@@ -43718,3 +43718,94 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0948 — Enforce §8's re-read-and-halt on the pull paths that ship, and decide a credential halt only from that comparison — 2026-10-02
+
+**What was wrong.** These are findings GAP2-36, GAP2-37 and GAP2-38.
+`CLAUDE.md` §8 says a stale token is re-read, and if the re-read returns the
+same dead value the pull halts loudly. `pull::secret::CredentialReader::reread_after_rejection`
+states that rule, and its own doc says no shipped caller reaches it. The shipped
+spot loop, `broker_run`, read Parameter Store again for every instrument and
+never compared the value with the one the vendor had rejected. A dead token
+therefore produced one more rejected request for every instrument left in the
+universe. The two F&O walks, `roll_every` for Dhan's offset cells and `fno_land`
+for Groww's named contracts, built one source and sent its token to every
+remaining cell. `fetch_rolling` reduced `Refusal.credential_dead` to plain text,
+and `fetch_chain_chunks` wrote the contract symbol in front of the marker, so
+neither walk could even see the verdict. A death after the first chunk of a spot
+instrument came back as `Ok` with the marker inside `unfetched`. Nothing read it
+there, and the control character reached the operator's page. GAP2-37: the
+autopilot then halted a feed as *"re-reading it returned the same value"* for any
+reason whose text contained the word `credential`. That included an unreachable
+or throttled Parameter Store, a missing `credentials.toml` and an absent AWS
+identity, and in none of those cases was any value compared. GAP2-38: invariants
+P-06 and P-09 cited tests of the unwired port only. The SSM action literal was
+named by no test, so changing it to a write action passed the whole suite.
+
+**The change.**
+- `pull::http::Credential::print` and `HttpSource::credential_print` give a
+  SHA-256 fingerprint of the credential. The input is domain-separated and
+  length-prefixed. Comparison is constant-time, and `Debug` is a redaction with
+  no accessor for the bytes. Only fingerprints are compared or kept; the secret
+  is never held twice and never logged.
+- `api::credential_law` holds the rule. `Watch` is one run's memory: what the
+  last request carried, and which value is known to be dead. `Watch::reread` is
+  called once per rejection and never in a loop. Its three outcomes are:
+  - The value is unchanged: the run halts as `CredentialStop::SameValue`.
+  - The re-read fails: the run halts as `CredentialStop::Unreadable(class)`.
+    It cannot tell whether the token rotated, and it will not send the rejected
+    value again.
+  - The value changed: the run continues with it. A later read that hands back
+    the rejected value is refused before the socket.
+
+  A configuration fault (`Unread::Configuration`) stops a spot run at once,
+  because every instrument would fail it the same way. A transport fault
+  (`Unread::Transport`) fails only that instrument.
+- `broker_run`, `roll_every` and `fno_land` call it. Spot reads the marker from
+  both the `Err` arm and `unfetched`. `fetch_rolling` and `fetch_chain_chunks`
+  put `CREDENTIAL_DEAD` first. A stop is set on `BrokerRun::stopped`, together
+  with the instruments not asked, and as receipt facts on the F&O pages. The
+  existing `CREDENTIAL_FACT` line is added only for the same-value verdict.
+- `credentialed_source` and `read_credential` return a classed `Unreadable`.
+  Parameter Store's own `SecretError::Unreachable`, which covers a timeout, a
+  throttle and a 5xx, is transport. `AccessDenied`, `NotFound`, an unbuildable
+  path, an unset HOME, an unusable configuration and no AWS identity are
+  configuration.
+- `autopilot::FeedState::observe` halts on `TickOutcome::credential` and never on
+  prose. `SameValue` halts as `Halt::Credential`. Configuration halts as the new
+  `Halt::Configuration`, whose sentence names the configuration and claims no
+  re-read. Transport, or no verdict, goes to the existing bounded backoff and
+  stall. The autopilot's own re-read allowance (`CREDENTIAL_REREADS`,
+  `FeedState::rereads`) and `credential_is_feedwide` are removed, because the run
+  now makes the one re-read itself. `autopilot::outcome_of` is split out of
+  `tick` so the hand-off can be tested.
+- `Site::credentials` selects the source. It is Parameter Store in every
+  constructor. A `Scripted` source exists only under `cfg(test)`, so the shipped
+  loops can be driven against a loopback vendor with no AWS.
+- `pull::ssm::fixed_headers` is the one place `get_parameter` takes its
+  `content-type` and `x-amz-target` from.
+  `ssm::tests::the_only_action_on_the_wire_is_get_parameter` pins the literal
+  `AmazonSSM.GetParameter` and a body of exactly `Name` and `WithDecryption`.
+
+**Proof.** `api::server::credential_law_tests` drives the three production loops
+against a scripted credential source and a fake vendor that answers 401. The
+fake counts the requests it receives. Same value: one request and no more, one
+re-read, and a reason naming the feed, `access-token` and §8 but not the value.
+`outcome_of` and `observe` then give `Halt::Credential`. Rotated value: the next
+request carries the new token. Rejected value handed back: refused before the
+socket. Failed re-read: a halt that does not say "same value", and the autopilot
+backs off. Configuration fault: no request and no re-read, then
+`Halt::Configuration`. A mid-walk rejection stops every remaining rolling cell
+and named contract, and a mid-walk rotation sends the rest with the new token.
+`autopilot::tests::an_unreachable_parameter_store_is_never_a_dead_token` is the
+finding's own case. Invariants P-05, P-06 and P-09 now cite these tests.
+
+**Cost.** O(1) per instrument or cell: one 32-byte comparison. A rejection adds
+one Parameter Store read and one SHA-256, at most once per rejection. Neither
+grows with the universe, the window or the cross product.
+
+**Not changed.** `pullrun`'s multi-leg runner still reads F&O pages through
+`credential_fault_in_page`. Those pages now carry `CREDENTIAL_FACT` only for a
+same-value stop, but the runner's prose fallback list is unchanged. The masters
+refresh (`mastersrun::credentialed_zerodha`) reads one credential for one
+download and has no loop to halt.

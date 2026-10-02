@@ -667,6 +667,25 @@ pub fn host_for(region: &str) -> String {
 ///
 /// The condition below reads `identity.session_token`, the same field
 /// `Signable` carries, so the two cannot drift.
+/// The headers every `GetParameter` request carries whatever the identity.
+///
+/// # Why a function and not two literals at the call site
+///
+/// GAP2-38: the action this crate sends was named by a private constant that
+/// only [`get_parameter`] read, and no test named the literal. Changing
+/// [`TARGET`] to any other SSM action — `PutParameter` among them — would have
+/// compiled, passed every test, and turned the read-only credential path into
+/// a writer. `docs/04-invariants.md` P-05 claims a credential is read and never
+/// written; that claim is now pinned on the bytes that go on the wire, by
+/// `ssm::tests::the_only_action_on_the_wire_is_get_parameter`, because
+/// [`get_parameter`] takes its fixed headers from here and nowhere else.
+///
+/// `x-amz-date` and `authorization` are not here: both vary per request.
+#[must_use]
+pub const fn fixed_headers() -> [(&'static str, &'static str); 2] {
+    [("content-type", CONTENT_TYPE), ("x-amz-target", TARGET)]
+}
+
 fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
     match identity.session_token.as_deref() {
         Some(token) => vec![("x-amz-security-token", token)],
@@ -720,10 +739,14 @@ pub async fn get_parameter(
 
     let mut request = client
         .post(format!("https://{host}/"))
-        .header("content-type", CONTENT_TYPE)
-        .header("x-amz-target", TARGET)
         .header("x-amz-date", stamp)
         .header("authorization", authorization);
+    // THE ACTION COMES FROM ONE PLACE, AND A TEST NAMES IT. See
+    // `fixed_headers`: this is the line that makes the read-only claim a
+    // property of the bytes sent rather than of a constant's spelling.
+    for (name, value) in fixed_headers() {
+        request = request.header(name, value);
+    }
 
     // A temporary credential MUST transmit the header its own signature covers.
     //
@@ -1336,5 +1359,43 @@ mod tests {
             detail.contains("not the broker token"),
             "the two secrets are told apart in the refusal itself: {detail}"
         );
+    }
+
+    /// GAP2-38 / D-0948: the one SSM action this crate sends is
+    /// `GetParameter`, named by its literal, on the headers `get_parameter`
+    /// actually transmits — and the body asks for exactly a name and
+    /// decryption, nothing that could write.
+    ///
+    /// Before this, `TARGET` was read by `get_parameter` and by a signing test
+    /// that interpolated the constant into its own expectation, so changing it
+    /// to `PutParameter` passed every test.
+    #[test]
+    fn the_only_action_on_the_wire_is_get_parameter() {
+        let headers = fixed_headers();
+        let targets: Vec<&str> = headers
+            .iter()
+            .filter(|(name, _)| *name == "x-amz-target")
+            .map(|(_, value)| *value)
+            .collect();
+        assert_eq!(targets, ["AmazonSSM.GetParameter"]);
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| *name == "content-type"
+                    && *value == "application/x-amz-json-1.1")
+        );
+        for (name, value) in headers {
+            assert!(
+                !value.contains("Put") && !value.contains("Delete"),
+                "{name}: {value}"
+            );
+        }
+        let sent: serde_json::Value =
+            serde_json::from_str(&body("/anorg/anenv/avendor/afield", true)).expect("json body");
+        let object = sent.as_object().expect("an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["Name", "WithDecryption"]);
+        assert_eq!(object["WithDecryption"], serde_json::Value::Bool(true));
     }
 }

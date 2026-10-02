@@ -5160,6 +5160,13 @@ pub struct Site {
     /// [`Site::load`], which only the served process calls — and left
     /// [`Broker::Refused`] everywhere else.
     pub broker: Broker,
+    /// Where a pull reads its broker credential from.
+    ///
+    /// Parameter Store in every constructor. A scripted source exists only
+    /// under `cfg(test)`, and it is what lets the shipped pull loops be driven
+    /// against a loopback vendor that rejects a token, with no AWS involved.
+    /// See [`crate::credential_law`]. D-0948.
+    pub credentials: crate::credential_law::Credentials,
     /// Where the manifests were read from, named on the page so an absence is
     /// actionable rather than mysterious.
     pub store_root: PathBuf,
@@ -5366,6 +5373,7 @@ impl Site {
             // on, so a test constructing a `Site` any other way cannot reach a
             // broker by omission.
             broker: Broker::Refused,
+            credentials: crate::credential_law::Credentials::Ssm,
             store_root,
             // NOT STARTED HERE, AND PAUSED UNLESS ASKED. This is the controls
             // and the status only; the task that acts on them is spawned by
@@ -6528,6 +6536,15 @@ pub(crate) struct BrokerRun {
     /// on [`CREDENTIAL_DEAD`], a control character no sentence can forge, and
     /// lands here. D-0351.
     pub credential_dead: bool,
+    /// Why the run stopped over its credential, decided by a comparison.
+    ///
+    /// `Some` only when the run actually stopped on it: the vendor rejected the
+    /// token and the one re-read returned the same value or failed, or the
+    /// credential configuration is unusable. `credential_dead` above records
+    /// that a vendor refused. This records what the re-read found, and it is
+    /// the only thing `autopilot::FeedState::observe` may halt a feed on as a
+    /// dead credential. `CLAUDE.md` §8, GAP2-36 and GAP2-37, D-0948.
+    pub credential_stop: Option<crate::credential_law::CredentialStop>,
 }
 
 impl BrokerRun {
@@ -6544,6 +6561,25 @@ impl BrokerRun {
             why: why.clone(),
         });
         self.refused.push(why);
+    }
+
+    /// Reads a credential death out of a window that landed its first chunks.
+    ///
+    /// `prefix_or_refusal` keeps the chunks that landed and puts the refusal in
+    /// `unfetched`, marker first. Unread, this lost the verdict: the next
+    /// instrument was sent the dead token, and the marker reached the
+    /// operator's page as a control character. Strips the marker and answers
+    /// whether the vendor rejected the credential. GAP2-36, D-0948.
+    fn lift_credential_death(&mut self, landed: &mut BrokerWindow) -> bool {
+        let Some(unfetched) = landed.unfetched.as_mut() else {
+            return false;
+        };
+        if !unfetched.starts_with(CREDENTIAL_DEAD) {
+            return false;
+        }
+        *unfetched = unfetched.trim_start_matches(CREDENTIAL_DEAD).to_owned();
+        self.credential_dead = true;
+        true
     }
 
     /// Preserve partial writes, but never certify an interrupted basket.
@@ -7270,6 +7306,32 @@ fn observed_cash_source_days(
         .collect()
 }
 
+/// One member's windows into the store, its shortfall and every landing failure
+/// on the rolling log. Split from `broker_run` to keep that loop under the
+/// workspace line ceiling; the sequence is unchanged.
+async fn land_broker_member(
+    landed: &BrokerWindow,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    site: &Site,
+    dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
+    month: &str,
+    asked: &ingest::SpotRequest,
+) -> pull::ingest::Ingested {
+    let mut landed_one = land_spot(landed, instrument, site, dated).await;
+    note_short_window(
+        &landed.instrument,
+        landed.unfetched.as_deref(),
+        &mut landed_one,
+    );
+    // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A FAILURE, and
+    // it is a different one from a refusal — the socket worked and the store did
+    // not. Both belong on the page; only naming the first would hide the disk.
+    for failure in &landed_one.failures {
+        note_member_failure(failure, month, asked, site);
+    }
+    landed_one
+}
+
 async fn land_spot(
     landed: &BrokerWindow,
     instrument: &brutex_core::instrument::InstrumentKey,
@@ -7522,6 +7584,9 @@ pub(crate) async fn broker_run(
     // pays the whole 5xx ladder to learn what the previous one already found
     // out. Counted here, three of them agreeing is the vendor being down.
     let mut vendor_down_streak = 0u32;
+    // THE RUN'S CREDENTIAL MEMORY: what the last request carried and what is
+    // known to be dead. See `credential_law::Watch`.
+    let mut watch = crate::credential_law::Watch::default();
     for (index, instrument) in targets.iter().enumerate() {
         // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
         // month is five to thirty-seven minutes on this store, and an operator
@@ -7553,7 +7618,8 @@ pub(crate) async fn broker_run(
                 since: std::time::Instant::now(),
             });
         });
-        match broker_window(asked, instrument, site).await {
+        // Whether the vendor rejected the credential on this instrument.
+        let rejected = match broker_window(asked, instrument, site, &mut watch).await {
             Err(why) => {
                 // THE MARKER IS READ AND REMOVED HERE, so it never reaches an
                 // operator and never reaches the journal. One instrument that
@@ -7593,8 +7659,12 @@ pub(crate) async fn broker_run(
                 site.autopilot
                     .fail(&instrument.underlying.to_string(), &month, &why);
                 out.record_refusal(instrument.underlying.as_str(), why);
+                marked.credential_dead
             }
-            Ok(landed) => {
+            Ok(mut landed) => {
+                // A DEATH AFTER THE FIRST CHUNK ARRIVES HERE, NOT ABOVE. See
+                // `BrokerRun::lift_credential_death`.
+                let rejected = out.lift_credential_death(&mut landed);
                 // ANY SUCCESS CLEARS THE BREAKER. The vendor answered, so
                 // whatever the previous instruments met was not an outage —
                 // and a streak that survived a success would eventually halt a
@@ -7602,21 +7672,16 @@ pub(crate) async fn broker_run(
                 vendor_down_streak = breaker_next(vendor_down_streak, false);
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
-                let mut landed_one = land_spot(&landed, instrument, site, &mut dated).await;
-                note_short_window(
-                    &landed.instrument,
-                    landed.unfetched.as_deref(),
-                    &mut landed_one,
-                );
-                // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A
-                // FAILURE, and it is a different one from a refusal — the
-                // socket worked and the store did not. Both belong on the page;
-                // only naming the first would hide the disk.
-                for failure in &landed_one.failures {
-                    note_member_failure(failure, &month, asked, site);
-                }
+                let landed_one =
+                    land_broker_member(&landed, instrument, site, &mut dated, &month, asked).await;
                 out.total.absorb(landed_one);
+                rejected
             }
+        };
+        // `CLAUDE.md` §8: A REJECTED TOKEN IS RE-READ ONCE, HERE. See
+        // `credential_halts`, which says what this loop used to do instead.
+        if credential_halts(&mut watch, site, asked.feed, rejected, &mut out, index).await {
+            break;
         }
         // THE BREAKER, AFTER BOTH ARMS SO EITHER CAN HAVE MOVED IT.
         if breaker_trips(vendor_down_streak) {
@@ -7636,6 +7701,70 @@ pub(crate) async fn broker_run(
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     note_run_finished(&out, out.total.balances(), claimed_run);
     out
+}
+
+/// `CLAUDE.md` §8 for one spot instrument: re-read once after a rejection, and
+/// say whether the run must stop.
+///
+/// The loop used to go straight to the next instrument. That instrument's own
+/// read returned the same dead value, so the vendor was sent it again, once per
+/// instrument, for the whole universe (GAP2-36). Now exactly one re-read
+/// follows each rejection. A rotated value lets the run continue, and the next
+/// instrument reads its own credential as before. The same value, a re-read
+/// that fails, or a configuration fault recorded by `broker_window` stops the
+/// run, and the stop names how many instruments were not asked. It is never a
+/// loop and never a mint. D-0948.
+async fn credential_halts(
+    watch: &mut crate::credential_law::Watch,
+    site: &Site,
+    feed: pull::vendor::Feed,
+    rejected: bool,
+    out: &mut BrokerRun,
+    index: usize,
+) -> bool {
+    if rejected {
+        let _rotated_or_halted = watch.reread(&site.credentials, feed).await;
+    }
+    let Some((stop, why)) = watch.stop() else {
+        return false;
+    };
+    out.credential_stop = Some(*stop);
+    let done = index.saturating_add(1);
+    out.stopped = Some(format!(
+        "{why} Stopped after {done} of {} instruments; the {} after it were not asked.",
+        out.attempted,
+        out.attempted.saturating_sub(done)
+    ));
+    true
+}
+
+/// One rejection on an F&O walk: re-read once, and either hand the walk a wire
+/// carrying the rotated token or say why it must stop.
+///
+/// Shared by `roll_every` and `fno_land`, which both used to send the token
+/// the vendor had just rejected to every remaining cell or contract (GAP2-36).
+///
+/// # Errors
+///
+/// The verdict and the reason, when the walk must stop. D-0948.
+async fn reread_wire(
+    watch: &mut crate::credential_law::Watch,
+    site: &Site,
+    feed: pull::vendor::Feed,
+    given: &Wire,
+    rotated: &mut Option<Wire>,
+) -> Result<(), (crate::credential_law::CredentialStop, String)> {
+    match watch.reread(&site.credentials, feed).await {
+        crate::credential_law::Reread::Rotated(source) => {
+            *rotated = Some(Wire {
+                source: (*source).sharing(shared_governor(site, feed)),
+                spec: given.spec,
+                store_vendor: given.store_vendor,
+            });
+            Ok(())
+        }
+        crate::credential_law::Reread::Halted(stop, why) => Err((stop, why)),
+    }
 }
 
 /// Exact recovery unit, using the existing mapping, credential, rate-limit,
@@ -9723,18 +9852,28 @@ async fn read_credential(
     config: &pull::config::CredentialConfig,
     vendor: brutex_core::vendor::Vendor,
     auth: pull::vendor::Auth,
-) -> Result<pull::http::Credential, String> {
-    let stamp = pull::ssm::now_stamp().map_err(|why| why.detail)?;
-    let read = async |field: &str| -> Result<String, String> {
-        let path = config
-            .path_for(vendor, field)
-            .map_err(|why| format!("the parameter path for {field:?} could not be built: {why}"))?;
+) -> Result<pull::http::Credential, crate::credential_law::Unreadable> {
+    use crate::credential_law::Unreadable;
+    // CLASSED, NOT FLATTENED. A clock that cannot sign and a path that cannot
+    // be built are configuration; Parameter Store's own answer is classed by
+    // its kind, so a timeout or a 5xx is transport and an `AccessDenied` is
+    // configuration. GAP2-37: a flattened string sent all of them to one halt.
+    let stamp = pull::ssm::now_stamp().map_err(|why| Unreadable::configuration(why.detail))?;
+    let read = async |field: &str| -> Result<String, Unreadable> {
+        let path = config.path_for(vendor, field).map_err(|why| {
+            Unreadable::configuration(format!(
+                "the parameter path for {field:?} could not be built: {why}"
+            ))
+        })?;
         pull::ssm::get_parameter(identity, config.region(), &path.to_string(), &stamp)
             .await
             .map_err(|why| {
-                format!(
-                    "this feed's credential field {field:?} could not be read: {}",
-                    why.detail
+                Unreadable::of_secret(
+                    why.kind,
+                    format!(
+                        "this feed's credential field {field:?} could not be read: {}",
+                        why.detail
+                    ),
                 )
             })
     };
@@ -9779,20 +9918,24 @@ async fn read_credential(
 pub(crate) async fn credentialed_source(
     feed: pull::vendor::Feed,
     spec: &pull::vendor::HttpSpec,
-) -> Result<(pull::http::HttpSource, brutex_core::vendor::Vendor), String> {
+) -> Result<(pull::http::HttpSource, brutex_core::vendor::Vendor), crate::credential_law::Unreadable>
+{
+    use crate::credential_law::Unreadable;
     let Some(home) = std::env::var_os("HOME") else {
-        return Err("HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned());
+        return Err(Unreadable::configuration(
+            "HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned(),
+        ));
     };
     let config_path = pull::config::default_config_path(std::path::Path::new(&home));
     let config = pull::config::CredentialConfig::load(&config_path).map_err(|why| {
-        format!(
+        Unreadable::configuration(format!(
             "the credential configuration at {} is not usable: {why}",
             config_path.display()
-        )
+        ))
     })?;
 
-    let identity =
-        pull::ssm::AwsIdentity::discover().map_err(|why| format!("no AWS identity: {why}"))?;
+    let identity = pull::ssm::AwsIdentity::discover()
+        .map_err(|why| Unreadable::configuration(format!("no AWS identity: {why}")))?;
 
     // WHICH BROKER, FROM THE REQUEST — not hardcoded. `CLAUDE.md`: adding a
     // vendor is a row in `pull::vendor`, and a route that names one defeats
@@ -9815,14 +9958,14 @@ pub(crate) async fn credentialed_source(
     // nowhere to file its bars yet", and saying the first would misdirect. The
     // message names the real gap.
     let vendor = feed.store_vendor().ok_or_else(|| {
-        format!(
+        Unreadable::configuration(format!(
             "{} has no store prefix. Bars are filed under bars/<vendor>/, and \
              filing one broker's prices under another's path destroys the \
              per-vendor independence D-0019 exists for — so nothing is pulled \
              until {} has a row in brutex_core::vendor::Vendor.",
             feed.display(),
             feed.display()
-        )
+        ))
     })?;
     let credential = read_credential(&identity, &config, vendor, spec.auth).await?;
 
@@ -9832,7 +9975,8 @@ pub(crate) async fn credentialed_source(
     // `crate::vendor`, not an edit here, and this is the line that keeps that
     // true — Groww and Dhan differ in six of those fields and share every line
     // of code below.
-    let source = pull::http::HttpSource::new(*spec, credential).map_err(|why| why.to_string())?;
+    let source = pull::http::HttpSource::new(*spec, credential)
+        .map_err(|why| Unreadable::configuration(why.to_string()))?;
 
     Ok((source, vendor))
 }
@@ -9841,6 +9985,7 @@ async fn broker_window(
     asked: &ingest::SpotRequest,
     instrument: &brutex_core::instrument::InstrumentKey,
     site: &Site,
+    watch: &mut crate::credential_law::Watch,
 ) -> Result<BrokerWindow, String> {
     // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
     // THAT ANSWERS "IS THIS A BROKER".
@@ -9939,7 +10084,19 @@ async fn broker_window(
     let feed = asked.feed;
     // THE CREDENTIAL AND THE SOCKET, in one place shared with expired F&O
     // discovery. The sequence this replaced is unchanged; it moved.
-    let (source, vendor) = credentialed_source(feed, &spec).await?;
+    //
+    // AND THE RUN'S WATCH SEES BOTH OUTCOMES. A configuration fault stops the
+    // run instead of failing every remaining instrument the same way, and a
+    // value this run already saw rejected is refused BEFORE the socket.
+    // `CLAUDE.md` §8, GAP2-36, D-0948.
+    let (source, vendor) = match site.credentials.source(feed).await {
+        Ok(read) => read,
+        Err(failed) => {
+            watch.unreadable(feed, &failed);
+            return Err(failed.why);
+        }
+    };
+    watch.admit(feed, &source)?;
     // AND IT ASKS THIS SITE'S GOVERNOR, not one of its own.
     //
     // `HttpSource::new` builds a private governor from the descriptor, which is
@@ -10942,9 +11099,24 @@ struct FnoLanded {
     priced: PricedCount,
     /// The first few reasons, verbatim, capped at five.
     why: Vec<String>,
+    /// Why the walk stopped over its credential, when it did. `CLAUDE.md` §8,
+    /// D-0948.
+    credential_stop: Option<crate::credential_law::CredentialStop>,
 }
 
 impl FnoLanded {
+    /// Counts one refused contract and keeps its reason, without the marker.
+    /// Answers whether the vendor rejected the credential, which `fno_land`
+    /// must re-read before the next contract. D-0948.
+    fn record_refusal(&mut self, refusal: &str) -> bool {
+        self.failed = self.failed.saturating_add(1);
+        if self.why.len() < 5 {
+            self.why
+                .push(refusal.trim_start_matches(CREDENTIAL_DEAD).to_owned());
+        }
+        refusal.starts_with(CREDENTIAL_DEAD)
+    }
+
     /// A failed census or derived rung does not undo a committed source append.
     /// Exact retries offer bars again but commit none; count before deciding
     /// whether the contract completed and may proceed to pricing.
@@ -11137,7 +11309,14 @@ async fn fno_land(
             .map(|e| e.last_ts_micros)
     };
 
+    // `CLAUDE.md` §8 OVER THE CONTRACTS, as `roll_every` does over its cells.
+    // One re-read per rejection; a rotated value carries on and the same value
+    // stops the walk. GAP2-36, D-0948.
+    let mut watch = crate::credential_law::Watch::sending(&wire.source);
+    let mut rotated: Option<Wire> = None;
+    let given = wire;
     'contracts: for found in wanted {
+        let wire = rotated.as_ref().unwrap_or(given);
         attempted = attempted.saturating_add(1);
 
         // WHAT THIS CONTRACT STILL OWES — its months, less the ones already
@@ -11158,9 +11337,18 @@ async fn fno_land(
         let bodies = match fetched.result {
             Fetched::Bodies(bodies) => bodies,
             Fetched::ContractRefused(refusal) => {
-                out.failed = out.failed.saturating_add(1);
-                if out.why.len() < 5 {
-                    out.why.push(refusal);
+                if out.record_refusal(&refusal)
+                    && let Err((stop, why)) =
+                        reread_wire(&mut watch, site, asked.feed, given, &mut rotated).await
+                {
+                    out.credential_stop = Some(stop);
+                    out.why.insert(0, why);
+                    // EVERY CONTRACT AFTER THIS ONE WAS NOT ASKED, and each is
+                    // a contract that did not land.
+                    out.failed = out
+                        .failed
+                        .saturating_add(wanted.len().saturating_sub(attempted));
+                    break 'contracts;
                 }
                 continue;
             }
@@ -11398,9 +11586,19 @@ async fn fetch_chain_chunks(
                 bodies.push((*chunk, body));
             }
             Err(refusal) => {
+                // THE MARKER STAYS AT THE HEAD. `with_retry` writes
+                // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
+                // buried the verdict mid-string, where no reader looks, so
+                // `fno_land` sent the dead token to every remaining contract.
+                let dead = refusal.starts_with(CREDENTIAL_DEAD);
+                let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
                     rows_read,
-                    result: Fetched::ContractRefused(format!("{}: {refusal}", found.vendor_symbol)),
+                    result: Fetched::ContractRefused(format!(
+                        "{}{}: {refusal}",
+                        if dead { CREDENTIAL_DEAD } else { "" },
+                        found.vendor_symbol
+                    )),
                 };
             }
         }
@@ -11772,7 +11970,7 @@ async fn fno_walk(
     // this point would be one permit spent on nothing: `credentialed_source`
     // reads AWS Parameter Store, not the vendor, so no vendor request happens
     // between here and the walk.
-    let wire = match credentialed_source(asked.feed, &spec).await {
+    let wire = match site.credentials.source(asked.feed).await {
         Ok((source, store_vendor)) => Wire {
             // THE SHARED GOVERNOR, and THIS is the path that made the split
             // cost something. A 429 on the discovery walk halved the source's
@@ -11783,12 +11981,12 @@ async fn fno_walk(
             spec,
             store_vendor,
         },
-        Err(why) => {
+        Err(failed) => {
             return page.say(
                 facts,
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 audit::Outcome::NotStarted,
-                &why,
+                &failed.why,
             );
         }
     };
@@ -13033,6 +13231,48 @@ struct Rolled {
     priced: PricedCount,
 }
 
+impl Rolled {
+    /// Folds one cell's answer into the walk, and answers whether the vendor
+    /// rejected the credential on it, which `roll_every` must re-read before
+    /// the next cell. The marker never reaches a stored reason. D-0948.
+    fn absorb(&mut self, one: Result<Self, String>) -> bool {
+        match one {
+            Ok(done) => {
+                self.rows_read = self.rows_read.saturating_add(done.rows_read);
+                self.stored = self.stored.saturating_add(done.stored);
+                self.declined = self.declined.saturating_add(done.declined);
+                self.priced.absorb_count(&done.priced);
+                // A RUN THAT PARTLY FAILED IS NOT AN `Err`, and its failures
+                // must not vanish into `Ok`.
+                //
+                // `roll_one` used to `?` on the first group it could not name
+                // or file, so every such failure arrived here as `Err(said)`
+                // and was counted. Now that it counts and continues — which is
+                // what stops one bad strike discarding 251 good ones — those
+                // counts live INSIDE the `Ok`, and dropping them here would
+                // trade a run that died loudly for one that succeeds quietly
+                // while having lost groups.
+                self.failed = self.failed.saturating_add(done.failed);
+                for said in done.why {
+                    if self.why.len() < pull::pricing::REASONS_KEPT {
+                        self.why.push(said);
+                    }
+                }
+                false
+            }
+            Err(said) => {
+                let dead = said.starts_with(CREDENTIAL_DEAD);
+                note_run_failure(
+                    &mut self.failed,
+                    &mut self.why,
+                    said.trim_start_matches(CREDENTIAL_DEAD).to_owned(),
+                );
+                dead
+            }
+        }
+    }
+}
+
 /// The request plan belongs to the whole walk, independently of row outcomes.
 #[derive(Debug, Default, PartialEq)]
 struct RollingWalk {
@@ -13040,6 +13280,9 @@ struct RollingWalk {
     planned: usize,
     /// Acknowledged rows and failures accumulated from the planned cells.
     done: Rolled,
+    /// Why the walk stopped over its credential, when it did. The cells after
+    /// that point were not asked. `CLAUDE.md` §8, D-0948.
+    credential_stop: Option<crate::credential_law::CredentialStop>,
 }
 
 /// How many rows priced, how many refused, and why.
@@ -13327,7 +13570,17 @@ async fn fetch_rolling(
         wire.source.post_json(endpoint, body.clone())
     })
     .await
-    .map_err(|why| format!("{label}: {why}"))?;
+    // THE VERDICT TRAVELS OUT, MARKER FIRST. This flattened the refusal to its
+    // prose, so `roll_every` could not tell a dead token from a bad strike and
+    // sent the dead token to every remaining cell (GAP2-36). The marker is the
+    // spot path's own `CREDENTIAL_DEAD`, read and stripped by `roll_every`.
+    .map_err(|why| {
+        if why.credential_dead {
+            format!("{CREDENTIAL_DEAD}{label}: {why}")
+        } else {
+            format!("{label}: {why}")
+        }
+    })?;
     pull::rolling::read(&answer, rolling, option_type, wire.spec.prices)
         .map_err(|why| format!("{label}: {why}"))
 }
@@ -13636,7 +13889,14 @@ async fn roll_every(
         planned,
     );
 
-    for flag in &cadences {
+    // `CLAUDE.md` §8 OVER THE CROSS PRODUCT. The walk was built with one source
+    // and sent its token to every cell, including every cell after the vendor
+    // had rejected it (GAP2-36). A rejection now gets one re-read. A rotated
+    // value is sent to the remaining cells, and the same value or a failed
+    // re-read ends the walk here.
+    let mut watch = crate::credential_law::Watch::sending(&wire.source);
+    let mut rotated: Option<Wire> = None;
+    'cells: for flag in &cadences {
         // EVERY ORDINAL THE VENDOR SERVES. THE NARROWING IS GONE.
         //
         // This read `.take(ORDINALS_ASKED)`, a `const usize = 1` carrying the
@@ -13692,7 +13952,7 @@ async fn roll_every(
                         let one = roll_one(
                             asked,
                             site,
-                            wire,
+                            rotated.as_ref().unwrap_or(wire),
                             security_id,
                             word,
                             flag,
@@ -13705,42 +13965,28 @@ async fn roll_every(
                             last_settled,
                         )
                         .await;
-                        match one {
-                            Ok(done) => {
-                                out.rows_read = out.rows_read.saturating_add(done.rows_read);
-                                out.stored = out.stored.saturating_add(done.stored);
-                                out.declined = out.declined.saturating_add(done.declined);
-                                out.priced.absorb_count(&done.priced);
-                                // A RUN THAT PARTLY FAILED IS NOT AN `Err`, and
-                                // its failures must not vanish into `Ok`.
-                                //
-                                // `roll_one` used to `?` on the first group it
-                                // could not name or file, so every such failure
-                                // arrived here as `Err(said)` and was counted.
-                                // Now that it counts and continues — which is
-                                // what stops one bad strike discarding 251 good
-                                // ones — those counts live INSIDE the `Ok`, and
-                                // dropping them here would trade a run that
-                                // died loudly for one that succeeds quietly
-                                // while having lost groups.
-                                out.failed = out.failed.saturating_add(done.failed);
-                                for said in done.why {
-                                    if out.why.len() < pull::pricing::REASONS_KEPT {
-                                        out.why.push(said);
-                                    }
-                                }
-                            }
-                            Err(said) => {
-                                note_run_failure(&mut out.failed, &mut out.why, said);
-                            }
+                        if out.absorb(one)
+                            && reread_wire(&mut watch, site, asked.feed, wire, &mut rotated)
+                                .await
+                                .is_err()
+                        {
+                            break 'cells;
                         }
                     }
                 }
             }
         }
     }
+    let credential_stop = watch.stop().map(|(stop, why)| {
+        note_run_failure(&mut out.failed, &mut out.why, why.clone());
+        *stop
+    });
     say_walk_finished(asked, out.stored, out.failed, out.declined, planned);
-    RollingWalk { planned, done: out }
+    RollingWalk {
+        planned,
+        done: out,
+        credential_stop,
+    }
 }
 
 /// Whether this underlying had contracts on that cadence at all over the window.
@@ -14024,13 +14270,39 @@ async fn fno_roll(
     rolling_receipt(page, facts, done)
 }
 
+/// The receipt rows for a walk that stopped over its credential.
+///
+/// The stop is stated rather than left to be inferred from a short count. The
+/// credential fact is the same exact line the spot receipt carries, so
+/// `autopilot::credential_fault_in_page` reads the verdict rather than guessing
+/// at prose. It appears only when a re-read returned the same value. D-0948.
+fn credential_stop_facts(
+    facts: &mut Vec<(&'static str, String)>,
+    stop: Option<crate::credential_law::CredentialStop>,
+) {
+    if let Some(stop) = stop {
+        facts.push((
+            "Stopped",
+            "the walk stopped over its credential; nothing after that point was asked".to_owned(),
+        ));
+        if stop == crate::credential_law::CredentialStop::SameValue {
+            facts.push(("Credential", CREDENTIAL_FACT.to_owned()));
+        }
+    }
+}
+
 /// Render and durably record the rolling walk's independently measured counts.
 fn rolling_receipt(
     page: &FnoPage<'_>,
     mut facts: Vec<(&'static str, String)>,
     walk: RollingWalk,
 ) -> (axum::http::StatusCode, String) {
-    let RollingWalk { planned, done } = walk;
+    let RollingWalk {
+        planned,
+        done,
+        credential_stop,
+    } = walk;
+    credential_stop_facts(&mut facts, credential_stop);
     let Rolled {
         rows_read,
         stored,
@@ -14236,8 +14508,10 @@ async fn fno_report(
         settled,
         why,
         priced,
+        credential_stop,
     } = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
+    credential_stop_facts(&mut facts, credential_stop);
     // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
     // that resumes stores fewer bars than one that starts cold, and without
     // this row that difference is indistinguishable from a run that lost them.
@@ -26744,8 +27018,16 @@ mod tests {
         };
         let outer = span("async fn broker_window", "broker_window");
         let helper = span("async fn credentialed_source", "credentialed_source");
+        // D-0948 put `Credentials::source` between the two, so a run's watch
+        // sees every read. Its production arm is the helper, pinned here, so
+        // splicing the helper in at that call is still the executed sequence.
+        assert!(
+            include_str!("credential_law.rs")
+                .contains("Self::Ssm => crate::server::credentialed_source(feed, &spec).await"),
+            "the production credential source is still the helper"
+        );
         let call = outer
-            .find("credentialed_source(feed, &spec)")
+            .find("site.credentials.source(feed)")
             .expect("broker_window reaches its credential and socket through the helper");
         let body = format!("{}{helper}{}", &outer[..call], &outer[call..]);
         let body = body.as_str();
@@ -31494,6 +31776,10 @@ mod gap_peer_route_tests;
 #[cfg(test)]
 #[path = "fno_boundary_tests.rs"]
 mod fno_boundary_tests;
+
+#[cfg(test)]
+#[path = "credential_law_tests.rs"]
+mod credential_law_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]

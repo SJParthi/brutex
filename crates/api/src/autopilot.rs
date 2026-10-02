@@ -74,6 +74,7 @@ use pull::session::{Day, IstMoment, Window};
 use store::path::{Timeframe, YearMonth};
 
 use crate::census::{Census, Series, VendorCensus};
+use crate::credential_law::{CredentialStop, Unread};
 use crate::server::{Broker, Loaded, Site};
 use crate::{audit, census, ingest, render};
 
@@ -130,14 +131,6 @@ pub const PAUSED_POLL_SECS: u64 = 1;
 /// hundred atomic loads rather than a pegged core, and short enough that the
 /// backfill resumes promptly once the operator's own pull finishes.
 pub const SEAT_WAIT_SECS: u64 = 1;
-
-/// How many credential failures are re-read before the feed halts.
-///
-/// One, and `CLAUDE.md` §8 is where the number comes from: *"A stale token is
-/// re-read; if the re-read returns the same dead value, the pull halts
-/// loudly."* The re-read is automatic — `broker_window` reads Parameter Store
-/// fresh on every instrument and caches nothing — so the retry IS the re-read.
-pub const CREDENTIAL_REREADS: u8 = 1;
 
 /// How many times one stalled month is put back on the ladder, per process.
 ///
@@ -324,10 +317,15 @@ pub struct Failed {
 /// would retry a dead credential sixty-four times and hammer a full disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trouble {
-    /// The credential could not be read, or the token is dead.
+    /// The reason TEXT is about the credential.
     ///
-    /// Re-read once, then **halt**. `CLAUDE.md` §8. Never minted, never
-    /// prompted for, never read from a file or an environment variable.
+    /// **This bucket no longer halts anything.** It is a description of prose,
+    /// and prose is not evidence that a re-read returned the same value: the
+    /// word is in an unreachable Parameter Store as well as in a dead token
+    /// (GAP2-37). [`FeedState::observe`] halts only on the run's structural
+    /// [`TickOutcome::credential`]. What this bucket still does is keep a
+    /// credential sentence that mentions "Parameter Store" out of
+    /// [`Trouble::Store`], so it is never mistaken for a full disk. D-0948.
     Credential,
     /// The write boundary refused: a full disk, a denied path, a short write.
     ///
@@ -496,38 +494,6 @@ pub fn credential_fault_in_page(html: &str) -> bool {
     }
     let lower = html.to_ascii_lowercase();
     VENDOR_SPELLINGS.iter().any(|m| lower.contains(m))
-}
-
-/// Whether a credential-shaped reason is about the TOKEN or about one
-/// instrument.
-///
-/// # The defect this removes
-///
-/// [`tick`] builds its reason from `run.blocked`, else the first entry in
-/// `run.total.failures`, else the first refusal. One instrument out of 773
-/// answering `status 401` — an entitlement gap on one symbol, which is a
-/// vendor's contract with the account and not a fact about the token — used to
-/// halt the entire feed for the life of the process, because the reason it put
-/// on the page carried a credential marker.
-///
-/// A genuinely dead token fails **every** instrument. So the halt requires that
-/// none was reached, and a credential-shaped reason from a sweep that did reach
-/// somebody falls through to the transport arm: bounded backoff, then the
-/// stall, both of which are visible and neither of which is terminal.
-///
-/// # Why `reached == 0` alone, and not `reached == 0 && attempted > 0`
-///
-/// A run that was BLOCKED before it attempted anything reports
-/// `attempted == 0`, and `broker_window`'s credential refusals — an unusable
-/// `credentials.toml`, no AWS identity, a parameter path that will not build —
-/// are exactly the shape that can produce one. Requiring `attempted > 0` would
-/// downgrade a real dead credential into a transport retry, which is the
-/// direction that costs the owner rate budget against a fault nothing here can
-/// fix. Halting is the direction that costs nothing outside this machine, so
-/// the ambiguous case takes it.
-#[must_use]
-pub const fn credential_is_feedwide(out: &TickOutcome) -> bool {
-    out.reached == 0
 }
 
 /// The wait before store probe number `made + 1`: 60 s, 120 s, 240 s … capped
@@ -857,6 +823,13 @@ pub struct TickOutcome {
     /// either, so it travels to [`Status::journal_error`] and onto
     /// `/autopilot.json`.
     pub journal_error: Option<String>,
+    /// The run's credential verdict, when it stopped over its credential.
+    ///
+    /// Carried from `BrokerRun::credential_stop`, which was decided by
+    /// comparing a re-read with the value the vendor rejected. It is the ONLY
+    /// thing [`FeedState::observe`] halts a feed on as a credential fault; the
+    /// reason text is never read for that. D-0948.
+    pub credential: Option<CredentialStop>,
 }
 
 /// What to do after a tick.
@@ -927,6 +900,15 @@ pub enum Halt {
     /// exactly the shape §4 bans — so this class is never re-checked here. It
     /// is named, and left named, until the process is restarted.
     Credential,
+    /// The credential configuration is unusable: HOME, `credentials.toml`, the
+    /// AWS identity, or the Parameter Store path or its permission.
+    ///
+    /// Distinct from [`Halt::Credential`] because no vendor rejected anything
+    /// and no re-read was compared. It sends the operator to their
+    /// configuration, not to a token. Like a dead token, nothing this process
+    /// can measure says it is fixed, so nothing re-checks it. A restart does.
+    /// GAP2-37, D-0948.
+    Configuration,
     /// The store refused the same write twice.
     ///
     /// Re-checkable, and the check costs nothing outside this machine: a few
@@ -947,6 +929,7 @@ impl Halt {
     pub const fn word(self) -> &'static str {
         match self {
             Self::Credential => "credential",
+            Self::Configuration => "configuration",
             Self::Store => "store",
             Self::Census => "census",
         }
@@ -1014,8 +997,6 @@ pub struct FeedState {
     pub dry: u8,
     /// How many backoffs in a row, which is the exponent.
     pub backoff: u32,
-    /// How many credential re-reads are still owed before halting.
-    pub rereads: u8,
     /// Terminal, with the reason.
     ///
     /// **No route can clear it, and that has not changed.** The feed table is a
@@ -1075,7 +1056,6 @@ impl FeedState {
             attempts: 0,
             dry: 0,
             backoff: 0,
-            rereads: CREDENTIAL_REREADS,
             halted: None,
             halt_kind: None,
             probe: None,
@@ -1110,7 +1090,7 @@ impl FeedState {
                 made: 0,
                 due_unix: 0,
             }),
-            Halt::Credential | Halt::Census => None,
+            Halt::Credential | Halt::Configuration | Halt::Census => None,
         };
     }
 
@@ -1126,7 +1106,6 @@ impl FeedState {
         self.halted = None;
         self.halt_kind = None;
         self.probe = None;
-        self.rereads = CREDENTIAL_REREADS;
         self.clear_month();
     }
 
@@ -1156,13 +1135,15 @@ impl FeedState {
     ///
     /// The order of the arms is the policy:
     ///
-    /// 1. **A credential failure that reached NOBODY outranks everything.**
-    ///    `CLAUDE.md` §8 — one automatic re-read, then halt. It is checked
-    ///    before progress because a token that dies mid-sweep still stores the
-    ///    instruments it reached, and treating that as progress would retry
-    ///    forever against a dead credential. The "reached nobody" clause is
-    ///    [`credential_is_feedwide`] and it is what stops ONE instrument's 401
-    ///    killing a whole feed for the life of the process.
+    /// 1. **The run's own credential verdict outranks everything.** The run
+    ///    makes `CLAUDE.md` §8's one re-read itself and records what the
+    ///    comparison found on [`TickOutcome::credential`]. The same value halts
+    ///    as [`Halt::Credential`]; an unusable configuration halts as
+    ///    [`Halt::Configuration`]; an unreachable Parameter Store falls through
+    ///    to the transport arm. It is checked before progress because a token
+    ///    that dies mid-sweep still stores the instruments it reached, and
+    ///    treating that as progress would retry against a dead credential. The
+    ///    reason TEXT is never read for this: GAP2-37, D-0948.
     /// 2. **Stopped by the operator is not a failure** and costs no attempt.
     /// 3. **Complete advances.**
     /// 4. **Progress resets the bound.** A tick that stored bars moved the
@@ -1178,38 +1159,63 @@ impl FeedState {
     pub fn observe(&mut self, out: &TickOutcome) -> Next {
         if let Some(reason) = out.reason.clone() {
             self.last_reason = Some(reason.clone());
-            if classify(&reason) == Trouble::Credential && credential_is_feedwide(out) {
-                if self.rereads > 0 {
-                    self.rereads = self.rereads.saturating_sub(1);
-                    return Next::Retry;
-                }
+        }
+        // THE CREDENTIAL VERDICT IS THE RUN'S, AND IT IS STRUCTURAL.
+        //
+        // This read `classify(&reason) == Trouble::Credential`, which matches
+        // the bare word "credential". That word is in an unreachable Parameter
+        // Store, an SSM throttle or 5xx, a missing `credentials.toml` and an
+        // absent AWS identity. Every one of them halted the feed for the life
+        // of the process with the sentence "re-reading it returned the same
+        // value", about a re-read that was never compared (GAP2-37). The run now
+        // makes the §8 re-read itself and records what it found
+        // (`credential_law::CredentialStop`). Only that record halts a feed
+        // here, and only the same-value verdict may say the value was
+        // unchanged. D-0948.
+        match out.credential {
+            Some(CredentialStop::SameValue) => {
                 let why = format!(
-                    "the broker credential is dead and re-reading it returned the same \
-                     value, and NOT ONE of the {} instruments asked answered. CLAUDE.md §8: \
+                    "the broker credential is dead: the vendor rejected it and the one \
+                     re-read returned the same value, compared by fingerprint. CLAUDE.md §8: \
                      this repository never mints a token, so nothing further is attempted \
                      and nothing is re-tried on a timer — a retry against an unchanged dead \
                      value would hide a permanent fault, which §4 bans. Refresh it in AWS \
                      Parameter Store and RESTART the server; a resume does not clear a halt, \
                      and POST /autopilot/control refuses one that would change nothing rather \
-                     than pretending to. The reason, verbatim: {reason}",
-                    out.attempted
+                     than pretending to. The reason, verbatim: {}",
+                    out.reason.as_deref().unwrap_or("none was recorded")
                 );
                 self.halt(Halt::Credential, why.clone());
                 return Next::Halt { reason: why };
             }
+            Some(CredentialStop::Unreadable(Unread::Configuration)) => {
+                let why = format!(
+                    "the credential configuration is not usable: HOME, \
+                     ~/.brutex/credentials.toml, the AWS identity, or the Parameter Store \
+                     path or its permission. No vendor rejected anything, no re-read was \
+                     compared, and retrying cannot fix a configuration, so nothing further \
+                     is attempted. Fix what the reason names and RESTART the server. The \
+                     reason, verbatim: {}",
+                    out.reason.as_deref().unwrap_or("none was recorded")
+                );
+                self.halt(Halt::Configuration, why.clone());
+                return Next::Halt { reason: why };
+            }
+            // AN UNREACHABLE PARAMETER STORE IS TRANSPORT. It falls through to
+            // the bounded backoff and the stall below, exactly as a vendor
+            // timeout does.
+            Some(CredentialStop::Unreadable(Unread::Transport)) | None => {}
         }
         if out.stopped {
             return Next::Retry;
         }
         if out.complete {
             self.clear_month();
-            self.rereads = CREDENTIAL_REREADS;
             self.months_done = self.months_done.saturating_add(1);
             return Next::Advance;
         }
         if out.stored > 0 {
             self.clear_month();
-            self.rereads = CREDENTIAL_REREADS;
             return Next::Retry;
         }
         if let Some(reason) = out.reason.clone() {
@@ -3283,6 +3289,20 @@ async fn tick(
         })
         .unwrap_or(false);
 
+    outcome_of(&run, complete, journal_error)
+}
+
+/// What the state machine reads from one finished run.
+///
+/// Split out of [`tick`] so the one line that carries the run's credential
+/// verdict to [`FeedState::observe`] is drivable from a test with a scripted
+/// credential and a loopback vendor. Before D-0948 there was no verdict to
+/// carry, and `observe` guessed one from the reason's prose.
+pub(crate) fn outcome_of(
+    run: &crate::server::BrokerRun,
+    complete: bool,
+    journal_error: Option<String>,
+) -> TickOutcome {
     let reason = run
         .blocked
         .as_ref()
@@ -3301,8 +3321,13 @@ async fn tick(
         stored: run.total.bars_stored,
         reason,
         complete,
-        stopped: run.stopped.is_some(),
+        // A CREDENTIAL STOP IS NOT AN OPERATOR'S PAUSE. `stopped` means "not a
+        // failure, ask again at once"; a run that stopped over its credential
+        // carries its own verdict below, and when that verdict is transport it
+        // must reach the backoff rather than an immediate retry.
+        stopped: run.stopped.is_some() && run.credential_stop.is_none(),
         journal_error,
+        credential: run.credential_stop,
     }
 }
 
@@ -4180,6 +4205,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         assert_eq!(
             state.observe(&failed),
@@ -4195,32 +4221,31 @@ mod tests {
             "the second wait is longer than the first"
         );
 
-        // The credential. §8: one automatic re-read, then halt — never mint.
+        // The credential. §8: the RUN re-read once and found the same value,
+        // so the feed halts on the first observation — never mints.
         let mut state = FeedState::new(
             pull::vendor::Feed::Groww,
             brutex_core::vendor::Vendor::Groww,
             month(2020, 1),
         );
         let dead = TickOutcome {
-            reason: Some(
-                "RELIANCE: the broker credential could not be read: AccessDenied".to_owned(),
-            ),
+            reason: Some("RELIANCE: refused with status 401 TokenException".to_owned()),
+            credential: Some(CredentialStop::SameValue),
             ..failed.clone()
         };
-        assert_eq!(
-            state.observe(&dead),
-            Next::Retry,
-            "the token is re-read once, automatically"
-        );
         let Next::Halt { reason } = state.observe(&dead) else {
-            panic!("the second dead credential must halt");
+            panic!("a same-value verdict must halt");
         };
+        assert!(
+            reason.contains("returned the same value"),
+            "only the comparison's verdict may say so: {reason}"
+        );
         assert!(
             reason.contains("never mints"),
             "the halt names §8 rather than trying again: {reason}"
         );
         assert!(
-            reason.contains("AccessDenied"),
+            reason.contains("TokenException"),
             "the vendor's own words survive onto the page: {reason}"
         );
         // TERMINAL, AND FOR THIS CLASS IT STAYS TERMINAL. D-0108 made a census
@@ -4287,6 +4312,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         let mut verdicts = Vec::new();
         for _ in 0..MAX_MONTH_ATTEMPTS {
@@ -4746,6 +4772,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
 
         // BACKOFF: waits, and says how long and why.
@@ -4794,17 +4821,13 @@ mod tests {
             brutex_core::vendor::Vendor::Groww,
             month(2020, 5),
         );
+        // THE RUN MADE THE §8 RE-READ ITSELF AND FOUND THE SAME VALUE, so the
+        // first observation halts: there is no second re-read to owe.
         let credential = TickOutcome {
-            reason: Some(String::from(
-                "the broker credential could not be read: AccessDenied",
-            )),
+            reason: Some(String::from("NIFTY: refused with status 401")),
+            credential: Some(CredentialStop::SameValue),
             ..failed.clone()
         };
-        assert_eq!(
-            settle(&site, &mut dead, &credential),
-            0,
-            "the re-read is immediate"
-        );
         assert_eq!(settle(&site, &mut dead, &credential), IDLE_POLL_SECS);
         let json = site.autopilot.json();
         assert!(json.contains(r#""state":"halted""#), "{json}");
@@ -5059,6 +5082,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         assert!(matches!(state.observe(&full), Next::Wait { .. }));
         let Next::Halt { reason } = state.observe(&full) else {
@@ -5085,6 +5109,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         assert!(matches!(state.observe(&failed), Next::Wait { .. }));
         assert_eq!(state.attempts, 1);
@@ -5122,6 +5147,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         assert_eq!(
             state.observe(&dry),
@@ -5149,6 +5175,7 @@ mod tests {
             complete: false,
             stopped: true,
             journal_error: None,
+            credential: None,
         };
         assert_eq!(state.observe(&stopped), Next::Retry);
         assert_eq!(state.attempts, 0);
@@ -5814,14 +5841,9 @@ mod tests {
 
     /// **One instrument's 401 does not kill a whole feed.**
     ///
-    /// A dead token fails EVERY instrument. A sweep that reached 772 of 773 and
-    /// saw one credential-shaped refusal has an entitlement gap on one symbol,
-    /// which is a fact about the account's contract and not about the token —
-    /// and it used to halt the feed for the life of the process, because the
-    /// reason carried a credential marker.
-    ///
-    /// Reverting [`credential_is_feedwide`] to `true` puts the halt back and
-    /// fails this.
+    /// A sweep that reached 772 of 773 and saw one credential-shaped refusal,
+    /// with no structural verdict from the run, is a transport-class failure:
+    /// bounded backoff, then a stall, never a halt. Prose does not halt a feed.
     #[test]
     fn a_credential_reason_from_a_sweep_that_reached_somebody_backs_off_instead_of_halting() {
         let mut state = FeedState::new(
@@ -5837,13 +5859,13 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         assert_eq!(
             classify("SOMEBOND — refused with status 401"),
             Trouble::Credential,
             "the premise: the reason IS credential-shaped"
         );
-        assert!(!credential_is_feedwide(&partial));
         for expected in 1..=2u8 {
             assert!(
                 matches!(state.observe(&partial), Next::Wait { .. }),
@@ -5861,20 +5883,19 @@ mod tests {
         assert!(matches!(state.observe(&partial), Next::Stall { .. }));
         assert!(state.halted.is_none());
 
-        // THE FEED-WIDE CASE IS UNCHANGED: nobody answered, so it is the token.
-        let dead = TickOutcome {
-            reached: 0,
-            ..partial
-        };
-        assert!(credential_is_feedwide(&dead));
+        // THE RUN'S OWN SAME-VALUE VERDICT HALTS, on the first observation.
         let mut token = FeedState::new(
             pull::vendor::Feed::Groww,
             brutex_core::vendor::Vendor::Groww,
             month(2020, 1),
         );
-        assert_eq!(token.observe(&dead), Next::Retry, "the one §8 re-read");
+        let dead = TickOutcome {
+            reached: 0,
+            credential: Some(CredentialStop::SameValue),
+            ..partial
+        };
         let Next::Halt { reason } = token.observe(&dead) else {
-            panic!("a feed-wide dead credential must still halt");
+            panic!("a same-value verdict must halt");
         };
         assert!(reason.contains("never mints"), "{reason}");
         assert_eq!(token.halt_kind, Some(Halt::Credential));
@@ -5883,20 +5904,93 @@ mod tests {
             "CLAUDE.md §8: a dead credential arms NOTHING here. A timer-driven retry \
              against an unchanged dead value is the auto-retry §4 bans."
         );
+    }
 
-        // A RUN BLOCKED BEFORE IT ATTEMPTED ANYTHING IS AMBIGUOUS, and the
-        // ambiguous case halts — the direction that costs nothing outside this
-        // machine.
+    /// **GAP2-37: an unreachable Parameter Store is transport, not a dead
+    /// token.**
+    ///
+    /// The finding's own case: a feed-wide refusal whose text says
+    /// `credential` because SSM timed out. Twice observed, it used to answer
+    /// `Retry` and then `Halt` as [`Halt::Credential`], saying the re-read
+    /// "returned the same value" about a read that never returned anything.
+    /// Now it backs off like any transport fault, and nothing claims a
+    /// comparison. D-0948.
+    #[test]
+    fn an_unreachable_parameter_store_is_never_a_dead_token() {
+        let reason = "NIFTY: this feed's credential field \"access-token\" could not be read: \
+                      ssm.ap-south-1.amazonaws.com was not reached: operation timed out";
+        for credential in [None, Some(CredentialStop::Unreadable(Unread::Transport))] {
+            let mut state = FeedState::new(
+                pull::vendor::Feed::Dhan,
+                brutex_core::vendor::Vendor::Dhan,
+                month(2020, 1),
+            );
+            let out = TickOutcome {
+                attempted: 3,
+                reached: 0,
+                stored: 0,
+                reason: Some(reason.to_owned()),
+                complete: false,
+                stopped: false,
+                journal_error: None,
+                credential,
+            };
+            for _ in 0..2 {
+                let next = state.observe(&out);
+                assert!(
+                    matches!(next, Next::Wait { .. }),
+                    "{credential:?}: transport backs off, it does not halt: {next:?}"
+                );
+            }
+            assert_eq!(state.halt_kind, None, "{credential:?}");
+            assert!(state.halted.is_none(), "{credential:?}");
+            let Next::Stall { reason: said } = state.observe(&out) else {
+                panic!("{credential:?}: the bound stalls the month, it does not halt the feed");
+            };
+            assert!(!said.contains("same value"), "{said}");
+            assert_ne!(state.halt_kind, Some(Halt::Credential));
+        }
+    }
+
+    /// **GAP2-37: a configuration fault gets its own halt, and claims no
+    /// re-read.**
+    ///
+    /// A missing `credentials.toml` or no AWS identity cannot fix itself
+    /// between attempts, so it halts. It halts as [`Halt::Configuration`], with
+    /// a sentence that sends the operator to their configuration, and it never
+    /// says a re-read "returned the same value": no vendor rejected anything and
+    /// nothing was compared. D-0948.
+    #[test]
+    fn a_configuration_fault_halts_as_configuration_and_claims_no_comparison() {
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Dhan,
+            brutex_core::vendor::Vendor::Dhan,
+            month(2020, 1),
+        );
         let blocked = TickOutcome {
-            attempted: 0,
+            attempted: 3,
             reached: 0,
             stored: 0,
             reason: Some("the credential configuration at ~/.brutex is not usable".to_owned()),
             complete: false,
-            stopped: false,
+            stopped: true,
             journal_error: None,
+            credential: Some(CredentialStop::Unreadable(Unread::Configuration)),
         };
-        assert!(credential_is_feedwide(&blocked));
+        let Next::Halt { reason } = state.observe(&blocked) else {
+            panic!("an unusable configuration halts");
+        };
+        assert_eq!(state.halt_kind, Some(Halt::Configuration));
+        assert!(reason.contains("configuration"), "{reason}");
+        assert!(
+            reason.contains("~/.brutex"),
+            "the reason is carried: {reason}"
+        );
+        assert!(!reason.contains("same value"), "{reason}");
+        assert!(
+            state.probe.is_none(),
+            "nothing local can measure a config fix"
+        );
     }
 
     // ------------------------------------------------------ census probation
@@ -6164,6 +6258,7 @@ mod tests {
             complete: false,
             stopped: false,
             journal_error: None,
+            credential: None,
         };
         let first = feeds.first_mut().expect("a drivable feed");
         assert!(matches!(first.observe(&disk), Next::Wait { .. }));
@@ -6548,7 +6643,12 @@ mod tests {
     /// travel into sentences an operator reads.
     #[test]
     fn every_halt_class_names_itself_and_only_the_store_class_arms_a_probe() {
-        let all = [Halt::Credential, Halt::Store, Halt::Census];
+        let all = [
+            Halt::Credential,
+            Halt::Configuration,
+            Halt::Store,
+            Halt::Census,
+        ];
         let mut words: Vec<&str> = all.iter().map(|h| h.word()).collect();
         words.sort_unstable();
         let before = words.len();
@@ -6573,10 +6673,6 @@ mod tests {
             state.revive();
             assert!(state.halted.is_none() && state.halt_kind.is_none());
             assert!(state.probe.is_none());
-            assert_eq!(
-                state.rereads, CREDENTIAL_REREADS,
-                "a revived feed is owed its one §8 re-read again"
-            );
         }
     }
 }

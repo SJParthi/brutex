@@ -182,6 +182,98 @@ impl Credential {
             key: Some(key),
         }
     }
+
+    /// The SHA-256 fingerprint of this credential, for one comparison and
+    /// nothing else.
+    ///
+    /// # Why it exists — `CLAUDE.md` §8 on the shipped path
+    ///
+    /// *"A stale token is re-read; if the re-read returns the same dead value,
+    /// the pull halts loudly."* That rule is a COMPARISON between the value a
+    /// vendor rejected and the value a re-read returned. The shipped pull never
+    /// held the rejected value anywhere it could be compared — `HttpSource`
+    /// folds it into a header at construction — so the comparison was never
+    /// made and every remaining instrument was sent the dead token again
+    /// (GAP2-36, D-0948).
+    ///
+    /// Keeping the token itself around to compare would keep a second copy of
+    /// the secret alive for the life of a run. A fingerprint keeps 32 bytes that
+    /// are equal exactly when the two values are equal, and that cannot be
+    /// turned back into either.
+    ///
+    /// # Domain-separated and length-prefixed
+    ///
+    /// The input is a fixed label, then each secret preceded by its byte
+    /// length, then whether a key is present. Without the lengths, the pair
+    /// `("ab", "c")` and the pair `("a", "bc")` would hash the same bytes.
+    ///
+    /// # Cost
+    ///
+    /// One SHA-256 over at most a few hundred bytes, once per credential read —
+    /// never per request.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
+    #[must_use]
+    pub fn print(&self) -> CredentialPrint {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"brutex-credential-print-v1\0");
+        hasher.update((self.token.len() as u64).to_le_bytes());
+        hasher.update(self.token.as_bytes());
+        match &self.key {
+            None => hasher.update([0u8]),
+            Some(key) => {
+                hasher.update([1u8]);
+                hasher.update((key.len() as u64).to_le_bytes());
+                hasher.update(key.as_bytes());
+            }
+        }
+        CredentialPrint(hasher.finalize().into())
+    }
+}
+
+/// A credential's fingerprint: equal exactly when the credentials are equal.
+///
+/// # What it may be used for
+///
+/// Comparing a re-read with the value a vendor just rejected — `CLAUDE.md` §8.
+/// It is not `Display`, its `Debug` prints nothing of the digest, and it has no
+/// accessor for the bytes, so it cannot reach a log, a page or an error by any
+/// route this crate offers. A digest of a secret is not the secret, but a
+/// printed digest still lets anyone holding a guess confirm it, and nothing here
+/// needs to print it.
+///
+/// # The comparison is constant-time
+///
+/// Every byte is XOR-folded before the answer is read, so how long the
+/// comparison takes does not depend on where the two digests first differ.
+/// Nothing in this repository exposes the timing to an attacker; it costs
+/// thirty-two XORs, and it means the question never has to be asked again.
+///
+/// **UNVERIFIED as a measurement.** No test or bench times the comparison;
+/// the claim is argued from the shape of the code. `CLAUDE.md` §3 rule 6.
+#[derive(Clone, Copy)]
+pub struct CredentialPrint([u8; 32]);
+
+impl PartialEq for CredentialPrint {
+    fn eq(&self, other: &Self) -> bool {
+        let mut diff = 0u8;
+        for (left, right) in self.0.iter().zip(other.0.iter()) {
+            diff |= left ^ right;
+        }
+        diff == 0
+    }
+}
+
+impl Eq for CredentialPrint {}
+
+impl core::fmt::Debug for CredentialPrint {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CredentialPrint(<redacted>)")
+    }
 }
 
 /// A vendor reached over HTTPS, driven entirely by its descriptor.
@@ -297,6 +389,12 @@ pub struct HttpSource {
     /// governed either way -- which is the property the other candidate fix,
     /// deleting the api's five charge sites, would have given up.
     charged_by_caller: bool,
+    /// The fingerprint of the credential this source was built with.
+    ///
+    /// Computed once in [`HttpSource::new`] and never recomputed: the header
+    /// is fixed at construction, so the credential a request carries is the
+    /// one this names. See [`Credential::print`] for why it exists.
+    print: CredentialPrint,
 }
 
 // The token is the reason this is hand-written. A derived `Debug` prints every
@@ -421,6 +519,10 @@ impl HttpSource {
         // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
         // costs nothing to find; building a TLS client first would spend that
         // work to throw it away.
+        // FINGERPRINTED BEFORE THE CREDENTIAL IS CONSUMED by the header. The
+        // print is what `CLAUDE.md` §8's comparison is made on; see
+        // `Credential::print`.
+        let print = credential.print();
         let header_value = Self::header_value(spec.auth.scheme, credential)?;
         let client = pooled_client().map_err(|why| FetchError::TransportFailed {
             detail: format!("the HTTPS client could not be built: {why}"),
@@ -467,7 +569,19 @@ impl HttpSource {
             // OWNED, THEREFORE CHARGED HERE. `sharing` is the only thing that
             // moves the charge to the caller.
             charged_by_caller: false,
+            print,
         })
+    }
+
+    /// The fingerprint of the credential every request from this source
+    /// carries.
+    ///
+    /// The one fact about the credential a caller may hold after the source is
+    /// built, and only for `CLAUDE.md` §8's comparison: a re-read whose print
+    /// equals this one returned the same dead value.
+    #[must_use]
+    pub const fn credential_print(&self) -> CredentialPrint {
+        self.print
     }
 
     /// Replaces this source's governor with one the caller already holds.
@@ -6470,5 +6584,52 @@ mod tests {
                 "and adds no per-rung parameter"
             );
         }
+    }
+
+    /// `CLAUDE.md` §8's comparison is made on fingerprints, so a fingerprint
+    /// must be equal exactly when the credentials are — and must never print.
+    ///
+    /// GAP2-36 / D-0948. Equal tokens give equal prints; one changed byte, a
+    /// key added, and a key/token split moved by one byte all give different
+    /// ones. The source carries the print of the credential it was built
+    /// with, and neither `Debug` shows a byte of the token or the digest.
+    #[test]
+    fn a_credential_print_is_equal_exactly_when_the_credential_is() {
+        let stale = Credential::token("stale".to_owned()).print();
+        assert_eq!(stale, Credential::token("stale".to_owned()).print());
+        assert_ne!(stale, Credential::token("fresh".to_owned()).print());
+        assert_ne!(stale, Credential::token("stalf".to_owned()).print());
+        assert_ne!(
+            stale,
+            Credential::pair(String::new(), "stale".to_owned()).print(),
+            "a present-but-empty key is a different credential from no key"
+        );
+        // THE LENGTH PREFIX: the same eight bytes split differently between
+        // key and token must not collide.
+        assert_ne!(
+            Credential::pair("the".to_owned(), "-token".to_owned()).print(),
+            Credential::pair("the-".to_owned(), "token".to_owned()).print()
+        );
+        // And a key/token transposition is a different credential.
+        assert_ne!(
+            Credential::pair("stale".to_owned(), "fresh".to_owned()).print(),
+            Credential::pair("fresh".to_owned(), "stale".to_owned()).print()
+        );
+
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let source = HttpSource::new(spec, Credential::token("stale".to_owned()))
+            .expect("an offline source builds");
+        assert_eq!(source.credential_print(), stale);
+        assert_ne!(
+            source.credential_print(),
+            Credential::token("fresh".to_owned()).print()
+        );
+        for shown in [format!("{stale:?}"), format!("{source:?}")] {
+            assert!(!shown.contains("stale"), "{shown}");
+        }
+        assert_eq!(format!("{stale:?}"), "CredentialPrint(<redacted>)");
     }
 }
