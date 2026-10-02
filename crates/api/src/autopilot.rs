@@ -906,6 +906,62 @@ pub struct Stall {
     /// in — [`FeedState::observe`] reads no clock, deliberately, so that every
     /// arm of it is drivable from a test with no vendor, no store and no clock.
     pub at_unix: i64,
+    /// Which rung of the ladder stalled at [`Self::month`].
+    ///
+    /// Part of the stall's key with the month: the day rung and the minute rung
+    /// owe different files for the same month, so a day stall at 2021-03 and a
+    /// minute stall at 2021-03 are two entries, and a minute completion clears
+    /// only the minute one. D-0949.
+    pub rung: pull::vendor::Granularity,
+}
+
+/// The two rungs the autopilot pulls, in the order it alternates them.
+///
+/// `store_timeframe` answers `Some` for the day rung and the minute rungs, and
+/// every coarser rung is derived from the minute one rather than fetched, so a
+/// vendor is asked for these two and nothing else. [`FeedState`] keeps one
+/// [`Place`] for each: the live one in its own fields and the other in
+/// [`FeedState::parked`]. D-0949.
+pub const RUNGS: [pull::vendor::Granularity; 2] = [
+    pull::vendor::Granularity::Day1,
+    pull::vendor::Granularity::Minute1,
+];
+
+/// Where one rung of one feed stands on the ladder while the other rung is
+/// being driven.
+///
+/// **Why a feed needs two of these (W1-api1-7).** One frontier used to be
+/// shared by both rungs. A day pass that completed month F moved it to F+1,
+/// and the next minute pass scanned upward from F+1, so the minute months below
+/// the day frontier were never examined for the life of the process. The
+/// per-month counters crossed over the same way: a day failure counted against
+/// the minute month that followed it. Each rung now carries its own frontier
+/// and its own counters, and [`FeedState::enter`] swaps them in O(1).
+/// Proven by `api::stall_tests::each_rung_keeps_its_own_frontier_and_counters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    /// That rung's frontier hint. A hint, never authority, as
+    /// [`FeedState::frontier`] is.
+    pub frontier: YearMonth,
+    /// That rung's [`FeedState::attempts`].
+    pub attempts: u8,
+    /// That rung's [`FeedState::dry`].
+    pub dry: u8,
+    /// That rung's [`FeedState::backoff`].
+    pub backoff: u32,
+}
+
+impl Place {
+    /// A rung at `frontier` with no attempts, no dry rounds and no backoff.
+    #[must_use]
+    pub const fn at(frontier: YearMonth) -> Self {
+        Self {
+            frontier,
+            attempts: 0,
+            dry: 0,
+            backoff: 0,
+        }
+    }
 }
 
 /// Which class of fault made a feed terminal, and therefore what — if anything
@@ -1052,12 +1108,24 @@ pub struct FeedState {
     /// `Some` only while [`Self::halt_kind`] is [`Halt::Store`] and the
     /// allowance is not spent.
     pub probe: Option<Probe>,
-    /// Months passed with a reason. Permanent for the life of the process.
+    /// Months passed with a reason, at most one entry per (month, rung).
+    ///
+    /// An entry leaves when its month completes on its rung. One that never
+    /// completes stays for the life of the process, saying whether its
+    /// reconsideration allowance is spent. Because a month that stalls again
+    /// updates its own entry rather than adding one, the list is bounded by the
+    /// months the feed can owe on its two rungs, not by how often they fail.
+    /// D-0949.
     pub stalls: Vec<Stall>,
     /// The last reason this feed reported, verbatim.
     pub last_reason: Option<String>,
     /// How many months this feed has retired since it started.
     pub months_done: u32,
+    /// Which rung [`Self::frontier`], [`Self::attempts`], [`Self::dry`] and
+    /// [`Self::backoff`] currently belong to. One of [`RUNGS`].
+    pub rung: pull::vendor::Granularity,
+    /// The other rung's place, held while this one is driven. D-0949.
+    pub parked: Place,
 }
 
 impl FeedState {
@@ -1082,7 +1150,83 @@ impl FeedState {
             stalls: Vec::new(),
             last_reason: None,
             months_done: 0,
+            rung: pull::vendor::Granularity::Day1,
+            parked: Place::at(frontier),
         }
+    }
+
+    /// Make `rung` the live rung: park the current rung's frontier and
+    /// counters, and take up `rung`'s. O(1): one swap of four fields.
+    ///
+    /// A no-op when `rung` is already live. The autopilot drives exactly the
+    /// two rungs in [`RUNGS`], so the rung that is not live is the parked one.
+    /// D-0949. Proven by
+    /// `api::stall_tests::each_rung_keeps_its_own_frontier_and_counters`.
+    pub fn enter(&mut self, rung: pull::vendor::Granularity) {
+        if rung == self.rung {
+            return;
+        }
+        let live = Place {
+            frontier: self.frontier,
+            attempts: self.attempts,
+            dry: self.dry,
+            backoff: self.backoff,
+        };
+        let Place {
+            frontier,
+            attempts,
+            dry,
+            backoff,
+        } = std::mem::replace(&mut self.parked, live);
+        self.frontier = frontier;
+        self.attempts = attempts;
+        self.dry = dry;
+        self.backoff = backoff;
+        self.rung = rung;
+    }
+
+    /// Record that the live rung's frontier month stalled.
+    ///
+    /// A month already on the list for this rung is UPDATED: its attempts are
+    /// added (saturating), its reason replaced, and its `retried` and `at_unix`
+    /// kept. Pushing a fresh entry with `retried: 0` instead was W1-api1-8: each
+    /// reconsideration that failed minted a full new allowance, so retries were
+    /// unbounded and the list grew without limit.
+    ///
+    /// Cost: one scan of this feed's list, which is bounded by the months the
+    /// feed owes on two rungs (`docs/06-limits.md`, D-0949), and only on the
+    /// stall branch, at most once per [`MAX_MONTH_ATTEMPTS`] failed ticks.
+    fn record_stall(&mut self, why: &str) {
+        let (month, rung, attempts) = (self.frontier, self.rung, self.attempts);
+        if let Some(held) = self
+            .stalls
+            .iter_mut()
+            .find(|s| s.month == month && s.rung == rung)
+        {
+            held.attempts = held.attempts.saturating_add(attempts);
+            why.clone_into(&mut held.reason);
+            return;
+        }
+        self.stalls.push(Stall {
+            month,
+            attempts,
+            reason: why.to_owned(),
+            // NEITHER FIELD IS STAMPED HERE. `observe` reads no clock,
+            // deliberately — see its doc comment — so the idle ladder stamps
+            // `at_unix` the first time it sees the stall and `reconsider` is
+            // what moves `retried`.
+            retried: 0,
+            at_unix: 0,
+            rung,
+        });
+    }
+
+    /// The live rung's frontier month completed, so its stall, if it had one,
+    /// leaves the list. Same bounded scan as [`Self::record_stall`]. D-0949.
+    fn unstall(&mut self) {
+        let (month, rung) = (self.frontier, self.rung);
+        self.stalls
+            .retain(|s| !(s.month == month && s.rung == rung));
     }
 
     /// Forget everything that is about one month, keeping what is about the
@@ -1202,6 +1346,7 @@ impl FeedState {
             return Next::Retry;
         }
         if out.complete {
+            self.unstall();
             self.clear_month();
             self.rereads = CREDENTIAL_REREADS;
             self.months_done = self.months_done.saturating_add(1);
@@ -1231,17 +1376,7 @@ impl FeedState {
                     "attempted {} times and never completed: {reason}",
                     self.attempts
                 );
-                self.stalls.push(Stall {
-                    month: self.frontier,
-                    attempts: self.attempts,
-                    reason: why.clone(),
-                    // NEITHER FIELD IS STAMPED HERE. This function reads no
-                    // clock, deliberately — see its doc comment — so the idle
-                    // ladder stamps `at_unix` the first time it sees the stall
-                    // and `reconsider` is what moves `retried`.
-                    retried: 0,
-                    at_unix: 0,
-                });
+                self.record_stall(&why);
                 self.clear_month();
                 return Next::Stall { reason: why };
             }
@@ -1337,13 +1472,21 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
     stall.retried = stall.retried.saturating_add(1);
     stall.at_unix = now_unix;
     let month = stall.month;
+    let rung = stall.rung;
     let retried = stall.retried;
     let reason = stall.reason.clone();
     // THE FRONTIER GOES BACK, AND ONLY HERE. Everywhere else it is monotone.
-    state.frontier = month;
-    state.clear_month();
+    // ON THE STALL'S OWN RUNG: a minute stall moves the minute frontier, even
+    // when the day rung is the live one. D-0949.
+    if rung == state.rung {
+        state.frontier = month;
+        state.clear_month();
+    } else {
+        state.parked = Place::at(month);
+    }
     Some(format!(
-        "nothing else is missing, so {feed}'s stalled month {month} is being reconsidered — \
+        "nothing else is missing, so {feed}'s stalled {rung} month {month} is being \
+         reconsidered — \
          attempt {retried} of {STALL_RETRIES} allowed after the stall, at least \
          {STALL_RECHECK_SECS}s since the last one. Nothing is replayed: the window is \
          re-derived from what the store already holds, so a day already stored is not \
@@ -1653,20 +1796,31 @@ impl Status {
                 if k > 0 {
                     out.push(',');
                 }
-                let _ = write!(
-                    out,
-                    r#"{{"month":{},"attempts":{},"retried":{},"retries_max":{},"reason":{}}}"#,
-                    render::json_string(&stall.month.to_string()),
-                    stall.attempts,
-                    stall.retried,
-                    STALL_RETRIES,
-                    render::json_string(&stall.reason)
-                );
+                stall.json_into(&mut out);
             }
             out.push_str("]}");
         }
         out.push_str("]}");
         out
+    }
+}
+
+impl Stall {
+    /// This stall as one JSON object, appended to `out`: the month, the rung
+    /// (`timeframe`, D-0949), the attempts, the retries spent and allowed, and
+    /// the reason verbatim.
+    fn json_into(&self, out: &mut String) {
+        use std::fmt::Write as _;
+        let _ = write!(
+            out,
+            r#"{{"month":{},"timeframe":{},"attempts":{},"retried":{},"retries_max":{},"reason":{}}}"#,
+            render::json_string(&self.month.to_string()),
+            render::json_string(&self.rung.to_string()),
+            self.attempts,
+            self.retried,
+            STALL_RETRIES,
+            render::json_string(&self.reason)
+        );
     }
 }
 
@@ -2131,9 +2285,10 @@ const _: () = assert!(
 /// universe" here would be a fourth spelling of it, and the one that is wrong
 /// is the one that reports a gap nothing can close.
 ///
-/// Computed once when the autopilot starts, for the reason `Site::series` is:
-/// it is O(rows log rows) and that belongs beside the manifest load, not
-/// inside a tick.
+/// O(rows log rows) over the merged master universe, so it does not belong
+/// inside a pass. [`fly`] reads it through [`SeriesCache`], which calls this
+/// once per rung per masters parse rather than once per pass (W1-api1-1,
+/// D-0949).
 #[must_use]
 pub fn tracked_series(site: &Site, timeframe: Timeframe) -> Vec<Series> {
     let mut out: Vec<Series> = site
@@ -2157,6 +2312,51 @@ pub fn tracked_series(site: &Site, timeframe: Timeframe) -> Vec<Series> {
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// [`tracked_series`] per rung, rebuilt only when the masters are re-parsed.
+///
+/// **Why (W1-api1-1).** `fly` called `tracked_series` on every pass: a filter of
+/// the whole merged universe, a sort and a dedup, O(U log U) for U master rows
+/// (2,787 real, 50,000 in the bench fixture), back to back while working and
+/// once a minute while idle. The answer changes only when
+/// [`crate::server::Site::reparse`] swaps a new universe in, and every swap
+/// moves [`crate::server::Parsed::generation`]. So a pass now costs one read
+/// lock and one integer compare; the rebuild happens once per rung per parse.
+/// Proven by `api::stall_tests::the_rung_work_lists_are_built_once_per_masters_parse`.
+#[derive(Debug, Default)]
+pub struct SeriesCache {
+    /// One list per rung timeframe: `(timeframe, generation, list)`. At most
+    /// [`RUNGS`]`.len()` entries, so the lookup is O(1). Proven by
+    /// `api::stall_tests::the_rung_work_lists_are_built_once_per_masters_parse`.
+    held: Vec<(Timeframe, u64, Vec<Series>)>,
+    /// How many times [`tracked_series`] has been called through this cache.
+    /// The operation count the cost test reads.
+    pub builds: u64,
+}
+
+impl SeriesCache {
+    /// The work list for `timeframe`, rebuilt only if the masters were
+    /// re-parsed since it was last built.
+    pub fn get(&mut self, site: &Site, timeframe: Timeframe) -> &[Series] {
+        let generation = site.universe().generation;
+        let slot = self.held.iter().position(|(held, _, _)| *held == timeframe);
+        let fresh = slot
+            .and_then(|at| self.held.get(at))
+            .is_some_and(|(_, at, _)| *at == generation);
+        if !fresh {
+            let list = tracked_series(site, timeframe);
+            self.builds = self.builds.saturating_add(1);
+            match slot.and_then(|at| self.held.get_mut(at)) {
+                Some(entry) => *entry = (timeframe, generation, list),
+                None => self.held.push((timeframe, generation, list)),
+            }
+        }
+        self.held
+            .iter()
+            .find(|(held, _, _)| *held == timeframe)
+            .map_or(&[], |(_, _, list)| list.as_slice())
+    }
 }
 
 /// A month ordinal, so month arithmetic is a subtraction rather than a
@@ -2384,7 +2584,7 @@ pub async fn fly(site: Loaded) {
     // turn is self-correcting, needs no completion predicate of its own, and
     // cannot wedge on a day rung that will never finish because one instrument
     // is delisted.
-    let mut day_rung_next = true;
+    let mut next_rung = 0usize;
     let granularity = pull::vendor::Granularity::Day1;
     let Some(timeframe) = granularity.store_timeframe() else {
         site.autopilot.publish(|status| {
@@ -2393,7 +2593,8 @@ pub async fn fly(site: Loaded) {
         });
         return;
     };
-    let series = tracked_series(&site, timeframe);
+    let mut cache = SeriesCache::default();
+    let instruments = cache.get(&site, timeframe).len();
     let mut feeds = drivable(yesterday);
     // THE TARGET IS PUBLISHED BEFORE THE GRACE WINDOW, NOT AFTER THE FIRST
     // ROUND.
@@ -2413,7 +2614,7 @@ pub async fn fly(site: Loaded) {
             .min()
             .map_or_else(|| yesterday.to_string(), |floor| floor.to_string()),
         to: yesterday.to_string(),
-        instruments: series.len(),
+        instruments,
         timeframe: granularity.to_string(),
         feed: String::new(),
     };
@@ -2428,23 +2629,25 @@ pub async fn fly(site: Loaded) {
             dwell_paused(&site.autopilot).await;
             continue;
         }
-        // WHICH RUNG THIS TICK IS FOR. Flipped before the call so a `continue`
-        // above cannot leave the same rung selected forever.
-        let rung = if day_rung_next {
-            pull::vendor::Granularity::Day1
-        } else {
-            pull::vendor::Granularity::Minute1
-        };
-        day_rung_next = !day_rung_next;
-        // THE SERIES IS PER RUNG, not computed once. `tracked_series` answers
-        // "which instrument-months does this timeframe still owe", and the day
-        // rung and the minute rung owe different ones — sharing one list would
-        // have the day pass chasing the minute pass's gaps.
+        // WHICH RUNG THIS TICK IS FOR. Advanced before the call so a
+        // `continue` below cannot leave the same rung selected forever. Each
+        // feed keeps a frontier per rung (`Place`, D-0949), which `round`
+        // swaps in.
+        let rung = RUNGS
+            .get(next_rung % RUNGS.len())
+            .copied()
+            .unwrap_or(granularity);
+        next_rung = next_rung.wrapping_add(1) % RUNGS.len();
+        // THE SERIES IS PER RUNG. `tracked_series` answers "which
+        // instrument-months does this timeframe still owe", and the day rung
+        // and the minute rung owe different ones — sharing one list would have
+        // the day pass chasing the minute pass's gaps. Cached per masters
+        // parse (W1-api1-1), so a pass pays one lock and one compare for it.
         let Some(rung_timeframe) = rung.store_timeframe() else {
             continue;
         };
-        let rung_series = tracked_series(&site, rung_timeframe);
-        let waited = round(&site, &mut feeds, &rung_series, rung).await;
+        let rung_series = cache.get(&site, rung_timeframe);
+        let waited = round(&site, &mut feeds, rung_series, rung).await;
         // BETWEEN UNITS, ALWAYS. The sweep itself awaits on every request, so
         // this is belt and braces for the one path that might not — a tick that
         // decides there is nothing to do and loops.
@@ -2906,6 +3109,11 @@ async fn round(
     series: &[Series],
     granularity: pull::vendor::Granularity,
 ) -> u64 {
+    // THIS RUNG'S PLACE, NOT THE OTHER ONE'S. One swap of four fields per feed;
+    // see `Place` for the months the shared frontier used to skip. D-0949.
+    for state in feeds.iter_mut() {
+        state.enter(granularity);
+    }
     // THE SEAT FIRST, BEFORE THE CENSUS IS READ.
     //
     // A hand-made pull holds it for the minutes its own month takes. Finding
@@ -3734,6 +3942,16 @@ fn start(control: &Control, halted: &[String]) {
             format!("resumed. The next unit is whatever the store is missing, oldest first.{note}");
     });
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic
+)]
+#[path = "autopilot_stall_tests.rs"]
+mod stall_tests;
 
 #[cfg(test)]
 #[allow(
@@ -5318,15 +5536,21 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // THE TWO RUNGS ARE NAMED ONCE, in `RUNGS`, and `fly` walks that
+        // table (D-0949), so the table is what must hold both.
         assert!(
-            code.contains("Granularity::Day1"),
-            "the daily rung must be asked for somewhere in `fly`; without it \
-             the ladder gate refuses every minute round forever and the store \
-             never receives a first bar"
+            RUNGS.contains(&pull::vendor::Granularity::Day1),
+            "the daily rung must be asked for; without it the ladder gate \
+             refuses every minute round forever and the store never receives \
+             a first bar"
         );
         assert!(
-            code.contains("Granularity::Minute1"),
+            RUNGS.contains(&pull::vendor::Granularity::Minute1),
             "and the minute rung too — it is the one the engine sweeps"
+        );
+        assert!(
+            code.contains("RUNGS"),
+            "`fly` chooses its rung from the table"
         );
         // BOTH REACH `round`, which is the only thing that pulls. Naming a rung
         // in a comment or a status string would satisfy the two assertions
@@ -5335,7 +5559,7 @@ mod tests {
             .find("round(&site")
             .expect("`fly` reaches the vendor through `round`");
         let chose = code
-            .find("day_rung_next")
+            .find("next_rung")
             .expect("the rung alternates rather than being fixed");
         assert!(
             chose < asked,
@@ -6211,6 +6435,7 @@ mod tests {
                 reason: String::from("attempted 3 times and never completed: timed out"),
                 retried,
                 at_unix,
+                rung: pull::vendor::Granularity::Day1,
             }],
             ..FeedState::new(
                 pull::vendor::Feed::Groww,
@@ -6478,6 +6703,7 @@ mod tests {
             reason: String::from("attempted 3 times and never completed: connection reset"),
             retried: 0,
             at_unix: now.saturating_sub(STALL_RECHECK_SECS * 2),
+            rung: pull::vendor::Granularity::Minute1,
         });
 
         let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
