@@ -814,14 +814,44 @@ pub fn decode_body(
     spec: &HttpSpec,
     listing: crate::vendor::Listing,
 ) -> Result<RawWindow, FetchError> {
+    let root = parse_answer(body).map_err(|why| not_json(&why))?;
+    decode_value(&root, spec, listing)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`parse_answer`] ran on this thread, so a test can count
+    /// the parses one answer costs. Test builds only.
+    static PARSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The one JSON parse a vendor answer goes through, whichever reader wants it.
+///
+/// [`crate::refusal::disposition_of`] parses through it as well, so a count of
+/// its calls sees a parse by the refusal reader and by the decode alike.
+pub(crate) fn parse_answer(body: &str) -> Result<serde_json::Value, serde_json::Error> {
+    #[cfg(test)]
+    PARSES.with(|c| c.set(c.get().saturating_add(1)));
+    serde_json::from_str(body)
+}
+
+/// The fault a body that is not JSON decodes to.
+fn not_json(why: &serde_json::Error) -> FetchError {
+    FetchError::TransportFailed {
+        detail: format!("the vendor's answer is not JSON: {why}"),
+    }
+}
+
+/// [`decode_body`] over a body already parsed by [`parse_answer`].
+fn decode_value(
+    root: &serde_json::Value,
+    spec: &HttpSpec,
+    listing: crate::vendor::Listing,
+) -> Result<RawWindow, FetchError> {
     // COUNTED ACROSS THE WHOLE BODY, reported ONCE. A per-row event would put
     // a `telemetry::emit` inside the decode loop; one per window is the
     // granularity `CLAUDE.md` section 3 rule 4 affords. See `one_volume`.
     let mut corrected = 0usize;
-    let root: serde_json::Value =
-        serde_json::from_str(body).map_err(|why| FetchError::TransportFailed {
-            detail: format!("the vendor's answer is not JSON: {why}"),
-        })?;
 
     let decoded = match spec.response {
         ResponseShape::ParallelArrays { envelope } => {
@@ -853,7 +883,7 @@ pub fn decode_body(
             // exactly that path. The other two arms return a `Result` into
             // `decoded` and were never affected. D-0332.
             (|| -> Result<RawWindow, FetchError> {
-                let root = container(&root, envelope)?;
+                let root = container(root, envelope)?;
                 let f = spec.fields;
                 // THE MASK FIRST, so every column below is filtered the same
                 // way and a minute the vendor did not trade is skipped rather
@@ -917,10 +947,10 @@ pub fn decode_body(
         // conversions run per object: rupees to paisa through `csv::paisa`, no
         // float, and a value off the tick grid refused by name.
         ResponseShape::ArrayOfObjects { envelope } => {
-            decode_objects(&root, spec, envelope, listing, &mut corrected)
+            decode_objects(root, spec, envelope, listing, &mut corrected)
         }
         ResponseShape::PositionalRows { envelope, array } => {
-            decode_positional(&root, spec, envelope, array, listing, &mut corrected)
+            decode_positional(root, spec, envelope, array, listing, &mut corrected)
         }
     };
     // ONLY WHEN A WINDOW ACTUALLY LANDED. A refused window wrote nothing, so an
@@ -2733,7 +2763,7 @@ impl HttpSource {
         //
         // Read through the WHOLE contract, so a code the vendor misfiled is
         // still read by its sentence — the rule D-0325 established.
-        self.weigh_answered_body(&text, status)?;
+        let decoded = self.settle_answer(&text, status, request.listing)?;
 
         // NAMED AS A DECODE FAULT, BECAUSE THE EXCHANGE ALREADY SUCCEEDED.
         //
@@ -2741,7 +2771,7 @@ impl HttpSource {
         // `TransportFailed` it read as "the vendor was not reached" — false,
         // and it sent `with_retry` through its whole ladder re-asking for bytes
         // that will come back identical. See `FetchError::BodyNotUnderstood`.
-        decode_body(&text, &self.spec, request.listing).map_err(|why| {
+        decoded.map_err(|why| {
             // THE INNER SENTENCE, NOT THE INNER ERROR'S WHOLE DISPLAY.
             //
             // `decode_body` reports its faults as `TransportFailed`, whose
@@ -2806,6 +2836,35 @@ impl HttpSource {
         ));
     }
 
+    /// A 2xx answer weighed for a refusal and then decoded.
+    ///
+    /// # Errors
+    ///
+    /// The outer [`FetchError::VendorRefused`] when the body names a refusal;
+    /// the inner result is [`decode_body`]'s, left for the caller to name.
+    fn settle_answer(
+        &self,
+        text: &str,
+        status: u16,
+        listing: crate::vendor::Listing,
+    ) -> Result<Result<RawWindow, FetchError>, FetchError> {
+        // ONE PARSE FOR BOTH READERS. Each used to run its own `from_str` over
+        // the same text, so every success body was parsed twice. W1-pull2-1.
+        let parsed = parse_answer(text);
+        self.weigh_parsed(parsed.as_ref().ok(), text, status)?;
+        Ok(match &parsed {
+            Ok(root) => decode_value(root, &self.spec, listing),
+            Err(why) => Err(not_json(why)),
+        })
+    }
+
+    /// [`Self::weigh_parsed`] over a body it parses itself. Tests only: the
+    /// live path parses once in [`Self::settle_answer`].
+    #[cfg(test)]
+    fn weigh_answered_body(&self, text: &str, status: u16) -> Result<(), FetchError> {
+        self.weigh_parsed(parse_answer(text).ok().as_ref(), text, status)
+    }
+
     /// Whether a 2xx answer is actually a success, and the governor feedback
     /// that follows from the answer.
     ///
@@ -2835,14 +2894,23 @@ impl HttpSource {
     /// A feed declaring no `error_names` has no contract to read and takes the
     /// success path unchanged, exactly as it did before this existed.
     ///
+    /// `parsed` is the body's one parse from [`Self::settle_answer`], and `None`
+    /// when the body was not JSON, which no contract can read a refusal from.
+    ///
     /// # Errors
     ///
     /// [`FetchError::VendorRefused`] carrying the disposition the body named, so
     /// the caller's ladder sees the same verdict it would have seen had the
     /// vendor used the status.
-    fn weigh_answered_body(&self, text: &str, status: u16) -> Result<(), FetchError> {
+    fn weigh_parsed(
+        &self,
+        parsed: Option<&serde_json::Value>,
+        text: &str,
+        status: u16,
+    ) -> Result<(), FetchError> {
         if let Some(contract) = self.spec.error_names
-            && let Some(named) = crate::refusal::disposition_of(text, contract)
+            && let Some(named) =
+                parsed.and_then(|value| crate::refusal::disposition_of_value(value, contract))
         {
             // THE GOVERNOR LEARNS THE RIGHT THING FROM IT. A throttle named in
             // the body is still a throttle; any other refusal is one the
@@ -2858,9 +2926,13 @@ impl HttpSource {
             }
             return Err(FetchError::VendorRefused {
                 status,
+                // CUT, LIKE EVERY OTHER REFUSAL THAT REACHES AN ERROR. This
+                // body is bounded only by `MAX_RESPONSE_BYTES`, and `trim` is the
+                // rule the non-2xx door already obeys. UC-22.
                 detail: format!(
                     "the vendor answered {status} and put a refusal in the \
-                     body: {text}"
+                     body: {}",
+                    trim(text)
                 ),
                 named: Some(named),
             });
@@ -3114,23 +3186,24 @@ fn stated_offset(text: &str) -> Option<i64> {
     if tail == "Z" {
         return Some(0);
     }
-    let sign = match tail.as_bytes().first()? {
+    // READ BY POSITION, AND BY LENGTH FIRST. `+0530` and `+05:30` are the only
+    // two shapes, so the tail is five or six bytes and the colon, when there
+    // is one, sits between the hours and the minutes. This used to strip every
+    // colon from the whole tail into a new `String` and count what was left,
+    // which walked a tail of any length and read `+0:530` as IST. W1-pull2-7.
+    let ([sign, h1, h2, m1, m2] | [sign, h1, h2, b':', m1, m2]) = *tail.as_bytes() else {
+        return None;
+    };
+    let sign = match sign {
         b'+' => 1,
         b'-' => -1,
         _ => return None,
     };
-    // `+0530` and `+05:30` differ only by the colon, so the digits are read by
-    // position from a form with it stripped rather than by two parsers.
-    let digits: String = tail
-        .get(1..)?
-        .chars()
-        .filter(|c| *c != ':')
-        .collect::<String>();
-    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if ![h1, h2, m1, m2].iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let hours: i64 = digits.get(0..2)?.parse().ok()?;
-    let minutes: i64 = digits.get(2..4)?.parse().ok()?;
+    let hours = i64::from(h1 - b'0') * 10 + i64::from(h2 - b'0');
+    let minutes = i64::from(m1 - b'0') * 10 + i64::from(m2 - b'0');
     // BOTH FIELDS ARE BOUNDED, and the hours one was not.
     //
     // A minutes field past 59 is not a zone, it is a malformed value, and
@@ -6909,5 +6982,213 @@ mod tests {
                 "and adds no per-rung parameter"
             );
         }
+    }
+
+    /// **A REFUSAL UNDER A 2XX REACHES ITS ERROR TRIMMED, like every other.**
+    ///
+    /// `trim` states the rule: a refusal body is unbounded input and an error
+    /// string reaches a log, so it is cut at 500 characters. The non-2xx door
+    /// obeyed it; the 2xx door formatted the whole body into
+    /// `VendorRefused::detail`, and that body is bounded only by
+    /// `MAX_RESPONSE_BYTES`. UC-22.
+    #[test]
+    fn a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error() {
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a client for the shipped Dhan row");
+        let pad = "x".repeat(10_000);
+        let dead = format!(
+            r#"{{"errorCode":"DH-901","errorType":"Invalid_Authentication","errorMessage":"Client ID or access token is invalid","errorDetail":"{pad}"}}"#
+        );
+        let Err(FetchError::VendorRefused { detail, named, .. }) =
+            source.weigh_answered_body(&dead, 200)
+        else {
+            panic!("a body naming DH-901 is a refusal whatever the status says")
+        };
+        assert_eq!(named, Some(crate::refusal::Disposition::SessionDead));
+        let prefix = "the vendor answered 200 and put a refusal in the body: ";
+        assert!(detail.starts_with(prefix), "{detail:.120}");
+        assert!(detail.contains("DH-901"), "the code survives the cut");
+        assert_eq!(
+            detail.chars().count(),
+            prefix.chars().count() + 500,
+            "the body is cut to `trim`'s 500 characters, not carried whole"
+        );
+    }
+
+    /// **A 2XX BODY IS PARSED ONCE, NOT ONCE FOR THE REFUSAL CHECK AND AGAIN
+    /// FOR THE DECODE.**
+    ///
+    /// `window_async` weighed a success body for a refusal and then decoded
+    /// it, and each step ran its own `serde_json::from_str` over the same
+    /// text — up to `MAX_RESPONSE_BYTES` parsed twice per window, on the path
+    /// every good request takes. The count is read from `parse_answer`, which
+    /// both `decode_body` and `refusal::disposition_of` parse through, on this
+    /// thread only, so either reader parsing the text again is counted.
+    /// W1-pull2-1.
+    #[test]
+    fn a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode() {
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+            .expect("a client for the shipped Dhan row");
+        let body = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+            "close":[24500.75],"volume":[250],"timestamp":[1751337900]}"#;
+
+        // THE COUNTER SEES THE REFUSAL READER'S OWN PARSE, so a refusal check
+        // that parsed the text again would be counted, not missed.
+        let contract = source
+            .spec
+            .error_names
+            .expect("Dhan declares its error names");
+        PARSES.with(|c| c.set(0));
+        assert_eq!(crate::refusal::disposition_of(body, contract), None);
+        assert_eq!(
+            PARSES.with(std::cell::Cell::get),
+            1,
+            "disposition_of parses once"
+        );
+
+        PARSES.with(|c| c.set(0));
+        let window = source
+            .settle_answer(body, 200, crate::vendor::Listing::Equity)
+            .expect("no refusal in a bars body")
+            .expect("and it decodes");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(PARSES.with(std::cell::Cell::get), 1, "one parse, not two");
+
+        // A REFUSAL IS STILL FOUND FROM THAT ONE PARSE, and still first.
+        PARSES.with(|c| c.set(0));
+        let dead = r#"{"errorType":"Invalid_Authentication","errorCode":"DH-901",
+                       "errorMessage":"Client ID or access token is invalid"}"#;
+        let Err(FetchError::VendorRefused { named, .. }) =
+            source.settle_answer(dead, 200, crate::vendor::Listing::Equity)
+        else {
+            panic!("a refusal under a 200 is still a refusal")
+        };
+        assert_eq!(named, Some(crate::refusal::Disposition::SessionDead));
+        assert_eq!(PARSES.with(std::cell::Cell::get), 1);
+
+        // AND A BODY THAT IS NOT JSON IS STILL A DECODE FAULT, NOT A SUCCESS.
+        PARSES.with(|c| c.set(0));
+        let Ok(Err(FetchError::TransportFailed { detail })) =
+            source.settle_answer("not json", 200, crate::vendor::Listing::Equity)
+        else {
+            panic!("a body that is not JSON fails the decode")
+        };
+        assert!(detail.contains("not JSON"), "{detail}");
+        assert_eq!(PARSES.with(std::cell::Cell::get), 1);
+    }
+
+    /// **AND THE LIVE PATH PARSES IT ONCE: `window_async` OVER A REAL SOCKET.**
+    ///
+    /// The test above drives `settle_answer` directly, so a `window_async`
+    /// that decoded the text again after it would pass there. This one serves a
+    /// 200 bars body on loopback to a source that declares Dhan's error names,
+    /// so the refusal check runs, and counts every `parse_answer` call the
+    /// whole fetch makes. The runtime is current-thread, so the parse runs on
+    /// this thread and the thread-local count sees it. W1-pull2-1.
+    #[test]
+    fn a_window_fetched_over_a_socket_parses_its_body_once() {
+        let crate::vendor::Transport::Http(dhan) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("this feed is HTTP")
+        };
+        assert!(
+            dhan.error_names.is_some(),
+            "the refusal check must run, or this counts only the decode"
+        );
+        let body = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+                       "close":[24500.75],"volume":[250],"timestamp":[1751337900]}"#;
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            error_names: dhan.error_names,
+            ..spec(PriceScale::Rupees)
+        };
+        let source = source_of(spec, "SUPERSECRET");
+        PARSES.with(|c| c.set(0));
+        let window = source.block_on_window().expect("a window comes back");
+        assert_eq!(window.rows.len(), 1);
+        assert_eq!(window.rows[0].open, 2_450_075);
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the vendor was contacted"
+        );
+        assert_eq!(
+            PARSES.with(std::cell::Cell::get),
+            1,
+            "one parse for the refusal check and the decode together"
+        );
+    }
+
+    /// **THE OFFSET IS READ BY POSITION, SO A COLON ANYWHERE ELSE IS REFUSED.**
+    ///
+    /// The reader stripped every `:` from the whole tail and then counted the
+    /// digits left, which walked and copied a tail of any length into a new
+    /// `String` per bar, against its own doc's "no allocation", and accepted a
+    /// colon at any position: `+0:530`, `+:0530` and `+0530:` all read as
+    /// IST. ISO-8601 places it between hours and minutes only. W1-pull2-7.
+    #[test]
+    fn a_stated_offset_is_read_by_position_and_a_misplaced_colon_is_refused() {
+        let at = "2017-12-15T09:15:00";
+        assert_eq!(stated_offset(&format!("{at}+0530")), Some(19_800));
+        assert_eq!(stated_offset(&format!("{at}+05:30")), Some(19_800));
+        assert_eq!(stated_offset(&format!("{at}-0330")), Some(-12_600));
+        assert_eq!(stated_offset(&format!("{at}Z")), Some(0));
+        // EVERY DIGIT POSITION CARRIES WEIGHT. The cases above all have a zero
+        // tens-of-hours digit and a zero minutes-units digit, so a reader that
+        // divided the tens digit or subtracted the units digit read them the
+        // same. These do not, and the edges of both bounds are read as well.
+        for (tail, seconds) in [
+            ("+1045", 38_700),
+            ("-0945", -35_100),
+            ("+1000", 36_000),
+            ("+14:00", 50_400),
+            ("-1400", -50_400),
+            ("+0559", 21_540),
+        ] {
+            assert_eq!(
+                stated_offset(&format!("{at}{tail}")),
+                Some(seconds),
+                "{tail}"
+            );
+        }
+        for bad in [
+            "+0:530", "+:0530", "+0530:", "+053:0", "+0:5:3:0", "+05::30",
+        ] {
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad}");
+        }
+        // A wrong length, a non-digit, no sign, a field past its bound, and a
+        // NUL or a space where a byte of the zone belongs.
+        for bad in [
+            "+053", "+05300", "+05:3", "+05:300", "+0a30", "+05:3a", "Z0530", "005:30", "+1500",
+            "+15:00", "+0560", "+05:60", "+05-30", "", "+0530\0", "+05 30", " +0530",
+        ] {
+            assert_eq!(stated_offset(&format!("{at}{bad}")), None, "{bad:?}");
+        }
+        // A STAMP SHORTER THAN ITS CLOCK, OR ONE WHOSE BYTE 19 FALLS INSIDE A
+        // CHARACTER, states no offset and does not panic.
+        assert_eq!(stated_offset(""), None);
+        assert_eq!(stated_offset("2017-12-15T09:15:0\u{e9}0530"), None);
+        // A REFUSAL CHECK, NOT A MEASUREMENT OF COST: the old reader refused
+        // this tail too. That the new one does not walk it is the slice
+        // pattern's shape in `stated_offset`, not something this asserts.
+        let long = format!("{at}+{}", "0".repeat(1 << 20));
+        assert_eq!(
+            stated_offset(&long),
+            None,
+            "a tail past six bytes is refused, not read as a zone"
+        );
     }
 }

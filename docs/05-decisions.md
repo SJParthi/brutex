@@ -46080,3 +46080,74 @@ requires the allowance to fall below where it stood, and requires the refusal
 to carry status 429. With the branch matching 430 it fails at "a 429 on the
 rolling path backs the governor off: 4 !< 4", and with `record_success` in
 place of `record_throttled` at "5 !< 4". It passes here.
+### D-0956 — Parse a 2xx vendor answer once for both the refusal check and the decode, and cut the refusal it names — 2026-09-29
+
+**What was wrong.** `HttpSource::window_async` weighed every 2xx body for a
+refusal and then decoded it. For a feed whose spec declares `error_names`, the
+refusal check called `refusal::disposition_of(text, contract)`, which runs
+`serde_json::from_str(body)`, and then `decode_body` ran its own
+`serde_json::from_str` over the same text. Every successful window was parsed
+twice, and the body is bounded only by `MAX_RESPONSE_BYTES`. `docs/06-limits.md`
+§83.1 said the linear refusal read was never called on a success path
+(W1-pull2-1). When that 2xx body did name a refusal, `weigh_answered_body`
+formatted the whole body into `FetchError::VendorRefused::detail` with no cut,
+although `trim` states that a refusal body reaching an error string is cut, and
+the non-2xx door already calls it (UC-22).
+
+**The change.** `HttpSource::settle_answer` parses the body once through
+`parse_answer` and hands the one `serde_json::Value` to both readers:
+`refusal::disposition_of_value`, which parses nothing itself, and
+`decode_value`, which is `decode_body` over a parsed value. `decode_body` keeps
+its signature and its not-JSON fault. The refusal is still read first, and a
+body that is not JSON is still a decode fault, not a success. The refusal's
+`detail` is now built from `trim(text)`: at most 500 characters of the body.
+What a window decodes to is unchanged, so no run identity moves.
+
+`refusal::disposition_of` now parses through `http::parse_answer` as well, so
+every JSON parse on this path goes through the one function a test can count.
+
+**Proof.**
+`pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
+counts calls to `parse_answer` on its own thread: one for `disposition_of`
+alone over a bars body, one for `settle_answer` over a bars body, one for a
+body naming `DH-901`, one for a body that is not JSON.
+`pull::http::tests::a_window_fetched_over_a_socket_parses_its_body_once` serves
+a 200 bars body on loopback to a source declaring Dhan's error names and counts
+one parse across the whole `window_async` call. With the refusal check put back
+in its origin/main shape, `crate::refusal::disposition_of(text, contract)` in
+`weigh_parsed`, both tests count two and fail. With `window_async` decoding the
+text again after `settle_answer`, the socket test counts two and fails. With
+`disposition_of` reading `serde_json::from_str` directly again, the first test's
+`disposition_of` count is zero and it fails.
+`pull::http::tests::a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error`
+pads a `DH-901` body to over 10,000 characters and requires the detail to be
+its prefix plus exactly 500 characters; on origin/main it measured 10,177.
+
+### D-0957 — Read a stated UTC offset by position, with no allocation, and refuse a misplaced colon — 2026-09-29
+
+**What was wrong.** `stated_offset`'s doc says "A fixed number of byte
+comparisons on a suffix. No allocation." The body stripped every `:` from the
+whole tail after byte 19 into a new `String` and then counted what was left.
+That allocated once per Kite bar, walked a tail of any length, and accepted a
+colon anywhere: `+0:530`, `+:0530` and `+0530:` each read as IST
+(W1-pull2-7).
+
+**The change.** The tail is matched as a byte slice of exactly five bytes
+(`+0530`) or six with the colon at index 3 (`+05:30`); anything else is
+`None`. The digits are read by position with no allocation. `Z` and the
+bounded hours and minutes checks are unchanged, so every offset the old reader
+accepted in one of those two shapes reads to the same seconds.
+
+**Proof.**
+`pull::http::tests::a_stated_offset_is_read_by_position_and_a_misplaced_colon_is_refused`
+reads `+0530`, `+05:30`, `-0330` and `Z`, and reads `+1045`, `-0945`,
+`+1000`, `+14:00`, `-1400` and `+0559`, whose tens-of-hours and
+minutes-units digits are not zero and which sit on both bounds. It refuses six
+misplaced-colon tails; wrong-length, non-digit, unsigned, out-of-bound, NUL and
+space tails; an empty stamp; a stamp whose byte 19 falls inside a character;
+and a tail of 2^20 zeros. On origin/main it fails on `+0:530`, which the old
+reader returned as `Some(19800)`. The 2^20-zero tail is a refusal check only:
+the old reader refused it too, so it is not evidence about cost. That the new
+reader neither walks nor copies the tail rests on the source line
+`let ([sign, h1, h2, m1, m2] | [sign, h1, h2, b':', m1, m2]) = *tail.as_bytes() else {`,
+which matches a slice of five or six bytes and allocates nothing.

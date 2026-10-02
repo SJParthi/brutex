@@ -10702,3 +10702,20 @@ ceiling (C4-PULL-05).
   `finding` renders its sentence whole with `let whole = why.to_string();`
   before cutting it. Both are that member's locals, gone before the next
   member is read. What the census keeps is the cut copy.
+## The 2xx refusal check parses nothing of its own — D-0956, 29 September 2026
+
+§83.1 says calling the linear refusal read on a success path would make it a
+defect, and that no such call existed. One did: `window_async` called
+`refusal::disposition_of` on every 2xx body of a feed declaring `error_names`,
+and `decode_body` then parsed the same body again. Since D-0956 that path
+parses the body once, in `HttpSource::settle_answer`, and the refusal check
+reads the parsed value through `refusal::disposition_of_value`. The one parse
+is the decode's own and is still O(body), bounded by `MAX_RESPONSE_BYTES`.
+`pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
+counts calls to `http::parse_answer`, which `disposition_of` and `decode_body`
+both parse through, and asserts one per `settle_answer`;
+`pull::http::tests::a_window_fetched_over_a_socket_parses_its_body_once` asserts
+one across a whole `window_async` call over loopback. `disposition_of` itself
+still parses. Its one remaining non-test caller is
+`refusal_words`, the non-2xx door, which reads at most `MAX_REFUSAL_BYTES`;
+the calls in `dhan.rs` are inside its `mod tests`.
