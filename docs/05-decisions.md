@@ -44120,3 +44120,30 @@ acceptance copy, prefix tables, timestamp map and square-off table.
 entry points that do not. The code fix is to take `&SliceFacts` from the caller,
 in `crates/runner/src/grid.rs`. Another lane owns that file, so it is handed
 over rather than made here. No output changes. Nothing is timed.
+
+### D-1182 — The signal-sourced cadence look-ahead is pinned by a test and stated as a limit — 2026-10-02
+
+**What was wrong (audit ET-strategies-trades-ranking-costs-0).** For a
+`Sourced::Signal` column, `SliceFacts::of` sets the walk's step to
+`median_step_micros_over` the whole slice. That step decides whether a signal's
+next bar is "immediate" and where its horizon deadline falls. Bars after a
+signal can therefore change whether that signal trades. `CLAUDE.md` §3 rule 7
+says the engine may read bars `0..N` at bar N.
+
+**Measured, not argued.**
+`runner::trade::tests::a_signal_sourced_cadence_is_read_from_bars_after_the_signal`
+builds twenty synthetic sessions. It keeps six dense and thins the fourteen
+after them to two minutes. On their own, the six sessions have a 60 s step and
+trade. With the later sessions appended, the step is 120 s and every signal
+before the split is refused. The test asserts that behaviour so the defect
+cannot be forgotten. When a fix lands, the test must be inverted. It does not
+specify correct behaviour.
+
+**Why it is deferred.** The fix is a cadence supplied by the caller, for example
+from the rung's declared timeframe, instead of one inferred from the slice. That
+changes the signatures `grid` and `cli` call, and `grid.rs` belongs to another
+lane. `Sourced::Fill` columns use the fixed execution minute and do not read the
+median. The comments in `walk_core` say shipping one-minute paths are
+reprojected to `Fill`. This lane did not re-check every caller to confirm that,
+so the exposure of shipping runs is UNVERIFIED. No output changes.
+

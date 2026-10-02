@@ -9919,3 +9919,16 @@ The text above is kept as it was written.
   documents the same cost for itself. The fix is to take `&SliceFacts` from
   the caller, which is a `grid.rs` change and was not made by this lane. Not
   timed.
+* **A signal-sourced walk reads its cadence from bars after the signal
+  (D-1182).** For `Sourced::Signal`, `SliceFacts::of` sets `step_micros` to the
+  median same-session gap over the WHOLE slice. That step decides whether a
+  signal's next bar is "immediate" and where its horizon deadline falls. Bars
+  later in the slice can therefore refuse or admit an earlier trade.
+  `a_signal_sourced_cadence_is_read_from_bars_after_the_signal` reproduces it:
+  six dense sessions trade on their own, and the same signals are all refused
+  once fourteen thinned sessions are appended. `Sourced::Fill` uses the fixed
+  execution minute and is unaffected. The code comments in `walk_core` say
+  shipping one-minute paths are reprojected to `Fill`. This lane did not
+  re-check every caller. The fix needs a cadence supplied by the caller (or
+  read from the rung's declared timeframe), which changes the `grid` and `cli`
+  call sites. It is deferred, and the direction of the error is not one-sided.

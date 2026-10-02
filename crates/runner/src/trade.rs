@@ -1679,6 +1679,86 @@ mod tests {
         );
     }
 
+    /// KNOWN LOOK-AHEAD, PINNED SO IT CANNOT BE FORGOTTEN — D-1182.
+    ///
+    /// A [`indicators::column::Sourced::Signal`] slice takes its cadence from
+    /// the median gap over the WHOLE slice, so bars after a signal decide
+    /// whether that signal's next bar counts as "immediate". Here the first
+    /// six sessions are one-minute and every later session is thinned to two
+    /// minutes. On their own the dense sessions trade. With the later sessions
+    /// appended, the median becomes two minutes and the same dense-session
+    /// signals are refused as `too_late`. Nothing in those sessions changed.
+    ///
+    /// The shipping one-minute paths are reprojected to `Sourced::Fill`, whose
+    /// step is the fixed execution minute, so they do not read this median.
+    /// When a caller-supplied cadence replaces the median, this test must be
+    /// inverted to require equal dense-session trades. It is not a
+    /// specification of correct behaviour.
+    #[test]
+    fn a_signal_sourced_cadence_is_read_from_bars_after_the_signal() {
+        // The evaluator's first signal falls in the sixth session, so six whole
+        // sessions stay dense and fourteen after them are thinned to two
+        // minutes: about 2,600 two-minute gaps outvote 2,244 one-minute ones.
+        let dense = crate::synthetic::sessions(20);
+        let mut day_starts = dense
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| {
+                let [before, after] = pair else {
+                    return false;
+                };
+                indicators::ist_day(before.ts_micros) != indicators::ist_day(after.ts_micros)
+            })
+            .map(|(index, _)| index + 1);
+        let split = day_starts.nth(5).expect("at least seven sessions");
+        let (dense_part, thinned_part) = dense.split_at(split);
+        let prefix: Vec<_> = dense_part.to_vec();
+        let mut full = prefix.clone();
+        full.extend(
+            thinned_part
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| index % 2 == 1)
+                .map(|(_, bar)| bar),
+        );
+        let alone_column = Column::build(&prefix, &mut evaluator());
+        let full_column = Column::build(&full, &mut evaluator());
+        assert_eq!(alone_column.sourced(), indicators::column::Sourced::Signal);
+        let alone = super::SliceFacts::of(&prefix, &alone_column);
+        let joined = super::SliceFacts::of(&full, &full_column);
+        assert_eq!(alone.step_micros(), 60_000_000);
+        assert_eq!(
+            joined.step_micros(),
+            120_000_000,
+            "later sessions set the cadence the first session is walked at"
+        );
+        let early = |walked: &Trades| {
+            walked
+                .trades
+                .iter()
+                .filter(|trade| trade.signal_bar < prefix.len())
+                .count()
+        };
+        for direction in [Direction::Long, Direction::Short] {
+            let on_its_own = walk(
+                &prefix,
+                &alone_column,
+                &ConditionMask::ZERO,
+                h(5),
+                direction,
+            );
+            let with_future = walk(&full, &full_column, &ConditionMask::ZERO, h(5), direction);
+            assert!(on_its_own.reconciles() && with_future.reconciles());
+            assert!(early(&on_its_own) > 0, "the dense sessions trade alone");
+            assert_eq!(
+                early(&with_future),
+                0,
+                "the same dense-session signals are refused once later bars exist"
+            );
+        }
+    }
+
     /// The cadence cannot be learned from damaged evidence. When most stored
     /// neighbours are two minutes apart, the median is two minutes; the engine
     /// still requires the missing one-minute bar and refuses every delayed row.
