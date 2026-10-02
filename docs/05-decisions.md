@@ -43702,8 +43702,17 @@ up only "a value exactly halfway between two paisa".
 the scaled value minus its floor is at least `0.5`. Half-up on both signs is
 unchanged: `0.125` gives `13` and `-0.125` gives `-12`. The multiplication by
 100 still rounds, which is the limit `a_decimal_tie_is_usually_not_a_binary_tie`
-already records. Proven by
+already records.
+
+**What it does not move.** Every two-decimal price from ₹0.00 to
+₹1,00,000.00, parsed from its decimal text, snaps to its own paisa, and so does the double one step above and one step below each of
+them: 30,000,003 inputs, counted by the test. The same test passes with the
+biased-sum rule put back, so on that grid no paisa this function writes
+changes. Prices above ₹1,00,000.00 and doubles further from the grid were not
+measured. Proven by
 `core::price::tests::the_half_up_decision_reads_the_scaled_value_not_a_biased_sum`
+and
+`core::price::tests::every_two_decimal_price_and_its_neighbours_snaps_to_its_own_paisa`
 (C4-CORE-02).
 
 ### D-0787 — Trim only ASCII whitespace from a master row's vendor id, series and suffix class — 2026-09-29

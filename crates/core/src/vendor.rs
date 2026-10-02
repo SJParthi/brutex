@@ -3483,7 +3483,7 @@ mod tests {
         }
         // Inside the id it is data, and ASCII padding is still trimmed.
         assert_eq!(
-            VendorId::new(" \t13\u{a0}33\n ")
+            VendorId::new(" \t\u{c}\r13\u{a0}33\n\r\u{c} ")
                 .expect("interior")
                 .as_str(),
             "13\u{a0}33"
@@ -3498,7 +3498,7 @@ mod tests {
                 .skip(),
             Some(Skip::UnrecognisedListingClass)
         );
-        assert_eq!(board_of(" \tEQ\n"), EquityVerdict::MainBoard);
+        assert_eq!(board_of(" \t\u{c}\rEQ\n\r"), EquityVerdict::MainBoard);
         assert_eq!(board_of("\u{b}EQ"), EquityVerdict::Unrecognised);
 
         // The suffix class. Only the row's own series, ASCII-trimmed, strips.

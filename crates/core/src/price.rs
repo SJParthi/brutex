@@ -654,4 +654,30 @@ mod tests {
         assert_eq!(Paisa::from_rupees_half_up(-0.005).expect("finite").raw(), 0);
         assert_eq!(Paisa::from_rupees_half_up(-0.3).expect("finite").raw(), -30);
     }
+
+    // C4 core batch 1 — D-0786. What the change does NOT move.
+    /// Every two-decimal price from ₹0.00 to ₹1,00,000.00 snaps to its own paisa, and so do
+    /// the doubles one step above and one step below it.
+    ///
+    /// The double is made by parsing the decimal text, so the test holds no float
+    /// arithmetic of its own. Run against the biased-sum rule this function used before
+    /// D-0786 it passes as well, which is the measurement D-0786 cites for "no paisa on
+    /// this grid changes".
+    #[test]
+    fn every_two_decimal_price_and_its_neighbours_snaps_to_its_own_paisa() {
+        let mut checked = 0_u64;
+        for n in 0_i64..=10_000_000 {
+            let text = format!("{}.{:02}", n / 100, n % 100);
+            let rupees: f64 = text.parse().expect("decimal text parses");
+            for r in [rupees.next_down(), rupees, rupees.next_up()] {
+                assert_eq!(
+                    Paisa::from_rupees_half_up(r).map(Paisa::raw),
+                    Ok(n),
+                    "{text} rupees, as the double {r:e}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 30_000_003, "every grid point and both neighbours");
+    }
 }
