@@ -487,6 +487,15 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn an_unreadable_folder_halts_loudly_and_names_the_path() {
+        crate::isolated::where_permission_binds(
+            "folder::tests::an_unreadable_folder_halts_loudly_and_names_the_path",
+            an_unreadable_folder_halts_loudly_and_names_the_path_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    #[cfg(unix)]
+    fn an_unreadable_folder_halts_loudly_and_names_the_path_body() {
         use std::os::unix::fs::PermissionsExt as _;
         let scratch = Scratch::new();
         scratch.feed_dir(Feed::TrueData, &[("NIFTY", TWO_DAYS)]);

@@ -130,7 +130,7 @@ fn the_whole_public_surface_is_reachable_with_nothing_else_in_scope() {
     assert!(solved.volatility < greeks::solver::MAX_VOLATILITY);
     assert!(rung.steps < greeks::moneyness::MAX_STEPS);
     // Every evaluation is counted, including the two that establish the
-    // bracket and the one at the answer. 2 + 8 + 64 + 1.
+    // bracket and the one at the answer. 2 + 8 + 75 + 1.
     assert_eq!(
         greeks::solver::MAX_ITERATIONS,
         greeks::solver::BRACKET_EVALUATIONS

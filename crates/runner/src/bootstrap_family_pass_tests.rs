@@ -500,3 +500,28 @@ fn a_receipt_is_refused_rather_than_built_from_counts_that_do_not_fit_its_ranks(
     last.position = 99;
     assert!(stray.receipt(&[0, 0, 0], 9, 12, 0, 2).is_none());
 }
+
+/// The shared walk refuses White's point-mass family where the separate White
+/// receipt does (D-0972), and keeps the conservative nonpositive one.
+#[test]
+fn a_family_that_never_varied_is_refused_by_white_in_the_shared_walk_too() {
+    for returns in [vec![vec![1_i64; 100]], vec![vec![7_i64; 40], vec![0; 40]]] {
+        assert_eq!(
+            family_tests_v1(&returns, &[], 1_000, 7, DEFAULT_BLOCK),
+            Err(FamilyTestsRefusalV1::White),
+            "{returns:?}"
+        );
+        assert_eq!(
+            white_reality_check_receipt_v1(&returns, 1_000, 7, DEFAULT_BLOCK),
+            None
+        );
+    }
+    for returns in [vec![vec![0_i64; 40]], vec![vec![-3_i64; 40], vec![0; 40]]] {
+        let shared = identical(&returns, &[], 50, 7, DEFAULT_BLOCK);
+        assert_eq!(shared.white().matched_or_exceeded(), 50);
+    }
+    // One varying row: measured, and bit for bit the separate receipt.
+    let mixed = vec![vec![7_i64; 40], noise(40, 3)];
+    let shared = identical(&mixed, &[1], 50, 7, DEFAULT_BLOCK);
+    assert!(shared.white().matched_or_exceeded() < 50);
+}

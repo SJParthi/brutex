@@ -27,13 +27,37 @@ use std::path::{Path, PathBuf};
 use store::catalog::{self, Census};
 use store::path::{Timeframe, YearMonth};
 
+/// A scratch tree that removes itself when the test that owns it ends, so a
+/// run leaves nothing under the system temporary root (found by a review:
+/// these trees were removed only before a test, never after).
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A private directory, named for the test that owns it so two can run at once.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> Scratch {
     let mut root = std::env::temp_dir();
     root.push(format!("brutex-catalog-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("scratch root is creatable");
-    root
+    Scratch(root)
 }
 
 /// Writes an empty file at `root/bars/<rel>`, creating parents.
@@ -173,6 +197,7 @@ fn the_census_reconciles_over_a_store_holding_every_refusal() {
         "13, notamonth, and the unpadded 2026-8"
     );
     assert_eq!(c.wrong_depth, 1, "one path too shallow");
+    assert_eq!(c.not_regular, 0, "every entry here is a regular file");
     assert!(c.reconciles(), "the parts must sum to the whole: {c:?}");
     assert_eq!(out.held.len(), 2, "only the spot months are rows");
 }
@@ -256,14 +281,96 @@ fn every_known_rung_and_every_known_feed_is_recognised() {
     assert!(out.census.reconciles());
 }
 
-/// A store whose `bars` is a file, not a directory, is empty rather than fatal.
+/// **A `bars` that is not a directory is refused by name, not an empty
+/// store.** D-0769.
+///
+/// The walk opened with `bars.is_dir()`, which answers false on any failure
+/// to stat, so a `bars` that was a regular file returned `Ok` with a zero
+/// census that reconciled: the same answer as "nothing pulled yet". Only a
+/// `bars` that is absent is the empty store.
 #[test]
-fn a_bars_path_that_is_not_a_directory_reports_an_empty_store() {
+fn a_bars_path_that_is_not_a_directory_is_refused_by_name() {
     let root = scratch("notadir");
     std::fs::write(root.join("bars"), b"not a directory").expect("writable");
-    let out = catalog::walk(&root).expect("not an error");
-    assert!(out.held.is_empty());
-    assert_eq!(out.census.seen, 0);
+    let refused = catalog::walk(&root).expect_err("a file where `bars` belongs is refused");
+    assert_eq!(
+        refused,
+        catalog::CatalogError::BarsUnreadable {
+            because: "it is not a directory".to_owned()
+        }
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A `bars` link that resolves to nothing is refused, not an empty store.**
+/// D-0769.
+///
+/// `is_dir` follows the link, fails to resolve it, and answered false, so a
+/// store whose `bars` pointed at a volume that was not mounted listed nothing
+/// and reconciled.
+#[test]
+fn a_dangling_bars_link_is_refused_not_empty() {
+    let root = scratch("danglingbars");
+    std::os::unix::fs::symlink(root.join("unmounted"), root.join("bars"))
+        .expect("a symlink is creatable");
+    let refused = catalog::walk(&root).expect_err("a dangling `bars` is refused");
+    let catalog::CatalogError::BarsUnreadable { because } = refused;
+    assert!(because.contains("os error 2"), "{because}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A `bars` link to a real directory is still walked.** D-0769.
+///
+/// The root is operator configuration and is followed as it always was; only
+/// links BELOW `bars/` are counted and not followed (D-0766). This pins that
+/// the stricter root probe did not narrow that.
+#[test]
+fn a_bars_link_to_a_real_directory_is_walked() {
+    let root = scratch("linkedbars");
+    let real = root.join("real");
+    let file = real.join("groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::fs::create_dir_all(file.parent().expect("a parent")).expect("creatable");
+    std::fs::write(&file, b"").expect("writable");
+    std::os::unix::fs::symlink(&real, root.join("bars")).expect("a symlink is creatable");
+    let out = catalog::walk(&root).expect("a linked `bars` is walked");
+    assert_eq!(
+        out.census,
+        Census {
+            seen: 1,
+            spot: 1,
+            ..Census::default()
+        }
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// **A store root this process cannot search is refused, not an empty
+/// store.** D-0769.
+///
+/// With the root at mode 000 the stat of `root/bars` fails with a permission
+/// error, `is_dir` answered false, and the walk returned `Ok` with a zero
+/// census while a month sat on disk (found by a review of D-0765).
+#[test]
+fn a_store_root_that_cannot_be_searched_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("root000");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000))
+        .expect("the fixture root can be locked");
+    let precondition = std::fs::symlink_metadata(root.join("bars")).is_err();
+    let out = catalog::walk(&root);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+        .expect("the fixture root can be unlocked");
+    assert!(
+        precondition,
+        "a process that ignores permissions cannot run this test"
+    );
+    let catalog::CatalogError::BarsUnreadable { because } =
+        out.expect_err("an unsearchable root is refused");
+    assert!(because.contains("os error 13"), "{because}");
+    let unlocked = catalog::walk(&root).expect("the walk runs once unlocked");
+    assert_eq!(unlocked.census.spot, 1);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The error type says what happened in the operator's words.
@@ -295,4 +402,233 @@ fn the_walk_descends_rather_than_guessing_the_depth() {
         "the deeper one reads as a contract level"
     );
     assert!(out.census.reconciles());
+}
+
+/// **A directory the walk cannot list is counted, not dropped.** D-0765.
+///
+/// The walk skipped a non-root directory whose `read_dir` failed with a bare
+/// `continue` and no census bucket, so a store with one locked symbol
+/// directory reported `seen 1, spot 1` and reconciled while a second month sat
+/// on disk unlisted (W3-store1-4). The locked month still cannot become a row
+/// (its contents are unknown), but the census now names it.
+#[test]
+fn a_directory_the_walk_cannot_list_is_counted_not_dropped() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("unreadable");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    put(&root, "groww/NSE/INDEX/BANKNIFTY/1min/2026-08.bin");
+    let locked = root.join("bars/groww/NSE/INDEX/BANKNIFTY");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+        .expect("the fixture directory can be locked");
+    let precondition = std::fs::read_dir(&locked).is_err();
+    let out = catalog::walk(&root);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("the fixture directory can be unlocked");
+    assert!(
+        precondition,
+        "the locked directory must refuse `read_dir`; a process that ignores permissions cannot run this test"
+    );
+    let out = out.expect("one locked branch does not fail the walk");
+
+    assert_eq!(out.census.unreadable, 1, "the locked directory is named");
+    assert_eq!(out.census.seen, 2, "one file and one unreadable directory");
+    assert_eq!(out.census.spot, 1, "the readable month is still a row");
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1);
+    assert_eq!(out.held[0].symbol, "NIFTY");
+
+    let unlocked = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(
+        unlocked.census.unreadable, 0,
+        "nothing is unreadable once unlocked"
+    );
+    assert_eq!(
+        unlocked.census.spot, 2,
+        "both months are rows once unlocked"
+    );
+}
+
+/// An unreadable entry is a part of the whole like every other bucket.
+#[test]
+fn an_unreadable_entry_is_part_of_the_reconciliation() {
+    let counted = Census {
+        seen: 2,
+        spot: 1,
+        unreadable: 1,
+        ..Census::default()
+    };
+    assert!(counted.reconciles(), "1 + 1 == 2");
+    let lost = Census {
+        seen: 2,
+        spot: 1,
+        ..Census::default()
+    };
+    assert!(
+        !lost.reconciles(),
+        "the unreadable one must be counted somewhere"
+    );
+}
+
+/// **A symlink back to an ancestor is one entry, not a second walk of the
+/// tree.** D-0766.
+///
+/// `is_dir` follows links, so one real file beside `back -> ../..` was seen
+/// again at every level before `read_dir` failed on the kernel's link limit
+/// (W3-store1-5, reproduced on origin/main 2c209309 on macOS). How many times
+/// depends on the scratch root: `seen 34, wrong_depth 33` under
+/// `/private/tmp/...` and `seen 33, wrong_depth 32` under the same directory
+/// reached through the `/tmp` link, which spends one of the limit's links. No
+/// test asserts that count. The walk no longer follows a link at all.
+#[test]
+fn a_symlink_loop_is_counted_once_and_not_walked() {
+    let root = scratch("loop");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::os::unix::fs::symlink("../..", root.join("bars/groww/NSE/back"))
+        .expect("a symlink is creatable");
+
+    let out = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(
+        out.census.linked, 1,
+        "the link back is named once: {:?}",
+        out.census
+    );
+    assert_eq!(
+        out.census.seen, 2,
+        "one file and one link: {:?}",
+        out.census
+    );
+    assert_eq!(out.census.spot, 1);
+    assert_eq!(out.census.wrong_depth, 0, "no path was walked twice");
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1);
+}
+
+/// **A link that resolves to nothing is `linked`, not a bar file.** D-0766.
+///
+/// `is_dir` answers false for a link it cannot resolve, so the walk filed a
+/// dangling `2026-09.bin` as a spot month that no reader could open. A link to
+/// a real file or directory is `linked` as well and is not followed, because
+/// the store's writer never makes one (`docs/02-store-format.md` §9).
+#[test]
+fn a_symlink_is_linked_whether_it_resolves_or_not() {
+    let root = scratch("linked");
+    let elsewhere = root.join("elsewhere/dhan/NSE/INDEX/NIFTY/1min");
+    std::fs::create_dir_all(&elsewhere).expect("creatable");
+    std::fs::write(elsewhere.join("2026-07.bin"), b"").expect("writable");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    std::os::unix::fs::symlink(root.join("elsewhere/dhan"), root.join("bars/dhan"))
+        .expect("a symlink is creatable");
+    std::os::unix::fs::symlink(
+        root.join("nowhere.bin"),
+        root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-09.bin"),
+    )
+    .expect("a symlink is creatable");
+    std::os::unix::fs::symlink(
+        root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-08.bin"),
+        root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-10.bin"),
+    )
+    .expect("a symlink is creatable");
+
+    let out = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(out.census.linked, 3, "{:?}", out.census);
+    assert_eq!(
+        out.census.spot, 1,
+        "only the real file is a row: {:?}",
+        out.census
+    );
+    assert_eq!(out.census.seen, 4, "{:?}", out.census);
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    let months: Vec<(Vendor, String)> = out
+        .held
+        .iter()
+        .map(|h| (h.vendor, h.month.to_string()))
+        .collect();
+    assert_eq!(months, vec![(Vendor::Groww, "2026-08".to_owned())]);
+}
+
+/// A link is a part of the whole like every other bucket.
+#[test]
+fn a_link_is_part_of_the_reconciliation() {
+    let counted = Census {
+        seen: 2,
+        spot: 1,
+        linked: 1,
+        ..Census::default()
+    };
+    assert!(counted.reconciles(), "1 + 1 == 2");
+    let lost = Census {
+        seen: 2,
+        spot: 1,
+        ..Census::default()
+    };
+    assert!(!lost.reconciles(), "the link must be counted somewhere");
+}
+
+/// **A signed month field is malformed, not a second spelling of a month.**
+/// D-0767.
+///
+/// The width check passed `2026-+8` because the integer parse accepts a
+/// leading `+`, so it was listed as `2026-08` beside the real `2026-08.bin`
+/// and the census counted two spot months for one row (W3-store1-6,
+/// reproduced on origin/main 2c209309).
+#[test]
+fn a_signed_month_field_is_malformed_not_a_second_spelling() {
+    let root = scratch("signed");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-+8.bin");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/+026-08.bin");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let out = catalog::walk(&root).expect("the walk runs");
+    assert_eq!(out.census.malformed_month, 2, "{:?}", out.census);
+    assert_eq!(out.census.spot, 1, "{:?}", out.census);
+    assert!(out.census.reconciles(), "{:?}", out.census);
+    assert_eq!(out.held.len(), 1);
+    assert_eq!(out.held[0].month.to_string(), "2026-08");
+}
+
+/// **A socket named like a month is `not_regular`, never a held month.**
+/// D-0769.
+///
+/// Everything that was neither a link nor a directory went to `classify` as a
+/// bar file, so a FIFO named `2026-09.bin` at spot depth became a held spot
+/// month (found by a review; `mkfifo` gave `held=["2026-08", "2026-09"]`). A
+/// FIFO with no writer blocks a reader's open. A socket stands in for the FIFO
+/// here because the standard library can make one: it is bound at a short
+/// path, as a socket path has a length limit, and renamed into place.
+#[test]
+fn a_socket_named_like_a_month_is_not_a_held_month() {
+    let root = scratch("socket");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let short = std::env::temp_dir().join(format!("bcs-{}", std::process::id()));
+    let _ = std::fs::remove_file(&short);
+    let listener = std::os::unix::net::UnixListener::bind(&short).expect("a socket is bindable");
+    let at = root.join("bars/groww/NSE/INDEX/NIFTY/1min/2026-09.bin");
+    std::fs::rename(&short, &at).expect("the socket moves into the tree");
+    let out = catalog::walk(&root).expect("the walk runs");
+    drop(listener);
+    assert_eq!(
+        out.census,
+        Census {
+            seen: 2,
+            spot: 1,
+            not_regular: 1,
+            ..Census::default()
+        }
+    );
+    let months: Vec<String> = out.held.iter().map(|h| h.month.to_string()).collect();
+    assert_eq!(months, vec!["2026-08".to_owned()]);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_scratch_tree_is_removed_when_its_test_ends() {
+    let root = scratch("self-removing");
+    put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
+    let path = root.to_path_buf();
+    assert!(path.join("bars").is_dir(), "premise: the tree was built");
+    drop(root);
+    assert!(
+        std::fs::symlink_metadata(&path).is_err(),
+        "{} was left behind",
+        path.display()
+    );
 }

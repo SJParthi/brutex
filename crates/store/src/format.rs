@@ -1197,6 +1197,22 @@ pub enum FormatError {
         /// Which field of the declaration is impossible.
         field: &'static str,
     },
+    /// A slot's reserved tail, bytes `60..64`, is not zero.
+    ///
+    /// `docs/02-store-format.md` §2: reserved bytes are zero and stay zero, and
+    /// a future field takes reserved space in a **new version**, never by
+    /// reinterpreting this one. The checksum covers those bytes, so a slot that
+    /// reaches this refusal was *written* that way: by a writer that broke the
+    /// format, not by a flipped bit. Carries the four bytes, little-endian.
+    /// D-1353.
+    ReservedNotZero(u32),
+    /// A slot's `flags` sets a bit its version does not define.
+    ///
+    /// Bit 0 ([`FLAG_CHECKSUMS`]) is the only one. A file declaring a property
+    /// this build has never heard of cannot be read as if it declared none.
+    /// Refused on the write side too, so no slot this build commits can reach
+    /// it. D-1354.
+    UnknownFlags(u32),
     /// No slot in the header region decoded.
     ///
     /// Not a torn tail — a torn tail is unobservable. This means every copy of
@@ -1263,6 +1279,14 @@ impl std::fmt::Display for FormatError {
             Self::DegenerateLayout { field } => {
                 write!(f, "layout field {field} is not a geometry a file can have")
             }
+            Self::ReservedNotZero(bytes) => write!(
+                f,
+                "header slot reserved bytes are {bytes:#010x}, must be zero"
+            ),
+            Self::UnknownFlags(flags) => write!(
+                f,
+                "header flags {flags:#010x} set a bit this version does not define"
+            ),
             Self::NoValidHeader => f.write_str("no header slot survived; the header is unreadable"),
         }
     }

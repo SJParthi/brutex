@@ -209,6 +209,50 @@ impl Fixture {
     }
 }
 
+/// Moves record `index`'s stamp by `delta_micros` in place, resealing its
+/// checksum block and, at either end, the header slot, exactly as the writer
+/// would have.
+///
+/// **A FILE FROM BEFORE D-0915.** `BarFile::append` now refuses an off-grid
+/// stamp (`StoreError::OffGrid`), so a sealed month holding one can only be a
+/// file written before that refusal existed. Those files still exist and this
+/// reader's own malformed-span refusal is what still faces them, so the state
+/// is laid by hand rather than abandoned.
+fn forge_pre_admission_stamp(path: &std::path::Path, index: u64, delta_micros: i64) {
+    use store::format::{HEADER_LEN, Row};
+    let mut bytes = fs::read(path).expect("the sealed month");
+    let region = usize::try_from(HEADER_LEN).expect("region");
+    let header = store::header::Header::read_region(&bytes[..region], bytes.len() as u64)
+        .expect("a committed header");
+    let layout = store::layout::Layout::for_version(header.format_version).expect("layout");
+    let at = usize::try_from(layout.offset_of(index).expect("offset")).expect("offset");
+    let mut bar = Bar::read_from(&bytes[at..at + Bar::LEN]).expect("a record");
+    bar.ts_micros += delta_micros;
+    bytes[at..at + Bar::LEN].copy_from_slice(&bar.image());
+    let block = index / layout.records_per_block();
+    let (start, end) = layout
+        .covered_byte_range(block, header.n_valid)
+        .expect("covered range");
+    let span = &bytes[usize::try_from(start).expect("s")..usize::try_from(end).expect("e")];
+    let sum = store::block::seal(layout, header.n_valid, block, span).expect("seal");
+    let crc_path = path.with_extension("crc");
+    let mut crc = fs::read(&crc_path).expect("the sidecar");
+    let entry = usize::try_from(block * 4).expect("entry");
+    crc[entry..entry + 4].copy_from_slice(&sum.to_le_bytes());
+    let mut resealed = header;
+    if index == 0 {
+        resealed.first_ts_micros = bar.ts_micros;
+    }
+    if index + 1 == header.n_valid {
+        resealed.last_ts_micros = bar.ts_micros;
+    }
+    let commit = resealed.commit().expect("a header image");
+    let slot = usize::try_from(commit.offset).expect("slot");
+    bytes[slot..slot + commit.bytes.len()].copy_from_slice(&commit.bytes);
+    fs::write(path, &bytes).expect("rewrite the month");
+    fs::write(&crc_path, &crc).expect("rewrite the sidecar");
+}
+
 fn generated_session(month: u8, date: u8) -> Vec<Bar> {
     let civil = pull::session::Day::new(2025, month, date).expect("date");
     let day = i64::from(civil.days_from_epoch());
@@ -504,12 +548,8 @@ fn stored_screens_reject_off_grid_execution_before_creating_an_attempt() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Fixture::warmed();
-    fixture.rewrite_owned_minutes(|day, rows| {
-        if day == 2 {
-            rows[0].ts_micros += 1;
-        }
-    });
     let path = fixture.path(5, Timeframe::MINUTE_1);
+    forge_pre_admission_stamp(&path, 0, 1);
     let before = fs::read(&path).expect("owned off-grid execution stream");
     let checksum = path.with_extension("crc");
     let proof = fs::read(&checksum).expect("matching raw-record checksum");

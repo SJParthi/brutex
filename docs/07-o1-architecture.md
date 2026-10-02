@@ -157,8 +157,10 @@ asserts the bound as a **number**:
 - Layer 4's probe length is asserted at `<= 8` and printed. The first attempt
   measured **14** — worse than the `binary_search` it replaced, still O(1) by
   definition — and the test refused it until the table was widened.
-- Layer 8's flatness is asserted against the 1.4× ceiling in
-  `docs/04-invariants.md`: C-E-02 checks ordinary k=1/4/8 candidates and C-E-09
+- Layer 8's flatness is asserted against the **3.0×** shared-CI ceiling
+  (`CEILING_PERMILLE = 3_000` in `crates/engine/benches/ratio.rs`). The 1.4× in
+  `docs/04-invariants.md` applies to dedicated hardware and no harness asserts
+  it; this line named 1.4× until D-0957. C-E-02 checks ordinary k=1/4/8 candidates and C-E-09
   drives the complete k=384 representation. The source guard separately pins one
   fixed-width `hits` call per row, because a ratio alone can hide a uniformly
   slower implementation.

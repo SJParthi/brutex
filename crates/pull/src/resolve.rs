@@ -269,8 +269,9 @@ impl Snapshot {
 ///
 /// One request per category, one per index, one per constituent file: 4 + 2n
 /// for n indices, which is 300 for the 148 the exchange published on 14 Aug
-/// 2026. The join inside is [`crate::universe::resolve`]'s, which indexes the
-/// master **once** for the whole pass rather than per index.
+/// 2026. The join inside is [`crate::universe::MasterIndex`], built **once**
+/// before the first category and probed once per index, so the master is
+/// indexed once for the whole pass rather than per index. D-0966.
 pub async fn crawl<S: DocumentSource>(
     source: &S,
     host: &str,
@@ -283,6 +284,9 @@ pub async fn crawl<S: DocumentSource>(
     let mut failures = Vec::new();
     // AN INDEX WITH NO BASKET, KEPT APART FROM A FAILED ONE. See `note_unlinked`.
     let mut unlinked = Vec::new();
+    // THE MASTER IS INDEXED ONCE FOR THE PASS, never inside the loops below.
+    // D-0966.
+    let joined = crate::universe::MasterIndex::new(master, key);
 
     for category in Category::ALL {
         let listing_url = format!("{host}{}", category.path());
@@ -390,9 +394,7 @@ pub async fn crawl<S: DocumentSource>(
                     let refusal = note_refused(csv_url, why.to_string());
                     failures.push(refusal);
                 }
-                Ok(published) => resolutions.push(crate::universe::resolve(
-                    &link.path, feed, key, &published, master,
-                )),
+                Ok(published) => resolutions.push(joined.resolve(&link.path, feed, &published)),
             }
         }
     }
@@ -695,21 +697,36 @@ impl HttpDocuments {
             }
         }
 
-        let body = answer
-            .text()
+        // THE BYTES ARE THE FACT, AND THEY ARE COUNTED AS THEY ARRIVE.
+        // `Content-Length` is a claim the host makes and may omit or get wrong;
+        // this is the check that actually binds. It used to be `text()` and then
+        // a length comparison, so an answer declaring no length (chunked, or
+        // delimited by the close) was read to its end before the bound was
+        // looked at (W1-pull3-3, W1-pull3-6, D-0950). Now the read stops at the
+        // first frame that would carry it past the bound, so what is held never
+        // exceeds `MAX_DOCUMENT_BYTES`.
+        let cap = crate::nse::MAX_DOCUMENT_BYTES;
+        let mut answer = answer;
+        let mut held: Vec<u8> = Vec::new();
+        while let Some(frame) = answer
+            .chunk()
             .await
-            .map_err(|why| format!("{url} answered, and the body could not be read: {why}"))?;
-
-        // THE BYTES ARE THE FACT. `Content-Length` is a claim the host makes and
-        // may omit or get wrong; this is the check that actually binds.
-        if body.len() > crate::nse::MAX_DOCUMENT_BYTES {
-            return Err(format!(
-                "{url} answered {} bytes and this build accepts at most {}",
-                body.len(),
-                crate::nse::MAX_DOCUMENT_BYTES
-            ));
+            .map_err(|why| format!("{url} answered, and the body could not be read: {why}"))?
+        {
+            let seen = held.len().saturating_add(frame.len());
+            if seen > cap {
+                return Err(format!(
+                    "{url} ran past {cap} bytes: at least {seen} arrived before \
+                     the read was abandoned, and the rest was not read. This \
+                     build accepts at most {cap}."
+                ));
+            }
+            held.extend_from_slice(&frame);
         }
-        Ok(body)
+        // LOSSY, EXACTLY AS `text()` WAS. This workspace builds reqwest without
+        // its `charset` feature, and in that build `text()` is
+        // `String::from_utf8_lossy` over the whole body.
+        Ok(String::from_utf8_lossy(&held).into_owned())
     }
 }
 
@@ -827,6 +844,45 @@ mod tests {
 
     fn day() -> Day {
         Day::new(2026, 8, 14).expect("a real day")
+    }
+
+    /// **The master is indexed once per pass, before the first category, and
+    /// never inside the per-index loop.** D-0966.
+    ///
+    /// `crawl` called `crate::universe::resolve` once per constituent file, and
+    /// that function rebuilt its key map and symbol set from the whole master
+    /// every time — O(master) per index, so O(indices x master) per pass, while
+    /// the `# Cost` section above said the master was indexed once. A slice
+    /// cannot count its own reads, so this reads the SHAPE of `crawl`: exactly
+    /// one `MasterIndex::new(` call, placed before the category loop, and no
+    /// call to the per-index `universe::resolve` that builds its own index.
+    #[test]
+    fn the_master_is_indexed_once_per_pass_not_once_per_index() {
+        let source = include_str!("resolve.rs");
+        let start = source
+            .find("pub async fn crawl<")
+            .expect("crawl is defined in this file");
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("crawl's body ends");
+        let body = &body[..end];
+        let build = concat!("MasterIndex", "::new(");
+        assert_eq!(
+            body.matches(build).count(),
+            1,
+            "crawl must build the master's index exactly once"
+        );
+        let built_at = body.find(build).expect("counted above");
+        let loop_at = body
+            .find("for category in Category::ALL")
+            .expect("crawl walks every category");
+        assert!(
+            built_at < loop_at,
+            "the index must be built before the category loop, not inside it"
+        );
+        assert!(
+            !body.contains("universe::resolve("),
+            "the per-index join rebuilds the master's index on every call"
+        );
     }
 
     #[tokio::test]
@@ -1139,6 +1195,114 @@ mod tests {
         let why = http.get_async(&url).await.expect_err("past the bound");
         assert!(why.contains("declares"), "{why}");
         assert!(why.contains("before the body was read"), "{why}");
+    }
+
+    /// A server that sends `head` and then streams `frames` frames of one MiB
+    /// each, framed as chunks when `chunked`, until the client hangs up. The
+    /// join handle answers how many body bytes were written before it stopped.
+    ///
+    /// No `Content-Length` is ever sent, so the declared-length check has
+    /// nothing to read and the read loop alone decides what the answer costs.
+    fn counting_flood(chunked: bool, frames: usize) -> (String, std::thread::JoinHandle<usize>) {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let handle = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return 0;
+            };
+            let mut buf = [0u8; 4096];
+            let _read = stream.read(&mut buf).unwrap_or(0);
+            let head = if chunked {
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            } else {
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+            };
+            if stream.write_all(head.as_bytes()).is_err() {
+                return 0;
+            }
+            let frame = vec![b'x'; 1 << 20];
+            let mut written = 0usize;
+            for _ in 0..frames {
+                // THE CLIENT HANGING UP IS THE EXPECTED END. Rust ignores
+                // SIGPIPE at startup, so this is an `Err`, not a dead process.
+                let sent = if chunked {
+                    stream
+                        .write_all(format!("{:x}\r\n", frame.len()).as_bytes())
+                        .and_then(|()| stream.write_all(&frame))
+                        .and_then(|()| stream.write_all(b"\r\n"))
+                } else {
+                    stream.write_all(&frame)
+                };
+                if sent.is_err() {
+                    return written;
+                }
+                written += frame.len();
+            }
+            if chunked {
+                let _end = stream.write_all(b"0\r\n\r\n");
+            }
+            let _flushed = stream.flush();
+            written
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// **AN UNDECLARED LENGTH IS REFUSED WHILE IT IS BEING READ, NOT AFTER.**
+    /// W1-pull3-3 and W1-pull3-6, D-0950.
+    ///
+    /// `body_of` refused a declared length early, and an undeclared one only
+    /// after `Response::text` had read the whole answer to its end. A host that
+    /// streams with no `Content-Length` (chunked, or delimited by the close)
+    /// was read in full before the 8 MiB bound was compared. The server here
+    /// offers eight times the bound; the read must stop and hang up before the
+    /// server has written all of it.
+    #[tokio::test]
+    async fn an_undeclared_length_past_the_bound_is_refused_before_it_is_all_read() {
+        let frames = 8 * (crate::nse::MAX_DOCUMENT_BYTES >> 20);
+        let offered = frames << 20;
+        for chunked in [false, true] {
+            let (url, server) = counting_flood(chunked, frames);
+            let http = HttpDocuments::new().expect("a client builds");
+            let got = http.get_async(&url).await;
+            // THE COST FIRST: whether the client hung up before the whole
+            // answer was written is the defect; the sentence comes after.
+            let written = tokio::task::spawn_blocking(move || server.join())
+                .await
+                .expect("the join task")
+                .expect("the fixture server");
+            assert!(
+                written < offered,
+                "chunked={chunked}: the server wrote all {offered} bytes it offered, \
+                 so the client read the answer to its end: {written}"
+            );
+            let why = got.expect_err("past the bound");
+            assert!(why.contains("ran past"), "{why}");
+            assert!(why.contains("rest was not read"), "{why}");
+        }
+    }
+
+    /// The streamed read keeps the bytes it was given exactly, including at the
+    /// bound itself and when the host declares no length.
+    #[tokio::test]
+    async fn an_undeclared_length_at_the_bound_is_read_whole() {
+        let body = "x".repeat(crate::nse::MAX_DOCUMENT_BYTES);
+        let url = listener(&format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{body}"
+        ));
+        let http = HttpDocuments::new().expect("a client builds");
+        let got = http
+            .get_async(&url)
+            .await
+            .expect("exactly the bound is allowed");
+        assert_eq!(got.len(), body.len());
+        assert!(got == body, "the bytes read are the bytes sent");
+        let over = format!("{body}y");
+        let url = listener(&format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{over}"
+        ));
+        let why = http.get_async(&url).await.expect_err("one byte past");
+        assert!(why.contains("ran past"), "{why}");
     }
 
     #[tokio::test]

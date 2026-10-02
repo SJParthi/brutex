@@ -29,6 +29,9 @@
               that cannot panic cannot fail."
 )]
 
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -604,6 +607,15 @@ fn the_second_rung_has_a_directory_and_folds_onward_to_the_coarser_ones() {
 #[cfg(unix)]
 #[test]
 fn an_unreadable_folder_halts_loudly_and_names_the_path() {
+    support::where_permission_binds(
+        "an_unreadable_folder_halts_loudly_and_names_the_path",
+        an_unreadable_folder_halts_loudly_and_names_the_path_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn an_unreadable_folder_halts_loudly_and_names_the_path_body() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = Scratch::new();

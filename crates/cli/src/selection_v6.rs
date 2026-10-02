@@ -228,10 +228,7 @@ fn open(root: &Path, writable: bool) -> Result<(File, PathBuf), String> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100);
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        options.custom_flags(0x20_000);
+        options.custom_flags(store::open_flags::O_NOFOLLOW);
     }
     let file = options
         .open(&path)

@@ -66,10 +66,8 @@ const COMPLETION_FILE: &str = "anchored-search-lineage-completions-v2.bin";
 const LOCK_FILE: &str = "anchored-search-lineage-v2.lock";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(MEMBER_PAYLOAD_BYTES + SEAL_BYTES == ANCHORED_SEARCH_LINEAGE_V2_MEMBER_BYTES);
 const _: () =

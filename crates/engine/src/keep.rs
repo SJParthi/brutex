@@ -239,6 +239,11 @@ fn weaker(held: &[Itemset], lower: usize, upper: usize) -> bool {
 ///
 /// **This is not a depth control.** See the module header: a cap of zero walks
 /// the same ladder as a cap of a million.
+///
+/// **No production path calls this.** No shipping source in this crate
+/// constructs it and no other crate's `src` names it: `runner::rank` feeds its
+/// own heap, so no run's retention, ranking or report depends on this type.
+/// `engine/tests/production_callers.rs` fails the day a caller appears (D-0762).
 #[derive(Clone, Debug, Default)]
 pub struct Best {
     cap: usize,
@@ -301,6 +306,18 @@ impl Best {
     ///
     /// Held when the retention is not yet full, or when it ranks above the
     /// weakest held. Otherwise refused, and counted.
+    ///
+    /// # Cost: O(1) to refuse, O(log cap) to admit
+    ///
+    /// A refusal is one comparison against the root. An admission is a heap
+    /// sift -- `sift_up` while filling, `take_root`'s `sift_down` then
+    /// `sift_up` when full -- and each sift walks at most `floor(log2(cap))`
+    /// levels, so the admit cost grows with the retention's capacity, not with
+    /// the number offered. UNVERIFIED as a measured figure: no bench row times
+    /// an admission. It went unstated until audit finding o1engine-20;
+    /// `docs/06-limits.md` names it beside the join's costs. Memory is `cap`
+    /// itemsets, fixed; the vector was reserved for `cap` when the retention
+    /// was built.
     pub fn offer(&mut self, candidate: Itemset) {
         if self.held.len() < self.cap {
             self.held.push(candidate);
