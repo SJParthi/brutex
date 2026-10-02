@@ -600,9 +600,17 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     //
     // Built from the ladder that ACTUALLY RAN rather than from `min_hits` as
     // typed — `Params::of` reads the ladder, so a zero the ladder raised to one
-    // is recorded as the one that ran. Same construction as `sweep_stored`, so
-    // sweeping a month here and sweeping it alone produce the same 64 hex
-    // characters, which is the only thing that makes the two reports comparable.
+    // is recorded as the one that ran.
+    //
+    // NOT THE SAME RUN AS `sweep-stored`, and its identity never equals one
+    // (W2-cli1-5, D-0968). Two of the nine terms differ by construction:
+    // `data_digest` here is `stored_anchored_digest` alone, while
+    // `stored_month_kernel` binds the one-minute execution series on top of it
+    // through `stored_executed_digest`; and `params` carries `BATCH_CEILING`,
+    // not the ceiling `ladder_for` derives from the environment and the share.
+    // So the two ledgers cannot be joined by identity. What does compare
+    // across them is the feed, the underlying, the month, the rung and the
+    // mask -- the fields a reader joins on.
     let id = runner::identity::identity(&runner::identity::Run {
         // `Default::default()` and not the named path, for the reason
         // `crate::sweep_stored` gives at its own call site: spelling
@@ -703,12 +711,11 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
 
     // AND THE LEDGER, WHICH IS THE HALF THE EVENT ABOVE COULD NOT BE.
     //
-    // The comment on `id` says this identity is built "same construction as
-    // `sweep_stored`, so sweeping a month here and sweeping it alone produce the
-    // same 64 hex characters, which is the only thing that makes the two
-    // reports comparable." They were comparable in the REPORT and nowhere else:
-    // the row was never appended, so nothing could put the two side by side,
-    // which is what comparable is for.
+    // Until this row was appended, a batch month existed in the REPORT and
+    // nowhere else, so nothing could put it beside a `sweep-stored` row of the
+    // same month. They are put side by side on feed, underlying, month, rung
+    // and mask -- never on identity, which the comment on `id` explains can
+    // never be equal between the two verbs (W2-cli1-5, D-0968).
     //
     // THIS NEEDED THE STREAMED WALK FIRST, and that is why it is landing now
     // rather than with the other three verbs. `Sweep` carries no count of

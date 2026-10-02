@@ -13323,9 +13323,10 @@ fn one_rung(
         // "AUDIT / REFUSED. The streamed sweep offered N survivor(s)". Both are
         // uppercase and indented, so neither carried the `refused: ` prefix
         // this tested nor the `NOT_RECORDED` marker below, and both fell
-        // through to `latest_for`.
+        // through to `latest_for`, the key-matching read [`recorded_row`]
+        // replaced (D-0968).
         //
-        // That fall-through is the defect. `latest_for` keys on feed,
+        // That fall-through was the defect. `latest_for` keyed on feed,
         // underlying, rung, span and min_hits -- never the identity -- so a
         // rung that halted on the budget printed an EARLIER run's combination
         // count, depth, trades and totals, under this run's banner, with
@@ -13341,8 +13342,8 @@ fn one_rung(
     } else if let Some(why) = not_recorded_reason(&text) {
         // A ROW THAT DID NOT LAND IS A REFUSAL, NOT A LOOKUP.
         //
-        // `latest_for` reads the newest row matching the KEY -- feed, underlying,
-        // rung, span, min_hits -- and the key does not carry the identity. So
+        // `latest_for` read the newest row matching the KEY -- feed, underlying,
+        // rung, span, min_hits -- and the key did not carry the identity. So
         // when this run's append failed, the read did not fail with it: it
         // returned an EARLIER run's row, from a different commit and possibly a
         // different ceiling, and the descent printed it under this run's banner
@@ -13350,12 +13351,24 @@ fn one_rung(
         // the string it named it into was thrown away here.
         //
         // Refusing costs the rung its row and says why, which is what §4 asks
-        // for. The alternative -- matching `record.identity` in `latest_for` --
-        // is the stronger fix and needs the `RunId` computed twice or threaded
-        // through; this closes the silent substitution now and does not block it.
+        // for. The stronger fix -- addressing the row by `record.identity` --
+        // has since landed as [`recorded_row`] (D-0968), and this arm stays:
+        // a report naming no recorded identity refuses there too, but this one
+        // carries `record_run`'s own reason.
         Err(first_line(format!("the result was not recorded: {why}")))
     } else {
-        latest_for(vendor_word, underlying, rung, from, to, min_hits)
+        recorded_row(
+            &root,
+            &text,
+            RowKey {
+                feed: vendor_word,
+                underlying,
+                rung,
+                from,
+                to,
+                min_hits,
+            },
+        )
     };
 
     // A RUNG FINISHING IS AN EVENT, AND IT WAS NOT ONE.
@@ -15121,50 +15134,149 @@ const IN_SAMPLE_WARNING: &str = "\n  \
     and discards the report that carries them. Treat these totals as an upper\n  \
     bound on what the setup did, not as an estimate of what it will do.\n";
 
-/// The record just written for this exact run, read back from the store.
+/// The ledger key one descent rung is asked under.
 ///
-/// Reads BACKWARDS from the newest row and stops at the first match, because the
-/// row this command just appended is the last one. That is `O(1)` in the ordinary
-/// case and `O(rows)` only if the run was somehow not recorded — which is
-/// reported as the refusal it is rather than absorbed.
-///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
-fn latest_for(
-    vendor_word: &str,
-    underlying: &str,
-    rung: &str,
+/// Not the ADDRESS -- the identity is. The key is checked against the row the
+/// identity names, so a row that answers another span, support or feed is a
+/// refusal rather than a figure printed under this rung's banner.
+#[derive(Clone, Copy, Debug)]
+struct RowKey<'a> {
+    feed: &'a str,
+    underlying: &'a str,
+    rung: &'a str,
     from: (u16, u8),
     to: (u16, u8),
     min_hits: u64,
-) -> Result<crate::results::Record, String> {
-    let root = store_root()?;
-    let mut store = crate::results::Results::open(&root)?;
-    let count = store.len()?;
-    let (feed, name, tf) = (
-        crate::results::field(vendor_word),
-        crate::results::field(underlying),
-        crate::results::field(rung),
-    );
-    for back in 1..=count {
-        let record = store.read(count.saturating_sub(back))?;
-        if record.feed == feed
-            && record.underlying == name
-            && record.timeframe == tf
-            && record.from_year == from.0
-            && record.from_month == from.1
-            && record.to_year == to.0
-            && record.to_month == to.1
-            && record.min_hits == min_hits
-        {
-            return Ok(record);
-        }
+}
+
+impl RowKey<'_> {
+    fn answered_by(&self, record: &crate::results::Record) -> bool {
+        record.feed == crate::results::field(self.feed)
+            && record.underlying == crate::results::field(self.underlying)
+            && record.timeframe == crate::results::field(self.rung)
+            && (record.from_year, record.from_month) == self.from
+            && (record.to_year, record.to_month) == self.to
+            && record.min_hits == self.min_hits
     }
-    Err(format!(
-        "the {rung} run completed but no row for it is in the results store"
-    ))
+}
+
+/// The ledger row of the run THIS report recorded, addressed by its identity.
+///
+/// # What it replaced (W2-cli8-9, D-0968)
+///
+/// `latest_for` read the newest row matching the KEY -- feed, underlying, rung,
+/// span, `min_hits` -- and the key carries no identity. An exact rerun takes
+/// `Committed::Reused` and appends nothing, so when another run under the same
+/// key had been recorded in between, the descent printed THAT run's figures
+/// under this run's banner with `complete = yes`.
+///
+/// The identity is read from the `RESULT RECORDED` / `RESULT ALREADY RECORDED
+/// AND VERIFIED` block [`committed_report`] wrote, the one renderer both sides
+/// share, so a reword moves producer and reader together.
+///
+/// # Cost (W2-cli8-4)
+///
+/// One `HashMap` probe and one seek through the process's cached ledger handle
+/// ([`crate::results::with_shared_writer`]), which `ensure_run_record` opened a
+/// moment earlier for this same root. The handle's refresh absorbs only rows
+/// appended since it last looked -- O(new rows), `O(1)` when the ledger is
+/// unchanged -- and the O(runs) open is paid once per process per root, not
+/// per rung. The old path opened the ledger fresh on every rung and then
+/// scanned backward. `docs/06-limits.md` names the remaining O(runs) open.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the shape of the
+/// code; `C-CLI-03` times the probe half and no bench times this pairing.
+///
+/// # Errors
+///
+/// A report naming no identity, two different ones or a malformed one; an
+/// identity the ledger does not hold (never a key fallback); a row whose key
+/// differs from the rung asked; every ledger refusal.
+fn recorded_row(
+    root: &std::path::Path,
+    report: &str,
+    key: RowKey<'_>,
+) -> Result<crate::results::Record, String> {
+    let identity = recorded_identity(report)?;
+    let found = crate::results::with_shared_writer(root, |store| store.of_identity(&identity))?;
+    let hex = || {
+        identity
+            .iter()
+            .fold(String::with_capacity(64), |mut out, byte| {
+                let _ = write!(out, "{byte:02x}");
+                out
+            })
+    };
+    let Some(record) = found else {
+        return Err(format!(
+            "the {} run reported identity {} but the results store holds no row with it",
+            key.rung,
+            hex()
+        ));
+    };
+    if !key.answered_by(&record) {
+        return Err(format!(
+            "the row recorded under identity {} does not answer the {} rung asked; it was not printed",
+            hex(),
+            key.rung
+        ));
+    }
+    Ok(record)
+}
+
+/// The one run identity a report's committed-result block names.
+///
+/// # Errors
+///
+/// No block, a block with no identity line, an identity that is not exactly 64
+/// lowercase hex characters, or two blocks naming different identities.
+fn recorded_identity(report: &str) -> Result<[u8; 32], String> {
+    let mut found: Option<[u8; 32]> = None;
+    let mut lines = report.lines();
+    while let Some(line) = lines.next() {
+        if line != RESULT_RECORDED && line != RESULT_REUSED {
+            continue;
+        }
+        let hex = lines
+            .by_ref()
+            .take_while(|l| !l.trim().is_empty())
+            .find_map(|l| l.trim_start().strip_prefix(RECORDED_IDENTITY))
+            .ok_or_else(|| format!("the report says {line} but names no identity beneath it"))?;
+        let identity = identity_from_hex(hex.trim())?;
+        if found.is_some_and(|seen| seen != identity) {
+            return Err(
+                "the report names two different identities as recorded, so no single row is this run's"
+                    .to_owned(),
+            );
+        }
+        found = Some(identity);
+    }
+    found.ok_or_else(|| {
+        "the report names no recorded run identity, so no ledger row can be tied to this run"
+            .to_owned()
+    })
+}
+
+/// Exactly 64 lowercase hex characters, as `Record::identity_hex` writes them.
+fn identity_from_hex(hex: &str) -> Result<[u8; 32], String> {
+    let refused = || format!("the recorded identity {hex:?} is not 64 lowercase hex characters");
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let bytes = hex.as_bytes();
+    if bytes.len() != 64 {
+        return Err(refused());
+    }
+    let mut out = [0_u8; 32];
+    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let [high, low] = *pair else {
+            return Err(refused());
+        };
+        *slot = (digit(high).ok_or_else(refused)? << 4) | digit(low).ok_or_else(refused)?;
+    }
+    Ok(out)
 }
 
 /// `screen`: sweep a span and report only the combinations that satisfy the
@@ -16883,24 +16995,39 @@ fn record_run(
     };
 
     let committed = ensure_run_record(into.root, &record)?;
-    let report = match committed {
+    let report = committed_report(into.root, committed, &record.identity_hex());
+    Ok((report, committed))
+}
+
+/// The header of a block whose row this invocation appended.
+const RESULT_RECORDED: &str = "RESULT RECORDED";
+/// The header of a block whose row an earlier invocation appended and this one
+/// verified field for field.
+const RESULT_REUSED: &str = "RESULT ALREADY RECORDED AND VERIFIED";
+/// The label of the identity line in either block, padded to the report column.
+const RECORDED_IDENTITY: &str = "identity                                       ";
+
+/// The block [`record_run`] prints once the ledger row is durable.
+///
+/// One renderer, because [`recorded_identity`] reads this block back: a
+/// descent rung discards the long report and ties its row to the identity
+/// printed here, so producer and reader must not be two spellings.
+fn committed_report(root: &std::path::Path, committed: Committed, identity_hex: &str) -> String {
+    match committed {
         Committed::Written(index) => format!(
-            "RESULT RECORDED\n  \
+            "{RESULT_RECORDED}\n  \
              row                                            {index:>10}  in {}\n  \
-             identity                                       {}\n\n",
-            results::Results::path(into.root).display(),
-            record.identity_hex(),
+             {RECORDED_IDENTITY}{identity_hex}\n\n",
+            results::Results::path(root).display(),
         ),
         Committed::Reused(index) => format!(
-            "RESULT ALREADY RECORDED AND VERIFIED\n  \
+            "{RESULT_REUSED}\n  \
              row                                            {index:>10}  in {}\n  \
-             identity                                       {}\n  \
+             {RECORDED_IDENTITY}{identity_hex}\n  \
              the prepared detail blocks and every deterministic ledger field match; the existing completion timestamp was kept\n\n",
-            results::Results::path(into.root).display(),
-            record.identity_hex(),
+            results::Results::path(root).display(),
         ),
-    };
-    Ok((report, committed))
+    }
 }
 
 /// The sentence [`record_run`] opens with when the row did not reach the ledger.
@@ -26343,6 +26470,220 @@ mod tests {
             None
         );
         assert_eq!(crate::not_recorded_reason(""), None);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod recorded_row_tests {
+    use super::{Committed, RowKey, committed_report, recorded_row};
+    use crate::results::{Record, Results, field};
+
+    const KEY: RowKey<'static> = RowKey {
+        feed: "zerodha",
+        underlying: "NIFTY",
+        rung: "15min",
+        from: (2025, 1),
+        to: (2025, 6),
+        min_hits: 200,
+    };
+
+    fn root(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("brutex-recorded-row-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a temp root");
+        root
+    }
+
+    /// One run under [`KEY`], told apart by identity and by its figures.
+    fn run(identity: u8, pessimistic: i64) -> Record {
+        Record {
+            identity: [identity; 32],
+            finished_micros: 1_785_727_500_000_000 + i64::from(identity),
+            feed: field(KEY.feed),
+            underlying: field(KEY.underlying),
+            timeframe: field(KEY.rung),
+            from_year: KEY.from.0,
+            from_month: KEY.from.1,
+            to_year: KEY.to.0,
+            to_month: KEY.to.1,
+            months_asked: 6,
+            months_found: 6,
+            bars: 2_250,
+            min_hits: KEY.min_hits,
+            combinations: 1_000 + u64::from(identity),
+            depth: 3,
+            halted: 0,
+            trades: 40 + u64::from(identity),
+            pessimistic,
+            optimistic: pessimistic + 1,
+            worst_trade: -1,
+            max_drawdown: 1,
+            winner_mae: 1,
+            winner_mfe: 1,
+            all_mae: 1,
+            exit_rungs: [0, 0, -1, -1, -1],
+            mask_words: [u64::from(identity), 0, 0, 0, 0, 0],
+        }
+    }
+
+    fn ledger(root: &std::path::Path, rows: &[Record]) {
+        let mut store = Results::open(root).expect("the store opens");
+        for row in rows {
+            store.append(row).expect("recorded");
+        }
+    }
+
+    /// W2-cli8-9: an exact rerun of run A, after a different run B under the
+    /// SAME key, shows A's row and A's figures -- not the newest row for the key.
+    #[test]
+    fn a_reused_rerun_reads_its_own_row_and_not_the_newest_row_for_its_key() {
+        let root = root("reused");
+        let (a, b) = (run(1, -111), run(2, 222));
+        ledger(&root, &[a, b]);
+        let report = committed_report(&root, Committed::Reused(0), &a.identity_hex());
+        let row = recorded_row(&root, &report, KEY).expect("A is recorded");
+        assert_eq!(row.identity, a.identity, "the row is A's, not B's");
+        assert_eq!(row.pessimistic, -111, "and so are its figures");
+        assert_eq!(row, a);
+
+        // A freshly written run still reads its own row.
+        let report = committed_report(&root, Committed::Written(1), &b.identity_hex());
+        assert_eq!(recorded_row(&root, &report, KEY).expect("B"), b);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The identity is the address. One absent from the ledger -- or a ledger
+    /// with no rows at all -- refuses and names why; it never falls back to a
+    /// key match.
+    #[test]
+    fn an_identity_the_ledger_does_not_hold_refuses_instead_of_matching_the_key() {
+        let root = root("absent");
+        let absent = run(9, 0);
+        let report = committed_report(&root, Committed::Reused(0), &absent.identity_hex());
+        let empty = recorded_row(&root, &report, KEY).expect_err("an empty ledger holds no row");
+        assert!(empty.contains(&absent.identity_hex()), "{empty}");
+        assert!(empty.contains("no row"), "{empty}");
+
+        ledger(&root, &[run(1, -111)]);
+        let why = recorded_row(&root, &report, KEY).expect_err("the key alone is not enough");
+        assert!(why.contains(&absent.identity_hex()), "{why}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A row under this identity that answers a DIFFERENT key is a refusal: the
+    /// rung would print another span's or another support's figures.
+    #[test]
+    fn a_row_whose_key_differs_from_the_rung_asked_is_refused() {
+        let root = root("foreign");
+        let a = run(1, -111);
+        ledger(&root, &[a]);
+        let report = committed_report(&root, Committed::Written(0), &a.identity_hex());
+        for asked in [
+            RowKey {
+                feed: "dhan",
+                ..KEY
+            },
+            RowKey {
+                underlying: "BANKNIFTY",
+                ..KEY
+            },
+            RowKey {
+                rung: "5min",
+                ..KEY
+            },
+            RowKey {
+                from: (2025, 2),
+                ..KEY
+            },
+            RowKey {
+                from: (2024, 1),
+                ..KEY
+            },
+            RowKey {
+                to: (2025, 5),
+                ..KEY
+            },
+            RowKey {
+                to: (2026, 6),
+                ..KEY
+            },
+            RowKey {
+                min_hits: 201,
+                ..KEY
+            },
+        ] {
+            let why = recorded_row(&root, &report, asked).expect_err("a foreign row");
+            assert!(why.contains("does not answer"), "{why}");
+        }
+        assert_eq!(recorded_row(&root, &report, KEY).expect("its own key"), a);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A report that names no identity, two different ones, or a malformed one
+    /// cannot be tied to a row, so it refuses before the ledger is consulted.
+    #[test]
+    fn a_report_that_does_not_name_exactly_one_identity_is_refused() {
+        let root = root("unnamed");
+        let (a, b) = (run(1, -111), run(2, 222));
+        ledger(&root, &[a, b]);
+        let written_a = committed_report(&root, Committed::Written(0), &a.identity_hex());
+        let written_b = committed_report(&root, Committed::Written(1), &b.identity_hex());
+
+        let none = recorded_row(&root, "REAL MARKET DATA\n  refused 0\n", KEY)
+            .expect_err("no result block");
+        assert!(none.contains("names no recorded run identity"), "{none}");
+
+        let headless = written_a.replace(&a.identity_hex(), "");
+        let why = recorded_row(&root, &headless, KEY).expect_err("an empty identity");
+        assert!(why.contains("64 lowercase hex"), "{why}");
+
+        let truncated = written_a.replace(&a.identity_hex(), &a.identity_hex()[..63]);
+        let why = recorded_row(&root, &truncated, KEY).expect_err("63 characters");
+        assert!(why.contains("64 lowercase hex"), "{why}");
+
+        let upper = written_a.replace(&a.identity_hex(), &"A".repeat(64));
+        let why = recorded_row(&root, &upper, KEY).expect_err("uppercase");
+        assert!(why.contains("64 lowercase hex"), "{why}");
+
+        let unlabelled = written_a.replace("identity", "ident");
+        let why = recorded_row(&root, &unlabelled, KEY).expect_err("no identity line");
+        assert!(why.contains("names no identity beneath it"), "{why}");
+
+        let two = format!("{written_a}{written_b}");
+        let why = recorded_row(&root, &two, KEY).expect_err("two runs in one report");
+        assert!(why.contains("two different identities"), "{why}");
+
+        // The same block twice is still exactly one identity.
+        let twice = format!("{written_a}{written_a}");
+        assert_eq!(recorded_row(&root, &twice, KEY).expect("one identity"), a);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every hex digit decodes to its own nibble, both halves of every byte.
+    #[test]
+    fn every_byte_of_the_identity_round_trips_through_the_report() {
+        let root = root("hex");
+        let mut a = run(1, -111);
+        for (i, byte) in a.identity.iter_mut().enumerate() {
+            *byte = u8::try_from(i * 8 + 7).unwrap();
+        }
+        a.identity[0] = 0xab;
+        a.identity[1] = 0xcd;
+        a.identity[2] = 0xef;
+        a.identity[3] = 0x09;
+        ledger(&root, &[a]);
+        let report = committed_report(&root, Committed::Written(0), &a.identity_hex());
+        assert_eq!(recorded_row(&root, &report, KEY).expect("decoded"), a);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

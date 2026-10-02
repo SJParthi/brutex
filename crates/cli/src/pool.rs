@@ -91,9 +91,16 @@
 //!
 //! Both passes are `par_iter` over INSTRUMENTS with indexed `collect`, so the
 //! order of every table is the sorted symbol order and never the scheduler's.
-//! Pass 1's per-instrument runs are the same runs `range-rung` makes, so their
-//! identities and rows are byte-identical to running each by hand. The pooled
-//! fold runs sequentially over the collected cells. §3 rule 5.
+//! Pass 1's per-instrument runs are the runs `range-rung` makes, under the
+//! machine's ceiling SHARED by the sweeps in flight (`screen_surface`, D-0968)
+//! -- the way `range-all` shares it among its rungs. The ceiling is a term of
+//! the run identity, so a pass-1 identity equals a lone `range-rung`'s only
+//! when the two derive the same share. The pooled fold runs sequentially over
+//! the collected cells. §3 rule 5.
+//!
+//! The ledger and evidence rows pass 1 writes are written from inside the
+//! workers, so their APPEND order follows completion, not the surface; see
+//! `docs/06-limits.md` for that bound (GAP13-13).
 
 use core::fmt::Write as _;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -290,14 +297,10 @@ fn run_under(
     );
 
     // ── PASS 1: every instrument, exactly as `range-rung` screens one ──
-    let screened: Vec<Screened> = surface
-        .par_iter()
-        .map(|symbol| Screened {
-            symbol: symbol.clone(),
-            outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None)
-                .outcome,
-        })
-        .collect();
+    let screened: Vec<Screened> = screen_surface(&surface, |symbol| Screened {
+        symbol: symbol.clone(),
+        outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None).outcome,
+    });
     let screened_ok = screened.iter().filter(|s| s.outcome.is_ok()).count();
     crate::note(
         &telemetry::Event::info("cli.pool", "pass 1 finished")
@@ -1019,6 +1022,31 @@ fn mask_hex(words: [u64; 6]) -> String {
         let _ = write!(out, "{w:016x}");
     }
     out
+}
+
+/// Pass 1's parallel map, in surface order, under the machine's shared budget.
+///
+/// # Why the share is declared here (R9-cli-o1-0, D-0968)
+///
+/// Each instrument is a full `one_rung` sweep, and up to
+/// `rayon::current_num_threads()` of them run at once. `shared_out` and
+/// `shared_support_lanes` divide the machine's candidate ceiling and its cores
+/// by [`crate::SWEEPS_SHARING_THIS_MACHINE`], and nothing on this path raised
+/// it: every concurrent screen read 1 and took the WHOLE machine's ceiling and
+/// every core, so `threads` sweeps could each size themselves to all of it.
+///
+/// The count is the sweeps that can actually be in flight -- the surface
+/// length capped at the pool's workers -- exactly as `batch` declares it.
+/// Declaring the whole surface would divide a fourteen-core machine by 210
+/// while only fourteen sweeps run. An empty surface declares zero, which
+/// `SharedBy::these` already raises to one.
+fn screen_surface<T: Send>(
+    surface: &[String],
+    screen: impl Fn(&String) -> T + Sync + Send,
+) -> Vec<T> {
+    let concurrent = surface.len().min(rayon::current_num_threads());
+    let _sharing = crate::SharedBy::these(concurrent);
+    surface.par_iter().map(screen).collect()
 }
 
 #[cfg(test)]
@@ -2484,5 +2512,30 @@ mod tests {
             last_pool = in_pool.expect("asserted above");
             last_screen = in_screen.expect("asserted above");
         }
+    }
+
+    /// R9-cli-o1-0: every concurrent pass-1 sweep sees the machine shared by
+    /// as many sweeps as can actually run at once, and the share is released
+    /// when the pass returns. Before D-0968 it read 1 -- every instrument got
+    /// the whole machine's ceiling and every core as support lanes.
+    #[test]
+    fn pass_one_divides_the_machine_by_the_sweeps_it_runs_at_once() {
+        let _serial = crate::knobs::serially();
+        let read = || crate::SWEEPS_SHARING_THIS_MACHINE.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = rayon::current_num_threads();
+        for size in [1_usize, 3, threads + 2] {
+            let surface: Vec<String> = (0..size).map(|i| format!("S{i:03}")).collect();
+            let seen = super::screen_surface(&surface, |symbol| (symbol.clone(), read()));
+            let want = size.min(threads).max(1);
+            assert_eq!(seen.len(), size);
+            for ((symbol, sharing), asked) in seen.iter().zip(&surface) {
+                assert_eq!(symbol, asked, "surface order, not completion order");
+                assert_eq!(*sharing, want, "{size} instruments on {threads} threads");
+            }
+            assert_eq!(read(), 1, "the share is released when the pass returns");
+        }
+        let empty: Vec<(String, usize)> = super::screen_surface(&[], |s| (s.clone(), read()));
+        assert!(empty.is_empty());
+        assert_eq!(read(), 1);
     }
 }

@@ -129,3 +129,34 @@ fn sweep_all_keeps_the_column_zero_refusal_and_dispatch_status() {
     );
     assert!(arm.contains("let refused = carries_refusal(&text);\n            out.push_str(&text);\n            if refused { MISUSED } else { OK }"), "{arm}");
 }
+
+/// W2-cli1-5, D-0968: a batch month's identity is NOT a `sweep-stored`
+/// identity, and the two facts that make it different are pinned here so the
+/// comment on `id` in `one` cannot drift back into promising equal hex.
+#[test]
+fn the_batch_identity_is_built_from_terms_sweep_stored_does_not_use() {
+    let source = include_str!("batch.rs");
+    let one = source.split_once("\nfn one(").expect("one").1;
+    let one = one.split_once("\n}\n").expect("one end").0;
+    assert!(one.contains("crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily)"));
+    assert!(!one.contains("stored_executed_digest("), "{one}");
+    assert!(one.contains(".with_ceiling(BATCH_CEILING)"), "{one}");
+    assert!(one.contains("NOT THE SAME RUN AS `sweep-stored`"), "{one}");
+    let promise = ["same 64 hex", " characters"].concat();
+    assert!(
+        !source.contains(&promise),
+        "the false parity promise is gone"
+    );
+
+    let lib = include_str!("lib.rs");
+    let kernel = lib.split_once("fn stored_month_kernel(").expect("kernel").1;
+    let kernel = kernel.split_once("\n}\n").expect("kernel end").0;
+    assert!(
+        kernel.contains("let ladder = ladder_for(min_hits)?;"),
+        "{kernel}"
+    );
+    assert!(
+        kernel.contains("stored_executed_digest(&loaded.bars"),
+        "{kernel}"
+    );
+}

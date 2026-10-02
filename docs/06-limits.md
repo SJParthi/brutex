@@ -9907,3 +9907,39 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## A descent row's read-back, pool pass 1's share, and the order parallel workers append in — D-0968, 2 October 2026
+
+- **The read-back is one probe and one seek after an O(runs) open paid once
+  per process per store root.** `recorded_row` reads the identity from the
+  report's committed-result block (O(report length), a string the rung
+  already holds) and probes the process's cached ledger handle
+  (`results::with_shared_writer`). That handle's refresh absorbs only rows
+  appended since it last looked: O(new rows), constant metadata checks when
+  the ledger is unchanged. The O(runs) identity-index build of
+  `Results::open` is paid when the cache is first filled for a root or after
+  a failed operation invalidates it -- `ensure_run_record` has normally just
+  filled it for the same root. The old `latest_for` paid that open on every
+  rung and then scanned backward over every row appended since the run's
+  own. Per-call O(1) for the open is not achievable without a persistent
+  index file. Not timed: `C-CLI-03` times the probe half and nothing times
+  this pairing.
+- **Pool pass 1 now shares the machine; the identity consequence, stated.**
+  `screen_surface` declares `min(surface, rayon threads)` sweeps, so each
+  instrument's candidate ceiling and support lanes are a share, as in
+  `range-all` and `sweep-all`. The ceiling is a term of the run identity, so a
+  pass-1 identity equals a lone `range-rung` identity only when both derive
+  the same share.
+- **Ledger and evidence APPEND ORDER under `sweep-all`, `range-all` and pool
+  pass 1 still follows thread completion (GAP13-13, open).** The workers
+  begin their sweep-evidence attempts and append their ledger rows from
+  inside `par_iter`, so `results/runs.bin` row order and attempt tokens can
+  differ between two identical runs on fresh stores, though every row's
+  content and identity is the same and every report table is in input order.
+  Fixing it means allocating attempts in input order (`begin_many`) and
+  committing ledger, frontier, trade and receipt rows after the indexed
+  collect, which splits `one_rung` and `batch::one` into a prepare half and a
+  commit half; that restructure has not landed. Serialising the commit inside
+  the workers with a turn gate was rejected: a worker blocked waiting for its
+  turn can be stacked by rayon's work stealing above the very item it waits
+  for, and deadlock.

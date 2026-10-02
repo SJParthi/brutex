@@ -43764,3 +43764,50 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0968 — A descent row is read back by its identity, and pool pass 1 shares the machine — 2026-10-02
+
+**Findings.** W2-cli8-9 (medium bug), W2-cli8-4 (low cost), R9-cli-o1-0
+(medium bug), W2-cli1-5 (low, false comment). GAP13-13 is the same work unit's
+remaining item and is not closed here.
+
+**What was wrong.** `one_rung` discards the long report and read its row back
+through `latest_for`, which returned the newest ledger row matching feed,
+underlying, rung, span and `min_hits` -- never the identity. An exact rerun
+takes `Committed::Reused` and appends nothing, so if another run under the same
+key had been recorded in between, `range-all`, `range-rung` and `descend`
+printed that other run's figures under this run's banner. Each call also
+opened the ledger fresh (an O(runs) index build) and scanned backward, while
+its doc claimed O(1). Separately, pool pass 1 ran up to `threads` full sweeps
+at once without declaring them, so `SWEEPS_SHARING_THIS_MACHINE` read 1 and
+every one took the whole machine's candidate ceiling and every core. And two
+comments in `batch::one` promised that a batch month and a `sweep-stored`
+month give the same 64-hex identity; they cannot (anchored versus executed
+digest, `BATCH_CEILING` versus `ladder_for`).
+
+**The choice.** (1) `recorded_row` reads the identity from the committed-result
+block, which one renderer (`committed_report`, with the shared constants
+`RESULT_RECORDED`, `RESULT_REUSED`, `RECORDED_IDENTITY`) writes, probes it with
+`Results::of_identity` through the process's cached ledger handle, and checks
+that the row answers the rung's key. No identity, two identities, a malformed
+one, an identity the ledger lacks, or a row answering another key each refuse
+and name why; there is no key fallback. (2) Pool pass 1 runs through
+`screen_surface`, which declares `min(surface, rayon threads)` sweeps with
+`SharedBy::these`, the rule `batch` already uses. (3) The `batch` comments now
+say the two identities can never be equal and name the fields that do join.
+
+**Rejected.** Threading the `RunId` back out of `audit_range_inner` through
+`audit_bars` and `record_all`: it changes the return type of a chain of
+functions to carry a value the report already prints from one renderer.
+Matching the key and then the identity: the identity alone addresses the row in
+one probe, and the key is kept only as a check. Declaring the whole surface
+length as the share: it would divide the machine by 210 while only `threads`
+sweeps run.
+
+**Not done, stated.** GAP13-13 -- workers append ledger and evidence rows in
+completion order -- needs attempts allocated in input order and the commit moved
+after the indexed collect; a turn gate inside rayon workers can deadlock under
+work stealing. `docs/06-limits.md` records the bound. The plan's D-0962 stays
+unused for that fix.
+
+Invariants CLI-W2C89-a to CLI-W2C89-d, CLI-R9O10-a and CLI-W2C15-a.
