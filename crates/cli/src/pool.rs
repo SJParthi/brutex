@@ -392,10 +392,12 @@ fn head_under(
         symbols: surface,
         elsewhere,
         unrecognised,
+        unoffered,
     } = surface_under(root, vendor, rung)?;
     let mut unread = String::new();
     not_on_the_surface(&mut unread, &elsewhere);
     not_catalogued(&mut unread, unrecognised);
+    not_walked(&mut unread, &unoffered);
     if surface.is_empty() && !elsewhere.is_empty() {
         return Err(format!(
             "no instrument is on the surface for {vendor_word} at {rung}; the catalog \
@@ -443,6 +445,19 @@ fn not_catalogued(out: &mut String, (feeds, rungs): (u64, u64)) {
          volume a directory spelt as a feed or rung in another case is the one a load\n  \
          opens, so a month counted here can be one this page reads or says is not held.\n"
     );
+}
+
+/// The catalog's `unoffered_report`, indented like the other blocks the pool
+/// names without reading, under a blank line. Nothing when it is empty.
+/// D-0769.
+fn not_walked(out: &mut String, unoffered: &str) {
+    if unoffered.is_empty() {
+        return;
+    }
+    out.push('\n');
+    for line in unoffered.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
 }
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
@@ -564,6 +579,7 @@ fn surface_under(
         symbols: symbols.into_iter().collect(),
         elsewhere: elsewhere.into_values().collect(),
         unrecognised: (holdings.census.unknown_vendor, holdings.census.unknown_rung),
+        unoffered: holdings.census.unoffered_report(),
     })
 }
 
@@ -581,6 +597,9 @@ struct Surface {
     /// directory, that is spelt as no feed or rung this engine knows: the
     /// catalog census's `unknown_vendor` and `unknown_rung`, store-wide.
     unrecognised: (u64, u64),
+    /// The catalog's own `unoffered_report`, store-wide: the entries it saw
+    /// below `bars/` and offered to nobody, or empty. D-0769.
+    unoffered: String,
 }
 
 /// The holdings the surface names and does not read, under the opening they
@@ -654,12 +673,8 @@ fn opening(
 }
 
 fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+    use crate::columns::{left, right};
     let _ = writeln!(out, "\n  PASS 1 -- PER SYMBOL, each on its own bars");
-    let _ = writeln!(
-        out,
-        "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD"
-    );
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
     // worst trade closest to zero, then the net. Refusals sort last and are
     // named, never dropped.
@@ -674,25 +689,49 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
         Err(_) => (true, i64::MIN, i64::MIN, i64::MIN),
     });
     rows.reverse();
-    for s in rows {
+    // LAID OUT TOGETHER (D-1420). Raw paisa at `i64::MIN` is 20 characters
+    // in a 12-character column, and a 14-character symbol filled its column,
+    // so `worst`, `net` and `max_dd` could read as one number.
+    let columns = [
+        left(14),
+        right(9),
+        right(9),
+        right(6),
+        right(8),
+        right(12),
+        right(12),
+        right(12),
+        right(10),
+    ];
+    let header = [
+        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for s in &rows {
+        cells.push(match &s.outcome {
+            Err(_) => vec![s.symbol.clone()],
+            Ok(r) => vec![
+                s.symbol.clone(),
+                r.bars.to_string(),
+                r.min_hits.to_string(),
+                r.depth.to_string(),
+                r.trades.to_string(),
+                r.worst_trade.to_string(),
+                r.pessimistic.to_string(),
+                r.max_drawdown.to_string(),
+                crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
+            ],
+        });
+    }
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (s, line) in rows.iter().zip(&laid.rows) {
         match &s.outcome {
             Err(why) => {
-                let _ = writeln!(out, "  {:<14}REFUSED: {why}", s.symbol);
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
             }
-            Ok(r) => {
-                let _ = writeln!(
-                    out,
-                    "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-                    s.symbol,
-                    r.bars,
-                    r.min_hits,
-                    r.depth,
-                    r.trades,
-                    r.worst_trade,
-                    r.pessimistic,
-                    r.max_drawdown,
-                    crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
-                );
+            Ok(_) => {
+                let _ = writeln!(out, "  {line}");
             }
         }
     }
@@ -1679,6 +1718,47 @@ mod tests {
         }
     }
 
+    /// **The pool page names what the catalog saw and offered to nobody.**
+    /// D-0769.
+    ///
+    /// The surface read only `unknown_vendor` and `unknown_rung` from the
+    /// census, so a linked symbol directory, which the catalog stops
+    /// offering at D-0766, was absent from the page without a line (found by a
+    /// review). A store with none of those entries gets no block.
+    #[test]
+    fn the_pool_page_names_the_entries_the_catalog_did_not_offer() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-pool-unoffered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cash = root.join("bars/zerodha/NSE/CASH");
+        std::fs::create_dir_all(cash.join("RELIANCE/60min")).expect("dirs");
+        std::fs::write(cash.join("RELIANCE/60min/2026-07.bin"), b"").expect("a month");
+        std::os::unix::fs::symlink(cash.join("RELIANCE"), cash.join("TCS")).expect("a link");
+        let head = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None);
+        let _ = std::fs::remove_dir_all(&root);
+        let (page, _, unread) = head.expect("the head renders");
+        let census = store::catalog::Census {
+            seen: 2,
+            spot: 1,
+            linked: 1,
+            ..store::catalog::Census::default()
+        };
+        let mut block = String::new();
+        super::not_walked(&mut block, &census.unoffered_report());
+        assert_eq!(unread, block, "`unread` is the block alone");
+        assert!(
+            block.starts_with(
+                "\n  NOT OFFERED: below bars/ the catalog could not read 0 director(ies) or \
+                 entr(ies), did not follow 1 symbolic link(s)"
+            ) && block.ends_with(".\n"),
+            "{block}"
+        );
+        assert!(page.contains(&block), "{page}");
+        let mut quiet = String::new();
+        super::not_walked(&mut quiet, "");
+        assert!(quiet.is_empty(), "no block when nothing went unoffered");
+    }
+
     #[test]
     fn a_pool_with_only_misfiled_holdings_refuses_and_keeps_their_reasons() {
         let root = store_holding(
@@ -2484,5 +2564,62 @@ mod tests {
             last_pool = in_pool.expect("asserted above");
             last_screen = in_screen.expect("asserted above");
         }
+    }
+
+    /// D-1420: the pass-1 table at the extremes a row can carry. Raw paisa at
+    /// `i64::MIN` is 20 characters in a 12-character column, so before the
+    /// columns were laid out together `worst`, `net` and `max_dd` ran into one
+    /// another and every column after them left its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_per_symbol_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let record = |extreme: i64, count: u64| crate::results::Record {
+            bars: count,
+            min_hits: count,
+            depth: u32::MAX,
+            trades: count,
+            pessimistic: extreme,
+            worst_trade: extreme,
+            max_drawdown: extreme,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let screened = [
+            super::Screened {
+                symbol: "WAAREEENERGY_X".to_owned(),
+                outcome: Ok(record(i64::MIN, u64::MAX)),
+            },
+            super::Screened {
+                symbol: "NIFTY".to_owned(),
+                outcome: Ok(record(i64::MAX, 0)),
+            },
+            super::Screened {
+                symbol: "TORNTPHARM".to_owned(),
+                outcome: Ok(record(-1, 1)),
+            },
+            super::Screened {
+                symbol: "SIXTEEN_CHARS_XY".to_owned(),
+                outcome: Err("its month could not be read".to_owned()),
+            },
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("symbol"))
+            .expect("a header");
+        for row in &lines[at + 1..] {
+            if let Some(refused) = row.find("REFUSED:") {
+                assert!(
+                    row[..refused].ends_with(' '),
+                    "a refusal touches its symbol: {row}"
+                );
+                continue;
+            }
+            crate::columns::assert_under(lines[at], row, &[L, R, R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+        }
+        assert_eq!(lines.len() - at - 1, screened.len(), "{out}");
     }
 }

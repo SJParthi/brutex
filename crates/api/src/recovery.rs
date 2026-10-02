@@ -191,13 +191,29 @@ fn plan(legs: Vec<Leg>, today: Day) -> Result<Vec<Record>, String> {
         }
     }
     let mut out: Vec<_> = bodies.into_iter().map(record).collect();
-    out.sort_by_key(|item| {
-        (
-            server::param(&item.body, "granularity") != "1day",
-            item.body.clone(),
-        )
-    });
+    scope_order(&mut out, scope_rank);
     Ok(out)
+}
+
+/// Where a window sorts in its plan: every daily window first, then by body.
+fn scope_rank(row: &Record) -> (bool, String) {
+    (
+        server::param(&row.body, "granularity") != "1day",
+        row.body.clone(),
+    )
+}
+
+/// Put windows in plan order, computing each row's rank exactly ONCE.
+///
+/// The rank parses the body and clones it. `sort_by_key` recomputes it for
+/// both sides of every comparison, so ordering `n` windows parsed and cloned a
+/// body once per comparison side on the request that plans them and on every
+/// seal check, up to the 100,000-window bound: 1,032 ranks for 80 unsorted
+/// windows, counted. `sort_by_cached_key` computes
+/// `n` ranks and sorts those; it is stable as `sort_by_key` is, so the order
+/// and therefore every plan identity is unchanged. D-1381.
+fn scope_order<K: Ord>(rows: &mut [Record], rank: impl FnMut(&Record) -> K) {
+    rows.sort_by_cached_key(rank);
 }
 
 fn root(site: &Site) -> PathBuf {
@@ -302,12 +318,7 @@ fn validate_seal(
                 .to_owned(),
         );
     }
-    scans.sort_by_key(|row| {
-        (
-            server::param(&row.body, "granularity") != "1day",
-            row.body.clone(),
-        )
-    });
+    scope_order(&mut scans, scope_rank);
     let scope = scope_identity(&scans);
     if control.body == CONTROL_BODY {
         if scope != id {
@@ -462,6 +473,7 @@ fn prepare_successor(site: &Site, asked: &Submission) -> Result<(), String> {
                 .to_owned(),
         );
     }
+    let mut missing = Vec::new();
     for row in &asked.units {
         if let Some(existing) = journal.latest.get(&row.key) {
             if existing != row {
@@ -471,9 +483,11 @@ fn prepare_successor(site: &Site, asked: &Submission) -> Result<(), String> {
                 );
             }
         } else {
-            journal.append(row.clone()).map_err(failure)?;
+            missing.push(row.clone());
         }
     }
+    // ONE SYNC FOR THE WHOLE SCOPE, not one per window. D-1380.
+    journal.append_new(missing).map_err(failure)?;
     let mut control = record(seal.clone());
     control.key = CONTROL;
     if journal.latest.get(&CONTROL) != Some(&control) {
@@ -734,11 +748,12 @@ fn seeded(site: &Site, id: [u8; 32], units: Option<Vec<Record>>) -> Result<Journ
         Journal::create_new(&path).map_err(failure)?
     };
     if let Some(units) = units {
-        for item in units {
-            if !journal.latest.contains_key(&item.key) {
-                journal.append(item).map_err(failure)?;
-            }
-        }
+        // ONE SYNC FOR THE WHOLE SEED, not one per window. D-1380.
+        let missing: Vec<_> = units
+            .into_iter()
+            .filter(|item| !journal.latest.contains_key(&item.key))
+            .collect();
+        journal.append_new(missing).map_err(failure)?;
     } else if !journal.latest.contains_key(&CONTROL) {
         return Err("recovery plan was not durably seeded; no vendor work is allowed".to_owned());
     }
@@ -1834,6 +1849,112 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// What one start of an already-seeded plan replays, COUNTED rather than
+    /// argued. W1-api4-0 and W1-api4-1; D-0907; `docs/06-limits.md`.
+    ///
+    /// `start` runs `preflight_submission` and then `seeded`, the blocking half
+    /// of an activation; `drive` then opens `attempts.bin` once more. This test
+    /// runs the first two exactly as `start` does and records every replay the
+    /// journal module performs on this thread. Each of the three journals is
+    /// replayed three times, and every replay reads every record the file
+    /// holds -- so the cost of one press grows with the history, not with the
+    /// plan. This pins the stated limit: a change that removes a replay fails
+    /// here and has to correct the limit it states.
+    #[test]
+    fn one_start_replays_each_journal_three_times_and_every_record_each_time() {
+        use crate::recovery_journal::REPLAYS;
+        let dir = crate::scratch::path("recovery-replay-count");
+        std::fs::create_dir_all(&dir).unwrap();
+        let site = Site::load(&dir.join("missing-masters"), &dir);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        // The first activation, then history that every later press re-reads.
+        let mut journal = seeded(&site, id, Some(units.clone())).unwrap();
+        let mut row = units[0].clone();
+        for _ in 0..40 {
+            row.unchanged += 1;
+            journal.append(row.clone()).unwrap();
+        }
+        drop(journal);
+        let mut attempts = Journal::open_existing(&root(&site).join("attempts.bin")).unwrap();
+        for n in 0..25 {
+            attempts.append(record(format!("other-plan-{n}"))).unwrap();
+        }
+        drop(attempts);
+        let records = |path: PathBuf| std::fs::metadata(path).unwrap().len() / 1_024;
+        let plan_records = records(plan_path(&site, id));
+        let attempt_records = records(root(&site).join("attempts.bin"));
+        let active_records = records(active_path(&site));
+        assert!(plan_records > 40 && attempt_records == 25 && active_records == 1);
+
+        REPLAYS.with(|seen| seen.borrow_mut().clear());
+        let asked = Submission {
+            id,
+            units: units.clone(),
+            successor: None,
+            prepare_only: false,
+        };
+        preflight_submission(&site, &asked).unwrap();
+        drop(seeded(&site, id, Some(units)).unwrap());
+        let seen = REPLAYS.with(core::cell::RefCell::take);
+
+        let replays_of = |name: &str| -> Vec<u64> {
+            seen.iter()
+                .filter(|(file, _)| file == name)
+                .map(|(_, read)| *read)
+                .collect()
+        };
+        let plan_name = format!("{}.bin", hex(id));
+        assert_eq!(replays_of(&plan_name), vec![plan_records; 3], "{seen:?}");
+        assert_eq!(
+            replays_of("attempts.bin"),
+            vec![attempt_records; 3],
+            "{seen:?}"
+        );
+        assert_eq!(
+            replays_of("active.bin"),
+            vec![active_records; 3],
+            "{seen:?}"
+        );
+        assert_eq!(seen.len(), 9, "no other journal is replayed: {seen:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `preflight_plan`'s replay of `attempts.bin` binds no result, and it is
+    /// still the check that refuses a start once the shared ledger is gone.
+    /// D-0907 keeps that replay rather than dropping it as wasted work.
+    #[test]
+    fn preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing() {
+        let dir = crate::scratch::path("recovery-preflight-ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        let site = Site::load(&dir.join("missing-masters"), &dir);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        drop(seeded(&site, id, Some(units.clone())).unwrap());
+        let asked = Submission {
+            id,
+            units,
+            successor: None,
+            prepare_only: false,
+        };
+        preflight_submission(&site, &asked).unwrap();
+        std::fs::remove_file(root(&site).join("attempts.bin")).unwrap();
+        let why = preflight_submission(&site, &asked).unwrap_err();
+        assert!(
+            why.contains("shared recovery attempt history is unavailable; budgets cannot be reset"),
+            "{why}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn start_acknowledges_a_saved_plan_and_read_only_fixture_finishes() {
         let root = crate::scratch::path("recovery-start-accepted");
@@ -2308,10 +2429,16 @@ mod tests {
     }
 
     fn missing_fixture(name: &str) -> (PathBuf, Loaded, String, [u8; 32]) {
+        missing_fixture_for(
+            name,
+            leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30)),
+        )
+    }
+
+    fn missing_fixture_for(name: &str, selected: Leg) -> (PathBuf, Loaded, String, [u8; 32]) {
         let scratch = crate::scratch::path(name);
         std::fs::create_dir(&scratch).unwrap();
         let site = Loaded::new(Site::load(&scratch.join("missing-masters"), &scratch));
-        let selected = leg("NIFTY", "1day", date(2026, 8, 30), date(2026, 8, 30));
         let body = encoded_leg(&selected);
         let units = plan(vec![selected], today()).unwrap();
         let id = scope_identity(&units);
@@ -2330,6 +2457,126 @@ mod tests {
         drop(attempts);
         std::fs::remove_file(plan_path(&site, id)).unwrap();
         (scratch, site, body, id)
+    }
+
+    /// ORDERING A PLAN RANKS EACH WINDOW ONCE. D-1381.
+    ///
+    /// The rank parses and clones a body. Counted, not timed: before D-1381,
+    /// on this unsorted order, 4 rows took 12 ranks and 80 rows took 1,032.
+    #[test]
+    fn ordering_a_plan_ranks_each_window_exactly_once_at_any_size() {
+        for (from, windows) in [(date(2026, 7, 1), 2), (date(2023, 5, 1), 40)] {
+            let mut units = plan(
+                vec![
+                    leg("NIFTY", "1min", from, date(2026, 8, 31)),
+                    leg("NIFTY", "1day", from, date(2026, 8, 31)),
+                ],
+                today(),
+            )
+            .unwrap();
+            assert_eq!(units.len(), 2 * windows);
+            let ordered = units.clone();
+            // The order a seal check meets: `validate_seal` collects its rows
+            // from a `HashMap`. Ordering by the blake3 work key is a fixed,
+            // effectively unsorted permutation.
+            units.sort_by_key(|row| row.key);
+            assert_ne!(units, ordered);
+            let mut ranked = 0_usize;
+            scope_order(&mut units, |row| {
+                ranked += 1;
+                scope_rank(row)
+            });
+            assert_eq!(
+                ranked,
+                units.len(),
+                "one rank per window, {windows} windows"
+            );
+            assert_eq!(units, ordered, "same order, so the same plan identity");
+            assert_eq!(scope_identity(&units), scope_identity(&ordered));
+            assert!(
+                units[..windows]
+                    .iter()
+                    .all(|row| server::param(&row.body, "granularity") == "1day")
+            );
+        }
+        let mut none: Vec<Record> = Vec::new();
+        scope_order(&mut none, |_| panic!("an empty plan ranks nothing"));
+        assert!(none.is_empty());
+    }
+
+    /// SEEDING SYNCS ONCE FOR THE WHOLE PLAN, NOT ONCE PER WINDOW. D-1380.
+    ///
+    /// `POST /pull/recovery` waits for `seeded`, and each of its window rows
+    /// was its own `Journal::append`, which is one `sync_all`. A forty-window
+    /// plan therefore cost thirty-eight more record syncs than a two-window
+    /// one, up to 100,000 for the largest plan the bound admits. Counted on
+    /// this thread by `recovery_journal::counted`, never timed.
+    #[test]
+    fn seeding_a_plan_costs_the_same_record_syncs_for_two_windows_as_for_forty() {
+        let mut seen = Vec::new();
+        for (name, from) in [
+            ("recovery-seed-syncs-2", date(2026, 7, 1)),
+            ("recovery-seed-syncs-40", date(2023, 5, 1)),
+        ] {
+            let scratch = crate::scratch::path(name);
+            let _ = std::fs::remove_dir_all(&scratch);
+            std::fs::create_dir_all(&scratch).unwrap();
+            let site = Site::load(&scratch.join("missing-masters"), &scratch);
+            let units = plan(vec![leg("NIFTY", "1min", from, date(2026, 8, 31))], today()).unwrap();
+            let windows = units.len();
+            let id = scope_identity(&units);
+            crate::recovery_journal::counted::take_syncs();
+            let journal = seeded(&site, id, Some(units)).unwrap();
+            let syncs = crate::recovery_journal::counted::take_syncs();
+            assert_eq!(
+                journal.latest.len(),
+                windows + 1,
+                "every window and the seal"
+            );
+            drop(journal);
+            // A rerun seeds nothing new and still succeeds: idempotent.
+            let again = seeded(&site, id, None).unwrap();
+            assert_eq!(again.latest.len(), windows + 1);
+            drop(again);
+            seen.push((windows, syncs));
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+        assert_eq!((seen[0].0, seen[1].0), (2, 40), "{seen:?}");
+        // One batch, the seal, the activation pointer.
+        assert_eq!(seen[0].1, 3, "{seen:?}");
+        assert_eq!(seen[0].1, seen[1].1, "{seen:?}");
+    }
+
+    /// PREPARING A SUCCESSOR SYNCS ONCE FOR ITS WHOLE SCOPE. D-1380.
+    #[test]
+    fn preparing_a_successor_costs_the_same_record_syncs_for_two_windows_as_for_forty() {
+        let mut seen = Vec::new();
+        for (name, from) in [
+            ("recovery-prepare-syncs-2", date(2026, 7, 1)),
+            ("recovery-prepare-syncs-40", date(2023, 5, 1)),
+        ] {
+            let _ = std::fs::remove_dir_all(crate::scratch::path(name));
+            let (scratch, site, body, old) =
+                missing_fixture_for(name, leg("NIFTY", "1day", from, date(2026, 8, 31)));
+            let asked = submission(&successor_form(&body, old, [41; 32], true), today()).unwrap();
+            crate::recovery_journal::counted::take_syncs();
+            prepare_successor(&site, &asked).unwrap();
+            let syncs = crate::recovery_journal::counted::take_syncs();
+            let saved = crate::recovery_journal::snapshot(&plan_path(&site, asked.id)).unwrap();
+            assert_eq!(saved.latest.len(), asked.units.len() + 1);
+            validate_seal(&saved.latest, asked.id).unwrap();
+            // Idempotent: a repeat appends and syncs nothing.
+            let before = history_bytes(&site);
+            prepare_successor(&site, &asked).unwrap();
+            assert_eq!(crate::recovery_journal::counted::take_syncs(), 0);
+            assert_eq!(history_bytes(&site), before);
+            seen.push((asked.units.len(), syncs));
+            std::fs::remove_dir_all(scratch).unwrap();
+        }
+        assert_eq!((seen[0].0, seen[1].0), (2, 40), "{seen:?}");
+        // One batch and the seal.
+        assert_eq!(seen[0].1, 2, "{seen:?}");
+        assert_eq!(seen[0].1, seen[1].1, "{seen:?}");
     }
 
     fn history_bytes(site: &Site) -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {

@@ -1179,3 +1179,48 @@ fn a_zstd_copy_carries_paisa_nulls_and_zeros_to_the_right_rows() {
         "a null stays a null and a zero stays a zero after the codec"
     );
 }
+
+/// **A codec this reader does not implement is refused by name, per column.**
+///
+/// `Columns::pages` maps `UNCOMPRESSED` and `ZSTD` and refuses every other
+/// codec as `UnknownCodec`. Nothing drove that arm: deleting it, or folding it
+/// into the `UNCOMPRESSED` arm, left every test green, and a mis-mapped codec
+/// is not a loud failure — a page of SNAPPY bytes handed to the uncompressed
+/// path would be decoded as if its bytes were the values (D-1332).
+///
+/// The file is written uncompressed and only the footer's codec field for
+/// one column changes, so the page bytes are still exactly the uncompressed
+/// ones. That is what makes the mutation visible: with the arm folded away the
+/// read SUCCEEDS, and this test sees a batch where it wanted a refusal.
+#[test]
+fn a_column_under_an_unimplemented_codec_is_refused_by_name_not_read_as_raw() {
+    for (codec, shown) in [
+        (CompressionCodec::SNAPPY, "SNAPPY"),
+        (CompressionCodec::GZIP, "GZIP"),
+        (CompressionCodec::LZ4_RAW, "LZ4_RAW"),
+    ] {
+        let broken = patch_footer(&sound_cash_file(), |meta| {
+            meta.row_groups[0].columns[2]
+                .meta_data
+                .as_mut()
+                .expect("the high chunk has metadata")
+                .codec = codec;
+        });
+        let file = LakeFile::from_bytes(broken).expect("the footer still parses");
+        match file.read_row_group(0) {
+            Err(LakeError::UnknownCodec { column, codec }) => {
+                assert_eq!(column, "high", "the column whose codec was changed");
+                assert!(codec.contains(shown), "{shown} named, got {codec}");
+            }
+            other => panic!(
+                "{shown}: expected UnknownCodec, got {:?}",
+                other.map(|b| b.len())
+            ),
+        }
+    }
+
+    // The control: the same file with its codec untouched decodes, so the
+    // refusal above is the codec's and not some other fault of the fixture.
+    let sound = LakeFile::from_bytes(sound_cash_file()).expect("open");
+    assert_eq!(sound.read_row_group(0).expect("decodes").len(), 3);
+}

@@ -179,10 +179,7 @@ fn open(path: &Path, writable: bool) -> Result<File, String> {
     #[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100);
-        #[cfg(any(target_os = "android", target_os = "linux"))]
-        options.custom_flags(0x20_000);
+        options.custom_flags(store::open_flags::O_NOFOLLOW);
     }
     let file = options.open(path).map_err(|why| why.to_string())?;
     let metadata = file.metadata().map_err(|why| why.to_string())?;

@@ -35,6 +35,8 @@
 
 use core::fmt;
 use std::io::{Cursor, Read, Seek};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use parquet::basic::Encoding;
@@ -147,18 +149,51 @@ pub(crate) struct LakePageReader {
     values_read: i64,
     total_values: i64,
     codec: Codec,
+    stranded: Arc<AtomicUsize>,
 }
 
 impl LakePageReader {
     /// Wraps one column chunk's bytes.
-    pub(crate) const fn new(chunk: Bytes, total_values: i64, codec: Codec) -> Self {
+    pub(crate) fn new(chunk: Bytes, total_values: i64, codec: Codec) -> Self {
         Self {
             chunk,
             pos: 0,
             values_read: 0,
             total_values,
             codec,
+            stranded: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// A handle on the number of chunk bytes, from the first page that could
+    /// hold a row, that this reader left unread when the declared value count
+    /// stopped it — readable after the reader itself has been boxed into a
+    /// column reader and consumed.
+    ///
+    /// The page walk stops at the chunk's declared `num_values`, which is what
+    /// lets a `num_values` short of `num_rows` surface as a short chunk. But a
+    /// footer that understates `num_rows` AND `num_values` together, on a page
+    /// boundary, stops the walk with whole pages still unread, and the column
+    /// reader then sees exactly the declared rows and nothing past them. The
+    /// bytes left over are the only trace of those pages, so they are counted
+    /// here and refused by the caller. W3-lake1-2.
+    ///
+    /// Pages that cannot hold a row are stepped over first, not counted: a
+    /// dictionary page, or a data page whose header declares no values. A
+    /// sound row group of NO rows needs this: written by `parquet`'s own
+    /// writer, its `timestamp` chunk holds one dictionary page, which a walk
+    /// whose declared count is zero never reads. Anything else left over — a
+    /// page holding values, a page of another type, a header that will not
+    /// parse, a body that runs past the chunk — is counted from where it
+    /// starts to the end of the chunk. See [`rowless_extent`].
+    ///
+    /// Every byte of a conforming chunk belongs to one of its pages:
+    /// `ColumnMetaData.total_compressed_size` is the "total byte size of all
+    /// compressed, and potentially encrypted, pages in this column chunk
+    /// (including the headers)" (`parquet-format-safe` 0.2.4,
+    /// `parquet_format.rs`).
+    pub(crate) fn stranded(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.stranded)
     }
 
     /// Decompresses one page body, insisting the result is the size the header
@@ -333,6 +368,73 @@ fn encoding(e: parquet_format_safe::Encoding) -> PqResult<Encoding> {
     })
 }
 
+/// Parses the page header at the start of `rest`, answering it and its length
+/// in bytes.
+fn read_header(rest: &[u8]) -> PqResult<(PageHeader, usize)> {
+    let mut cursor = Cursor::new(rest);
+    let header = {
+        let mut proto = TCompactInputProtocol::new(&mut cursor, rest.len());
+        PageHeader::read_from_in_protocol(&mut proto)
+            .map_err(|e| ParquetError::General(format!("page header refused: {e}")))?
+    };
+    let consumed = cursor
+        .stream_position()
+        .map_err(|e| ParquetError::General(format!("cursor refused: {e}")))?;
+    let header_len = usize::try_from(consumed).map_err(|_| {
+        ParquetError::General("page header length does not fit in usize".to_owned())
+    })?;
+    Ok((header, header_len))
+}
+
+/// The length, header and body, of the page at the start of `rest` if that
+/// page cannot hold a row: a dictionary page, or a data page whose header
+/// declares no values. `None` for an empty `rest`, for any other page, and for
+/// bytes that do not parse as a page lying wholly inside `rest` — each of which
+/// the caller counts as unread. Only headers are parsed; no body is
+/// decompressed. W3-lake1-2.
+fn rowless_extent(rest: &[u8]) -> Option<usize> {
+    let (header, header_len) = read_header(rest).ok()?;
+    let rowless = match header.type_ {
+        PageType::DICTIONARY_PAGE => true,
+        PageType::DATA_PAGE => header
+            .data_page_header
+            .as_ref()
+            .is_some_and(|d| d.num_values == 0),
+        _ => false,
+    };
+    let body = usize::try_from(header.compressed_page_size).ok()?;
+    let len = header_len.checked_add(body)?;
+    (rowless && len <= rest.len()).then_some(len)
+}
+
+/// What is left of `rest` once every leading page `extent` measures as
+/// rowless has been stepped over. W3-lake1-2.
+///
+/// BOUNDED BY `rest`, NOT BY `extent` BEHAVING. Every real step consumes a
+/// page header of at least one byte, so at most `rest.len()` steps can happen
+/// before nothing is left and [`rowless_extent`] answers `None`. The loop is
+/// written to that bound, so an `extent` that answered `Some(0)` would end the
+/// walk with those bytes still left, to be counted as unread and refused,
+/// rather than spin. An `extent` that answered a length past the end of
+/// what is left ends the walk the same way, leaving those bytes to be
+/// counted rather than taking them as consumed. Cost: at most `rest.len()`
+/// calls to `extent`; with
+/// [`rowless_extent`], one header parse per rowless page stepped over.
+fn step_over_rowless(mut rest: &[u8], extent: impl Fn(&[u8]) -> Option<usize>) -> &[u8] {
+    for _ in 0..rest.len() {
+        match extent(rest) {
+            // A length past the end is not believed: `rest` is left as it
+            // is, to be counted as unread, never taken as consumed.
+            Some(len) => match rest.get(len..) {
+                Some(after) => rest = after,
+                None => break,
+            },
+            None => break,
+        }
+    }
+    rest
+}
+
 /// `usize` from a thrift `i32`, refusing a negative length.
 fn length(what: &str, v: i32) -> PqResult<usize> {
     usize::try_from(v).map_err(|_| ParquetError::General(format!("{what} is {v}, not a length")))
@@ -361,18 +463,7 @@ impl PageReader for LakePageReader {
                 return Ok(None);
             }
 
-            let mut cursor = Cursor::new(rest);
-            let header = {
-                let mut proto = TCompactInputProtocol::new(&mut cursor, rest.len());
-                PageHeader::read_from_in_protocol(&mut proto)
-                    .map_err(|e| ParquetError::General(format!("page header refused: {e}")))?
-            };
-            let consumed = cursor
-                .stream_position()
-                .map_err(|e| ParquetError::General(format!("cursor refused: {e}")))?;
-            let header_len = usize::try_from(consumed).map_err(|_| {
-                ParquetError::General("page header length does not fit in usize".to_owned())
-            })?;
+            let (header, header_len) = read_header(rest)?;
 
             let compressed = length("compressed_page_size", header.compressed_page_size)?;
             let uncompressed = length("uncompressed_page_size", header.uncompressed_page_size)?;
@@ -449,6 +540,14 @@ impl PageReader for LakePageReader {
                 }
             }
         }
+        // The declared value count is met. Anything left in the chunk past the
+        // pages that hold no row is pages that count does not cover; see
+        // `Self::stranded`.
+        let rest = step_over_rowless(
+            self.chunk.get(self.pos..).unwrap_or_default(),
+            rowless_extent,
+        );
+        self.stranded.store(rest.len(), Ordering::Relaxed);
         Ok(None)
     }
 
@@ -982,7 +1081,192 @@ mod tests {
     #[test]
     fn a_reader_with_no_values_yields_nothing() {
         let mut r = LakePageReader::new(Bytes::from_static(b"junk"), 0, Codec::Zstd);
+        let stranded = r.stranded();
+        assert_eq!(stranded.load(Ordering::Relaxed), 0, "nothing counted yet");
         assert!(r.get_next_page().unwrap().is_none());
+        // It yields nothing, but it does not pretend the chunk was empty: the
+        // four bytes its declared count left unread are counted, through a
+        // handle taken before the read. W3-lake1-2.
+        assert_eq!(stranded.load(Ordering::Relaxed), 4);
+
+        let mut empty = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+        assert!(empty.get_next_page().unwrap().is_none());
+        assert_eq!(empty.stranded().load(Ordering::Relaxed), 0);
+    }
+
+    /// One page, header then body, with `compressed_page_size` set to
+    /// `declared` rather than to the body's length. `data_values` is the data
+    /// page's `num_values`; a dictionary page always declares two entries.
+    fn page_bytes(type_: PageType, data_values: i32, declared: i32, body: &[u8]) -> Vec<u8> {
+        let header = PageHeader {
+            type_,
+            uncompressed_page_size: declared,
+            compressed_page_size: declared,
+            crc: None,
+            data_page_header: (type_ == PageType::DATA_PAGE).then_some(DataPageHeader {
+                num_values: data_values,
+                encoding: parquet_format_safe::Encoding(0),
+                definition_level_encoding: parquet_format_safe::Encoding(3),
+                repetition_level_encoding: parquet_format_safe::Encoding(3),
+                statistics: None,
+            }),
+            index_page_header: None,
+            dictionary_page_header: (type_ == PageType::DICTIONARY_PAGE).then_some(
+                parquet_format_safe::DictionaryPageHeader {
+                    num_values: 2,
+                    encoding: parquet_format_safe::Encoding(0),
+                    is_sorted: None,
+                },
+            ),
+            data_page_header_v2: None,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut proto = TCompactOutputProtocol::new(&mut out);
+            header
+                .write_to_out_protocol(&mut proto)
+                .expect("a page header this test just built serialises");
+        }
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// **A PAGE THAT CANNOT HOLD A ROW IS STEPPED OVER; EVERY OTHER LEFTOVER
+    /// IS COUNTED.** W3-lake1-2.
+    ///
+    /// A dictionary page, and a data page declaring no values, answer their
+    /// whole length. A data page holding a value, a page of another type, a
+    /// rowless page whose body runs past the bytes, one whose body length is
+    /// negative, bytes that are no header, and no bytes at all answer `None`.
+    #[test]
+    fn a_rowless_page_is_measured_and_anything_else_is_not() {
+        let dict = page_bytes(PageType::DICTIONARY_PAGE, 0, 3, b"abc");
+        assert_eq!(rowless_extent(&dict), Some(dict.len()));
+        let mut two = dict.clone();
+        two.extend_from_slice(b"zz");
+        assert_eq!(
+            rowless_extent(&two),
+            Some(dict.len()),
+            "only the first page"
+        );
+
+        let empty_data = page_bytes(PageType::DATA_PAGE, 0, 2, b"ab");
+        assert_eq!(rowless_extent(&empty_data), Some(empty_data.len()));
+
+        let one_value = page_bytes(PageType::DATA_PAGE, 1, 2, b"ab");
+        assert_eq!(rowless_extent(&one_value), None, "a page with a value");
+        let index = page_bytes(PageType::INDEX_PAGE, 0, 2, b"ab");
+        assert_eq!(rowless_extent(&index), None, "an index page");
+        let v2 = page_bytes(PageType::DATA_PAGE_V2, 0, 2, b"ab");
+        assert_eq!(rowless_extent(&v2), None, "a v2 data page");
+
+        let past = page_bytes(PageType::DICTIONARY_PAGE, 0, 4, b"abc");
+        assert_eq!(rowless_extent(&past), None, "a body past the bytes");
+        let exact = page_bytes(PageType::DICTIONARY_PAGE, 0, 3, b"abc");
+        assert_eq!(
+            rowless_extent(&exact[..exact.len() - 1]),
+            None,
+            "one byte short"
+        );
+        let negative = page_bytes(PageType::DICTIONARY_PAGE, 0, -1, b"");
+        assert_eq!(rowless_extent(&negative), None, "a negative body length");
+
+        assert_eq!(rowless_extent(b"junk"), None, "no header");
+        assert_eq!(rowless_extent(&[]), None, "no bytes");
+    }
+
+    /// **THE WALK STEPS OVER ROWLESS PAGES AND COUNTS FROM THE FIRST PAGE THAT
+    /// COULD HOLD A ROW.** W3-lake1-2.
+    ///
+    /// A chunk whose declared value count is zero is never walked. Holding a
+    /// dictionary page and an empty data page, nothing is counted — the shape
+    /// of a sound row group of no rows. With a one-value data page after
+    /// them, exactly that page's bytes are counted; with a second rowless page
+    /// after it, that page is counted too, because counting runs to the end.
+    #[test]
+    fn a_stopped_walk_counts_from_the_first_page_that_could_hold_a_row() {
+        let dict = page_bytes(PageType::DICTIONARY_PAGE, 0, 3, b"abc");
+        let empty_data = page_bytes(PageType::DATA_PAGE, 0, 2, b"ab");
+        let one_value = page_bytes(PageType::DATA_PAGE, 1, 5, b"vwxyz");
+
+        let rowless: Vec<u8> = [dict.as_slice(), &empty_data].concat();
+        let mut r = LakePageReader::new(Bytes::from(rowless), 0, Codec::Uncompressed);
+        let stranded = r.stranded();
+        assert!(r.get_next_page().unwrap().is_none());
+        assert_eq!(
+            stranded.load(Ordering::Relaxed),
+            0,
+            "rowless pages are not counted"
+        );
+
+        let tail: Vec<u8> = [dict.as_slice(), &empty_data, &one_value].concat();
+        let mut r = LakePageReader::new(Bytes::from(tail), 0, Codec::Uncompressed);
+        assert!(r.get_next_page().unwrap().is_none());
+        assert_eq!(r.stranded().load(Ordering::Relaxed), one_value.len());
+
+        let after: Vec<u8> = [dict.as_slice(), &one_value, &empty_data].concat();
+        let mut r = LakePageReader::new(Bytes::from(after), 0, Codec::Uncompressed);
+        assert!(r.get_next_page().unwrap().is_none());
+        assert_eq!(
+            r.stranded().load(Ordering::Relaxed),
+            one_value.len() + empty_data.len()
+        );
+    }
+
+    /// **THE STEP OVER ROWLESS PAGES ENDS EVEN IF A STEP DOES NOT ADVANCE.**
+    ///
+    /// Round 3 of review found `rowless_extent -> Some(0)` and `pos *= len`
+    /// reported by `cargo mutants` as TIMEOUT: the old loop relied on every
+    /// step advancing and spun when one did not. `step_over_rowless` is
+    /// bounded by the bytes it is given: an extent that never advances ends
+    /// with every byte left over, which the caller counts as unread; one that
+    /// advances a byte at a time ends with nothing left; and neither is asked
+    /// more than once per byte.
+    #[test]
+    fn the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance() {
+        let bytes = [7_u8; 5];
+        let calls = std::cell::Cell::new(0_usize);
+        let stuck = step_over_rowless(&bytes, |_| {
+            calls.set(calls.get() + 1);
+            Some(0)
+        });
+        assert_eq!(
+            stuck, bytes,
+            "a step that does not advance leaves every byte"
+        );
+        assert_eq!(
+            calls.get(),
+            bytes.len(),
+            "asked once per byte, then stopped"
+        );
+
+        calls.set(0);
+        let crawl = step_over_rowless(&bytes, |r| {
+            calls.set(calls.get() + 1);
+            (!r.is_empty()).then_some(1)
+        });
+        assert!(crawl.is_empty(), "a byte at a time consumes everything");
+        assert_eq!(calls.get(), bytes.len());
+
+        let none = step_over_rowless(&bytes, |_| None);
+        assert_eq!(none, bytes, "nothing rowless, nothing stepped over");
+        assert!(step_over_rowless(&[], |_| Some(0)).is_empty());
+
+        // An extent that answers past the end is not believed: those bytes
+        // are left to be counted as unread, never taken as consumed.
+        let over = step_over_rowless(&bytes, |r| Some(r.len() + 1));
+        assert_eq!(over, bytes, "a step past the end leaves every byte");
+        let tail = step_over_rowless(&bytes, |r| {
+            Some(if r.len() == bytes.len() {
+                2
+            } else {
+                r.len() + 1
+            })
+        });
+        assert_eq!(
+            tail, [7_u8; 3],
+            "a step past the end after a real step leaves the rest"
+        );
     }
 
     #[test]

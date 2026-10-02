@@ -30,6 +30,10 @@
 //! `store::bench::block_seal_is_flat`; and `C-08`,
 //! `store::bench::checksum_beats_the_bit_loop`.
 //!
+//! C-28 and C-29 time the WARM record read, one inside the block verified
+//! last; C-BC-01 and C-BC-02 time the COLD one, which verifies its block, and
+//! C-BC-02 holds it to its own budget because it does not fit C-29's (D-0914).
+//!
 //! All arithmetic is integer. `clippy::float_arithmetic` is a workspace lint
 //! and a ratio is the one place it would be tempting.
 
@@ -143,7 +147,7 @@ fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
         .map(|i| {
             let raw = i64::try_from(i).unwrap_or(0);
             Bar {
-                ts_micros: raw.saturating_mul(60_000_000),
+                ts_micros: JUNE_2024_IST_START.saturating_add(raw.saturating_mul(1_000_000)),
                 open: 2_000_000 + raw,
                 high: 2_000_100 + raw,
                 low: 1_999_900 + raw,
@@ -159,7 +163,18 @@ fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
     (file, root)
 }
 
+/// 2024-06-01 00:00 IST in epoch microseconds, where every bench bar starts.
+///
+/// The write boundary refuses a stamp outside the month the path names
+/// (D-0915), and the bench used to stamp from the 1970 epoch.
+const JUNE_2024_IST_START: i64 = 1_717_180_200_000_000;
+
 /// The path every bench file uses. One month, one symbol, one timeframe.
+///
+/// THE ONE-SECOND RUNG, because the largest bench file is 100,000 bars and a
+/// one-minute month holds at most 44,640: the month admission (D-0915) refuses
+/// the rest. 100,000 seconds is under 28 hours. The record geometry is the
+/// same at every rung, so what `read_record` costs does not change.
 fn bench_path() -> StorePath<'static> {
     match StorePath::new(PathParts {
         vendor: Vendor::Groww,
@@ -167,7 +182,7 @@ fn bench_path() -> StorePath<'static> {
         segment: "INDEX",
         symbol: "NIFTY",
         contract: None,
-        timeframe: Timeframe::MINUTE_1,
+        timeframe: Timeframe::SECOND_1,
         month: match YearMonth::new(2024, 6) {
             Ok(m) => m,
             Err(_) => refuse("June 2024 is a real month"),
@@ -310,6 +325,124 @@ fn record_read_is_flat_in_the_file() -> bool {
     ok
 }
 
+/// How many distinct checksum blocks one cold measurement cycles through.
+///
+/// Fourteen because the 1x file holds exactly fourteen blocks (1,000 records
+/// at 73 per block), so the 1x row touches every block it has and the larger
+/// files are sampled at the same count, spread end to end. Holding the count
+/// fixed keeps the footprint of the measurement fixed, so a ratio that moved
+/// would be the read moving, not the sample.
+const COLD_BLOCKS: usize = 14;
+
+/// Fourteen record indices, each the FIRST record of a different checksum
+/// block, spread evenly from block 0 to the tail block of an `n`-record file.
+///
+/// # Why this shape, and what it closes
+///
+/// `C-28` and `C-29` re-read one fixed index, and `BarFile` remembers the one
+/// block it verified last, so after the first call they time a relaxed load
+/// and a 56-byte `pread` — the WARM path. Every random access and every
+/// bisection probe pays the COLD path instead: one `pread` of the block, one
+/// four-byte `pread` of the sidecar entry and one CRC-32C over up to 4,088
+/// bytes, plus an `fstat` on the tail block. Cycling through these indices
+/// makes every read land in a block other than the one before it, so every
+/// read pays `verify_block_of` in full. The cycle wraps from the tail back to
+/// block 0, so the wrap is a block change too.
+///
+/// The tail block is one in fourteen at every size, so the tail's `fstat` is
+/// the same share of every row and cannot masquerade as growth.
+fn cold_indices(n: u64) -> [u64; COLD_BLOCKS] {
+    let per_block = Layout::V2.records_per_block();
+    let blocks = n.div_ceil(per_block);
+    let last = u64::try_from(COLD_BLOCKS - 1).unwrap_or(1);
+    let mut out = [0u64; COLD_BLOCKS];
+    for (slot, step) in out.iter_mut().zip(0u64..) {
+        let block = step.saturating_mul(blocks.saturating_sub(1)) / last;
+        *slot = block.saturating_mul(per_block);
+    }
+    // A setup check, not a measurement: two neighbours in one block would let
+    // the one-block memory serve the second, and the row would time the warm
+    // path while claiming the cold one.
+    let mut previous = Layout::V2.block_of(out.last().copied().unwrap_or(0));
+    for &index in &out {
+        let block = Layout::V2.block_of(index);
+        if block == previous || index >= n {
+            refuse("a cold index shares its block with its neighbour or is uncommitted");
+        }
+        previous = block;
+    }
+    out
+}
+
+/// Times a cold record read, in picoseconds per call: every call lands in a
+/// different checksum block from the one before it.
+fn cold_ps(file: &BarFile, n: u64) -> u128 {
+    let at = cold_indices(n);
+    let mut next = 0usize;
+    cost_ps(280, || {
+        let index = at.get(next % COLD_BLOCKS).copied().unwrap_or(0);
+        next = next.wrapping_add(1);
+        file.read_record(black_box(index))
+    })
+}
+
+/// C-BC-01 — a COLD record read, one that verifies its checksum block, costs the
+/// same whatever the file holds.
+///
+/// `C-28` measured only the warm path. This row reads indices in fourteen
+/// distinct blocks in turn, so every read pays the block `pread`, the sidecar
+/// entry and the CRC — the cost a random access or a bisection probe pays —
+/// and asserts that cost is flat at 1x, 10x and 100x the record count.
+fn cold_record_read_is_flat_in_the_file() -> bool {
+    let (small, _d1) = loaded("cold-small", 1_000);
+    let (medium, _d2) = loaded("cold-medium", 10_000);
+    let (large, _d3) = loaded("cold-large", 100_000);
+    let base = cold_ps(&small, 1_000);
+    let mut ok = true;
+    ok &= ratio(
+        "C-BC-01 cold read_record, 10x file",
+        base,
+        cold_ps(&medium, 10_000),
+    );
+    ok &= ratio(
+        "C-BC-01 cold read_record, 100x file",
+        base,
+        cold_ps(&large, 100_000),
+    );
+    ok
+}
+
+/// C-BC-02 — a COLD record read costs a bounded multiple of the address floor,
+/// under its OWN budget.
+fn cold_record_read_stays_within_its_budget() -> bool {
+    /// Floors allowed per cold record read — its OWN budget, not C-29's 800.
+    ///
+    /// **The cold read does not fit 800, and this row is where that is said
+    /// rather than hidden.** Measured, `x86_64` shared host (4 cores, 8
+    /// concurrent builds), release, 2026-10-02: **2,066.247** floors before
+    /// D-0914 removed the per-read heap allocation, and **2,394.687, 2,096.921,
+    /// 2,443.033** after it, at floors of 1,407–1,624 ps. The allocation was
+    /// not the cost and removing it did not visibly move the number on this
+    /// noisy host: the CRC-32C over 4,088 bytes is, and C-07 times that alone
+    /// at about 2.45 us, roughly 1,500 floors of the ~2,100–2,450.
+    ///
+    /// **10,000**, sized on the worst observed (2,443) with roughly 4x left
+    /// over, the rule C-29 and the other budgets in this workspace apply. It
+    /// still refuses the 174x uniform regression this kind of row exists for:
+    /// such a read would land near 360,000 floors.
+    const ALLOWED_COLD: u128 = 10_000;
+
+    let (file, _d) = loaded("cold-budget", 10_000);
+    let floor = floor_ps(Layout::V2);
+    let at = cold_ps(&file, 10_000);
+    budget(
+        "C-BC-02 cold read_record against the address floor",
+        floor,
+        at,
+        ALLOWED_COLD,
+    )
+}
+
 /// C-01 — reading the header costs the same whatever region it is handed.
 ///
 /// The region a caller passes may be a whole read-only mapping of the file, so
@@ -418,6 +551,8 @@ fn main() {
     ok &= checksum_beats_the_bit_loop();
     ok &= record_read_is_flat_in_the_file();
     ok &= record_read_stays_within_its_budget();
+    ok &= cold_record_read_is_flat_in_the_file();
+    ok &= cold_record_read_stays_within_its_budget();
     if ok {
         println!("all ratios within the ceiling");
     } else {
