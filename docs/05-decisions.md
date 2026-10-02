@@ -43764,3 +43764,40 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0998 — The cli binary reads its arguments as `OsString` and refuses one that is not UTF-8 as a misuse — 2026-10-02
+
+**What was wrong (probeapi-3, cli half).** `crates/cli/src/main.rs` collected
+`std::env::args()`, and that iterator panics on the first argument that is not
+valid Unicode. `cli $'\xff'` therefore exited 101 with a std panic message on
+stderr, before `main` printed the line saying where events went and before any
+event reached the log. Reproduced on this branch before the fix:
+`a_non_utf8_argument_is_refused_by_name_not_a_panic` got exit 101 and
+`panicked at .../std/src/env.rs:876:51` on stderr.
+
+**The change.** `main` now passes `std::env::args_os().skip(1)` to the new
+`cli::run_durable_os`. It converts each argument with `OsString::into_string`.
+When all are text it calls `run_durable` exactly as before. When one is not,
+it refuses with the existing `refuse` path: the line `refused: argument N is
+not valid UTF-8 (read as ...)`, where the parenthesis holds the lossy
+spelling, then the usage, exit `MISUSED`. It also
+emits one `cli.lifecycle` warn event with the reason and exit code. The lossy
+spelling is shown only so the operator can see which word it was; it is never
+dispatched. `MISUSED` was chosen over a new code because the crate documents
+three codes (`OK`, `FAILED`, `MISUSED`) and an argument the binary cannot read
+is "something it does not understand" in that doc's own words; the `MISUSED`
+doc comment now names this case. `main` still prints `events ->` (or the
+reason events are not recorded) after the refusal, as on every run.
+
+**Not covered.** The `api` binary has the same defect at
+`crates/api/src/main.rs:33`; the audit finding names both, and this entry fixes
+only `cli`. The store-root preflight still runs before argument parsing, so a
+missing store is reported as before even when an argument is also not text.
+The tests are `#[cfg(unix)]` because a non-UTF-8 `OsString` is built from raw
+bytes; Windows (UTF-16) was not exercised.
+
+**Proof.** `binary::a_non_utf8_argument_is_refused_by_name_not_a_panic` runs
+the built binary with `6\xff` as argument 2 and checks the exit code, stderr,
+stdout and the log directory. `cli::tests::a_non_utf8_argument_is_refused_by_position_and_text_passes`
+checks the conversion and the refusal in process. Recorded as
+`docs/04-invariants.md` C-PROBEAPI3-01.

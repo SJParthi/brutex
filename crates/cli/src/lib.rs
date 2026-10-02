@@ -287,7 +287,9 @@ use std::fmt::Write as _;
 pub const OK: u8 = 0;
 /// It was asked for something reasonable and could not do it.
 pub const FAILED: u8 = 1;
-/// It was asked for something it does not understand.
+/// It was asked for something it does not understand: an unknown word, a
+/// malformed argument, or an argument that is not valid UTF-8 at all
+/// ([`run_durable_os`], D-0998). The binary never exits 101 for an argument.
 pub const MISUSED: u8 = 2;
 
 /// The sentence every rendered report carries above it.
@@ -1964,6 +1966,50 @@ fn audit_range_arm(
 #[must_use]
 pub fn run(args: &[String], out: &mut String) -> u8 {
     run_with_sink(args, out, telemetry::global())
+}
+
+/// The binary's entry: the raw process arguments, admitted as text first.
+///
+/// # Why the arguments arrive as `OsString`
+///
+/// `main` used to collect `std::env::args()`, which PANICS on the first
+/// argument that is not valid Unicode: exit 101, a backtrace hint on stderr,
+/// no line saying where events went, and no event in the log. Every command
+/// word this binary understands is text, so an argument that is not text is a
+/// misuse like an unknown word: refused by name, with the usage, exit
+/// [`MISUSED`], and one `cli.lifecycle` event recording why. Nothing is
+/// dispatched, and no lossy conversion guesses what the word was meant to be.
+/// D-0998, probeapi-3.
+#[must_use]
+pub fn run_durable_os(raw: impl IntoIterator<Item = std::ffi::OsString>, out: &mut String) -> u8 {
+    match text_args(raw) {
+        Ok(args) => run_durable(&args, out),
+        Err(why) => {
+            note(
+                &telemetry::Event::warn("cli.lifecycle", "command refused")
+                    .with("phase", "refused")
+                    .with("reason", why.as_str())
+                    .with("exit_code", u64::from(MISUSED)),
+            );
+            refuse(out, &why)
+        }
+    }
+}
+
+/// Every argument as text, or the first one that is not, named by position.
+fn text_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(index, word)| {
+            word.into_string().map_err(|word| {
+                format!(
+                    "argument {} is not valid UTF-8 (read as `{}`); every command word is text, so nothing was dispatched",
+                    index.saturating_add(1),
+                    word.to_string_lossy()
+                )
+            })
+        })
+        .collect()
 }
 
 /// Binary entry with required durable history for every recognized sweep.
@@ -19754,6 +19800,36 @@ fn record_all_attempt(
               test that cannot panic cannot fail."
 )]
 mod tests {
+    /// **Text arguments pass through unchanged; the first that is not text is
+    /// refused by position, as a misuse, and nothing is dispatched.** D-0998.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_argument_is_refused_by_position_and_text_passes() {
+        use std::os::unix::ffi::OsStringExt;
+        let words = vec!["sweep".into(), "6".into(), "200".into()];
+        assert_eq!(
+            super::text_args(words),
+            Ok(vec!["sweep".to_owned(), "6".to_owned(), "200".to_owned()])
+        );
+        let bad = vec![
+            "sweep".into(),
+            std::ffi::OsString::from_vec(b"6\xff".to_vec()),
+            std::ffi::OsString::from_vec(vec![0xfe]),
+        ];
+        let why = super::text_args(bad.clone()).expect_err("not text");
+        assert!(
+            why.starts_with("argument 2 is not valid UTF-8 (read as `6\u{fffd}`)"),
+            "{why}"
+        );
+        let mut out = String::new();
+        assert_eq!(super::run_durable_os(bad, &mut out), MISUSED);
+        assert!(
+            out.starts_with("refused: argument 2 is not valid UTF-8"),
+            "{out}"
+        );
+        assert!(out.contains(USAGE), "{out}");
+    }
+
     use super::{
         COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
         USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, calendar_terms,
