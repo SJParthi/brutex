@@ -36,3 +36,4 @@ Medium first: o1cli-1, probestore-3, probeapi-3 (cli half). Then: o1store-1, o1s
 Weekly usage at 45%: lane 1 now runs at most 2 agents (the step3 test-speed agent + one sequential workflow). Order: review pushed PRs, batch-1 rest, then lane1-b units U1, U2, U9(+U3), U4... Root-permission test fix paused with partial work in its worktree (resume later). Stop and checkpoint at 85%.
 
 | extra | fix/cloud-step3-test-speed | pushed (55m -> 8m15s) | https://github.com/SJParthi/brutex/pull/40 |
+| extra | fix/cloud-root-permission-tests | pushed (16 root-only failures fixed) | https://github.com/SJParthi/brutex/pull/43 |
