@@ -29,7 +29,7 @@ After any pause: read this file, `git ls-remote origin 'refs/heads/fix/cloud-*'`
 
 ## Batch 3 (audit-20261002 new-findings.md, queued after lane1-b)
 
-Medium done: o1cli-1 PR #49 (D-0997), probeapi-3 cli half PR #50 (D-0998), probestore-3 PR #51 (D-0996, after #24). Next, one agent at a time: o1store-1, o1store-2, o1engine-22, o1engine-23, o1engine-24, o1engine-40, o1cli-2..6, probestore-4..7, probeapi-6. State: low items running. Source: /mnt/project-files/audit-20261002/new-findings.md (copied to fix-queue/lane1-c-findings.md).
+Medium done: o1cli-1 PR #49 (D-0997), probeapi-3 cli half PR #50 (D-0998), probestore-3 PR #51 (D-0996, after #24). Next, one agent at a time: o1store-1, o1store-2, o1engine-22, o1engine-23, o1engine-24, o1engine-40, o1cli-2..6, probestore-4..7, probeapi-6. State: low items PRs #59-#73 open (o1store-1/2, o1engine-22/23/24/40, o1cli-2..6, probestore-4..7); probeapi-6 still running. Source: /mnt/project-files/audit-20261002/new-findings.md (copied to fix-queue/lane1-c-findings.md).
 
 ## Usage mode (08:15 UTC)
 
