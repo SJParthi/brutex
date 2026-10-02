@@ -15,8 +15,13 @@
 //! # Join and cost
 //!
 //! Both inputs are ordered.  One monotonic cursor advances through daily bars,
-//! and each daily bar is consumed at most once.  State is fixed-size apart from
-//! the two borrowed input slices: total work is `O(signal + daily)`, while every
+//! and each daily bar is consumed at most once by an accepted signal bar.  A
+//! refused signal bar walks no daily bar at all: its refusal is decided on the
+//! committed evaluator before the cursor moves (D-0942), because the cursor walk
+//! runs on a copy a refusal discards and used to be repeated, from the committed
+//! cursor, by every consecutive refused bar.  State is fixed-size apart from the
+//! two borrowed input slices: total work is `O(signal + daily)` with at most one
+//! extra fold per signal bar that has an unconsumed prior reference, while every
 //! bar after the cursor is positioned reads the current reference in `O(1)`.
 //! A calendar gap performs no search and needs no fabricated intermediate day.
 //! This shape is **UNVERIFIED as a measured bound** until the indicators ratio
@@ -385,8 +390,40 @@ impl<'a> AnchoredEvaluator<'a> {
         &mut self,
         bar: &Candle,
     ) -> Result<(ConditionMask, ConditionMask, bool), Corrupt> {
-        let mut next = *self;
         let signal_day = crate::ist_day(bar.ts_micros);
+        // DECIDE A REFUSAL BEFORE WALKING THE DAILY CURSOR (D-0942).
+        //
+        // The walk below runs on a copy that a refusal discards, so a refused
+        // bar used to walk every reference between the committed cursor and its
+        // own day for nothing, and the next refused bar walked the same
+        // references again: O(daily) per refused bar and O(signal x daily) per
+        // run, against the module doc's O(signal + daily).
+        //
+        // Committing the walk on refusal is NOT safe: a refused bar may carry a
+        // later day than the next accepted bar, and references installed for the
+        // later day would be look-ahead for the earlier one. Instead the verdict
+        // is taken first. Whether `Evaluator::stepped` refuses depends only on
+        // the record, the last accepted timestamp and signal-folded state; the
+        // three fields the walk writes (`prev5`, `yesterday`, `previous`) are
+        // read by no refusal (`SessionState::step` reads `previous` only for its
+        // bits, after `check_evaluable`). So the committed evaluator refuses
+        // exactly the bars the advanced one refuses, with the same `Corrupt`.
+        //
+        // The probe runs only when the walk is non-empty, which an accepted bar
+        // meets at most once per day that has an unconsumed prior reference.
+        // A refused bar therefore costs one fold and no walk, and an accepted
+        // bar's mask, known set, warmth and census are byte-identical to before.
+        if self
+            .references
+            .get(self.cursor)
+            .is_some_and(|reference| reference.day < signal_day)
+        {
+            #[cfg(test)]
+            tests::count_refusal_probe();
+            let mut probe = self.evaluator;
+            probe.step(bar)?;
+        }
+        let mut next = *self;
         next.advance_before(signal_day);
         let warm = next.evaluator.warmed_up();
         let (mask, known) = next.evaluator.step_known(bar)?;
@@ -450,6 +487,8 @@ impl<'a> AnchoredEvaluator<'a> {
                 break;
             }
             self.cursor = self.cursor.saturating_add(1);
+            #[cfg(test)]
+            tests::count_reference_walk_step();
             self.census.consumed = self.census.consumed.saturating_add(1);
             match reference.payload {
                 Payload::Eligible(levels) => {
@@ -2327,6 +2366,312 @@ mod tests {
             (evaluator.current_reference(), evaluator.reference_census()),
             before
         );
+    }
+
+    thread_local! {
+        /// Daily references the cursor walk has stepped over on THIS test
+        /// thread, including walks on copies a refusal discards. A count, not a
+        /// clock, so the bound below is deterministic on a loaded machine.
+        static REFERENCE_WALK_STEPS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    pub(super) fn count_reference_walk_step() {
+        REFERENCE_WALK_STEPS.with(|steps| steps.set(steps.get().saturating_add(1)));
+    }
+
+    fn reference_walk_steps() -> u64 {
+        REFERENCE_WALK_STEPS.with(core::cell::Cell::get)
+    }
+
+    thread_local! {
+        /// Refusal probes taken on THIS test thread: the extra fold D-0942 pays.
+        static REFUSAL_PROBES: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    pub(super) fn count_refusal_probe() {
+        REFUSAL_PROBES.with(|probes| probes.set(probes.get().saturating_add(1)));
+    }
+
+    fn refusal_probes() -> u64 {
+        REFUSAL_PROBES.with(core::cell::Cell::get)
+    }
+
+    /// The probe's own price, pinned: one extra fold on the first accepted bar
+    /// of a day that has an unconsumed STRICTLY earlier reference, and none on
+    /// any other bar -- not on a later bar of that day, not while the cursor
+    /// rests on a same-day reference, and not after the references run out.
+    #[test]
+    fn the_refusal_probe_runs_once_per_day_with_a_pending_prior_reference() {
+        let references = [
+            eligible(1, 2_500_000),
+            eligible(2, 2_500_000),
+            eligible(3, 2_500_000),
+        ];
+        let mut evaluator = evaluator(&references);
+        let before = refusal_probes();
+        for day in 2..=5 {
+            for offset in 0..5 {
+                evaluator
+                    .step(&signal_bar(day, OPEN_IST_MINUTE + offset, 2_500_000))
+                    .expect("ordinary bar");
+            }
+        }
+        assert_eq!(
+            refusal_probes().saturating_sub(before),
+            3,
+            "days 2, 3 and 4 each have one pending prior reference; day 5 has none"
+        );
+        assert_eq!(evaluator.reference_census().consumed, 3);
+    }
+
+    /// The pre-D-0942 step, kept verbatim as the oracle: walk the cursor on a
+    /// copy, evaluate, commit only on success.
+    fn oracle_step(
+        evaluator: &mut AnchoredEvaluator<'_>,
+        bar: &Candle,
+    ) -> Result<(ConditionMask, ConditionMask, bool), Corrupt> {
+        let mut next = *evaluator;
+        let signal_day = crate::ist_day(bar.ts_micros);
+        next.advance_before(signal_day);
+        let warm = next.evaluator.warmed_up();
+        let (mask, known) = next.evaluator.step_known(bar)?;
+        next.charge_signal(signal_day);
+        *evaluator = next;
+        Ok((mask, known, warm && next.evaluator.warmed_up()))
+    }
+
+    fn zero_priced(day: i64, minute: i64) -> Candle {
+        Candle::new(ts(day, minute), 0, 0, 0, 0, 0, OI_NULL)
+    }
+
+    /// W3-indicators1-0 / W3-indicators1-1 (D-0942). Every refused signal bar
+    /// used to re-walk every daily reference between the committed cursor and
+    /// its own day, so N refused bars over D unconsumed references cost N x D
+    /// walk steps. The walk count is now exactly D for the whole run: the one
+    /// accepted bar's walk, and nothing for any refusal. Every refusal kind
+    /// that can arrive with a pending walk is covered: a zero price, a
+    /// negative low, an inverted bar, a straddling range, a negative volume
+    /// and an overflowing VWAP accumulator.
+    #[test]
+    fn refused_signal_bars_never_rewalk_the_daily_references() {
+        const DAILY: i64 = 2_000;
+        let references = (1..=DAILY)
+            .map(|day| {
+                if day % 7 == 0 {
+                    excluded(day, 2_500_000)
+                } else {
+                    eligible(day, 2_500_000)
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut evaluator = AnchoredEvaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Present,
+            Thresholds::CLASSICAL,
+            &references,
+        )
+        .expect("fixture reference days are strictly increasing");
+        let day = DAILY.saturating_add(1);
+        let huge = 5_000_000_000_000_000_000;
+        let kinds = [
+            zero_priced(day, OPEN_IST_MINUTE),
+            Candle::new(ts(day, OPEN_IST_MINUTE), 5, 10, -5, 5, 1, OI_NULL),
+            Candle::new(ts(day, OPEN_IST_MINUTE), 100, 90, 110, 100, 1, OI_NULL),
+            Candle::new(
+                ts(day, OPEN_IST_MINUTE),
+                0,
+                i64::MAX,
+                i64::MIN,
+                0,
+                1,
+                OI_NULL,
+            ),
+            Candle::new(ts(day, OPEN_IST_MINUTE), 100, 110, 90, 100, -1, OI_NULL),
+            Candle::new(ts(day, OPEN_IST_MINUTE), huge, huge, huge, huge, 1, OI_NULL),
+        ];
+        let refused_bars: u64 = 3_000;
+        let before = reference_walk_steps();
+        for (index, bar) in kinds.iter().cycle().take(3_000).enumerate() {
+            assert!(
+                evaluator.step(bar).is_err(),
+                "fixture bar {index} must be refused"
+            );
+        }
+        assert_eq!(
+            reference_walk_steps().saturating_sub(before),
+            0,
+            "a refused bar walked daily references it then discarded"
+        );
+        assert_eq!(evaluator.cursor, 0, "a refusal moved the committed cursor");
+        assert_eq!(evaluator.reference_census().consumed, 0);
+        evaluator
+            .step(&signal_bar(day, OPEN_IST_MINUTE, 2_500_000))
+            .expect("an ordinary bar after the refusals is accepted");
+        let walked = reference_walk_steps().saturating_sub(before);
+        let daily = u64::try_from(DAILY).expect("positive");
+        assert_eq!(
+            walked, daily,
+            "{refused_bars} refused bars and one accepted bar over {daily} references \
+             must walk each reference exactly once"
+        );
+        assert_eq!(evaluator.reference_census().consumed, daily);
+        assert!(evaluator.reference_census().reconciles());
+    }
+
+    /// The oracle's cost on the same shape, so the test above is measuring the
+    /// defect and not a fixture that never walked: one refused bar over D
+    /// unconsumed references walks D on the old path.
+    #[test]
+    fn the_pre_fix_step_walks_every_pending_reference_per_refusal() {
+        let references = (1..=50)
+            .map(|day| eligible(day, 2_500_000))
+            .collect::<Vec<_>>();
+        let mut evaluator = evaluator(&references);
+        let before = reference_walk_steps();
+        for _ in 0..10 {
+            assert_eq!(
+                oracle_step(&mut evaluator, &zero_priced(51, OPEN_IST_MINUTE)),
+                Err(Corrupt::PriceNotPositive)
+            );
+        }
+        assert_eq!(reference_walk_steps().saturating_sub(before), 500);
+        let before = reference_walk_steps();
+        for _ in 0..10 {
+            assert_eq!(
+                evaluator.step(&zero_priced(51, OPEN_IST_MINUTE)),
+                Err(Corrupt::PriceNotPositive)
+            );
+        }
+        assert_eq!(reference_walk_steps().saturating_sub(before), 0);
+    }
+
+    /// Mixed accepted and refused bars, including the case that makes
+    /// committing a refused bar's walk unsafe: a refused bar on a LATER day
+    /// followed by an accepted bar on an EARLIER one. Every step returns the
+    /// same result as the pre-fix oracle, and after every step the cursor,
+    /// installed reference, census, Prev5 fill, anchor and warmth agree.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one oracle comparison over one generated bar mix reads as a single table"
+    )]
+    fn mixed_refused_and_accepted_bars_match_the_pre_fix_step_exactly() {
+        let references = (10_i64..60)
+            .filter(|day| day % 5 != 3)
+            .map(|day| {
+                let base = 2_400_000_i64.saturating_add(day.saturating_mul(1_000));
+                if day % 9 == 0 {
+                    excluded(day, base)
+                } else {
+                    eligible(day, base)
+                }
+            })
+            .collect::<Vec<_>>();
+        for availability in [Availability::Absent, Availability::Present] {
+            let build = || {
+                AnchoredEvaluator::new(
+                    Widths::pinned().expect("pinned widths are valid"),
+                    availability,
+                    Thresholds::CLASSICAL,
+                    &references,
+                )
+                .expect("fixture reference days are strictly increasing")
+            };
+            let mut fixed = build();
+            let mut oracle = build();
+            let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+            let mut day: i64 = 8;
+            let mut minute: i64 = OPEN_IST_MINUTE;
+            let mut accepted = 0_u32;
+            let mut refused = 0_u32;
+            for step in 0..4_000_u32 {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let roll = (seed >> 33) % 100;
+                let price = 2_450_000_i64
+                    .saturating_add(day.saturating_mul(1_000))
+                    .saturating_add(i64::try_from((seed >> 20) % 4_000).expect("small"));
+                let bar = match roll {
+                    0..=59 => {
+                        minute = minute.saturating_add(1);
+                        if minute > OPEN_IST_MINUTE + 374 || roll < 6 {
+                            day = day.saturating_add(1 + i64::from(roll.is_multiple_of(3)));
+                            minute = OPEN_IST_MINUTE;
+                        }
+                        signal_bar(day, minute, price)
+                    }
+                    60..=69 => zero_priced(
+                        day.saturating_add(i64::try_from(roll % 7).expect("small")),
+                        minute,
+                    ),
+                    70..=74 => zero_priced(day.saturating_add(30), minute),
+                    75..=79 => Candle::new(
+                        ts(day.saturating_add(2), OPEN_IST_MINUTE),
+                        price,
+                        price,
+                        price,
+                        price,
+                        -1,
+                        OI_NULL,
+                    ),
+                    80..=84 => signal_bar(day, minute, price),
+                    85..=89 => signal_bar(day, minute.saturating_sub(1), price),
+                    90..=94 => {
+                        let huge = 5_000_000_000_000_000_000;
+                        Candle::new(
+                            ts(day.saturating_add(4), OPEN_IST_MINUTE),
+                            huge,
+                            huge,
+                            huge,
+                            huge,
+                            1,
+                            OI_NULL,
+                        )
+                    }
+                    _ => Candle::new(
+                        ts(day.saturating_add(3), minute),
+                        100,
+                        90,
+                        110,
+                        100,
+                        1,
+                        OI_NULL,
+                    ),
+                };
+                let got = fixed.step_with_warmth(&bar);
+                let want = oracle_step(&mut oracle, &bar);
+                assert_eq!(got, want, "step {step} ({availability:?}) bar {bar:?}");
+                if got.is_ok() {
+                    accepted = accepted.saturating_add(1);
+                } else {
+                    refused = refused.saturating_add(1);
+                }
+                assert_eq!(fixed.cursor, oracle.cursor, "step {step}");
+                assert_eq!(
+                    fixed.current_reference(),
+                    oracle.current_reference(),
+                    "step {step}"
+                );
+                assert_eq!(
+                    fixed.reference_census(),
+                    oracle.reference_census(),
+                    "step {step}"
+                );
+                assert_eq!(
+                    fixed.sessions_completed(),
+                    oracle.sessions_completed(),
+                    "step {step}"
+                );
+                assert_eq!(fixed.has_yesterday(), oracle.has_yesterday(), "step {step}");
+                assert_eq!(fixed.warmed_up(), oracle.warmed_up(), "step {step}");
+            }
+            assert!(
+                accepted > 500 && refused > 500,
+                "{accepted} accepted, {refused} refused"
+            );
+            assert!(fixed.reference_census().installed > 10);
+        }
     }
 
     #[test]

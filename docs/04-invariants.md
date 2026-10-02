@@ -5410,6 +5410,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### A refused anchored signal bar walks no daily reference — W3-indicators1-0 / W3-indicators1-1 (D-0942)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A signal bar the anchored evaluator refuses walks no daily reference and commits nothing, so total cursor work over a run is at most the number of daily references whatever the mix of refused and accepted bars; every accepted bar's mask, known set, warmth and refusal, and the cursor, installed reference and census after every step, are identical to the pre-D-0942 step, including a refused later-day bar followed by an accepted earlier-day bar | `indicators::anchored::tests::refused_signal_bars_never_rewalk_the_daily_references`; `indicators::anchored::tests::the_pre_fix_step_walks_every_pending_reference_per_refusal`; `indicators::anchored::tests::the_refusal_probe_runs_once_per_day_with_a_pending_prior_reference`; `indicators::anchored::tests::mixed_refused_and_accepted_bars_match_the_pre_fix_step_exactly` | ✓ |
+
 ### Daily reference records are prices — ET-indicators-1 / UC-3 (D-0941)
 
 | Invariant | Test that proves it | Status |
