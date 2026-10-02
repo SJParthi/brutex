@@ -3963,7 +3963,7 @@ mod tests {
             body.contains(".find(|row| row.population().candidate_semantic_id() == *strategy)")
         );
         let source_read = production
-            .split("    pub(crate) fn execution_v4_source(\n")
+            .split(concat!("    pub(crate) fn ", "execution_v4_source(\n"))
             .nth(1)
             .and_then(|rest| rest.split("\n    }\n").next())
             .expect("execution_v4_source body");
