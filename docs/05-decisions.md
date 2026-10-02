@@ -48582,6 +48582,47 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-1201 — Pull fold and CSV clock: one sentence per unmeasured day, and a sign is not a digit — 2026-10-02
+
+**The defects (audit cluster C2).** Two, both in `crates/pull`, both changed.
+
+* **o1api-44.** `fold::complete_minutes_with_calendar` already wrote one
+  sentence for a day the calendar does not know (`DayKind::Unmeasured`: before
+  2019-12-02 or after 2026-09-04): "day N: UNVERIFIED: ...; derived buckets
+  withheld". It then also wrote one "incomplete or invalid minute coverage ...
+  calendar Unmeasured" line for every bucket of that day, because no bucket of
+  such a day can complete. Each line is a `pull.derive` warning from
+  `ingest::derive` and a clause of the rung's refusal, which `derive` rewrites
+  into "restore complete minute source", a repair that cannot help. Measured:
+  five weekdays from 2026-09-07 at two minutes gave 905 diagnostics and 158,085
+  bytes; through `ingest::from_window` the two-minute refusal alone was 198,032
+  bytes, and every download window repeats it for each of the seven derived
+  rungs. A bucket on an `Unmeasured` day is now skipped after its minutes are
+  consumed, so the day sentence is the only line it produces. Nothing that was
+  withheld is now certified, and every other day's lines are unchanged.
+* **probestore-1.** `csv::ist_seconds` checked each clock field for two bytes
+  and `h > 23 || m > 59 || s > 59`, then used `str::parse`, which accepts a
+  leading `+` and, for `i64`, a leading `-`. `20240103,-9:15:00,...` decoded to
+  2024-01-02 15:15 IST and was stored. `csv::day_of` had the same hole for `+`
+  (`2024+103` read as 2024-01-03). A new private `csv::digits` refuses any field
+  that is not all ASCII digits before parsing it; both readers use it. The
+  refusals are the existing `CsvError::TimeMalformed` and `DateMalformed`.
+
+**Cost.** One enum comparison per bucket and one byte check per clock or date
+field (two or four bytes): O(1) each. The diagnostic count for a window outside
+the calendar falls from O(buckets) to O(days); `docs/06-limits.md` states the
+bound that remains.
+
+**Rejected.** (1) Aggregating to one line per run: a window spans days, and the
+day number is what an operator needs to extend the calendar. (2) Dropping the
+day sentence and keeping the bucket lines: the bucket lines name no reason. (3)
+Clamping a negative field to zero: that is a different minute filed as the
+vendor's, the fallback `CLAUDE.md` §4 bans. (4) Touching the
+`OpenLengthUnmeasured` and `Closed` arms: D-0955 (open PR #48) owns them; this
+change is a separate guard above them and leaves their lines alone.
+
+Invariants PSG-01 to PSG-03; `docs/06-limits.md` has the remaining bound.
+
 ### D-0918 — Bound rupee text at 64 bytes and refuse longer text by name — 2026-10-02
 
 **The defect (audit finding o1store-2).** `Paisa::from_rupee_text_half_up`
