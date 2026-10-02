@@ -1528,7 +1528,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `server::census_request_tests::an_absence_its_stamps_contradict_is_logged_at_warn`.
     // Four additional refusal sites are read back by the partial/interrupted
     // broker basket, recovery resume refusal, and partial cash replay tests.
-    const REACHED_IN_SERVER_TESTS: usize = 19;
+    // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
+    // driven and read back by `server::credential_law_tests::
+    // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
+    const REACHED_IN_SERVER_TESTS: usize = 20;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1620,9 +1623,11 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 57 -> 58 at D-0695's ninth repair: a census row served unreadable
     // because its stamps contradict its absence, driven in `server`'s census
     // request tests.
+    //
+    // 58 -> 59 at D-0948: the credential re-read in `credential_law::note`.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 58,
+        lib_sites, 59,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"
