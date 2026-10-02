@@ -847,14 +847,17 @@ fn appending_a_month_never_relocates_the_bars_already_held() {
         );
     }
     let span = builder.finish().expect("span");
-    assert_eq!(span.bars.len(), (MONTHS * PER_MONTH) as usize);
+    assert_eq!(
+        span.bars.len(),
+        usize::try_from(MONTHS * PER_MONTH).expect("a test-sized bar count fits usize")
+    );
     assert_eq!(span.bars.capacity(), span.bars.len(), "one exact join");
     assert_eq!(i64::from(span.asked), MONTHS);
     assert_eq!(span.found, span.asked);
     for (at, bar) in span.bars.iter().enumerate() {
         assert_eq!(
             bar.ts_micros,
-            at as i64 * 60_000_000,
+            i64::try_from(at).expect("a test-sized index fits i64") * 60_000_000,
             "bar {at} out of order"
         );
     }

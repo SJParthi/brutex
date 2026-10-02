@@ -402,10 +402,9 @@ fn a_population_v5_row_read_derives_the_whole_population_twice_and_its_docs_say_
     says(&limits, "the limits section", route);
 }
 
-/// W2-cli12-4. `commit_population_v5` opens a writer, appends and reopens,
-/// and each of the three scans the whole ledger.
-#[test]
-fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so() {
+/// The call shape behind W2-cli12-4: the commit opens a writer, appends and
+/// reopens, each door scans once, and every generation check hashes whole files.
+fn a_population_v5_commit_opens_appends_and_reopens_and_hashes_whole_files() {
     let commit = body(POPULATION_V5, "", "pub(crate) fn commit_population_v5(");
     let write = commit
         .find("PopulationV5Ledger::open_write(")
@@ -486,6 +485,11 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
         2,
         "{v5_generation}"
     );
+}
+
+/// Every scan decodes, re-encodes and block-validates each row; returns the
+/// `decode`, `encode` and `validate_complete_block` bodies for the doc checks.
+fn population_v5_rows_are_validated_on_every_scan() -> (&'static str, &'static str, &'static str) {
     let scan = body(POPULATION_V5, "impl PopulationV5Ledger", "fn scan(");
     assert!(scan.contains("self.read_rows("), "{scan}");
     assert_eq!(count(scan, "validate_complete_block("), 1, "{scan}");
@@ -510,6 +514,15 @@ fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so
         block.contains("for (index, row) in rows.iter().enumerate() {\n        row.validate()?;"),
         "{block}"
     );
+    (decode, encode, block)
+}
+
+/// W2-cli12-4. `commit_population_v5` opens a writer, appends and reopens,
+/// and each of the three scans the whole ledger.
+#[test]
+fn a_population_v5_commit_scans_the_whole_ledger_three_times_and_its_docs_say_so() {
+    a_population_v5_commit_opens_appends_and_reopens_and_hashes_whole_files();
+    let (decode, encode, block) = population_v5_rows_are_validated_on_every_scan();
 
     let module = words(
         POPULATION_V5

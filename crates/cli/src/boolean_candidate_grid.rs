@@ -359,8 +359,14 @@ mod tests {
         // The selector word sits before the 32-byte cost id and the four
         // eight-byte forced-stop kind, level, ambiguity and gap-fill words.
         let at = raw.len() - 8 - 32 - 32;
-        assert_eq!(raw[at..at + 8], 3_u64.to_le_bytes());
-        raw[at..at + 8].copy_from_slice(&4_u64.to_le_bytes());
+        assert_eq!(
+            raw.get(at..at + 8),
+            Some(3_u64.to_le_bytes().as_slice()),
+            "the selector word sits where the layout puts it"
+        );
+        raw.get_mut(at..at + 8)
+            .ok_or("the selector word is inside the encoding")?
+            .copy_from_slice(&4_u64.to_le_bytes());
         let refused = decode_policy(&mut Decode::new(&raw)).err();
         assert_eq!(refused.as_deref(), Some("Boolean selector unknown"));
         Ok(())
