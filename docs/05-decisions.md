@@ -43813,3 +43813,29 @@ is a source-shape test, because the hoisted and unhoisted answers are equal. It
 fails on the previous tree, where both resolved doors contained
 `SliceFacts::of(`. The existing split-versus-combined attested tests in
 `exit_grid_policy` still pass, so the attested facts give the same grid.
+
+### D-1142 — Say in `runner::identity` that a `RunId` is persisted, and pin one identity byte for byte — 2026-10-02
+
+**Finding.** AC-whp-law-3. The crate doc of `runner::identity` said "nothing
+persists a `RunId` yet — it is formatted into a report string and never written
+to the store — so there is no recorded corpus to migrate". The `Run::feed` doc
+repeated the claim to argue that adding an identity term "costs nothing". Both
+statements are false. `cli::results::Record::identity` writes the `RunId` into
+the append-only results ledger and deduplicates reruns on it. Sweep-evidence
+attempts and the AND-checkpoint journal are keyed by it, and frontier and trade
+rows carry it. The same file already said, at `data_digest_with_execution`,
+"Results already persist `RunId`". A maintainer about to add a term would read
+the false sentence first, and following it would split every recorded run from
+its own rerun.
+
+**The change.** Docs and one test, with no code change. The module doc and the
+`feed` doc now say that a `RunId` is persisted and that a new term must arrive
+as a new, versioned identity domain with its own decision, never as an edit to
+the existing encoding. The history (D-0225 was free when it landed) is kept.
+
+**Test.** `identity::tests::a_persisted_run_identity_does_not_drift` pins one
+fixed `Run`'s identity to
+`d33cd3169acbb4104fbed7e3b3568824303b32d91f6a2386e7e66bfe6a420b28`. It also
+refuses the false sentence in the module source, and that half fails on the
+previous tree. A `vocab::VOCAB_VERSION` bump re-keys on purpose and is the one
+legitimate reason to re-take the constant. No identity changes.
