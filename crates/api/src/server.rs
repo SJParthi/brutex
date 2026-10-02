@@ -19101,11 +19101,43 @@ mod tests {
             .unwrap();
             let id =
                 u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
-            let mut file = store::file::BarFile::open_or_create(&root, path, id).unwrap();
-            file.append(&rows).unwrap();
-            let source_path = file.path().to_owned();
+            // FORGED AS A PRE-D-0915 FILE. The write boundary now refuses an
+            // off-grid stamp (`StoreError::OffGrid`), so a 1min file holding
+            // them can only be one written before that refusal existed — and
+            // such files are what this reader's own defence still faces. Laid
+            // by hand: unsealed (flags 0, the legacy shape the reader accepts
+            // without a `.crc`), genesis in slot 0, the commit in slot 1.
+            let genesis = store::header::Header::genesis(id, 60, 0);
+            let committed = genesis
+                .advance(
+                    u64::try_from(rows.len()).unwrap(),
+                    rows.first().unwrap().ts_micros,
+                    rows.last().unwrap().ts_micros,
+                )
+                .unwrap();
+            let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).unwrap()];
+            for commit in [genesis.commit().unwrap(), committed.commit().unwrap()] {
+                let at = usize::try_from(commit.offset).unwrap();
+                image
+                    .iter_mut()
+                    .skip(at)
+                    .zip(commit.bytes)
+                    .for_each(|(dst, src)| *dst = src);
+            }
+            for row in &rows {
+                image.extend_from_slice(&row.image());
+            }
+            let source_path = path.to_path_buf(&root);
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            std::fs::write(&source_path, &image).unwrap();
+            assert_eq!(
+                store::file::BarFile::open_existing(&root, path, id)
+                    .unwrap()
+                    .records(),
+                u64::try_from(rows.len()).unwrap(),
+                "the forged legacy month opens and holds every off-grid row"
+            );
             let before = std::fs::read(&source_path).unwrap();
-            drop(file);
             let audit = audit_one(&site, &asked, asked.month, None, None);
             assert_eq!(audit.invalid_timestamps, if extra { 1 } else { 375 });
             assert_eq!(audit.expected, 0, "no coverage claim on invalid input");

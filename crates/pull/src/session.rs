@@ -120,6 +120,10 @@ pub const BARS_PER_REGULAR_SESSION: u32 = 375;
 const _: () = assert!(SESSION_CLOSE_MINUTE - SESSION_OPEN_MINUTE == BARS_PER_REGULAR_SESSION);
 const _: () = assert!(SESSION_OPEN_MINUTE == 555 && SESSION_CLOSE_MINUTE == 930);
 const _: () = assert!(IST_OFFSET_SECS == 19_800);
+// The store keeps its own copy to compute a month's IST span at its write
+// boundary (`store::path::YearMonth::ist_bounds_micros`, D-0915) because it
+// cannot depend on this crate. This is what keeps the copy honest.
+const _: () = assert!(IST_OFFSET_SECS == store::path::IST_OFFSET_SECS);
 const _: () = assert!(SECS_PER_DAY == 86_400);
 // `IstMoment::from_epoch_secs` narrows this one to `u32`. The cast is exact
 // only while it is 60, and this is what says so at compile time.

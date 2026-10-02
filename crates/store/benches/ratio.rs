@@ -147,7 +147,7 @@ fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
         .map(|i| {
             let raw = i64::try_from(i).unwrap_or(0);
             Bar {
-                ts_micros: raw.saturating_mul(60_000_000),
+                ts_micros: JUNE_2024_IST_START.saturating_add(raw.saturating_mul(1_000_000)),
                 open: 2_000_000 + raw,
                 high: 2_000_100 + raw,
                 low: 1_999_900 + raw,
@@ -163,7 +163,18 @@ fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
     (file, root)
 }
 
+/// 2024-06-01 00:00 IST in epoch microseconds, where every bench bar starts.
+///
+/// The write boundary refuses a stamp outside the month the path names
+/// (D-0915), and the bench used to stamp from the 1970 epoch.
+const JUNE_2024_IST_START: i64 = 1_717_180_200_000_000;
+
 /// The path every bench file uses. One month, one symbol, one timeframe.
+///
+/// THE ONE-SECOND RUNG, because the largest bench file is 100,000 bars and a
+/// one-minute month holds at most 44,640: the month admission (D-0915) refuses
+/// the rest. 100,000 seconds is under 28 hours. The record geometry is the
+/// same at every rung, so what `read_record` costs does not change.
 fn bench_path() -> StorePath<'static> {
     match StorePath::new(PathParts {
         vendor: Vendor::Groww,
@@ -171,7 +182,7 @@ fn bench_path() -> StorePath<'static> {
         segment: "INDEX",
         symbol: "NIFTY",
         contract: None,
-        timeframe: Timeframe::MINUTE_1,
+        timeframe: Timeframe::SECOND_1,
         month: match YearMonth::new(2024, 6) {
             Ok(m) => m,
             Err(_) => refuse("June 2024 is a real month"),

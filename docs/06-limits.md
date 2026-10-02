@@ -2933,7 +2933,7 @@ unmeasured. This sentence used to say no bench timed a syscall at all. D-0790.
 §14 carries what *is* measured.
 
 the operation is constant and the read underneath it is the device's. *(This
-said "no bench in this repository times a syscall". That is false: `C-28` and
+said no bench timed a syscall at all. That is false: `C-28` and
 `C-29` time `read_record`, one `pread` each, and `C-T-01` times `emit`, which
 writes the log file. None of them separates the device's latency from the
 code's — D-0957.)* §14 carries what *is* measured.
@@ -11177,6 +11177,37 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## The store admits a bar by month and grid, not by session — D-0915, 2 October 2026
+
+* **What the write boundary now checks.** `BarFile::append` and
+  `repair::publish` refuse a bar stamped outside the IST month the path names
+  (`StoreError::OutsideMonth`, which also catches `i64::MIN`, `i64::MAX` and
+  zero) and a bar off the timeframe's grid (`StoreError::OffGrid`). The month
+  span is computed once per open by `YearMonth::ist_bounds_micros`, two
+  civil-to-day conversions with no table and no loop, so it is O(1). The check
+  itself is two comparisons and one remainder per bar: O(1) per bar, O(batch)
+  per append, the same order as the `survey` pass that already walked the
+  batch. Not timed.
+* **Session membership is enforced upstream only.** A bar inside the month and
+  on the grid but outside every NSE session (03:00 IST, a Sunday, a holiday) is
+  admitted. The venue hours (`pull::vendor`'s session tables) and the trading
+  calendar (`pull::calendar`) live in `pull`, and `store` cannot depend on
+  `pull`: `pull` depends on `store`, so the arrow would be a cycle (`CLAUDE.md`
+  §5). Neither `store` nor `core` holds a calendar. The filtering is
+  `pull::session::Window::verdict` and the fold's complete-minute checks, and
+  `store::admission::session_membership_is_not_the_stores_check_and_a_three_am_bar_is_admitted`
+  pins the store's acceptance so this limit cannot change silently.
+* **The daily rung's grid is weaker than the intraday one.** `Window::verdict`
+  records that vendors stamp a daily bar at midnight, at the open or at the
+  close, so the store admits any whole second in a `1day` file and refuses only
+  a fractional one. Two daily bars on one IST day are not refused here.
+* **Files written before D-0915 are not rechecked.** The admission runs on
+  append and on a repair revision, not on open or read. A month that already
+  holds an out-of-month or off-grid bar opens as it did; the readers that
+  defend against that (for example the gap page's invalid-timestamp count,
+  `api::server::tests::committed_off_grid_minutes_do_not_certify_the_gap_page`)
+  keep their own checks.
 
 ## The calendar derivation reads records, one positional read each — D-0950
 

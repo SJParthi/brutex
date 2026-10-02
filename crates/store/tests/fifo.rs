@@ -76,7 +76,9 @@ fn month() -> StorePath<'static> {
 
 fn bar(index: i64) -> Bar {
     Bar {
-        ts_micros: (index + 1) * 60_000_000,
+        // Inside the 2024-06 month the path names, on the minute grid: the
+        // writer admits no other stamp since D-0915.
+        ts_micros: 1_717_386_300_000_000 + index * 60_000_000,
         open: 100,
         high: 120,
         low: 90,

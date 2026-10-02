@@ -1453,21 +1453,21 @@ fn an_overlay_is_written_and_read_back_through_the_bar_writer() {
 
     let rows = [
         Overlay {
-            ts_micros: 1_700_000_000_000_000,
+            ts_micros: T0, // inside the 2024-06 the path names (D-0915)
             spot: 2_465_005,
             iv_micros: 125_000,
         },
         // ONE OF EACH SENTINEL, because a vendor answering a spot without a
         // volatility is ordinary and the record must survive it.
         Overlay {
-            ts_micros: 1_700_000_060_000_000,
+            ts_micros: T0 + MINUTE,
             spot: 2_465_100,
             iv_micros: OI_NULL,
         },
         // AND A GENUINE ZERO, which must NOT come back as absent. A deep
         // out-of-the-money option prints exactly this late in its life.
         Overlay {
-            ts_micros: 1_700_000_120_000_000,
+            ts_micros: T0 + 2 * MINUTE,
             spot: 0,
             iv_micros: 0,
         },

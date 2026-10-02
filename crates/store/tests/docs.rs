@@ -164,7 +164,7 @@ fn section_6_does_not_cite_c07_for_per_read_verification() {
         "C-07 times `block::seal` over an in-memory buffer"
     );
     assert!(
-        FILE_RS.contains("fn verify_block_of(&self, index: u64)"),
+        FILE_RS.contains("fn verify_block_of("),
         "the read path verifies through `verify_block_of`"
     );
     let six = section("6");

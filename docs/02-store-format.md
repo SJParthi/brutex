@@ -219,6 +219,15 @@ contradicted it; the lock is real, and what it does *not* provide is
 cross-machine exclusion on a network filesystem, which is the honest limit and
 the one worth stating.
 
+**A stamp the path rules out is refused before step 1 (D-0915).** The path's
+`<yyyy-mm>` and `<tf>` segments bind the records: every offered stamp must lie
+in `[00:00 IST on the 1st, 00:00 IST on the 1st of the next month)` and on the
+rung's grid — intraday rungs anchored at 09:15 IST as `pull::fold` cuts them,
+the `1day` rung any whole second. A refusal (`OutsideMonth`, `OffGrid`) writes
+nothing. Session hours are not part of this check; `docs/06-limits.md` records
+why. No byte of the format changes, and files written before the check are
+read exactly as before.
+
 ---
 
 ## 6. Integrity — one checksum per block of 73 records

@@ -1172,7 +1172,9 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1401,7 +1403,9 @@ fn clean_month_reads_every_row(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
