@@ -722,6 +722,18 @@ fn browser_scan(path: &str, src: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Every function a file declares, by line and name: each `fn` keyword token
+/// followed by an identifier. A `fn` in a comment or a string literal is not a
+/// token, so prose cannot add a function, and a `*`-led line is code.
+fn fn_names(src: &str) -> Result<Vec<(usize, String)>, String> {
+    let tokens = lex(src)?.tokens;
+    Ok(tokens
+        .windows(2)
+        .filter(|w| is_ident(Some(&w[0]), "fn"))
+        .filter_map(|w| ident(&w[1]).map(|n| (w[0].line, n.to_owned())))
+        .collect())
+}
+
 /// Every string literal in a file, test code included, by line and DECODED value:
 /// escapes resolved, raw and byte strings read as what they hold, and each
 /// `concat!` reported once more as the one literal the compiler sees. A literal in
@@ -795,7 +807,7 @@ fn children(
     src: &str,
     owns_dir: bool,
     exists: &dyn Fn(&str) -> bool,
-) -> Result<Vec<(String, bool)>, Vec<String>> {
+) -> Result<Vec<(String, bool, Vec<String>)>, Vec<String>> {
     let lexed = lex(src).map_err(|e| vec![format!("{file}: {e}")])?;
     let t = &lexed.tokens;
     let fp = Path::new(file);
@@ -911,7 +923,7 @@ fn children(
                         };
                         let target = path_string(&normalise(&target));
                         if exists(&target) {
-                            out.push((target, true));
+                            out.push((target, true, module_rel(&stack, Some(name))));
                         } else {
                             errs.push(format!("{file}:{line}: `#[path = \"{p}\"] mod {name};` names {target}, which is not tracked"));
                         }
@@ -919,9 +931,9 @@ fn children(
                         let a = path_string(&normalise(&inline_dir.join(format!("{name}.rs"))));
                         let b = path_string(&normalise(&inline_dir.join(name).join("mod.rs")));
                         if exists(&a) {
-                            out.push((a, false));
+                            out.push((a, false, module_rel(&stack, Some(name))));
                         } else if exists(&b) {
-                            out.push((b, true));
+                            out.push((b, true, module_rel(&stack, Some(name))));
                         } else {
                             errs.push(format!(
                                 "{file}:{line}: `mod {name};` resolves to neither {a} nor {b}"
@@ -940,7 +952,7 @@ fn children(
                     Some(p) => {
                         let target = path_string(&normalise(&dir.join(&p)));
                         if exists(&target) {
-                            out.push((target, true));
+                            out.push((target, true, module_rel(&stack, None)));
                         } else {
                             errs.push(format!("{file}:{line}: include!(\"{p}\") names {target}, which is not tracked"));
                         }
@@ -976,7 +988,61 @@ fn closure(
         };
         let owns = owns || f.ends_with("/mod.rs") || f == "mod.rs";
         match children(&f, &src, owns, exists) {
-            Ok(c) => queue.extend(c),
+            Ok(c) => queue.extend(c.into_iter().map(|(p, o, _)| (p, o))),
+            Err(e) => errs.extend(e),
+        }
+    }
+    (seen, errs)
+}
+
+/// The module segments a child adds below its parent: the inline modules it
+/// sits in, then its own name (none for an `include!`, whose text is inlined).
+fn module_rel(stack: &[Option<String>], name: Option<&str>) -> Vec<String> {
+    stack
+        .iter()
+        .flatten()
+        .cloned()
+        .chain(name.map(str::to_owned))
+        .collect()
+}
+
+/// Every module path at which each file is compiled, from `roots` given with
+/// their own path (empty for a library or binary root, the file stem for a test,
+/// bench or example root). A file mounted twice has two. D-1114.
+fn module_paths(
+    roots: &[(String, Vec<String>)],
+    read: &dyn Fn(&str) -> Option<String>,
+    exists: &dyn Fn(&str) -> bool,
+) -> (BTreeSet<(String, String)>, Vec<String>) {
+    let mut seen = BTreeSet::new();
+    let mut errs = Vec::new();
+    // Each entry carries the files that mounted it. A file that mounts one of
+    // its own ancestors (`#[path = "lib.rs"] mod me;`) would otherwise be
+    // re-queued under an ever-longer module path, so the walk stops there, as
+    // `closure` does for the same tree.
+    let mut queue: Vec<(String, bool, Vec<String>, Vec<String>)> = roots
+        .iter()
+        .map(|(r, m)| (r.clone(), true, m.clone(), Vec::new()))
+        .collect();
+    while let Some((f, owns, module, ancestors)) = queue.pop() {
+        if ancestors.contains(&f) || !seen.insert((f.clone(), module.join("::"))) {
+            continue;
+        }
+        let Some(src) = read(&f) else {
+            errs.push(format!("{f}: cannot be read"));
+            continue;
+        };
+        let owns = owns || f.ends_with("/mod.rs") || f == "mod.rs";
+        match children(&f, &src, owns, exists) {
+            Ok(c) => {
+                let mut lineage = ancestors.clone();
+                lineage.push(f.clone());
+                queue.extend(c.into_iter().map(|(p, o, rel)| {
+                    let mut m = module.clone();
+                    m.extend(rel);
+                    (p, o, m, lineage.clone())
+                }));
+            }
             Err(e) => errs.extend(e),
         }
     }
@@ -1894,7 +1960,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|strings|paths|paths-prod|closure|orphans|toml|deps|step-runs|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|strings|fns|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -1927,6 +1993,13 @@ fn run(args: &[String]) -> Result<bool, String> {
                     println!("{line}");
                 }
                 clean &= found.is_empty();
+            }
+        }
+        "fns" => {
+            for f in rest {
+                for (line, name) in fn_names(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
+                    println!("{f}:{line}:{name}");
+                }
             }
         }
         "strings" => {
@@ -1981,6 +2054,50 @@ fn run(args: &[String]) -> Result<bool, String> {
                         clean = false;
                     }
                 }
+            }
+        }
+        "modules" => {
+            let listing = rest
+                .first()
+                .ok_or("modules needs a NUL-separated tracked listing")?;
+            let tracked = tracked_set(&read_file(listing)?);
+            let roots: Vec<(String, Vec<String>)> = compiled_roots(&tracked)?
+                .into_iter()
+                .map(|r| {
+                    let parts: Vec<&str> = r.split('/').collect();
+                    let own = match parts.as_slice() {
+                        [".github", file] => vec![file.trim_end_matches(".rs").to_owned()],
+                        ["crates", _, "tests" | "benches" | "examples", file] => {
+                            vec![file.trim_end_matches(".rs").to_owned()]
+                        }
+                        [
+                            "crates",
+                            _,
+                            "tests" | "benches" | "examples",
+                            dir,
+                            "main.rs",
+                        ] => {
+                            vec![(*dir).to_owned()]
+                        }
+                        _ => Vec::new(),
+                    };
+                    (r, own)
+                })
+                .collect();
+            let read = |p: &str| {
+                tracked
+                    .contains(p)
+                    .then(|| std::fs::read_to_string(p).ok())
+                    .flatten()
+            };
+            let exists = |p: &str| tracked.contains(p);
+            let (mounted, errs) = module_paths(&roots, &read, &exists);
+            for e in &errs {
+                println!("UNRESOLVED {e}");
+            }
+            clean &= errs.is_empty();
+            for (file, module) in &mounted {
+                println!("{file}\t{module}");
             }
         }
         "content" => {
@@ -2307,6 +2424,43 @@ mod tests {
         assert_eq!(files.len(), 1);
     }
 
+    #[test]
+    fn a_file_is_named_by_the_module_it_is_mounted_as() {
+        let (read, exists) = tracked(&[
+            (
+                "c/src/lib.rs",
+                "mod server;\nmod a { #[path = \"../t.rs\"] mod tests; }\n",
+            ),
+            (
+                "c/src/server.rs",
+                "#[path = \"wire.rs\"]\nmod store_wire;\n",
+            ),
+            ("c/src/wire.rs", "mod tests {}\n"),
+            ("c/src/t.rs", ""),
+            ("c/tests/it.rs", "mod helper;\n"),
+            ("c/tests/helper.rs", ""),
+            ("c/src/me.rs", "#[path = \"me.rs\"] mod again;\n"),
+        ]);
+        let roots = [
+            ("c/src/lib.rs".to_owned(), Vec::new()),
+            ("c/tests/it.rs".to_owned(), vec!["it".to_owned()]),
+            ("c/src/me.rs".to_owned(), Vec::new()),
+        ];
+        let (mounted, errs) = module_paths(&roots, &read, &exists);
+        assert!(errs.is_empty(), "{errs:?}");
+        let has = |f: &str, m: &str| mounted.contains(&(f.to_owned(), m.to_owned()));
+        assert!(has("c/src/lib.rs", ""));
+        assert!(has("c/src/wire.rs", "server::store_wire"));
+        assert!(!mounted.iter().any(|(f, _)| f == "c/src/store_wire.rs"));
+        assert!(has("c/src/t.rs", "a::tests"));
+        assert!(has("c/tests/helper.rs", "it::helper"));
+        // A file that mounts itself is named once and the walk ends.
+        assert_eq!(
+            mounted.iter().filter(|(f, _)| f == "c/src/me.rs").count(),
+            1
+        );
+    }
+
     // ---- build scripts (gate 2) ----
 
     #[test]
@@ -2437,6 +2591,13 @@ mod tests {
                 "missed: {src} -> {d:?}"
             );
         }
+    }
+
+    #[test]
+    fn only_a_declared_fn_is_a_function() {
+        let src = "/// and `fn constraint` used to live here\nfn real() {}\nconst S: &str = \"fn phantom\";\n    pub(crate) fn r#match() {}\n/* fn hidden() */\nfn(u8) -> u8;\n";
+        let got = fn_names(src).unwrap();
+        assert_eq!(got, [(2, "real".to_owned()), (4, "match".to_owned())]);
     }
 
     #[test]

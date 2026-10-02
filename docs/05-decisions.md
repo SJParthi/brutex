@@ -44106,3 +44106,56 @@ and the gate tests parsed leaves.
 An operator's own shell environment is outside the repository. Invariant
 CIG-17.
 
+### D-1114 — Gate 10 builds its proof table from tokens and checks module-first tokens — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-2, AC-gates-o1-1 and AC-gates-law-11.
+
+First, gate 10's `(crate, fn)` table came from a line filter.
+- It dropped a `*`-led line.
+- It kept a `fn name` written in a string or a `/* */` block, so prose could
+  prove a row.
+
+Second, 52 tokens whose first segment is not a crate were counted "pending"
+and checked by nothing. Example: `server::store_wire::tests::…`. The branch's
+own comment said the crate was "not a member yet", but all thirteen crates are
+members.
+
+Third, X-01 sat in `allow_pending` on the claim that no run-identity function
+existed. `crates/runner/src/identity.rs` has held one, with tests, for a long
+time. The row named a phantom property test, and X-10's figures described a
+tree that no longer exists.
+
+**The choice.**
+- `source_scan fns` prints each `fn` keyword token with the identifier after
+  it. It reads `crates/**/*.rs` and the tracked `.github/*.rs` tools; the tools
+  are indexed by path only.
+- `source_scan modules` prints the module path at which each compiled file is
+  mounted, following `#[path]`. It stops at a file that mounts its own
+  ancestor.
+- `.github/invariant_paths.rs` takes that table as a third argument. A
+  module-first token in a table row must name a function declared in one of
+  two places:
+  - a tracked file mounted at a module path that some tail of the token's
+    module segments begins with, or
+  - a file whose path names the module.
+- An unresolvable mounting refuses.
+- X-01 leaves the allowlist. Its row now cites
+  `one_differing_bar_re_keys_the_identity` and
+  `every_term_changes_the_identity`. It is `◐` because only `close` is
+  perturbed. X-10 leads with the current figures.
+
+**Measured.**
+- Wiring the module table resolved four real tokens that the path heuristic
+  could not see. Example: `server::store_wire` lives in
+  `crates/api/src/store_wire.rs`.
+- Renaming the cited `server::store_wire` test in the document failed the
+  gate. The old gate counted the same token as pending and passed.
+- On this tree: 2312 rows, 1587 crate-qualified tokens checked, 52
+  module-first tokens resolved, 6 exempted (P-03, X-13), 0 missing.
+
+**Limits.**
+- The module check proves that a function of that name is declared in a file
+  at that module. It does not prove that the function is a `#[test]`.
+- A module-first token outside a table row is not read, as before.
+
+Invariant CIG-18.
