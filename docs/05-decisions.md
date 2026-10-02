@@ -43911,3 +43911,35 @@ rename per dependency name from a `package` key.
 has the same line parser. That crate is owned by another worker in this
 change, so it is left as it is. Gate 22 clause A no longer relies on it.
 Invariant CIG-11.
+
+### D-1108 — One banned-runtime list for gate 13, the vocab test and deny.toml, and gate 13 reads parsed manifests — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-6, ET-rust-only-purity-7 and
+UC-11. Gate 13 layer 1 matched three line patterns, and four valid spellings
+passed it: `"pyo3" = ..`, `pyo3 . version = ..`, `package = 'pyo3'` and
+`[dependencies."pyo3"]`. The lock layer and `cargo deny` still caught a
+resolved `pyo3`, so this was a loss of defence in depth. The three ban lists
+disagreed. Gate 13, which runs first, did not name `napi`, `rhai`, `mozjs`,
+`j4rs`, `quickjs`, `lua`, or the three crates that embed or bind the
+best-known interpreted language. The vocab `FORBIDDEN` list missed eleven
+names that gate 13 had. One `FORBIDDEN` entry, the `lib`-prefixed `-sys`
+shim, is not a crate: crates.io returned 404 for it on 2026-10-02.
+
+**The choice.** Gate 13 layer 1 now also reads every tracked `Cargo.toml`
+through `source_scan deps` (D-1100). A family match on a declaration's name or
+package is refused, and a manifest the scanner cannot read is refused. The
+line patterns stay. All three lists now name the same runtimes. Every added
+name returned HTTP 200 from `https://crates.io/api/v1/crates/<name>` on
+2026-10-02, and the missing shim was replaced by the crate that exists.
+`crates/core/tests/banned_lists.rs` reads all three lists from their files and
+fails when they drift. It lives in `core` because gate 22 clause D refuses a
+sweep crate's compile-time include of the workflow. The vocab lockfile check
+now matches families, as gate 13 does. The vocab file spells the three names
+with `concat!`, so gate 15's allowlist entry for it is removed.
+
+**Not changed.** `wasmtime` and the other WebAssembly runtimes stay unbanned
+by name, as gate 13's DELIBERATELY ABSENT list records (D-0298, D-0486).
+`deny.toml` cannot hold the three names that contain gate 15's word, so gate
+13 and the vocab test hold those. `deny.toml` matches exact names, not
+families. `cargo deny` is not installed in this environment, so the edited
+`deny.toml` was not checked by `cargo deny check` locally. Invariant CIG-12.

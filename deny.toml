@@ -112,6 +112,27 @@ deny = [
     { name = "node-bindgen" },
     { name = "neon" },
     { name = "jni" },
+    # ADDED BY D-1108, so this list, CI gate 13's and the `FORBIDDEN` list in
+    # crates/vocab/tests/workspace_is_rust.rs name the same runtimes; that test
+    # reads all three and fails when they drift. The three crates that embed or
+    # bind the best-known interpreted language are not here, because gate 15
+    # refuses the word in this file; gate 13 and that test hold them.
+    { name = "hlua" },
+    { name = "lua" },
+    { name = "lua-src" },
+    { name = "luajit-src" },
+    { name = "quickjs" },
+    { name = "rquickjs" },
+    { name = "duktape" },
+    { name = "mozjs" },
+    { name = "rhai" },
+    { name = "napi" },
+    { name = "j4rs" },
+    { name = "ruby-sys" },
+    { name = "magnus" },
+    { name = "rutie" },
+    { name = "ext-php-rs" },
+    { name = "openssl-sys" },
     # ADDED BY D-0211, WHICH REMOVED `ring` FROM THE BUILD. The list above is
     # about interpreted runtimes; these three are C and assembly, and nothing
     # stopped them returning once the TLS feature that pulled them was changed.

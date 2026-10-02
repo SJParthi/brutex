@@ -2081,15 +2081,29 @@ jobs:
           #     symbol demangler that arrives transitively behind `addr2line`.
           #     A gate that is wrong in the false-positive direction is a gate
           #     that gets allowlisted into silence.
-          banned='
-          pyo3
-          mlua rlua hlua lua-src luajit-src
-          rquickjs quickjs-rs duktape boa_engine deno_core v8 rusty_v8
-          neon node-bindgen
-          jni
+          #
+          # ONE LIST FOR THREE MECHANISMS (D-1108). This list,
+          # `crates/vocab/tests/workspace_is_rust.rs`'s `FORBIDDEN` and
+          # `deny.toml`'s `deny` were written apart and disagreed: this one,
+          # which runs first, named neither `napi`, `rhai`, `mozjs`, `j4rs`,
+          # `quickjs`, `lua`, nor the three crates that embed or bind the
+          # best-known interpreted language. They are added below, each having
+          # answered HTTP 200 from crates.io on 2026-10-02.
+          # `the_three_banned_lists_agree` in that test file reads THIS LIST
+          # out of this file and fails the build when the three drift. The
+          # banned word is spelled through `$snake` so gate 15 can keep
+          # refusing it outright here.
+          snake="$(printf 'py')thon"
+          banned="
+          pyo3 c${snake} rust${snake}-vm ${snake}3-sys
+          mlua rlua hlua lua lua-src luajit-src
+          rquickjs quickjs quickjs-rs duktape boa_engine deno_core v8 rusty_v8
+          mozjs rhai
+          napi neon node-bindgen
+          jni j4rs
           ruby-sys magnus rutie
           ext-php-rs
-          '
+          "
 
           # THE ESCAPE HATCHES ARE HERE, NEVER IN THE CODE. `path max_count`,
           # gate 1d's and gate 11's mechanism — no magic comment scattered
@@ -2190,12 +2204,21 @@ jobs:
           # truncates its line; no manifest here has one, and a truncated line
           # can only cause a MISS inside a comment, never a false refusal.
           decl="$work/decl"; : > "$decl"
+          # And the same manifests PARSED, one declaration per line (D-1108). A
+          # manifest the scanner cannot read is a refusal: an unparsed manifest
+          # is one whose dependencies nobody has vouched for.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          parsed="$work/parsed"; : > "$parsed"
           nt=0
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             case "${f##*/}" in Cargo.toml) ;; *) continue ;; esac
             nt=$((nt + 1))
             awk -v F="$f" '{ l = $0; sub(/#.*$/, "", l); print F":"NR":"l }' "$f" >> "$decl"
+            if ! "$scan" deps "$f" >> "$parsed"; then
+              printf '  REFUSED  %s could not be read as TOML\n' "$f"
+              bad=1
+            fi
           done < <(git ls-files '*Cargo.toml')
 
           # ---- layer 2: nothing in the LOCK either. -------------------------
@@ -2248,6 +2271,17 @@ jobs:
             # this, one word defeats the whole gate.
             d3="package[[:space:]]*=[[:space:]]*\"${fam}\""
             h=$( { grep -E "${d1}|${d2}|${d3}" "$decl" || true; } )
+            [ -z "$h" ] || dh="${dh}${h}
+          "
+            # THE SAME QUESTION, ASKED OF THE PARSED MANIFEST (D-1108). The
+            # three patterns above read lines, and four valid spellings walked
+            # past them: `"n" = ..`, `n . version = ..`, `package = 'n'` and
+            # `[dependencies."n"]`. `source_scan deps` lists every declaration
+            # as `FILE:LINE:kind:name:package`, so a family match on the NAME or
+            # the PACKAGE field is the declaration, however it was spelt. The
+            # line patterns stay: they are not weaker, and two readings that
+            # must both be fooled are stronger than one.
+            h=$( { grep -E "(:${fam}:[^:]+|:${fam})$" "$parsed" || true; } )
             [ -z "$h" ] || dh="${dh}${h}
           "
             h=$( { grep -E ":name[[:space:]]*=[[:space:]]*\"${fam}\"" "$lockc" || true; } )
@@ -2533,6 +2567,10 @@ jobs:
           #
           # The COUNT is pinned at 3, so a fourth occurrence in that file still
           # fails. This is a bounded hole with a named reason, not an exemption.
+          #
+          # AND THE ENTRY IS GONE (D-1108): that file now spells the three names
+          # with `concat!`, as gate 13 spells them through `$snake`, so it holds
+          # no occurrence and the word is refused there like everywhere else.
           # FOUR ENTRIES ADDED, AND ALL FOUR ARE THE HISTORICAL-REFERENCE CASE
           # the paragraph above says this list exists for. Every one names the
           # language of KITE'S OWN VENDOR SDK, in prose, while explaining why a
@@ -2553,7 +2591,6 @@ jobs:
           # number warns rather than fails, so a sentence removed later is
           # noticed without blocking the branch.
           allow_word='
-          crates/vocab/tests/workspace_is_rust.rs 3
           crates/pull/src/kite.rs 2
           crates/pull/src/refusal.rs 1
           crates/pull/src/vendor.rs 1
