@@ -64,7 +64,7 @@ differently on each (§3 rule 5).
 | 0 | 8 | `magic` | `b"BRUTEXB2"` |
 | 8 | 2 | `format_version` | `2` |
 | 10 | 2 | `record_stride` | `56`. Read it; never assume it. |
-| 12 | 4 | `flags` | bit 0: block checksums present |
+| 12 | 4 | `flags` | bit 0: block checksums present. Every other bit is zero; a set one is refused on read and on commit (D-1354) |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | **the commit counter.** See §5. |
 | 32 | 8 | `first_ts_micros` | of record 0. Meaningful only when `n_valid > 0`. |
@@ -72,7 +72,7 @@ differently on each (§3 rule 5).
 | 48 | 4 | `symbol_id` | resolved from the path; a cross-check, not the index |
 | 52 | 4 | `timeframe_secs` | 60 for 1-minute |
 | 56 | 4 | `slot_crc` | CRC-32C over bytes 0..56 **and** 60..64 |
-| 60 | 4 | reserved | zero |
+| 60 | 4 | reserved | zero; a non-zero value is refused (D-1353) |
 
 The checksum covers every byte of the slot except the four it occupies, so a
 flipped bit anywhere in the 64 is detected — there is no window a corruption

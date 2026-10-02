@@ -362,8 +362,9 @@ impl Header {
     /// [`FormatError::UnknownVersion`] or [`FormatError::RetiredVersion`] if
     /// this header names a version this build cannot write,
     /// [`FormatError::StrideMismatch`] if it names a stride its own version
-    /// does not define, or [`FormatError::OffsetOverflow`] if the counter puts
-    /// the end of the data past `u64`.
+    /// does not define, [`FormatError::UnknownFlags`] if it sets a flag bit
+    /// the version does not define, or [`FormatError::OffsetOverflow`] if the
+    /// counter puts the end of the data past `u64`.
     pub fn commit(&self) -> Result<Commit, FormatError> {
         self.commit_image()
             .inspect_err(|&refusal| note_commit_refused(self, refusal))
@@ -377,6 +378,10 @@ impl Header {
         let layout = Layout::for_version(self.format_version)?;
         if u64::from(self.record_stride) != layout.record_stride() {
             return Err(FormatError::StrideMismatch(self.record_stride));
+        }
+        // A slot this build writes must be one this build reads. D-1354.
+        if self.flags & !FLAG_CHECKSUMS != 0 {
+            return Err(FormatError::UnknownFlags(self.flags));
         }
         Ok(Commit {
             slot: self.generation % layout.slot_count(),
@@ -432,8 +437,9 @@ impl Header {
     ///
     /// [`FormatError::SlotTooShort`], [`FormatError::NotABarFile`],
     /// [`FormatError::UnknownVersion`], [`FormatError::RetiredVersion`],
-    /// [`FormatError::MagicVersionMismatch`], [`FormatError::SlotChecksum`] or
-    /// [`FormatError::StrideMismatch`] — checked in that order, so the most
+    /// [`FormatError::MagicVersionMismatch`], [`FormatError::SlotChecksum`],
+    /// [`FormatError::StrideMismatch`], [`FormatError::ReservedNotZero`] or
+    /// [`FormatError::UnknownFlags`] — checked in that order, so the most
     /// basic disagreement is the one reported.
     pub fn decode(slot: &[u8]) -> Result<Self, FormatError> {
         Self::decode_parts(slot).map(|(header, _)| header)
@@ -478,11 +484,23 @@ impl Header {
         if u64::from(record_stride) != layout.record_stride() {
             return Err(FormatError::StrideMismatch(record_stride));
         }
+        // THE RESERVED TAIL AND THE UNDEFINED FLAG BITS ARE READ, not skipped.
+        // Both are covered by the checksum, so a slot that fails here was
+        // written that way, and decoding it would read a slot whose meaning the
+        // format does not give. `docs/02-store-format.md` §2. D-1353, D-1354.
+        let reserved = u32::from_le_bytes(le_bytes(&image, OFF_RESERVED));
+        if reserved != 0 {
+            return Err(FormatError::ReservedNotZero(reserved));
+        }
+        let flags = u32::from_le_bytes(le_bytes(&image, OFF_FLAGS));
+        if flags & !FLAG_CHECKSUMS != 0 {
+            return Err(FormatError::UnknownFlags(flags));
+        }
         Ok((
             Self {
                 format_version,
                 record_stride,
-                flags: u32::from_le_bytes(le_bytes(&image, OFF_FLAGS)),
+                flags,
                 generation: u64::from_le_bytes(le_bytes(&image, OFF_GENERATION)),
                 n_valid: u64::from_le_bytes(le_bytes(&image, OFF_N_VALID)),
                 first_ts_micros: i64::from_le_bytes(le_bytes(&image, OFF_FIRST_TS)),
