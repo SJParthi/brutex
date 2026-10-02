@@ -48538,6 +48538,658 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-1100 — Read the gates' inputs as tokens, and refuse three workflow shapes that switch a gate off — 2026-10-02
+
+**What was wrong.** An audit (lane 2, findings ET-rust-only-purity-0..10,
+UC-5..12, AC-gates-*) fed the shell gates valid source they passed: `r#Command`,
+`#[path]`, `pub(crate) mod`, `include!`, `*slot = "acmeorg";` dropped as a
+comment line, `#[cfg(test)] use std::{fs, io};` swallowing the next function,
+`[dependencies . indicators]`. Each gate read characters on a line. Separately,
+twenty-three `printf ... | grep -q` tests ran under `set -o pipefail`: grep exits
+at its first match, the producer takes SIGPIPE once its output is larger than a
+pipe buffer, and the `if` reads the match as a miss (AC-gates-law-5). Gate 1e's
+toolchain-word check over `cargo test` output was one of them. And Gate W5 ran
+an 86-line JavaScript program through `node -e` from `ci.yml`, a tracked file
+outside `web/` (ET-rust-only-purity-9).
+
+**The choice.** One dependency-free Rust file, `.github/source_scan.rs`, built by
+`rustc` in a new gate 0 the same way gate 10 builds `invariant_paths.rs` and
+gate 18 builds `mutation_gate.rs`. Gate 0 runs its unit tests first and exports
+the binary's path as `SOURCE_SCAN` for the rest of the `language-purity` job.
+Later decisions move each gate onto it. A shell regex per spelling was rejected:
+every audit pass found one more spelling, and the lexer answers the question
+the regex approximated.
+
+Gate 0 also reads every tracked workflow and refuses: a pipe into `grep -q` (each
+of the 23 is now `grep -q ... <<< "$x"`, which has no pipe), `continue-on-error`
+anywhere, and an interpreter given a program inline (`node -e`, `-c` to the py-family interpreters,
+`perl -e`, `ruby -e`, `php -r`, `deno eval`). Gate W5's program moved verbatim
+to `web/ci/css-comments.mjs`, an ES module, where D-0053 makes any language
+legal. It now also refuses an empty file list itself.
+
+**Limits.** The workflow reader reads `ci.yml`'s own layout (jobs at two
+spaces, steps at six), not YAML in general. The pipe check reads one logical
+shell line after `\` and leading-`|` continuations are joined. A grep fed by
+a process substitution or a file is not a pipe and is not refused.
+Invariants CIG-01 and CIG-02.
+
+### D-1101 — Read a build script's files and calls from tokens, and shadow every interpreter in gate 1e — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-0 and UC-10. Gate 2 found a
+build script's files by grepping `^(pub )?mod NAME;` and its spawns with five
+regexes. An audit appended `use std::process as p;` and
+`p::r#Command::r#new("/usr/local/bin/node").r#status()` to the allowlisted
+`crates/cli/build_provenance.rs`, and added files through `#[path] mod`,
+`pub(crate) mod` and `include!`. A compiled build script ran seven spawns,
+Node and another interpreter among them, with gates 2, 13 and 1e green. Gate 13
+layer 3 counted the same incomplete file set against its three-file
+allowlist, so the extra files were never counted.
+
+**The choice.** Both gates call `source_scan closure` (D-1100), which follows the
+compiler's resolution and refuses what it cannot resolve. Gate 2 then calls
+`source_scan build`, a token check. A process-spawning type, any `std::process`
+member that can start a child, the spawn methods, and the four ways to call code
+the scan cannot read (`macro_rules`, `unsafe`, `extern`, `asm!`, plus `libc`) are
+refused in any build-script file. `std::process::id()`, used by
+`build_provenance.rs`'s tests, is one of six named members that start nothing
+and stays legal. Gate 1e also shadows the py-family interpreters, `perl`,
+`ruby`, `php`, `lua` and `luajit`.
+
+**Limits.** A program reached by absolute path is still not shadowed by gate 1e.
+Gate 2's source check is the control for that case, so the rule does not depend
+on PATH. Invariants CIG-03, CIG-04.
+
+### D-1102 — A guarded step must block the run, not just appear in it — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-7, AC-gates-o1-3 and AC-gates-cx-2.
+`runs_unconditionally`, copied into gate 13 layer 4 (gate 3's `cargo deny`) and
+gate 14 layer 5 (gate 8's benches), refused only an `if:` that collapses to a
+literal false. Each of these left both checks printing `present`: a step-level
+`continue-on-error: true`, `if: false && true`, `if: github.run_attempt == 0`,
+or a job-level `if:` (out of scope by the helper's own comment). Gate 14's
+comment also said gate 8 carries `if: always()`. That step has no `if:`.
+
+**The choice.** `source_scan step-runs` takes an allowlist of safe conditions,
+not a denylist of unsafe ones. A guarded step and its job may carry no
+`continue-on-error` other than `false`. Their `if:` must be absent or one of
+`always()`, `success()`, `!cancelled()` and the build job's crate probe. The
+probe is false only for a tree with no `crates/*/Cargo.toml`, and gate 16
+refuses that tree in the job `build` needs. The job must also appear in ci-ok's
+`needs`. Gate 0 (D-1100) refuses `continue-on-error` anywhere in a tracked
+workflow as well. The false comment is corrected. Invariant CIG-05.
+
+### D-1103 — Gate 16 reads every crate root, not two per crate — 2026-10-02
+
+**What was wrong.** Finding AC-gates-cx-1. Gate 16's rule is "every crate root
+forbids unsafe outright", and it read only `src/lib.rs` and `src/main.rs`. Every
+`tests/*.rs`, `benches/*.rs` and `build.rs` is a crate root of its own. The
+workspace deny reaches them, but one `#[allow(unsafe_code)]` switches it off,
+and gate 5 passes up to three with no decision entry. In `build.rs` an `unsafe
+extern "C"` call to `system` starts a shell with no token gate 2 read.
+
+**The choice.** Layer 1b computes the scanner closure (D-1100) of every other
+root: `build.rs`, `tests/*.rs`, `benches/*.rs`, `examples/*.rs`, `src/bin/*.rs`.
+It refuses `unsafe`, a foreign `extern` interface or `asm!` in any file of that
+closure, read from tokens. Adding `#![forbid(unsafe_code)]` to all 90 roots was
+the alternative. It was not taken here because several of those files belong to
+lanes this change does not own. The token refusal is at least as strict: no
+`allow` can switch it off. The tree uses none. Invariant CIG-06.
+
+### D-1104 — Gate 1 reads modes and content, and every tracked `.rs` must be compiled — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-3, -8, -10, UC-8, UC-12 and
+AC-gates-law-10. Gate 1 decided from the name alone. Non-Rust content under a
+`.rs` name passed. So did `LICENSE` at any depth, an executable bit, a symlink,
+and a NUL byte, which makes gate 15's `grep -I` skip the file: the banned word
+in a `.md` beside one NUL printed OK. A non-ASCII `.rs` was refused, because
+`git ls-files` quotes it and the parsed extension became `rs"`. Gates 1, 1b and
+1c read `git ls-files` through `< <(...)` or `| ... || true`, so a git that
+failed (a moved worktree, a refused owner) gave an empty listing and a pass.
+
+**The choice.** Gate 1 reads `git ls-files -s -z` from a file. It refuses any
+mode other than 100644 outside `web/`. It places `LICENSE` and `CODEOWNERS` at
+the root (`CODEOWNERS` also under `.github/` or `docs/`). It refuses an empty
+listing. It adds two scanner checks. `content` refuses a NUL byte, non-UTF-8, a
+shebang `.rs`, and browser code in `.html`/`.css`. `orphans` refuses a tracked
+`.rs` outside `web/` that no crate root or `.github` tool compiles. A compiled
+file must be Rust or the build fails; an uncompiled one is not Rust to anything,
+whatever it holds. Gate 15 now reads with `grep -a`, so a binary file is read and
+not skipped. Gates 1b and 1c write their listings first. The tree has no
+orphan, no NUL and no mode other than 100644. Invariants CIG-07, CIG-09.
+
+**Limits.** `web/` keeps D-0053's freedom, so none of these apply there.
+
+### D-1105 — No tracked configuration names a program for cargo, rustup or nextest — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-1 and -2. `.toml` is allowed
+anywhere. A tracked `.cargo/config.toml` can set `build.rustc-wrapper` to an
+executable script named `.rs`, which cargo runs for every rustc invocation. A
+`[scripts.setup.*]` table in `.config/nextest.toml` runs shell before the
+mutation job's tests. `rust-toolchain.toml`'s `toolchain.path` names a toolchain
+to run. No gate read any of them.
+
+**The choice.** New gate 1g. It refuses any tracked file under a `.cargo/`
+directory at any depth. It refuses a `rust-toolchain.toml` or `nextest.toml`
+anywhere but its one place, and any other file under `.config/`. It passes the
+two tool files' keys, read by the scanner's TOML walker, only through an
+allowlist: `toolchain.{channel,components,targets,profile}` and
+`profile.*.overrides[].{filter,priority}`. A new key is a reviewed edit. It also
+refuses a workflow that sets a rustc wrapper, `RUSTC`, a target runner or linker,
+or passes `cargo --config`. Gate 1's mode check (D-1104) separately refuses the
+executable script. Invariant CIG-08.
+
+### D-1106 — Gate 1f reads every production string literal, case-blind, and past the first test module — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-4, UC-5 and UC-9. Gate 1f
+grepped lines case-sensitively for five words and dropped any line holding
+`src=` anywhere, including `data-src=` and `<img src=x onerror=..>`. It never
+looked for an `on*=` handler or `javascript:`. It stopped reading each file at
+the first `#[cfg(test)]`, leaving 385 public items in 48 files unscanned while
+its comment said no such file existed. `<SCRIPT>`, `onclick=` and
+`concat!("<scr", "ipt>..")` all passed, and the success line claimed "no inline
+handler".
+
+**The choice.** `source_scan browser` (D-1100). It removes exactly the
+`#[cfg(test)]` items, measured by token extent. It decodes each literal's
+escapes and joins each `concat!`. It then refuses, case-blind: a `<script>`
+without its own `src` or with a body, an `on*=` attribute in any tag,
+`javascript:`, and the named browser APIs. The two external loaders,
+`/typeahead.js` and `/masters.js`, pass. Prose words such as "document" and
+"window" pass because only member access is matched.
+
+**Limits.** Markup assembled at run time from pieces that are not one literal
+or one `concat!` is not seen. Invariant CIG-10.
+
+### D-1107 — Manifests are read as TOML by every gate that pins a dependency set, and an absent manifest refuses — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-0, AC-gates-cx-0 and LATE-gates-and-ci
+#13 (gates 9 and 9b). Gates 9, 9b and 22 clause A refused the table spellings
+they could not parse and extracted `name =` from the flat `[dependencies]`
+table, on the claim that with the refusal held the extraction was complete. The
+refusal read headers with `^\[dependencies\.`, so `[ dependencies . store ]`,
+`["dependencies"]` and a root-level `dependencies.store = { .. }` matched
+neither the refusal nor the extraction, and each gate printed its success line
+over a declared dependency. Gate 22 clause A compared dependency NAMES, so
+`vocab = { package = "store", .. }` passed as `vocab`. Gates 9 and 9b printed
+"skip — crate not created yet" and passed when the manifest was missing. Gate
+21 clause A (an awk range) and gate 23 clause B's `has_telemetry` had the same
+parse. `crates/core/tests/graph.rs` had the same holes, and read any value
+containing the word `package` as a rename.
+
+**The choice.** Every one of these gates calls `source_scan deps` (D-1100),
+which parses the manifest as TOML and prints `kind:name:package` for every
+declaration in every linking table, `target.*`, `[patch]` and `[replace]`.
+Gates 9, 9b and 21 clause A refuse any line. Gate 22 clause A compares the
+sorted `kind:package` set with its pin. Gate 23 answers yes only for a plain
+`dependencies` declaration of the package `telemetry`. A manifest that is not
+tracked, or that the scanner cannot read, refuses. `graph.rs` splits headers
+and keys into TOML segments, strips comments outside quotes, and resolves a
+rename per dependency name from a `package` key.
+
+**Deferred.** `engine::tests::declared_dependencies` in `crates/engine/src/lib.rs`
+has the same line parser. That crate is owned by another worker in this
+change, so it is left as it is. Gate 22 clause A no longer relies on it.
+Invariant CIG-11.
+
+### D-1108 — One banned-runtime list for gate 13, the vocab test and deny.toml, and gate 13 reads parsed manifests — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-6, ET-rust-only-purity-7 and
+UC-11. Gate 13 layer 1 matched three line patterns, and four valid spellings
+passed it: `"pyo3" = ..`, `pyo3 . version = ..`, `package = 'pyo3'` and
+`[dependencies."pyo3"]`. The lock layer and `cargo deny` still caught a
+resolved `pyo3`, so this was a loss of defence in depth. The three ban lists
+disagreed. Gate 13, which runs first, did not name `napi`, `rhai`, `mozjs`,
+`j4rs`, `quickjs`, `lua`, or the three crates that embed or bind the
+best-known interpreted language. The vocab `FORBIDDEN` list missed eleven
+names that gate 13 had. One `FORBIDDEN` entry, the `lib`-prefixed `-sys`
+shim, is not a crate: crates.io returned 404 for it on 2026-10-02.
+
+**The choice.** Gate 13 layer 1 now also reads every tracked `Cargo.toml`
+through `source_scan deps` (D-1100). A family match on a declaration's name or
+package is refused, and a manifest the scanner cannot read is refused. The
+line patterns stay. All three lists now name the same runtimes. Every added
+name returned HTTP 200 from `https://crates.io/api/v1/crates/<name>` on
+2026-10-02, and the missing shim was replaced by the crate that exists.
+`crates/core/tests/banned_lists.rs` reads all three lists from their files and
+fails when they drift. It lives in `core` because gate 22 clause D refuses a
+sweep crate's compile-time include of the workflow. The vocab lockfile check
+now matches families, as gate 13 does. The vocab file spells the three names
+with `concat!`, so gate 15's allowlist entry for it is removed.
+
+**Not changed.** `wasmtime` and the other WebAssembly runtimes stay unbanned
+by name, as gate 13's DELIBERATELY ABSENT list records (D-0298, D-0486).
+`deny.toml` cannot hold the three names that contain gate 15's word, so gate
+13 and the vocab test hold those. `deny.toml` matches exact names, not
+families. `cargo deny` is not installed in this environment, so the edited
+`deny.toml` was not checked by `cargo deny check` locally. Invariant CIG-12.
+
+### D-1109 — Gates 1c, 1d, 17, 23 and 24 read tokens, and no listing is word-split — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-1, AC-gates-cx-4, AC-gates-law-8,
+AC-gates-law-10 (gate 1d), LATE-gates-and-ci #5 and #13 (gate 17). Gates 1d,
+17, 23 and 24 dropped every line whose first non-blank character was `//` or
+`*`. A `*slot = "acmeorg";` statement, a `*s = 1; eprintln!(..)` statement and
+a `*s = Some(MmapOptions::new().map_anon()?)` statement were therefore never
+read. `map_anon` is safe, so `forbid(unsafe_code)` does not stop it. Gates 17
+and 23 matched macro names as text. `use std::eprintln as note;` followed by
+`note!(..)` printed to stderr and counted as nothing. Gate 17 did not look for
+`dbg!`. Gate 23 counted a `println!` written inside a string literal as a
+print. Gates 17 and 23 word-split their file lists. Gate 17 printed "absent"
+and passed when a swept crate was missing. Gate 1d required a segment to begin
+with `[a-z0-9]` and gate 1c required the org to begin with `[A-Za-z0-9]`, but
+`pull::config::check_segment` also accepts `_` and `-` there. Gate 1d read its
+listing through process substitution, so a failing git produced a pass.
+
+**The choice.** `source_scan` gains `strings`, which prints every string
+literal's decoded value. `paths` now reads a leading `::` as the crate root
+and marks each macro invocation with a trailing `!`. Gate 1d extracts every
+literal that is segment-shaped in whole, plus every `"word"` quoted inside a
+literal. Its new words are declared with a reason: three config-fixture
+segments hidden behind `\"`, three JSON and CSV keys, and six negative numbers.
+Gates 17 and 23 match canonical paths. Gate 17 reads each swept crate's tracked
+`src/` plus the module closure of its `src/lib.rs`, and it refuses an absent
+crate. Gate 23's declaration drops `telemetry/src/record.rs`, whose one
+"print" is an assertion message. Gate 24 greps the comment-blanked view, with
+line numbers that are true. Gate 1c accepts `_` and `-` before the org and
+matches the environment word case-blind. Every one of these gates reads a
+NUL-separated listing file.
+
+**Limits.** Gate 1d still does not extract a segment containing an upper-case
+letter. There are 356 such distinct values in `crates/pull` today, and gate 1c
+covers a mixed-case joined path. Gate 23 counts the `use` that imports a
+stream handle together with its calls. Invariant CIG-13.
+
+### D-1110 — The cli test fixtures name their process, and gate 23 clause C reads tokens — 2026-10-02
+
+**What was wrong.** Finding LATE-gates-and-ci #10. Gate 23 clause C allowed
+four fixed temporary paths in `cli/src/results.rs` and one in `cli/src/lib.rs`
+(`brutex-v2-read-test`, `brutex-v2-append-test`, `brutex-v9-test`,
+`brutex-wire-test`). The stated reason was that "under `cargo test` they run in
+one process on separate names, so nothing collides". `cargo nextest` runs each
+test in its own process, and two checkouts running the suite at once share one
+temp directory. Each fixture calls `remove_dir_all` on its root, so a second
+run could delete the first run's ledger mid-test. The ceiling for `results.rs`
+read 4 where 3 sites existed. The clause also skipped `*`-led lines and read its
+listing through process substitution.
+
+**The choice.** Each of the four fixtures now names `process::id()`, as
+`results.rs`'s own `brutex-results-*` fixtures already did, and the `cli`
+entries leave the ceiling. `pull/tests/unit.rs`'s ceiling drops from 4 to the
+3 it measures. The clause reads `source_scan code`, in which comments are blank
+and every other line is itself, from a NUL-separated listing. Invariant CIG-14.
+
+### D-1112 — Gates 21 and 22 read filesystem capability as canonical paths — 2026-10-02
+
+**What was wrong.** Findings AC-gates-cx-3, LATE-gates-and-ci tests-bite #3
+and #4, and #13 (gate 22 clauses B to D). Gate 21 counted nine substrings in
+the logger's production code. `File::create`, `fs::write` and `File::options`
+were not among them, so the logger could write any path while the gate
+printed "the declared one". Its production window was cut by an awk walk, and
+a line filter dropped `*`-led statements. Gate 22 clause B grepped text, so
+`use std::{fs as f}; f::read(p)` matched none of its patterns. Clause C
+anchored on `use store`, so `use ::store::file as sf;` passed. Clauses B to E
+skipped a swept crate whose directory was absent.
+
+**The choice.** Gate 21 reads `source_scan paths-prod` (D-1100). That command
+removes `#[cfg(test)]` items by token extent and expands `use` aliases. The
+surface is every path into `std::fs`, `std::process`, `std::net` or `std::os`
+whose last segment is a function, counted per file and compared exactly. The
+declaration is re-spelt as canonical paths and its counts are unchanged. A
+glob import of those modules is refused. Gate 22 gains clauses B2 and C2, which
+ask clauses B and C's questions of canonical paths over each swept crate's
+`src/`, `benches/` and the module closure of `src/lib.rs`. They refuse a
+swept crate whose `src/lib.rs` is not tracked. The text clauses stay.
+
+**Limits.** A method call that touches the filesystem, such as
+`path.exists()`, is not a path and is not seen. `extern crate store as s;`
+does not record its alias. Clause A pins three of the four swept crates'
+dependency sets, which closes the second case for those three. Invariant
+CIG-15.
+
+### D-1111 — Gates 13b and 13c read what cargo builds, not what is declared — 2026-10-02
+
+**What was wrong.** Finding rustonly-6. Gate 13 checks declared and resolved
+names against the banned runtimes. `ring` is a C library and is in `Cargo.lock`
+as an optional entry. With `ring` turned back on, here by a direct `ring`
+dependency in `crates/pull` (the audit used a `rustls` feature), cargo compiled
+it, and gate 13 still printed its success line. Only `cargo deny`, which is not
+run locally, stood between the workspace and a vendored C binding. That breaks
+`CLAUDE.md` §2.
+
+**The choice.** Gate 13b runs
+`cargo tree --workspace --locked --offline -e normal,build,dev` for the host
+target. It refuses any package whose name is in a family on its list: gate 13's
+runtimes plus `ring`, `aws-lc-rs`, `aws-lc-sys`, `cc` and `openssl-sys`. Each
+refusal prints `cargo tree -i` for that package. A lock-only optional entry is
+legal; a built one is not.
+
+Gate 13c reads `cargo build --message-format=json`. It refuses a build script
+that reports any `linked_libs`. It also refuses one that leaves a `.o`, `.a`,
+`.obj`, `.lib`, `.so`, `.dylib` or `.dll` in its `out_dir`. This catches a C
+compile that uses no listed crate name.
+
+Both steps self-test on a fixture before they read the tree.
+`core::banned_lists::the_three_banned_lists_agree` now also pins gate 13b's
+list to the vocab forbidden list joined with `deny.toml`'s native crates.
+Gate 13's own success line no longer claims "built".
+
+**Measured.**
+- On this tree, gate 13b read 203 packages and gate 13c read 25 build-script
+  runs. Both passed.
+- With `ring = "0.17"` added to `crates/pull` and the lockfile updated offline,
+  gate 13b failed and named `ring v0.17.14 <- pull`. Gate 13 passed on that
+  same tree.
+
+**Limits.**
+- `cargo tree` covers the host target only. A dependency gated on another
+  `cfg(target_os)` is not read.
+- Gate 13c sees native output only where a build script reports it or writes
+  it to its `out_dir`.
+- `cargo deny check` was not run locally.
+
+Invariant CIG-16.
+
+### D-1113 — Gate 25 reads every manifest's profiles as TOML — 2026-10-02
+
+**What was wrong.** Finding AC-gates-law-6. Gate 25's "off" check was
+`^overflow-checks = false` at column zero of the root manifest. It missed four
+spellings, and each one let a release build wrap while the gate passed:
+- an indented key
+- a quoted key
+- a dotted `profile.release.overflow-checks` key
+- a `[profile.release.package.<name>]` override
+
+The presence checks had the same blindness. The environment
+(`CARGO_PROFILE_<NAME>_OVERFLOW_CHECKS`, or a codegen flag in `RUSTFLAGS`) was
+not read at all.
+
+**The choice.** Every tracked `Cargo.toml` is read through `source_scan toml`,
+and the gate tests parsed leaves.
+- Presence: the root manifest must hold the leaves
+  `profile.release.overflow-checks = true` and
+  `profile.release.panic = "abort"`.
+- Refusal: any leaf under `profile` that ends in `overflow-checks` with a value
+  other than `true`.
+- Environment: every tracked workflow is grepped for the environment variable
+  and for an off-valued `overflow-checks` flag. The patterns are assembled from
+  pieces so the step does not match itself.
+- A tracked `.cargo/config.toml` is already refused by gate 1g (D-1105).
+
+**Measured.**
+- On this tree, the gate passes.
+- It fails on `[profile.release.package.engine]` with an indented,
+  quoted `"overflow-checks" = false`.
+- It fails on an `overflow-checks` environment line appended to `ci.yml`.
+
+**Limits.** A `RUSTFLAGS` value assembled at run time from pieces is not seen.
+An operator's own shell environment is outside the repository. Invariant
+CIG-17.
+
+### D-1114 — Gate 10 builds its proof table from tokens and checks module-first tokens — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-2, AC-gates-o1-1 and AC-gates-law-11.
+
+First, gate 10's `(crate, fn)` table came from a line filter.
+- It dropped a `*`-led line.
+- It kept a `fn name` written in a string or a `/* */` block, so prose could
+  prove a row.
+
+Second, 52 tokens whose first segment is not a crate were counted "pending"
+and checked by nothing. Example: `server::store_wire::tests::…`. The branch's
+own comment said the crate was "not a member yet", but all thirteen crates are
+members.
+
+Third, X-01 sat in `allow_pending` on the claim that no run-identity function
+existed. `crates/runner/src/identity.rs` has held one, with tests, for a long
+time. The row named a phantom property test, and X-10's figures described a
+tree that no longer exists.
+
+**The choice.**
+- `source_scan fns` prints each `fn` keyword token with the identifier after
+  it. It reads `crates/**/*.rs` and the tracked `.github/*.rs` tools; the tools
+  are indexed by path only.
+- `source_scan modules` prints the module path at which each compiled file is
+  mounted, following `#[path]`. It stops at a file that mounts its own
+  ancestor.
+- `.github/invariant_paths.rs` takes that table as a third argument. A
+  module-first token in a table row must name a function declared in one of
+  two places:
+  - a tracked file mounted at a module path that some tail of the token's
+    module segments begins with, or
+  - a file whose path names the module.
+- An unresolvable mounting refuses.
+- X-01 leaves the allowlist. Its row now cites
+  `one_differing_bar_re_keys_the_identity` and
+  `every_term_changes_the_identity`. It is `◐` because only `close` is
+  perturbed. X-10 leads with the current figures.
+
+**Measured.**
+- Wiring the module table resolved four real tokens that the path heuristic
+  could not see. Example: `server::store_wire` lives in
+  `crates/api/src/store_wire.rs`.
+- Renaming the cited `server::store_wire` test in the document failed the
+  gate. The old gate counted the same token as pending and passed.
+- On this tree: 2312 rows, 1587 crate-qualified tokens checked, 52
+  module-first tokens resolved, 6 exempted (P-03, X-13), 0 missing.
+
+**Limits.**
+- The module check proves that a function of that name is declared in a file
+  at that module. It does not prove that the function is a `#[test]`.
+- A module-first token outside a table row is not read, as before.
+
+Invariant CIG-18.
+
+### D-1115 — Gate 11 rule 6 reads method chains, and rule 5c's awk is linear — 2026-10-02
+
+**What was wrong.** Finding AC-gates-law-3. Rule 6 grepped
+`.iter().find(`, `.position(` and `.rposition(` one corpus line at a time.
+Past 100 columns `cargo fmt` breaks a chain before every `.`, so the
+formatter's default shape for a long expression could add a data-bounded
+search with no allowance raised. This is not an evasion; it is what `cargo fmt`
+does.
+
+**The choice.**
+- Rule 6 reads `chained`, the corpus with each record whose code begins with
+  `.` folded onto the record above it in the same file. The fold keeps that
+  record's `FILE:LINE`.
+- A fixture of three chains, one of them at a file boundary, must yield
+  exactly three hits before the corpus is read.
+- On this tree the fold finds 76 sites against 35 declared: 41 more in 29
+  files. A spot check of five found fixed tables or one record's own fields.
+  Five is not 41, so the 41 are pinned per file in `allow_scan_unread`, labelled
+  measured and not classified. That list may only shrink.
+- Rule 5c's attribute walk built a regex from each line's own `FILE:LINE`.
+  Under mawk, which keeps every regex it compiles, that made the step
+  quadratic: a local run did not finish in 50 minutes. It is now a constant
+  pattern with the same match, and the whole gate runs in seconds.
+
+**Measured.**
+- Before the fold, a function ending
+  `values\n    .iter()\n    .find(..)` in `crates/core/src/price.rs` would pass
+  rule 6, because no line holds the whole pattern.
+- With the fold, rule 6 refused it at `price.rs:590`, 1 occurrence with 0
+  allowed.
+- On the real tree the gate passes.
+
+**Limits.**
+- A chain with another call between `.iter()` and `.find(`, such as
+  `.iter().copied().find(`, is still outside the rule's pattern. That was true
+  before this change and is unchanged.
+- A trailing `//` comment on the line before a `.` continuation lands inside
+  the joined record and can split the pattern.
+- The 41 sites are recorded as unread in `docs/06-limits.md`.
+
+Invariant CIG-19.
+
+### D-1116 — Gates 12 and 14 share one claim reader, and gate 12 excuses a block by its item — 2026-10-02
+
+**What was wrong.** There were two findings.
+
+The first is LATE-gates-and-ci tests-bite #8. Gate 14 said it used gate 12's
+trigger "character for character", but it scrubbed with one `sed` where gate 12
+ran five, and its non-claim noun list lacked `director(y|ies)`. A block that
+gate 12 excused as a financial `worst case` was a cost claim to gate 14.
+
+The second is AC-gates-o1-2. Gate 12's `allow_claim` was `FILE COUNT`.
+- `note_grid_progress` gained its UNVERIFIED.
+- Its slot went silently to `window_range_percentile`'s "O(1) amortised per
+  bar", which named no proof.
+- The log was unchanged, because an allowed file printed no locations.
+
+**The choice.**
+- The block reader, trigger, `notclaim` and scrub live in one region, marked
+  `>>> CLAIM READER` and `<<< CLAIM READER`, which is carried byte-identically
+  by both steps.
+- Gate 14 refuses unless there are exactly two copies and they are equal.
+  `crates/core/tests/claim_reader.rs` holds the same facts under `cargo test`.
+- The reader prints, for each block, the item it documents: the name below
+  it, `impl`, `//!` or `-`.
+- `allow_claim` entries are `FILE ITEM`. Each allowed block is printed with its
+  location, and an entry naming `-` or without exactly two fields is refused.
+- The one entry left is `crates/cli/src/lib.rs base_win_rate_bp`, where the
+  trigger is the English word "flat".
+- `window_range_percentile`'s doc now says UNVERIFIED, and `docs/06-limits.md`
+  records why.
+
+**Measured.**
+- Gate 12 on this tree: 397 claims, 1 naming nothing, and that one is allowed
+  by item.
+- With the UNVERIFIED removed, gate 12 refused
+  `crates/cli/src/lib.rs:4516 (window_range_percentile)`. The old `lib.rs 2`
+  entry would have passed it.
+- Deleting one `sed` line from gate 14's copy failed gate 14 with the diff.
+- Gate 14 on this tree: 374 claims, all crates covered.
+
+**Limits.**
+- The item is read from the first code line below a block. A block over a
+  macro invocation or an expression names `-`, and `-` cannot be allowlisted.
+- Two items with the same name in one file share an entry.
+
+Invariant CIG-20.
+
+### D-1117 — Gate 14 counts measurements and printed ids from tokens — 2026-10-02
+
+**What was wrong.** Finding AC-gates-o1-0. Layer 3 counted lines containing
+`ratio(` against `min_points`. That count had three defects:
+- It counted comments.
+- It counted `fn growth_ratio(` as a measurement.
+- The pins were never raised. Engine carried 12 call sites against a pin of 4,
+  vocab 12 against 7, and store 9 against 4.
+
+Layer 4 accepted an id if it appeared anywhere in the bench file. Every C-E id
+appears on a `///` line in another row's doc, so the mask-evaluation rows could
+be emptied with every text gate green.
+
+**The choice.**
+- Layer 3 counts lines of `source_scan code` output that call a helper whose
+  name ends in `ratio`. The convention `indicators`' `two_sided_ratio` was
+  named for still counts. Comments are blank, and a line declaring such a
+  helper is excluded.
+- Every pin is that count at this commit: core 3, pull 6, store 9, api 4,
+  costs 27, lake 6, telemetry 8, greeks 6, vocab 12, indicators 6, engine 12,
+  runner 3, cli 4. Each pin is equal to or higher than before.
+- Layer 4 counts an id as printed only when it is the first word of a decoded
+  string literal in the bench, as `printed_ids` in
+  `crates/core/tests/cost_invariants.rs` already does.
+
+**Measured.** In the vocab bench, commenting out one `ratio(` call and renaming
+the `C-V-01` label failed layer 3 with "11-of-12-measurement-points" and layer
+4 with "C-V-01: in-invariants=1 in-bench=0". The old layers passed both: 12
+lines still matched `ratio(` against a pin of 7, and `C-V-01` was still in a
+doc comment. On this tree the gate passes.
+
+**Limits.**
+- A string literal that contains `ratio(` would still count as a call.
+- The engine and runner benches are owned by other lines of work. Their pins
+  now bind any edit that removes a measurement from them.
+
+Invariant CIG-21.
+
+### D-1118 — Opening /masters is proven by running the script, not by reading one spelling — 2026-10-02
+
+**What was wrong.** Finding LATE-gates-and-ci correctness-and-extremes #11.
+Gate W6 enforces the operator's rule that opening a page spends no vendor
+request. It did so with `grep -qE "^$fn\(\);"`, so only a `refresh();` or
+`verify();` at column zero was refused. An indented call passed, and so did:
+- a call with no semicolon
+- `setTimeout(refresh)`
+- a `load` or `DOMContentLoaded` listener
+- an `onload` assignment
+
+Each of these calls the function when the page loads, which is exactly what
+the gate's own comment says it refuses.
+
+**The choice.** `web/tests/masters-load.test.js` loads `web/masters.js` into a
+`node:vm` context with a stub document. It plays the page's load: every load
+event on window and document, the `on*` handlers, every timer, every settled
+promise. It records every `fetch`, then checks three things:
+- Opening the page asks for `/masters/status.json` and nothing else.
+- Pressing `#go` and `#verify` reach `/masters/refresh` and
+  `/indexmap.json?feed=`.
+- Twelve load-time spellings, each appended to the real script, are each
+  caught.
+
+Gate W2 already runs every `web/tests/*.test.js`. Gate W6 now refuses if this
+file is not tracked and keeps its text checks as the fast first answer. All of
+this lives under `web/` and in the browser job, so no crate gains the front
+end's toolchain (CLAUDE.md §2).
+
+**Measured.** With `  refresh();` appended to `web/masters.js`, gate W6 passed
+and the new test failed `opening the page asks only for the socket-free
+status`. On the real script all three tests pass.
+
+**Limits.** The stub document answers only what `masters.js` uses. A script
+that reaches the network through something the stub lacks, such as
+`XMLHttpRequest`, `navigator.sendBeacon` or an `<img>` source, would throw
+or go unrecorded rather than be counted. Invariant CIG-22.
+
+### D-1119 — Gate 18 plans mutants in every file cargo-mutants walks, under the name it uses — 2026-10-02
+
+**What was wrong.** Finding GAP14-56. Gate 18 diffed only
+`crates/*/src/*.rs`, so `crates/cli/build_provenance.rs` and
+`crates/cli/commit_stamp.rs`, both mounted by `#[path]` from outside `src/`,
+never reached the plan. Widening the pathspec alone changed nothing, for two
+measured reasons:
+- The verifier was compiled only into `build.rs` and an integration test.
+  cargo-mutants walks neither.
+- cargo-mutants names a `#[path]`-mounted file by its spelled path,
+  `crates/cli/src/../commit_stamp.rs`. The diff names it
+  `crates/cli/commit_stamp.rs`, so `--in-diff` matched nothing even for
+  `commit_stamp.rs`, which the library already mounts.
+
+**The choice.**
+- `cli`'s library mounts `build_provenance.rs` under `#[cfg(all(test))]`, in
+  place of `tests/build_provenance.rs`.
+  - Its 18 tests now run in the library's test build, as they ran in the
+    integration test.
+  - It stays out of the binary, because `sha1` and `flate2` remain
+    dev- and build-dependencies only.
+  - It is written `all(test)` because cargo-mutants skips a module marked
+    exactly `cfg(test)`. With `cfg(test)`, `--list` gave 0 mutants in the
+    file; with `all(test)` it gave 352.
+- Gate 18 diffs `crates/*.rs`.
+- `mutation_gate respell` re-heads each diff section under every spelling
+  `cargo mutants --list-files` walks for it. The respelt diff becomes the
+  `changed.diff` every shard reads.
+- A self-test appends a comment inside `delta_varint` and requires a non-empty
+  plan naming the file. It runs before the real plan, so a future cargo-mutants
+  that skips the module, or names it another way, fails the gate rather than
+  shrinking it.
+
+**Measured.** For a one-line change in `delta_varint`:
+- Before this change, the plan was empty with both pathspecs.
+- After it, the raw diff still plans 0 mutants and the respelt diff plans 5,
+  all in `build_provenance.rs`.
+- `cargo test -p cli --lib build_provenance` runs the same 18 tests and passes.
+
+**Limits.**
+- The `all(test)` spelling relies on cargo-mutants' literal match, which is
+  why the self-test exists.
+- `build.rs` itself is still not walked by cargo-mutants. Its `main` is a few
+  lines that call `verify`.
+
+Invariant CIG-23.
+
 ### D-0954 — Sweep-run, sweep-evidence, audit-journal and census reads: six api findings (cluster B7) — 2 October 2026
 
 Six audit findings in `crates/api`, fixed together because four of them are

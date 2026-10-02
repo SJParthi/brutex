@@ -133,8 +133,9 @@ sha1 = { workspace = true }
 flate2 = { workspace = true }
 
 [dev-dependencies]
-# The build-time verifier is included directly by its adversarial integration
-# test. Keeping these test-only avoids adding either crate to the CLI binary.
+# The build-time verifier is mounted by the library's test build (D-1119), so
+# its adversarial tests run under `cargo test` and cargo-mutants walks it.
+# Keeping these test-only avoids adding either crate to the CLI binary.
 sha1 = { workspace = true }
 flate2 = { workspace = true }
 

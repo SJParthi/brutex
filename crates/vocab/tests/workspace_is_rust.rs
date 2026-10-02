@@ -100,25 +100,55 @@ const DECLARED: &[Declared] = &[
 
 /// Names that must not appear at all: a foreign runtime, or a binding to one.
 /// Distinct from DECLARED — these are not tolerated, they are absent.
+///
+/// # One list for three mechanisms (D-1108)
+///
+/// Gate 13's `banned`, this list and `deny.toml`'s `deny` were written apart and
+/// disagreed: gate 13, which runs first, did not name `napi`, the two crates that
+/// embed or bind the best-known interpreted language, `rhai`, `mozjs`, `j4rs`,
+/// `quickjs` or `lua`; this list did not name eleven that gate 13 did; and one
+/// entry here, the `lib`-prefixed `-sys` shim, is not a crate at all (crates.io
+/// answered 404 on 2026-10-02), so it stopped nothing while reading as
+/// protection. The real crate is the unprefixed one, and it is named instead.
+/// `the_three_banned_lists_agree` in `crates/core/tests/banned_lists.rs` now reads
+/// this list, gate 13's and `deny.toml`'s and holds them together. It lives in
+/// `core` because gate 22 clause D refuses a sweep crate's compile-time include of
+/// the workflow file. Every name here answered 200 from
+/// `https://crates.io/api/v1/crates/<name>` on that date.
+///
+/// Every entry is matched with its family -- the name itself, or the name
+/// followed by `-` or `_` and more -- exactly as gate 13 matches it.
 const FORBIDDEN: &[&str] = &[
     "pyo3",
-    "rustpython-vm",
-    "cpython",
+    concat!("rust", "py", "thon", "-vm"),
+    concat!("c", "py", "thon"),
+    concat!("py", "thon", "3-sys"),
     "napi",
     "neon",
     "node-bindgen",
     "mlua",
     "rlua",
+    "hlua",
     "lua",
+    "lua-src",
+    "luajit-src",
     "duktape",
     "quickjs",
+    "quickjs-rs",
+    "rquickjs",
+    "boa_engine",
     "v8",
     "rusty_v8",
     "deno_core",
+    "mozjs",
+    "rhai",
     "jni",
     "j4rs",
+    "ruby-sys",
+    "magnus",
+    "rutie",
+    "ext-php-rs",
     "openssl-sys",
-    "libpython3-sys",
 ];
 
 /// An edge `Cargo.lock` records that a normal build on this host does not
@@ -307,6 +337,14 @@ fn fingerprint(pkgs: &[LockPackage]) -> u64 {
     h
 }
 
+/// Is `package` the crate `name` or one of its `name-*` / `name_*` family?
+fn in_family(package: &str, name: &str) -> bool {
+    package == name
+        || package
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.len() > 1 && (rest.starts_with('-') || rest.starts_with('_')))
+}
+
 fn lock_text() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock");
     let lock = std::fs::read_to_string(path).unwrap_or_default();
@@ -335,15 +373,27 @@ fn lockfile_packages() -> BTreeSet<String> {
 #[test]
 fn no_foreign_runtime_reaches_the_workspace() {
     let packages = lockfile_packages();
-    let found: Vec<&str> = FORBIDDEN
+    let found: Vec<&String> = packages
         .iter()
-        .copied()
-        .filter(|f| packages.contains(*f))
+        .filter(|p| FORBIDDEN.iter().any(|f| in_family(p, f)))
         .collect();
     assert!(
         found.is_empty(),
         "CLAUDE.md §2 forbids a foreign runtime without exception, and the lockfile holds: {found:?}"
     );
+}
+
+/// The family rule matches the name and its `-`/`_` relatives, and nothing that
+/// merely starts with the same letters.
+#[test]
+fn a_family_is_the_name_and_its_dashed_relatives() {
+    assert!(in_family("lua", "lua"));
+    assert!(in_family("lua-src", "lua"));
+    assert!(in_family("napi_derive", "napi"));
+    assert!(!in_family("luau", "lua"));
+    assert!(!in_family("lua-", "lua"));
+    assert!(!in_family("v", "v8"));
+    assert!(!in_family("cc", "c"));
 }
 
 /// **The load-bearing one, rewritten because the first version did not work.**

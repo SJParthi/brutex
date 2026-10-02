@@ -11176,6 +11176,41 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## Forty-one chained searches rule 6 now sees and nobody has classified — D-1115, 2 October 2026
+
+CI gate 11 rule 6 reads method chains as of D-1115. It found 41
+`.iter().find(` / `.position(` / `.rposition(` sites in 29 files that the
+line-based grep had never shown. They are pinned per file in
+`allow_scan_unread`, so a new one is refused. **None has been opened and
+classified.** The list sits beside `allow_scan`, whose entries each carry a
+written bound.
+
+A spot check of five found a fixed table or one record's own fields each time:
+- `telemetry::record::Record::field`
+- vocab's `TABLE` lookup by name
+- `pull::rolling`'s expiry flags
+- `pull::vendor`'s window caps
+- the grid's baseline cell
+
+Five of 41 is not a measurement of the rest. Until each entry is moved into
+`allow_scan` with its bound, none of these sites is shown to be bounded by a
+compile-time table rather than by the data.
+
+## The window-range percentile's per-bar bound is read off the source — D-1116, 2 October 2026
+
+`cli::window_range_percentile` sizes the stop ladder from the travel over each
+`hold`-bar window. It keeps two monotonic deques, so each bar index is pushed
+once and popped at most once: the walk is O(bars), with an amortised O(1) step
+per bar. A `select_nth_unstable` then places one index, which is expected O(n)
+and not worst-case O(n).
+
+**None of that is measured.** `crates/cli/benches/ratio.rs` has no row for
+this walk. The tests in `crates/cli/src/lib.rs` prove the percentile it
+returns, not its cost. The function's doc says UNVERIFIED for this reason.
+Gate 12 refused the claim once its allowlist was keyed by item rather than by
+count. A bench row that times two series of different lengths at one `hold`
+would close this.
+
 ## Sweep slot, sweep evidence, journal and census opens — D-0954, 2 October 2026
 
 - **A sweep-evidence page is O(page), not O(total), and the total is no longer
