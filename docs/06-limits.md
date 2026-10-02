@@ -10443,3 +10443,13 @@ is still not seen by a held handle until it is reopened.
   pair. Each call reaches `boolean_campaign::prepare`, which builds
   `prepared::Prepared::new` over the sources, so a batch costs a multiple of
   its source bytes rather than O(1) in them. Not timed. (W2-cli2-7.)
+### Knob reads of an unset knob are not constant-time (D-0931)
+
+`cli::knobs::var` for a knob nothing has set reads `std::env::var_os`, a
+lookup over the process environment. Its cost depends on the size of that
+environment, which this workspace neither bounds nor measures, so it is not
+claimed O(1); `count` inherits it. A set knob is answered by the store and does
+not read the environment (`a_set_knob_never_reads_the_environment`). Knobs are
+read once per rung or once per run, never inside a loop over bars or
+candidates, as the module documentation states. UNVERIFIED as a measured bound:
+no bench times it.

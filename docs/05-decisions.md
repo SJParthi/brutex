@@ -44917,3 +44917,55 @@ sources before `prepare_resolved(request, input, commit)` takes that
 preparation by value. Reusing one preparation across the calls would change
 that ownership, so the cost is recorded in `docs/06-limits.md` rather than
 changed here.
+### D-0930 — Family-test ppm and the White decision come from the exact bootstrap fraction (GAP5-54, W2-cli7-6) — 2026-09-29
+
+**What was wrong.** Two projections of one exact bootstrap fraction
+`k/(draws+1)` disagreed with the exact decision at the same alpha.
+
+- `FamilyTestEvidenceV1::from_runner` and the durable path decided White
+  with `Verdict::clears` (`p < 0.05`, `runner::bootstrap`) while the stored
+  ppm beside it is compared against `<=` maxima. `p = 250/5000` stored
+  `50_000`, which passes a `<= 50_000` maximum, beside `DidNotReject`. Its
+  `ceil(p * 1e6)` also overshot exact boundaries in `f64`: `79/5000`
+  projected to `15_801`.
+- `InstitutionalStatisticsAuthorityV1::fwer_p_value_ppm` and
+  `romano_wolf_p_value_ppm` returned the row's stored `exact_ppm`, a floor.
+  `50_001/1_000_001` read `50_000` and passed a `<= 50_000` maximum that
+  `romano_wolf_rejects_at_ppm(50_000)` refuses.
+
+**The change.** `institutional_evidence` recovers `k` from the runner's
+p-value and `draws`, refuses a value that is not exactly `k/(draws+1)` (or is
+zero, or has a denominator above `2^53`), and derives both the ppm
+(`ceil(k * PPM / d)`) and the White decision (`k * PPM <= d * alpha`, the
+inclusive rule `romano_wolf_rejects_at_ppm` already uses) from the integers.
+The statistics authority's two getters now return `ceil` over the retained
+exact counts. The V1 row still stores and validates the floor: its bytes are
+a format version and are not mutated in place (`CLAUDE.md` §3 rule 8). Only
+the admission-facing projection moved, and only when the fraction is not a
+whole number of ppm.
+
+**Proof.** `family_ppm_and_white_decision_come_from_one_exact_fraction`,
+`invalid_probabilities_are_refused_instead_of_clamped` and
+`ppm_projections_never_pass_a_maximum_the_exact_count_fails`; see
+`docs/04-invariants.md` C4-CLI-12-01 and C4-CLI-12-02.
+
+### D-0931 — A set knob does not read the environment; a live-run name is lowercase hex only (W2-cli7-4, W2-cli9-6) — 2026-09-29
+
+**Knobs.** `cli::knobs`' cost table called `var` O(1) in both rows, "one
+hash probe" when set and "one hash probe, then one `getenv`" when unset.
+`var` evaluated `std::env::var_os(name)` as an argument, so the set path read
+the environment too, and an environment lookup's cost depends on the process
+environment, which this workspace neither bounds nor measures. `resolve` now
+takes the environment as a closure that runs only when nothing is set, and the
+table no longer claims O(1) for the unset row or for `count`, which reads
+through `var`. `docs/06-limits.md` records the retraction.
+
+**Live-run names.** `live::identity_from_name` said it admits lowercase hex
+only, and checked `is_ascii_hexdigit`, which admits `A` to `F`. A foreign
+`AA..AA.bin` therefore parsed to the identity `aa..aa.bin` names. The check is
+now `0-9` and `a-f`, the only digits `Live::path`'s `{byte:02x}` writes.
+
+**Proof.** `a_set_knob_never_reads_the_environment`,
+`the_cost_table_does_not_call_an_environment_read_constant` and
+`an_upper_case_hex_name_is_not_an_identity`; see `docs/04-invariants.md`
+C4-CLI-12-03 and C4-CLI-12-04.
