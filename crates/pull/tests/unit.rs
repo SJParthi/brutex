@@ -316,9 +316,39 @@ fn the_only_path_is_the_one_the_configuration_assembles() {
 
     // The impls this type carries are exercised, so the coverage gate is
     // measuring them rather than reporting on code nothing calls.
+    // Each equality is checked against an independently built value AND
+    // against one that differs in a single segment, so an impl that always
+    // answers the same way fails one of the pair. GAP14-65.
     let twin = config.clone();
     assert_eq!(config, twin);
-    assert_eq!(path, path);
+    let reparsed = CredentialConfig::parse(CONFIG).expect("the reference config parses");
+    assert_eq!(
+        config, reparsed,
+        "the same text parses to an equal configuration"
+    );
+    let other_org = CredentialConfig::parse(&config_without(
+        r#"org    = "orgone""#,
+        r#"org    = "vendortwo""#,
+    ))
+    .expect("a one-segment variant parses");
+    assert_ne!(
+        config, other_org,
+        "one segment apart is a different configuration"
+    );
+    assert_eq!(
+        path,
+        reparsed
+            .path_for(Vendor::Groww, "fieldtwo")
+            .expect("a configured field"),
+        "the same segments assemble an equal path"
+    );
+    assert_ne!(
+        path,
+        config
+            .path_for(Vendor::Groww, "fieldone")
+            .expect("a configured field"),
+        "one field apart is a different path"
+    );
 }
 
 /// P-18 — no formatter renders a path segment. `Debug` is a redaction on the
@@ -1151,11 +1181,24 @@ fn an_entry_round_trips_through_its_image() {
         assert_eq!(Entry::decode(&image), Ok(original));
     }
 
-    // The derived impls this type carries are exercised.
+    // The derived impls this type carries are exercised — each equality
+    // against an independently built value and against one differing in a
+    // single field, so an impl that always answers the same way fails one of
+    // the pair. GAP14-65.
     let one = entry("NIFTY", 2024, 1, 1, 0, 0);
-    assert_eq!(one, one);
+    assert_eq!(one, entry("NIFTY", 2024, 1, 1, 0, 0));
+    assert_ne!(one, entry("NIFTY", 2024, 1, 2, 0, 0), "rows differ");
     assert!(format!("{one:?}").contains("NIFTY"));
-    assert_eq!(one.key, one.key);
+    assert_eq!(
+        one.key,
+        entry("NIFTY", 2024, 1, 9, 9, 9).key,
+        "the key ignores the counts"
+    );
+    assert_ne!(
+        one.key,
+        entry("NIFTY", 2024, 2, 1, 0, 0).key,
+        "month differs"
+    );
     assert!(format!("{:?}", one.key).contains("Nse"));
     assert!(one.key < entry("NIFTY", 2024, 2, 1, 0, 0).key);
 }
@@ -1495,7 +1538,22 @@ fn a_manifest_round_trips_through_its_regions() {
     assert_eq!(genesis.slot, 0);
     assert_eq!(genesis.offset, 0);
     assert_eq!(genesis.durable_through, HEADER_LEN);
-    assert_eq!(genesis, genesis);
+    // Against an independent build and against another vendor's genesis, so
+    // an impl that always answers the same way fails one of the pair.
+    // GAP14-65.
+    assert_eq!(
+        genesis,
+        ManifestHeader::genesis(Vendor::Dhan)
+            .commit()
+            .expect("genesis")
+    );
+    assert_ne!(
+        genesis,
+        ManifestHeader::genesis(Vendor::Groww)
+            .commit()
+            .expect("genesis"),
+        "another vendor's genesis is another commit"
+    );
     assert!(format!("{genesis:?}").contains("Dhan"));
 }
 
@@ -2151,7 +2209,23 @@ fn a_short_or_misplaced_header_region_is_refused() {
     assert_eq!(read.newest(), ManifestHeader::genesis(Vendor::Groww));
     assert_eq!(read.older(), None, "one commit is one generation");
     assert_eq!(read.stepped_over(), None, "and nothing was stepped over");
-    assert_eq!(read, read);
+    // Against an independent read of the same region and a read of another
+    // vendor's, so an impl that always answers the same way fails one of the
+    // pair. GAP14-65.
+    assert_eq!(
+        read,
+        ManifestHeader::read_region(&region(&[genesis]), &[], Vendor::Groww)
+            .expect("the genesis commit")
+    );
+    let dhan = ManifestHeader::genesis(Vendor::Dhan)
+        .commit()
+        .expect("genesis");
+    assert_ne!(
+        read,
+        ManifestHeader::read_region(&region(&[dhan]), &[], Vendor::Dhan)
+            .expect("another vendor's genesis commit"),
+        "another vendor's newest header is another read"
+    );
     assert!(format!("{read:?}").contains("Groww"));
     // Nothing at all: no slot decodes, and none gave a specific reason.
     assert_eq!(

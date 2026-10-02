@@ -46203,3 +46203,58 @@ It is lock-free, not wait-free: an attempt that loses a race or fails
 spuriously runs the closure again. The doc comment and the inline comment now
 say that. The code is unchanged, because `fetch_add` would wrap rather than
 saturate.
+### D-0966 — Index the vendor master once per crawl pass, not once per index — 2026-09-29
+
+**What was wrong (W1-pull3-0).** `pull::resolve::crawl`'s `# Cost` section
+said the join "indexes the master **once** for the whole pass rather than per
+index". The code called `pull::universe::resolve` once per constituent file,
+and that function built its key map and its symbol set from the whole master
+on every call, then walked the master a third time to count `extra`. Each
+index therefore cost O(master), and a pass O(indices x master).
+
+**The change.** `pull::universe::MasterIndex` holds the key map, a count of
+rows per non-blank trading symbol, and the total of those rows. `crawl` builds
+it once, before the first category, and calls `MasterIndex::resolve` per
+index. That call probes the key map once per published name, and computes
+`extra` as the rows with a symbol minus the rows carrying each distinct name the
+index publishes, so it no longer walks the master. `universe::resolve` remains
+for a single index and is now `MasterIndex::new(..).resolve(..)`.
+
+**Proof.** `pull::resolve::tests::the_master_is_indexed_once_per_pass_not_once_per_index`
+reads `crawl`'s source: exactly one `MasterIndex::new(` call, before the
+category loop, and no call to `universe::resolve`. A slice cannot count its
+own reads, so this is a shape test, not a timing. It fails on `origin/main`.
+`pull::universe::tests::extra_counts_every_unnamed_row_once_through_repeats_and_blanks`
+requires the new `extra` to equal the old master walk on a master that lists
+one symbol twice and carries a blank symbol, and a file that repeats a name and
+publishes a blank one, on both keys.
+`pull::universe::tests::one_master_index_answers_each_index_as_a_fresh_join_would`
+requires one index reused across three resolutions to answer each as a fresh
+`universe::resolve` does. Building the index is still O(master) once per pass;
+that is the stated cost, not a limit this removes.
+
+### D-0967 — A repeated month or cell is one cell in `Selection::cells` and `gaps` — 2026-09-29
+
+**What was wrong (W1-pull4-1).** `Selection::of` removes a repeated instrument
+because, in its own words, "a duplicate would pull the same window twice and
+the second write would be refused as not following the first". `cells` did not
+do the same for months: a month the caller repeated produced every one of its
+cells twice. `gaps` did not remove a repeated cell either, so it listed the
+same cell twice in `missing` or counted it twice in `held`.
+
+**The change.** `cells` keeps each month once, at its first position, before
+building cells, and still orders them instrument-major. `gaps` skips a cell it
+has already seen, so a repeated cell is listed or counted once. Both use one
+pre-sized hash set, reserved from the input's length, and stay O(input).
+`Work::requested` now documents that it counts distinct cells.
+
+**Proof.** `pull::work::tests::a_repeated_month_yields_each_cell_once_in_first_seen_order`
+and `pull::work::tests::a_repeated_cell_is_missing_once_and_held_once`, each
+failing on `origin/main`.
+
+**Also in this batch (GAP14-65, no decision needed).** Assertions in
+`crates/pull/tests/unit.rs` compared a value with itself (`assert_eq!(path,
+path)`, `assert_eq!(one, one)`, `assert_eq!(one.key, one.key)`,
+`assert_eq!(genesis, genesis)`, `assert_eq!(read, read)`), which no derived
+`PartialEq` can fail. Each now compares against an independently built equal
+value and uses `assert_ne!` against a value differing in one field.
