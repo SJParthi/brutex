@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Parallel rungs' repeated one-minute reads are stated — audit 2026-10-02 o1cli-3
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1CLI-3 — **`docs/06-limits.md` states that `sweep_rungs` runs every rung in parallel and each re-reads the same one-minute span: the kernel's execution load, one read per column-build attempt and one per `exact_minute_withholding_unsourceable_days` attempt (at least three per rung, four with a derived support, some 24 to 32 per command, up to 64 attempts per build), and the code still reads exactly there.** The test reads the section, `sweep_rungs`, `one_rung`, the kernel, both retry loops and `stored::load_exact_minute_context`'s `"1min"` load. A shared load fails it and withdraws the limit | `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_3.rs` | ✓ |
+
 ### A rung's second span load and column build are stated — audit 2026-10-02 o1cli-2
 
 | Invariant | Test that proves it | Status |

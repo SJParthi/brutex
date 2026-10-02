@@ -11177,6 +11177,27 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## Parallel rungs each re-read the same one-minute span (audit o1cli-3)
+
+- **`sweep_rungs` runs every rung through `one_rung` in parallel, and each
+  rung reads the same one-minute span for itself.** For a rung other than
+  `1min` the reads are the execution series `audit_range_kernel` loads, one
+  per attempt of every column build (inside `load_exact_minute_context`: the
+  kernel's build, and `one_rung`'s own when the support is derived), and one
+  per attempt of `exact_minute_withholding_unsourceable_days`. That is at
+  least three reads of that rung's one-minute span, four when the support is
+  derived, and the `1min` rung reads it as its own span as well. Across the
+  eight rungs that is some 24 to 32 reads of identical minutes per command,
+  O(minute bars) each, and more when withheld days force a rebuild: each
+  build retries up to 64 attempts and every attempt reads the minutes again.
+  Loading the minute span once per command and sharing it is possible, since
+  the read itself does not depend on the rung, and is not done: each context
+  is derived from that rung's surviving bars and digested into its
+  preparation identity, and sharing the read is a change to that path.
+  Stated from the code's shape; not timed. Held to the code by
+  `the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid` in
+  `crates/cli/tests/limits_o1cli_3.rs`.
+
 ## A rung loads its span twice and may build its column twice (audit o1cli-2)
 
 - **`one_rung` loads the rung's span with `stored::load_span`, and the audit
