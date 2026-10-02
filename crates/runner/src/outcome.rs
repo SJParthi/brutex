@@ -1050,10 +1050,9 @@ impl Edge {
         if self.max_loss_paisa <= 0.0 {
             return i64::MAX;
         }
-        // `as` is refused here for the same reason the excursion sums use
-        // `f64::from`: a ratio of two paisa magnitudes is bounded by the
-        // instrument's own range, and a value that somehow is not saturates
-        // rather than wrapping into a plausible number.
+        // A ratio of two paisa magnitudes is bounded by the instrument's own
+        // range, and a value that somehow is not saturates below rather than
+        // wrapping into a plausible number.
         let ratio = self.min_win_paisa / self.max_loss_paisa * 100.0;
         if !ratio.is_finite() || ratio <= 0.0 {
             return 0;
@@ -1351,12 +1350,13 @@ fn milli(x: f64) -> i64 {
 ///
 /// Keeping them together also makes the ZERO rule checkable in one place rather
 /// than at each `+=`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Sides {
     /// Strictly positive observations.
     wins: u64,
-    /// Sum of the strictly positive observations.
-    win_sum: f64,
+    /// Sum of the strictly positive observations, EXACT -- D-1173. An `i128`
+    /// cannot overflow on fewer than 2^64 observations of an `i64` move.
+    win_sum: i128,
     /// Strictly negative observations.
     ///
     /// **Counted rather than derived, and that is the whole point.** It was
@@ -1372,8 +1372,8 @@ struct Sides {
     /// away. A flat forward move on a one-minute index bar is routine, so it
     /// fired constantly, and `ByPayoff` RANKS on the result.
     losses: u64,
-    /// Sum of the strictly negative observations. Negative or zero.
-    loss_sum: f64,
+    /// Sum of the strictly negative observations. Negative or zero. Exact.
+    loss_sum: i128,
     /// The SMALLEST strictly positive observation, in paisa. Zero when none.
     ///
     /// # The three order statistics, and why sums could not stand in
@@ -1385,19 +1385,20 @@ struct Sides {
     /// -- MEAN win over MEAN loss -- which is precisely the statistic the rule
     /// names and rejects, because one catastrophic loss hides behind many small
     /// ones in a denominator and one enormous win is diluted by the rest.
-    min_win: f64,
+    min_win: i64,
     /// The LARGEST strictly positive observation, in paisa. Zero when none.
     ///
     /// Carried beside `min_win` because the two answer different halves of the
     /// same objective: `min_win` decides whether the 3:1 rule HOLDS, and this
     /// decides how much the setup PAYS when it pays. A rank on the first alone
     /// prefers a setup whose wins are uniformly mediocre.
-    max_win: f64,
+    max_win: i64,
     /// The largest strictly negative observation as a MAGNITUDE, in paisa.
     ///
     /// Non-negative, and zero when nothing lost. Stored positive so the ratio
     /// against `min_win` is a division rather than a sign argument.
-    max_loss: f64,
+    /// Unsigned because the magnitude of `i64::MIN` is not an `i64`.
+    max_loss: u64,
 }
 
 impl Sides {
@@ -1405,33 +1406,51 @@ impl Sides {
     ///
     /// **Zero is neither.** A flat forward move paid nothing and cost nothing;
     /// charging it to a side would move [`Edge::payoff_bp`] by the number of
-    /// flat bars rather than by anything about the setup. A NaN is also neither
-    /// — it fails both comparisons — which is the honest handling for a value
-    /// that is not a move at all.
+    /// flat bars rather than by anything about the setup.
+    ///
+    /// # Paisa in, paisa held — D-1173
+    ///
+    /// This took the move as an `f64` and kept every sum and extremum as one, so
+    /// a move above 2^53 paisa was rounded on the way in and every sum was
+    /// rounded at every addition once it passed 2^53. A forward move is an `i64`
+    /// of paisa (§7). It is now held as one, the sums as exact `i128`, and the
+    /// float is made once, when [`edge`] assembles the [`Edge`].
     ///
     /// The three extrema are maintained here rather than derived later for the
     /// reason the field docs give: nothing downstream holds the observations.
     /// `min_win` opens at zero and is replaced by the first win rather than
     /// compared against it, because a zero sentinel would otherwise win every
     /// comparison and pin the minimum at nothing.
-    fn observe(&mut self, x: f64) {
-        if x > 0.0 {
+    fn observe(&mut self, x: i64) {
+        if x > 0 {
             self.wins = self.wins.saturating_add(1);
-            self.win_sum += x;
-            if self.min_win == 0.0 || x < self.min_win {
+            self.win_sum = self.win_sum.saturating_add(i128::from(x));
+            if self.min_win == 0 || x < self.min_win {
                 self.min_win = x;
             }
-            if x > self.max_win {
-                self.max_win = x;
-            }
-        } else if x < 0.0 {
+            self.max_win = self.max_win.max(x);
+        } else if x < 0 {
             self.losses = self.losses.saturating_add(1);
-            self.loss_sum += x;
-            if -x > self.max_loss {
-                self.max_loss = -x;
-            }
+            self.loss_sum = self.loss_sum.saturating_add(i128::from(x));
+            self.max_loss = self.max_loss.max(x.unsigned_abs());
         }
     }
+}
+
+/// An exact paisa integer as the `f64` [`Edge`] carries — D-1173.
+///
+/// Exact for every magnitude up to 2^53 paisa (about 90 lakh crore rupees).
+/// Above that, ONE rounding to nearest, made here, where the old path rounded at
+/// every addition. `Edge`'s money fields stay `f64` because `cli` persists their
+/// IEEE bits in the sweep-evidence row, and changing that row's meaning in place
+/// is what §3 rule 8 forbids.
+fn wide(paisa: i128) -> f64 {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the one documented rounding, above 2^53 paisa only."
+    )]
+    let out = paisa as f64;
+    out
 }
 
 /// The Newey-West long-run sum of squares, from `edge`'s four accumulators.
@@ -1513,8 +1532,8 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // for why the funnel needs them and `|t|` cannot supply them.
     let mut sides = Sides::default();
     // THE PATH SUMS. See `Edge::adverse_sum`.
-    let mut adverse_sum = 0.0_f64;
-    let mut favourable_sum = 0.0_f64;
+    let mut adverse_sum: i128 = 0;
+    let mut favourable_sum: i128 = 0;
 
     // THE OVERLAP CORRECTION, AND WHY THE t BELOW IS MEANINGLESS WITHOUT IT.
     //
@@ -1673,7 +1692,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // replacement for the exit grid — it has no stop, no target and no
         // path, so it cannot say what a stop WOULD have done. It says which
         // combinations are worth asking that question about.
-        sides.observe(x);
+        sides.observe(r);
 
         // AND THE PATH, WHICH `sides` CANNOT SEE.
         //
@@ -1687,23 +1706,15 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // struct gained fields at all: every stage that ranks on `Edge` was
         // choosing which combinations reach the exit grid while blind to the
         // one property that decides whether a stop helps them.
-        // `f64::from` on an `i32`, which is LOSSLESS -- no `as` and no precision
-        // lint to silence. An excursion is a price DIFFERENCE over one horizon,
-        // so it is bounded by the instrument's own range and cannot approach
-        // two billion paisa; a value that somehow did is dropped rather than
-        // truncated into a plausible number.
-        if let Some(down) = forward
-            .adverse_at(source)
-            .and_then(|v| i32::try_from(v).ok())
-        {
-            adverse_sum += f64::from(down);
-        }
-        if let Some(up) = forward
-            .favourable_at(source)
-            .and_then(|v| i32::try_from(v).ok())
-        {
-            favourable_sum += f64::from(up);
-        }
+        // EXACT `i128` SUMS, converted once at assembly -- D-1173. These went
+        // through `i32::try_from` and DROPPED any excursion above 2^31 paisa
+        // (about 2.1 crore rupees), so the sum silently left that hit out while
+        // `n` still counted it. That was a smaller sum presented as a whole one,
+        // which is the fallback §4 bans.
+        adverse_sum =
+            adverse_sum.saturating_add(i128::from(forward.adverse_at(source).unwrap_or(0)));
+        favourable_sum =
+            favourable_sum.saturating_add(i128::from(forward.favourable_at(source).unwrap_or(0)));
 
         // EVERY EARLIER HIT WHOSE WINDOW STILL TOUCHES THIS ONE.
         //
@@ -1759,14 +1770,14 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // or the other, and `payoff_bp` refuses a one-sided sample on its own
         // terms rather than being handed a zero that looks measured.
         wins: sides.wins,
-        win_sum: sides.win_sum,
-        adverse_sum,
-        favourable_sum,
+        win_sum: wide(sides.win_sum),
+        adverse_sum: wide(adverse_sum),
+        favourable_sum: wide(favourable_sum),
         losses: sides.losses,
-        loss_sum: sides.loss_sum,
-        min_win_paisa: sides.min_win,
-        max_win_paisa: sides.max_win,
-        max_loss_paisa: sides.max_loss,
+        loss_sum: wide(sides.loss_sum),
+        min_win_paisa: wide(i128::from(sides.min_win)),
+        max_win_paisa: wide(i128::from(sides.max_win)),
+        max_loss_paisa: wide(i128::from(sides.max_loss)),
         t,
     };
 
@@ -2205,23 +2216,23 @@ mod tests {
     #[test]
     fn a_flat_move_is_neither_a_win_nor_a_loss() {
         let mut sides = Sides::default();
-        for x in [5.0, 0.0, 0.0, -1.0, 0.0] {
+        for x in [5, 0, 0, -1, 0] {
             sides.observe(x);
         }
         assert_eq!(sides.wins, 1, "one strictly positive move");
-        assert!(
-            (sides.win_sum - 5.0).abs() < f64::EPSILON,
+        assert_eq!(
+            sides.win_sum, 5,
             "the flats added nothing to the winning side"
         );
-        assert!(
-            (sides.loss_sum + 1.0).abs() < f64::EPSILON,
+        assert_eq!(
+            sides.loss_sum, -1,
             "the flats added nothing to the losing side"
         );
 
-        // A NaN is not a move either, and must not become one.
-        let mut nan = Sides::default();
-        nan.observe(f64::NAN);
-        assert_eq!(nan, Sides::default(), "a NaN is charged to neither side");
+        // Only flats is no move on either side.
+        let mut flat = Sides::default();
+        flat.observe(0);
+        assert_eq!(flat, Sides::default(), "a zero is charged to neither side");
     }
 
     #[test]
@@ -3832,5 +3843,130 @@ mod overlap_tests {
         let one = forward(&bars, &column, Horizon::bars(1).expect("positive"));
         let e1 = edge(&column, &one, &ConditionMask::default());
         assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod money_tests {
+    use super::{Horizon, Sides, edge, forward, wide};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
+    use vocab::ConditionMask;
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// GAP16-26: a move is held as the paisa integer it is. 2^53 + 1 is the
+    /// first integer an `f64` cannot hold, and it came back as ...992.
+    #[test]
+    fn a_move_past_two_to_the_fifty_three_is_held_exactly() {
+        let big: i64 = 9_007_199_254_740_993;
+        let mut sides = Sides::default();
+        sides.observe(big);
+        sides.observe(1);
+        sides.observe(-big);
+        assert_eq!(sides.max_win, big);
+        assert_eq!(sides.min_win, 1);
+        assert_eq!(sides.max_loss, big.unsigned_abs());
+        assert_eq!(sides.win_sum, i128::from(big) + 1);
+        assert_eq!(sides.loss_sum, -i128::from(big));
+
+        // THE EXTREMES OF THE TYPE: no overflow, no sign error, no saturation.
+        let mut ends = Sides::default();
+        for x in [i64::MAX, i64::MAX, i64::MIN, i64::MIN] {
+            ends.observe(x);
+        }
+        assert_eq!(ends.win_sum, 2 * i128::from(i64::MAX));
+        assert_eq!(ends.loss_sum, 2 * i128::from(i64::MIN));
+        assert_eq!(ends.max_loss, i64::MIN.unsigned_abs(), "2^63, not an i64");
+        assert_eq!((ends.wins, ends.losses), (2, 2));
+
+        // ONE rounding, at the conversion, to the nearest double.
+        assert_eq!(
+            wide(i128::from(big) + 1).to_bits(),
+            9_007_199_254_740_994.0_f64.to_bits()
+        );
+        assert_eq!(wide(-5).to_bits(), (-5.0_f64).to_bits());
+        assert_eq!(wide(0).to_bits(), 0.0_f64.to_bits());
+    }
+
+    /// Prices scaled so that every forward move and excursion is far past
+    /// 2^31 paisa and the running sums pass 2^53.
+    fn huge_bars(scale: i64) -> Vec<Candle> {
+        crate::synthetic::sessions(8)
+            .iter()
+            .map(|b| {
+                let s = |p: i64| p.saturating_mul(scale);
+                Candle::new(
+                    b.ts_micros,
+                    s(b.open),
+                    s(b.high),
+                    s(b.low),
+                    s(b.close),
+                    b.volume,
+                    OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    /// The path sums dropped every excursion above `i32::MAX` and kept counting
+    /// the hit in `n`; the net sums rounded at every addition once past 2^53.
+    /// Both are now the exact integer sum, converted once.
+    #[test]
+    fn every_sum_is_the_exact_sum_converted_once() {
+        let bars = huge_bars(1 << 39);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::DEFAULT);
+        let all = ConditionMask::default();
+        let e = edge(&column, &f, &all);
+        assert!(e.n > 100, "the fixture must measure -- n={}", e.n);
+
+        let (mut wins, mut losses, mut adverse, mut favourable) = (0_i128, 0_i128, 0_i128, 0_i128);
+        let mut beyond_i32 = 0_u32;
+        for &s in column.sources() {
+            let Some(x) = f.at(s) else { continue };
+            if x > 0 {
+                wins += i128::from(x);
+            } else {
+                losses += i128::from(x);
+            }
+            let down = f.adverse_at(s).expect("measured");
+            let up = f.favourable_at(s).expect("measured");
+            adverse += i128::from(down);
+            favourable += i128::from(up);
+            if i32::try_from(down).is_err() || i32::try_from(up).is_err() {
+                beyond_i32 += 1;
+            }
+        }
+        assert!(
+            beyond_i32 > 0,
+            "no excursion past i32 -- the fixture tests nothing"
+        );
+        assert!(wins > 1_i128 << 53, "the win sum must pass 2^53 -- {wins}");
+        assert_eq!(e.win_sum.to_bits(), wide(wins).to_bits(), "win_sum");
+        assert_eq!(e.loss_sum.to_bits(), wide(losses).to_bits(), "loss_sum");
+        assert_eq!(
+            e.adverse_sum.to_bits(),
+            wide(adverse).to_bits(),
+            "adverse_sum"
+        );
+        assert_eq!(
+            e.favourable_sum.to_bits(),
+            wide(favourable).to_bits(),
+            "favourable_sum"
+        );
     }
 }

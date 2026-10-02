@@ -43833,3 +43833,50 @@ the ladder. The expected-linear bound is the documented bound of
 one occurrence. Its comment in `ci.yml` still says "ONE sort", and it should say
 "one selection". That file belongs to another lane, so the stale comment is
 reported here and not edited.
+
+### D-1173 — `edge` accumulates its money in paisa integers and converts once; `Edge`'s `f64` money fields are sanctioned with their bound — 2026-10-02
+
+**What was wrong (audit GAP16-26).** `runner::outcome::Edge` carries seven paisa
+quantities as `f64`. They are the three single-move extrema (`min_win_paisa`,
+`max_win_paisa`, `max_loss_paisa`) and the four sums (`win_sum`, `loss_sum`,
+`adverse_sum`, `favourable_sum`). `Sides` and `edge` also ACCUMULATED them as
+`f64`. That rounded every move above 2^53 paisa on the way in, and every sum at
+every addition once it passed 2^53. No decision entry sanctioned a float for
+money here. Worse, the two path sums went through `i32::try_from(..).ok()` and
+silently DROPPED any excursion above 2^31 paisa (about 2.1 crore rupees), while
+`n` still counted the hit. That was a smaller sum presented as a whole one, the
+§4 fallback.
+
+**The change.** `Sides::observe` takes the `i64` move. It holds the extrema as
+`i64` (the loss magnitude as `u64`, because the magnitude of `i64::MIN` is not an
+`i64`) and the sums as exact `i128`. `edge` sums both excursions as exact
+`i128`, and nothing is dropped. Each value becomes an `f64` exactly once, in
+`outcome::wide`, when the `Edge` is assembled.
+
+**Why `Edge` keeps `f64` fields, and the bound that sanctions them.** `cli`
+persists `win_sum`, `loss_sum`, `adverse_sum` and `favourable_sum` as IEEE bits
+in the sweep-evidence `RankedRow`, and `api` serves them. Changing those fields'
+type or meaning in place is what §3 rule 8 forbids, and a new row version is a
+`cli` store change outside this lane. So this entry records the sanction the
+audit offered as an alternative. Every `Edge` money field is the nearest `f64`
+to an exact paisa integer. It is exact whenever the magnitude is at most 2^53
+paisa (about 90 lakh crore rupees, far past any index or stock move). Above
+that, the error is one rounding, at most 2^-53 relative, and no longer one
+rounding per observation. The ratios built from these fields (`payoff_bp`,
+`path_ratio_bp`, `worst_reward_risk_bp`) are statistics under §7 and stay
+floating.
+
+**Outputs that change.** Only where a path excursion exceeded 2^31 paisa, which
+was dropped before and is now counted, or where a sum or move exceeded 2^53.
+Neither occurs on real index or equity data at paisa scale. Every other value
+is bit-identical: the old `f64` sum of integers below 2^53 was already exact.
+
+**Tests.** `a_move_past_two_to_the_fifty_three_is_held_exactly` covers 2^53 + 1,
+`i64::MAX` twice, `i64::MIN` twice, the `u64` magnitude and the single
+conversion. `every_sum_is_the_exact_sum_converted_once` prices
+`synthetic::sessions(8)` scaled by 2^39 and requires every sum's bits to equal
+the exact sum converted once. On the previous tree it fails: `adverse_sum` and
+`favourable_sum` were 0 against 71,231,860,805,468,160. **Not changed here:**
+gate 11's float allowlist for `outcome.rs` (29) now has headroom, since this
+removes six float lines. Tightening that number and its rationale is a `ci.yml`
+edit, which belongs to another lane.
