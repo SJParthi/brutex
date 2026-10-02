@@ -45196,3 +45196,26 @@ filled at". A bar whose low is above its high is still `InvertedBar`, whatever
 its open. Which bars are refused is unchanged; only the error that names the
 refusal moves. `runner::trade` discards this error with `.ok()?`, so no run
 output changes. Invariant C4-COSTS-03.
+### D-0944 — Justify the index-future cost-free arm by the operator rule it rests on, not by untradeability — 2026-09-29
+
+**What was wrong.** `costs::scope::is_cost_free` answered `true` for
+`Segment::IndexFuture` in one arm shared with `Segment::IndexSpot`, under the
+comment *"Not tradeable. An index level is a number, not an instrument"*. That
+is true of a spot index and false of a future, which is an exchange-traded
+contract. Finding `ET-strategies-trades-ranking-costs-5`.
+
+**What changed.** The future has its own arm, and the comment over it says the
+zero is the operator rule `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001` (index spot and
+index futures are signal-only), not a market fact, and that this crate holds no
+futures charge stack to price one with: the `crates/costs/src/trip.rs` header
+lists "**The futures charge stack.** See `docs/06-limits.md` §27." under its
+heading "What is deliberately not here", and §27 has the heading "The futures
+charge stack is NOT ported". The answer is unchanged: `is_cost_free` still returns
+`true` for a future, so what a run computes does not move and no identity term
+changes.
+
+**The test.** `costs::scope::tests::the_index_future_arm_cites_the_operator_rule_not_untradeability`
+reads `scope.rs`, requires the future's arm not to name `IndexSpot`, requires
+the comment block over it to contain `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001` and
+not `Not tradeable`, and requires `is_cost_free(Segment::IndexFuture)`. It fails
+on `origin/main` (2c209309) with *"the future shares the spot's arm"*.
