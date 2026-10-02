@@ -10719,3 +10719,17 @@ one across a whole `window_async` call over loopback. `disposition_of` itself
 still parses. Its one remaining non-test caller is
 `refusal_words`, the non-2xx door, which reads at most `MAX_REFUSAL_BYTES`;
 the calls in `dhan.rs` are inside its `mod tests`.
+## Two pull costs stated as they are paid — D-0961, 29 September 2026
+
+* **`GET /indexmap.json` scans the NSE catalogue per request.**
+  `api::indexmap::join` calls `Catalogue::resolve` for each feed index symbol
+  on every request, twice when the feed renames the symbol (the renamed-from
+  name first), and each `resolve` does one hash probe and, when the name is
+  not published verbatim, one scan of the catalogue that compares the symbol
+  with each collapsed name. `Catalogue::index`, which would pay that scan once
+  per distinct symbol, has no production caller. Not timed.
+* **`pull::rate::note_absorbed` is a compare-exchange loop.** It calls
+  `AtomicU64::fetch_update`, which retries `compare_exchange_weak` while
+  another thread changes the counter in between or the weak exchange fails
+  spuriously. The number of attempts grows with that contention; it is not
+  one `fetch_add`. Not timed.
