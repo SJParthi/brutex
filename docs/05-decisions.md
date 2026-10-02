@@ -43844,6 +43844,42 @@ only lines that left were the two `return 0` arms. The 30 lines over CI's
 figure belong to four permission tests that fail as root, which is the
 audit-root item and is outside this change. **Not yet shown:** the CI
 workspace profile reproducing 20.
+
+### D-1353 — `Header::decode` refuses a non-zero reserved tail — 2026-10-02
+
+**What was wrong.** `docs/02-store-format.md` §2 gives slot bytes `60..64` as
+*reserved, zero* and says a future field takes reserved space *"in a new
+version, never by reinterpreting version 2"*. `decode` never read them. The
+slot checksum covers them, so a slot carrying a value there was written that
+way, and it decoded as a healthy version-2 header: the in-place
+reinterpretation `CLAUDE.md` §3 rule 8 forbids, accepted silently.
+
+**The change.** After the checksum and stride checks, a non-zero reserved
+tail is `FormatError::ReservedNotZero(u32)`. Ordering keeps a flipped bit a
+`SlotChecksum`. Every writer in this build leaves the tail zero
+(`a_slot_round_trips_every_field_at_its_documented_offset` pins it), so no
+file this repository wrote is newly refused. `docs/02-store-format.md` §2's
+row now says the refusal. Proof:
+`store::unit::a_slot_whose_reserved_tail_is_not_zero_is_refused`, all four
+bytes, through `decode` and `read_region` (failed before: a probe asserting
+`decode(..).is_err()` got `Ok(Header { format_version: 2, .. })`). O(1): one
+four-byte read per slot decode.
+
+### D-1354 — Undefined flag bits are refused on read and on commit — 2026-10-02
+
+**What was wrong.** `flags` defines bit 0 (`FLAG_CHECKSUMS`) and nothing
+else. `decode` accepted any value, so a file declaring a property this build
+has never heard of was read as if it declared none, and `Header::commit`
+wrote any value it was handed — a slot whose meaning no reader could know.
+
+**The change.** `FormatError::UnknownFlags(u32)` from `decode` (after the
+checksum) and from `commit`, so no slot this build writes can reach the read
+refusal. Production writes `FLAG_CHECKSUMS` (and older files `0`); both still
+round-trip. Proof:
+`store::unit::a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write`,
+bits 1..31 (failed before: flags `3` decoded `Ok`, and a commit with flags
+`2` succeeded). O(1).
+
 ### D-1370 — `split_window`'s documentation says a capped chunk may cross a month — 2026-10-02
 
 **What was false.** The rustdoc of `pull::session::split_window` opened with
@@ -43945,96 +43981,3 @@ RFC 6238 Appendix B vectors that `the_rfc_6238_sha1_vectors_reproduce_exactly`
 checks are unchanged and still pass. No code path in `totp.rs` exchanges a
 code for a token. It computes the code and nothing else, so §8's ban on
 minting holds in this file.
-### D-1350 — `catalog::walk` refuses a `bars` it cannot examine; only "not found" is an empty store — 2026-10-02
-
-**What was wrong.** `walk` began `if !bars.is_dir() { return Ok(empty) }`.
-`Path::is_dir` answers `false` for every stat failure, so a `bars` symlink
-loop (`ELOOP`), a root this process may not search (`EACCES`) or an I/O error
-came back `Ok` with an empty census — "nothing pulled yet", the one answer
-that is certainly wrong when the directory exists. The doc promised
-`BarsUnreadable` for a `bars` that could not be listed.
-
-**The change.** `fs::metadata(bars)`: a directory is walked; a non-directory
-is still an empty store (pinned by
-`a_bars_path_that_is_not_a_directory_reports_an_empty_store`); `NotFound`
-(including a dangling link) is an empty store; any other error is
-`CatalogError::BarsUnreadable` carrying the OS's reason. Proof:
-`store::catalog::a_bars_that_cannot_be_examined_is_refused_and_not_reported_empty`
-(failed before: `Ok(Holdings { held: [], census: Census { seen: 0, .. } })`).
-Cost unchanged: one stat.
-
-### D-1351 — An unlistable branch or unreadable entry is counted in `Census::unlisted`, and the census no longer reconciles — 2026-10-02
-
-**What was wrong.** The module header says *"Nothing is dropped silently"*. A
-subdirectory `read_dir` refused was skipped with a bare `continue`, and an
-entry the OS could not describe was dropped by `entries.flatten()`. Neither
-touched the census, so a store whose whole `dhan` tree was unreadable listed
-only `groww`'s months and `Census::reconciles()` answered `true`.
-
-**The change.** A new `Census::unlisted` counts both, and `reconciles()` is
-`false` whenever it is non-zero: the files under such a directory were never
-seen, so no sum over the buckets can account for them. The branch is still
-skipped (one unreadable corner must not hide the rest); the root failing is
-still the walk's one refusal. The listing is injected through a private
-`walk_with` because a process running as root lists a `chmod 000` directory,
-so a permission fixture proves nothing where this suite runs. Proof:
-`store::catalog::tests::an_unreadable_branch_or_entry_is_counted_and_the_census_does_not_reconcile`
-(with the two increments removed, i.e. the old behaviour: `unlisted: 0`,
-`reconciles()` true). **Not done here:** `cli`'s `sweep-all` and `pool`
-reports print named census buckets and do not yet print `unlisted`; that is a
-`crates/cli` follow-up outside this change's files. Cost unchanged.
-
-### D-1352 — A contract-depth path is checked like a spot path before it is counted — 2026-10-02
-
-**What was wrong.** `classify` counted every file seven components below
-`bars/` as `with_contract` without reading a segment. A contract month's
-`.crc`, `.ovl` and `.lock` siblings were three more "contract files", an
-unknown feed, an unknown rung or an impossible month at that depth was a
-contract too, and a spot `.bin` misfiled one directory too deep
-(`1min/deeper/2026-09.bin`) was reported as a contract. `cli research-plan`
-prints the count as "contract files excluded".
-
-**The change.** At either depth the rung and file are the last two
-components, and the extension, feed, rung and month checks run in the same
-order; only a path that passes all four is a contract month. The existing test
-`the_walk_descends_rather_than_guessing_the_depth` pinned the old answer for
-`1min/deeper/2026-09.bin` (`with_contract == 1`) and now pins `unknown_rung ==
-1`: `deeper` is where a contract path's rung sits, and it is no rung. Proof:
-`store::catalog::a_contract_path_is_checked_like_a_spot_path_before_it_is_counted`
-(failed before: `with_contract: 7` for one contract month, three siblings and
-three misspelt paths). Cost unchanged.
-
-### D-1353 — `Header::decode` refuses a non-zero reserved tail — 2026-10-02
-
-**What was wrong.** `docs/02-store-format.md` §2 gives slot bytes `60..64` as
-*reserved, zero* and says a future field takes reserved space *"in a new
-version, never by reinterpreting version 2"*. `decode` never read them. The
-slot checksum covers them, so a slot carrying a value there was written that
-way, and it decoded as a healthy version-2 header: the in-place
-reinterpretation `CLAUDE.md` §3 rule 8 forbids, accepted silently.
-
-**The change.** After the checksum and stride checks, a non-zero reserved
-tail is `FormatError::ReservedNotZero(u32)`. Ordering keeps a flipped bit a
-`SlotChecksum`. Every writer in this build leaves the tail zero
-(`a_slot_round_trips_every_field_at_its_documented_offset` pins it), so no
-file this repository wrote is newly refused. `docs/02-store-format.md` §2's
-row now says the refusal. Proof:
-`store::unit::a_slot_whose_reserved_tail_is_not_zero_is_refused`, all four
-bytes, through `decode` and `read_region` (failed before: a probe asserting
-`decode(..).is_err()` got `Ok(Header { format_version: 2, .. })`). O(1): one
-four-byte read per slot decode.
-
-### D-1354 — Undefined flag bits are refused on read and on commit — 2026-10-02
-
-**What was wrong.** `flags` defines bit 0 (`FLAG_CHECKSUMS`) and nothing
-else. `decode` accepted any value, so a file declaring a property this build
-has never heard of was read as if it declared none, and `Header::commit`
-wrote any value it was handed — a slot whose meaning no reader could know.
-
-**The change.** `FormatError::UnknownFlags(u32)` from `decode` (after the
-checksum) and from `commit`, so no slot this build writes can reach the read
-refusal. Production writes `FLAG_CHECKSUMS` (and older files `0`); both still
-round-trip. Proof:
-`store::unit::a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write`,
-bits 1..31 (failed before: flags `3` decoded `Ok`, and a commit with flags
-`2` succeeded). O(1).

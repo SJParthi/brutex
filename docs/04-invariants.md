@@ -126,13 +126,10 @@ The negative-price comparisons overlap with ordering refusals; these fixtures
 do not establish a distinct non-equivalent killed mutant for each sign check.
 Branch execution is not a mutation result or a complete coverage measurement.
 
-### Store catalog and header follow-up — 2 October 2026
+### Store header follow-up — 2 October 2026
 
 | Invariant | Executable proof |
 |---|---|
-| Only *not found* makes `root/bars` an empty store; any other failure to examine it (a symlink loop here) is `CatalogError::BarsUnreadable` (D-1350) | `store::catalog::a_bars_that_cannot_be_examined_is_refused_and_not_reported_empty` |
-| A subdirectory the walk cannot list, or an entry it cannot read, is counted in `Census::unlisted`, and a census with any is refused by `reconciles()` (D-1351) | `store::catalog::tests::an_unreadable_branch_or_entry_is_counted_and_the_census_does_not_reconcile` |
-| A contract-depth path counts as a contract month only if its extension, feed, rung and month pass the spot checks; otherwise it lands in the same refusal bucket (D-1352) | `store::catalog::a_contract_path_is_checked_like_a_spot_path_before_it_is_counted`; `store::catalog::the_walk_descends_rather_than_guessing_the_depth` |
 | A header slot with a non-zero reserved tail `60..64` is refused by name, through `decode` and `read_region` (D-1353) | `store::unit::a_slot_whose_reserved_tail_is_not_zero_is_refused` |
 | A flag bit version 2 does not define is refused on read and on commit (D-1354) | `store::unit::a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write` |
 
