@@ -12,8 +12,8 @@ Checkpoint for pause/resume. Updated after each item. Branch per item: `fix/clou
 | W3-store1-0 | W3-store1-0, W3-store1-1, ET-bars-candles-store-12 | pushed, in review | https://github.com/SJParthi/brutex/pull/27 |
 | ET-o1-proof-coverage-4 | ET-o1-proof-coverage-4, ET-bars-candles-store-9 | pushed, reviewed | https://github.com/SJParthi/brutex/pull/41 |
 | ET-bars-candles-store-2 | ET-bars-candles-store-2, ET-bars-candles-store-3 | pushed | https://github.com/SJParthi/brutex/pull/45 |
-| UC-7 | UC-7, UC-13, ET-rust-only-purity-5 | in progress | - |
-| ET-o1-proof-coverage-3 | ET-o1-proof-coverage-3, ET-o1-proof-coverage-13 | in progress | - |
+| UC-7 | UC-7, UC-13, ET-rust-only-purity-5 | pushed, in review | https://github.com/SJParthi/brutex/pull/52 |
+| ET-o1-proof-coverage-3 | ET-o1-proof-coverage-3, ET-o1-proof-coverage-13 | pushed, in review | https://github.com/SJParthi/brutex/pull/53 |
 
 ## Batch 2 (lane1-b.md, 64 findings)
 
