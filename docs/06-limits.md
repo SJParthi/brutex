@@ -7375,7 +7375,9 @@ alter the O(sum C_i + F log F) time and O(F) temporary-space bounds above.
 The live support column similarly makes candidate depth constant per bar, not
 the sweep constant in total. Building the owned column is O(B) time and space
 for B fixed-six-word masks; one support or fingerprint pass is O(B) total with
-O(1) work per bar independent of k. Measured `C-E-02` ratios were 0.971x at
+O(1) work per bar independent of k. No production source calls the fingerprint
+pass, so no run pays for it or ranks by it (D-0760). Measured `C-E-02` ratios
+were 0.971x at
 k=4 and 0.996x at k=8 relative to k=1, and `C-E-09` was 0.942x from k=1 to
 k=384. Those release measurements close the former live O(k)-per-bar defect;
 they do not bound Apriori frontier growth, number of candidates, persistence,

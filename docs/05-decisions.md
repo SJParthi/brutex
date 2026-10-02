@@ -45333,3 +45333,86 @@ guard, which is equivalent, since `SWEPT_INDICES` holds only strings and
 `docs/06-limits.md` each said "No page under `web/` renders `equity_note`".
 From this entry on, the report page renders it for the open run. Those
 entries are not edited.
+### D-0760 — The hit-set fingerprint has no production caller, and says so — 2026-09-29
+
+**What was wrong.** D-0454 says `support_fingerprinted` "repacks the same row
+result into stable 64-bar hit words so support identity remains
+byte-reproducible", and `docs/06-limits.md` priced "one support or fingerprint
+pass" beside the live support count. Both read as if a run used the
+fingerprint. None does: `Column::support_fingerprinted`, and the `HitSet` it
+returns, are reached only from engine tests and from the C-E-07 row in
+`crates/engine/benches/ratio.rs`. The live sweep calls `Column::support`.
+
+**The change.** No code path moves. The method's doc now opens a paragraph with
+"No production path calls this", the limits paragraph says no production
+source calls the fingerprint pass, and
+`engine/tests/production_callers.rs::the_fingerprinted_path_has_no_production_caller_and_says_so`
+reads every `.rs` file under `crates/engine/src` up to its first
+`#[cfg(test)]` line and every other crate's `src` whole, with line comments
+stripped, and requires no whole-token mention outside the definition and that
+sentence in the doc.
+`engine/tests/production_callers.rs::nothing_after_an_engine_files_first_test_gate_ships`
+holds the cut sound. The scan lives under `crates/engine/tests` because CI Gate
+22 clause B refuses `read_dir` and `std::fs` anywhere in `crates/engine/src`,
+test-only code included, and the engine's `src` keeps no filesystem call.
+The guard fails the day a caller appears, so the
+doc cannot go stale silently.
+
+**Why it was not deleted or wired in.** C-E-07 names the bench row that calls
+it, and invariant rows are append-only. Wiring it into the sweep would dedupe
+candidates by hit set, which changes what a run ranks and counts; that is a
+change to what a run computes and needs its own decision and identity move,
+not a follow-up fix. D-0454 stays as written; this entry corrects it.
+
+### D-0761 — The empty mask folds like every other candidate; no identity is reserved — 2026-09-29
+
+**What was wrong.** `support_fingerprinted` returned `HitSet::EVERY_BAR`, the
+pair `(0, 0)`, for the empty mask, and its doc called that pair "unreachable
+as a fold output". Two defects followed. First (W3-engine1-5), the identity was
+not a function of the bar set: on a column with bars, the empty mask and a bit
+every bar carries select the same bars and got different identities, and on an
+empty column the empty mask got `(0, 0)` while every other candidate got the
+unfolded seed pair, though all select nothing. Second (ET-masks-evaluation-sweep-4),
+the unreachability argument was false for each half: the high fold is zero
+when its one word equals `seed_hi.rotate_left(23)` and the low fold is zero
+when its word equals `seed_lo`, and a 64-bar column spells either word.
+
+**The change.** The early return and the `EVERY_BAR` constant are gone. The
+empty mask hits every row, since `(bits & 0) == 0`, and takes the ordinary
+fold, so it folds the same words as a bit every bar carries. With no reserved
+pair there is no value a real fold could collide with. The test-only vertical
+reference now starts each word with its real bars set and padding clear, so it
+folds the empty mask the same way.
+`engine::column::tests::the_empty_mask_folds_like_a_bit_every_bar_carries` and
+`engine::column::tests::either_half_of_a_fold_can_be_zero_so_no_pair_is_reserved`
+pin both. `the_empty_and_the_impossible_never_collide` and
+`selecting_no_bars_is_its_own_identity` now compare "every bar" with "no bar"
+on the same column instead of with the removed constant, and the engine's
+early-exit count for `column.rs` drops from two to one.
+
+**Why no run identity moves.** D-0760: no production path calls
+`support_fingerprinted`, so no run's ranking, count, trades or report changes.
+Only the value a test or the C-E-07 bench sees for the empty mask changes, and
+C-E-07 does not time the empty mask.
+
+### D-0762 — `keep::Best` has no production caller, and says so — 2026-09-29
+
+**What was wrong.** The crate doc called `keep::Best` "the bounded retention a
+caller feeds from the level boundary", and the type's doc said nothing about
+who calls it. Every use outside `keep.rs` sits in the engine's test module;
+`runner::rank` keeps its own heap. A reader could take the type for part of the
+live path.
+
+**The change.** No code path moves. The type's doc now says "No production path
+calls this" and names `runner::rank` as keeping its own heap; the crate doc
+says a caller could feed it and no production caller does.
+`engine/tests/production_callers.rs::best_has_no_production_caller_and_says_so`
+uses the D-0760 scan to require the token `Best` nowhere in any shipping engine
+region or any other crate's `src` but the type's own `pub struct Best` and
+`impl Best` lines, and that sentence in the doc.
+
+**Why it was not deleted or gated to tests.** `keep::Streamed`, `Tally` and the
+module's tests share the file, and the retention's cost and allocation
+findings (W3-engine1-2, W3-engine1-4) are open in a later batch against this
+type. Removing it would erase what those batches fix; the guard makes the
+first production caller visible instead.
