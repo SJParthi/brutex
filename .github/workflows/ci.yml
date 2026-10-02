@@ -8876,6 +8876,23 @@ jobs:
             echo "renders and every status cell stays empty."
             exit 1
           fi
+          # THE TEXT BELOW SEES ONE SPELLING, SO IT IS NOT THE PROOF (D-1118).
+          # It refuses `refresh();` at column zero and passed an indented call,
+          # `verify()` with no semicolon, `setTimeout(refresh)`, a `load` or
+          # `DOMContentLoaded` listener and an `onload` assignment, each of
+          # which spends the request on load (LATE gates-and-ci #11). The proof
+          # is `web/tests/masters-load.test.js`, which runs this script in
+          # `node:vm` against a stub document, plays every load event, timer
+          # and promise, and records every `fetch`: opening the page may ask
+          # for `/masters/status.json` and nothing else. Gate W2 runs it; this
+          # step refuses if it is gone, and keeps the text checks as the fast
+          # first answer.
+          t=web/tests/masters-load.test.js
+          if ! git ls-files --error-unmatch "$t" >/dev/null 2>&1; then
+            echo "$t is not tracked. It is what proves opening /masters spends"
+            echo "no vendor request; the text checks below see one spelling."
+            exit 1
+          fi
           bad=0
           for fn in refresh verify; do
             if ! grep -q "addEventListener('click', $fn)" "$f"; then

@@ -44286,3 +44286,40 @@ doc comment. On this tree the gate passes.
 
 Invariant CIG-21.
 
+### D-1118 — Opening /masters is proven by running the script, not by reading one spelling — 2026-10-02
+
+**What was wrong.** Finding LATE-gates-and-ci correctness-and-extremes #11.
+Gate W6 enforces the operator's rule that opening a page spends no vendor
+request. It did so with `grep -qE "^$fn\(\);"`, so only a `refresh();` or
+`verify();` at column zero was refused. An indented call passed, and so did:
+- a call with no semicolon
+- `setTimeout(refresh)`
+- a `load` or `DOMContentLoaded` listener
+- an `onload` assignment
+
+Each of these calls the function when the page loads, which is exactly what
+the gate's own comment says it refuses.
+
+**The choice.** `web/tests/masters-load.test.js` loads `web/masters.js` into a
+`node:vm` context with a stub document. It plays the page's load: every load
+event on window and document, the `on*` handlers, every timer, every settled
+promise. It records every `fetch`, then checks three things:
+- Opening the page asks for `/masters/status.json` and nothing else.
+- Pressing `#go` and `#verify` reach `/masters/refresh` and
+  `/indexmap.json?feed=`.
+- Twelve load-time spellings, each appended to the real script, are each
+  caught.
+
+Gate W2 already runs every `web/tests/*.test.js`. Gate W6 now refuses if this
+file is not tracked and keeps its text checks as the fast first answer. All of
+this lives under `web/` and in the browser job, so no crate gains the front
+end's toolchain (CLAUDE.md §2).
+
+**Measured.** With `  refresh();` appended to `web/masters.js`, gate W6 passed
+and the new test failed `opening the page asks only for the socket-free
+status`. On the real script all three tests pass.
+
+**Limits.** The stub document answers only what `masters.js` uses. A script
+that reaches the network through something the stub lacks, such as
+`XMLHttpRequest`, `navigator.sendBeacon` or an `<img>` source, would throw
+or go unrecorded rather than be counted. Invariant CIG-22.
