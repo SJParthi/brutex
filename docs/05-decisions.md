@@ -48538,6 +48538,49 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0916 — Read native-dependency reachability from the lock's edges, and fingerprint the edges — 2026-10-02
+
+**The defect (audit findings UC-7, UC-13, ET-rust-only-purity-5).**
+`no_declared_native_dependency_is_compiled_any_more` in
+`crates/vocab/tests/workspace_is_rust.rs` filtered `DECLARED` on
+`compiled_on_this_target && packages.contains(name)`, and the field was a
+literal `false` in all four rows. Nothing else read it, so the assertion could
+not fail whatever the build did. Reproduced on this branch's base: with one
+line, `"ring"`, added to `rustls`'s `dependencies` in `Cargo.lock` (what
+turning on rustls's `ring` feature writes), all three tests in the file
+passed. The fingerprint test passed too, because it hashed the package-name
+set and no name changed.
+
+**The change.** Test-only. The file now parses each `[[package]]` stanza's
+name, version, `source` and `dependencies`, walks the edges from the workspace
+members (no `source`; asserted to be thirteen), and fails on any `DECLARED`
+crate it reaches. The lock records more than a host build compiles, so the
+walk skips exactly three named `(parent, child)` edges, each checked to still
+be present: `rustls-webpki -> ring` (the weak `ring?/alloc` feature records
+the optional dependency without enabling it), `iana-time-zone ->
+iana-time-zone-haiku` (Haiku-only) and `wasip2 -> wit-bindgen` (wasm-only).
+A dependency entry naming no package is refused by name rather than dropped.
+The same mutated lock now fails both
+`no_declared_native_dependency_is_compiled_any_more` (naming `ring` and `cc`)
+and the fingerprint test. The fingerprint now hashes every package's name and
+dependency list, re-pinned from `0x354E_E31C_8B93_4AEA` to
+`0xA685_8949_AA8A_D9CE` over a byte-identical `Cargo.lock`. The
+`compiled_on_this_target` field is removed. Two synthetic-lock tests show the
+checker reporting `ring` when a member reaches it and the fingerprint telling
+apart two locks with the same names.
+
+**Rejected.** (1) Running `cargo metadata` or `cargo tree` from the test: no
+test in this repository spawns cargo, and doing so needs the registry, which
+`--offline` in a clean checkout does not have (`cargo tree --offline` here
+fails on an undownloaded Android-only crate). (2) Evaluating target `cfg`
+expressions from the lock: the lock does not carry them. (3) Hashing versions
+into the fingerprint: out of scope for this finding, and every routine bump
+would re-pin it; a version change that alters a `dependencies` list still
+moves it.
+
+Invariants RUST-UC7-a through RUST-UC7-c; `docs/06-limits.md` records what the
+skip list cannot see.
+
 ### D-0998 — The cli binary reads its arguments as `OsString` and refuses one that is not UTF-8 as a misuse — 2026-10-02
 
 **What was wrong (probeapi-3, cli half).** `crates/cli/src/main.rs` collected
