@@ -11178,6 +11178,48 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## The invocation journal grows by one file per audited request, and its terminal is owed — D-0952, 2 October 2026
+
+- **One new file per audited request, in one flat directory, with no
+  retention, rotation or sharding.** Every request to a route in
+  `operation_audit::AUDITED` that passes admission runs `journal::begin`: one
+  256-byte start appended to `audit/invocations-v1/index.bin` and one new
+  `audit/invocations-v1/<id>.bin` created with `create_new`, then a 256-byte
+  terminal appended to that file. So each finished request costs 256 bytes in
+  the index plus 512 bytes in its own file, and one more directory entry. The
+  audited routes are `/backtest/run`, `/backtest/descend`, `/engine/command`,
+  `/engine/boolean-launch.json`, `/backtest.json`, `/backtest/run.json`,
+  `/trades.json`, `/frontier.json`, `/candidate-trades.json`,
+  `/sweep-evidence.json`, `/boolean-candidates.json`,
+  `/boolean-statistics.json`, `/boolean-admission.json`,
+  `/boolean-qualification.json`, `/boolean-qualified-search.json`,
+  `/boolean-campaign.json`, `/boolean-qualified-campaign.json`,
+  `/boolean-oos.json`, `/expression-search.json`, `/engine/top.json` and
+  `/live.json`, several of them polled by the console, so the journal grows
+  while the operator only watches.
+- **The code work per request is fixed; the filesystem's is not.** `begin`
+  is one index append, one file create and about seven `fsync`s (two directory
+  creations each flushing themselves and their parent, the index, the new
+  file, and the directory again); the terminal is one append and its `fsync`.
+  The directory insert at `create_new` and the lookup at each read depend on
+  the filesystem and on the directory's entry count, which grows with every
+  audited request ever served. Disk use is O(history). Not timed: no bench
+  covers the journal, and no measurement of a large directory has been taken.
+  `api::operation_audit::tests::each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed`
+  pins the byte and file counts, not the latency.
+- **The terminal is owed, so it is not refused by a full detail pool.**
+  `request_audited` writes the terminal through `detail::run_owed`, which
+  takes a slot past `MAX_CONCURRENT` instead of answering `Saturated`. The
+  number of owed terminals running at once is therefore not bounded by
+  `MAX_CONCURRENT`: it is at most the number of audited requests whose handler
+  has returned and whose terminal has not, which is bounded by in-flight
+  connections and by Tokio's blocking pool (its default thread cap, with
+  excess tasks queued), not by this crate. Each owed task still counts against
+  new detail work while it runs, so the pool refuses reads sooner under that
+  load rather than later. Before D-0952 the terminal was refused, the dropped
+  attempt wrote `Cancelled` with status 0 synchronously on a Tokio worker, and
+  the handler's real answer was replaced by a 503.
+
 ## The store admits a bar by month and grid, not by session — D-0915, 2 October 2026
 
 * **What the write boundary now checks.** `BarFile::append` and
