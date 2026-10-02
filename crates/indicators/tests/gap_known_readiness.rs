@@ -281,6 +281,27 @@ fn non_regular_session_cannot_replace_the_prior_regular_gap_anchor() {
     assert!(counts.iter().all(|[f, t, _]| f + t == 4));
 }
 
+/// The five-minute exact-minute `GapFib` overlay over regular 09:15-15:29 sessions; the
+/// caller's session close is 15:29 on every fixture day (D-0943).
+fn overlay_five_minute(
+    signal: &[Candle],
+    minutes: &[Candle],
+    widths: Widths,
+    calendar: Calendar,
+    column: &mut Column,
+) -> Result<indicators::anchored::ExactMinuteGapCensus, indicators::anchored::ExactMinuteGapRefusal>
+{
+    indicators::anchored::overlay_exact_minute_gapfib(
+        signal,
+        minutes,
+        5 * MINUTE,
+        widths,
+        calendar,
+        |_| Some(15 * 60 + 29),
+        column,
+    )
+}
+
 #[test]
 fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_evidence() {
     let widths = Widths::pinned().expect("widths");
@@ -311,15 +332,8 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
     let mut column = Column::build(&signal, &mut evaluator(widths.fib, calendar));
     assert!(!column.is_empty(), "fixture must warm the actual column");
     let before = column.clone();
-    indicators::anchored::overlay_exact_minute_gapfib(
-        &signal,
-        &minutes,
-        5 * MINUTE,
-        widths,
-        calendar,
-        &mut column,
-    )
-    .expect("exact close alignment");
+    overlay_five_minute(&signal, &minutes, widths, calendar, &mut column)
+        .expect("exact close alignment");
     let mut known_false = 0;
     for ((source, truth), known) in column
         .sources()
@@ -368,17 +382,7 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
     let missing_ts = signal.get(first_source).expect("source").ts_micros + 4 * MINUTE;
     minutes.retain(|bar| bar.ts_micros != missing_ts);
     let intact = column.clone();
-    assert!(
-        indicators::anchored::overlay_exact_minute_gapfib(
-            &signal,
-            &minutes,
-            5 * MINUTE,
-            widths,
-            calendar,
-            &mut column
-        )
-        .is_err()
-    );
+    assert!(overlay_five_minute(&signal, &minutes, widths, calendar, &mut column).is_err());
     assert_eq!(
         column, intact,
         "no partial truth or availability overlay on failure"

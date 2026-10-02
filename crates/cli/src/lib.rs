@@ -2495,6 +2495,7 @@ fn stored_anchored_column(
         signal_length_micros,
         widths,
         indicators::evaluator::Calendar::charter(),
+        stored::nse_session_close_minute,
         &mut column,
     )
     .map_err(|why| {
