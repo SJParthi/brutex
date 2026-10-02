@@ -1616,6 +1616,12 @@ mod tests {
             .expect("decode_rows exists");
         let body = &source[start..];
         let body = &body[..body.find("\n}\n").expect("decode_rows ends")];
+        // CODE ONLY: D-0721's comment in the loop names the `Vec` it removed.
+        let body: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
         for needle in [
             format!("{}{}", "Vec<&", "str>"),
             format!("{}{}", ".coll", "ect()"),
@@ -1628,6 +1634,7 @@ mod tests {
             );
         }
         assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
+    }
 
     /// **A LINE'S FIELDS LAND IN A FIXED ARRAY, AND ARE COUNTED WHOLE.**
     /// D-0721.
