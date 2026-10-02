@@ -43897,3 +43897,37 @@ gains a clause refusing `ExecutionRunV1::new(` in the loop, and
 `cli::candidate_universe::boolean_candidate_v1::tests::produce_side_hashes_no_slice` covers the `cli`
 catalogue. The three source-shape tests fail on the previous tree; the
 behavioural test does not compile there.
+
+### D-1144 — Count `priced` from the pricing loop's output, and replace two `held_up` assertions that could not fail — 2026-10-02
+
+**Findings.** W3-runner5-5 and AC-whp-tb-1, grouped because both are tests
+that asserted nothing, which `CLAUDE.md` §4 bans.
+
+* `walk_forward_core` set `considered` and `priced` from the same expression,
+  `u64::try_from(closed.kept.len())`. So R-01's
+  `every_candidate_the_sweep_produced_is_priced_and_none_is_skipped`
+  (`priced == considered`) held by construction and would have passed with a
+  `.take(N)` cap reintroduced. The field doc says it "counts what the loop
+  visited", and it did not.
+* `held_up_judges_the_strategy_that_was_chosen` asserted
+  `counted >= old_rule || old_rule > counted`, which is true for any two
+  integers. Its other equality compared `held_up()` with a verbatim copy of
+  `held_up`'s own filter.
+
+**The change.** `priced` is now `assessed.len()`, the length of the indexed
+`collect` the pricing `par_iter` returns. That is one entry per visited
+candidate, priceable or not, so a cap shrinks it and nothing else. The value
+is unchanged on every input the loop prices completely, which is every input
+today. The tautology is removed, and a new test builds folds by hand where the
+chosen-exit rule and the level-less rule disagree in both directions, with a
+literal expected count.
+
+**Tests.**
+`validate::tests::priced_is_counted_from_what_the_pricing_loop_returned`
+(source shape, since the two counts are equal on every uncapped run) fails on
+the previous tree.
+`validate::tests::held_up_counts_the_chosen_exit_and_not_the_level_less_walk`
+covers six disagreeing folds, the empty set, one fold and the
+`i64::MAX`/`i64::MIN` extremes. Checked by reverting `held_up` to
+`out_of_sample.worst_case_positive()`: it fails, and so does the remaining
+half of the old test. No output changes.

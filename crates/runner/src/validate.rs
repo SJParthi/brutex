@@ -4699,7 +4699,14 @@ fn walk_forward_core(
         // The side rides in this vector too, so `oos_all` prices every candidate
         // on the side its own training evidence chose.
         let mut scored: Vec<Scored> = Vec::with_capacity(assessed.len());
-        let priced: u64 = u64::try_from(closed.kept.len()).unwrap_or(u64::MAX);
+        // COUNTED FROM WHAT THE LOOP RETURNED, NOT FROM ITS INPUT (D-1144).
+        //
+        // This read `closed.kept.len()` -- the expression `considered` is built
+        // from -- so `priced == considered` held by construction and R-01's
+        // test could not see a `.take(N)` reintroduced on the `par_iter`.
+        // `assessed` has one entry per candidate the indexed `collect`
+        // actually visited, priceable or not, so a cap shrinks it and only it.
+        let priced: u64 = u64::try_from(assessed.len()).unwrap_or(u64::MAX);
         for Assessed {
             mask,
             summary: s,
@@ -6088,6 +6095,53 @@ mod tests {
         );
     }
 
+    /// D-1144 (AC-whp-tb-1). `held_up` must read the chosen exit's own
+    /// out-of-sample total when there is one, and the level-less walk only
+    /// when there is none. Every fold here makes the two rules disagree in one
+    /// direction or the other, and the expected count is a literal, so
+    /// reverting `held_up` to `out_of_sample.worst_case_positive()` fails, and
+    /// so does dropping the fallback, counting unchosen folds, or flipping `>`
+    /// to `>=`.
+    #[test]
+    fn held_up_counts_the_chosen_exit_and_not_the_level_less_walk() {
+        let chosen = Some(ConditionMask::ZERO.with_bit(1));
+        let walk = |worst| super::Summary {
+            trades: 1,
+            worst,
+            ..super::Summary::default()
+        };
+        let fold = |chosen, exit, level_less| super::FoldResult {
+            chosen,
+            out_of_sample_exit: exit,
+            out_of_sample: walk(level_less),
+            ..super::FoldResult::default()
+        };
+        let folds = vec![
+            fold(chosen, Some(6_900), -50), // exit won, walk lost: counted
+            fold(chosen, Some(-10), 400),   // exit lost, walk won: not counted
+            fold(chosen, Some(0), 400),     // exactly zero is not a win
+            fold(chosen, None, 1),          // no exit figure: walk decides, won
+            fold(chosen, None, 0),          // no exit figure: walk decides, flat
+            fold(None, Some(9_000), 9_000), // nothing chosen: never counted
+        ];
+        let v = Validated {
+            folds,
+            refused: None,
+        };
+        assert_eq!(v.held_up(), 2);
+        // Empty and one-fold edges.
+        let none = Validated {
+            folds: Vec::new(),
+            refused: None,
+        };
+        assert_eq!(none.held_up(), 0);
+        let one = Validated {
+            folds: vec![fold(chosen, Some(i64::MAX), i64::MIN)],
+            refused: None,
+        };
+        assert_eq!(one.held_up(), 1);
+    }
+
     #[test]
     fn held_up_judges_the_strategy_that_was_chosen() {
         // It counted `out_of_sample.worst_case_positive()` — the chosen
@@ -6127,15 +6181,13 @@ mod tests {
         // What IS asserted: the counts are reported honestly against each
         // other, so a future change that reverts `held_up` to the level-less
         // reading has to make this equality false to pass.
-        let old_rule = v
-            .folds
-            .iter()
-            .filter(|f| f.chosen.is_some() && f.out_of_sample.worst_case_positive())
-            .count();
-        assert!(
-            counted >= old_rule || old_rule > counted,
-            "unreachable: the two counts are always comparable"
-        );
+        //
+        // D-1144: what stood here was `counted >= old_rule || old_rule >
+        // counted`, true for any two integers, and `by_hand` above is a copy of
+        // `held_up`'s own filter, so neither could fail on a revert. The
+        // revert-sensitive check is
+        // `held_up_counts_the_chosen_exit_and_not_the_level_less_walk`, over
+        // folds built by hand so the expected count is a literal.
         // A fold the OLD rule counted must still be counted, unless its chosen
         // exit genuinely lost — a levelled strategy that loses where the
         // level-less one won is a real outcome and not a bug, but it must come
@@ -6311,6 +6363,39 @@ mod tests {
         assert!(
             seen_any,
             "every fold was handed zero candidates, so the equality above is vacuous"
+        );
+    }
+
+    /// D-1144. The equality above binds only if `priced` is counted from the
+    /// loop's output. It was `closed.kept.len()`, the same expression as
+    /// `considered`, so a reintroduced cap kept it green. Source shape, because
+    /// no fixture can tell a count-of-input from a count-of-output while the
+    /// two are equal.
+    #[test]
+    fn priced_is_counted_from_what_the_pricing_loop_returned() {
+        let source = include_str!("validate.rs");
+        let considered = concat!(
+            "let considered = u64::try_from(",
+            "closed.kept.len()).unwrap_or(u64::MAX);"
+        );
+        let from_input = concat!(
+            "let priced: u64 = u64::try_from(",
+            "closed.kept.len()).unwrap_or(u64::MAX);"
+        );
+        let from_output = concat!(
+            "let priced: u64 = u64::try_from(",
+            "assessed.len()).unwrap_or(u64::MAX);"
+        );
+        assert!(source.contains(considered), "the anchor moved");
+        assert!(
+            !source.contains(from_input),
+            "priced must not count the input"
+        );
+        let at = source.find(from_output);
+        let collect = source.find(concat!("let assessed: Vec<Option<Assessed>>", " = closed"));
+        assert!(
+            at.is_some() && collect.is_some() && collect < at,
+            "priced must count `assessed`, after the pricing loop built it"
         );
     }
 

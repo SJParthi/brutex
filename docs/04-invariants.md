@@ -5380,3 +5380,10 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | `ExecutionRunV1::with_digests` over `ExecutionDigestsV1` returns exactly what `ExecutionRunV1::new` / `new_with_daily_reference` returns, or exactly the same refusal, for every input those constructors accept or refuse. Reusing one digest set is idempotent. | `runner::exit_grid_policy::tests::sealing_against_hoisted_digests_equals_hashing_per_run` | ✓ |
 | No per-candidate loop in the V4 walk-forward (training population or OOS replay) or in `cli`'s Boolean catalogue hashes the fold's or source's slices to seal a run. | `runner::validate::tests::the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop` · `runner::validate::tests::the_oos_replay_loop_hashes_its_slices_once_per_fold` · `cli::candidate_universe::boolean_candidate_v1::tests::produce_side_hashes_no_slice` | ✓ |
+
+### Walk-forward counts and `held_up` are tested against independent answers — W3-runner5-5, AC-whp-tb-1 (D-1144)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `FoldResult::priced` is counted from the pricing loop's returned vector, not from its input, so `priced == considered` fails when any cap truncates the loop. | `runner::validate::tests::priced_is_counted_from_what_the_pricing_loop_returned` · `runner::validate::tests::every_candidate_the_sweep_produced_is_priced_and_none_is_skipped` | ✓ |
+| `Validated::held_up` counts a chosen fold by its chosen exit's out-of-sample total when one exists (strictly positive), and by the level-less walk only when none does. Unchosen folds never count. | `runner::validate::tests::held_up_counts_the_chosen_exit_and_not_the_level_less_walk` | ✓ |
