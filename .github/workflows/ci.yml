@@ -6785,12 +6785,14 @@ jobs:
             END { out() }
           '
           printf '%s\n' \
-            'a.rs:1:    let x = xs' 'a.rs:2:        .iter()' 'a.rs:3:        .position(|v| v == 1);' \
-            'a.rs:4:    let y = ys.iter().find(|v| ok(v));' \
-            'b.rs:1:        .iter()' 'b.rs:2:    .find(|v| v)' > "$work/chain-fixture"
+            'a.rs:1:    let x = xs' 'a.rs:2:        .iter()' 'a.rs:3:        .position(is_one);' \
+            'a.rs:4:    let y = ys.iter().find(ok);' \
+            'b.rs:1:        .iter()' 'b.rs:2:    .find(ok)' > "$work/chain-fixture"
           awk "$chain" "$work/chain-fixture" > "$work/chain-out"
           got=$( { grep -cE '\.iter\(\)\.(find|position|rposition)\(' "$work/chain-out" || true; } )
-          if [ "$got" != "3" ] || ! grep -qx 'a.rs:1:    let x = xs.iter().position(|v| v == 1);' "$work/chain-out"; then
+          joined=0
+          grep -qx 'a.rs:1:    let x = xs.iter().position(is_one);' "$work/chain-out" && joined=1
+          if [ "$got" != "3" ] || [ "$joined" != 1 ]; then
             echo "GATE 11 RULE 6's CHAIN FOLD FAILED ITS SELF-TEST (expected 3 hits, one per chain and none across files, got ${got}):"
             cat "$work/chain-out"
             exit 1
@@ -7892,6 +7894,13 @@ jobs:
               continue
             fi
             npt=$(awk '/ratio[ \t]*\(/ && !/(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z0-9_]*ratio[ \t]*[(<]/ { n++ } END { print n+0 }' "$work/bench.code")
+            # Layer 4's input: the first word of every decoded string literal.
+            if ! "$scan" strings "$b" > "$work/bench.strings"; then
+              printf '  REFUSED  %s: its string literals could not be read\n' "$b"
+              bad=1
+              continue
+            fi
+            cut -d: -f3- "$work/bench.strings" | awk '{print $1}' > "$work/bench.heads"
             nce=$( { grep -c 'CEILING' "$b" || true; } | tr -d ' ')
             miss=''
             [ "$nce" -ge 2 ] || miss="${miss} a-named-ceiling-compared-against"
@@ -7920,8 +7929,7 @@ jobs:
               # applies. A substring of the file was satisfied by any `///`
               # line that mentioned the id, and every C-E id is mentioned in
               # another row's doc.
-              "$scan" strings "$b" | cut -d: -f3- | awk '{print $1}' \
-                | grep -qxF -- "$r" && inbench=1 || true
+              grep -qxF -- "$r" "$work/bench.heads" && inbench=1 || true
               if [ "$inrow" -eq 1 ] && [ "$inbench" -eq 1 ]; then
                 printf '  ok       %s — %s is a row in %s and is printed\n' "$b" "$r" "$inv"
               else
