@@ -3900,8 +3900,13 @@ fn validate_arithmetic_envelope_view(
     bars: &[Candle],
     resolved: &ResolvedGridViewV1<'_>,
 ) -> Result<(), ExitGridErrorV1> {
-    let count = i128::try_from(bars.len())
-        .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;
+    validate_envelope_extremes(bars.len(), envelope_extremes(bars), resolved)
+}
+
+/// The two price extremes the arithmetic envelope reads: the highest high and
+/// the lowest open. One O(B) pass, which a caller pricing many resolutions on
+/// one series takes once (D-1188).
+fn envelope_extremes(bars: &[Candle]) -> Result<(i64, i64), ExitGridErrorV1> {
     let max_price = bars
         .iter()
         .map(|bar| bar.high)
@@ -3912,6 +3917,20 @@ fn validate_arithmetic_envelope_view(
         .map(|bar| bar.open)
         .min()
         .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
+    Ok((max_price, min_open))
+}
+
+/// [`validate_arithmetic_envelope_view`] over extremes already taken. The
+/// refusal order is the original's: the bar count, then an empty series, then
+/// each bound in turn.
+fn validate_envelope_extremes(
+    bars: usize,
+    extremes: Result<(i64, i64), ExitGridErrorV1>,
+    resolved: &ResolvedGridViewV1<'_>,
+) -> Result<(), ExitGridErrorV1> {
+    let count = i128::try_from(bars)
+        .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;
+    let (max_price, min_open) = extremes?;
     let money_bound = i128::from(max_price)
         .checked_mul(count)
         .and_then(|value| value.checked_mul(4))

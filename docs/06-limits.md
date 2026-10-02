@@ -10043,4 +10043,11 @@ not:
   rows from there. The empty mask still walks from row 0. `SliceFacts` for the
   fold is still built over `trade_test` from bar 0, which is O(E_prefix) once
   per fold. Not timed.
+- **Boolean later-period run: O(B + R) once per series, then per program and
+  side only what depends on them (D-1188).** The later slice's validation,
+  hashes, price extremes, `SliceFacts` and fold index are built once. Each
+  program and side still costs its own truth summary over the column (O(R)),
+  its exact grid walk, its seal over the grid's cells and an O(rungs) envelope
+  check. The fold map holds O(B + folds) memory for the whole run instead of
+  per bind. Not timed.
 

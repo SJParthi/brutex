@@ -44584,3 +44584,51 @@ late, and that a start past the column walks nothing.
 `the_oos_pass_walks_from_the_first_live_row` is a source-shape test and fails
 on the previous tree.
 
+### D-1188 — A Boolean later-period run checks, hashes and fold-indexes its later series once — 2026-10-02
+
+**Finding.** o1runner-2. `cli::boolean_oos_v1::compute` prices every training
+program on both sides over one later series and column. For each program and
+side, `evaluate_expression_oos` re-validated every bar, recounted the column's
+acceptance, rechecked every source, rescanned the price extremes for the
+arithmetic envelope, BLAKE3-hashed the series and the column, and rebuilt
+`SliceFacts`. `FixedTrainingFoldPlanV1::bind` then re-indexed every later bar
+into its fold. None of that depends on the program or the side: O(B + R) per
+program and side for one answer.
+
+**The change.**
+* New `LaterExpressionSliceV1::new(series, column)` takes every series-level
+  verdict once and keeps it as found: bar validation, complete acceptance,
+  source order, the envelope's two price extremes, the execution digest, the
+  column digest and one shared `SliceFacts`. Its fields are private and its one
+  constructor reads the real bars. New
+  `ResearchResolvedExitGridV1::evaluate_expression_oos_on(anchor, &later, run)`
+  checks in exactly the order `evaluate_expression_oos` did and reads each
+  stored verdict at the position the per-call check had. A multi-fault input
+  therefore reports the same refusal. `evaluate_expression_oos` is now
+  `_on` over a slice it builds.
+* `exit_grid_policy::validate_arithmetic_envelope_view` is split into
+  `envelope_extremes` (the O(B) scan) and `validate_envelope_extremes` (the
+  per-resolution bounds). The refusal order is unchanged.
+* New `LaterFoldMapV1::new(windows, bars, column, cap)` indexes the later bars
+  once. New `FixedTrainingFoldPlanV1::bind_with(later, &map, cap)` refuses
+  foreign authority, then the byte cap, then a map built over other bars, another
+  column or another partition (pointer identity and window equality). It then
+  reports whatever the indexing found, so the refusals and their order are
+  `bind`'s. The bound mapping borrows the map instead of copying it.
+* `cli::boolean_oos_v1::compute` builds one slice and one map before its loop.
+
+**No output changes.** Every later digest, grid, summary, materialised row,
+fold mapping and session count is byte-identical.
+`one_later_slice_prices_every_program_as_the_per_call_path_does` compares both
+paths for three programs on both sides, ordinal by ordinal. It also compares
+their refusals for an overlapping series and for a column that does not cover
+the bars. `one_fold_map_binds_every_program_exactly_as_bind_does` compares
+mappings, session counts, the cap refusal at the boundary byte and the
+empty-fold refusal, and refuses a map for another partition or other bars.
+`cli`'s `the_later_loop_attests_its_slice_and_fold_index_once` is a
+source-shape test and fails on the previous tree.
+
+**What is still per program and side.** The program's own truth summary and
+support sessions, the exact grid and its seal, and the per-resolution envelope
+bounds. These depend on the program or the resolution.
+

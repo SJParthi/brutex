@@ -443,3 +443,27 @@ fn optional_fold_proof_refuses_foreign_month_partitions_and_additional_memory_bo
     );
     Ok(())
 }
+
+/// D-1188 (o1runner-2), source shape: the later-period loop checks, hashes and
+/// fold-indexes the later series once, before it iterates, and every program
+/// and side is priced and bound over that one slice and map. The answers are
+/// byte-identical either way (`runner`'s
+/// `one_later_slice_prices_every_program_as_the_per_call_path_does` and
+/// `one_fold_map_binds_every_program_exactly_as_bind_does`), so only the
+/// source tells the two apart.
+#[test]
+fn the_later_loop_attests_its_slice_and_fold_index_once() {
+    let source = include_str!("boolean_oos_v1.rs");
+    let body = source
+        .split_once("fn compute(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    let (before, inside) = body
+        .split_once("for (group, anchor) in training.anchors.iter().enumerate() {")
+        .unwrap_or_default();
+    assert!(before.contains("LaterExpressionSliceV1::new(series, &column)"));
+    assert!(before.contains("LaterFoldMapV1::new("));
+    assert!(inside.contains("evaluate_expression_oos_on(anchor, &later, &run)"));
+    assert!(inside.contains("plan.bind_with(&evaluated, map,"));
+    assert!(!inside.contains("evaluate_expression_oos(") && !inside.contains("plan.bind(&"));
+}

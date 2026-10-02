@@ -578,3 +578,71 @@ fn empty_numeric_observation_refuses_even_with_valid_version_and_complete_header
         Ok(())
     })
 }
+
+/// D-1188 (o1runner-2): a fold index built once binds exactly as `bind`
+/// indexes on its own -- the same mapping, the same session counts, the same
+/// cap refusal at the same byte, the same empty-fold refusal -- and a map
+/// built for other bars or another partition is refused.
+#[test]
+fn one_fold_map_binds_every_program_exactly_as_bind_does() -> Result<(), String> {
+    let (bars, column) = fixture(0, false)?;
+    let (later, later_column) = fixture(16 * DAY, false)?;
+    let key = InstrumentKey::index(Exchange::Nse, "NIFTY").map_err(display)?;
+    let resolved = policy(crate::excursion::Side::Long)?
+        .resolve_research_attested(series(&key, &bars)?)
+        .map_err(display)?;
+    let attested = resolved
+        .attest_training(
+            series(&key, &bars)?,
+            &column,
+            Horizon::bars(5).ok_or("horizon")?,
+        )
+        .map_err(display)?;
+    let (requested, parts) = windows(&later)?;
+    let bytes = (later.len() * size_of::<usize>() + 2 * size_of::<u64>()) as u64;
+    let map = LaterFoldMapV1::new(&parts, &later, &later_column, bytes)?;
+    let shared = super::super::LaterExpressionSliceV1::new(series(&key, &later)?, &later_column);
+    for raw in ["30", "30 | !30"] {
+        let program = Expression::parse(raw).map_err(|e| format!("{e:?}"))?;
+        let training = resolved.evaluate_expression_with_attested(
+            &attested,
+            &run(&key, &bars, &program, Direction::Long)?,
+        )?;
+        let anchor = resolved
+            .validate_expression_evaluation(&training)?
+            .later_period_anchor();
+        let observed = resolved.evaluate_expression_oos_on(
+            &anchor,
+            &shared,
+            &run(&key, &later, &program, Direction::Long)?,
+        )?;
+        let plan = FixedTrainingFoldPlanV1::new(&resolved, &anchor, requested, &parts, 2)?;
+        let own = plan.bind(&observed, bytes)?;
+        let reused = plan.bind_with(&observed, &map, bytes)?;
+        assert_eq!(own.mapping, reused.mapping);
+        assert_eq!(own.sessions, reused.sessions);
+        assert_eq!(
+            plan.bind(&observed, bytes - 1).err(),
+            plan.bind_with(&observed, &map, bytes - 1).err()
+        );
+        let first = LaterSessionWindowV1::new(requested.first - 1, requested.first - 1)?;
+        let all = LaterSessionWindowV1::new(first.first, requested.last)?;
+        let empty = FixedTrainingFoldPlanV1::new(&resolved, &anchor, all, &[first, requested], 2)?;
+        let empty_map = LaterFoldMapV1::new(&[first, requested], &later, &later_column, bytes)?;
+        assert_eq!(
+            empty.bind(&observed, bytes).err(),
+            empty.bind_with(&observed, &empty_map, bytes).err()
+        );
+        assert!(
+            empty.bind_with(&observed, &map, bytes).is_err(),
+            "another partition"
+        );
+        let copy = later.clone();
+        let elsewhere = LaterFoldMapV1::new(&parts, &copy, &later_column, bytes)?;
+        assert!(
+            plan.bind_with(&observed, &elsewhere, bytes).is_err(),
+            "other bars"
+        );
+    }
+    Ok(())
+}
