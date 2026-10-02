@@ -1713,6 +1713,14 @@ mod tests {
     /// succeed. That is exactly the freeze this checks for.
     #[test]
     fn a_failed_roll_reports_with_the_emit_lock_released() {
+        crate::tests::where_permission_binds(
+            "sink::tests::a_failed_roll_reports_with_the_emit_lock_released",
+            a_failed_roll_reports_with_the_emit_lock_released_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_failed_roll_reports_with_the_emit_lock_released_body() {
         use std::os::unix::fs::PermissionsExt as _;
         use std::sync::PoisonError;
 
@@ -2993,6 +3001,14 @@ mod tests {
     /// no root.
     #[test]
     fn a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed() {
+        crate::tests::where_permission_binds(
+            "sink::tests::a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed",
+            a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed_body() {
         use std::os::unix::fs::PermissionsExt as _;
 
         // (a) THE UNLINK. A directory sits where the oldest file belongs.
@@ -3396,6 +3412,14 @@ mod tests {
     /// which needs `chflags` and is not portable) cannot regress silently.
     #[test]
     fn a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event() {
+        crate::tests::where_permission_binds(
+            "sink::tests::a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event",
+            a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event_body() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = scratch("roll-keeps-history");
@@ -3831,9 +3855,18 @@ mod tests {
     /// A **write-only** file is the portable way to reach it: `FileTarget`
     /// opens it for appending and `read_at`, which opens for reading, refuses.
     /// The same caveat the read-only-directory fixture above carries applies —
-    /// as root the mode decides nothing and this proves nothing.
+    /// as root the mode decides nothing, which is why the body runs through
+    /// `where_permission_binds` (D-0995).
     #[test]
     fn a_tail_that_cannot_be_examined_is_left_exactly_as_it_was_found() {
+        crate::tests::where_permission_binds(
+            "sink::tests::a_tail_that_cannot_be_examined_is_left_exactly_as_it_was_found",
+            a_tail_that_cannot_be_examined_is_left_exactly_as_it_was_found_body,
+        );
+    }
+
+    /// The test above, run where the mode bits bind (D-0995).
+    fn a_tail_that_cannot_be_examined_is_left_exactly_as_it_was_found_body() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = scratch("torn-tail-unreadable");

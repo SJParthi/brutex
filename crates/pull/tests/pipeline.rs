@@ -46,6 +46,9 @@
 
 use brutex_core::vendor::Vendor;
 use std::collections::HashSet;
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::mem::discriminant;
 use std::path::PathBuf;
@@ -198,6 +201,15 @@ fn every_archive_refusal_prints_a_sentence_of_its_own() {
 #[cfg(unix)]
 #[test]
 fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words() {
+    support::where_permission_binds(
+        "a_directory_that_will_not_open_is_refused_with_the_operating_systems_words",
+        a_directory_that_will_not_open_is_refused_with_the_operating_systems_words_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("UNLISTABLE");
@@ -236,6 +248,15 @@ fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words() 
 #[cfg(unix)]
 #[test]
 fn a_member_that_will_not_open_stops_the_walk_and_names_the_member() {
+    support::where_permission_binds(
+        "a_member_that_will_not_open_stops_the_walk_and_names_the_member",
+        a_member_that_will_not_open_stops_the_walk_and_names_the_member_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_member_that_will_not_open_stops_the_walk_and_names_the_member_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("UNREADABLE");

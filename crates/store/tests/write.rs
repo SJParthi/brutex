@@ -25,6 +25,8 @@
     clippy::indexing_slicing
 )]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -674,6 +676,14 @@ fn a_file_where_a_directory_belongs_is_named() {
 
 #[test]
 fn a_directory_that_refuses_a_write_is_named() {
+    support::where_permission_binds(
+        "a_directory_that_refuses_a_write_is_named",
+        a_directory_that_refuses_a_write_is_named_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_directory_that_refuses_a_write_is_named_body() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = Scratch::new("denied");
