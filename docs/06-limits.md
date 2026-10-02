@@ -11176,6 +11176,19 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## Boolean expression evaluation is Θ(program length) per bar (audit o1engine-22)
+
+- **`vocab::expression::Expression::evaluate` costs one step per instruction,
+  at most 1,151, on every bar it is asked about.** It is not O(1) in the
+  program and cannot be, because every instruction can change the answer;
+  it is O(1) in the bar count and allocates nothing. Its scratch stack is
+  sized to the program by `scratch_slots`: 8 slots up to 15 instructions, 64
+  up to 127, and 576 (the deepest stack 1,151 instructions can reach) past
+  that, so the slots initialised per bar are at most `4.5 * len + 8`. Until
+  this audit every bar cleared all 1,151 slots, even for a one-condition rule.
+  Stated from the code's shape; not timed. Proved by
+  `vocab::expression::invariant_tests::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
+
 ## Rupee text is read at most 64 bytes at a time (D-0918)
 
 - **`Paisa::from_rupee_text_half_up` costs at most a few passes over

@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Expression scratch stack sized to the program — audit 2026-10-02 o1engine-22
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1ENGINE-22 — **`Expression::evaluate` uses a scratch stack of `scratch_slots(len)` truths, never below the deepest height a program of that length can reach and never above `4.5 * len + 8`.** Tiers are 8 slots through 15 instructions, 64 through 127, and 576 through 1,151, checked at every length. The deepest program at each boundary (1, 2, 15, 16, 17, 127, 128, 129, 1,150 and 1,151 instructions) evaluates `True`/`False`/`Unknown` exactly as its leaves say, so no tier refuses a real signal; an overflowing stack answers `Unknown`. Before this, every bar cleared the 1,151-slot wire capacity | `vocab::expression::invariant_tests::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates` | ✓ |
+
 ### Rupee text is bounded before it is read — audit 2026-10-02 o1store-2 (D-0918)
 
 | Invariant | Test that proves it | Status |
