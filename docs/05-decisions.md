@@ -45416,3 +45416,91 @@ module's tests share the file, and the retention's cost and allocation
 findings (W3-engine1-2, W3-engine1-4) are open in a later batch against this
 type. Removing it would erase what those batches fix; the guard makes the
 first production caller visible instead.
+### D-0780 — A SuperTrend flip whose new stop will not fit `i64` leaves the stop absent — 2026-09-29
+
+**What was wrong (ET-indicators-4).** `SuperTrend::fold` computes the flip
+arm's new stop in `i128`. It then set the trend unconditionally and wrote the
+stop only `if let Ok(next) = i64::try_from(stop)`. A flip whose band left `i64`
+therefore recorded the new trend and kept the previous leg's stop, a level on
+the wrong side of price. Positions 64/65 read `stop()` whenever it is `Some`,
+and the next candle compared its close with that stale level. That is a
+fallback that hides a failure, which `CLAUDE.md` §4 bans. The same function's
+seed arm already used the other policy, `self.stop = i64::try_from(stop).ok()`.
+
+**The change.** The flip and ratchet arms now use the seed's policy: an
+unrepresentable stop is `None`. The next candle reseeds, as it does after an
+unrepresentable seed. The existing test that required the stale stop was
+rewritten as
+`trend::the_stop_on_both_sides::a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale`,
+which requires `stop()` to be `None` after the flip and on the candle after
+it. It fails with the old two-line write restored (`left: Some(2500000)`).
+
+**Identity.** `vocab::VOCAB_VERSION` is not moved. The ledger row records that
+reaching this arm "needs prices near i64::MAX, so real data cannot reach it";
+the test reaches it only through a multiplier of 10^21. It is a second route to
+the stale-latch class of `F-87AB98`, whose own route (the cross-bar true range)
+this entry does not change.
+
+### D-0781 — `Column::reproject` refuses a map that steps back or leaves its series — 2026-09-29
+
+**What was wrong (ET-indicators-3).** The collision guard in
+`Column::reproject_with` compares each target only with the last kept one. Its
+own comment says that is exact because "the alignment is monotonically
+non-decreasing", but `reproject` and `reproject_checked` are public and their
+docs did not state that precondition, nor that a target must be below
+`onto_len`. A map that stepped back filed a second row on an earlier fill bar
+with `collided` left at zero, which is the duplicated observation the guard
+exists to prevent, and a target at or past `onto_len` was accepted.
+
+**The change.** The precondition is checked rather than assumed: a target at or
+past `onto_len`, or below the last kept target, refuses the whole projection
+(`None`), the same answer the door already gives a map of the wrong length.
+Both checks compare against values already in hand, so the pass stays one walk
+over the rows. The two public docs now state the refusal.
+`column::reproject_tests::a_map_that_steps_back_or_past_its_series_refuses`
+requires `None` for a swapped pair, for a step back across a dropped row, and
+for a last target equal to `onto_len` on both doors, and requires that a
+repeated target across a dropped row still projects with `collided() == 1`.
+The existing fixture of `two_signals_resolving_to_one_fill_bar_produce_one_row`
+started at bar 20 and then mapped rows 1 to 4 onto bars 7 and 9, a step back;
+it now maps them onto bars 22 and 24 so the map is non-decreasing, and its
+assertions are otherwise unchanged.
+
+**Identity.** Not moved. Every non-test `reproject_checked` call in `runner`
+and `cli` (`validate.rs`, `signal_candle_stop.rs`, `cli/src/lib.rs`,
+`candidate_universe.rs`) passes a map built by `runner::align::onto_execution`,
+whose source reads "THE CURSOR ONLY MOVES FORWARD" and which pushes
+`Some(cursor)` only after `execution.get(cursor)` returned a bar. Such a map is
+non-decreasing and inside the execution series, so the new refusal does not
+fire on it; `validate.rs` only replaces some of its targets with `None`, which
+keeps it so.
+
+### D-0782 — The ordinary and anchored columns differ by the first warm bar, recorded not fixed — 2026-09-29
+
+**What was reported (ET-indicators-6).** Given the same one-minute bars and
+daily references aggregated from the same sessions, `Column::build` and
+`AnchoredColumn::build` admit different first rows. The ordinary
+`step_with_warmth` in `column.rs` reads `warmed_up()` before `step_known`, and
+the rollover that installs the fifth completed session runs inside the step,
+so the first bar of the first warm session is not admitted. The anchored
+`step_with_warmth` in `anchored.rs` calls `advance_before(signal_day)` and only
+then reads `warmed_up()`, so it admits that bar.
+
+**Reproduced on `origin/main` (2c209309).**
+`column::tests::the_anchored_column_admits_the_first_warm_bar_the_ordinary_one_drops`
+passes there unchanged: the anchored column's `first_swept()` is one less than
+the ordinary one's, its length is one more, the ordinary first row is the
+second bar of a session (`first % BARS_PER_SESSION == 1`), and the anchored
+`sources`, `bits` and `known` from index 1 on equal the ordinary ones.
+
+**Why it is not changed.** The ordinary path's pre-step read is a priced
+choice, not an accident: this module's doc states that reading before "is
+correct for *every* shape", that "the cost of reading it before is one lost
+warm bar per run", and that "paying it knowingly is different from paying it by
+accident". Moving either path's read point changes which rows every run of that
+path sweeps, which is a change to what runs compute and is outside a low
+severity follow-up. The test above pins the present difference so that any
+later change to either read point fails it and must be decided in its own
+entry.
+
+**Identity.** Not moved; no code changes.
