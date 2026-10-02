@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Filtered per-member append line builds nothing — audit 2026-10-02 o1store-1
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1STORE-1 — **The per-member `store.append` `committed` line is gated before its fields are built.** `BarFile::append` emits it through `telemetry::emit_if!` at `Debug`, so a run at the `Info` floor pays the level check and does not format or allocate the month's path. Through the function `telemetry::emit` the path's `to_string()` ran on every commit before the level was read, against the site's own comment. No production `Debug` event in `store/src/file.rs` is built eagerly. The macro's half is proved by `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`; the line still reaches a `Trace`-floor log through `store::emits` | `store::file::tests::a_filtered_append_line_formats_no_path` | ✓ |
+
 ## CI gates read tokens, not lines — D-1100 onward
 
 `.github/source_scan.rs` is the one reader these rows share: a dependency-free
