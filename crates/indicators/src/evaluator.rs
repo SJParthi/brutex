@@ -1017,6 +1017,20 @@ impl Evaluator {
     ///   clears both sides. That bar reports no crossing; the bar that leaves
     ///   the level reports one, which is the honest reading of a touch-and-go.
     ///
+    /// # Where this is proved, and through which path
+    ///
+    /// `crates/indicators/tests/crossing_known_readiness.rs` drives the public
+    /// `Evaluator::step_known` and so reaches this function. Two of its tests
+    /// fail if the rule goes back to reading the previous bar (an `Unknown` bar
+    /// clearing the remembered side):
+    /// `a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it` and
+    /// `every_crossing_and_ordinal_matches_a_last_definite_side_oracle_including_known_non_events`.
+    /// All three of its tests fail if a session's first definite side is
+    /// reported as a crossing. Both mutations were run by hand for D-0945. An
+    /// earlier in-file module, `band_crossing_tests`, re-implemented this loop
+    /// locally and called no production code, so neither mutation could fail
+    /// it; D-0945 removed it.
+    ///
     /// # Cost
     ///
     /// `CROSSINGS.len()` iterations, each two mask reads and at most one
@@ -3621,124 +3635,6 @@ mod tests {
             d.is_non_regular(20_382),
             "the default calendar does not recognise 2025-10-21, the one Muhurat session whose \
              bars reach disk"
-        );
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    reason = "the exception every test module in this workspace takes."
-)]
-mod band_crossing_tests {
-    use super::Side;
-
-    /// A CLOSE THAT WALKS THROUGH A BAND STILL CROSSED IT.
-    ///
-    /// # The defect this pins, which shipped in the first version
-    ///
-    /// The crossing family compared against the PREVIOUS BAR and required it to
-    /// have had a definite side. That is right for the day-open pair — 276/277
-    /// are gated on `seeded`, so a session's first bar has no side and the naive
-    /// test reported a crossing on bar 1 of every session — and wrong for every
-    /// BANDED level.
-    ///
-    /// `close_above_pivot_r1_band` is true above the band's TOP edge and
-    /// `close_below_` below its BOTTOM edge, so the gap between them is the
-    /// whole band: half the CPR width either way, a real price interval. A close
-    /// walking through it spends bars with neither bit set, so the bar before
-    /// the emergence had no side and the guard refused.
-    ///
-    /// **Fifty of the eighty-five new positions could fire only on a bar that
-    /// jumped the entire band in one step.** An adversarial fleet measured it
-    /// twice, independently.
-    ///
-    /// # Why this is a state-machine test and not a bar fixture
-    ///
-    /// The band's width is a function of the previous session's CPR, so driving
-    /// a real close through a real `pivot_r1_band` needs a two-session fixture
-    /// whose CPR is wide enough to hold a bar — which makes the test about the
-    /// fixture rather than about the rule. The rule is: an `Unknown` bar records
-    /// nothing over the remembered side. That is exactly what this asserts, and
-    /// it fails the moment the code goes back to reading the previous bar.
-    #[test]
-    fn an_unknown_side_does_not_erase_the_side_before_it() {
-        // The sequence a close makes walking down through a band: definitely
-        // above, then inside for three bars, then definitely below.
-        let walk = [
-            Side::Above,
-            Side::Unknown,
-            Side::Unknown,
-            Side::Unknown,
-            Side::Below,
-        ];
-
-        // The rule, applied exactly as `crossings_of` applies it.
-        let mut last = Side::Unknown;
-        let mut crossings = 0_u32;
-        for now in walk {
-            if matches!(now, Side::Unknown) {
-                continue;
-            }
-            let was = last;
-            last = now;
-            if matches!(was, Side::Unknown) || was == now {
-                continue;
-            }
-            crossings = crossings.saturating_add(1);
-        }
-        assert_eq!(
-            crossings, 1,
-            "a close that was above, spent three bars inside the band, and came \
-             out below has crossed the level once. Comparing against the \
-             PREVIOUS bar sees `Unknown -> Below` and reports nothing"
-        );
-
-        // AND THE PREVIOUS-BAR RULE REALLY DOES MISS IT, so the assertion above
-        // is discriminating rather than merely true.
-        let mut previous = Side::Unknown;
-        let mut naive = 0_u32;
-        for now in walk {
-            let was = previous;
-            previous = now;
-            if matches!(was, Side::Unknown) || matches!(now, Side::Unknown) || was == now {
-                continue;
-            }
-            naive = naive.saturating_add(1);
-        }
-        assert_eq!(
-            naive, 0,
-            "the previous-bar rule reports NO crossing on this walk, which is \
-             the defect: 50 of the 85 new positions could fire only on a bar \
-             that jumped the whole band in one step"
-        );
-    }
-
-    /// A SESSION'S FIRST BAR STILL REPORTS NOTHING.
-    ///
-    /// The fix must not reintroduce the defect it replaced. `last_side` starts
-    /// and is cleared to `Unknown`, so the first bar that HAS a side records it
-    /// and reports no crossing — which is what kept `crossed_up_day_open` from
-    /// firing on the second bar of every session.
-    #[test]
-    fn the_first_definite_side_of_a_session_is_recorded_and_not_reported() {
-        let mut last = Side::Unknown;
-        let mut crossings = 0_u32;
-        for now in [Side::Unknown, Side::Above, Side::Above, Side::Below] {
-            if matches!(now, Side::Unknown) {
-                continue;
-            }
-            let was = last;
-            last = now;
-            if matches!(was, Side::Unknown) || was == now {
-                continue;
-            }
-            crossings = crossings.saturating_add(1);
-        }
-        assert_eq!(
-            crossings, 1,
-            "the first Above is recorded and reports nothing; only the later \
-             Below is a crossing"
         );
     }
 }
