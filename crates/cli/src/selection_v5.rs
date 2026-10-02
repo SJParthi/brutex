@@ -4351,8 +4351,8 @@ mod tests {
         }
     }
 
-    /// W2-cli14-0: the module doc called exact lookup after open one
-    /// average-O(1) probe while `structural_receipt` rehashes both files
+    /// W2-cli14-0: the module doc called exact lookup after open a single
+    /// average-case hash probe while `structural_receipt` rehashes both files
     /// first. Pins the corrected claim to the live mechanism it describes.
     #[test]
     fn module_doc_states_lookup_is_o_f_because_it_rehashes_both_files() {

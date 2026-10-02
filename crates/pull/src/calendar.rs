@@ -1325,6 +1325,7 @@ impl Calendar {
     ///
     /// O(1): the count is taken once by [`Self::from_observed`] and held. It
     /// used to filter every day of the span on each call. W1-pull1-4, D-0953.
+    /// Proved by `pull::calendar::sessions_is_counted_once_at_construction_not_per_call`.
     #[must_use]
     pub const fn sessions(&self) -> u32 {
         self.sessions
