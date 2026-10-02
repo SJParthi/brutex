@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### A rung's second span load and column build are stated — audit 2026-10-02 o1cli-2
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1CLI-2 — **`docs/06-limits.md` states that an all-rungs run loads each rung's span twice (`one_rung`, then `audit_range_kernel`) and, when the support is derived, builds its column twice (`column_withholding_unsourceable_days` for `affordable_min_hits`, then `column_withholding_at_build`), and the code still does exactly that.** The test reads the section and both function bodies: each named call must be present, and the first load must precede the named-support branch. The day the span is threaded through, the test fails and the limit is withdrawn with the cost | `a_rungs_second_load_and_build_are_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_2.rs` | ✓ |

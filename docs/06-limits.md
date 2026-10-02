@@ -9907,3 +9907,20 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## A rung loads its span twice and may build its column twice (audit o1cli-2)
+
+- **`one_rung` loads the rung's span with `stored::load_span`, and the audit
+  kernel `audit_range_kernel` then loads the same span again.** When no
+  support is named, the column is also built twice:
+  `column_withholding_unsourceable_days` for `affordable_min_hits`, then
+  `column_withholding_at_build` inside the kernel, each loading its own daily
+  and exact-minute context. So an all-rungs run pays two span loads per rung
+  always, and two column builds per rung when the support is derived, O(rung
+  bars) each. Until this audit only a comment in `stored.rs` admitted it.
+  Threading the loaded span and column into the kernel would remove the
+  second pair; it is not done because the kernel re-derives both from the
+  bars that survive its own withholding and binds them to the preparation
+  digest. Stated from the code's shape; not timed. Held to the code by
+  `a_rungs_second_load_and_build_are_stated_and_still_paid` in
+  `crates/cli/tests/limits_o1cli_2.rs`.
