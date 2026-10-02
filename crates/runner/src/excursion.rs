@@ -435,6 +435,12 @@ pub struct Crossings {
     /// maxima wrong for every bar after it, so the honest unit of refusal is the
     /// PATH and not the bar.
     refused: usize,
+    /// The offset of the FIRST refused bar, or `None` when none was.
+    ///
+    /// Every crossing recorded BEFORE this offset was read off accepted bars only,
+    /// so a variant whose level exit falls strictly before it is fully priced.
+    /// [`Self::refused`] alone cannot say where the hole is -- D-1179.
+    first_refused: Option<usize>,
     /// The last offset walked, so a lookup can say "held to the end".
     last: usize,
     /// The LOWEST LOW seen from the entry bar up to each offset, in paisa.
@@ -514,6 +520,7 @@ impl Crossings {
             armed_ambiguous: Vec::new(),
             trail_count: trails.len(),
             refused: 0,
+            first_refused: None,
             last: 0,
             low_run: Vec::new(),
             high_run: Vec::new(),
@@ -685,6 +692,19 @@ impl Crossings {
     #[must_use]
     pub const fn refused(&self) -> usize {
         self.refused
+    }
+
+    /// The offset of the first refused bar on this path, or `None` when the
+    /// engine refused none -- D-1179.
+    ///
+    /// Every crossing at an offset strictly before it was read off accepted
+    /// bars only. A level exit there happened before the hole, so pricing it
+    /// needs no bar the engine could not read. A caller that refuses the whole
+    /// path on [`Self::refused`] alone also refuses those variants, and blocks
+    /// the position to the time exit although it had already closed.
+    #[must_use]
+    pub const fn first_refused(&self) -> Option<usize> {
+        self.first_refused
     }
 
     /// The worst the path had gone AGAINST `entry` by offset `offset`, in ppm.
@@ -1090,7 +1110,11 @@ fn crossings_with(
         };
         // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM, and a
         // non-positive entry may move nothing but the extremes. See [`admit`].
+        let refused_before = out.refused;
         if !admit(&mut out, &mut admission, bar, (accepted, index), priced) {
+            if out.refused > refused_before && out.first_refused.is_none() {
+                out.first_refused = Some(offset);
+            }
             continue;
         }
         out.last = offset;
@@ -1478,7 +1502,51 @@ mod tests {
             assert!(checked.ambiguous().is_empty());
             assert!(checked.trail_ambiguous().is_empty());
             assert_eq!(checked.last(), 2, "the accepted suffix is still walked");
+            assert_eq!(checked.first_refused(), Some(1), "the hole is at offset 1");
         }
+    }
+
+    /// W3-runner2-7: the path says WHERE its first hole is, so a level exit
+    /// strictly before it is known to have been read off accepted bars only.
+    /// A stop crossed at offset 1 and a hole at offset 3: the stop stands.
+    #[test]
+    fn a_hole_after_a_level_exit_is_located_not_merely_counted() {
+        let bars = [
+            bar(0, 999, 1_001),
+            bar(1, 900, 1_001),
+            bar(2, 999, 1_001),
+            bar(3, 100, 5_000),
+            bar(4, 999, 1_001),
+            bar(5, 999, 1_001),
+        ];
+        let stops = ladder(&[50_000]);
+        let targets = ladder(&[50_000]);
+        let trails = ladder(&[50_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let one_hole = [true, true, true, false, true, true];
+        let c = crossings_checked(&bars, 0, 5, 1_000, Side::Long, ladders, &one_hole);
+        assert_eq!(c.stop_at(0), 1, "the stop fired on an accepted bar");
+        assert_eq!(c.refused(), 1);
+        assert_eq!(c.first_refused(), Some(3), "and the hole is after it");
+        assert!(c.stop_at(0) < c.first_refused().expect("a hole"));
+
+        // TWO HOLES: the FIRST is named. NONE: `None`. A non-positive entry
+        // counts nothing and locates nothing.
+        let two_holes = [true, false, true, false, true, true];
+        let c = crossings_checked(&bars, 0, 5, 1_000, Side::Long, ladders, &two_holes);
+        assert_eq!((c.refused(), c.first_refused()), (2, Some(1)));
+        let clean = [true; 6];
+        let c = crossings_checked(&bars, 0, 5, 1_000, Side::Long, ladders, &clean);
+        assert_eq!((c.refused(), c.first_refused()), (0, None));
+        let c = crossings_checked(&bars, 0, 5, 0, Side::Long, ladders, &one_hole);
+        assert_eq!((c.refused(), c.first_refused()), (0, None));
+        // A walk that does not start at zero reports an OFFSET, not an index.
+        let c = crossings_checked(&bars, 2, 5, 1_000, Side::Long, ladders, &one_hole);
+        assert_eq!(c.first_refused(), Some(1));
     }
 
     /// NO RUNG SITS ON THE MAXIMUM, AND DEPTH BUYS TIGHTNESS.

@@ -44049,3 +44049,35 @@ shorts tied at `i64::MAX`: the one paying 1,000 must lead the one paying 100,
 although its `|t|` is smaller. `min_loss_paisa` did not exist on the previous
 tree, so these do not compile there. Read on that tree, the example's path
 ratio is 10/900 = 1 bp.
+
+### D-1179 — A path's first refused bar is located, not only counted; the grid half is handed to `grid.rs`'s owner — 2026-10-02
+
+**What was wrong (audit W3-runner2-7).** `crossings_with` walks every candidate
+to its time exit, and `admit` adds one to `refused` for a refused bar wherever it
+sits. `grid::blocks_without_pricing` then runs
+`if c.block_only || c.cross.refused() > 0 { *open_until = Some(c.time_exit); return true; }`
+for every variant, without comparing the variant's exit offset with where the
+hole is. A refused bar AFTER a stop, target or trail had already fired therefore
+un-priced that variant's trade, and blocked the position to the time exit
+although it had closed. That is look-ahead in the refusal: a bar after the exit
+decided whether the exit counted.
+
+**What this lane changed.** `Crossings` now records `first_refused`, the
+OFFSET of the first refused bar, and exposes it as `Crossings::first_refused()`.
+Every crossing at an offset strictly before it was read off accepted bars only.
+`a_hole_after_a_level_exit_is_located_not_merely_counted` covers a stop at
+offset 1 with a hole at 3, two holes (the first is named), none (`None`), a
+non-positive entry (counts and locates nothing) and a walk that does not start
+at zero (an offset, not an index). Nothing that prices a trade reads the new
+accessor yet, so no output changes.
+
+**What remains, and why it is not done here.** The decision that consumes it is
+in `crates/runner/src/grid.rs`, which another lane owns. The change it needs is
+in `blocks_without_pricing` and its caller in `one_variant`. Refuse the variant
+only when its pessimistic exit offset, `span.min(stop_at).min(target_at)…`, is
+at or after `c.cross.first_refused()`. Block to `time_exit` only in that case,
+and otherwise price the trade and block to its own exit. Until that lands, the
+defect is live and its effect is unchanged. A refused bar after a level exit
+still un-prices that variant and blocks to the time exit. The direction is
+conservative: it refuses trades, it never invents one. This lane did not edit
+`grid.rs`.
