@@ -44552,3 +44552,35 @@ refused.
 `the_training_fold_builds_its_slice_facts_once` is a source-shape test and fails
 on the previous tree.
 
+### D-1186 — The walk-forward OOS pass walks from the first row that can fire — 2026-10-02
+
+**Findings.** W3-runner5-3, and the walk half of W3-runner5-0.
+`walk_forward_core`'s OOS pass re-priced every scored candidate with
+`with_levels_over` on a column that runs from row 0 to the end of the test
+window. `restricted` blanks the training rows rather than cutting them, so that
+`sources` keep their meaning. Every candidate's walk therefore visited every
+training row only to find it could not fire: O(prefix rows) per candidate where
+O(test rows) was needed. The same held for the chosen candidate's level-less
+`walk_over`.
+
+**The change.** New `trade::walk_over_from(.., first_row)` starts the walk at a
+column row. Earlier rows are not visited, and every recorded index is still a
+slice index. `walk_over` is `walk_over_from(.., 0)`. New crate-visible
+`grid::with_levels_over_from` is `with_levels_over` over that walk. The OOS pass
+finds the first row with a set bit once per fold, a single linear scan, and
+starts each candidate there. A row whose bits are all zero cannot hit a mask
+with a bit set, so those answers are unchanged. The empty mask does hit a blank
+row, so it keeps row 0 and its answer is unchanged too.
+
+**W3-runner5-0's walk half needs no change.** The V4 anchored-search OOS replay
+walks `project_oos_fold`'s column, which drops every pre-OOS row, so its walk
+was already O(OOS rows). D-1184's `docs/06-limits.md` entry corrects the
+D-1143 bullet that said otherwise.
+
+**No output changes.** `a_walk_from_the_first_live_row_equals_the_full_walk`
+compares the two walks for every single-bit mask on both sides over a column
+whose first half is blanked. It also shows the empty mask differs when started
+late, and that a start past the column walks nothing.
+`the_oos_pass_walks_from_the_first_live_row` is a source-shape test and fails
+on the previous tree.
+

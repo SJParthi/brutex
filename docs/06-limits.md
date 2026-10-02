@@ -10036,4 +10036,11 @@ not:
   `SliceFacts` build over `trade_test`, which D-1184 hoists to once per fold.
   The attestation term (BLAKE3 over `trade_test` and the column, bar and
   source validation) is still per candidate.
+- **`walk_forward_core` OOS pass: O(test rows) per candidate, plus one scan per
+  fold (D-1186).** This closes the W3-runner5-3 bullet under D-1143. Each fold
+  scans its test column once to find the first row with a set bit, which is
+  O(prefix rows) per fold, not per candidate. Each candidate's walk then visits
+  rows from there. The empty mask still walks from row 0. `SliceFacts` for the
+  fold is still built over `trade_test` from bar 0, which is O(E_prefix) once
+  per fold. Not timed.
 

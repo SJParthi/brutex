@@ -3642,6 +3642,36 @@ fn levelled_over(
     levelled_timed(bars, side, ladders, variant, trades, facts, &timed)
 }
 
+/// [`with_levels_over`] over a walk that starts at column row `first_row`
+/// (D-1186). See [`crate::trade::walk_over_from`] for when that equals the
+/// full walk; the caller owns that precondition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "nine: with_levels_over's eight plus the starting row"
+)]
+pub(crate) fn with_levels_over_from(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    facts: &crate::trade::SliceFacts,
+    first_row: usize,
+) -> Option<Cell> {
+    let timed = crate::trade::walk_over_from(
+        bars,
+        column,
+        mask,
+        horizon,
+        direction_of(side),
+        facts,
+        first_row,
+    );
+    levelled_timed(bars, side, ladders, variant, None, facts, &timed).cell
+}
+
 fn levelled_timed(
     bars: &[Candle],
     side: Side,

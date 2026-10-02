@@ -581,6 +581,33 @@ pub fn walk_over(
     direction: Direction,
     facts: &SliceFacts,
 ) -> Trades {
+    walk_over_from(bars, column, mask, horizon, direction, facts, 0)
+}
+
+/// [`walk_over`], starting at column row `first_row` (D-1186).
+///
+/// Rows before `first_row` are not visited at all, so they contribute no
+/// signal, no block and no count. The answer equals [`walk_over`]'s exactly
+/// when no skipped row could fire: for a mask with at least one bit set, when
+/// every skipped row's bits are zero. That is the shape
+/// `crate::validate::restricted` gives a test fold, whose training rows are
+/// blanked rather than cut so that `sources` keep their meaning. Visiting them
+/// cost O(prefix rows) per candidate for rows that cannot fire. The caller
+/// picks `first_row` once per column and keeps `0` for the empty mask, which
+/// hits a blanked row.
+///
+/// A `first_row` past the column walks nothing. Every index the walk records
+/// (`signal_bar`, `entry_bar`, ...) is still a slice index, never an offset.
+#[must_use]
+pub fn walk_over_from(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    direction: Direction,
+    facts: &SliceFacts,
+    first_row: usize,
+) -> Trades {
     walk_core(
         bars,
         column,
@@ -589,6 +616,7 @@ pub fn walk_over(
         direction,
         facts.exits(),
         facts,
+        first_row,
     )
 }
 
@@ -621,6 +649,7 @@ pub fn walk_expression_over(
         direction,
         facts.exits(),
         facts,
+        0,
     ))
 }
 
@@ -685,6 +714,7 @@ pub fn walk_with(
         direction,
         exits,
         &SliceFacts::of(bars, column),
+        0,
     )
 }
 
@@ -699,6 +729,11 @@ pub fn walk_with(
     reason = "one ordered signal-state machine; splitting its refusal branches \
               would obscure the one-position-at-a-time transition"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the D-1186 starting row; the seven before \
+              it are the walk's own inputs and per-slice facts"
+)]
 fn walk_core(
     bars: &[Candle],
     column: &Column,
@@ -707,6 +742,7 @@ fn walk_core(
     direction: Direction,
     exits: &[Option<SquareOff>],
     facts: &SliceFacts,
+    first_row: usize,
 ) -> Trades {
     let h = horizon.as_bars() as usize;
     let step_micros = facts.step_micros();
@@ -715,7 +751,17 @@ fn walk_core(
     // and a new fill is eligible only strictly after it.
     let mut open_until: Option<usize> = None;
 
-    for (index, (bits, &signal)) in column.bits().iter().zip(column.sources()).enumerate() {
+    // FROM `first_row`, AS SLICES (D-1186). Rows before it are not visited;
+    // `index` stays the column row, so `fires` and every recorded bar are
+    // unchanged for the rows that are.
+    let rows = column
+        .bits()
+        .get(first_row..)
+        .unwrap_or_default()
+        .iter()
+        .zip(column.sources().get(first_row..).unwrap_or_default());
+    for (offset, (bits, &signal)) in rows.enumerate() {
+        let index = first_row.saturating_add(offset);
         if !fires(bits, index) {
             continue;
         }
@@ -1676,6 +1722,83 @@ mod tests {
         assert!(
             walked.occupancy.iter().all(|held| held.signal_bar != 0),
             "a trade that never entered must not occupy the position"
+        );
+    }
+
+    /// D-1186: a walk that starts at the first row with a set bit equals the
+    /// full walk for every mask with a bit set, on a column whose earlier rows
+    /// were blanked the way `validate::restricted` blanks a test fold. The
+    /// empty mask fires on a blank row, which is why its caller keeps row 0.
+    #[test]
+    fn a_walk_from_the_first_live_row_equals_the_full_walk() {
+        let (bars, mut column) = swept();
+        let from = column
+            .sources()
+            .get(column.len() / 2)
+            .copied()
+            .expect("a warm column");
+        column.clear_before(from);
+        let facts = super::SliceFacts::of(&bars, &column);
+        let first_live = column
+            .bits()
+            .iter()
+            .position(|bits| *bits != ConditionMask::ZERO)
+            .expect("the unblanked half has set bits");
+        assert!(first_live > 0, "the blanked prefix is skipped");
+        let mut compared = 0;
+        let width = u32::try_from(vocab::table::TABLE.len()).expect("a small table");
+        for bit in 0..width {
+            let mask = ConditionMask::ZERO.with_bit(bit);
+            for direction in [Direction::Long, Direction::Short] {
+                let full = super::walk_over(&bars, &column, &mask, h(5), direction, &facts);
+                let from_live = super::walk_over_from(
+                    &bars,
+                    &column,
+                    &mask,
+                    h(5),
+                    direction,
+                    &facts,
+                    first_live,
+                );
+                assert_eq!(full, from_live, "bit {bit} {direction:?}");
+                compared += usize::from(full.signals > 0);
+            }
+        }
+        assert!(compared > 0, "some mask must actually fire");
+        let empty_full = super::walk_over(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            &facts,
+        );
+        let empty_late = super::walk_over_from(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            &facts,
+            first_live,
+        );
+        assert!(
+            empty_full.signals > empty_late.signals,
+            "the empty mask hits blank rows"
+        );
+        let past = super::walk_over_from(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            &facts,
+            usize::MAX,
+        );
+        assert_eq!(
+            past,
+            Trades::default(),
+            "a start past the column walks nothing"
         );
     }
 
