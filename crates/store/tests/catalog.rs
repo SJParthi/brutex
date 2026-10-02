@@ -173,6 +173,7 @@ fn the_census_reconciles_over_a_store_holding_every_refusal() {
         "13, notamonth, and the unpadded 2026-8"
     );
     assert_eq!(c.wrong_depth, 1, "one path too shallow");
+    assert_eq!(c.not_regular, 0, "every entry here is a regular file");
     assert!(c.reconciles(), "the parts must sum to the whole: {c:?}");
     assert_eq!(out.held.len(), 2, "only the spot months are rows");
 }

@@ -326,6 +326,18 @@ pub enum StoreError {
         /// Which operation refused.
         action: Action,
     },
+    /// A FIFO, a device or a socket sits where a read door expected a regular
+    /// file (directly or through a symlink).
+    ///
+    /// The read door opens with `O_NONBLOCK` and checks the handle with
+    /// `fstat`, so a FIFO is refused at once rather than parking the caller in
+    /// `open(2)` until some writer appears. D-0911, AC-whp-cx-0.
+    NotARegularFile {
+        /// The path the store asked for (not a symlink's target).
+        path: PathBuf,
+        /// Which operation refused.
+        action: Action,
+    },
     /// The path is not there. `ENOENT`.
     Missing {
         /// The path that does not exist.
@@ -669,6 +681,11 @@ impl fmt::Display for StoreError {
                 write!(f, "{} is a directory, {action} it", path.display())
             }
             Self::NotADirectory { path, action } => write_not_a_directory(f, path, *action),
+            Self::NotARegularFile { path, action } => write!(
+                f,
+                "{} is not a regular file (a FIFO, device or socket), {action} it",
+                path.display()
+            ),
             Self::Missing { path, action } => {
                 write!(f, "{} does not exist, {action} it", path.display())
             }
@@ -1112,7 +1129,9 @@ impl BarFile {
     ///
     /// [`StoreError::NotABarPath`] for a non-bar path, [`StoreError::Missing`]
     /// when the month does not exist, [`StoreError::Locked`] when a writer holds
-    /// it, and whatever `Self::validated` refuses.
+    /// it, [`StoreError::NotARegularFile`] (or [`StoreError::IsADirectory`])
+    /// when the bars, the `.lock` or the `.crc` is not a regular file — refused
+    /// at once, never waited on — and whatever `Self::validated` refuses.
     pub fn open_existing(
         root: &Path,
         path: StorePath<'_>,
@@ -1134,20 +1153,25 @@ impl BarFile {
 
         // Read-only and no `create`, so a missing month is `ENOENT` and
         // `classify` turns it into `Missing` naming this exact path.
-        let bars = fault(File::open(&bars_path), &bars_path, Action::Open)?;
+        //
+        // NEVER A BLOCKING OPEN. A FIFO at `<month>.bin` parked this call in
+        // `open(2)` until a writer appeared — a sweep, an HTTP worker or a pull
+        // hung with no refusal and no log line. `open_read` opens nonblocking
+        // and refuses anything `fstat` does not call a regular file. D-0911.
+        let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
 
         // The lock is opened read-only and never created. A bar file with no
         // lock beside it has had no writer since it was made, so there is
         // nothing to wait for and `None` is the honest answer; inventing the
         // file to hold a lock on would be the very write this function exists
         // to avoid.
-        let lock = match File::open(&lock_path) {
+        let lock = match open_read(&lock_path) {
             Ok(handle) => Some(
                 Flock::try_lock_shared(handle, lock_path.clone())
                     .map_err(|refusal| lock_fault(&lock_path, refusal))?,
             ),
-            Err(why) if why.kind() == io::ErrorKind::NotFound => None,
-            Err(why) => return Err(classify(&lock_path, Action::Open, &why)),
+            Err(why) if why.is_absent() => None,
+            Err(why) => return Err(why.refusal(&lock_path)),
         };
 
         let len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
@@ -1485,8 +1509,8 @@ impl BarFile {
                 }
                 Access::Read => match open_read(at) {
                     Ok(file) => Some(file),
-                    Err(why) if why.kind() == io::ErrorKind::NotFound => None,
-                    Err(why) => return Err(classify(at, Action::Open, &why)),
+                    Err(why) if why.is_absent() => None,
+                    Err(why) => return Err(why.refusal(at)),
                 },
                 Access::Audit => Some(fault(
                     crate::checksum_audit::open_regular(at),
@@ -5041,8 +5065,98 @@ mod tests {
 /// The counterpart to [`open_rw`], and the reason it exists is that `open_rw`
 /// carries `create(true)`: any door that used it turned a read into a write the
 /// moment its target was absent.
-fn open_read(path: &Path) -> io::Result<File> {
-    fs::OpenOptions::new().read(true).open(path)
+///
+/// # Never a blocking open, never a non-regular file (D-0911, AC-whp-cx-0)
+///
+/// A plain `open(2)` of a FIFO for reading blocks until a writer opens the
+/// other end, so a FIFO (or a symlink to one) at a month's `.bin`, `.lock` or
+/// `.crc` hung every reader with no refusal. This opens with `O_NONBLOCK` —
+/// which makes the FIFO open return at once — and then asks the HANDLE, by
+/// `fstat`, whether it is a regular file. Asking the handle rather than the
+/// name leaves no window for a swap between the check and the open.
+///
+/// Symlinks are still followed (no `O_NOFOLLOW`): a symlink to a regular bar
+/// file was readable before and stays readable; what it reaches is checked.
+/// `O_NONBLOCK` is left set on the returned handle. For a regular file it has
+/// no effect on `pread`, and `flock` is taken with `LOCK_NB` regardless.
+///
+/// The flag values are the ones `crate::checksum_audit::open_regular` already
+/// carries for the same hosts. On any other unix host there is no verified
+/// value, so every read open is refused as unsupported rather than risk a
+/// blocking open, exactly as `open_regular` refuses there.
+fn open_read(path: &Path) -> Result<File, ReadOpen> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    let flags = 0x800; // O_NONBLOCK
+    #[cfg(target_os = "macos")]
+    let flags = 0x4; // O_NONBLOCK
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    let flags = {
+        let _ = path;
+        return Err(ReadOpen::Host(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "store reads require verified macOS or Linux x86_64/aarch64 open flags",
+        )));
+    };
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .map_err(ReadOpen::Host)?;
+    let held = file.metadata().map_err(ReadOpen::Host)?;
+    if held.is_file() {
+        Ok(file)
+    } else {
+        Err(ReadOpen::NotRegular {
+            directory: held.is_dir(),
+        })
+    }
+}
+
+/// Why [`open_read`] gave no handle.
+#[derive(Debug)]
+enum ReadOpen {
+    /// The host refused the open or the `fstat`.
+    Host(io::Error),
+    /// The handle is not a regular file. A directory keeps its own, more
+    /// specific name ([`StoreError::IsADirectory`]); anything else is
+    /// [`StoreError::NotARegularFile`].
+    NotRegular {
+        /// Whether what was reached is a directory.
+        directory: bool,
+    },
+}
+
+impl ReadOpen {
+    /// Whether the name is simply not there — the one answer a read door may
+    /// turn into `None` for an optional sibling.
+    fn is_absent(&self) -> bool {
+        matches!(self, Self::Host(why) if why.kind() == ErrorKind::NotFound)
+    }
+
+    /// The named refusal for `path`, always [`Action::Open`].
+    fn refusal(&self, path: &Path) -> StoreError {
+        match self {
+            Self::Host(why) => classify(path, Action::Open, why),
+            Self::NotRegular { directory: true } => StoreError::IsADirectory {
+                path: path.to_path_buf(),
+                action: Action::Open,
+            },
+            Self::NotRegular { directory: false } => StoreError::NotARegularFile {
+                path: path.to_path_buf(),
+                action: Action::Open,
+            },
+        }
+    }
 }
 
 /// Whether a door may create what it opens.
