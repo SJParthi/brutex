@@ -491,29 +491,40 @@ jobs:
           # sample. D-0060's lesson, recurring one route later: an invariant is
           # only as true as its sample. A GATE has no sample to go stale.
           #
-          # LIMIT, STATED RATHER THAN GLOSSED: each file is read only as far as
-          # its first `#[cfg(test)]`, because tests legitimately name `<script`
-          # to assert its ABSENCE and there is no sound way to find a test
-          # module's end by counting braces -- braces live inside string
-          # literals, which is the very thing this gate exists to read. A
-          # production item placed AFTER a test module is therefore not scanned.
-          # Nothing in the tree does that today; if that changes, this gate is
-          # narrower than it reads.
+          # THE GATE NOW READS STRING LITERALS, NOT LINES (D-1106). The version
+          # this replaced grepped each line case-sensitively for five words,
+          # dropped every line holding `src=` anywhere, and stopped reading a
+          # file at its first `#[cfg(test)]`. An audit got `<SCRIPT>`,
+          # `onclick=`, `<img src=x onerror=..>`, `<script data-src=x>..`,
+          # `concat!("<scr", "ipt>..")` and production code after a test
+          # module (385 public items in 48 files) past it, and its success line
+          # claimed "no inline handler" while nothing looked for one.
+          #
+          # `source_scan browser` lexes each file, drops exactly the
+          # `#[cfg(test)]` items (their extent is read from tokens, so braces in
+          # strings do not matter and production code after a test module is
+          # scanned), decodes every string literal's escapes (so `\x3c` is
+          # `<`), joins the pieces of each `concat!`, and refuses, case-blind:
+          # a `<script>` without its own `src` attribute or with a body; any
+          # `on*=` attribute inside a tag; `javascript:`; and the browser APIs
+          # (`document.getElementById`/`querySelector`/`createElement`/
+          # `cookie`/`write`/`body`, `window.location`, `window.open(`,
+          # `addEventListener`, `innerHTML`, `outerHTML`, `XMLHttpRequest`,
+          # `await fetch(`, `eval(`).
+          #
+          # WHAT IT CANNOT SEE: markup assembled at run time from pieces that
+          # are not one literal or one `concat!` -- `format!("<scr{}", "ipt>")`.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          files=$(git ls-files 'crates/*.rs')
+          [ -n "$files" ] || { echo "GATE 1F READ NO FILE."; exit 1; }
           bad=0
-          for f in $(git ls-files 'crates/*.rs' 'crates/**/*.rs'); do
-            body=$(awk '/^#\[cfg\(test\)\]/{exit} {print NR": "$0}' "$f")
-            # A `<script` is allowed ONLY when it carries `src=` -- the external
-            # shape `/typeahead.js` and `/masters.js` both use. Comment lines are
-            # prose about the rule, not the rule being broken.
-            hits=$(printf '%s\n' "$body" \
-                   | grep -vE '^[0-9]+:[[:space:]]*//' \
-                   | grep -E '<script|document\.(getElementById|querySelector|createElement)|await fetch\(|addEventListener|\.innerHTML' \
-                   | grep -v 'src=' || true)
-            if [ -n "$hits" ]; then
-              printf 'BROWSER CODE IN A RUST FILE: %s\n%s\n' "$f" "$hits"
-              bad=1
-            fi
-          done
+          # One argument per line, so a name with a space stays one name.
+          mapfile -t list <<< "$files"
+          if ! out=$("$scan" browser "${list[@]}"); then
+            printf 'BROWSER CODE IN A RUST FILE:\n%s\n' "$out"
+            bad=1
+          fi
+          echo "scanned $(grep -c . <<< "$files") tracked .rs file(s) under crates/"
           if [ "$bad" = 1 ]; then
             echo ""
             echo "Browser code belongs under web/, which CLAUDE.md section 2"

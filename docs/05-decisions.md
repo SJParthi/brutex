@@ -43858,3 +43858,25 @@ allowlist: `toolchain.{channel,components,targets,profile}` and
 refuses a workflow that sets a rustc wrapper, `RUSTC`, a target runner or linker,
 or passes `cargo --config`. Gate 1's mode check (D-1104) separately refuses the
 executable script. Invariant CIG-08.
+
+### D-1106 — Gate 1f reads every production string literal, case-blind, and past the first test module — 2026-10-02
+
+**What was wrong.** Findings ET-rust-only-purity-4, UC-5 and UC-9. Gate 1f
+grepped lines case-sensitively for five words and dropped any line holding
+`src=` anywhere, including `data-src=` and `<img src=x onerror=..>`. It never
+looked for an `on*=` handler or `javascript:`. It stopped reading each file at
+the first `#[cfg(test)]`, leaving 385 public items in 48 files unscanned while
+its comment said no such file existed. `<SCRIPT>`, `onclick=` and
+`concat!("<scr", "ipt>..")` all passed, and the success line claimed "no inline
+handler".
+
+**The choice.** `source_scan browser` (D-1100). It removes exactly the
+`#[cfg(test)]` items, measured by token extent. It decodes each literal's
+escapes and joins each `concat!`. It then refuses, case-blind: a `<script>`
+without its own `src` or with a body, an `on*=` attribute in any tag,
+`javascript:`, and the named browser APIs. The two external loaders,
+`/typeahead.js` and `/masters.js`, pass. Prose words such as "document" and
+"window" pass because only member access is matched.
+
+**Limits.** Markup assembled at run time from pieces that are not one literal
+or one `concat!` is not seen. Invariant CIG-10.
