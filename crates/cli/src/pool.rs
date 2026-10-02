@@ -654,12 +654,8 @@ fn opening(
 }
 
 fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+    use crate::columns::{left, right};
     let _ = writeln!(out, "\n  PASS 1 -- PER SYMBOL, each on its own bars");
-    let _ = writeln!(
-        out,
-        "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD"
-    );
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
     // worst trade closest to zero, then the net. Refusals sort last and are
     // named, never dropped.
@@ -674,25 +670,49 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
         Err(_) => (true, i64::MIN, i64::MIN, i64::MIN),
     });
     rows.reverse();
-    for s in rows {
+    // LAID OUT TOGETHER (D-1420). Raw paisa at `i64::MIN` is 20 characters
+    // in a 12-character column, and a 14-character symbol filled its column,
+    // so `worst`, `net` and `max_dd` could read as one number.
+    let columns = [
+        left(14),
+        right(9),
+        right(9),
+        right(6),
+        right(8),
+        right(12),
+        right(12),
+        right(12),
+        right(10),
+    ];
+    let header = [
+        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for s in &rows {
+        cells.push(match &s.outcome {
+            Err(_) => vec![s.symbol.clone()],
+            Ok(r) => vec![
+                s.symbol.clone(),
+                r.bars.to_string(),
+                r.min_hits.to_string(),
+                r.depth.to_string(),
+                r.trades.to_string(),
+                r.worst_trade.to_string(),
+                r.pessimistic.to_string(),
+                r.max_drawdown.to_string(),
+                crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
+            ],
+        });
+    }
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (s, line) in rows.iter().zip(&laid.rows) {
         match &s.outcome {
             Err(why) => {
-                let _ = writeln!(out, "  {:<14}REFUSED: {why}", s.symbol);
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
             }
-            Ok(r) => {
-                let _ = writeln!(
-                    out,
-                    "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-                    s.symbol,
-                    r.bars,
-                    r.min_hits,
-                    r.depth,
-                    r.trades,
-                    r.worst_trade,
-                    r.pessimistic,
-                    r.max_drawdown,
-                    crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
-                );
+            Ok(_) => {
+                let _ = writeln!(out, "  {line}");
             }
         }
     }
@@ -2484,5 +2504,62 @@ mod tests {
             last_pool = in_pool.expect("asserted above");
             last_screen = in_screen.expect("asserted above");
         }
+    }
+
+    /// D-1420: the pass-1 table at the extremes a row can carry. Raw paisa at
+    /// `i64::MIN` is 20 characters in a 12-character column, so before the
+    /// columns were laid out together `worst`, `net` and `max_dd` ran into one
+    /// another and every column after them left its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_per_symbol_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let record = |extreme: i64, count: u64| crate::results::Record {
+            bars: count,
+            min_hits: count,
+            depth: u32::MAX,
+            trades: count,
+            pessimistic: extreme,
+            worst_trade: extreme,
+            max_drawdown: extreme,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let screened = [
+            super::Screened {
+                symbol: "WAAREEENERGY_X".to_owned(),
+                outcome: Ok(record(i64::MIN, u64::MAX)),
+            },
+            super::Screened {
+                symbol: "NIFTY".to_owned(),
+                outcome: Ok(record(i64::MAX, 0)),
+            },
+            super::Screened {
+                symbol: "TORNTPHARM".to_owned(),
+                outcome: Ok(record(-1, 1)),
+            },
+            super::Screened {
+                symbol: "SIXTEEN_CHARS_XY".to_owned(),
+                outcome: Err("its month could not be read".to_owned()),
+            },
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("symbol"))
+            .expect("a header");
+        for row in &lines[at + 1..] {
+            if let Some(refused) = row.find("REFUSED:") {
+                assert!(
+                    row[..refused].ends_with(' '),
+                    "a refusal touches its symbol: {row}"
+                );
+                continue;
+            }
+            crate::columns::assert_under(lines[at], row, &[L, R, R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+        }
+        assert_eq!(lines.len() - at - 1, screened.len(), "{out}");
     }
 }

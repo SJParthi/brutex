@@ -47,6 +47,9 @@ pub mod audited_range_command;
 mod audited_stored;
 /// Independent full-file checksum audit and retained historical admission receipts.
 pub mod checksum_receipts;
+mod columns;
+#[cfg(test)]
+mod columns_tests;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
 #[cfg(test)]
@@ -7784,6 +7787,7 @@ pub fn render_top_record(
     damaged: Option<&str>,
     unreadable: &str,
 ) -> String {
+    use crate::columns::{left, right};
     let mut out = stored_provenance(&crate::results::read_field(&rows.underlying));
     blank_line_after_banner(&mut out);
     let _ = writeln!(
@@ -7804,28 +7808,46 @@ pub fn render_top_record(
         return out;
     }
 
-    let _ = writeln!(
-        out,
-        "\n  {:<5}{:>10}{:>9}{:>14}{:>10}{:>10}  conditions",
-        "rank", "hits", "n", "mean", "t", "payoff"
+    // COLUMNS LAID OUT TOGETHER, NOT FORMATTED ONE ROW AT A TIME: a figure
+    // that filled its width ran into the next one and pushed every column
+    // after it off its header. D-1420.
+    let body = found
+        .iter()
+        .map(|row| {
+            vec![
+                row.rank.to_string(),
+                row.hits.to_string(),
+                row.n.to_string(),
+                // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
+                // column in this binary. It is stored in thousandths of a paisa,
+                // so it comes back to whole paisa first.
+                rupees(row.mean_milli_paisa / 1_000),
+                hundredths_of(row.t_milli / 10),
+                if row.payoff_bp == i64::MAX {
+                    "inf".to_owned()
+                } else {
+                    hundredths_of(row.payoff_bp)
+                },
+            ]
+        })
+        .collect();
+    let lines = crate::columns::with_header(
+        &[
+            left(5),
+            right(10),
+            right(9),
+            right(14),
+            right(10),
+            right(10),
+        ],
+        &["rank", "hits", "n", "mean", "t", "payoff"],
+        body,
     );
-    for row in found {
+    let _ = writeln!(out, "\n  {}  conditions", lines.header);
+    for (row, line) in found.iter().zip(&lines.rows) {
         let _ = writeln!(
             out,
-            "  {:<5}{:>10}{:>9}{:>14}{:>10}{:>10}  {}",
-            row.rank,
-            row.hits,
-            row.n,
-            // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
-            // column in this binary. It is stored in thousandths of a paisa, so
-            // it comes back to whole paisa first.
-            rupees(row.mean_milli_paisa / 1_000),
-            hundredths_of(row.t_milli / 10),
-            if row.payoff_bp == i64::MAX {
-                "inf".to_owned()
-            } else {
-                hundredths_of(row.payoff_bp)
-            },
+            "  {line}  {}",
             runner::report::names_from_words(row.mask_words).join(" · ")
         );
     }
@@ -7948,6 +7970,66 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     results_at(&root, feed, underlying)
 }
 
+/// The listing's table: the newest `LIST_ROWS` rows, one line each.
+fn results_table(out: &mut String, rows: &[crate::results::Record]) {
+    use crate::columns::{left, right};
+    // LAID OUT TOGETHER (D-1420): a 16-byte feed filled its 9-character
+    // column and ran into the rung, and a money figure past 16 characters
+    // pushed every column after it off its header.
+    let body = rows
+        .iter()
+        .take(LIST_ROWS)
+        .map(|record| {
+            vec![
+                crate::results::read_field(&record.feed),
+                crate::results::read_field(&record.timeframe),
+                // THE NUMBER THE WHOLE ENGINE EXISTS TO PRODUCE, and the listing
+                // did not print it. An operator asking "how many combinations
+                // did this actually weigh" had no answer on this surface at all
+                // -- the field has been in every record since the ledger landed.
+                grouped(record.combinations),
+                grouped(record.min_hits),
+                format!("{}/{}", record.months_found, record.months_asked),
+                record.depth.to_string(),
+                if record.halted == 0 { "yes" } else { "NO" }.to_owned(),
+                rupees(record.pessimistic),
+                rupees(record.optimistic),
+                record.trades.to_string(),
+            ]
+        })
+        .collect();
+    let laid = crate::columns::with_header(
+        &[
+            left(9),
+            left(8),
+            right(16),
+            right(16),
+            right(7),
+            right(6),
+            right(6),
+            right(17),
+            right(17),
+            right(9),
+        ],
+        &[
+            "feed",
+            "rung",
+            "COMBINATIONS",
+            "min_hits",
+            "months",
+            "depth",
+            "done",
+            "worst",
+            "best",
+            "trades",
+        ],
+        body,
+    );
+    for line in std::iter::once(&laid.header).chain(&laid.rows) {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
 /// The same read-only listing against a caller-owned root.
 fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&str>) -> String {
     // OPEN_READ, BECAUSE THIS IS A LISTING. `Results::open` calls
@@ -8014,44 +8096,7 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     let best = best_complete_newest_first(&rows);
     out.push_str(&listing_equity_note(&rows, best));
 
-    let _ = writeln!(
-        out,
-        "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
-        "feed",
-        "rung",
-        "COMBINATIONS",
-        "min_hits",
-        "months",
-        "depth",
-        "done",
-        "worst",
-        "best",
-        "trades"
-    );
-    for record in rows.iter().take(LIST_ROWS) {
-        let _ = writeln!(
-            out,
-            "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
-            crate::results::read_field(&record.feed),
-            crate::results::read_field(&record.timeframe),
-            // THE NUMBER THE WHOLE ENGINE EXISTS TO PRODUCE, and the listing did
-            // not print it. An operator asking "how many combinations did this
-            // actually weigh" had no answer on this surface at all -- the field
-            // has been in every record since the ledger landed.
-            grouped(record.combinations),
-            grouped(record.min_hits),
-            format!("{}/{}", record.months_found, record.months_asked),
-            record.depth,
-            if record.halted == 0 { "yes" } else { "NO" },
-            rupees(record.pessimistic),
-            rupees(record.optimistic),
-            record.trades,
-            // The first sixteen hex characters. The full digest is 64 and would
-            // own the line; sixteen is enough to find a row and short enough to
-            // read, and `cli results` prints the whole one when a row is asked
-            // for by name.
-        );
-    }
+    results_table(&mut out, &rows);
     if rows.len() > LIST_ROWS {
         let _ = writeln!(
             out,
@@ -12117,50 +12162,7 @@ fn screen<'a>(
 
     let passed = rows.iter().filter(|r| r.admitted).count();
     let mut out = rules_banner(rules, passed, rows.len());
-    let _ = writeln!(
-        out,
-        // SIDE IS THE SECOND COLUMN, before any measurement. Every figure in
-        // this table is unactionable without it, and `struct Screened`
-        // computed the side and had no field to keep it in.
-        "  {:<5}{:>7}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  conditions",
-        "rank", "side", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule"
-    );
-    for row in rows.iter().take(rules.top) {
-        let pf = row.cell.profit_factor_bp();
-        // `pf` is still printed; `rr` moved into the TIGHTEST column, which
-        // answers a question the ratio could not: what stop is REACHABLE.
-        let _ = row.cell.reward_to_risk_bp();
-        let _ = writeln!(
-            out,
-            "  {:<5}{:>7}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  {}",
-            row.rank,
-            row.side.as_str().to_uppercase(),
-            row.cell.trades,
-            format!("{}%", row.cell.win_rate_bp() / 100),
-            ppm_as_percent(row.cell.worst_mae),
-            // THE TIGHTEST ANY VARIANT ACHIEVED, in points, so a reader learns
-            // what is REACHABLE instead of guessing another threshold. A rule
-            // below this cannot be met by any of the 625 exits.
-            row.tightest.map_or_else(
-                || "-".to_owned(),
-                |t| format!("{}pt", ppm_to_points_at(t.worst_mae, reference)),
-            ),
-            if pf == i64::MAX {
-                "inf".to_owned()
-            } else {
-                hundredths_of(pf)
-            },
-            rupees(row.cell.pessimistic),
-            exit_label(&row.cell),
-            if row.admitted {
-                "PASS"
-            } else {
-                why_refused(&row.cell, rules, row.steady())
-            },
-            // BUILT HERE, FOR THE ROWS THAT ARE PRINTED. See `Screened`.
-            runner::report::condition_names(&row.scored.mask).join(" · ")
-        );
-    }
+    screen_table(&mut out, &rows, rules, reference);
     let _ = writeln!(out);
 
     append_consistency(&mut out, &rows, rules.top);
@@ -12512,6 +12514,82 @@ fn measure_top(
     }
 }
 
+/// The screen's ranked table: one row per printed combination, its side, its
+/// chosen exit's figures and the rule that refused it, then its conditions.
+fn screen_table(out: &mut String, rows: &[Screened<'_>], rules: Rules, reference: i64) {
+    use crate::columns::{left, right};
+    let shown: Vec<&Screened<'_>> = rows.iter().take(rules.top).collect();
+    let body = shown
+        .iter()
+        .map(|row| {
+            let pf = row.cell.profit_factor_bp();
+            // `pf` is still printed; `rr` moved into the TIGHTEST column, which
+            // answers a question the ratio could not: what stop is REACHABLE.
+            let _ = row.cell.reward_to_risk_bp();
+            vec![
+                row.rank.to_string(),
+                row.side.as_str().to_uppercase(),
+                row.cell.trades.to_string(),
+                format!("{}%", row.cell.win_rate_bp() / 100),
+                ppm_as_percent(row.cell.worst_mae),
+                // THE TIGHTEST ANY VARIANT ACHIEVED, in points, so a reader
+                // learns what is REACHABLE instead of guessing another
+                // threshold. A rule below this cannot be met by any of the 625
+                // exits.
+                row.tightest.map_or_else(
+                    || "-".to_owned(),
+                    |t| format!("{}pt", ppm_to_points_at(t.worst_mae, reference)),
+                ),
+                if pf == i64::MAX {
+                    "inf".to_owned()
+                } else {
+                    hundredths_of(pf)
+                },
+                rupees(row.cell.pessimistic),
+                exit_label(&row.cell),
+                if row.admitted {
+                    "PASS"
+                } else {
+                    why_refused(&row.cell, rules, row.steady())
+                }
+                .to_owned(),
+            ]
+        })
+        .collect();
+    // LAID OUT TOGETHER (D-1420), so a figure wider than its column widens the
+    // column for every row instead of running into the next one.
+    let lines = crate::columns::with_header(
+        &[
+            left(5),
+            right(7),
+            right(8),
+            right(6),
+            right(10),
+            right(11),
+            right(6),
+            right(13),
+            right(13),
+            right(6),
+        ],
+        // SIDE IS THE SECOND COLUMN, before any measurement. Every figure in
+        // this table is unactionable without it, and `struct Screened`
+        // computed the side and had no field to keep it in.
+        &[
+            "rank", "side", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule",
+        ],
+        body,
+    );
+    let _ = writeln!(out, "  {}  conditions", lines.header);
+    for (row, line) in shown.iter().zip(&lines.rows) {
+        // BUILT HERE, FOR THE ROWS THAT ARE PRINTED. See `Screened`.
+        let _ = writeln!(
+            out,
+            "  {line}  {}",
+            runner::report::condition_names(&row.scored.mask).join(" · ")
+        );
+    }
+}
+
 /// The consistency table writes one column per grain by hand, because the
 /// widths differ and a loop would need a parallel table of them — the same
 /// drift in another shape. This is what stops a grain being added without one.
@@ -12534,6 +12612,7 @@ const _: () = assert!(
 /// make it STEADILY" -- a different question, on a different table, with a
 /// different failure mode.
 fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
+    use crate::columns::{left, right};
     // CONSISTENCY, and it is a SEPARATE table on purpose.
     //
     // # Why not another column
@@ -12583,9 +12662,21 @@ fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
     // need a parallel table of them -- which is the same drift in another shape.
     // `GRAINS.len()` is asserted against the count below so a new grain cannot
     // be added without a column.
-    let _ = writeln!(
-        out,
-        "  {:<5}{:>6}{:>8}{:>7}{:>10}{:>8}{:>7}{:>7}{:>8}{:>9}{:>14}",
+    let columns = [
+        left(5),
+        right(6),
+        right(8),
+        right(7),
+        right(10),
+        right(8),
+        right(7),
+        right(7),
+        right(8),
+        right(9),
+        right(14),
+    ];
+    let shown: Vec<&Screened<'_>> = rows.iter().take(top).collect();
+    let header = [
         "rank",
         "years",
         "yearly",
@@ -12596,32 +12687,43 @@ fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
         "daily",
         "hourly",
         "WEAKEST",
-        "worst day"
-    );
-    for row in rows.iter().take(top) {
+        "worst day",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for row in &shown {
         let Some(ref c) = row.consistency else {
-            let _ = writeln!(out, "  {:<5}   not measured", row.rank);
+            // Its rank still counts toward the first column's width.
+            cells.push(vec![row.rank.to_string()]);
             continue;
         };
-        let _ = writeln!(
-            out,
-            "  {:<5}{:>6}{:>8}{:>7}{:>10}{:>8}{:>7}{:>7}{:>8}{:>9}{:>14}",
-            row.rank,
-            c.years,
+        cells.push(vec![
+            row.rank.to_string(),
+            c.years.to_string(),
             // `GRAINS` order: year, half, quarter, month, week, day, hour.
-            c.share_bp(0),
-            c.share_bp(1),
-            c.share_bp(2),
-            c.share_bp(3),
-            c.share_bp(4),
-            c.share_bp(5),
-            c.share_bp(6),
+            c.share_bp(0).to_string(),
+            c.share_bp(1).to_string(),
+            c.share_bp(2).to_string(),
+            c.share_bp(3).to_string(),
+            c.share_bp(4).to_string(),
+            c.share_bp(5).to_string(),
+            c.share_bp(6).to_string(),
             // THE COLUMN THE OPERATOR'S RULE ACTUALLY READS. His requirement is
             // every grain at once, so the weakest one is the whole answer and
             // the seven before it are the evidence for it.
-            c.weakest_bp(),
+            c.weakest_bp().to_string(),
             rupees(c.worst_day),
-        );
+        ]);
+    }
+    // LAID OUT TOGETHER (D-1420): `worst day` is a money figure and a share is
+    // an `i64`, and either at its extreme ran into its neighbour.
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (row, line) in shown.iter().zip(&laid.rows) {
+        if row.consistency.is_some() {
+            let _ = writeln!(out, "  {line}");
+        } else {
+            let _ = writeln!(out, "  {line}   not measured");
+        }
     }
     let _ = writeln!(
         out,
@@ -14385,6 +14487,74 @@ fn exhausted_walk(out: &mut String, floor: u64, last_page: Option<&str>) {
     }
 }
 
+/// The descent table as the report prints it: the header, then every step in
+/// the order it landed.
+fn descent_table(out: &mut String, steps: Vec<(u64, Result<crate::results::Record, String>)>) {
+    use crate::columns::{left, right};
+    // LAID OUT AFTER THE LAST STEP, NOT AS EACH LANDS (D-1420). The progress
+    // line on stderr is still printed the moment a step lands; the report is
+    // one artifact read whole, so its columns can be sized from every row and
+    // a raw paisa figure at its extreme no longer runs into the next column.
+    let columns = [
+        left(10),
+        right(10),
+        right(14),
+        right(7),
+        right(10),
+        right(9),
+        right(12),
+        right(12),
+        right(14),
+    ];
+    let header = [
+        "support",
+        "min_hits",
+        "combinations",
+        "depth",
+        "complete",
+        "trades",
+        "worst_mae",
+        "all_mae",
+        "worst",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    let mut refusals = Vec::new();
+    for (support, row) in steps {
+        match row {
+            Err(why) => {
+                cells.push(vec![format!("{support}ppm")]);
+                refusals.push(Some(why.lines().next().unwrap_or(&why).to_owned()));
+            }
+            Ok(record) => {
+                cells.push(vec![
+                    format!("{support}ppm"),
+                    record.min_hits.to_string(),
+                    record.combinations.to_string(),
+                    record.depth.to_string(),
+                    if record.halted == 0 { "yes" } else { "NO" }.to_owned(),
+                    record.trades.to_string(),
+                    record.winner_mae.to_string(),
+                    record.all_mae.to_string(),
+                    record.pessimistic.to_string(),
+                ]);
+                refusals.push(None);
+            }
+        }
+    }
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (line, refused) in laid.rows.iter().zip(refusals) {
+        match refused {
+            Some(why) => {
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
+            }
+            None => {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+    }
+}
+
 /// One completed or refused support step in the legacy descent table.
 fn descent_line(support: u64, row: Result<crate::results::Record, String>) -> String {
     match row {
@@ -14542,19 +14712,6 @@ pub fn descend(
         seed.bars.saturating_mul(floor) / 1_000_000,
         ladder.len()
     );
-    let _ = writeln!(
-        out,
-        "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
-        "support",
-        "min_hits",
-        "combinations",
-        "depth",
-        "complete",
-        "trades",
-        "worst_mae",
-        "all_mae",
-        "worst"
-    );
 
     // SEQUENTIAL, and deliberately so.
     //
@@ -14564,6 +14721,7 @@ pub fn descend(
     // would hold the cheap answers hostage to the expensive one -- which is the
     // exact failure this command exists to avoid. One at a time, printed as it
     // lands.
+    let mut steps = Vec::with_capacity(ladder.len());
     for (step, &support) in ladder.iter().enumerate() {
         let row = if step == 0 {
             // Already swept, above. Re-sweeping it would be a second identical
@@ -14581,7 +14739,7 @@ pub fn descend(
             )
             .outcome
         };
-        let line = descent_line(support, row);
+        let line = descent_line(support, row.clone());
         // EACH ROW IS ANNOUNCED THE MOMENT IT LANDS, ON STDERR.
         //
         // # The defect this closes, found by running the command
@@ -14602,8 +14760,9 @@ pub fn descend(
         // stdout that a pipe or a file capture sees whole. Progress is for the
         // human watching; the report is for whatever reads the output.
         eprintln!("  [{}/{}] {line}", step + 1, ladder.len());
-        let _ = writeln!(out, "{line}");
+        steps.push((support, row));
     }
+    descent_table(&mut out, steps);
 
     let _ = writeln!(
         out,
@@ -14832,16 +14991,91 @@ fn range_opening(
     out
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one table, rendered once. The body is a single report: the two \
-              argument refusals, the provenance banner, the all-refused guard, \
-              the column header, the per-rung row and the named missing months. \
-              Splitting it would put the header in one function and the row that \
-              must match it in another, which is the defect `the_generated_and_\
-              stored_banners_make_opposite_claims` exists to catch — a format \
-              string and its columns have to be readable together or they drift"
-)]
+/// The `range-all` comparison table: one row per rung, or its refusal.
+fn range_table(out: &mut String, rows: &[RungRow]) {
+    use crate::columns::{left, right};
+    let columns = [
+        left(8),
+        right(10),
+        right(10),
+        right(8),
+        right(14),
+        right(7),
+        right(10),
+        right(9),
+        right(14),
+        right(14),
+        right(10),
+    ];
+    let header = [
+        "rung",
+        "bars",
+        "min_hits",
+        "months",
+        "combinations",
+        "depth",
+        "complete",
+        "trades",
+        "worst",
+        "best",
+        "ret/DD",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for row in rows {
+        match &row.outcome {
+            // A refusal names its rung; the rung still counts toward the
+            // first column's width.
+            Err(_) => cells.push(vec![row.rung.to_owned()]),
+            Ok(r) => cells.push(vec![
+                row.rung.to_owned(),
+                r.bars.to_string(),
+                r.min_hits.to_string(),
+                format!("{}/{}", r.months_found, r.months_asked),
+                r.combinations.to_string(),
+                r.depth.to_string(),
+                // THE ONE COLUMN THAT DECIDES WHETHER THE REST MEAN ANYTHING. A
+                // halted sweep's depth is PARTIAL and its combination count
+                // covers less of the ladder than it looks like, so a `no` here
+                // is not a footnote.
+                if r.halted == 0 { "yes" } else { "NO" }.to_owned(),
+                r.trades.to_string(),
+                r.pessimistic.to_string(),
+                r.optimistic.to_string(),
+                // A PEAK-TO-TROUGH FALL IS NON-NEGATIVE, AND THIS TESTED
+                // THE OTHER SIGN.
+                //
+                // `grid::Cell::max_drawdown` is documented "Always >= 0"
+                // and asserted so; `record_run` copies that value straight
+                // in. So `r.max_drawdown < 0` was false for every real run
+                // and this column printed "-" on all eight rungs, forever
+                // -- the one column answering "what did this rung risk per
+                // unit of return", structurally dead.
+                //
+                // It survived because FOUR test fixtures in this file wrote
+                // the drawdown NEGATIVE, so the suite exercised a branch
+                // production could not reach. They now carry the engine's
+                // sign, which is what made this visible at all.
+                //
+                return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
+            ]),
+        }
+    }
+    // LAID OUT TOGETHER (D-1420): a raw paisa total past fourteen characters
+    // ran into the next column and pushed every column after it off its header.
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (row, line) in rows.iter().zip(&laid.rows) {
+        match &row.outcome {
+            Err(why) => {
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
+            }
+            Ok(_) => {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+    }
+}
+
 fn range_over_inner(
     vendor_word: &str,
     underlying: &str,
@@ -14903,64 +15137,7 @@ fn range_over_inner(
         );
     }
 
-    let _ = writeln!(
-        out,
-        "  {:<8}{:>10}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
-        "rung",
-        "bars",
-        "min_hits",
-        "months",
-        "combinations",
-        "depth",
-        "complete",
-        "trades",
-        "worst",
-        "best",
-        "ret/DD"
-    );
-    for row in &rows {
-        match &row.outcome {
-            Err(why) => {
-                let _ = writeln!(out, "  {:<8}REFUSED: {why}", row.rung);
-            }
-            Ok(r) => {
-                let _ = writeln!(
-                    out,
-                    "  {:<8}{:>10}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
-                    row.rung,
-                    r.bars,
-                    r.min_hits,
-                    format!("{}/{}", r.months_found, r.months_asked),
-                    r.combinations,
-                    r.depth,
-                    // THE ONE COLUMN THAT DECIDES WHETHER THE REST MEAN
-                    // ANYTHING. A halted sweep's depth is PARTIAL and its
-                    // combination count covers less of the ladder than it looks
-                    // like, so a `no` here is not a footnote.
-                    if r.halted == 0 { "yes" } else { "NO" },
-                    r.trades,
-                    r.pessimistic,
-                    r.optimistic,
-                    // A PEAK-TO-TROUGH FALL IS NON-NEGATIVE, AND THIS TESTED
-                    // THE OTHER SIGN.
-                    //
-                    // `grid::Cell::max_drawdown` is documented "Always >= 0"
-                    // and asserted so; `record_run` copies that value straight
-                    // in. So `r.max_drawdown < 0` was false for every real run
-                    // and this column printed "-" on all eight rungs, forever
-                    // -- the one column answering "what did this rung risk per
-                    // unit of return", structurally dead.
-                    //
-                    // It survived because FOUR test fixtures in this file wrote
-                    // the drawdown NEGATIVE, so the suite exercised a branch
-                    // production could not reach. They now carry the engine's
-                    // sign, which is what made this visible at all.
-                    //
-                    return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
-                );
-            }
-        }
-    }
+    range_table(&mut out, &rows);
     // AND THE HOLES ARE NAMED, not just counted. The `months` column above
     // shows `found/asked`, so a short span is VISIBLE -- but a reader cannot
     // act on `61/80` without knowing WHICH nineteen are absent, and every
@@ -19399,28 +19576,35 @@ fn decay_block(
     anchored: &runner::validate::Validated,
     rolling: &runner::validate::Validated,
 ) -> String {
+    use crate::columns::{left, right};
     let mut out = String::from("\nWINDOW SHAPE -- did the edge survive on RECENT history too\n");
-    let _ = writeln!(
-        out,
-        "  {:<12}{:>8}{:>10}{:>12}{:>14}",
-        "shape", "folds", "decided", "positive", "train bars"
+    let body = [("anchored", anchored), ("rolling", rolling)]
+        .iter()
+        .map(|&(shape, v)| {
+            // `held_up` and not a hand-rolled comparison: it already encodes
+            // what counts as a fold that survived -- an exit total above zero
+            // where one exists, and the worst-case-positive test otherwise --
+            // and a second definition beside it would drift from the audit
+            // table above.
+            let positive = v.held_up();
+            let width = v.folds.last().map_or(0, |f| f.train_bars);
+            vec![
+                shape.to_owned(),
+                v.folds.len().to_string(),
+                v.decided().to_string(),
+                format!("{positive}/{}", v.folds.len()),
+                width.to_string(),
+            ]
+        })
+        .collect();
+    // LAID OUT TOGETHER (D-1420).
+    let laid = crate::columns::with_header(
+        &[left(12), right(8), right(10), right(12), right(14)],
+        &["shape", "folds", "decided", "positive", "train bars"],
+        body,
     );
-    for (shape, v) in [("anchored", anchored), ("rolling", rolling)] {
-        // `held_up` and not a hand-rolled comparison: it already encodes what
-        // counts as a fold that survived -- an exit total above zero where one
-        // exists, and the worst-case-positive test otherwise -- and a second
-        // definition beside it would drift from the audit table above.
-        let positive = v.held_up();
-        let width = v.folds.last().map_or(0, |f| f.train_bars);
-        let _ = writeln!(
-            out,
-            "  {:<12}{:>8}{:>10}{:>12}{:>14}",
-            shape,
-            v.folds.len(),
-            v.decided(),
-            format!("{positive}/{}", v.folds.len()),
-            width
-        );
+    for line in std::iter::once(&laid.header).chain(&laid.rows) {
+        let _ = writeln!(out, "  {line}");
     }
     let anchored_positive = anchored.held_up();
     let rolling_positive = rolling.held_up();
