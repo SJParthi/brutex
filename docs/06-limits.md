@@ -11945,8 +11945,15 @@ quiet-machine measurement.
   blank or header lines reserves for rows it never yields, up to `MAX_ROWS`
   rows of 64 bytes each. Not timed.
 - **A rate reservation is O(1) per acquire, with no retry.** o1api-54.
-  `Governor::reserve` is two cursor advances and two walks of the three
-  windows. What it gives up: a reservation is not revoked by a later
+  `Governor::reserve` is at most two cursor advances and two walks of the three
+  windows. With no shortfall it answers the caller's own instant, so a
+  cursor ahead of the clock costs no sleep when a permit is free; a
+  reservation whose instant would pass `u64::MAX` is `None` and both callers
+  refuse it by name rather than sleep toward it (the amendment to D-1203).
+  What "go now" gives up: with the cursor ahead of the clock, a permit the
+  bucket counts as earned by the cursor's instant is spent at the caller's
+  earlier one. The cursor runs ahead only after a reading behind the highest
+  seen, which `monotonic_micros` never produces, or under a deliberate pin. What it gives up: a reservation is not revoked by a later
   `record_throttled`, so at most one request per waiter that held a
   reservation at the instant of a refusal still goes out on the old schedule.
   The retry loop it replaced had the same exposure for a waiter already past

@@ -8398,7 +8398,10 @@ where
 /// # Errors
 ///
 /// A poisoned budget lock, or a feed with no HTTP transport: returned on the
-/// first attempt without sleeping, because neither becomes true later.
+/// first attempt without sleeping, because neither becomes true later. And a
+/// saturated reservation — the governor's cursor plus the wait passes the end
+/// of the clock — refused with the cursor named, because the alternative was a
+/// sleep toward `u64::MAX` that never ends (the fix to D-1203).
 async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
     // ONE `reserve` CALL, and the lock is dropped before the sleep.
     //
@@ -8437,7 +8440,17 @@ async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), Strin
         let mut held = governor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.reserve(now)
+        let reserved = held.reserve(now);
+        let cursor = held.cursor_micros();
+        reserved.ok_or_else(|| {
+            format!(
+                "the rate budget for {} saturated: its cursor is at {cursor} µs \
+                 and the wait for the next permit passes the end of the clock, \
+                 so there is no instant to sleep to. Nothing was issued and \
+                 nothing was charged.",
+                feed.display()
+            )
+        })?
     };
     let wait = at.saturating_sub(now);
     if wait > 0 {
@@ -25937,6 +25950,59 @@ mod tests {
              the bars path and `laddered` for the two F&O transports. A third is \
              a hand-written copy of the ladder and will drift from these two."
         );
+    }
+
+    /// **A SATURATED RESERVATION IS REFUSED BY NAME, AND A FREE PERMIT GOES
+    /// NOW WHEREVER THE CURSOR STANDS.** The fix to D-1203.
+    ///
+    /// Dhan's shared governor pinned with `admit(u64::MAX)`: `reserve` used to
+    /// answer the cursor even with a permit free, so `await_budget` slept
+    /// `u64::MAX - now` microseconds — the hang lane 1 found in
+    /// `fno_boundary_tests`. A free permit now goes at once; once the second is
+    /// spent, the next reservation has no instant to sleep to and is refused
+    /// with the cursor named, charging nothing.
+    #[tokio::test]
+    async fn a_saturated_budget_is_refused_and_a_free_permit_is_not_slept_for() {
+        let dir = agreeing("budgetsaturated");
+        let site = site("budgetsaturated", &dir);
+        let feed = pull::vendor::Feed::Dhan;
+        let governor = {
+            let budgets = site.budgets.lock().expect("budget table");
+            std::sync::Arc::clone(
+                budgets
+                    .get(feed as usize)
+                    .and_then(Option::as_ref)
+                    .expect("Dhan is budgeted"),
+            )
+        };
+        let pin = || {
+            governor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit(u64::MAX)
+        };
+        assert_eq!(pin(), pull::rate::Verdict::Admit, "the pin spends one");
+        let bound = std::time::Duration::from_secs(5);
+        let free = tokio::time::timeout(bound, await_budget(feed, &site)).await;
+        assert_eq!(free, Ok(Ok(())), "a free permit is not slept for");
+        while pin() == pull::rate::Verdict::Admit {}
+        let credit = || {
+            governor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .credit_micro_permits(pull::rate::WindowSpan::Second)
+        };
+        let before = credit();
+        let why = tokio::time::timeout(bound, await_budget(feed, &site))
+            .await
+            .expect("a saturated reservation must not sleep")
+            .expect_err("a saturated reservation is refused");
+        assert!(why.contains("saturated"), "{why}");
+        assert!(
+            why.contains(&u64::MAX.to_string()),
+            "names the cursor: {why}"
+        );
+        assert_eq!(credit(), before, "nothing was charged");
     }
 
     #[tokio::test]

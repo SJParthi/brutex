@@ -51441,8 +51441,10 @@ D-1201's digits-only field check and is not repeated here.
 against the instant the bucket will afford it, moves the forward-only cursor
 there and returns that instant; both callers call it once and sleep once. The
 schedule is the one `admit` would allow at those instants, which a test proves
-by replaying it. A wait past `u64::MAX` charges nothing and returns
-`u64::MAX`. The server's refusal is removed rather than reworded: a reservation
+by replaying it. With no window short it returns the caller's own instant —
+go now — wherever the cursor stands. A wait past `u64::MAX` charges nothing and
+returns `None`, and both callers refuse the request with the saturated cursor
+named (see the amendment below). The server's refusal is removed rather than reworded: a reservation
 cannot lose a race, and a zero ceiling is already refused at construction. (2)
 Both callers read one clock, `pull::rate::monotonic_micros`: the transport read
 the wall clock, which `admit`'s forward-only cursor tolerated but a reservation
@@ -51467,6 +51469,25 @@ workspace `unsafe_code = "deny"` refuses and gate 5 counts as an exception
 needing its own entry; the CSV reservation is proven
 through `Vec::with_capacity`'s documented exact capacity instead, and the field
 vector's absence through the source.
+
+**Amended before merge: a free permit goes now, and saturation is refused.**
+As first written, `reserve` returned `cursor + w` even when `w` was zero, and
+`u64::MAX` when `cursor + w` overflowed; each caller slept `at - now`. A cursor
+ahead of the clock therefore made a caller sleep the whole gap with a permit
+already free, and a cursor at `u64::MAX` made that sleep endless. Lane 1's full
+run on `final/all-fixes` hung on
+`api::fno_boundary_tests::rolling_requests_spend_one_shared_permit_per_network_attempt`,
+which pins a shared governor with `admit(u64::MAX)`; run alone under
+`timeout 120` before this amendment it was killed at the limit, and after it
+passes in about a second. Now: no shortfall answers the caller's instant and
+charges one permit; a shortfall is still measured from the cursor, so a caller
+behind earlier reservations still queues after them; and an overflow returns
+`None`, which `HttpSource::wait_for_permit` (now `Result<(), String>`, mapped
+to `Refusal::transport` / `FetchError::TransportFailed` at its three callers)
+and `api::server::await_budget` each refuse with the cursor named, charging
+nothing and sending nothing (`CLAUDE.md` §4). No emit site was added: every
+caller already had an error path to refuse on. Owned and decided by the lane
+lead.
 
 Invariants AF-1203-a through AF-1203-f; `docs/06-limits.md` has the costs, the
 unrevoked-reservation exposure and the unmeasured decode peak.
