@@ -43731,7 +43731,11 @@ Until then the call itself is pinned in the source:
 `same_coordinate(row.original, row.family, row.coordinate, original)?;` inside
 `project`'s row loop ahead of `admission_projection::row(`, and fails on
 origin/main, where that call does not exist. It reads source text and does not
-run `project`.
+run `project`. So `cargo mutants --in-diff` over this batch still reports two
+MISSED mutants, `replace + with -` and `replace + with *` at
+`crates/api/src/booleanqualification_projection.rs:26:34`, the unchanged line
+`let index = asked.offset + n;` beside the changed call: no api test runs
+`project`, and only a rendered page would see a wrong index.
 
 ### D-0732 — `/audit.json` counts the asked feed's months from its own manifest, once per census snapshot — 2026-09-29
 
