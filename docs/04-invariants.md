@@ -5471,3 +5471,9 @@ the guard. The existing emits test pins the warning's message and level.
 | `trade::walk_over_from(.., first_row)` equals `walk_over` for every mask with a bit set when every row before `first_row` has zero bits. A start past the column walks nothing. The walk-forward OOS pass finds the first row with a set bit once per fold, starts every non-empty mask there, and keeps row 0 for the empty mask (D-1186). | `runner::trade::tests::a_walk_from_the_first_live_row_equals_the_full_walk`, `runner::validate::tests::the_oos_pass_walks_from_the_first_live_row` | ✓ |
 | A `LaterExpressionSliceV1` built once prices every program and side exactly as `evaluate_expression_oos` does: the same digest, grid, summary and rows, and the same refusal in the same order. A `LaterFoldMapV1` built once binds exactly as `bind` indexes, refuses at the same cap byte, and is refused for other bars, another column or another partition. `cli`'s Boolean later loop builds both once, before it iterates (D-1188). | `runner::exit_grid_policy::expression_execution::later_period::tests::one_later_slice_prices_every_program_as_the_per_call_path_does`, `runner::exit_grid_policy::expression_execution::later_period::validation::tests::one_fold_map_binds_every_program_exactly_as_bind_does`, `cli::candidate_universe::boolean_candidate_v1::oos::tests::the_later_loop_attests_its_slice_and_fold_index_once` | ✓ |
 
+
+### Runner lane-2 D follow-ups (D-1190 onward)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| One stored rung's screen builds `SliceFacts` once, in `trade_and_screen`. `screen_cascade`, every tier's `screen` and `measure_top` take the caller's facts and build none. The final exact rebuild uses `evaluate_over`, `materialize_cell_over` and `walk_over` (D-1190). | `cli::tests::one_rung_screen_builds_its_slice_facts_once` | ✓ |

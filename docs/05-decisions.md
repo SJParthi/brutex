@@ -44811,3 +44811,58 @@ scope file. The local run therefore used a copy that strips the same prefix
 with `substr`, which removes the same characters, and it finished in seconds.
 The checked-in gate is unchanged. Whether the CI runner's awk is affected was
 not measured.
+
+### D-1190 — One stored rung's screen builds its `SliceFacts` once — 2026-10-02
+
+**Finding.** The D-1184 limit, read against every production caller of the
+per-call doors. `cli::trade_and_screen` prices one stored rung. Under it,
+`screen` built `SliceFacts::of(bars, column)` on entry and `measure_top` built a
+second copy. `screen_cascade` calls `screen` once for the operator's rules and,
+when nothing passes, once more for the mildest tier, once per tier walked, and
+once for the diagnostic table. Then the final exact rebuild in
+`trade_and_screen` called `grid::evaluate`, `grid::materialize_cell` and
+`trade::walk`, each of which built its own. So one rung built the facts, an O(B)
+value, up to two times per `screen` call plus three: five when the stated rules
+pass on the first screen, more when the tier ladder is walked.
+
+**The change.** `trade_and_screen` builds the facts once, before
+`screen_cascade`. `screen_cascade`, `screen` and `measure_top` take
+`facts: &SliceFacts` and build none. The final rebuild calls
+`grid::evaluate_over`, `grid::materialize_cell_over` and `trade::walk_over`.
+`screen_cascade` now takes eight arguments, so it carries a
+`clippy::too_many_arguments` expectation with a reason.
+
+**The other per-call doors.** Each was read against its production callers:
+
+* `grid::evaluate_with`, `evaluate_families`, `per_trade`, `with_levels` and
+  `materialize_best` have no production caller outside their own tests.
+  `grid::evaluate` and `grid::materialize_cell` had only the two sites above.
+  Left as they are.
+* `ResolvedExitGridV1::replay_selected` has no production caller.
+* `replay_selected_universe` is called by `cli::global_replay`'s
+  `prepare_global_replay_v1`, which only tests call, and by
+  `cli::global_replay_v2`'s `prepare_global_replay_v2`, which nothing calls.
+  Each witness carries its own OOS series and column. Sharing facts between two
+  witnesses would need the caller to prove they hold the same slice, and
+  `SliceFacts::covers` checks only the length. Left as they are.
+* `replay_global_witness` has one production caller,
+  `CandidateGlobalReplayOosSourceV1::mint_witness_recorded`, once per source.
+  Population V6 reaches it once per selected disposition through
+  `StoredPostTrainingOosCohortV1::mint_witness_inner`, which builds a new source
+  (signal fold, execution column and all) on every call. The slice is rebuilt
+  per candidate, so the facts are built once per slice already, and they are
+  not the larger part of that cost. Building the source once per cohort would
+  remove both. It would also drop the `FoldStarted` / `FoldCompleted` events
+  that `global_replay_v4_lifecycle` records as durable `Preparation` attempts
+  for every witness, which is a change to what a run writes. Not made here.
+* `cli::institutional_evidence::from_exact_replay` still calls
+  `materialize_cell`, and nothing in the workspace calls it. Not deleted.
+
+**No output changes.** The facts are a pure function of `bars` and `column`,
+and D-1184's `the_hoisted_replay_doors_equal_the_per_call_doors` shows the
+`_over` doors equal the per-call ones. The tier, capture and consistency tests
+under `cli::candidate_trades::tests` and `cli::tests` pass unchanged, with their
+`screen` calls given the facts. `cli::tests::one_rung_screen_builds_its_slice_facts_once`
+is a source-shape test: it counts one build in `trade_and_screen`, none in
+`screen_cascade`, `screen` or `measure_top`, and no per-call door in the final
+rebuild. It fails on the previous tree. Not timed.

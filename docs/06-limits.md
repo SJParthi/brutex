@@ -10051,3 +10051,12 @@ not:
   check. The fold map holds O(B + folds) memory for the whole run instead of
   per bind. Not timed.
 
+- **One stored rung's screen: one `SliceFacts` build (D-1190).** This narrows
+  the `SliceFacts` bullet above. `trade_and_screen` builds the facts once and
+  every tier's `screen`, `measure_top` and the final rebuild share them. The
+  one-shot doors still build facts per call, but no production loop calls
+  them. `replay_global_witness` still builds facts once per witness, because
+  `StoredPostTrainingOosCohortV1` rebuilds the whole OOS source (signal fold
+  and execution column) per disposition. That rebuild is O(signal bars +
+  execution bars) per selected candidate. It is left because hoisting it would
+  change the durable fold records each witness writes. Not timed.

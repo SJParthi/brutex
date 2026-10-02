@@ -499,6 +499,7 @@ fn real_screen_keeps_nonwinning_candidate_traces_and_actual_cap_across_tiers() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     )
     .expect("real first pricing pass");
     let selected = first.selected.expect("one candidate chosen");
@@ -514,6 +515,7 @@ fn real_screen_keeps_nonwinning_candidate_traces_and_actual_cap_across_tiers() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     )
     .expect("real second pricing pass");
     assert!(!second.admitted_any);
@@ -583,6 +585,7 @@ fn actual_screen_callback_failure_refuses_the_pass_and_never_seals_catalog() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     );
     assert!(result.is_err());
     assert!(capture.finish().is_err());
