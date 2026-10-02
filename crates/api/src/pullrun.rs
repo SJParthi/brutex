@@ -504,7 +504,8 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 /// recovery's call after each attempt miss. Outside the per-leg path; the
 /// census a miss builds is shared with every other `census_now` caller.
 /// `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)" says why a
-/// header-only read is not used. UNMEASURED.
+/// header-only read is not used. UNVERIFIED: the bound is read from the
+/// code and has not been measured.
 pub(crate) fn rows_now(site: &Site) -> u64 {
     let (censuses, _) = crate::server::census_now(site);
     censuses

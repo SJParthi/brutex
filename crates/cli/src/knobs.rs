@@ -490,7 +490,8 @@ mod tests {
     /// whose size this workspace neither bounds nor measures. The table said
     /// `var` (unset) was "**O(1)** | one hash probe, then one `getenv`" and
     /// `var` (set) "**O(1)** | one hash probe" while the set path read the
-    /// environment too. W2-cli7-4, D-0931.
+    /// environment too. W2-cli7-4, D-0931. Proved here:
+    /// `cli::knobs::the_cost_table_does_not_call_an_environment_read_constant`.
     #[test]
     fn the_cost_table_does_not_call_an_environment_read_constant() {
         let source = include_str!("knobs.rs");

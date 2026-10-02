@@ -563,6 +563,7 @@ impl AnchoredAdmissionValidationV2 {
     /// Admission decision instead of re-running the fold-wide reconciliation
     /// (D-0740). The fields are private and only the issuing door writes
     /// them, so the value cannot drift from what that reconciliation saw.
+    /// Proved by `runner::admission::per_candidate_admission_never_re_reconciles_the_opaque_validation`.
     pub(crate) fn issued_authority_projection(
         &self,
     ) -> Result<AnchoredSearchAuthorityProjectionV2, AnchoredAdmissionValidationRefusalV2> {
@@ -841,6 +842,7 @@ impl AnchoredSearchValidationV3 {
 
     /// The projection sealed at issuance, read in O(1) per Admission
     /// decision (D-0740).
+    /// Proved by `runner::admission::per_candidate_admission_never_re_reconciles_the_opaque_validation`.
     pub(crate) fn issued_authority_projection(
         &self,
     ) -> Result<AnchoredSearchAuthorityProjectionV3, AnchoredSearchValidationRefusalV3> {
@@ -1116,6 +1118,7 @@ impl AnchoredSearchValidationV4 {
 
     /// The projection sealed at issuance, read in O(1) per Admission
     /// decision (D-0740).
+    /// Proved by `runner::admission::per_candidate_admission_never_re_reconciles_the_opaque_validation`.
     pub(crate) fn issued_authority_projection(
         &self,
     ) -> Result<AnchoredSearchAuthorityProjectionV4, AnchoredSearchValidationRefusalV4> {
@@ -7824,7 +7827,7 @@ pub(crate) mod tests {
     }
 
     /// W3-runner1-0 (D-0740): a value whose issuance projection is absent is
-    /// refused by the O(1) door, never answered from nothing.
+    /// refused by the sealed-projection door, never answered from nothing.
     #[test]
     fn an_unissued_opaque_validation_refuses_the_sealed_projection() {
         let mut v2 = anchored_admission_fixture_v2();

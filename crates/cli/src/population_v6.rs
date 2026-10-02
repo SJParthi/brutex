@@ -3227,7 +3227,8 @@ impl CommittedStoredPopulationV6 {
     /// strategy and O(25 * C) per call at the Top-25 cap. The call already
     /// runs `execution_v4_source` twice, before and after the replay, and each
     /// run re-authenticates the whole retained source and projects all C rows,
-    /// so the lookup does not change the call's class. W2-cli13-3.
+    /// so the lookup does not change the call's class. W2-cli13-3. UNVERIFIED:
+    /// the O(C) bound is read from the code and has not been measured.
     pub(crate) fn selected_stored_oos_witnesses(
         &mut self,
         request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
