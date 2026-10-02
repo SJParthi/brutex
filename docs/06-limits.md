@@ -10530,3 +10530,9 @@ What is measured does not cover the difference. C-K-08
 times NIFTY asked on 2024-06-06 against 2024-06-07, two days inside one
 regime, each a single pass. A boundary-crossing ask is not timed, and its cost
 relative to a single pass is UNMEASURED.
+- **Corrected 2026-09-30, D-0946.** The AF-19 correction above says "No page
+  under `web/` renders `equity_note`". The report page now renders the open
+  run's `equity_note`, trimmed of leading and trailing blanks, in its
+  breakdown pane and over its trade list, and labels every run that is not a note-free NIFTY or BANKNIFTY run gross of
+  every charge (`web/tests/charge-scope.test.js`). No other page under `web/`
+  was changed.

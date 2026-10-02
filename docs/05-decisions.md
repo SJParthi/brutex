@@ -45284,3 +45284,52 @@ and names the file-level refusal and
 `store::docs::the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data`
 reads the module doc beside the refusal in `file.rs`; row C4-DOCS-WEB-09. No
 code path changes.
+### D-0946 — The report page states a stock run gross of every charge, and zero levies only for a spot index — 2026-09-30
+
+**What was wrong (AC-docslaw-law-0).** `CLAUDE.md` §1 lets equities be
+ranked cost-excluded only as labelled research, "every such report stating
+it is gross of every charge". The operator's report page
+(`web/src/routes/backtest/+page.svelte`) printed three statements
+hard-coded, whatever the run's instrument: `Commission load` `0.00%` with
+"statutory charges are zero for spot indices · spread is not modeled" in the
+breakdown pane, "Statutory charges are zero for this spot-index sweep" over
+the trade list, and "spot indices only" in the coverage line. The page
+accepts a non-index pick (`indexWorkflow` is false once a picked symbol is
+not NIFTY or BANKNIFTY), and `/backtest.json` gives a stock's run an
+`equity_note` (`crates/api/src/backtest.rs`,
+`a_stock_run_carries_the_equity_note_and_an_index_run_is_unchanged`). So a
+RELIANCE run reached the operator labelled as carrying no commission.
+
+**The change.** `web/src/lib/charge-scope.js` decides the words.
+`chargeScope(run)` prints `0.00%` and the zero-levy sentences only when the
+run's `underlying` is one of `NIFTY`, `BANKNIFTY`, `NSE-NIFTY`,
+`NSE-BANKNIFTY` and the server sent no non-blank `equity_note`. Every other
+run, including one with no known instrument, prints `Not subtracted` and a
+sentence saying the figures are gross of every charge. When the server sent
+a note, the page shows it verbatim under both statements, and the note wins
+over an index name; the note is trimmed of leading and trailing blanks and
+otherwise unchanged. `coverScope(pickedSymbols)` keeps "spot indices only"
+only when every picked instrument is an index, names one non-index pick as
+gross of every charge, and counts several. It reads the whole picked set, not
+the first pick, because the picker accepts several instruments: NIFTY and
+RELIANCE picked together is labelled by RELIANCE. Both breakdown wordings
+keep "spread is not modeled" visible and both trade-list sentences keep
+"spread remains unmodeled". The page renders the note in two places, the
+breakdown pane and over the trade list. The Margin pane's "one-unit spot-index
+totals" became "one-unit totals".
+
+**Proof.** `web/tests/charge-scope.test.js` fails 7 of 7 against origin/main
+(bc531316, whose `web/` is byte-identical to 2c209309's), passes 7 of 7 with
+the change, and fails its two page-source tests with only the page change
+reverted. `web/tests/backtest-ui.test.js`'s commission test asserted the old
+hard-coded `0.00%`, now asserts the page reads `openCharges`, and fails on
+origin/main and with only the page change reverted. The batch changes no Rust file, so `cargo mutants
+--in-diff` has nothing to mutate. Hand mutations of `charge-scope.js` were
+each caught by these tests except one: dropping `isSweptIndex`'s `typeof`
+guard, which is equivalent, since `SWEPT_INDICES` holds only strings and
+`includes` of a non-string over it is false.
+
+**What this corrects.** D-0694's correction and the AF-19 correction in
+`docs/06-limits.md` each said "No page under `web/` renders `equity_note`".
+From this entry on, the report page renders it for the open run. Those
+entries are not edited.
