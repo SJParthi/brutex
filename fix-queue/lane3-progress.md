@@ -21,8 +21,8 @@ Updated: 2026-10-02 12:10 UTC. Budget rule: max 2 agents at once; worktrees /hom
 | B1 credential halt | GAP2-36, GAP2-37, GAP2-38 | fix/cloud-gap2-36 | D-0948 | PR open, CI running | #38 |
 | B2 autopilot | W1-api1-2, W1-api1-8, W1-api1-7, W1-api1-1 | fix/cloud-w1-api1-2 | D-0949 | PR open, CI running | #39 |
 | B3 calendar_of | W1-api2-1, W1-api2-9, W1-api2-11, R9-api-law-0, W1-api2-0 | fix/cloud-w1-api2-1 | D-0950 | worker building/testing (wt/w1-api2-1, WIP 619e966b) |  |
-| B4 json renderers | W1-api1-5, W1-api2-2, W1-api2-3, W1-api1-4, W1-api6-3, W1-api1-6 | fix/cloud-w1-api1-5 | D-0951 | worker running (wt/w1-api1-5) | |
-| B5 operation_audit | GAP14-57, W1-api3-5, W1-api3-0 | fix/cloud-gap14-57 | D-0952 | next | |
+| B4 json renderers | W1-api1-5, W1-api2-2, W1-api2-3, W1-api1-4, W1-api6-3, W1-api1-6 | fix/cloud-w1-api1-5 | D-0951 | PR open, CI running | #42 |
+| B5 operation_audit | GAP14-57, W1-api3-5, W1-api3-0 | fix/cloud-gap14-57 | D-0952 | worker running (wt/gap14-57) | |
 | B6 server.rs | W1-api5-0..-11, UC-20, R9-api-cx-2, GAP14-63 | fix/cloud-w1-api5-0 | D-0953 | next | |
 | B7 sweeprun/audit/census | W1-api6-1, -4, -2, -5, W1-api1-9, R9-api-cx-1 | fix/cloud-w1-api6-1 | D-0954 | next | |
 | B8 pull ingest/fold | ET-bars-candles-store-1, -8, -4, W1-pull2-0, -3, -5, -6, R9-csr-cx-0, -1, GAP2-41, GAP12-12, W1-pull1-0 | fix/cloud-et-bars-candles-store-1 | D-0955 | next | |
