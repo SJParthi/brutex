@@ -420,23 +420,9 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
     let (censuses, entries) = census_now(site);
     let census = censuses.iter().find(|c| c.vendor == feed);
 
-    let mut months: BTreeMap<store::path::YearMonth, (u64, u64)> = BTreeMap::new();
-    let mut instrument_months = 0u64;
-    let mut bars = 0u64;
-    for (series, month) in entries.iter() {
-        let Some(rows) = census.and_then(|c| c.rows_for(&series.at(*month))) else {
-            continue;
-        };
-        let cell = months.entry(*month).or_insert((0, 0));
-        cell.0 = cell.0.saturating_add(1);
-        cell.1 = cell.1.saturating_add(rows);
-        instrument_months = instrument_months.saturating_add(1);
-        bars = bars.saturating_add(rows);
-    }
-
     let _ = write!(
         out,
-        r#","store":{{"feed":{},"state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"instrument_months":{instrument_months},"bars":{bars},"months":["#,
+        r#","store":{{"feed":{},"state":{},"note":{},"degraded":{},"generation":{},"commits":{},"manifest":{},"committed_at":{},"#,
         render::json_string(feed.as_str()),
         render::json_string(census.map_or("absent", |c| c.state.name())),
         render::json_string(&census.map_or_else(
@@ -460,6 +446,38 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
             .and_then(committed_at)
             .map_or_else(|| "null".to_owned(), |secs| secs.to_string()),
     );
+    // ONCE PER CENSUS SNAPSHOT, NOT ONCE PER POLL. The walk below visits every
+    // held entry of every vendor; it now runs when `census_now` hands out a new
+    // snapshot and every other poll reuses its bytes. A poisoned cache renders
+    // the same bytes uncached — only the cost differs. o1api-21, D-1202.
+    let rollup = || month_rollup(census, &entries);
+    match crate::server::audit_months(site, &censuses, feed, rollup) {
+        Ok(cached) => out.push_str(&String::from_utf8_lossy(&cached)),
+        Err(_poisoned) => out.push_str(&rollup()),
+    }
+    out.push('}');
+}
+
+/// `"instrument_months":N,"bars":N,"months":[...]` for one feed: every held
+/// entry of `entries` that `census` counts, rolled up by month.
+fn month_rollup(
+    census: Option<&crate::census::VendorCensus>,
+    entries: &[(crate::census::Series, store::path::YearMonth)],
+) -> String {
+    let mut months: BTreeMap<store::path::YearMonth, (u64, u64)> = BTreeMap::new();
+    let mut instrument_months = 0u64;
+    let mut bars = 0u64;
+    for (series, month) in entries {
+        let Some(rows) = census.and_then(|c| c.rows_for(&series.at(*month))) else {
+            continue;
+        };
+        let cell = months.entry(*month).or_insert((0, 0));
+        cell.0 = cell.0.saturating_add(1);
+        cell.1 = cell.1.saturating_add(rows);
+        instrument_months = instrument_months.saturating_add(1);
+        bars = bars.saturating_add(rows);
+    }
+    let mut out = format!(r#""instrument_months":{instrument_months},"bars":{bars},"months":["#);
     for (n, (month, (held, rows))) in months.iter().enumerate() {
         if n > 0 {
             out.push(',');
@@ -470,7 +488,8 @@ fn store_block(site: &Site, feed: Vendor, out: &mut String) {
             render::json_string(&month.to_string())
         );
     }
-    out.push_str("]}");
+    out.push(']');
+    out
 }
 
 /// How many entries the manifest has committed, when it loaded.

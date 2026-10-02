@@ -3854,3 +3854,66 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
         "the held name's next call met its calendar"
     );
 }
+
+/// o1api-21, D-1202: `/audit.json`'s month roll-up is built once per census
+/// snapshot, not once per poll; a new manifest is a new snapshot and a new
+/// roll-up; and a poisoned cache renders the same bytes uncached.
+#[test]
+fn the_audit_month_rollup_is_built_once_per_census_snapshot() {
+    let fixture = Fixture::new("census-request-audit-rollup");
+    fixture.publish_nifty(&[may()], 0);
+    let poll = || {
+        crate::audit_json::body(
+            &fixture.site,
+            Vendor::Dhan,
+            0,
+            at(5),
+            Ok(Day::new(2025, 6, 2).expect("fixture date")),
+        )
+    };
+    assert!(fixture.site.census_wire.is_empty());
+    let first = poll();
+    assert!(
+        first.contains(r#""instrument_months":1,"bars":"#)
+            && first.contains(r#""months":[{"month":"2025-05","instrument_months":1,"bars":"#),
+        "{first}"
+    );
+    assert!(
+        !fixture.site.census_wire.is_empty(),
+        "the poll must have kept its roll-up"
+    );
+    assert!(fixture.site.census_wire.holds_audit_months(Vendor::Dhan));
+    assert!(!fixture.site.census_wire.holds_audit_months(Vendor::Groww));
+    assert_eq!(poll(), first, "an unchanged store answers the same bytes");
+
+    // A further month is a new manifest, so a new snapshot and a new roll-up.
+    fixture.publish_nifty(&[may(), june()], 1);
+    let grown = poll();
+    assert!(grown.contains(r#""instrument_months":2,"#), "{grown}");
+    assert!(
+        grown.contains(r#"{"month":"2025-06","instrument_months":1,"#),
+        "{grown}"
+    );
+
+    // Poisoned: the same bytes, rendered without the cache.
+    std::thread::scope(|scope| {
+        #[expect(
+            clippy::panic,
+            reason = "the poison is the fixture: a holder must die with the lock held"
+        )]
+        let died = scope
+            .spawn(|| {
+                fixture
+                    .site
+                    .census_wire
+                    .while_held(|| std::panic::panic_any("died holding the wire cache"));
+            })
+            .join();
+        assert!(died.is_err(), "the holder panicked");
+    });
+    assert_eq!(
+        poll(),
+        grown,
+        "a poisoned cache changes the cost, not the bytes"
+    );
+}
