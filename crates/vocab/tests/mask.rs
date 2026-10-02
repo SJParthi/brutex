@@ -372,3 +372,59 @@ fn the_mask_is_words_times_eight_bytes_at_run_time_too() {
     assert_eq!(std::mem::size_of::<ConditionMask>(), vocab::mask::WORDS * 8);
     assert_eq!(std::mem::align_of::<ConditionMask>(), 8);
 }
+
+/// The vocab bench source, read so its prose and its ratio rule are checked.
+const VOCAB_BENCH: &str = include_str!("../benches/ratio.rs");
+
+/// The invariants document, read for the C-V-02 row.
+const INVARIANTS_DOC: &str = include_str!("../../../docs/04-invariants.md");
+
+/// Comment markers removed and whitespace collapsed, so a phrase wrapped across
+/// `//!` or `///` lines still matches as one sentence.
+fn prose(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|word| !matches!(*word, "//!" | "///" | "//"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// C-V-02 does not catch an early-exit `hits`, so nothing may say it does.
+///
+/// Audit findings ET-o1-proof-coverage-3 and -13 (D-0917): an early-exit word
+/// loop in `hits` measured 1.09x to 2.06x across words 1 to 5, under the 3.0x
+/// ceiling, so C-V-02 passed it. The guard that refuses that loop is the
+/// source-shape unit test `hits_does_the_same_work_for_every_input` in
+/// `src/mask.rs`. This test pins three things: neither the bench nor the
+/// invariants table claims the clock is the guard, the C-V-02 row names the
+/// source-shape test, and the bench's ratio breaches in both directions.
+#[test]
+fn the_word_position_bench_does_not_claim_to_catch_an_early_exit_loop() {
+    let bench = prose(VOCAB_BENCH);
+    let row = INVARIANTS_DOC
+        .lines()
+        .find(|line| line.starts_with("| C-V-02 |"))
+        .expect("docs/04-invariants.md has a C-V-02 row");
+    let row = prose(row);
+    for claim in [
+        "measurement that would catch an early-exit loop",
+        "measurement that catches an early-exit loop",
+        "an early-exit loop would return sooner on the first and that is precisely",
+    ] {
+        assert!(
+            !bench.contains(claim),
+            "crates/vocab/benches/ratio.rs still claims C-V-02 is the guard: `{claim}`"
+        );
+        assert!(
+            !row.contains(claim),
+            "the C-V-02 row still claims the bench is the guard: `{claim}`"
+        );
+    }
+    assert!(
+        row.contains("hits_does_the_same_work_for_every_input"),
+        "the C-V-02 row must name the source-shape test that refuses an early exit: {row}"
+    );
+    assert!(
+        bench.contains("let ok = up.max(down) <= CEILING_PERMILLE;"),
+        "the vocab bench's ratio must breach in both directions, as the engine bench's does"
+    );
+}

@@ -9907,3 +9907,22 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## C-V-02 cannot see an early-exit `hits`; the source-shape test is the guard — D-0917, 2 October 2026
+
+- **The clock does not separate an early-exit word loop from the branchless
+  body.** Audit findings ET-o1-proof-coverage-3 and -13 replaced `hits` with a
+  loop returning on the first word that fails and measured C-V-02 at 1.093×,
+  1.275×, 1.560×, 1.895× and 2.056× for words 1 to 5 (2.055× to 2.211× on
+  repeats, scratch timings under load, not Gate 8). The 3.0× ceiling passes all
+  of them. Engine C-E-03 passed the same mutant at 0.558× (1.78× inverted).
+  Not re-measured for this entry.
+- **Why the ceiling is not lowered.** The whole call is about 0.8 ns, so the
+  exit saves at most a few word operations. A ceiling under 2.0× would sit
+  inside a shared runner's noise and make Gate 8 flaky, which is worse than a
+  row that states what it does not catch.
+- **What guards it.** `vocab::mask::hits_does_the_same_work_for_every_input`
+  refuses `for`, `while`, `loop`, `return`, `if`, `match`, `&&` and `||` in the
+  body of `hits` and counts its operators against `WORDS`. The mutant fails it.
+  C-V-02 stays as evidence that the compiled function agrees, and its ratio now
+  breaches in both directions.

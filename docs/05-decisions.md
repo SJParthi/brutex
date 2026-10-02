@@ -43764,3 +43764,34 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0917 — C-V-02 is evidence, not the guard against an early-exit `hits`; the vocab ratio breaches both ways — 2026-10-02
+
+**The defect (audit findings ET-o1-proof-coverage-3 and ET-o1-proof-coverage-13).**
+`crates/vocab/benches/ratio.rs` (module doc and the C-V-02 doc),
+`docs/04-invariants.md` row C-V-02 and D-0103's "the word-0 versus word-5
+measurement is the one to read twice" all said C-V-02 is the measurement that
+catches an early-exit loop in `ConditionMask::hits`. It is not. The audit
+replaced the branchless body with a loop returning on the first word that fails
+and measured 1.093×, 1.275×, 1.560×, 1.895× and 2.056× for words 1 to 5, under
+the 3.0× ceiling, so Gate 8 passed it. Engine C-E-03 passed it too. Only the
+source-shape unit test `vocab::mask::hits_does_the_same_work_for_every_input`
+failed it. The vocab bench's `ratio` was also one-sided, so a word that became
+cheaper than word 0 passed by construction.
+
+**The choice.** Correct the claim and keep the bench as evidence. The C-V-02
+doc, the module doc, the invariant row, `docs/01-architecture.md`'s cost row
+and `docs/06-limits.md` now name the source-shape test as the guard. The bench's
+`ratio` breaches in both directions, as `crates/engine/benches/ratio.rs` does,
+and refuses a zero on either side. The ceiling stays at 3.0×.
+`the_word_position_bench_does_not_claim_to_catch_an_early_exit_loop` in
+`crates/vocab/tests/mask.rs` refuses the old claim in the bench and the row,
+requires the row to name the source-shape test, and requires the two-sided rule.
+
+**Rejected.** (1) Lowering the ceiling under 2.0× for C-V-02: the call is about
+0.8 ns and the exit saves a few word operations, so that ceiling sits inside
+shared-runner noise and Gate 8 would flake. (2) Lengthening the measured work
+(for example many `hits` calls per sample) to amplify the gap: that times a
+different loop, and the mutant's gap stays a small fraction of the call.
+(3) Editing D-0103's text: the ledger is append-only, so this entry is the
+correction.
