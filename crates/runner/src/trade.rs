@@ -211,6 +211,19 @@ pub struct Occupancy {
     pub exit_bar: usize,
     /// Whether both legs were priceable and therefore have a [`Trade`].
     pub priceable: bool,
+    /// The first bar on `entry_bar..=exit_bar` whose record the evaluator refused,
+    /// as a slice index: [`SliceFacts::first_refused_within`] over this interval.
+    ///
+    /// Kept so a later reader can tell a hole BEFORE an exit from one after it
+    /// without re-reading the slice. Always `None` on a priceable path. No walk
+    /// or grid decision reads it yet (D-1191).
+    pub first_refused: Option<usize>,
+    /// The first bar on `entry_bar + 1..=exit_bar` that follows one or more
+    /// missing minutes, as a slice index: [`SliceFacts::first_missing_within`]
+    /// over this interval. A missing minute is the hole a crossing table
+    /// cannot see, so this is the location only the walk can record. Always
+    /// `None` on a priceable path. No walk or grid decision reads it yet (D-1191).
+    pub first_missing: Option<usize>,
 }
 
 /// Every trade one combination produced, and what was skipped to get there.
@@ -401,6 +414,16 @@ pub struct SliceFacts {
     /// times this, so the shape above is read from the source rather
     /// than measured. `CLAUDE.md` §3 rule 6.
     broken_prefix: Vec<u64>,
+    /// For each bar `i`, the first bar `j >= i` whose record the evaluator
+    /// refused, or the bar count when none follows. One entry per bar plus that
+    /// trailing sentinel, derived from `refused_prefix` once. It turns "where is
+    /// this path's first refused record?" into one read -- D-1191.
+    next_refused: Vec<usize>,
+    /// For each bar `i`, the first bar `j >= i` whose timestamp gap from bar
+    /// `j - 1` is not `step_micros` (one or more minutes missing just before
+    /// it), or the bar count when none follows. Derived from `broken_prefix`
+    /// once, with the same shape as `next_refused` -- D-1191.
+    next_broken: Vec<usize>,
     /// Accepted bars by exact timestamp. Built once per slice so an exit at a
     /// wall-clock deadline is a lookup rather than an H-bar scan.
     at_timestamp: std::collections::HashMap<i64, usize>,
@@ -457,12 +480,16 @@ impl SliceFacts {
                 }
             }
         }
+        let next_refused = next_marked(&refused_prefix);
+        let next_broken = next_marked(&broken_prefix);
         Self {
             exits: forced_exits_with_step(bars, step_micros, accepted.as_deref()),
             step_micros,
             accepted,
             refused_prefix,
             broken_prefix,
+            next_refused,
+            next_broken,
             at_timestamp,
         }
     }
@@ -561,6 +588,57 @@ impl SliceFacts {
         };
         after == before && gaps_after == gaps_before
     }
+
+    /// The first bar on the inclusive path `from..=to` whose record the evaluator
+    /// refused, as a slice index (D-1191).
+    ///
+    /// `None` when the path holds no refused record, when the range is reversed
+    /// or starts past the slice, and when no checked acceptance map exists. One
+    /// read. Agrees with [`Self::refused_within`] on whether a refused record is
+    /// there, and also says where.
+    #[must_use]
+    pub fn first_refused_within(&self, from: usize, to: usize) -> Option<usize> {
+        let none = self.next_refused.len().saturating_sub(1);
+        let at = self.next_refused.get(from).copied()?;
+        (at <= to && at < none).then_some(at)
+    }
+
+    /// The first bar on `from + 1..=to` whose timestamp gap from the bar before
+    /// it is not this slice's cadence, so one or more minutes are missing just
+    /// before it, as a slice index (D-1191).
+    ///
+    /// The gap into `from` itself is not on the path and is not reported. `None`
+    /// when every adjacent pair on the path advances by exactly one step, for a
+    /// reversed or out-of-range path, and when no checked acceptance map exists.
+    /// One read. With [`Self::first_refused_within`] it is `None` on both counts
+    /// exactly when [`Self::path_accepts`] holds for an in-range path.
+    #[must_use]
+    pub fn first_missing_within(&self, from: usize, to: usize) -> Option<usize> {
+        let none = self.next_broken.len().saturating_sub(1);
+        let at = self.next_broken.get(from.checked_add(1)?).copied()?;
+        (at <= to && at < none).then_some(at)
+    }
+}
+
+/// For each bar `i` of a prefix count over `bars + 1` entries, the first `j >= i`
+/// at which the count rises, or the bar count when it never does again.
+///
+/// One reverse pass and one in-place reversal, O(B) once per slice (D-1191).
+fn next_marked(prefix: &[u64]) -> Vec<usize> {
+    let bars = prefix.len().saturating_sub(1);
+    let mut next = Vec::with_capacity(prefix.len());
+    next.push(bars);
+    let mut nearest = bars;
+    for (index, pair) in prefix.windows(2).enumerate().rev() {
+        if let [before, after] = pair
+            && after > before
+        {
+            nearest = index;
+        }
+        next.push(nearest);
+    }
+    next.reverse();
+    next
 }
 
 /// [`walk`], over the per-slice facts the caller already derived.
@@ -716,6 +794,26 @@ pub fn walk_with(
         &SliceFacts::of(bars, column),
         0,
     )
+}
+
+/// One occupancy record, with where its path's first refused record and first
+/// missing minute are (D-1191). Two O(1) reads of `facts`; the walk's decisions
+/// do not depend on either.
+fn held(
+    signal_bar: usize,
+    entry_bar: usize,
+    exit_bar: usize,
+    priceable: bool,
+    facts: &SliceFacts,
+) -> Occupancy {
+    Occupancy {
+        signal_bar,
+        entry_bar,
+        exit_bar,
+        priceable,
+        first_refused: facts.first_refused_within(entry_bar, exit_bar),
+        first_missing: facts.first_missing_within(entry_bar, exit_bar),
+    }
 }
 
 /// The walk itself, over facts that have already been derived.
@@ -988,12 +1086,8 @@ fn walk_core(
             if let Some(wanted) = horizon_bar(bars, entry, h, step_micros, facts) {
                 (wanted, false)
             } else {
-                out.occupancy.push(Occupancy {
-                    signal_bar: signal,
-                    entry_bar: entry,
-                    exit_bar: forced.bar,
-                    priceable: false,
-                });
+                out.occupancy
+                    .push(held(signal, entry, forced.bar, false, facts));
                 if !blocked {
                     open_until = Some(forced.bar);
                 }
@@ -1005,12 +1099,8 @@ fn walk_core(
                 continue;
             }
         } else {
-            out.occupancy.push(Occupancy {
-                signal_bar: signal,
-                entry_bar: entry,
-                exit_bar: forced.bar,
-                priceable: false,
-            });
+            out.occupancy
+                .push(held(signal, entry, forced.bar, false, facts));
             if !blocked {
                 open_until = Some(forced.bar);
             }
@@ -1033,12 +1123,7 @@ fn walk_core(
         // EXTREMUM UNKNOWABLE. Keep the occupied interval, but publish no
         // trade and let the grid retain it as block-only.
         if !facts.path_accepts(entry, exit) {
-            out.occupancy.push(Occupancy {
-                signal_bar: signal,
-                entry_bar: entry,
-                exit_bar: exit,
-                priceable: false,
-            });
+            out.occupancy.push(held(signal, entry, exit, false, facts));
             if !blocked {
                 open_until = Some(exit);
             }
@@ -1061,12 +1146,7 @@ fn walk_core(
             // time exit, exactly as `grid::blocks_without_pricing` treats a
             // corrupt bar inside a path.
             if entry_is_priceable(bars, entry, direction, facts) {
-                out.occupancy.push(Occupancy {
-                    signal_bar: signal,
-                    entry_bar: entry,
-                    exit_bar: exit,
-                    priceable: false,
-                });
+                out.occupancy.push(held(signal, entry, exit, false, facts));
                 if !blocked {
                     open_until = Some(exit);
                 }
@@ -1085,12 +1165,7 @@ fn walk_core(
         // grid needs the signals a DIFFERENT exit would have freed -- see that
         // field for what its absence cost.
         out.eligible.push(trade);
-        out.occupancy.push(Occupancy {
-            signal_bar: signal,
-            entry_bar: entry,
-            exit_bar: exit,
-            priceable: true,
-        });
+        out.occupancy.push(held(signal, entry, exit, true, facts));
         if blocked {
             out.while_open = out.while_open.saturating_add(1);
             continue;
@@ -2296,6 +2371,112 @@ mod tests {
                  unpriceable path's conservative exit bar"
             );
             assert!(walked.reconciles(), "{direction:?}: {walked:?}");
+        }
+    }
+
+    /// A slice with one refused record and one missing minute, both a few bars
+    /// after the first signal so held paths cross them.
+    fn holed() -> (Vec<indicators::Candle>, Column, usize, usize) {
+        let mut bars = crate::synthetic::sessions(8);
+        let probe = Column::build(&bars, &mut evaluator());
+        let first = *probe.sources().first().expect("the fixture must sweep");
+        let refused = first.saturating_add(4);
+        let corrupt = bars.get_mut(refused).expect("the fixture is long enough");
+        corrupt.close = corrupt.high.saturating_add(1);
+        // Removing bar `refused + 6` leaves the bar after it at that index, one
+        // minute late.
+        let missing = refused.saturating_add(6);
+        bars.remove(missing);
+        let column = Column::build(&bars, &mut evaluator());
+        (bars, column, refused, missing)
+    }
+
+    /// D-1191. `first_refused_within` and `first_missing_within` are the first
+    /// refused record and the first bar after a missing minute on the path, as a
+    /// scan finds them, for every short path over a slice holding both. Both are
+    /// `None` exactly when `path_accepts` holds.
+    #[test]
+    fn slice_facts_locate_the_first_refused_record_and_missing_minute() {
+        let (bars, column, refused, missing) = holed();
+        let facts = super::SliceFacts::of(&bars, &column);
+        let last = bars.len().saturating_sub(1);
+        let scan_refused =
+            |from: usize, to: usize| (from..=to.min(last)).find(|&at| !facts.accepts(at));
+        let scan_missing = |from: usize, to: usize| {
+            (from.saturating_add(1)..=to.min(last)).find(|&at| {
+                let gap = bars.get(at).map(|bar| bar.ts_micros).unwrap_or_default()
+                    - bars
+                        .get(at.saturating_sub(1))
+                        .map(|bar| bar.ts_micros)
+                        .unwrap_or_default();
+                gap != facts.step_micros()
+            })
+        };
+        assert!(!facts.accepts(refused), "the corrupt record is refused");
+        assert_eq!(
+            scan_missing(missing.saturating_sub(1), missing),
+            Some(missing)
+        );
+        let (mut saw_refused, mut saw_missing) = (false, false);
+        for from in 0..bars.len().saturating_add(2) {
+            for to in from.saturating_sub(2)..from.saturating_add(40) {
+                let (r, m) = (
+                    facts.first_refused_within(from, to),
+                    facts.first_missing_within(from, to),
+                );
+                let expected_r = if from > to {
+                    None
+                } else {
+                    scan_refused(from, to)
+                };
+                let expected_m = if from > to {
+                    None
+                } else {
+                    scan_missing(from, to)
+                };
+                assert_eq!(r, expected_r, "first refused on {from}..={to}");
+                assert_eq!(m, expected_m, "first missing on {from}..={to}");
+                if to <= last && from <= to {
+                    assert_eq!(
+                        r.is_none() && m.is_none(),
+                        facts.path_accepts(from, to),
+                        "{from}..={to}"
+                    );
+                }
+                saw_refused |= r == Some(refused);
+                saw_missing |= m == Some(missing);
+            }
+        }
+        assert!(saw_refused && saw_missing, "both holes were located");
+    }
+
+    /// D-1191. Every occupancy record carries its path's first refused record
+    /// and first missing minute; a priceable path has neither. The walk's
+    /// trades, eligible list and counters are what they were.
+    #[test]
+    fn every_occupancy_record_says_where_its_holes_are() {
+        let (bars, column, refused, missing) = holed();
+        let facts = super::SliceFacts::of(&bars, &column);
+        for direction in [Direction::Long, Direction::Short] {
+            let walked = walk(&bars, &column, &ConditionMask::default(), h(15), direction);
+            assert!(walked.reconciles(), "{direction:?}");
+            let mut located = (false, false);
+            for path in &walked.occupancy {
+                assert_eq!(
+                    path.first_refused,
+                    facts.first_refused_within(path.entry_bar, path.exit_bar)
+                );
+                assert_eq!(
+                    path.first_missing,
+                    facts.first_missing_within(path.entry_bar, path.exit_bar)
+                );
+                if path.priceable {
+                    assert_eq!((path.first_refused, path.first_missing), (None, None));
+                }
+                located.0 |= path.first_refused == Some(refused);
+                located.1 |= path.first_missing == Some(missing);
+            }
+            assert_eq!(located, (true, true), "{direction:?}: both holes are held");
         }
     }
 

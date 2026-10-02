@@ -10060,3 +10060,10 @@ not:
   and execution column) per disposition. That rebuild is O(signal bars +
   execution bars) per selected candidate. It is left because hoisting it would
   change the durable fold records each witness writes. Not timed.
+- **Hole locations are recorded, not used (D-1191).** This narrows the D-1183
+  bullet above. Each `Occupancy` now carries its path's first refused record
+  and first missing minute, read in O(1) from two per-slice tables. Those
+  tables cost one more O(B) pass and `2 × (B + 1)` `usize`s per `SliceFacts`.
+  `Occupancy` doubles to 64 bytes per held path. The grid still blocks a
+  whole path for a hole after a level exit. Reading the locations there changes
+  shipping cells, so it waits for its own decision. Not timed.

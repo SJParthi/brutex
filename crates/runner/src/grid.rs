@@ -5803,6 +5803,8 @@ mod exit_family_tests {
             entry_bar,
             exit_bar,
             priceable: true,
+            first_refused: None,
+            first_missing: None,
         };
         let bar = |price: i64| indicators::Candle {
             open: price,

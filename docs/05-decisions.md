@@ -44866,3 +44866,59 @@ under `cli::candidate_trades::tests` and `cli::tests` pass unchanged, with their
 is a source-shape test: it counts one build in `trade_and_screen`, none in
 `screen_cascade`, `screen` or `measure_top`, and no per-call door in the final
 rebuild. It fails on the previous tree. Not timed.
+
+### D-1191 — An occupancy record says where its path's first refused record and first missing minute are — 2026-10-02
+
+**Finding.** D-1183's upstream half. `trade::walk_core` records each held path
+as an `Occupancy`, and when `SliceFacts::path_accepts(entry, exit)` fails it
+records `priceable: false` and nothing else. The grid builds that path as
+`block_only`, so a hole after a stop, target or trail has fired still refuses
+every variant and blocks to the time exit. `Crossings::first_refused` locates a
+refused record for the grid, but a missing minute is not a bar, so no crossing
+table can see it. Only the walk, which has the facts, can say where it is.
+
+**The change.** `SliceFacts` keeps two more per-slice tables, `next_refused`
+and `next_broken`: for each bar, the first bar at or after it that is refused,
+or that follows a missing minute. Each is derived from the prefix count already
+built, in one reverse pass. Two new O(1) reads use them:
+`SliceFacts::first_refused_within(from, to)` and
+`SliceFacts::first_missing_within(from, to)` (the gap into `from` is not on the
+path and is not reported). `Occupancy` gains `first_refused` and
+`first_missing`, both slice indices, and every record the walk pushes fills them
+from those reads over `entry_bar..=exit_bar`. A priceable path has neither.
+
+**What this does not do, and why.** No walk or grid decision reads the two
+fields. Making the grid read them is the actual D-1183 correction: a variant
+whose pessimistic exit offset is before `min(first_refused, first_missing) -
+entry_bar` would be priced, and its block would end at its own exit. That
+changes shipping output by design. Such a variant gains a trade and money.
+The next signal may open earlier, so the cell's trades, statistics and digest
+change, and with them selection, persisted trade rows and every OOS replay
+digest built on the grid. The brief for this lane allowed only changes with no
+output change, so the correction is left for a decision that accepts it. That
+decision also has to settle two things this one does not:
+
+* which `block_only` causes the location rescues. A path is also block-only when
+  its horizon minute is missing, when the data stops before a real square-off,
+  or when the exit record cannot be priced (`round_trip` refuses). Only the
+  first of these has a hole on the path. The other two have a time exit that
+  cannot be read and no hole to compare with.
+* the arithmetic envelope. `money_envelope_fits` is checked over every
+  occupancy path, and pricing more of them must not widen what it accepts.
+
+**No output changes.** The tables and fields are new. Nothing serialises,
+digests, renders or compares an `Occupancy` outside tests, and no branch reads
+the new fields. Every walk's trades, eligible list, counters, intervals and
+`priceable` flags are as before, and the D-1186 walk-equality tests still pass.
+Costs: `SliceFacts::of` does one more O(B) pass and holds `2 × (B + 1)` more
+`usize`s, and `Occupancy` grows from 32 to 64 bytes on a 64-bit target. That is
+read from the layout, not measured. Not timed.
+
+**Tests.** `runner::trade::tests::slice_facts_locate_the_first_refused_record_and_missing_minute`
+checks both reads against a scan, for every path of up to 40 bars over a slice
+holding one refused record and one missing minute. It also checks that both are
+`None` exactly when `path_accepts` holds.
+`runner::trade::tests::every_occupancy_record_says_where_its_holes_are` checks
+every record of a long and a short walk over that slice, and that both holes are
+located by at least one held path. Neither compiles on the previous tree. With
+`next_marked` off by one, or `held` dropping `first_missing`, each fails.
