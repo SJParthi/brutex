@@ -1,26 +1,26 @@
 # Cloud fix lane 3 progress (checkpoint; resume from here after any pause)
 
 Decision numbers: D-0940..D-0959, then D-1200..D-1299. Branch per fix: fix/cloud-<id>.
-Updated: 2026-10-02 08:35 UTC. Budget rule: max 2 agents at once; worktrees /home/claude/wt/<id>, resume notes in session scratchpad resume-*.md
+Updated: 2026-10-02 12:10 UTC. Budget rule: max 2 agents at once; worktrees /home/claude/wt/<id>, resume notes in session scratchpad resume-*.md
 
 ## Set 1 (lane3.md)
 | Fix | Findings | Branch | D | State | PR |
 |---|---|---|---|---|---|
 | VWAP sigma floor | ET-indicators-0, ET-indicators-12 | fix/cloud-et-indicators-0 | D-0940 | PR open, CI running | #28 |
 | Zero-price daily anchor | ET-indicators-1, UC-3 | fix/cloud-et-indicators-1 | D-0941 | PR open, CI running | #30 |
-| Refused-bar re-walk | W3-indicators1-0, W3-indicators1-1 | fix/cloud-w3-indicators1-0 | D-0942 | written, local WIP; gates pending |  |
+| Refused-bar re-walk | W3-indicators1-0, W3-indicators1-1 | fix/cloud-w3-indicators1-0 | D-0942 | PR open, CI running | #34 |
 | Overlay stub clamp | GAP12-5, GAP12-7, GAP4-47 | fix/cloud-gap12-5 | D-0943 | PR open, CI running | #29 |
-| Gap candle by clock | ET-indicators-2, ET-indicators-11 | fix/cloud-et-indicators-2 | D-0944 | final workspace test running |  |
+| Gap candle by clock | ET-indicators-2, ET-indicators-11 | fix/cloud-et-indicators-2 | D-0944 | PR open, CI running | #33 |
 | Dead crossing tests | AC-whp-tb-4 | fix/cloud-ac-whp-tb-4 | D-0945 | PR open, CI running | #31 |
-| Muhurat doc | GAP12-10 | fix/cloud-gap12-10 | D-0946 | written, local WIP; clippy pending |  |
-| Stale lib.rs docs | ET-indicators-7, ET-indicators-10, UC-1 | fix/cloud-et-indicators-7 | D-0947 | written, local WIP; clippy pending |  |
+| Muhurat doc | GAP12-10 | fix/cloud-gap12-10 | D-0946 | PR open, CI running | #36 |
+| Stale lib.rs docs | ET-indicators-7, ET-indicators-10, UC-1 | fix/cloud-et-indicators-7 | D-0947 | PR open, CI running | #37 |
 
 ## Set 2 (lane3-b.md)
 | Fix | Findings | Branch | D | State | PR |
 |---|---|---|---|---|---|
-| B1 credential halt | GAP2-36, GAP2-37, GAP2-38 | fix/cloud-gap2-36 | D-0948 | written, local WIP; clippy running |  |
-| B2 autopilot | W1-api1-2, W1-api1-8, W1-api1-7, W1-api1-1 | fix/cloud-w1-api1-2 | D-0949 | written, local WIP; never compiled |  |
-| B3 calendar_of | W1-api2-1, W1-api2-9, W1-api2-11, R9-api-law-0, W1-api2-0 | fix/cloud-w1-api2-1 | D-0950 | written, local WIP; never compiled |  |
+| B1 credential halt | GAP2-36, GAP2-37, GAP2-38 | fix/cloud-gap2-36 | D-0948 | PR open, CI running | #38 |
+| B2 autopilot | W1-api1-2, W1-api1-8, W1-api1-7, W1-api1-1 | fix/cloud-w1-api1-2 | D-0949 | worker building/testing (wt/w1-api1-2) |  |
+| B3 calendar_of | W1-api2-1, W1-api2-9, W1-api2-11, R9-api-law-0, W1-api2-0 | fix/cloud-w1-api2-1 | D-0950 | worker building/testing (wt/w1-api2-1, WIP 619e966b) |  |
 | B4 json renderers | W1-api1-5, W1-api2-2, W1-api2-3, W1-api1-4, W1-api6-3, W1-api1-6 | fix/cloud-w1-api1-5 | D-0951 | next | |
 | B5 operation_audit | GAP14-57, W1-api3-5, W1-api3-0 | fix/cloud-gap14-57 | D-0952 | next | |
 | B6 server.rs | W1-api5-0..-11, UC-20, R9-api-cx-2, GAP14-63 | fix/cloud-w1-api5-0 | D-0953 | next | |
