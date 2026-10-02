@@ -9907,3 +9907,15 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## A window outside the calendar costs one diagnostic per day per rung — D-1201, 2 October 2026
+
+`fold::complete_minutes_with_calendar` now names a day the calendar does not
+know once, not once per bucket (o1api-44). What remains is still not constant
+per window: one line, one `pull.derive` warning and one clause of the rung's
+refusal **per unmeasured day, per derived rung, per download window**, and the
+minute walk itself stays O(minutes). A month past 2026-09-04 is about 22 lines
+per rung, 154 for the seven rungs, every time that month is pulled, until the
+calendar is extended. Aggregating further would drop the day number, which is
+the fact an operator needs to extend it. **UNVERIFIED as a measurement** beyond
+the counts the tests assert: no bench times the fold.

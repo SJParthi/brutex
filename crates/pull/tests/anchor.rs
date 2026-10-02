@@ -216,8 +216,8 @@ fn a_multi_year_gap_does_not_scan_or_diagnose_unobserved_days() {
     );
     assert_eq!(
         diagnostics.len(),
-        4,
-        "two observed buckets, the first observed day's tail, and one unknown-day explanation, regardless of gap length"
+        3,
+        "the first observed bucket, the first observed day's tail, and one unknown-day explanation, regardless of gap length; the unknown day's bucket is not restated (o1api-44, D-1201)"
     );
     assert!(diagnostics[0].contains("observed 1, scheduled 5"));
     let missing = (OPEN_UTC + 300) * 1_000_000;
@@ -232,7 +232,12 @@ fn a_multi_year_gap_does_not_scan_or_diagnose_unobserved_days() {
         diagnostics[2]
             .contains("calendar authority missing; absent observations do not prove closure")
     );
-    assert!(diagnostics[3].contains("calendar Unmeasured"));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|why| !why.contains("calendar Unmeasured")),
+        "{diagnostics:?}"
+    );
 }
 
 #[test]

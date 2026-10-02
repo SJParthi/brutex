@@ -790,8 +790,6 @@ pub fn complete_minutes_with_calendar(
     runtime: crate::calendar::Runtime<'_>,
 ) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
     const MINUTE: i64 = 60_000_000;
-    const DAY: i64 = 86_400_000_000;
-    const OFFSET: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
     let candidates = fold_from_bars(bars, bucket, Bucket::MINUTE)?;
     let mut complete = Vec::with_capacity(candidates.len());
     let mut diagnostics = Vec::new();
@@ -804,14 +802,7 @@ pub fn complete_minutes_with_calendar(
         let end = start
             .checked_add(i64::from(bucket.secs()) * 1_000_000)
             .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
-        let day = start
-            .checked_add(OFFSET)
-            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?
-            .div_euclid(DAY);
-        let midnight = day
-            .checked_mul(DAY)
-            .and_then(|t| t.checked_sub(OFFSET))
-            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
+        let (day, midnight) = ist_day_of(start)?;
         let calendar = runtime.kind_of(day);
         let exceptional = matches!(calendar, crate::calendar::DayKind::Open(s) if s != crate::calendar::Session::full());
         let session = match minute_session(day, calendar, venue, cash_schedule) {
@@ -885,6 +876,17 @@ pub fn complete_minutes_with_calendar(
             cursor += 1;
         }
         let expected = scheduled_minutes(session, midnight, start, end);
+        // AN UNMEASURED DAY IS NAMED ONCE, NOT ONCE PER BUCKET (o1api-44,
+        // D-1201). The day sentence above already says every derived bucket
+        // of it is withheld and why. No bucket of a day outside the calendar
+        // can complete, so a per-bucket "incomplete coverage" line restated
+        // that sentence once per bucket: 900 lines for five days at two
+        // minutes, each one a `pull.derive` warning and a clause of the rung's
+        // refusal, and `derive` rewrote each into a source repair that cannot
+        // help. The minutes are still consumed above; nothing is certified.
+        if calendar == crate::calendar::DayKind::Unmeasured {
+            continue;
+        }
         if exceptional {
             diagnostics.push(format!("bucket {start}: exceptional session {session:?} withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
         } else if valid && expected > 0 && i128::from(count) == expected {
@@ -901,6 +903,28 @@ fn session_minutes(session: crate::calendar::DayKind) -> i64 {
         crate::calendar::DayKind::Open(s) => i64::from(s.bars()),
         _ => 0,
     }
+}
+
+/// The IST civil day a bucket starting at `start` falls on, as days since the
+/// epoch, and that day's midnight as UTC microseconds.
+///
+/// Split out of [`complete_minutes_with_calendar`] so that function stays under
+/// the workspace's line limit once it skips an unmeasured day's buckets
+/// (o1api-44, D-1201). The arithmetic is the one it did inline: checked, and an
+/// overflow is the same `AnchorOverflow` naming the bucket's start.
+fn ist_day_of(start: i64) -> Result<(i64, i64), FoldError> {
+    const DAY: i64 = 86_400_000_000;
+    const OFFSET: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
+    let overflow = || FoldError::AnchorOverflow { ts_micros: start };
+    let day = start
+        .checked_add(OFFSET)
+        .ok_or_else(overflow)?
+        .div_euclid(DAY);
+    let midnight = day
+        .checked_mul(DAY)
+        .and_then(|t| t.checked_sub(OFFSET))
+        .ok_or_else(overflow)?;
+    Ok((day, midnight))
 }
 
 /// The calendar decides which days are regular; the venue decides their hours.
@@ -984,6 +1008,165 @@ fn scheduled_minutes(
 )]
 mod guard {
     use super::{Bucket, FoldError, fold_from_bars, fold_from_snapshots};
+    use crate::calendar::{DayKind, Runtime};
+    use crate::session::{Day, IST_OFFSET_SECS};
+    use crate::vendor::Venue;
+    use store::format::Bar;
+
+    /// The first one-minute bar of a regular session on `day`, 09:15 IST, as
+    /// a UTC epoch second.
+    fn open_of(day: Day) -> i64 {
+        i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60
+    }
+
+    /// `n` one-minute bars from `from`, a second apart by `step`.
+    fn minutes(from: i64, n: i64, step: i64) -> Vec<Bar> {
+        (0..n)
+            .map(|m| Bar {
+                ts_micros: (from + m * step) * 1_000_000,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect()
+    }
+
+    /// **A DAY OUTSIDE THE CALENDAR IS ONE SENTENCE, AT EVERY WIDTH.**
+    /// o1api-44, D-1201.
+    ///
+    /// Measured on main before the fix: five weekdays from 2026-09-07, 1,800
+    /// minute bars, two-minute rung, gave `complete = 0` and 905 diagnostics,
+    /// 158,085 bytes: one day sentence each and one "incomplete or invalid
+    /// minute coverage" line per bucket, every one a `pull.derive` warning.
+    /// Checked here at every derived rung width, after the calendar's last day
+    /// and before its first, with a full session, a single bar, misaligned
+    /// seconds and duplicate stamps on the unmeasured days, and with measured
+    /// days either side whose own coverage faults must still be named.
+    #[test]
+    fn an_unmeasured_day_is_one_diagnostic_and_not_one_per_bucket() {
+        let after: Vec<Day> = (7..=11).map(|d| Day::new(2026, 9, d).unwrap()).collect();
+        for day in &after {
+            assert_eq!(
+                Runtime::default().kind_of(i64::from(day.days_from_epoch())),
+                DayKind::Unmeasured,
+                "the premise: {day:?} is past the calendar's last day"
+            );
+        }
+        let mut bars = Vec::new();
+        for day in &after {
+            bars.extend(minutes(open_of(*day), 375, 60));
+        }
+        let widths = [60_u32, 120, 180, 300, 900, 2_700, 3_600, 14_400, 86_400];
+        for secs in widths {
+            let bucket = Bucket::of_secs(secs).unwrap();
+            for venue in Venue::ALL {
+                let (complete, diagnostics) = super::complete_minutes_with_calendar(
+                    &bars,
+                    bucket,
+                    venue,
+                    None,
+                    Runtime::default(),
+                )
+                .unwrap();
+                assert!(complete.is_empty(), "{secs}s {venue}: nothing certified");
+                assert_eq!(
+                    diagnostics.len(),
+                    after.len(),
+                    "{secs}s {venue}: one sentence per day, not one per bucket: {} \
+                     lines, first {:?}",
+                    diagnostics.len(),
+                    diagnostics.iter().take(7).collect::<Vec<_>>()
+                );
+                for (why, day) in diagnostics.iter().zip(&after) {
+                    assert!(
+                        why.starts_with(&format!("day {}: UNVERIFIED", day.days_from_epoch())),
+                        "{secs}s {venue}: {why}"
+                    );
+                }
+                let bytes: usize = diagnostics.iter().map(String::len).sum();
+                assert!(bytes < 1_000, "{secs}s {venue}: {bytes} bytes");
+            }
+        }
+
+        // One bar, misaligned seconds and a duplicated stamp on an unmeasured
+        // day are each still that day's one sentence, not a coverage fault.
+        let day = after[0];
+        let mut odd = minutes(open_of(day), 1, 60);
+        odd.extend(minutes(open_of(day) + 61, 3, 17));
+        odd.extend(minutes(open_of(day) + 600, 2, 0));
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &odd,
+            Bucket::of_secs(120).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert!(complete.is_empty());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+
+        // Before the calendar's first day as well as after its last.
+        let early = Day::new(2019, 11, 29).unwrap();
+        assert_eq!(
+            Runtime::default().kind_of(i64::from(early.days_from_epoch())),
+            DayKind::Unmeasured
+        );
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &minutes(open_of(early), 375, 60),
+            Bucket::of_secs(120).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert!(complete.is_empty());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    }
+
+    /// **A MEASURED DAY BESIDE AN UNMEASURED ONE KEEPS EVERY LINE OF ITS OWN.**
+    /// o1api-44, D-1201: the skip is for the unmeasured day only. A whole
+    /// session on 2026-09-04, the calendar's last day, still completes, and a
+    /// hole in it is still named bucket by bucket, ahead of the next day's one
+    /// sentence.
+    #[test]
+    fn a_measured_day_beside_an_unmeasured_one_keeps_its_own_lines() {
+        let after = [Day::new(2026, 9, 7).unwrap()];
+        let last = Day::new(2026, 9, 4).unwrap();
+        assert!(matches!(
+            Runtime::default().kind_of(i64::from(last.days_from_epoch())),
+            DayKind::Open(_)
+        ));
+        let mut mixed = minutes(open_of(last), 375, 60);
+        mixed.extend(minutes(open_of(after[0]), 375, 60));
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &mixed,
+            Bucket::of_secs(300).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert_eq!(complete.len(), 75, "the measured day completes whole");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let mut holed = minutes(open_of(last), 375, 60);
+        holed.remove(100);
+        holed.extend(minutes(open_of(after[0]), 375, 60));
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &holed,
+            Bucket::of_secs(300).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert_eq!(complete.len(), 74, "only the holed bucket is withheld");
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("incomplete or invalid minute coverage: observed 4"));
+        assert!(diagnostics[1].contains("UNVERIFIED"));
+    }
 
     /// Every timeframe the operator named is a whole number of minutes, and
     /// every one of them is exact from stored one-minute bars.

@@ -531,6 +531,59 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
     assert!(!again.failures.is_empty());
 }
 
+/// **A WINDOW PAST THE CALENDAR IS ONE CLAUSE PER DAY IN EACH RUNG'S
+/// REFUSAL, NOT ONE PER BUCKET.** o1api-44, D-1201.
+///
+/// Five weekdays from 2026-09-07, a whole session each. The minute bars are
+/// stored and no derived rung is. On main each rung's refusal joined one
+/// "incomplete or invalid minute coverage" clause per bucket (900 at two
+/// minutes, 1,875 at one) after the day sentences, and each clause was also a
+/// `pull.derive` warning. Now every rung's refusal names each day once.
+#[test]
+fn a_window_past_the_calendar_names_each_day_once_per_rung() {
+    use pull::session::{Day, IST_OFFSET_SECS, Window};
+    let scratch = Scratch::new("PAST-CALENDAR-WINDOW");
+    let first = Day::new(2026, 9, 7).unwrap();
+    let last = Day::new(2026, 9, 11).unwrap();
+    let mut req = request();
+    req.window = Window::new(first, last).unwrap();
+    let mut rows = Vec::new();
+    for d in 7..=11 {
+        let day = Day::new(2026, 9, d).unwrap();
+        let open = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+        let mut member = session_member();
+        for (index, row) in member.rows.iter_mut().enumerate() {
+            row.timestamp = open + i64::try_from(index).unwrap() * 60;
+        }
+        rows.extend(member.rows);
+    }
+    let raw = pull::fetch::RawWindow { rows };
+    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert_eq!(done.bars_committed, 5 * 375, "the minute source is kept");
+    assert_eq!(done.derived_files, 0, "and nothing is derived from it");
+    let refusals: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.contains("folded to no complete bars"))
+        .collect();
+    assert!(!refusals.is_empty(), "{:?}", done.failures);
+    for refusal in refusals {
+        assert!(
+            !refusal.why.contains("incomplete or invalid"),
+            "no per-bucket coverage clause: {} bytes, starting {:?}",
+            refusal.why.len(),
+            refusal.why.get(..300)
+        );
+        assert_eq!(
+            refusal.why.matches("UNVERIFIED").count(),
+            5,
+            "one clause per day: {}",
+            refusal.why
+        );
+        assert!(refusal.why.len() < 2_000, "{} bytes", refusal.why.len());
+    }
+}
+
 #[test]
 fn request_minutes_skip_closed_days_but_name_unverified_sessions() {
     use pull::session::{Day, Window};

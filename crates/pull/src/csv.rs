@@ -305,6 +305,20 @@ pub(crate) fn paisa(text: &str) -> Option<i64> {
     Some(if negative { -total } else { total })
 }
 
+/// A date or clock field that is ASCII digits and nothing else, parsed.
+///
+/// `str::parse` for an integer accepts a leading `+`, and for a signed one a
+/// leading `-`, so a two-byte field `-9` or `+1` used to pass a length check
+/// and be read as a number. A time of `-9:15:00` was stored as 15:15 on the
+/// previous day (probestore-1, D-1201). Every byte is checked first; the
+/// callers hand it two- or four-byte fields only.
+fn digits<T: core::str::FromStr>(text: &str) -> Option<T> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// Seconds since IST midnight, from `HH:MM:SS`.
 fn ist_seconds(text: &str) -> Option<i64> {
     let mut parts = text.split(':');
@@ -312,7 +326,7 @@ fn ist_seconds(text: &str) -> Option<i64> {
     if parts.next().is_some() || h.len() != 2 || m.len() != 2 || s.len() != 2 {
         return None;
     }
-    let (h, m, s): (i64, i64, i64) = (h.parse().ok()?, m.parse().ok()?, s.parse().ok()?);
+    let (h, m, s): (i64, i64, i64) = (digits(h)?, digits(m)?, digits(s)?);
     if h > 23 || m > 59 || s > 59 {
         return None;
     }
@@ -324,27 +338,27 @@ fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
     let (y, m, d) = match format {
         // `20221003`
         DateFormat::CompactYmd if text.len() == 8 => (
-            text.get(0..4)?.parse().ok()?,
-            text.get(4..6)?.parse().ok()?,
-            text.get(6..8)?.parse().ok()?,
+            digits(text.get(0..4)?)?,
+            digits(text.get(4..6)?)?,
+            digits(text.get(6..8)?)?,
         ),
         // `2022-10-03`
         DateFormat::DashedYmd if text.len() == 10 => (
-            text.get(0..4)?.parse().ok()?,
-            text.get(5..7)?.parse().ok()?,
-            text.get(8..10)?.parse().ok()?,
+            digits(text.get(0..4)?)?,
+            digits(text.get(5..7)?)?,
+            digits(text.get(8..10)?)?,
         ),
         // `01/07/2025` — DAY first. 1 July, not 7 January.
         DateFormat::SlashedDmy if text.len() == 10 => (
-            text.get(6..10)?.parse().ok()?,
-            text.get(3..5)?.parse().ok()?,
-            text.get(0..2)?.parse().ok()?,
+            digits(text.get(6..10)?)?,
+            digits(text.get(3..5)?)?,
+            digits(text.get(0..2)?)?,
         ),
         // `01072025`
         DateFormat::CompactDmy if text.len() == 8 => (
-            text.get(4..8)?.parse().ok()?,
-            text.get(2..4)?.parse().ok()?,
-            text.get(0..2)?.parse().ok()?,
+            digits(text.get(4..8)?)?,
+            digits(text.get(2..4)?)?,
+            digits(text.get(0..2)?)?,
         ),
         _ => return None,
     };
@@ -1026,6 +1040,68 @@ mod tests {
         ] {
             assert_eq!(ist_seconds(&text), None, "{text:?} has {why}");
         }
+    }
+
+    /// **A SIGN IS NOT A DIGIT.** probestore-1, D-1201.
+    ///
+    /// `str::parse` reads a leading `+`, and `-` for a signed type, so a
+    /// two-byte field `-9` passed the length check. On main
+    /// `20240103,-9:15:00,...` decoded to 2024-01-02 15:15 IST, a bar on the
+    /// previous day that the window filter then kept. Every clock field and
+    /// every date field, either sign, through `decode` as well as directly.
+    #[test]
+    fn a_signed_clock_or_date_field_is_refused_not_shifted() {
+        let rows = |line: &str| decode(&format!("{line}\n"), Columns::TrueDataIndex);
+        assert!(rows("20240103,09:15:00,100.00,5,0").is_ok(), "the control");
+        for time in [
+            "-9:15:00", "+9:15:00", "09:-5:00", "09:+5:00", "09:15:-1", "09:15:+1", "-0:00:00",
+            "+0:00:00", "00:-0:00", "00:00:-0", " 9:15:00", "09:15: 1", "-1:-1:-1",
+        ] {
+            assert_eq!(ist_seconds(time), None, "{time:?} carries a sign");
+            assert_eq!(
+                rows(&format!("20240103,{time},100.00,5,0")),
+                Err(CsvError::TimeMalformed {
+                    line: 1,
+                    got: time.to_owned(),
+                }),
+                "{time:?} is refused, never stored on another minute or day"
+            );
+        }
+        for (format, text) in [
+            (DateFormat::CompactYmd, "2024+103"),
+            (DateFormat::CompactYmd, "202401+3"),
+            (DateFormat::CompactYmd, "+0240103"),
+            (DateFormat::DashedYmd, "2024-+1-03"),
+            (DateFormat::DashedYmd, "2024-01-+3"),
+            (DateFormat::DashedYmd, "+024-01-03"),
+            (DateFormat::SlashedDmy, "+3/01/2024"),
+            (DateFormat::SlashedDmy, "03/+1/2024"),
+            (DateFormat::SlashedDmy, "03/01/+024"),
+            (DateFormat::CompactDmy, "+3012024"),
+            (DateFormat::CompactDmy, "03+12024"),
+            (DateFormat::CompactDmy, "0301+024"),
+        ] {
+            assert_eq!(day_of(text, format), None, "{text:?} as {format:?}");
+        }
+        assert_eq!(
+            rows("2024+103,09:15:00,100.00,5,0"),
+            Err(CsvError::DateMalformed {
+                line: 1,
+                got: "2024+103".to_owned(),
+                format: DateFormat::CompactYmd,
+            })
+        );
+        // The digits helper itself, at its edges.
+        assert_eq!(digits::<u8>(""), None);
+        assert_eq!(digits::<u8>("+"), None);
+        assert_eq!(digits::<i64>("-0"), None);
+        assert_eq!(
+            digits::<u8>(&(u16::from(u8::MAX) + 1).to_string()),
+            None,
+            "all digits and still no u8"
+        );
+        assert_eq!(digits::<u8>(&format!("{:02}", 0)), Some(0));
+        assert_eq!(digits::<u16>("9999"), Some(9_999));
     }
 
     /// The byte ranges each format reads its year, month and day from, in the
