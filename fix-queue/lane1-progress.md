@@ -7,7 +7,7 @@ Checkpoint for pause/resume. Updated after each item. Branch per item: `fix/clou
 | Unit | Findings | State | PR |
 |---|---|---|---|
 | W3-store1-3 | W3-store1-3 | pushed, in review | https://github.com/SJParthi/brutex/pull/22 |
-| AC-whp-cx-0 | AC-whp-cx-0 | in progress | - |
+| AC-whp-cx-0 | AC-whp-cx-0 | pushed, in review | https://github.com/SJParthi/brutex/pull/24 |
 | ET-bars-candles-store-0 | ET-bars-candles-store-0 | in progress | - |
 | W3-store1-0 | W3-store1-0, W3-store1-1, ET-bars-candles-store-12 | in progress | - |
 | ET-o1-proof-coverage-4 | ET-o1-proof-coverage-4, ET-bars-candles-store-9 | in progress | - |
