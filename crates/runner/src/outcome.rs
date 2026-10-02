@@ -115,17 +115,39 @@ pub struct SessionBounds {
 impl SessionBounds {
     /// Derive the session geometry of `bars`.
     #[must_use]
+    ///
+    /// The cadence at each bar is [`prefix_median_steps_over`]'s: measured over
+    /// bars `0..=i` only, so appending later bars cannot change a boundary
+    /// already derived for an earlier one. `CLAUDE.md` §3 rule 7, D-1410.
     pub fn of(bars: &[Candle]) -> Self {
-        Self::with_step(bars, median_step_micros(bars), None)
+        let steps = prefix_median_steps_over(bars, None);
+        Self::with_steps(bars, |index| steps.get(index).copied().unwrap_or(0), None)
     }
 
-    /// Derive the session geometry with the slice's median step already known.
+    /// Derive the session geometry under ONE cadence for every bar.
     ///
-    /// This is the constructor [`crate::trade::SliceFacts`] uses so its horizon
-    /// clock and its session boundaries share one measurement and no candidate
-    /// loop can allocate the median sample again.
+    /// Test-only since D-1410: production derives a per-bar prefix cadence and
+    /// calls [`Self::with_steps`], which is also the constructor
+    /// [`crate::trade::SliceFacts`] uses so its horizon clock and its session
+    /// boundaries share one measurement.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_step(bars: &[Candle], step_micros: i64, accepted: Option<&[bool]>) -> Self {
+        Self::with_steps(bars, |_| step_micros, accepted)
+    }
+
+    /// Derive the session geometry with a cadence known PER BAR.
+    ///
+    /// `step_at(i)` must depend on bars `0..=i` only. A day's forced close is
+    /// proved with the cadence at its own 15:09 record, and a bar's
+    /// fillability with the cadence at that bar, so no boundary reads a
+    /// cadence measured on bars after the ones it describes. D-1410.
+    #[must_use]
+    pub(crate) fn with_steps(
+        bars: &[Candle],
+        step_at: impl Fn(usize) -> i64,
+        accepted: Option<&[bool]>,
+    ) -> Self {
         struct ReverseSession {
             day: i64,
             square_off: Option<i64>,
@@ -134,7 +156,6 @@ impl SessionBounds {
             day_ended: bool,
         }
 
-        let step = step_micros.max(0);
         let is_accepted = |index: usize| {
             accepted.is_none_or(|verdict| verdict.get(index).copied().unwrap_or(false))
         };
@@ -165,7 +186,8 @@ impl SessionBounds {
         let proved: std::collections::HashSet<i64> = required
             .iter()
             .filter_map(|(&day, &(count, accepted_index))| {
-                (step == 60_000_000 && count == 1 && accepted_index.is_some()).then_some(day)
+                (count == 1 && accepted_index.is_some_and(|index| step_at(index) == 60_000_000))
+                    .then_some(day)
             })
             .collect();
         let mut stamped: Vec<BarBound> = Vec::with_capacity(bars.len());
@@ -211,6 +233,7 @@ impl SessionBounds {
             // A non-positive step cannot prove that even this bar's interval
             // completed. Refusing is the only answer that does not invent a
             // timeframe for an empty or one-bar slice.
+            let step = step_at(index).max(0);
             let fillable = step > 0
                 && bar.ts_micros.rem_euclid(60_000_000) == 0
                 && bar
@@ -629,7 +652,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             continue;
         };
         let span = i64::try_from(h).unwrap_or(i64::MAX);
-        let deadline = start.saturating_add(facts.step_micros().saturating_mul(span));
+        let deadline = start.saturating_add(facts.step_at(i).saturating_mul(span));
         let forced_stamp = bars
             .get(square_off.bar)
             .map_or(i64::MIN, |bar| bar.ts_micros);
@@ -773,31 +796,23 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     }
 }
 
-/// The median positive same-session gap between consecutive bars, in
-/// microseconds.
+/// The median positive same-session gap between consecutive bars of the WHOLE
+/// slice, in microseconds.
 ///
-/// Overnight gaps are excluded outright; median and not mean keeps an intraday
-/// closure from redefining the timeframe. Zero means the slice contains no
-/// positive observed step; callers then refuse to invent one.
+/// **Test-only, and kept as the oracle the prefix cadence must end on.** It was
+/// the production cadence until D-1410, and it read bars after every trade it
+/// clocked: appending forty two-minute sessions to eight one-minute ones moved
+/// it to two minutes, and every trade and outcome the eight sessions had already
+/// produced vanished. [`prefix_median_steps_over`] replaces it; its LAST entry
+/// equals this value on every slice, which
+/// `the_prefix_cadence_ends_on_the_whole_slice_median` pins.
+#[cfg(test)]
 pub(crate) fn median_step_micros(bars: &[Candle]) -> i64 {
-    median_step_micros_over(bars, None)
-}
-
-/// [`median_step_micros`], excluding every record the execution evaluator
-/// refused. A duplicate timestamp or overflowing accumulator record may not
-/// define another trade's clock.
-pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>) -> i64 {
     let mut steps: Vec<i64> = bars
         .iter()
-        .enumerate()
-        .zip(bars.iter().enumerate().skip(1))
-        .filter(|((a_index, a), (b_index, b))| {
-            accepted.is_none_or(|verdict| {
-                verdict.get(*a_index).copied().unwrap_or(false)
-                    && verdict.get(*b_index).copied().unwrap_or(false)
-            }) && indicators::ist_day(a.ts_micros) == indicators::ist_day(b.ts_micros)
-        })
-        .map(|((_, a), (_, b))| b.ts_micros.saturating_sub(a.ts_micros))
+        .zip(bars.iter().skip(1))
+        .filter(|(a, b)| indicators::ist_day(a.ts_micros) == indicators::ist_day(b.ts_micros))
+        .map(|(a, b)| b.ts_micros.saturating_sub(a.ts_micros))
         .filter(|&step| step > 0)
         .collect();
     if steps.is_empty() {
@@ -806,6 +821,87 @@ pub(crate) fn median_step_micros_over(bars: &[Candle], accepted: Option<&[bool]>
     let middle = steps.len() / 2;
     let (_, median, _) = steps.select_nth_unstable(middle);
     *median
+}
+
+/// The cadence at every bar, measured on bars `0..=i` ONLY.
+///
+/// Entry `i` is the upper median (sorted index `len / 2`) of every positive
+/// same-IST-day gap between adjacent rows `(j - 1, j)` with `j <= i`, both
+/// accepted by the evaluator when `accepted` is given. Before the first such
+/// gap, entry `i` is the gap `(i, i + 1)` when that one qualifies: the first
+/// step of a position opened at `i`, which that position holds before any exit.
+/// Otherwise `0`, and callers then refuse to invent a timeframe.
+///
+/// # Why per bar
+///
+/// `CLAUDE.md` §3 rule 7: at bar N the engine may read bars `0..N`. A single
+/// whole-slice median is decided by bars no trade at N could have seen, so it
+/// broke append-invariance (D-1410). Median rather than mean still keeps an
+/// intraday closure from redefining the timeframe, and overnight gaps are still
+/// excluded outright.
+///
+/// # Cost
+///
+/// One forward pass with a two-heap running median: O(log g) per bar, where
+/// `g` is the number of gaps seen so far, and O(n) memory for the heaps and the
+/// output. The former whole-slice selection was O(n) total; this is the named
+/// O(n log n) per-SLICE bound in `docs/06-limits.md`. It runs once per
+/// [`crate::trade::SliceFacts`], never per candidate.
+pub(crate) fn prefix_median_steps_over(bars: &[Candle], accepted: Option<&[bool]>) -> Vec<i64> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let qualifies =
+        |index: usize| accepted.is_none_or(|verdict| verdict.get(index).copied().unwrap_or(false));
+    // `lower` holds the smaller floor(n/2) gaps, `upper` the larger ceil(n/2);
+    // the upper median is therefore `upper`'s minimum.
+    let mut lower: BinaryHeap<i64> = BinaryHeap::new();
+    let mut upper: BinaryHeap<Reverse<i64>> = BinaryHeap::new();
+    let mut out: Vec<i64> = Vec::with_capacity(bars.len());
+    let mut prior: Option<(usize, &Candle)> = None;
+    for (index, bar) in bars.iter().enumerate() {
+        if let Some((prior_index, prior_bar)) = prior
+            && qualifies(prior_index)
+            && qualifies(index)
+            && indicators::ist_day(prior_bar.ts_micros) == indicators::ist_day(bar.ts_micros)
+        {
+            let step = bar.ts_micros.saturating_sub(prior_bar.ts_micros);
+            if step > 0 {
+                if upper.peek().is_some_and(|&Reverse(least)| step >= least) {
+                    upper.push(Reverse(step));
+                } else {
+                    lower.push(step);
+                }
+                if upper.len() > lower.len().saturating_add(1) {
+                    if let Some(Reverse(moved)) = upper.pop() {
+                        lower.push(moved);
+                    }
+                } else if lower.len() > upper.len()
+                    && let Some(moved) = lower.pop()
+                {
+                    upper.push(Reverse(moved));
+                }
+            }
+        }
+        out.push(upper.peek().map_or(0, |&Reverse(median)| median));
+        prior = Some((index, bar));
+    }
+    // BEFORE THE FIRST GAP, THE TRADE'S OWN FIRST STEP. Until one qualifying
+    // gap exists the prefix knows no cadence, which would leave the first bar
+    // of every slice unable to enter or measure anything. A position opened at
+    // bar `i` holds bar `i + 1` before it can exit, so that gap belongs to its
+    // own path: it is the earliest bar any completed trade from `i` reads, and
+    // no bar after its exit. `out[i] == 0` means no gap was seen through `i`,
+    // so `out[i + 1]` is exactly the gap `(i, i + 1)` or still zero.
+    for index in 0..out.len() {
+        if out.get(index) == Some(&0)
+            && let Some(&next) = out.get(index.saturating_add(1))
+            && let Some(slot) = out.get_mut(index)
+        {
+            *slot = next;
+        }
+    }
+    out
 }
 
 /// Minute of the IST day, `0..1440`.
@@ -1819,7 +1915,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
 mod tests {
     use super::{
         Edge, FORCED_EXIT_MINUTE, Horizon, SessionBounds, Sides, edge, forward,
-        long_run_sum_squares, median_step_micros, milli,
+        long_run_sum_squares, median_step_micros, milli, prefix_median_steps_over,
     };
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
@@ -2695,6 +2791,108 @@ mod tests {
         assert!(!session.fillable(0));
         assert!(session.last_fill_bar(0).is_none());
         assert!(forward_of(&bars, h(1)).at(0).is_none());
+    }
+
+    /// THE PREFIX CADENCE AT BAR i IS THE WHOLE-SLICE MEDIAN OF bars[..=i].
+    ///
+    /// The oracle is the former production function, recomputed from scratch
+    /// on every prefix; the running two-heap median must agree with it at every
+    /// bar, and in particular its LAST entry is the old whole-slice value, so a
+    /// slice with a uniform cadence is clocked exactly as before D-1410.
+    #[test]
+    fn the_prefix_cadence_ends_on_the_whole_slice_median() {
+        // A deterministic mix of 1-, 2-, 3- and 5-minute gaps, overnight
+        // jumps and repeated stamps, so the median moves in both directions.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for length in [0_usize, 1, 2, 3, 17, 240] {
+            let mut minute = 0_i64;
+            let mut bars = Vec::with_capacity(length);
+            for _ in 0..length {
+                bars.push(candle(minute, 10_000));
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                minute += match state >> 61 {
+                    0 => 0,
+                    3 => 2,
+                    4 => 3,
+                    5 => 5,
+                    6 => 1_440,
+                    _ => 1,
+                };
+            }
+            let steps = prefix_median_steps_over(&bars, None);
+            assert_eq!(steps.len(), bars.len());
+            for i in 0..bars.len() {
+                let own = median_step_micros(bars.get(..=i).unwrap_or_default());
+                let expected = if own == 0 {
+                    // Before the first gap: the entry's own first step only.
+                    median_step_micros(bars.get(i..=i.saturating_add(1)).unwrap_or_default())
+                } else {
+                    own
+                };
+                assert_eq!(
+                    steps.get(i).copied(),
+                    Some(expected),
+                    "length {length} bar {i}"
+                );
+            }
+            assert_eq!(
+                steps.last().copied().unwrap_or(0),
+                median_step_micros(&bars),
+                "length {length}: the last prefix is the whole slice"
+            );
+        }
+    }
+
+    /// The hand-checked shape, the refusals and the timestamp extremes.
+    #[test]
+    fn the_prefix_cadence_is_hand_checked_and_refuses_what_it_cannot_measure() {
+        let m = 60_000_000_i64;
+        // Gaps 2,2,1,1,1: upper medians [2,2,2,2,2,1], bar 0 taking its own
+        // first step because no earlier gap exists.
+        let bars: Vec<Candle> = [0, 2, 4, 5, 6, 7]
+            .into_iter()
+            .map(|minute| candle(minute, 10_000))
+            .collect();
+        assert_eq!(
+            prefix_median_steps_over(&bars, None),
+            vec![2 * m, 2 * m, 2 * m, 2 * m, 2 * m, m]
+        );
+        // A refused row defines neither of its two gaps.
+        assert_eq!(
+            prefix_median_steps_over(&bars, Some(&[true, true, false, true, true, true])),
+            vec![2 * m, 2 * m, 2 * m, 2 * m, 2 * m, m]
+        );
+        // A verdict shorter than the slice refuses the rows it does not cover.
+        assert_eq!(
+            prefix_median_steps_over(&bars, Some(&[true, true])),
+            vec![2 * m; 6]
+        );
+        // Before the first gap a bar reads only its own first step, never one
+        // further: bar 0's own step is refused, so it stays unclocked.
+        assert_eq!(
+            prefix_median_steps_over(&bars, Some(&[false, true, true, true, true, true])),
+            vec![0, 2 * m, 2 * m, 2 * m, m, m]
+        );
+        // Overnight, repeated and reversed stamps are not a cadence.
+        let odd = [
+            candle(0, 1),
+            candle(1_440, 1),
+            candle(1_440, 1),
+            candle(1_439, 1),
+        ];
+        assert_eq!(prefix_median_steps_over(&odd, None), vec![0, 0, 0, 0]);
+        assert!(prefix_median_steps_over(&[], None).is_empty());
+        assert_eq!(prefix_median_steps_over(&odd[..1], None), vec![0]);
+        // The extremes of the timestamp type neither panic nor wrap.
+        let edge = |ts: i64| Candle::new(ts, 1, 1, 1, 1, 1, OI_NULL);
+        let top = [edge(i64::MAX - m), edge(i64::MAX)];
+        assert_eq!(prefix_median_steps_over(&top, None), vec![m, m]);
+        let bottom = [edge(i64::MIN), edge(i64::MIN + m)];
+        assert_eq!(prefix_median_steps_over(&bottom, None), vec![m, m]);
+        let span = [edge(i64::MIN), edge(i64::MAX)];
+        assert_eq!(prefix_median_steps_over(&span, None), vec![0, 0]);
     }
 
     /// A SLICE THAT STOPS MID-SESSION MEASURES NO FORCED OUTCOME.

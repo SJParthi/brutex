@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Prefix-only execution cadence — D-1410
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| Appending later bars to a slice changes no trade that the shorter slice completed, no measured return or excursion, and no bar's fillability, `day_ended`, `last_fill_bar`, cadence or path acceptance, for prefixes that end at a session close or mid-session. | `appending_future_bars_changes_no_completed_trade`, `appending_future_bars_changes_no_measured_outcome`, `appending_future_bars_changes_no_square_off_or_session_bound`, `a_prefix_cut_mid_session_keeps_every_completed_trade_and_outcome` in `crates/runner/tests/prefix_only_cadence.rs` | ✓ |
+| The cadence at bar `i` equals the whole-slice median recomputed on `bars[..=i]`. Where that is zero, it is the bar's own first step `(i, i + 1)` and never a later one. The last entry is therefore the former whole-slice value. Refused rows, overnight gaps, repeated stamps, reversed stamps and `i64` extremes define no cadence. | `the_prefix_cadence_ends_on_the_whole_slice_median`, `the_prefix_cadence_is_hand_checked_and_refuses_what_it_cannot_measure` in `crates/runner/src/outcome.rs` | ✓ |

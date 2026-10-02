@@ -43718,3 +43718,67 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-1410 — The execution cadence is measured on bars `0..=i`, not on the whole slice — 2026-10-02
+
+**What was wrong.** `CLAUDE.md` §3 rule 7 says that at bar N the engine may
+read bars `0..N`. On a native, signal-sourced column, `runner::trade::SliceFacts::of`
+took its cadence from `median_step_micros_over`, the median same-day step of
+the WHOLE slice, and `SessionBounds::of` and `trade::forced_exits` did the
+same. Every trade and outcome then used that one number. It decided whether a
+fill was immediate, where the horizon deadline fell, which paths counted as
+unbroken, which bars could still be filled before 15:10, and whether a day's
+15:09 record proved a forced close (that proof requires a one-minute
+cadence). So bars after a trade could change the trade.
+
+**Measured.** `crates/runner/tests/prefix_only_cadence.rs` takes eight
+one-minute sessions, then appends forty later sessions that keep every other
+minute. The appended sessions hold more same-day steps than the first eight,
+so the whole-slice median moved from one minute to two. On `origin/main` all
+three original tests failed. Every trade the eight sessions had completed
+disappeared (`h=1 Long`: the kept list was `[]` against a non-empty prefix list). `forward(..).at(0)`
+went from `Some(28)` to `None`. `SessionBounds::day_ended(0)` went from
+`true` to `false`. The column itself did not change, because `Column::build`
+is prefix-stable.
+
+**The change.** `outcome::prefix_median_steps_over` computes, for each bar
+`i`, the upper median (sorted index `len / 2`, the same order statistic as
+before) of the qualifying gaps between rows `(j-1, j)` with `j <= i`. A gap
+qualifies if it is positive, falls within one IST day, and has both rows
+accepted. A two-heap running median does this in one forward pass. Before
+the first qualifying gap, bar `i` takes the gap `(i, i + 1)`, if that gap
+qualifies. That gap is the first step of a position opened at `i`, and the
+position holds it before any exit can happen, so a completed trade still
+reads nothing after its exit. Without this rule the first bar of every slice
+could neither enter nor measure. The first full-suite run caught that in four
+existing tests: `the_return_is_close_to_close_and_the_tail_has_none`,
+`a_coarse_rung_prices_exact_horizons_but_not_an_unproved_square_off`,
+`a_bar_the_run_refused_can_never_price_an_outcome` and
+`completeness_not_a_later_day_proves_a_session_ended`. All four pass
+unchanged with the rule.
+`SliceFacts` holds a `Cadence`. A fill-sourced column has the fixed one-minute
+cadence, unchanged from before. A native column has the per-bar prefix table.
+The walk reads `step_at(entry)`, and `forward` reads `step_at(i)`.
+`SessionBounds::with_steps` proves a day with the cadence at its own 15:09
+row and tests each bar's fillability with that bar's own cadence.
+`SliceFacts::step_micros()` stays as a diagnostic. It is the cadence at the
+last bar, which is exactly the old whole-slice value, so
+`signal_candle_stop` (fill-sourced, one minute) and cli's sparse-slice test
+are unaffected. The old whole-slice median remains as a `#[cfg(test)]`
+oracle. `the_prefix_cadence_ends_on_the_whole_slice_median` requires every
+prefix entry to equal that oracle recomputed on `bars[..=i]`. On a slice with
+one uniform cadence, every trade is therefore clocked exactly as before.
+
+**Cost.** Each `SliceFacts`, `SessionBounds::of` or `forced_exits`
+derivation goes from O(n) selection to O(n log g), where g is the number of
+gaps seen so far. This is paid once per slice and never per candidate. The
+bound is named in `docs/06-limits.md`.
+
+**Not changed, and why.** The excursion look-ahead is W3-runner2-7: a refused
+bar after a level exit un-prices the trade
+(`crates/runner/src/excursion.rs:1053`). Another lane owns it.
+`grid::evaluate` derives exit ladders from the slice it is given. Its own doc
+records that this is in sample by design, and out-of-sample callers pass
+training ladders through the fixed-level path. `resample` emits the trailing
+bucket, and its doc assigns dropping that bucket to a streaming caller.
+`vwap::availability_of` belongs to lane 3, and no production code calls it.
