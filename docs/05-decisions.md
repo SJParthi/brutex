@@ -44028,6 +44028,7 @@ paths, untouched bars, an out-of-range path, and empty input.
 scales a real fixture past the bound and requires refusal from the grid, the
 cell replay and `with_levels`. With the check disabled it fails ("no clamped
 cell may be reported").
+
 ### D-0927 — Refuse a sub-tick printed-extreme sell fill instead of pricing it — 2026-10-02
 
 **Finding.** probeengine-1 (audit 2026-10-02). `costs::fill::fills_at` with

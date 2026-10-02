@@ -5405,6 +5405,7 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | A legacy grid, fixed-ladder replay or cell materialisation whose paths fail `4·A·P ≤ i64::MAX` reports no cell and counts every path refused. It never reports a total clamped by `saturating_add`. The envelope is exact at its boundary. | `runner::grid::exit_family_tests::a_grid_that_could_saturate_is_refused_not_clamped` · `runner::grid::exit_family_tests::the_money_envelope_is_exact_at_its_boundary` | ✓ |
+
 ### Printed-extreme sell floor — probeengine-1 (D-0927)
 
 | Invariant | Test that proves it | Status |
