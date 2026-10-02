@@ -9936,6 +9936,11 @@ Both are comparison sorts, so each level costs `O(|F| log |F|)` comparisons
 beyond the join, and the cost grows with the frontier. It replaced an
 `|F|^2 / 2` pairwise scan, and it is per level, never per pair or per bar.
 
+**The top-results keeper admits in O(log cap), not O(1).** `keep::Best::offer`
+refuses in one root comparison and admits with a binary-heap sift of at most
+`floor(log2(cap))` levels. It has no production caller today; the bound is
+stated so one does not inherit an unstated cost (audit finding o1engine-20).
+
 **Duplicate rejection at k>=2 is absent, not measured (D-0926).** The prefix
 join is injective, so `duplicates` is written as a literal zero at k>=2 and no
 operation counts it. Its tests witness injectivity through `generated` and
