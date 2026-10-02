@@ -44171,3 +44171,643 @@ same order, so every threshold and rejection is bit-identical.
 uses a twelve-strategy family that rejects across two rounds. It counts exactly
 S·draws `mean_at` calls, and on four seeds it matches a reference copy of the
 per-round recomputation.
+
+### D-1170 — `forward` slides its excursion window instead of building a sparse table — 2026-10-02
+
+**What was wrong (audit W3-runner3-4).** `outcome::forward` built
+`RangeExtremes::of(bars)` on every call: a sparse table of highs and lows,
+Θ(n log n) time and two tables of about `n·log₂ n` `i64`s. `forward` runs once
+per ranked run and once per walk-forward fold, so at 1,222,791 bars that was
+some 21 levels per call. The table's doc said a monotonic deque "cannot answer a
+variable one", and that was the reason given for the cost.
+
+**Why the reason was wrong.** The excursion window is `[i + 1, exit(i)]`. Its
+width varies, but both ends only move forward as `forward` walks the entries:
+`i` increases, and `exit(i)` is either the exact deadline `ts(i) + H·step`
+(increasing, because accepted bars have strictly increasing timestamps) or that
+day's forced bar, which every later entry of the day shares and every later day
+exceeds. A pair of monotonic deques whose two ends only advance pushes and pops
+each bar at most once.
+
+**The change.** `WindowExtremes` replaces `RangeExtremes`: O(bars) per
+`forward`, amortised O(1) per query, memory bounded by the window. A query whose
+right end moves backwards is still answered correctly by clearing and refilling
+from its left end; `forward` never issues one, and the unit test drives that
+branch. `Forward` also carries each outcome's exit bar (`Forward::exit_at`),
+which the test uses to check every excursion against a direct scan of
+`[i + 1, exit]` and which D-1171 uses.
+
+**Outputs.** Unchanged. Maxima and minima of integers are exact, so every
+`adverse_at` and `favourable_at` is the same value as before.
+`the_sliding_window_agrees_with_a_full_scan_on_every_query`,
+`every_forward_excursion_is_the_scan_over_its_own_window` and
+`forward_builds_no_power_of_two_table` pin it. The last one fails on the
+previous tree. **Not measured:** no bench row times `forward`. The O(bars) bound
+is argued from the code (§3 rule 6).
+
+### D-1171 — `edge` pairs two hits only while their windows share a bar, and refuses a sample that one window holds — 2026-10-02
+
+**What was wrong (audits W3-runner3-7 and W3-runner3-5).** `edge`'s Newey-West
+correction drained its queue on the bar-index gap alone:
+`source - older >= H`. `forward` ends every window at the earlier of the
+horizon and that day's forced close, so a 15:08 hit and the next session's 09:15
+hit share no bar. They are about 22 bars apart on a full session, so at
+`H >= 23` the gap paired them anyway, at weight `1 - 22/H`.
+
+The second defect follows from the first. `Horizon::bars` refuses only zero, and
+`BRUTEX_HORIZON_BARS` parses any `u32`. At a horizon past the span of the hits,
+every pair was weighted near one. The corrected sum of squares then tends to
+`(Σ (x - m))²`, which is zero by the definition of the mean, and only rounding
+was left. The audit measured `t` = 24,673.4 and 116,747.9 on the empty mask at
+8 and 32 sessions with `H = u32::MAX`, and 0 at 128 sessions, where the residue
+was negative. `rank::walk` sorts on `|t|`, so the first two would rank above
+every real finding.
+
+**The change.** `Forward` carries each outcome's exit bar (D-1170). `edge` now
+also drains a pair once the older window has exited by the newer entry
+(`older_exit <= source`). Exits only advance with the entry, so the drain stays
+front-only. A same-day pair closer than `H` always still overlaps, so it is
+weighted exactly as before. A pair across a session boundary is never weighted.
+The weight matrix is therefore block-diagonal, one Bartlett triangle per day. It
+stays positive semi-definite, and at a large `H` the estimate becomes the
+per-session (cluster) sum of squares rather than zero.
+
+When the queue still holds every observation at the end of the walk, every pair
+overlapped, and one window holds the whole sample. Newey-West has no second
+window to estimate from, so `t` is reported as `0.0`, which is the same "no
+evidence" answer the `m2 <= 0` guard gives. The mean, sums and counts are still
+carried.
+
+**Outputs that change.** `t` changes for any mask with a hit pair that crosses
+a session closer than `H`. At the default `H = 15` there is none on a full
+session, so only horizons at or above about 23 bars move. `t` becomes `0.0` for
+a sample with at least two observations whose windows all mutually overlap. The
+mean, the counts and every sum are unchanged.
+
+**Tests that fail on the previous tree:** `no_overlap_pair_crosses_a_session`
+(`t` = 77.967 against the per-session definition's 77.951 at `H = 23`),
+`a_horizon_past_every_session_is_measured_per_session` (24,673.4 against
+1,195.8 at 8 sessions) and
+`one_window_holding_the_whole_sample_is_no_evidence` (14,175.6 on 353 hits of
+one day). They compare `edge` against the estimator written out pair by pair
+from its definition, not against `edge`'s own accumulators.
+
+### D-1172 — `Ladder::from_excursions` selects its rung positions instead of sorting the sample — 2026-10-02
+
+**What was wrong (audit W3-runner2-6).** `Ladder::from_excursions` is called
+once per candidate on the legacy and expression grid paths (`grid.rs`
+`merged_stops` and `ladder_of`). It ran `observed.sort_unstable()` over every
+trade's excursion and then read only `count` positions. That is Θ(n log n) per
+candidate, or Θ(log n) per trade, and no limits entry stated it. The loop also
+ran `count` times and reserved `count` rungs, so an absurd `count` was an
+allocation failure, which aborts the process.
+
+**The change.** Rung `i` reads position `(len - 1) / 2^(count - i + 1)`, and
+these positions halve. The deepest one is selected with `select_nth_unstable`
+over the whole slice. Each shallower one is selected inside the prefix the
+previous selection left below it, which is at most half as long. The total is
+expected O(n) per ladder, which is O(1) per trade. Positions past the 64th
+halving are all zero, so the loop visits at most 65 positions whatever `count`
+is. The position arithmetic moved, unchanged, into `rung_position`.
+
+**Outputs.** Unchanged. The same order statistics are read, so every ladder is
+rung-for-rung identical to the sorted reading.
+`the_selected_ladder_is_the_sorted_ladder_rung_for_rung` checks this over
+twelve samples (empty, one element, duplicates, zeros, negatives, `i64`
+extremes) and eleven counts. One difference is visible to a caller: the slice
+it passes in is now left permuted, not sorted. Every production caller passes a
+fresh `to_vec()` copy and never reads it afterwards.
+
+**Tests that fail on the previous tree:** `from_excursions_does_not_sort_the_sample`
+(the old body sorts), and `an_absurd_rung_count_is_the_sixty_five_rung_ladder`
+(the old loop reserves `usize::MAX` rungs). **Not measured:** no bench row times
+the ladder. The expected-linear bound is the documented bound of
+`select_nth_unstable`. The gate 11 sort allowlist for `excursion.rs` stays at
+one occurrence. Its comment in `ci.yml` still says "ONE sort", and it should say
+"one selection". That file belongs to another lane, so the stale comment is
+reported here and not edited.
+
+### D-1173 — `edge` accumulates its money in paisa integers and converts once; `Edge`'s `f64` money fields are sanctioned with their bound — 2026-10-02
+
+**What was wrong (audit GAP16-26).** `runner::outcome::Edge` carries seven paisa
+quantities as `f64`. They are the three single-move extrema (`min_win_paisa`,
+`max_win_paisa`, `max_loss_paisa`) and the four sums (`win_sum`, `loss_sum`,
+`adverse_sum`, `favourable_sum`). `Sides` and `edge` also ACCUMULATED them as
+`f64`. That rounded every move above 2^53 paisa on the way in, and every sum at
+every addition once it passed 2^53. No decision entry sanctioned a float for
+money here. Worse, the two path sums went through `i32::try_from(..).ok()` and
+silently DROPPED any excursion above 2^31 paisa (about 2.1 crore rupees), while
+`n` still counted the hit. That was a smaller sum presented as a whole one, the
+§4 fallback.
+
+**The change.** `Sides::observe` takes the `i64` move. It holds the extrema as
+`i64` (the loss magnitude as `u64`, because the magnitude of `i64::MIN` is not an
+`i64`) and the sums as exact `i128`. `edge` sums both excursions as exact
+`i128`, and nothing is dropped. Each value becomes an `f64` exactly once, in
+`outcome::wide`, when the `Edge` is assembled.
+
+**Why `Edge` keeps `f64` fields, and the bound that sanctions them.** `cli`
+persists `win_sum`, `loss_sum`, `adverse_sum` and `favourable_sum` as IEEE bits
+in the sweep-evidence `RankedRow`, and `api` serves them. Changing those fields'
+type or meaning in place is what §3 rule 8 forbids, and a new row version is a
+`cli` store change outside this lane. So this entry records the sanction the
+audit offered as an alternative. Every `Edge` money field is the nearest `f64`
+to an exact paisa integer. It is exact whenever the magnitude is at most 2^53
+paisa (about 90 lakh crore rupees, far past any index or stock move). Above
+that, the error is one rounding, at most 2^-53 relative, and no longer one
+rounding per observation. The ratios built from these fields (`payoff_bp`,
+`path_ratio_bp`, `worst_reward_risk_bp`) are statistics under §7 and stay
+floating.
+
+**Outputs that change.** Only where a path excursion exceeded 2^31 paisa, which
+was dropped before and is now counted, or where a sum or move exceeded 2^53.
+Neither occurs on real index or equity data at paisa scale. Every other value
+is bit-identical: the old `f64` sum of integers below 2^53 was already exact.
+
+**Tests.** `a_move_past_two_to_the_fifty_three_is_held_exactly` covers 2^53 + 1,
+`i64::MAX` twice, `i64::MIN` twice, the `u64` magnitude and the single
+conversion. `every_sum_is_the_exact_sum_converted_once` prices
+`synthetic::sessions(8)` scaled by 2^39 and requires every sum's bits to equal
+the exact sum converted once. On the previous tree it fails: `adverse_sum` and
+`favourable_sum` were 0 against 71,231,860,805,468,160. **Not changed here:**
+gate 11's float allowlist for `outcome.rs` (29) now has headroom, since this
+removes six float lines. Tightening that number and its rationale is a `ci.yml`
+edit, which belongs to another lane.
+
+### D-1174 — `edge` folds each hit's Newey-West pairs in O(1) from exact running sums — 2026-10-02
+
+**What was wrong (audit W3-runner3-0).** For every measured hit, `edge` visited
+every queued hit still inside the horizon. That cost O(min(H - 1, hits in the
+last H bars)) per hit and O(rows + n·min(H, n)) per candidate. `rank` calls
+`edge` once per frequent itemset. `Horizon::bars` accepts any non-zero `u32`,
+so once `H` covered the hits the cost was quadratic in the candidate's own hits.
+The doc said only that the working set was O(H).
+
+**The change.** The Bartlett weight of a queued hit `o` against the new hit `s`
+is `(H - (s - o)) / H`, which is linear in `o`. So each new hit's three pair
+sums factor into four running sums over the queue: its count, `Σ y`, `Σ o` and
+`Σ o·y`. `OverlapWindow` adds a hit's terms on push and subtracts them on pop.
+Every hit therefore costs O(1) amortised, and no queued hit is visited. The
+running sums are exact `i128`, so pops leave no rounding drift. Moves are
+centred on the sample's first move, `y = x - x₀`, before anything is
+multiplied, so the uncentred sums are formed at the scale of the spread and not
+of the price. Offsets are taken from the hit that opened the current overlap
+cluster. Under D-1171 a cluster lies inside one day's priced minutes, which
+bounds every product below 2^108, inside `i128`.
+
+**Outputs that change.** `t`, in its last bits. The pair sums are now formed
+from exact integers and rounded once per hit, where before they were rounded
+once per pair at the price's scale. `no_overlap_pair_crosses_a_session` and
+`a_horizon_past_every_session_is_measured_per_session` hold `edge`'s `t` within
+1e-9 and 1e-6 relative of the pairwise definition written out in the test.
+`the_running_sums_reproduce_every_pair` holds the running form against the
+pairwise form across six horizons. The mean, counts and sums are untouched.
+`edge` dropped below the hundred-line lint, so its `too_many_lines` expectation
+was removed.
+
+**Tests.** `edge_visits_no_queued_hit` fails on the previous tree (the pair loop
+`for … in &recent` is there). `moves_at_the_ends_of_i64_neither_overflow_nor_cancel`
+drives moves near `i64::MAX` with a spread of a few paisa, and alternating
+`i64::MIN` and `i64::MAX`. `empty_single_and_reopened_windows` covers no hit,
+one hit, and a drain to empty that re-anchors. **Not measured:** no bench row
+covers `edge`. The O(1) per hit is argued from the code (§3 rule 6).
+
+### D-1175 — The long-run-variance refusal is tested where it lives, and its stated cause is corrected — 2026-10-02
+
+**What was wrong (audit LATE-whole-hot-path:tests-bite#8).**
+`a_non_positive_long_run_variance_is_refused_rather_than_reported_as_nan`
+never called `edge` or anything `edge` calls after the sum. It built a negative
+sum and asserted that `f64::sqrt` of it divided by two constants is `NaN`. That
+is a fact about IEEE 754, and the test passed with `edge`'s guard deleted.
+
+**The change.** `edge`'s last step, from the long-run sum to `t`, is now the
+function `newey_west_t`. It has the same arithmetic, in the same order, so its
+bits are unchanged. `a_long_run_sum_that_cannot_give_a_t_reports_none` drives
+it with a negative sum, `-0.0`, `0.0`, `NaN` and both infinities, and requires
+exactly `0.0` each time. It also requires the ordinary `t` (3/2) for a positive
+sum and the mean's sign. With the guard removed the test fails (`sum -99 gave
+t=NaN`).
+
+**The cause the old comment gave was wrong, and is corrected.** It said the
+Bartlett kernel is positive semi-definite only on evenly spaced lags, so
+irregular hits could drive the sum below zero through negative
+autocovariance. The triangle `max(0, 1 - |d|/H)` is a positive-definite
+function on the real line, since its Fourier transform is a squared sinc. Its
+matrix is therefore positive semi-definite at any set of hit positions, and
+under D-1171 it is one such block per day. The exact sum is never negative.
+Only rounding in the `f64` assembly can push it to zero or below, which is why
+the guard stays.
+
+**Outputs.** None change.
+
+### D-1176 — A missing minute is named apart from a refused record — 2026-10-02
+
+**What was wrong (audit W3-runner3-8).** `forward` set its one `refused` flag
+for every absence that was not the tail. That included a deadline minute with no
+record (`at_timestamp(deadline)` is `None`) and a timestamp gap inside the held
+path (`path_accepts` is false on any `broken_prefix` change). `Edge::refused`
+was documented as *"Non-zero means the store handed this run a record the engine
+refuses"*. A session with a hole therefore read as a corrupt store, although no
+record existed to refuse. The tests covered duplicate, overflowing and corrupt
+records only.
+
+**The change.** `Forward`'s reason lane is an enum, `Unpriced::{No, Refused,
+Missing}`, one byte per bar as before. When the deadline lookup fails, or
+`path_accepts` says no, `Unpriced::of` asks the new O(1)
+`SliceFacts::refused_within(from, to)`. A refused record anywhere on the
+path charges the absence to the store's refusal. Otherwise the cadence broke with
+nothing refused, and the absence is `Missing`. For the deadline case the range
+checked is the `H` records after the entry. `Forward::was_missing` and the new
+`Edge::missing` name the second kind.
+
+**What did not change, and why.** `Edge::refused` keeps its total, refused
+records plus missing minutes. `cli` persists it in the sweep-evidence row as the
+"unpriceable/refused outcome count", and changing what that stored number means
+is what §3 rule 8 forbids. Its doc now says what it counts, and that
+`refused - missing` is the refused records. `missing` is not persisted. It is
+derived again on every run. No existing output changes.
+
+**Tests.** `a_missing_minute_is_named_missing_and_never_a_refused_record`
+removes one bar mid-session and requires every entry whose window needed it to
+be absent, unpriceable and missing, with `Edge::missing == Edge::refused`.
+`a_refused_record_is_never_named_missing` covers a `Candle::check` refusal
+(`missing == 0`) and a path holding both kinds, where the refusal is named.
+`the_tail_and_an_index_past_the_slice_are_neither` covers the tail and
+out-of-range indices. These tests did not compile on the previous tree: neither
+`was_missing` nor `Edge::missing` existed, and nothing could tell the two
+absences apart.
+
+### D-1177 — The forced-close day map is pre-sized from an exact upper bound — 2026-10-02
+
+**What was wrong (audit o1runner-8).** `SessionBounds::with_step` built its
+per-day map of 15:09 records with `HashMap::new()` and let it grow by
+resizing. That is against docs/07 law 2 ("pre-size every map"), which gate 11
+rule 3 enforces. `outcome.rs` was on that rule's allowlist for this one line.
+The `proved` set beside it was collected from an iterator whose lower size hint
+is zero, so it also grew from empty.
+
+**The change.** One pass first counts the whole-minute 15:09 records. Each map
+entry is a distinct IST day that has such a record, so that count is an exact
+upper bound, and the map is reserved at it. The reservation can never be too
+small, whatever the slice's shape. The suggested `bars.len() / 375 + 1` would
+under-reserve on a coarse rung, a single session or a slice of only 15:09 rows,
+and reserving `bars.len()` would reserve a million entries for a few hundred
+days. `proved` is reserved at `required.len()`, its own exact bound, and
+extended. The extra pass costs two integer tests per bar, once per slice.
+
+**Outputs.** Unchanged. `a_slice_of_only_forced_close_rows_proves_each_lone_day`
+pins the answers on the shape a per-375 bound under-reserves: 1,000 lone 15:09
+rows each prove their day, and a duplicated one proves nothing.
+`the_forced_close_map_is_pre_sized_from_its_exact_bound` fails on the previous
+tree (`HashMap::new()`). **Reported, not edited:** gate 11 rule 3's allowlist
+entry `crates/runner/src/outcome.rs 1` in `ci.yml` no longer matches, and the
+gate will warn that it is loose. Removing it is a `ci.yml` edit for the lane
+that owns that file.
+
+### D-1178 — The asymmetry and path keys are read on the side the combination is traded — 2026-10-02
+
+**What was wrong (audit AC-whp-cx-1).** `Edge::payoff_bp` was fixed to read its
+side from `mean_paisa < 0`, the same rule `cli::side_of_evidence` uses to trade
+a combination short. The two sibling keys that the other two lenses rank on were
+not fixed. `worst_reward_risk_bp` (`Lens::Asymmetry`, D-0593) always divided
+`min_win_paisa`, the smallest UP move, by `max_loss_paisa`, the largest DOWN
+move. `path_ratio_bp` (`Lens::Path`) always divided the up excursion by the down
+one. For a combination traded short these are the long's figures. An ideal
+short, with every move down, scored 0 on asymmetry and near 0 on path, and was
+cut. `ByAsymmetry` then broke ties on `max_win_paisa`, which for a short is its
+worst loss. The audit's worked example, moves of [-300, -300, -300, +10],
+scored 3 bp where the short's true figure is 3000 bp.
+
+**The change.** `Edge` gains `min_loss_paisa`, the smallest losing move's
+magnitude (a short's smallest win). `Sides` tracks it beside the other extrema,
+and like them it is not persisted. When `mean_paisa < 0`:
+
+* `worst_reward_risk_bp` is `min_loss_paisa / max_win_paisa`;
+* `path_ratio_bp` is `adverse_sum / favourable_sum`;
+* the new `largest_gain_paisa` is `max_loss_paisa`. `ByAsymmetry` breaks ties on
+  it, and it reads `max_win_paisa` for a long, as before.
+
+A zero or positive mean reads exactly as before.
+
+**Outputs that change.** Asymmetry and path scores, and therefore the
+`Lens::Asymmetry` and `Lens::Path` orders, for every combination with a negative
+mean. Long-side combinations are unchanged. The persisted sweep-evidence row
+carries neither key, so no stored value changes.
+
+**Tests.** `a_short_is_scored_on_the_moves_that_go_its_way` covers the worked
+example (3000 and 9000 bp), its mirror traded long (equal scores), the
+always-down short (unbounded on both) and a flat sample (the floor).
+`the_asymmetry_tie_break_reads_the_traded_side` covers two never-gave-back
+shorts tied at `i64::MAX`: the one paying 1,000 must lead the one paying 100,
+although its `|t|` is smaller. `min_loss_paisa` did not exist on the previous
+tree, so these do not compile there. Read on that tree, the example's path
+ratio is 10/900 = 1 bp.
+
+### D-1179 — A path's first refused bar is located, not only counted; the grid half is handed to `grid.rs`'s owner — 2026-10-02
+
+**What was wrong (audit W3-runner2-7).** `crossings_with` walks every candidate
+to its time exit, and `admit` adds one to `refused` for a refused bar wherever it
+sits. `grid::blocks_without_pricing` then runs
+`if c.block_only || c.cross.refused() > 0 { *open_until = Some(c.time_exit); return true; }`
+for every variant, without comparing the variant's exit offset with where the
+hole is. A refused bar AFTER a stop, target or trail had already fired therefore
+un-priced that variant's trade, and blocked the position to the time exit
+although it had closed. That is look-ahead in the refusal: a bar after the exit
+decided whether the exit counted.
+
+**What this lane changed.** `Crossings` now records `first_refused`, the
+OFFSET of the first refused bar, and exposes it as `Crossings::first_refused()`.
+Every crossing at an offset strictly before it was read off accepted bars only.
+`a_hole_after_a_level_exit_is_located_not_merely_counted` covers a stop at
+offset 1 with a hole at 3, two holes (the first is named), none (`None`), a
+non-positive entry (counts and locates nothing) and a walk that does not start
+at zero (an offset, not an index). Nothing that prices a trade reads the new
+accessor yet, so no output changes.
+
+**What remains, and why it is not done here.** The decision that consumes it is
+in `crates/runner/src/grid.rs`, which another lane owns. The change it needs is
+in `blocks_without_pricing` and its caller in `one_variant`. Refuse the variant
+only when its pessimistic exit offset, `span.min(stop_at).min(target_at)…`, is
+at or after `c.cross.first_refused()`. Block to `time_exit` only in that case,
+and otherwise price the trade and block to its own exit. Until that lands, the
+defect is live and its effect is unchanged. A refused bar after a level exit
+still un-prices that variant and blocks to the time exit. The direction is
+conservative: it refuses trades, it never invents one. This lane did not edit
+`grid.rs`.
+
+### D-1180 — `walk`'s cost paragraph names the fill calls the walk makes — 2026-10-02
+
+**What was wrong (audit ET-strategies-trades-ranking-costs-8).** The `# Cost`
+section of `runner::trade::walk` said each signal costs "two `costs::fill::Bar`
+constructions and two `worst_case_fills`". Nothing in `crates/runner` calls
+`worst_case_fills`. `round_trip` builds two `FillBar`s and calls
+`costs::fill::fills_at` twice, once at `Anchor::Open` and once at
+`Anchor::PrintedExtreme`. A signal whose exit cannot be priced also calls
+`entry_is_priceable`, which costs one more `FillBar` and two more `fills_at`.
+The paragraph also left out the `SliceFacts::at_timestamp` probe in
+`horizon_bar`. That probe is a `HashMap` lookup, so it is expected O(1), not
+worst-case O(1). `CLAUDE.md` §3 rule 6 asks for that distinction to be stated.
+
+**Change.** Documentation only. The paragraph now names those calls and the
+hash probe's expected bound. No code path and no output changes.
+`the_walk_cost_paragraph_names_the_calls_the_walk_makes` reads the paragraph and
+fails if the stale call returns. It also counts the `FillBar::new` and
+`fills_at` calls in `round_trip` and the `.at_timestamp(` probe in
+`horizon_bar`, so the doc and the code cannot drift apart unnoticed. The test
+fails on the previous text.
+
+### D-1181 — `SliceFacts` is rebuilt per candidate on the grid entry points, and §113 says so — 2026-10-02
+
+**What was wrong (audit W3-runner4-0).** `docs/06-limits.md` §113 said the
+`SliceFacts` preparation costs "are per-slice costs, not per-candidate costs".
+`runner::grid` calls `SliceFacts::of(bars, column)` inside `evaluate`,
+`evaluate_with`, `evaluate_families`, `evaluate_resolved_policy_v1`,
+`evaluate_resolved_expression_policy_v1`, `materialize_expression_cell` and
+`replay_universe_v1`. Their callers in `expression_execution`,
+`expression_oos`, `exit_grid_policy`, `validate` and `cli::candidate_trades`
+call them once per candidate. Every candidate therefore pays the O(B)
+acceptance copy, prefix tables, timestamp map and square-off table.
+
+**Change.** Documentation only. §113 now limits its claim to callers that hoist
+`SliceFacts`, and the D-1170-onward section of `docs/06-limits.md` lists the
+entry points that do not. The code fix is to take `&SliceFacts` from the caller,
+in `crates/runner/src/grid.rs`. Another lane owns that file, so it is handed
+over rather than made here. No output changes. Nothing is timed.
+
+### D-1182 — The signal-sourced cadence look-ahead is pinned by a test and stated as a limit — 2026-10-02
+
+**What was wrong (audit ET-strategies-trades-ranking-costs-0).** For a
+`Sourced::Signal` column, `SliceFacts::of` sets the walk's step to
+`median_step_micros_over` the whole slice. That step decides whether a signal's
+next bar is "immediate" and where its horizon deadline falls. Bars after a
+signal can therefore change whether that signal trades. `CLAUDE.md` §3 rule 7
+says the engine may read bars `0..N` at bar N.
+
+**Measured, not argued.**
+`runner::trade::tests::a_signal_sourced_cadence_is_read_from_bars_after_the_signal`
+builds twenty synthetic sessions. It keeps six dense and thins the fourteen
+after them to two minutes. On their own, the six sessions have a 60 s step and
+trade. With the later sessions appended, the step is 120 s and every signal
+before the split is refused. The test asserts that behaviour so the defect
+cannot be forgotten. When a fix lands, the test must be inverted. It does not
+specify correct behaviour.
+
+**Why it is deferred.** The fix is a cadence supplied by the caller, for example
+from the rung's declared timeframe, instead of one inferred from the slice. That
+changes the signatures `grid` and `cli` call, and `grid.rs` belongs to another
+lane. `Sourced::Fill` columns use the fixed execution minute and do not read the
+median. The comments in `walk_core` say shipping one-minute paths are
+reprojected to `Fill`. This lane did not re-check every caller to confirm that,
+so the exposure of shipping runs is UNVERIFIED. No output changes.
+
+### D-1183 — A grid variant is un-priced only by a hole at or before its own exit — 2026-10-02
+
+**Finding.** W3-runner2-7, the grid half D-1179 handed over.
+`grid::blocks_without_pricing` refused a candidate when
+`c.cross.refused() > 0`, a count. A refused bar after a stop, target or trail
+had already closed the position therefore un-priced that variant's trade and
+blocked the next signal to the time exit. A bar after the exit decided whether
+the exit counted.
+
+**The change.** `one_variant` computes the variant's pessimistic exit offset
+`pess_off` first, then asks `blocks_without_pricing(c, pess_off, ..)`. The
+candidate is refused when it is `block_only`, or when `first_refused` is at or
+before `pess_off`. Every crossing strictly before the first hole was read off
+accepted bars only, so the order that fired there is the first that fired. A
+count with no location keeps the conservative refusal. All reads are O(1), and
+the `open_until` test still comes first.
+
+**Output change, and where it reaches.** A variant whose exit precedes a
+refused bar on its path is now priced, and the next signal may open after that
+exit instead of after the time exit. This reaches only a candidate built with
+`block_only: false` and a refused bar on its path. **Every shipping grid builds
+its candidates from `trade::walk_over`'s `occupancy`, and that walk marks a path
+`priceable: false` (so `block_only`) whenever `SliceFacts::path_accepts(entry,
+time_exit)` fails, which any refused bar or missing minute on the path makes it
+do.** So no shipping cell changes. The look-ahead the audit describes is still
+live one step upstream: the walk blocks the whole path for a hole after a level
+exit. Closing that needs `Occupancy` to carry where the hole is, and a
+missing-minute location as well, because `crossings_with` cannot see a missing
+minute. That is a change to the walk's output and to every grid built on it. It
+is recorded in `docs/06-limits.md` and not made here.
+
+**Test.** `a_hole_after_a_level_exit_leaves_that_exit_priced`: a stop at offset
+1 with a refused bar at 3 is priced; the time-exit variant and a hole on the
+stop bar are not. With the old count test the first assertion fails.
+
+### D-1184 — The remaining per-candidate replays reuse one `SliceFacts` per slice — 2026-10-02
+
+**Finding.** W3-runner4-0, the code half D-1181 handed over. D-1141, D-1145 and
+D-1146 had already moved the resolved-policy doors, the walk-forward OOS pass
+and the in-sample walk onto hoisted facts. This entry closes the per-candidate
+callers that still rebuilt `SliceFacts::of(bars, column)`, an O(B) value, on
+every call:
+
+* `grid::replay_universe_v1` built facts per call, and the V4 anchored-search
+  OOS loop calls it once per pending candidate through
+  `ResolvedExitGridV1::replay_selected`. It now takes `facts`. The loop builds
+  `SliceFacts::of(trade_test, &projected_oos)` once per fold, beside the
+  digests D-1143 hoisted, and calls the new crate-visible
+  `replay_selected_over`. A hoisted value that does not cover the OOS series is
+  refused, never replaced by a fresh build. The public `replay_selected` and
+  `replay_selected_universe` still build their own.
+* `EvaluatedExpressionOosV1::materialize(ordinal)` called
+  `materialize_expression_cell`, which built facts per ordinal. The later
+  result now keeps the facts it priced its grid with and materialises over them.
+* `cli::candidate_trades::Capture::materialize` called `materialize_cell` /
+  `materialize_expression_cell` per captured candidate. The capture now builds
+  its facts on first use (`OnceLock`) and passes them to the new public
+  `grid::materialize_cell_over` and the now-public
+  `grid::materialize_expression_cell_over`.
+* `cli`'s `consistency_of` called `grid::per_trade` once per screened row. It
+  now takes the `facts_again` its caller already built and calls the new
+  `grid::per_trade_over`.
+
+`evaluate`, `evaluate_with`, `evaluate_families`, `materialize_cell`,
+`materialize_expression_cell`, `per_trade` and `with_levels` keep their
+signatures and still build facts per call. They are one-shot doors. Every loop
+named above now uses an `_over` form. `cli::institutional_evidence::from_exact_replay`
+still calls `materialize_cell`; nothing in the workspace calls it.
+
+**No output changes.** The facts are a pure function of the bars and the column,
+so every grid, cell, row and digest is byte-identical.
+`the_hoisted_replay_doors_equal_the_per_call_doors` compares the new doors
+with the old ones. `the_per_candidate_replays_reuse_one_slice_facts_per_slice`
+and `cli::candidate_trades::tests::materialisation_reuses_one_slice_facts_per_capture`
+are source-shape tests and fail on the previous tree.
+
+### D-1185 — A training fold's forward returns read the facts its candidate loop shares — 2026-10-02
+
+**Finding.** o1runner-5 (`docs` audit of 2 October 2026). `walk_forward_core`
+builds `SliceFacts::of(trade_train, train_column)` once per fold for its
+candidate loop, then called `outcome::forward(trade_train, train_column,
+horizon)`, which built the same facts again on entry. That is one extra O(B)
+build per fold: the acceptance copy, two prefix tables, the timestamp map, the
+square-off table and the cadence pass.
+
+**The change.** New `outcome::forward_over(bars, horizon, &facts)`. `forward`
+is now `forward_over` over facts it builds, and the fold passes its own. Facts
+whose verdict does not cover `bars` price nothing: every outcome is absent and
+refused.
+
+**No output changes.** `forward_over_hoisted_facts_is_forward` compares the two
+`Forward`s field for field at three horizons and checks the non-covering case.
+`the_training_fold_builds_its_slice_facts_once` is a source-shape test and fails
+on the previous tree.
+
+### D-1186 — The walk-forward OOS pass walks from the first row that can fire — 2026-10-02
+
+**Findings.** W3-runner5-3, and the walk half of W3-runner5-0.
+`walk_forward_core`'s OOS pass re-priced every scored candidate with
+`with_levels_over` on a column that runs from row 0 to the end of the test
+window. `restricted` blanks the training rows rather than cutting them, so that
+`sources` keep their meaning. Every candidate's walk therefore visited every
+training row only to find it could not fire: O(prefix rows) per candidate where
+O(test rows) was needed. The same held for the chosen candidate's level-less
+`walk_over`.
+
+**The change.** New `trade::walk_over_from(.., first_row)` starts the walk at a
+column row. Earlier rows are not visited, and every recorded index is still a
+slice index. `walk_over` is `walk_over_from(.., 0)`. New crate-visible
+`grid::with_levels_over_from` is `with_levels_over` over that walk. The OOS pass
+finds the first row with a set bit once per fold, a single linear scan, and
+starts each candidate there. A row whose bits are all zero cannot hit a mask
+with a bit set, so those answers are unchanged. The empty mask does hit a blank
+row, so it keeps row 0 and its answer is unchanged too.
+
+**W3-runner5-0's walk half needs no change.** The V4 anchored-search OOS replay
+walks `project_oos_fold`'s column, which drops every pre-OOS row, so its walk
+was already O(OOS rows). D-1184's `docs/06-limits.md` entry corrects the
+D-1143 bullet that said otherwise.
+
+**No output changes.** `a_walk_from_the_first_live_row_equals_the_full_walk`
+compares the two walks for every single-bit mask on both sides over a column
+whose first half is blanked. It also shows the empty mask differs when started
+late, and that a start past the column walks nothing.
+`the_oos_pass_walks_from_the_first_live_row` is a source-shape test and fails
+on the previous tree.
+
+### D-1188 — A Boolean later-period run checks, hashes and fold-indexes its later series once — 2026-10-02
+
+**Finding.** o1runner-2. `cli::boolean_oos_v1::compute` prices every training
+program on both sides over one later series and column. For each program and
+side, `evaluate_expression_oos` re-validated every bar, recounted the column's
+acceptance, rechecked every source, rescanned the price extremes for the
+arithmetic envelope, BLAKE3-hashed the series and the column, and rebuilt
+`SliceFacts`. `FixedTrainingFoldPlanV1::bind` then re-indexed every later bar
+into its fold. None of that depends on the program or the side: O(B + R) per
+program and side for one answer.
+
+**The change.**
+* New `LaterExpressionSliceV1::new(series, column)` takes every series-level
+  verdict once and keeps it as found: bar validation, complete acceptance,
+  source order, the envelope's two price extremes, the execution digest, the
+  column digest and one shared `SliceFacts`. Its fields are private and its one
+  constructor reads the real bars. New
+  `ResearchResolvedExitGridV1::evaluate_expression_oos_on(anchor, &later, run)`
+  checks in exactly the order `evaluate_expression_oos` did and reads each
+  stored verdict at the position the per-call check had. A multi-fault input
+  therefore reports the same refusal. `evaluate_expression_oos` is now
+  `_on` over a slice it builds.
+* `exit_grid_policy::validate_arithmetic_envelope_view` is split into
+  `envelope_extremes` (the O(B) scan) and `validate_envelope_extremes` (the
+  per-resolution bounds). The refusal order is unchanged.
+* New `LaterFoldMapV1::new(windows, bars, column, cap)` indexes the later bars
+  once. New `FixedTrainingFoldPlanV1::bind_with(later, &map, cap)` refuses
+  foreign authority, then the byte cap, then a map built over other bars, another
+  column or another partition (pointer identity and window equality). It then
+  reports whatever the indexing found, so the refusals and their order are
+  `bind`'s. The bound mapping borrows the map instead of copying it.
+* `cli::boolean_oos_v1::compute` builds one slice and one map before its loop.
+
+**No output changes.** Every later digest, grid, summary, materialised row,
+fold mapping and session count is byte-identical.
+`one_later_slice_prices_every_program_as_the_per_call_path_does` compares both
+paths for three programs on both sides, ordinal by ordinal. It also compares
+their refusals for an overlapping series and for a column that does not cover
+the bars. `one_fold_map_binds_every_program_exactly_as_bind_does` compares
+mappings, session counts, the cap refusal at the boundary byte and the
+empty-fold refusal, and refuses a map for another partition or other bars.
+`cli`'s `the_later_loop_attests_its_slice_and_fold_index_once` is a
+source-shape test and fails on the previous tree.
+
+**What is still per program and side.** The program's own truth summary and
+support sessions, the exact grid and its seal, and the per-resolution envelope
+bounds. These depend on the program or the resolution.
+
+
+### D-1189 — Gate 11's outcome.rs and excursion.rs rows are tightened to the code — 2026-10-02
+
+**Finding.** Three gate 11 entries in `.github/workflows/ci.yml` no longer
+described the code they allow:
+
+* Rule 2 allowed `crates/runner/src/outcome.rs` 29 floats. The rule's own count
+  is 26, so the allowance had room for three new float sites nobody had read.
+* Rule 3 allowed `crates/runner/src/outcome.rs` one unsized map, as a SHAPE 3
+  row keyed by IST session day. D-1177 pre-sizes that map from an exact count
+  and the proved-day set from `required.len()`, so the file has no unsized map.
+  The gate printed the row as loose.
+* Rule 4's comment called `crates/runner/src/excursion.rs` "ONE sort" over
+  integer basis points. D-1172 replaced the sort with nested
+  `select_nth_unstable` calls over `Ppm` (parts per million), expected O(n) per
+  ladder, which leave the slice permuted rather than sorted.
+
+**Decision.** Set the rule 2 count to 26 and record the change as a tightening.
+Delete the rule 3 row and its SHAPE 3 sentence, and say why where the list
+ends. Rewrite the rule 4 comment to describe the selection. The rule 4 count
+stays 1, because the rule's pattern matches the selection's spelling.
+
+**Verified.** The gate 11 `run:` block was extracted to a script, its walk
+limited to `crates/runner/*.rs` and `crates/cli/*.rs`, and run on this tree. It
+reports `outcome.rs — 26 of 26` for rule 2, no rule 3 row for `outcome.rs`, and
+"OK — no banned construct outside the allowlist", with no REFUSED or STALE line.
+That run is not the whole-workspace gate. Rows for other crates print as loose
+in it only because their files were not walked.
+
+**Honest limit.** Under `mawk 1.3.4` in this container, the step's rule-5 lint
+scan ran more than 15 minutes without finishing. That scan strips a prefix with
+`sub("^" p ":" n ":", ...)`, which builds a regex for every line of a 240k-line
+scope file. The local run therefore used a copy that strips the same prefix
+with `substr`, which removes the same characters, and it finished in seconds.
+The checked-in gate is unchanged. Whether the CI runner's awk is affected was
+not measured.

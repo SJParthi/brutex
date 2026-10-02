@@ -545,8 +545,9 @@ impl Ord for ByAsymmetry {
     /// preferring the one whose wins are *smaller and more uniform*, which is
     /// the opposite of the question being asked.
     ///
-    /// `max_win_paisa` breaks that tie on the thing the operator is hunting —
-    /// how much it pays when it pays — and `|t|` remains the LAST term so the
+    /// `Edge::largest_gain_paisa` breaks that tie on the thing the operator is
+    /// hunting — how much it pays when it pays, on the side it is traded
+    /// (D-1178) — and `|t|` remains the LAST term so the
     /// order is still total and reproducible under §3 rule 5.
     fn cmp(&self, other: &Self) -> Ordering {
         let (mine, theirs) = (
@@ -557,8 +558,8 @@ impl Ord for ByAsymmetry {
             .then_with(|| {
                 self.0
                     .edge
-                    .max_win_paisa
-                    .total_cmp(&other.0.edge.max_win_paisa)
+                    .largest_gain_paisa()
+                    .total_cmp(&other.0.edge.largest_gain_paisa())
             })
             .then_with(|| self.0.cmp(&other.0))
     }
@@ -1292,6 +1293,119 @@ mod tests {
             never_won.worst_reward_risk_bp(),
             0,
             "nothing won is the floor -- it is not asymmetric, it is absent"
+        );
+    }
+
+    /// AC-whp-cx-1: the asymmetry and path keys are read on the side the
+    /// combination is TRADED. A combination whose mean is negative is traded
+    /// short, so its wins are the down moves.
+    ///
+    /// The audit's worked example: moves of [-300, -300, -300, +10]. As a short
+    /// the smallest win is 300 and the largest give-back 10, so 3000 bp. Read
+    /// long it scored 10/300 = 3 bp, near the floor.
+    #[test]
+    fn a_short_is_scored_on_the_moves_that_go_its_way() {
+        let short = Edge {
+            n: 4,
+            mean_paisa: -222.5,
+            wins: 1,
+            win_sum: 10.0,
+            losses: 3,
+            loss_sum: -900.0,
+            min_win_paisa: 10.0,
+            max_win_paisa: 10.0,
+            max_loss_paisa: 300.0,
+            min_loss_paisa: 300.0,
+            adverse_sum: 900.0,
+            favourable_sum: 10.0,
+            t: -3.0,
+            ..Edge::default()
+        };
+        assert_eq!(short.worst_reward_risk_bp(), 3_000, "300 over 10 is 30.00x");
+        assert_eq!(
+            short.path_ratio_bp(),
+            9_000,
+            "900 down over 10 up is 90.00x"
+        );
+        assert_eq!(short.largest_gain_paisa().to_bits(), 300.0_f64.to_bits());
+
+        // THE MIRROR: the same moves negated, traded long, scores the same.
+        let long = Edge {
+            mean_paisa: 222.5,
+            wins: 3,
+            win_sum: 900.0,
+            losses: 1,
+            loss_sum: -10.0,
+            min_win_paisa: 300.0,
+            max_win_paisa: 300.0,
+            max_loss_paisa: 10.0,
+            min_loss_paisa: 10.0,
+            adverse_sum: 10.0,
+            favourable_sum: 900.0,
+            t: 3.0,
+            ..short
+        };
+        assert_eq!(long.worst_reward_risk_bp(), short.worst_reward_risk_bp());
+        assert_eq!(long.path_ratio_bp(), short.path_ratio_bp());
+        assert_eq!(
+            long.largest_gain_paisa().to_bits(),
+            short.largest_gain_paisa().to_bits()
+        );
+
+        // THE IDEAL SHORT: every move down. It never gave anything back, so it
+        // is unbounded, not the floor it scored when read long.
+        let always_down = Edge {
+            n: 3,
+            mean_paisa: -50.0,
+            losses: 3,
+            loss_sum: -150.0,
+            min_loss_paisa: 40.0,
+            max_loss_paisa: 60.0,
+            adverse_sum: 150.0,
+            ..Edge::default()
+        };
+        assert_eq!(always_down.worst_reward_risk_bp(), i64::MAX);
+        assert_eq!(always_down.path_ratio_bp(), i64::MAX);
+
+        // A flat sample has a zero mean, is read long, and scores the floor on
+        // both keys.
+        let flat = Edge {
+            n: 2,
+            ..Edge::default()
+        };
+        assert_eq!((flat.worst_reward_risk_bp(), flat.path_ratio_bp()), (0, 0));
+    }
+
+    /// The asymmetry lens breaks ties on the largest move IN THE TRADED
+    /// DIRECTION. Two shorts that never gave anything back tie at `i64::MAX`;
+    /// the one whose largest down move is bigger pays more and comes first,
+    /// even when its `|t|` is smaller. It read `max_win_paisa`, a short's worst
+    /// loss, which is zero for both, so `|t|` decided.
+    #[test]
+    fn the_asymmetry_tie_break_reads_the_traded_side() {
+        let big = Edge {
+            n: 5,
+            mean_paisa: -300.0,
+            losses: 5,
+            min_loss_paisa: 50.0,
+            max_loss_paisa: 1_000.0,
+            t: -1.5,
+            ..Edge::default()
+        };
+        let small = Edge {
+            max_loss_paisa: 100.0,
+            t: -9.0,
+            ..big
+        };
+        assert_eq!(big.worst_reward_risk_bp(), small.worst_reward_risk_bp());
+        let (b, s) = (shaped(1, big), shaped(2, small));
+        assert!(
+            s > b,
+            "on |t| alone the small payer leads -- the case this is about"
+        );
+        assert!(
+            ByAsymmetry(b) > ByAsymmetry(s),
+            "the short that pays 1,000 when it pays must come first"
         );
     }
 }

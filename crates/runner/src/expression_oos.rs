@@ -104,6 +104,59 @@ pub struct EvaluatedExpressionOosV1<'a> {
     support_sessions: u64,
     digest: [u8; 32],
     refusals: Vec<super::super::ExecutionRefusalBitsV1>,
+    /// The later slice's facts, built once in `evaluate_expression_oos` and
+    /// reused by every [`Self::materialize`] (D-1184). They are a function of
+    /// `bars` and `column`, both borrowed immutably for this value's life.
+    facts: std::sync::Arc<crate::trade::SliceFacts>,
+}
+
+/// One later execution series and its column, checked, hashed and indexed ONCE
+/// for every program and side priced on it (D-1188, audit o1runner-2).
+///
+/// `cli`'s Boolean later-period loop prices every program on both sides over
+/// the same series and column. Each call re-validated every bar, recounted the
+/// acceptance verdict, rechecked every source, rescanned the price extremes,
+/// re-hashed the series and the column, and rebuilt [`crate::trade::SliceFacts`]:
+/// O(B + R) per program and side for facts that depend on neither. This holds
+/// each verdict as it was found, so
+/// [`ResearchResolvedExitGridV1::evaluate_expression_oos_on`] reports exactly
+/// the refusal, in exactly the order, the per-call path reported.
+///
+/// Fields are private and the one constructor reads the real bars and column,
+/// so a verdict or digest cannot be supplied from elsewhere.
+pub struct LaterExpressionSliceV1<'a> {
+    series: super::super::ExecutionSeriesV1<'a>,
+    column: &'a Column,
+    bars_valid: Result<(), super::super::ExitGridErrorV1>,
+    acceptance: Result<(), super::super::ExitGridErrorV1>,
+    sources: Result<(), super::super::ExitGridErrorV1>,
+    extremes: Result<(i64, i64), super::super::ExitGridErrorV1>,
+    execution: [u8; 32],
+    column_digest: [u8; 32],
+    facts: std::sync::Arc<crate::trade::SliceFacts>,
+}
+impl<'a> LaterExpressionSliceV1<'a> {
+    /// Check, hash and index one later series and column once.
+    ///
+    /// # Cost
+    ///
+    /// O(B + R) time for B bars and R column rows, and the O(B) memory of one
+    /// `SliceFacts`, whatever is later priced on it. Not timed.
+    #[must_use]
+    pub fn new(series: super::super::ExecutionSeriesV1<'a>, column: &'a Column) -> Self {
+        let bars = series.bars();
+        Self {
+            series,
+            column,
+            bars_valid: super::super::validate_execution_bars(bars),
+            acceptance: super::super::require_complete_acceptance(column, bars.len()),
+            sources: super::super::validate_column_sources(column, bars.len(), 0),
+            extremes: super::super::envelope_extremes(bars),
+            execution: crate::identity::data_digest(bars),
+            column_digest: super::super::digest_column(column),
+            facts: std::sync::Arc::new(crate::trade::SliceFacts::of(bars, column)),
+        }
+    }
 }
 impl EvaluatedExpressionOosV1<'_> {
     /// Identity of the complete later program, source, frozen grid and measured cells.
@@ -145,7 +198,9 @@ impl EvaluatedExpressionOosV1<'_> {
             .cells
             .get(ordinal)
             .ok_or("later expression coordinate absent")?;
-        crate::grid::materialize_expression_cell(
+        // Over the facts built once with the grid (D-1184): one per ordinal
+        // was an O(B) rebuild per materialised coordinate.
+        crate::grid::materialize_expression_cell_over(
             self.bars,
             self.column,
             self.anchor.program(),
@@ -153,6 +208,7 @@ impl EvaluatedExpressionOosV1<'_> {
             self.side,
             &self.grid,
             cell,
+            &self.facts,
         )
     }
 }
@@ -171,6 +227,24 @@ impl ResearchResolvedExitGridV1 {
         column: &'a Column,
         run: &ExpressionExecutionRunV1,
     ) -> Result<EvaluatedExpressionOosV1<'a>, String> {
+        self.evaluate_expression_oos_on(anchor, &LaterExpressionSliceV1::new(series, column), run)
+    }
+
+    /// [`Self::evaluate_expression_oos`] over a later slice checked, hashed and
+    /// indexed once for every program and side priced on it (D-1188).
+    ///
+    /// Every refusal is the one `evaluate_expression_oos` reports, in the same
+    /// order: the slice's own verdicts were taken when it was built and are
+    /// read here at the position the per-call check had.
+    /// # Errors
+    /// As [`Self::evaluate_expression_oos`].
+    pub fn evaluate_expression_oos_on<'a>(
+        &self,
+        anchor: &ExpressionTrainingAnchorV1,
+        later: &LaterExpressionSliceV1<'a>,
+        run: &ExpressionExecutionRunV1,
+    ) -> Result<EvaluatedExpressionOosV1<'a>, String> {
+        let (series, column) = (later.series, later.column);
         let view = self.view();
         view.require_runtime_integrity().map_err(super::display)?;
         view.require_matching_series(series)
@@ -185,7 +259,7 @@ impl ResearchResolvedExitGridV1 {
             );
         }
         let bars = series.bars();
-        super::super::validate_execution_bars(bars).map_err(super::display)?;
+        later.bars_valid.clone().map_err(super::display)?;
         let first = bars
             .first()
             .ok_or("later expression execution is empty")?
@@ -196,13 +270,14 @@ impl ResearchResolvedExitGridV1 {
         {
             return Err("later expression requires a strictly later actual IST session".into());
         }
-        super::super::require_complete_acceptance(column, bars.len()).map_err(super::display)?;
-        super::super::validate_column_sources(column, bars.len(), 0).map_err(super::display)?;
+        later.acceptance.clone().map_err(super::display)?;
+        later.sources.clone().map_err(super::display)?;
         if column.is_empty() {
             return Err("later expression has no warm reachable signal rows".into());
         }
-        super::super::validate_arithmetic_envelope_view(bars, &view).map_err(super::display)?;
-        let execution = crate::identity::data_digest(bars);
+        super::super::validate_envelope_extremes(bars.len(), later.extremes.clone(), &view)
+            .map_err(super::display)?;
+        let execution = later.execution;
         run.source
             .require_matches_terms(
                 &view.instrument,
@@ -212,6 +287,7 @@ impl ResearchResolvedExitGridV1 {
                 view.side(),
             )
             .map_err(super::display)?;
+        let facts = std::sync::Arc::clone(&later.facts);
         let grid = crate::grid::evaluate_resolved_expression_policy_v1(
             bars,
             column,
@@ -219,7 +295,7 @@ impl ResearchResolvedExitGridV1 {
             anchor.horizon,
             view.side(),
             &view,
-            &crate::trade::SliceFacts::of(bars, column),
+            &facts,
         )?;
         view.validate_complete_grid(&grid).map_err(super::display)?;
         let (summary, support_sessions) = summarize(column, bars, anchor.program())?;
@@ -229,7 +305,7 @@ impl ResearchResolvedExitGridV1 {
         let digest = seal(
             anchor,
             run,
-            column,
+            later.column_digest,
             execution,
             &grid,
             summary,
@@ -255,6 +331,7 @@ impl ResearchResolvedExitGridV1 {
             support_sessions,
             digest,
             refusals,
+            facts,
         })
     }
 }
@@ -287,7 +364,7 @@ fn summarize(
 fn seal(
     anchor: &ExpressionTrainingAnchorV1,
     run: &ExpressionExecutionRunV1,
-    column: &Column,
+    column_digest: [u8; 32],
     execution: [u8; 32],
     grid: &Grid,
     summary: Summary,
@@ -299,7 +376,7 @@ fn seal(
         anchor.digest(),
         run.run_id().bytes(),
         execution,
-        super::super::digest_column(column),
+        column_digest,
     ] {
         h.update(&value);
     }

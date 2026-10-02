@@ -2581,7 +2581,37 @@ impl ResolvedExitGridV1 {
         selected: &SelectedExitV1,
         oos_run: ExecutionRunV1,
     ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
-        let universe = self.replay_selected_universe(oos, column, selected, oos_run)?;
+        self.replay_selected_with(oos, column, selected, oos_run, None)
+    }
+
+    /// [`Self::replay_selected`] over OOS slice facts the caller built once for
+    /// many candidates (D-1184).
+    ///
+    /// `facts` must be `SliceFacts::of(oos.series().bars(), column)`. A value
+    /// that does not cover the series is refused as a series mismatch rather
+    /// than substituted. Crate-visible only, like `materialize_expression_cell_over`:
+    /// the V4 OOS loop is its one caller, and it builds the facts from the
+    /// exact pair it passes here.
+    pub(crate) fn replay_selected_over(
+        &self,
+        oos: OosExecutionSeriesV1<'_>,
+        column: &indicators::column::Column,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+        facts: &crate::trade::SliceFacts,
+    ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
+        self.replay_selected_with(oos, column, selected, oos_run, Some(facts))
+    }
+
+    fn replay_selected_with(
+        &self,
+        oos: OosExecutionSeriesV1<'_>,
+        column: &indicators::column::Column,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+        facts: Option<&crate::trade::SliceFacts>,
+    ) -> Result<ReplayedExitV1, ExitGridErrorV1> {
+        let universe = self.replay_selected_universe_with(oos, column, selected, oos_run, facts)?;
         universe.require_integrity()?;
         if universe.pricing_refused_paths != 0 {
             return Err(ExitGridErrorV1::RefusedExecutionPaths {
@@ -2647,6 +2677,17 @@ impl ResolvedExitGridV1 {
         selected: &SelectedExitV1,
         oos_run: ExecutionRunV1,
     ) -> Result<ReplayedCandidateUniverseV1, ExitGridErrorV1> {
+        self.replay_selected_universe_with(oos, column, selected, oos_run, None)
+    }
+
+    fn replay_selected_universe_with(
+        &self,
+        oos: OosExecutionSeriesV1<'_>,
+        column: &indicators::column::Column,
+        selected: &SelectedExitV1,
+        oos_run: ExecutionRunV1,
+        hoisted: Option<&crate::trade::SliceFacts>,
+    ) -> Result<ReplayedCandidateUniverseV1, ExitGridErrorV1> {
         self.require_runtime_integrity()?;
         if selected.resolution_digest != self.digest
             || selected.side != self.side()
@@ -2703,6 +2744,21 @@ impl ResolvedExitGridV1 {
             return Err(ExitGridErrorV1::InvalidChosenCoordinate);
         }
         let ladders = self.ladders()?;
+        // BORROWED WHERE THE CALLER HOISTED THEM, BUILT HERE OTHERWISE (D-1184).
+        // A hoisted value that does not cover these bars is refused, never
+        // replaced by a fresh build.
+        let owned;
+        let facts = if let Some(facts) = hoisted {
+            if !facts.covers(bars) {
+                return Err(ExitGridErrorV1::RunIdentityMismatch(
+                    "hoisted OOS slice facts do not cover the OOS series",
+                ));
+            }
+            facts
+        } else {
+            owned = crate::trade::SliceFacts::of(bars, column);
+            &owned
+        };
         let replay = crate::grid::replay_universe_v1(
             bars,
             column,
@@ -2711,6 +2767,7 @@ impl ResolvedExitGridV1 {
             selected.side,
             ladders.borrowed(),
             selected.coordinate,
+            facts,
         )?;
         let cell = replay.cell;
         let oos_data_digest = crate::identity::data_digest(bars);
@@ -3951,8 +4008,13 @@ fn validate_arithmetic_envelope_view(
     bars: &[Candle],
     resolved: &ResolvedGridViewV1<'_>,
 ) -> Result<(), ExitGridErrorV1> {
-    let count = i128::try_from(bars.len())
-        .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;
+    validate_envelope_extremes(bars.len(), envelope_extremes(bars), resolved)
+}
+
+/// The two price extremes the arithmetic envelope reads: the highest high and
+/// the lowest open. One O(B) pass, which a caller pricing many resolutions on
+/// one series takes once (D-1188).
+fn envelope_extremes(bars: &[Candle]) -> Result<(i64, i64), ExitGridErrorV1> {
     let max_price = bars
         .iter()
         .map(|bar| bar.high)
@@ -3963,6 +4025,20 @@ fn validate_arithmetic_envelope_view(
         .map(|bar| bar.open)
         .min()
         .ok_or(ExitGridErrorV1::EmptyExecutionSeries)?;
+    Ok((max_price, min_open))
+}
+
+/// [`validate_arithmetic_envelope_view`] over extremes already taken. The
+/// refusal order is the original's: the bar count, then an empty series, then
+/// each bound in turn.
+fn validate_envelope_extremes(
+    bars: usize,
+    extremes: Result<(i64, i64), ExitGridErrorV1>,
+    resolved: &ResolvedGridViewV1<'_>,
+) -> Result<(), ExitGridErrorV1> {
+    let count = i128::try_from(bars)
+        .map_err(|_| ExitGridErrorV1::ArithmeticEnvelopeExceeded("bar count"))?;
+    let (max_price, min_open) = extremes?;
     let money_bound = i128::from(max_price)
         .checked_mul(count)
         .and_then(|value| value.checked_mul(4))

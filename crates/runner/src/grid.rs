@@ -2676,8 +2676,33 @@ pub fn per_trade(
     ladders: Ladders<'_>,
     variant: Chosen,
 ) -> Option<(Cell, Vec<TradeRow>)> {
+    let facts = crate::trade::SliceFacts::of(bars, column);
+    per_trade_over(bars, column, mask, horizon, side, ladders, variant, &facts)
+}
+
+/// [`per_trade`] over slice facts the caller built once (D-1184).
+///
+/// `per_trade` builds [`crate::trade::SliceFacts`] per call. A report that
+/// replays one variant for each of many rows on one slice builds them once and
+/// passes them here. `facts` must be [`crate::trade::SliceFacts::of`] the same
+/// `bars` and `column`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are per_trade's own"
+)]
+#[must_use]
+pub fn per_trade_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    facts: &crate::trade::SliceFacts,
+) -> Option<(Cell, Vec<TradeRow>)> {
     let mut rows = Vec::new();
-    let cell = levelled(
+    let cell = levelled_over(
         bars,
         column,
         mask,
@@ -2686,6 +2711,7 @@ pub fn per_trade(
         ladders,
         variant,
         Some(&mut rows),
+        facts,
     )
     .cell?;
     Some((cell, rows))
@@ -2749,7 +2775,34 @@ pub fn materialize_cell(
     selected: &Cell,
 ) -> Result<Vec<TradeRow>, String> {
     let facts = crate::trade::SliceFacts::of(bars, column);
-    CellReplay::prepare(bars, column, mask, horizon, side, grid, &facts).materialize(selected)
+    materialize_cell_over(bars, column, mask, horizon, side, grid, selected, &facts)
+}
+
+/// [`materialize_cell`] over slice facts the caller built once (D-1184).
+///
+/// `materialize_cell` builds [`crate::trade::SliceFacts`] per call, an O(B)
+/// value. A caller that materialises one cell for each of many candidates on
+/// one slice builds the facts once and passes them here. `facts` must be
+/// [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
+///
+/// # Errors
+///
+/// The same reconciliation refusals as [`materialize_best`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are materialize_cell's own"
+)]
+pub fn materialize_cell_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    grid: &Grid,
+    selected: &Cell,
+    facts: &crate::trade::SliceFacts,
+) -> Result<Vec<TradeRow>, String> {
+    CellReplay::prepare(bars, column, mask, horizon, side, grid, facts).materialize(selected)
 }
 
 /// [`materialize_cell`] for MANY cells of one grid: the cell-independent work
@@ -2868,12 +2921,18 @@ pub fn materialize_expression_cell(
 /// [`materialize_expression_cell`] over slice facts the caller already holds
 /// -- the attested training token carries them (D-1141), so a per-ordinal
 /// replay no longer rebuilds them. The program walk itself is still per call;
-/// `docs/06-limits.md` names that bound.
+/// `docs/06-limits.md` names that bound. Public since D-1184 so `cli`'s
+/// candidate capture can pass the facts it builds once per slice. `facts` must
+/// be [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
+///
+/// # Errors
+///
+/// As [`materialize_expression_cell`].
 #[expect(
     clippy::too_many_arguments,
     reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are the public replay's own"
 )]
-pub(crate) fn materialize_expression_cell_over(
+pub fn materialize_expression_cell_over(
     bars: &[Candle],
     column: &Column,
     expression: &crate::expression::Expression,
@@ -3152,11 +3211,20 @@ pub(crate) struct ReplayUniverseV1 {
 ///
 /// # Cost
 ///
-/// O(B + C·(H + L)) time and O(B + C·L + C) transient space: `walk_over`
-/// derives slice facts over B bars, L is the complete resolved crossing-table
-/// width (including armed target×trail slots), and each of C candidates
-/// materializes exact excursions through a hold of at most H bars. This is a
-/// chosen-coordinate publication path, not an inner sweep-cell operation.
+/// O(R + C·(H + L)) time and O(C·L + C) transient space for R column rows: L
+/// is the complete resolved crossing-table width (including armed target×trail
+/// slots), and each of C candidates materializes exact excursions through a
+/// hold of at most H bars. This is a chosen-coordinate publication path, not an
+/// inner sweep-cell operation.
+///
+/// `facts` must be [`crate::trade::SliceFacts::of`] the same `bars` and
+/// `column`. They are taken rather than built (D-1184): the V4 OOS loop calls
+/// this once per pending candidate over one fold's slice, and the O(B) facts
+/// are a property of that slice.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts"
+)]
 pub(crate) fn replay_universe_v1(
     bars: &[Candle],
     column: &Column,
@@ -3165,9 +3233,9 @@ pub(crate) fn replay_universe_v1(
     side: Side,
     ladders: Ladders<'_>,
     chosen: Chosen,
+    facts: &crate::trade::SliceFacts,
 ) -> Result<ReplayUniverseV1, crate::exit_grid_policy::ExitGridErrorV1> {
-    let facts = crate::trade::SliceFacts::of(bars, column);
-    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), &facts);
+    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
     let requested_paths = u64::try_from(timed.occupancy.len()).map_err(|_| {
         crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceRefused(
             "candidate count does not fit the V1 receipt",
@@ -3572,6 +3640,36 @@ fn levelled_over(
 ) -> ReplayOutcomeV1 {
     let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
     levelled_timed(bars, side, ladders, variant, trades, facts, &timed)
+}
+
+/// [`with_levels_over`] over a walk that starts at column row `first_row`
+/// (D-1186). See [`crate::trade::walk_over_from`] for when that equals the
+/// full walk; the caller owns that precondition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "nine: with_levels_over's eight plus the starting row"
+)]
+pub(crate) fn with_levels_over_from(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    facts: &crate::trade::SliceFacts,
+    first_row: usize,
+) -> Option<Cell> {
+    let timed = crate::trade::walk_over_from(
+        bars,
+        column,
+        mask,
+        horizon,
+        direction_of(side),
+        facts,
+        first_row,
+    );
+    levelled_timed(bars, side, ladders, variant, None, facts, &timed).cell
 }
 
 fn levelled_timed(
@@ -4084,7 +4182,24 @@ fn row_of(
 /// it sooner, and without the bar that could not be read there is no way to know
 /// which. Blocking to the time exit can only ever refuse a later signal, never
 /// invent one — the direction an unmeasurable case has to err in.
-fn blocks_without_pricing(c: &Candidate, open_until: &mut Option<usize>) -> bool {
+///
+/// # Only a hole AT OR BEFORE this variant's exit un-prices it (D-1183)
+///
+/// `exit_offset` is the variant's pessimistic exit offset from `c.entry`, the
+/// `pess_off` `one_variant` prices. This used to read `c.cross.refused() > 0`,
+/// a count, so a refused bar AFTER a stop, target or trail had already closed
+/// the position still un-priced the trade and blocked to the time exit: a bar
+/// after the exit decided whether the exit counted (audit W3-runner2-7).
+/// [`crate::excursion::Crossings::first_refused`] locates the first hole, and
+/// every crossing strictly before it was read off accepted bars only, so an
+/// order that fired there is the first order that fired. A hole at the exit
+/// offset itself still refuses: the exit bar is the one that cannot be read.
+/// `block_only` is unchanged -- such a path never had a priceable exit.
+fn blocks_without_pricing(
+    c: &Candidate,
+    exit_offset: usize,
+    open_until: &mut Option<usize>,
+) -> bool {
     // Compare the actual fill against the prior exit. The signal can legally be
     // on that exit bar when its fill is the following minute, but the fill
     // itself must be strictly later: one minute cannot close and reopen the
@@ -4092,7 +4207,13 @@ fn blocks_without_pricing(c: &Candidate, open_until: &mut Option<usize>) -> bool
     if open_until.is_some_and(|until| c.entry <= until) {
         return true;
     }
-    if c.block_only || c.cross.refused() > 0 {
+    // A count with no location cannot be placed against the exit, so it keeps
+    // the conservative answer. `crossings_with` locates every hole it counts.
+    let hole_reaches_exit = c
+        .cross
+        .first_refused()
+        .map_or(c.cross.refused() > 0, |hole| hole <= exit_offset);
+    if c.block_only || hole_reaches_exit {
         *open_until = Some(c.time_exit);
         return true;
     }
@@ -4136,11 +4257,6 @@ fn one_variant(
     let mut gain_on_winners: i64 = 0;
 
     for c in candidates {
-        // TWO REASONS TO SKIP AND THEY ARE DIFFERENT, which is why the decision
-        // is named rather than inlined. See [`blocks_without_pricing`].
-        if blocks_without_pricing(c, &mut open_until) {
-            continue;
-        }
         let span = c.time_exit.saturating_sub(c.entry);
         let stop_at = stop.map_or(NEVER, |r| c.cross.stop_at(r));
         let target_at = target.map_or(NEVER, |r| c.cross.target_at(r));
@@ -4176,6 +4292,13 @@ fn one_variant(
         // an order that never fires is `NEVER`, so it drops out of the `min`
         // without a branch.
         let pess_off = span.min(stop_at).min(target_at).min(live.at).min(armed.at);
+        // TWO REASONS TO SKIP AND THEY ARE DIFFERENT, which is why the decision
+        // is named rather than inlined. See [`blocks_without_pricing`]. It is
+        // asked AFTER `pess_off` because a refused bar only un-prices a variant
+        // whose exit is at or after it (D-1183); every read above is O(1).
+        if blocks_without_pricing(c, pess_off, &mut open_until) {
+            continue;
+        }
         let firing = Firing {
             stop_at,
             target_at,
@@ -5893,6 +6016,98 @@ mod exit_family_tests {
         );
     }
 
+    /// D-1184, source shape: the remaining per-candidate callers pass the
+    /// slice facts they built once. `replay_universe_v1` takes them; the V4
+    /// OOS loop builds one per fold and replays over it; a later expression
+    /// result materialises every ordinal over the facts built with its grid.
+    #[test]
+    fn the_per_candidate_replays_reuse_one_slice_facts_per_slice() {
+        let grid_source = include_str!("grid.rs");
+        let built = concat!("SliceFacts", "::of(");
+        let replay = grid_source
+            .split_once("pub(crate) fn replay_universe_v1(")
+            .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+            .unwrap_or_default();
+        assert!(
+            !replay.is_empty() && !replay.contains(built),
+            "replay takes facts"
+        );
+
+        let validate = include_str!("validate.rs");
+        let oos_loop = validate
+            .split_once("let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));")
+            .map(|(_, rest)| {
+                rest.split_once("oos_all.push(")
+                    .map_or(rest, |(body, _)| body)
+            })
+            .unwrap_or_default();
+        assert!(
+            oos_loop.contains("replay_selected_over("),
+            "the loop replays over hoisted facts"
+        );
+        let in_loop = oos_loop
+            .split_once("for (ordinal, candidate) in pending.iter().enumerate() {")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        assert!(
+            !in_loop.is_empty() && !in_loop.contains(built),
+            "no facts per pending candidate"
+        );
+
+        let later = include_str!("expression_oos.rs");
+        let materialize = later
+            .split_once("pub fn materialize(&self, ordinal: usize)")
+            .map(|(_, rest)| rest.split_once("\n    }\n").map_or(rest, |(body, _)| body))
+            .unwrap_or_default();
+        assert!(
+            materialize.contains("materialize_expression_cell_over("),
+            "a later ordinal is materialised over the facts built with its grid"
+        );
+    }
+
+    /// D-1184: the hoisted doors answer exactly what the per-call doors answer.
+    #[test]
+    fn the_hoisted_replay_doors_equal_the_per_call_doors() {
+        for sessions in [3_i64, 5] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = column(&bars);
+            let facts = SliceFacts::of(&bars, &column);
+            let horizon = Horizon::bars(15).expect("nonzero horizon");
+            for side in [Side::Long, Side::Short] {
+                let mask = ConditionMask::default();
+                let grid = super::evaluate_over(
+                    &bars,
+                    &column,
+                    &mask,
+                    horizon,
+                    side,
+                    Levels::derived(3),
+                    &facts,
+                );
+                for cell in grid.cells.iter().take(8) {
+                    assert_eq!(
+                        super::materialize_cell(&bars, &column, &mask, horizon, side, &grid, cell),
+                        super::materialize_cell_over(
+                            &bars, &column, &mask, horizon, side, &grid, cell, &facts
+                        ),
+                    );
+                    let ladders = crate::excursion::Ladders {
+                        stops: &grid.stops,
+                        targets: &grid.targets,
+                        trails: &grid.trails,
+                    };
+                    let chosen = super::Chosen::from_cell(cell);
+                    assert_eq!(
+                        super::per_trade(&bars, &column, &mask, horizon, side, ladders, chosen),
+                        super::per_trade_over(
+                            &bars, &column, &mask, horizon, side, ladders, chosen, &facts
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn exit_family_empty_input_does_not_substitute_a_baseline() {
         let bars = [];
@@ -7089,6 +7304,7 @@ mod tests {
                     entry_pess: 2_500_100,
                     entry_opt: 2_500_000,
                 },
+                2,
                 &mut open_until,
             );
             assert!(
@@ -7096,6 +7312,75 @@ mod tests {
                 "{side:?}: a path with a refused bar must never reach a cell"
             );
         }
+    }
+
+    /// A refused bar AFTER a level exit does not un-price that exit -- D-1183.
+    ///
+    /// Audit W3-runner2-7: `blocks_without_pricing` read `refused() > 0`, so a
+    /// hole at offset 3 refused a stop that had already closed the position at
+    /// offset 1, and blocked the next signal to the time exit. Each variant now
+    /// compares its own exit offset with `first_refused`. The time-exit
+    /// variant, whose exit IS the hole, and a path whose hole sits on the stop
+    /// bar itself, still refuse.
+    #[test]
+    fn a_hole_after_a_level_exit_leaves_that_exit_priced() {
+        let bars = vec![
+            candle(0, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+            candle(1, 2_500_000, 2_500_100, 2_450_000, 2_460_000),
+            candle(2, 2_460_000, 2_460_100, 2_459_900, 2_460_000),
+            candle(3, 2_460_000, 2_460_100, 2_459_900, 2_460_000),
+        ];
+        let stops = probe_ladder(&[10_000]);
+        let targets = probe_ladder(&[900_000]);
+        let trails = probe_ladder(&[900_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let priced = |accepted: &[bool], stop: Option<usize>| {
+            let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+            let candidate = super::Candidate {
+                signal: 0,
+                entry: 0,
+                time_exit: 3,
+                block_only: false,
+                cross: crossings_checked(&bars, 0, 3, entry_opt, Side::Long, ladders, accepted),
+                entry_pess,
+                entry_opt,
+            };
+            super::one_variant(
+                &bars,
+                &[candidate],
+                (stops.rungs(), targets.rungs(), trails.rungs()),
+                super::Variant {
+                    stop,
+                    target: None,
+                    tsl: None,
+                    ttp: None,
+                },
+                Side::Long,
+                None,
+            )
+            .trades
+        };
+        let hole_after = [true, true, true, false];
+        assert_eq!(
+            priced(&hole_after, Some(0)),
+            1,
+            "the stop closed the position at offset 1; the hole at 3 is after it"
+        );
+        assert_eq!(
+            priced(&hole_after, None),
+            0,
+            "the time exit IS the refused bar, so it cannot be priced"
+        );
+        let hole_on_stop = [true, false, true, true];
+        assert_eq!(
+            priced(&hole_on_stop, Some(0)),
+            0,
+            "a hole at or before the exit leaves the exit unknowable"
+        );
     }
 
     /// FNV-1a over a rendering, so no field can be left out of a fingerprint.
@@ -8515,11 +8800,11 @@ mod tests {
         let following_minute = candidate(3, 5);
         let mut blocked_until = Some(2);
         assert!(
-            super::blocks_without_pricing(&same_minute, &mut blocked_until),
+            super::blocks_without_pricing(&same_minute, 3, &mut blocked_until),
             "entry bar 2 is the previous exit bar and must be blocked"
         );
         assert!(
-            !super::blocks_without_pricing(&following_minute, &mut blocked_until),
+            !super::blocks_without_pricing(&following_minute, 2, &mut blocked_until),
             "entry bar 3 is strictly after exit bar 2 and must remain eligible"
         );
     }

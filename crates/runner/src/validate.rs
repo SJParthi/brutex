@@ -2710,6 +2710,10 @@ fn walk_forward_exact_grid_v4(
             // The OOS slices are the fold's, not the candidate's: hashed once
             // here (D-1143) rather than three times per pending candidate.
             let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));
+            // And the OOS slice facts with them (D-1184): `replay_selected`
+            // built `SliceFacts::of(trade_test, &projected_oos)` once per
+            // pending candidate, an O(E_prefix) value no candidate changes.
+            let oos_facts = crate::trade::SliceFacts::of(trade_test, &projected_oos);
             for (ordinal, candidate) in pending.iter().enumerate() {
                 let resolved = match candidate.side {
                     Direction::Long => &long,
@@ -2726,11 +2730,12 @@ fn walk_forward_exact_grid_v4(
                     feed: execution.feed(),
                 };
                 let execution_run = ExecutionRunV1::with_digests(&run, &oos_digests)?;
-                let replay = resolved.replay_selected(
+                let replay = resolved.replay_selected_over(
                     oos,
                     &projected_oos,
                     &candidate.selected,
                     execution_run,
+                    &oos_facts,
                 )?;
                 let outcome = replay.cell().ok_or(
                     AnchoredSearchValidationRefusalV4::IncompleteCandidateOos {
@@ -4618,7 +4623,10 @@ fn walk_forward_core(
         //
         // Hoisted beside `facts` because it too is a fact about `train` and
         // does not vary by candidate. One pass, shared by every thread.
-        let forward = crate::outcome::forward(trade_train, train_column, horizon);
+        //
+        // Over `facts` (D-1185): `forward` built a second, identical
+        // `SliceFacts::of(trade_train, train_column)` on entry.
+        let forward = crate::outcome::forward_over(trade_train, horizon, &facts);
         // THE RUNG COUNT WAS RESOLVED BY THE CALLER, ONCE. It is the same
         // already-clamped value the caller records in run identity; no lane
         // reads `std::env`, and no fold can reinterpret the memory bound.
@@ -4881,6 +4889,28 @@ fn walk_forward_core(
                 // `trade_test` and `confined`, both borrowed immutably here and
                 // unchanged by the loop.
                 let test_facts = crate::trade::SliceFacts::of(trade_test, confined);
+                // THE FIRST ROW THAT CAN FIRE, FOUND ONCE PER FOLD (D-1186).
+                //
+                // `restricted` blanks every training row rather than cutting
+                // it, so the column still runs from row 0 and each candidate's
+                // walk visited every training row only to find it could not
+                // fire. A row whose bits are all zero cannot hit a mask with any
+                // bit set, so the walk starts at the first row with a set bit.
+                // The empty mask DOES hit a blank row and keeps row 0, so its
+                // answer is unchanged too. One linear scan here, none per
+                // candidate.
+                let first_live = confined
+                    .bits()
+                    .iter()
+                    .position(|bits| *bits != ConditionMask::ZERO)
+                    .unwrap_or(confined.bits().len());
+                let start_for = |mask: &ConditionMask| {
+                    if *mask == ConditionMask::ZERO {
+                        0
+                    } else {
+                        first_live
+                    }
+                };
                 oos_exact = scored
                     .par_iter()
                     .map(|candidate| {
@@ -4902,7 +4932,7 @@ fn walk_forward_core(
                         // window scores 0, exactly as before: `with_levels`
                         // returns `None` on an empty trade set, and 0 is the
                         // level-less total of no trades rather than a sentinel.
-                        let pessimistic = crate::grid::with_levels_over(
+                        let pessimistic = crate::grid::with_levels_over_from(
                             trade_test,
                             confined,
                             &candidate.mask,
@@ -4916,6 +4946,7 @@ fn walk_forward_core(
                             },
                             candidate.pick.rungs,
                             &test_facts,
+                            start_for(&candidate.mask),
                         )
                         .map(|cell| cell.pessimistic);
                         CandidateOosV2 { pessimistic }
@@ -4929,13 +4960,14 @@ fn walk_forward_core(
                 //
                 // Over `test_facts` (D-1145): `walk` rebuilt the identical
                 // `SliceFacts::of(trade_test, confined)` built above.
-                let plain = Summary::of(&crate::trade::walk_over(
+                let plain = Summary::of(&crate::trade::walk_over_from(
                     trade_test,
                     confined,
                     &mask,
                     horizon,
                     chosen_side,
                     &test_facts,
+                    start_for(&mask),
                 ));
 
                 // THE CHOSEN EXIT, APPLIED. `docs/06-limits.md` §70 recorded
@@ -7492,7 +7524,7 @@ mod tests {
         let plain = region.find("let plain = Summary::of(");
         assert!(plain.is_some(), "the level-less walk must be in the region");
         let tail = region.get(plain.unwrap_or_default()..).unwrap_or_default();
-        assert!(tail.contains("walk_over(") && tail.contains("&test_facts,"));
+        assert!(tail.contains("walk_over_from(") && tail.contains("&test_facts,"));
         assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
     }
 
@@ -7516,7 +7548,7 @@ mod tests {
             body.len()
         );
         assert!(
-            body.contains("with_levels_over("),
+            body.contains("with_levels_over_from("),
             "the loop must call the hoisted door"
         );
         // EVERYTHING AFTER THE ANCHOR is the loop. The convenience form
@@ -7613,6 +7645,44 @@ mod tests {
     /// D-1143: the V4 OOS replay loop seals each pending candidate's run
     /// against digests built once per fold, not by hashing both slices three
     /// times per candidate.
+    /// D-1186 (W3-runner5-3): the OOS pass finds the first row that can fire
+    /// once per fold and starts every candidate's walk there, so the blanked
+    /// training rows are not visited per candidate. The empty mask keeps row
+    /// 0 because it fires on a blank row.
+    #[test]
+    fn the_oos_pass_walks_from_the_first_live_row() {
+        let source = include_str!("validate.rs");
+        let anchor = "let test_facts = crate::trade::SliceFacts::of(trade_test, confined);";
+        let rest = source
+            .split_once(anchor)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let (head, body) = rest.split_once(".par_iter()").unwrap_or_default();
+        assert!(head.contains(".position(|bits| *bits != ConditionMask::ZERO)"));
+        assert!(head.contains("if *mask == ConditionMask::ZERO"));
+        let pass = body
+            .split_once("(plain, with)")
+            .map_or("", |(pass, _)| pass);
+        assert!(pass.contains("with_levels_over_from(") && pass.contains("walk_over_from("));
+        assert_eq!(pass.matches("start_for(&").count(), 2);
+        assert!(!pass.contains("with_levels_over(") && !pass.contains("walk_over("));
+    }
+
+    #[test]
+    fn the_training_fold_builds_its_slice_facts_once() {
+        // D-1185 (o1runner-5): the fold's `forward` reads the facts the
+        // candidate loop already shares, instead of building a second copy.
+        let source = include_str!("validate.rs");
+        let anchor = "let facts = crate::trade::SliceFacts::of(trade_train, train_column);";
+        let rest = source
+            .split_once(anchor)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let fold = rest.split_once(".par_iter()").map_or("", |(head, _)| head);
+        assert!(fold.contains("crate::outcome::forward_over(trade_train, horizon, &facts)"));
+        assert!(!fold.contains("crate::outcome::forward(trade_train"));
+    }
+
     #[test]
     fn the_oos_replay_loop_hashes_its_slices_once_per_fold() {
         let source = include_str!("validate.rs");

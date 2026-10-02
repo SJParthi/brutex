@@ -398,3 +398,84 @@ fn later_refuses_foreign_frozen_resolution_changed_evaluator_and_entirely_cold_d
     assert!(error.contains("no warm reachable signal rows"));
     Ok(())
 }
+
+/// D-1188 (o1runner-2): one later slice, checked and hashed once, prices
+/// every program on both sides exactly as the per-call path does -- the same
+/// digest, grid and materialised rows -- and reports the same refusal for an
+/// overlapping series and for a column that does not cover the bars.
+#[test]
+fn one_later_slice_prices_every_program_as_the_per_call_path_does() -> Result<(), String> {
+    let (bars, column) = fixture(0)?;
+    let (later, later_column) = fixture(8 * 86_400_000_000)?;
+    let key = InstrumentKey::index(Exchange::Nse, "NIFTY").map_err(super::super::display)?;
+    let shared = LaterExpressionSliceV1::new(series(&key, &later)?, &later_column);
+    let overlapping = LaterExpressionSliceV1::new(series(&key, &bars)?, &column);
+    let short = later.get(..later.len() - 10).ok_or("a prefix")?;
+    let uncovered = LaterExpressionSliceV1::new(series(&key, short)?, &later_column);
+    let mut compared = 0;
+    for (side, direction) in [
+        (crate::excursion::Side::Long, Direction::Long),
+        (crate::excursion::Side::Short, Direction::Short),
+    ] {
+        let resolved = policy(side)?
+            .resolve_research_attested(series(&key, &bars)?)
+            .map_err(super::super::display)?;
+        let attested = resolved
+            .attest_training(
+                series(&key, &bars)?,
+                &column,
+                Horizon::bars(5).ok_or("horizon")?,
+            )
+            .map_err(super::super::display)?;
+        for raw in ["30 | !30", "30 & !30", "146 | !146"] {
+            let program = Expression::parse(raw).map_err(|e| format!("{e:?}"))?;
+            let training = resolved.evaluate_expression_with_attested(
+                &attested,
+                &run(&key, &bars, &program, direction)?,
+            )?;
+            let anchor = resolved
+                .validate_expression_evaluation(&training)?
+                .later_period_anchor();
+            let later_run = run(&key, &later, &program, direction)?;
+            let own = resolved.evaluate_expression_oos(
+                &anchor,
+                series(&key, &later)?,
+                &later_column,
+                &later_run,
+            )?;
+            let reused = resolved.evaluate_expression_oos_on(&anchor, &shared, &later_run)?;
+            assert_eq!(own.digest(), reused.digest());
+            assert_eq!(own.grid(), reused.grid());
+            assert_eq!(own.summary(), reused.summary());
+            for ordinal in 0..own.grid().cells.len() {
+                assert_eq!(own.materialize(ordinal)?, reused.materialize(ordinal)?);
+                compared += 1;
+            }
+            let training_run = run(&key, &bars, &program, direction)?;
+            assert_eq!(
+                resolved
+                    .evaluate_expression_oos(&anchor, series(&key, &bars)?, &column, &training_run)
+                    .err(),
+                resolved
+                    .evaluate_expression_oos_on(&anchor, &overlapping, &training_run)
+                    .err()
+            );
+            let short_run = run(&key, short, &program, direction)?;
+            let per_call_refusal = resolved
+                .evaluate_expression_oos(&anchor, series(&key, short)?, &later_column, &short_run)
+                .err();
+            assert!(
+                per_call_refusal.is_some(),
+                "a column that does not cover the bars refuses"
+            );
+            assert_eq!(
+                per_call_refusal,
+                resolved
+                    .evaluate_expression_oos_on(&anchor, &uncovered, &short_run)
+                    .err()
+            );
+        }
+    }
+    assert!(compared > 0);
+    Ok(())
+}
