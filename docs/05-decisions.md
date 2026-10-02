@@ -47310,3 +47310,22 @@ refused at use, by `fields` and `path_for`. `pull::unit` now asserts
 `path_for(Vendor::Dhan, ..)` on a Groww-only config is `MissingVendor`. That
 assertion passes before and after, which is the evidence that the old comment
 was false.
+
+### D-1311 — An option strike must be positive — 2026-10-02
+
+**What happened.** `parse_strike` accepted any decimal, so a strike of
+`-19450`, `0` or `0.004` (zero paisa after the half-up snap) validated, and the
+row was declined as `Skip::LiveContract`, a routine skip. A malformed row was
+indistinguishable from a legitimate one, which §4 forbids.
+
+**The change.** The snapped value must be greater than `Paisa::ZERO`; anything
+else is `Malformed`. The smallest strike still read is one paisa (`0.005`).
+No exchange source is needed for "a strike is positive": a strike is a price
+level, and a level at or below zero is not one. Proved by
+`vendor::tests::a_strike_at_or_below_zero_is_malformed_not_a_live_contract`,
+which failed before the change (`-19450` decoded as
+`Ok(Skipped(Declined { reason: LiveContract, .. }))`). One comparison; O(1).
+
+The same lane-4 commit also carried D-1310 (index promotion of `EQ` rows only)
+and D-1312 (ASCII-only trimming). Both duplicate D-0785 and D-0787, already on
+this branch, so neither was taken and neither number heads an entry.

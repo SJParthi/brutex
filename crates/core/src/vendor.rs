@@ -1826,7 +1826,15 @@ fn parse_strike(text: &str) -> Result<Paisa, InstrumentError> {
     // across the 40,000 three-decimal strings from "0.000" to "39.999" -- "0.145" became 14
     // paisa where exact half-up is 15 -- always losing downward. The master file is text and
     // nothing has been lost yet when this is called.
-    Paisa::from_rupee_text_half_up(text).map_err(|_| InstrumentError::Malformed)
+    //
+    // AND A STRIKE IS POSITIVE (D-1311). Any decimal used to pass, so `-19450` and `0`
+    // validated and the row was declined as a routine live contract. No exchange lists a
+    // strike at or below zero; the snapped value is checked, so `0.004` (zero paisa) is
+    // refused as well.
+    match Paisa::from_rupee_text_half_up(text) {
+        Ok(strike) if strike > Paisa::ZERO => Ok(strike),
+        _ => Err(InstrumentError::Malformed),
+    }
 }
 
 #[cfg(test)]
@@ -3523,6 +3531,32 @@ mod tests {
                 .expect("no error")
                 .map(|k| k.underlying.as_str().to_owned()),
             Some("BLUECHIP".to_owned())
+        );
+    }
+
+    /// core-01-b. An option strike must be a positive price. D-1311.
+    ///
+    /// `parse_strike` accepted any decimal, so `-19450` and `0` validated and the
+    /// row was declined as a routine live contract. No exchange lists a strike at
+    /// or below zero; such a row is malformed and must say so.
+    #[test]
+    fn a_strike_at_or_below_zero_is_malformed_not_a_live_contract() {
+        for strike in ["-19450", "0", "0.00", "-0", "0.004", "-0.004", "-0.01"] {
+            assert_eq!(
+                groww(row("NSE", "FNO", "NIFTY", "CE", "2026-08-04", strike)),
+                Err(InstrumentError::Malformed),
+                "strike {strike:?} is not a strike"
+            );
+            assert_eq!(parse_strike(strike), Err(InstrumentError::Malformed));
+        }
+        // The smallest positive strike, one paisa after the half-up snap, is still read.
+        assert_eq!(parse_strike("0.005").map(Paisa::raw), Ok(1));
+        assert_eq!(parse_strike("117.5").map(Paisa::raw), Ok(11_750));
+        assert_eq!(
+            groww(row("NSE", "FNO", "NIFTY", "PE", "2026-08-04", "0.01"))
+                .expect("ok")
+                .skip(),
+            Some(Skip::LiveContract)
         );
     }
 }
