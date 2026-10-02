@@ -43718,3 +43718,70 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0943 — The exact-minute overlay clamps a stub bucket onto the caller's per-day session close, not onto a stored minute — 2026-10-02
+
+**What was wrong.** Three findings against the same clamp in
+`crates/indicators/src/anchored.rs`, GAP12-5, GAP12-7 and GAP4-47. On the four
+rungs whose day-final bucket is a stub (`2min`, `10min`, `30min`, `60min`), the
+overlay pulled the formula's minute `t + rung - 1` back onto the day's last
+STORED minute whenever that minute-of-day lay past every minute-of-day in the
+whole supplied slice. Two defects followed.
+
+1. **Truncated sessions were mapped on some rungs and refused on others.** A day
+   missing 15:29, or stopping at 15:16, had its last `30min`/`60min` bucket (and
+   its `2min`/`10min` one when 15:29 alone was missing) priced off 15:28 or 15:16,
+   while `3min`, `5min` and `15min` refused the same bytes for 15:29.
+2. **A later day decided an earlier answer.** The threshold was a maximum over
+   the WHOLE slice, so one off-session minute on a later day (16:20, or 15:40 for
+   `2min`/`10min`) flipped every earlier day's last stub bucket from mapped to
+   `MissingClosingMinute`. That is look-ahead, which `CLAUDE.md` §3 rule 7 bans,
+   and the test that claimed the opposite appended a 09:15 minute at `15min`,
+   where no version of the clamp ever looked.
+
+**The choice.** The two options the findings named were a caller-supplied
+per-day close and a causal running maximum over earlier minutes. The causal
+maximum still guesses the close from bytes: it cannot tell a truncated first day
+from a complete one, and it reads a short session such as a Muhurat as a hole.
+The caller already has the authority. `indicators` stays `vocab`-only (gate 22):
+both public bridges take `session_close: impl Fn(i64) -> Option<u16>`, the IST
+minute-of-day at which that day's final one-minute bar opens. `cli` passes
+`stored::nse_session_close_minute`, which reads `pull::calendar::kind_of` and
+returns the last window's `to`, or `None` for a closed, unmeasured-length or
+out-of-range day. The rule for each signal bar is then
+`min(demanded, close)` when `close >= t`, else `demanded`, and the minute stamped
+exactly there must be stored on that day or the join refuses naming it. The
+slice-wide maximum and the per-day `HashMap` of last stored minutes are removed.
+Per signal bar this is one caller call and one comparison, and the bound is
+UNVERIFIED as a measurement.
+
+**What changes for a run.** A day that loses its final minute now refuses on all
+eight rungs alike, where it used to refuse on three and be mapped onto an
+earlier minute on the other four. Doors that withhold a day on a
+`MissingClosingMinute` refusal now withhold it on the stub rungs too. Whether any
+stored day actually lacks its 15:29 was not measured here. No output on intact
+data changes, because the calendar close of a regular day is the 15:29 the old
+rule read off the bars.
+
+**Honest limits.** A day the caller cannot place keeps the formula's minute and
+so refuses its stub bucket. On a two-window day only the last window's close is
+a clamp target, so a bucket straddling the gap between windows still refuses.
+Both kinds of day are already withheld from stored sweeps by
+`SWEPT_SERIES_CALENDAR_POLICY` and the calendar boundary. A caller passing a
+close that is not a real minute-of-day (`u16::MAX`) gets the formula's minute,
+never a wrapped one.
+
+**Proof.** In `indicators::anchored::tests`:
+`a_truncated_final_stub_bucket_refuses_on_every_stub_rung`,
+`a_later_days_off_session_minute_cannot_change_an_earlier_mapping`, the
+rewritten `future_exact_minutes_cannot_change_an_already_mapped_signal_column`
+(a `60min` rung with a later-day 16:20 minute),
+`a_short_session_closes_at_the_callers_close_for_that_day`,
+`a_bucket_opening_after_the_session_close_is_never_pulled_back_onto_it`,
+`intact_sessions_resolve_on_every_rung_including_a_bucket_opening_on_the_close`
+and `an_unplaced_day_keeps_the_formula_minute_and_an_empty_day_changes_nothing`.
+All but the `intact_sessions_...` guard failed against `origin/main` at bc53131
+and all seven pass here; the updated
+`a_day_with_no_stored_minutes_refuses_from_either_side` now expects the 15:29
+close rather than the formula's 16:14. The cli helper is
+pinned by `cli::stored::tests::the_overlay_session_close_is_the_calendars_last_window_close`.

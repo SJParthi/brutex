@@ -39,8 +39,6 @@
 //! three, not daily OHLC.  [`GapReferenceSource`] exposes that boundary so a
 //! caller cannot mistake this path for an external `GapFib` anchor.
 
-use std::collections::HashMap;
-
 use crate::daily::{DailyLevels, Unusable};
 use crate::evaluator::{Calendar, Evaluator, Widths};
 use crate::gap::GapFib;
@@ -543,60 +541,15 @@ pub enum ExactMinuteGapRefusal {
     OverlayLengthMismatch,
 }
 
-/// Micros elapsed since the IST midnight that opens this timestamp's session day.
+/// The UTC micros of the IST midnight that opens `ist_day`.
 ///
-/// Micros and not minutes, because that is the unit every timestamp in this crate is
-/// already in and converting would only introduce a rounding policy. The ORDER is what
-/// callers use it for, and micros-of-day and minute-of-day sort identically.
-///
-/// `rem_euclid` and never `%`, for [`crate::ist_day`]'s reason: a pre-epoch stamp gives
-/// a negative remainder under `%` and would compare as an impossibly early minute.
-fn ist_micros_of_day(ts_micros: i64) -> i64 {
-    ts_micros
-        .saturating_add(crate::IST_OFFSET_MICROS)
-        .rem_euclid(crate::MICROS_PER_DAY)
-}
-
-/// The last stored one-minute bar of every IST day the exact-minute context holds.
-///
-/// # This was a binary search, and the search sat inside a per-signal-bar loop
-///
-/// It used to be `last_stored_minute_of_day(exact_minute, day)`, one
-/// `slice::partition_point` per short day-final signal bucket — `O(log minutes)`
-/// probes against a slice that grows with every month ingested, called from inside
-/// the `for (source, signal_bar) in signal.iter().enumerate()` loop below. Gate 11
-/// rule 1 refuses that spelling without exception and `docs/07-o1-architecture.md`
-/// layer 4 is why: the frequency was small — one bucket per day per rung — but the
-/// COST of each lookup tracked the size of the store, which is the shape the rule
-/// exists to remove rather than to bound.
-///
-/// # What replaces it, and why the shape is not a second walk
-///
-/// The pair walk below is `exact_minute`'s own cadence pass, which already visits
-/// every bar exactly once. `day_last` records `(day, last ts)` by overwriting the
-/// tail entry while the day holds and pushing when it changes — legal because the
-/// caller has already proved `exact_minute` strictly increasing, so `ist_day` is
-/// non-decreasing and a day's bars are contiguous. The map is then built at the
-/// EXACT size `day_last` measured, which is the day count and never the minute
-/// count: `docs/07-o1-architecture.md` law 2 asks for a reservation and reserving
-/// one slot per minute would over-reserve by the session length.
-///
-/// Lookup afterwards is one hash probe, so the per-signal-bar cost no longer
-/// depends on how many minutes are in scope. Total work is `O(minutes)` once and
-/// `O(1)` per query; the extra space is `O(days)`. **UNVERIFIED as a measured
-/// bound** — no row in `crates/indicators/benches/ratio.rs` covers this overlay.
-fn last_stored_minute_by_day(exact_minute: &[Candle]) -> HashMap<i64, i64> {
-    let mut day_last: Vec<(i64, i64)> = Vec::new();
-    for bar in exact_minute {
-        let day = crate::ist_day(bar.ts_micros);
-        match day_last.last_mut() {
-            Some(seen) if seen.0 == day => seen.1 = bar.ts_micros,
-            _ => day_last.push((day, bar.ts_micros)),
-        }
-    }
-    let mut by_day = HashMap::with_capacity(day_last.len());
-    by_day.extend(day_last);
-    by_day
+/// The inverse of [`crate::ist_day`] at the day boundary. Saturating, so a day no
+/// timestamp can name lands on an `i64` edge and the exact-minute lookup that follows
+/// refuses it rather than wrapping onto a real day.
+const fn ist_day_start_micros(ist_day: i64) -> i64 {
+    ist_day
+        .saturating_mul(crate::MICROS_PER_DAY)
+        .saturating_sub(crate::IST_OFFSET_MICROS)
 }
 
 /// Replace a signal column's `GapFib` family with exact stored one-minute evidence.
@@ -633,42 +586,49 @@ fn last_stored_minute_by_day(exact_minute: &[Candle]) -> HashMap<i64, i64> {
 /// refused here, at every support step, for a minute 44 minutes past a close that has
 /// never moved.
 ///
-/// **What the fix does NOT do is relax the refusal.** The guard is correct and
-/// deliberate: substituting a later minute or coarser data for a genuine hole is the
-/// silent fallback `CLAUDE.md` §4 bans, and `3min` — which divides 375 exactly — must
-/// still refuse its real one-minute hole. So the clamp is admitted only when both hold:
+/// **What the fix does NOT do is relax the refusal.** Substituting a later minute or
+/// coarser data for a genuine hole is the silent fallback `CLAUDE.md` §4 bans, and
+/// `3min` — which divides 375 exactly — must still refuse its real one-minute hole.
 ///
-/// 1. the demanded minute-of-day is later than **any** minute-of-day anywhere in the
-///    supplied evidence; and
-/// 2. that day HAS a stored minute at or after the signal bar itself, so a bucket can
-///    never be resolved by a minute that precedes it.
+/// # The clamp target is the CALLER'S session close, never a stored minute (D-0943)
 ///
-/// The clamp can only ever narrow the target and never move it later, and that is a
-/// consequence rather than a third clause: the candidate minute lies on the signal
-/// bar's own day, and clause 1 puts the demanded minute-of-day past every minute-of-day
-/// in the evidence — including that candidate's. Writing it as a check as well would be
-/// a branch no input could take.
+/// `session_close(ist_day)` answers the minute-of-day at which that day's FINAL
+/// one-minute bar opens — 15:29 on a regular NSE day — or `None` when the caller's
+/// calendar cannot say. This crate depends on `vocab` alone and holds no exchange
+/// calendar, so the answer is supplied: `cli` passes `pull::calendar::kind_of`'s last
+/// window. The rule is then one line: the bar's target is
+/// `min(demanded, close)` when `close` is at or after the bar's own open, and
+/// `demanded` otherwise. Whatever the target is, the minute stamped exactly there must
+/// be stored on that day, or the join refuses `MissingClosingMinute` naming it.
 ///
-/// Clause 1 is the whole distinction. A minute-of-day no session in the evidence ever
-/// reached is a minute outside the session; a minute other days DO hold and this one
-/// does not is a hole, and a hole still refuses. On a slice whose days all end at 15:29
-/// that makes 16:14 clampable and a missing 15:29 refusable, which is exactly the split
-/// wanted — and it is derived from the bars rather than from a hardcoded 15:29, because
-/// this crate depends on `vocab` alone and has no exchange calendar to consult.
+/// It replaced a data-derived rule with two defects (GAP12-5, GAP12-7, GAP4-47):
 ///
-/// **There is deliberately no "is this the day's last signal bar" clause**, though it
-/// reads like the obvious third one. It would be REDUNDANT, and a redundant branch is a
-/// surviving mutant under §9. Clause 1 already implies the session ends inside this
-/// bar's own window: `demanded` is past every session's last minute, so it is past this
-/// day's, and clause 2 pins the target at or after the bar — the clamp therefore cannot
-/// leave the bucket `[t, t + signal_length)` whether or not another bar follows on the
-/// same day.
+/// 1. **The target was the day's last STORED minute.** A session truncated inside
+///    its last bucket — 15:29 missing, or the day stopping at 15:16 — was mapped onto
+///    whatever minute it stopped at on `2min`, `10min`, `30min` and `60min`, while
+///    `3min`, `5min` and `15min`, whose last bucket is full length, refused the same
+///    data. Now every rung demands the session close and every rung refuses alike.
+/// 2. **The threshold was read off the WHOLE minute slice.** One later day's 16:20
+///    minute raised "the latest minute any session reached" past 16:14 and flipped
+///    every EARLIER day's last hourly bucket from mapped to refused — a later minute
+///    deciding an earlier answer, which is the look-ahead `CLAUDE.md` §3 rule 7 bans.
+///    The caller's close for `signal_day` depends on that day alone, so appending any
+///    later minute cannot move an earlier row.
 ///
-/// **The honest limit**, under §3 rule 6: a day that genuinely stops early, such as the
-/// 2021-02-24 outage stub, ends before every other day in the slice, so clause 1 fails
-/// and its final bucket still refuses. That is the conservative direction — a refusal
-/// rather than a substitution — but it is a refusal, and a caller sweeping a month
-/// containing such a day on one of the four stub rungs will still be stopped by it.
+/// The `close >= t` guard is the causality half: a bucket opening after the session's
+/// last minute is never resolved by a minute that precedes it — it keeps `demanded` and
+/// refuses. `min` makes the clamp unable to move a target later, so a full-length
+/// bucket inside the session is untouched by it. Both are O(1) per signal bar: one
+/// caller call and one comparison, with no per-day table and no scan. **UNVERIFIED as
+/// a measured bound**: it is read off the source, and no row in
+/// `crates/indicators/benches/ratio.rs` times this overlay.
+///
+/// **The honest limits**, under §3 rule 6. A day the caller cannot place (`None`) keeps
+/// the formula's minute and so refuses its stub bucket; that is the conservative
+/// direction. A day with two trading windows, such as the disaster-recovery Saturdays,
+/// is clamped only at its LAST window's close; a bucket straddling the gap between
+/// windows still demands its formula minute and refuses. Both kinds of day are withheld
+/// from the stored sweep before this point by `SWEPT_SERIES_CALENDAR_POLICY`.
 ///
 /// # Errors
 ///
@@ -680,6 +640,7 @@ pub fn overlay_exact_minute_gapfib(
     signal_length_micros: i64,
     widths: Widths,
     calendar: Calendar,
+    session_close: impl Fn(i64) -> Option<u16>,
     column: &mut crate::column::Column,
 ) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
     overlay_exact_minute(
@@ -688,6 +649,7 @@ pub fn overlay_exact_minute_gapfib(
         signal_length_micros,
         widths,
         calendar,
+        &session_close,
         column,
         ExactMinuteFamilies::GapFib,
     )
@@ -718,6 +680,7 @@ pub fn overlay_exact_minute_orb_and_gapfib(
     signal_length_micros: i64,
     widths: Widths,
     calendar: Calendar,
+    session_close: impl Fn(i64) -> Option<u16>,
     column: &mut crate::column::Column,
 ) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
     overlay_exact_minute(
@@ -726,6 +689,7 @@ pub fn overlay_exact_minute_orb_and_gapfib(
         signal_length_micros,
         widths,
         calendar,
+        &session_close,
         column,
         ExactMinuteFamilies::OrbAndGapFib,
     )
@@ -757,12 +721,17 @@ impl ExactMinuteFamilies {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the two public bridges' signature plus the explicit family selection"
+)]
 fn overlay_exact_minute(
     signal: &[Candle],
     exact_minute: &[Candle],
     signal_length_micros: i64,
     widths: Widths,
     calendar: Calendar,
+    session_close: &dyn Fn(i64) -> Option<u16>,
     column: &mut crate::column::Column,
     families: ExactMinuteFamilies,
 ) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
@@ -781,11 +750,6 @@ fn overlay_exact_minute(
     let mut gap = GapFib::new();
     let mut orb = Orb::new();
     let mut minute_masks = Vec::with_capacity(exact_minute.len());
-    // The latest minute-of-day any supplied session reached. Accumulated in the pass
-    // that already walks every minute, so it costs one comparison per bar and no
-    // second traversal. `i64::MIN` cannot survive a non-empty slice, and the slice was
-    // proved non-empty above.
-    let mut latest_session_micros = i64::MIN;
     for (index, bar) in exact_minute.iter().enumerate() {
         if index > 0 {
             let Some(previous) = exact_minute.get(index.saturating_sub(1)) else {
@@ -799,14 +763,8 @@ fn overlay_exact_minute(
         let mask = families
             .step(bar, &mut gap, &mut orb, widths, &calendar)
             .map_err(|why| ExactMinuteGapRefusal::CorruptMinute { index, why })?;
-        latest_session_micros = latest_session_micros.max(ist_micros_of_day(bar.ts_micros));
         minute_masks.push(mask);
     }
-
-    // BUILT ONCE, OUTSIDE THE LOOP THAT ASKS IT. The lookup below used to be a
-    // `partition_point` over the whole minute context, so its cost tracked the
-    // months in scope. See [`last_stored_minute_by_day`].
-    let last_minute_by_day = last_stored_minute_by_day(exact_minute);
 
     let mut exact_by_source = Vec::with_capacity(signal.len());
     let mut cursor = 0_usize;
@@ -816,25 +774,19 @@ fn overlay_exact_minute(
             .ts_micros
             .saturating_add(signal_length_micros)
             .saturating_sub(MINUTE_MICROS);
-        let expected = if ist_micros_of_day(demanded) > latest_session_micros {
-            // `filter` is the causality guard and not tidiness: it admits only a minute
-            // AT OR AFTER this signal bar, so a bucket can never be resolved by a minute
-            // that precedes it. A day with no stored minute at all -- and a day whose
-            // minutes all end before the bucket opens -- falls through to `demanded` and
-            // refuses exactly as before.
-            //
-            // There is deliberately no `< demanded` half. It would always be true here
-            // and so would be a branch no test could take: `last` is on `signal_day` and
-            // the condition above puts `demanded`'s minute-of-day past EVERY minute-of-
-            // day in the evidence, `last`'s included, so `last < demanded` follows.
-            last_minute_by_day
-                .get(&signal_day)
-                .copied()
-                .filter(|last| *last >= signal_bar.ts_micros)
-                .unwrap_or(demanded)
-        } else {
-            demanded
-        };
+        // THE CALLER'S SESSION CLOSE FOR THIS DAY, AND NOTHING READ FROM THE SLICE.
+        // Only `signal_day` is asked about, so no other day's minutes -- later ones
+        // included -- can move this target (GAP12-7, GAP4-47). `filter` is the causality
+        // half: a close BEFORE the bucket opens is never its target, so such a bucket
+        // keeps `demanded` and refuses. `min` means the clamp can only pull a target
+        // that runs past the close back onto it, never push one later (GAP12-5). D-0943.
+        let expected = session_close(signal_day)
+            .map(|close| {
+                ist_day_start_micros(signal_day)
+                    .saturating_add(i64::from(close).saturating_mul(MINUTE_MICROS))
+            })
+            .filter(|close| *close >= signal_bar.ts_micros)
+            .map_or(demanded, |close| demanded.min(close));
         while exact_minute
             .get(cursor)
             .is_some_and(|minute| minute.ts_micros < expected)
@@ -901,6 +853,15 @@ mod tests {
     const DAY_MICROS: i64 = 86_400 * 1_000_000;
     const MINUTE_MICROS: i64 = 60 * 1_000_000;
     const OPEN_IST_MINUTE: i64 = 9 * 60 + 15;
+
+    /// The fixture sessions' close: every fixture day is a regular 09:15-15:29 session.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the overlay's session-close argument is an `Option`; this fixture always knows the day"
+    )]
+    const fn nse_close(_ist_day: i64) -> Option<u16> {
+        Some(15 * 60 + 29)
+    }
 
     fn ts(day: i64, minute: i64) -> i64 {
         day.saturating_mul(DAY_MICROS)
@@ -1305,6 +1266,7 @@ mod tests {
                 15 * MINUTE_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut column,
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
@@ -1342,6 +1304,7 @@ mod tests {
                 15 * MINUTE_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut column,
             ),
             Err(ExactMinuteGapRefusal::SignalCloseMismatch {
@@ -1445,6 +1408,7 @@ mod tests {
             HOUR_MICROS,
             Widths::pinned().expect("pinned widths"),
             Calendar::charter(),
+            nse_close,
             &mut column,
         )
         .expect("every hourly bucket resolves against an intact session");
@@ -1481,6 +1445,7 @@ mod tests {
                 HOUR_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut column,
             ),
             Err(ExactMinuteGapRefusal::SignalCloseMismatch {
@@ -1517,6 +1482,7 @@ mod tests {
                 HOUR_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut column,
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
@@ -1531,9 +1497,8 @@ mod tests {
     /// A session that stops early still refuses, and that limit is deliberate.
     ///
     /// The 2021-02-24 shape: 09:15–10:08 and nothing after it. Its only 60-minute
-    /// bucket demands 10:14, and 10:14 is a minute-of-day the neighbouring sessions DO
-    /// reach — so the clamp's first clause fails and the join refuses rather than
-    /// mapping the bucket onto 10:08.
+    /// bucket demands 10:14, which is before the caller's 15:29 close, so the clamp
+    /// cannot move it and the join refuses rather than mapping the bucket onto 10:08.
     ///
     /// This is the conservative direction and it is asserted rather than merely
     /// documented, because the alternative — clamping any final bucket to whatever
@@ -1565,6 +1530,7 @@ mod tests {
                 HOUR_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut column,
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
@@ -1578,13 +1544,12 @@ mod tests {
 
     /// A bucket is never resolved by a minute that opens before it.
     ///
-    /// The clamp's second clause, and the case that makes it load-bearing rather than
-    /// decorative. Every session here stops at 09:20, so a 60-minute bucket opening at
-    /// 10:15 has its demanded minute past every minute-of-day in the evidence and the
-    /// first clause admits it — but the day's last stored minute is 09:20, which is
-    /// BEFORE the bucket opens. Resolving the bucket there would price it off a bar it
-    /// does not contain, so the clamp is withdrawn and the join refuses at the minute it
-    /// originally asked for.
+    /// Every session here stops at 09:20, so the day's last STORED minute is before a
+    /// 10:15 bucket opens. The retired data-derived clamp admitted this bucket and was
+    /// saved only by its causality filter; the caller's 15:29 close leaves 11:14 where it
+    /// is, so the join refuses at the minute the bucket originally asked for. The filter's
+    /// own case, a close before the bucket opens, is
+    /// `a_bucket_opening_after_the_session_close_is_never_pulled_back_onto_it`.
     #[test]
     fn a_bucket_is_never_resolved_by_a_minute_that_precedes_it() {
         let mut signal = Vec::new();
@@ -1608,6 +1573,7 @@ mod tests {
                 HOUR_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut crate::column::Column::default(),
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
@@ -1621,11 +1587,12 @@ mod tests {
 
     /// A day with no stored minutes refuses, from either side of the evidence.
     ///
-    /// Two arms of the same lookup, and both are reachable only once the clamp has been
-    /// admitted, which is why they need saying. Asking for the last minute of a day that
-    /// is BEFORE every stored minute finds no prefix at all; asking for one that falls
+    /// Two arms of the same lookup, both reached after the clamp has pulled the stub
+    /// bucket's target back onto the caller's 15:29 close. Asking for a day that is
+    /// BEFORE every stored minute finds no prefix at all; asking for one that falls
     /// between two stored days finds a prefix whose last bar belongs to the wrong day.
-    /// Neither may be answered with somebody else's minute.
+    /// Neither may be answered with somebody else's minute, and both name the session
+    /// close they owed rather than the formula's 16:14 (D-0943).
     #[test]
     fn a_day_with_no_stored_minutes_refuses_from_either_side() {
         let full = hourly_fixture(1_200, 3).1;
@@ -1639,11 +1606,12 @@ mod tests {
                 HOUR_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut crate::column::Column::default(),
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
                 source: 0,
-                expected_ts_micros: ts(1_199, 16 * 60 + 14),
+                expected_ts_micros: ts(1_199, 15 * 60 + 29),
             }),
             "a day before every stored minute borrowed a later day's session close"
         );
@@ -1661,11 +1629,12 @@ mod tests {
                 HOUR_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut crate::column::Column::default(),
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
                 source: 0,
-                expected_ts_micros: ts(1_201, 16 * 60 + 14),
+                expected_ts_micros: ts(1_201, 15 * 60 + 29),
             }),
             "a day with no minutes of its own was closed off the previous day's 15:29"
         );
@@ -1699,6 +1668,7 @@ mod tests {
             3 * MINUTE_MICROS,
             Widths::pinned().expect("pinned widths"),
             Calendar::charter(),
+            nse_close,
             &mut crate::column::Column::default(),
         );
         assert!(
@@ -1718,6 +1688,7 @@ mod tests {
                 3 * MINUTE_MICROS,
                 Widths::pinned().expect("pinned widths"),
                 Calendar::charter(),
+                nse_close,
                 &mut crate::column::Column::default(),
             ),
             Err(ExactMinuteGapRefusal::MissingClosingMinute {
@@ -1728,37 +1699,144 @@ mod tests {
         );
     }
 
+    /// The eight swept rungs, in minutes.
+    const RUNGS: [i64; 8] = [1, 2, 3, 5, 10, 15, 30, 60];
+
+    /// The regular NSE session close as a minute-of-day: 15:29.
+    const CLOSE_MINUTE: i64 = 15 * 60 + 29;
+
+    /// A deterministic, non-monotone price for one stored minute, so the ORB and
+    /// `GapFib` families see ranges that open, break and gap rather than a ramp.
+    fn wiggle_price(day: i64, minute_of_day: i64) -> i64 {
+        2_500_000_i64
+            .saturating_add(day.rem_euclid(17).saturating_mul(3_100))
+            .saturating_add(
+                minute_of_day
+                    .saturating_mul(37)
+                    .rem_euclid(211)
+                    .saturating_mul(90),
+            )
+    }
+
+    /// Stored minutes and the signal stream resampled from them the way the store
+    /// does: buckets on the 09:15 grid at `rung` minutes, each stamped at its open and
+    /// closing at the close of its LAST stored minute. A bucket with no stored minute
+    /// has no signal bar, and the final bucket of a session that does not divide by the
+    /// rung is a stub. `session(day)` gives the inclusive `[open, close]` minutes-of-day
+    /// a day trades, `None` for no session at all; `keep(day, minute)` punches holes.
+    fn resampled(
+        days: core::ops::Range<i64>,
+        rung: i64,
+        session: impl Fn(i64) -> Option<(i64, i64)>,
+        keep: impl Fn(i64, i64) -> bool,
+    ) -> (Vec<Candle>, Vec<Candle>) {
+        let mut signal = Vec::new();
+        let mut minute = Vec::new();
+        for day in days {
+            let Some((open, close)) = session(day) else {
+                continue;
+            };
+            let mut bucket: Option<(i64, i64)> = None;
+            for minute_of_day in open..=close {
+                if !keep(day, minute_of_day) {
+                    continue;
+                }
+                let price = wiggle_price(day, minute_of_day);
+                minute.push(signal_bar(day, minute_of_day, price));
+                let opens = OPEN_IST_MINUTE.saturating_add(
+                    minute_of_day
+                        .saturating_sub(OPEN_IST_MINUTE)
+                        .div_euclid(rung)
+                        .saturating_mul(rung),
+                );
+                match bucket {
+                    Some((current, _)) if current == opens => bucket = Some((opens, price)),
+                    _ => {
+                        if let Some((stamp, last)) = bucket {
+                            signal.push(signal_bar(day, stamp, last));
+                        }
+                        bucket = Some((opens, price));
+                    }
+                }
+            }
+            if let Some((stamp, last)) = bucket {
+                signal.push(signal_bar(day, stamp, last));
+            }
+        }
+        (signal, minute)
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the fixture builder's session argument is an `Option`; a regular day always trades"
+    )]
+    fn regular(_day: i64) -> Option<(i64, i64)> {
+        Some((OPEN_IST_MINUTE, CLOSE_MINUTE))
+    }
+
+    fn overlay(
+        signal: &[Candle],
+        minute: &[Candle],
+        rung: i64,
+        close: impl Fn(i64) -> Option<u16>,
+        column: &mut crate::column::Column,
+    ) -> Result<ExactMinuteGapCensus, ExactMinuteGapRefusal> {
+        overlay_exact_minute_orb_and_gapfib(
+            signal,
+            minute,
+            rung.saturating_mul(MINUTE_MICROS),
+            Widths::pinned().expect("pinned widths"),
+            Calendar::charter(),
+            close,
+            column,
+        )
+    }
+
+    /// A warm anchored column over `signal`, so an overlay has real rows to replace.
+    fn warm_column(signal: &[Candle], references: &[DailyReference]) -> crate::column::Column {
+        let mut anchored = evaluator(references);
+        let column = AnchoredColumn::build_required(signal, &mut anchored)
+            .expect("every fixture day has an earlier daily reference")
+            .into_column();
+        assert!(!column.is_empty(), "the fixture must warm at least one row");
+        column
+    }
+
+    /// Thirty-two regular sessions warm every rung, `60min` included: 7 buckets a day
+    /// is 224 signal bars.
+    const WARM_FIRST: i64 = 1_000;
+    const WARM_LAST: i64 = 1_032;
+
+    fn warm_references() -> Vec<DailyReference> {
+        (995_i64..WARM_LAST)
+            .map(|day| {
+                eligible(
+                    day,
+                    2_480_000_i64.saturating_add(day.rem_euclid(13).saturating_mul(900)),
+                )
+            })
+            .collect()
+    }
+
+    /// GAP4-47's rewrite of this test: a 60-minute rung and a later-day 16:20 minute.
+    ///
+    /// It used to append a 09:15 minute at a 15-minute rung, which no version of the
+    /// clamp ever read, so it passed while the property it names was false: a later
+    /// day's 16:20 raised the slice-wide threshold past 16:14 and every earlier day's
+    /// 15:15 hourly bucket refused. The caller's per-day close (D-0943) makes an
+    /// appended minute on a later day irrelevant to every earlier row, byte for byte.
     #[test]
     fn future_exact_minutes_cannot_change_an_already_mapped_signal_column() {
-        let (signal, references, minute) = coarse_overlay_fixture();
-        let mut left_evaluator = evaluator(&references);
-        let mut right_evaluator = evaluator(&references);
-        let mut left = AnchoredColumn::build_required(&signal, &mut left_evaluator)
-            .expect("the fixture warms")
-            .into_column();
-        let mut right = AnchoredColumn::build_required(&signal, &mut right_evaluator)
-            .expect("the fixture warms twice")
-            .into_column();
+        let references = warm_references();
+        let (signal, minute) = resampled(WARM_FIRST..WARM_LAST, 60, regular, |_, _| true);
+        let mut left = warm_column(&signal, &references);
+        let mut right = left.clone();
         let mut extended = minute.clone();
-        extended.push(signal_bar(1_009, OPEN_IST_MINUTE, 9_000_000));
-        let left_census = overlay_exact_minute_gapfib(
-            &signal,
-            &minute,
-            15 * MINUTE_MICROS,
-            Widths::pinned().expect("pinned widths"),
-            Calendar::charter(),
-            &mut left,
-        )
-        .expect("every signal close has an exact minute");
-        let right_census = overlay_exact_minute_gapfib(
-            &signal,
-            &extended,
-            15 * MINUTE_MICROS,
-            Widths::pinned().expect("pinned widths"),
-            Calendar::charter(),
-            &mut right,
-        )
-        .expect("future evidence is well formed but causally irrelevant");
+        extended.push(signal_bar(WARM_LAST, 16 * 60 + 20, 9_000_000));
+        let left_census = overlay(&signal, &minute, 60, nse_close, &mut left)
+            .expect("every hourly bucket resolves against an intact session");
+        let right_census = overlay(&signal, &extended, 60, nse_close, &mut right)
+            .expect("a later day's off-session minute is causally irrelevant");
         assert_eq!(left.bits(), right.bits());
         assert_eq!(left.known(), right.known());
         assert_eq!(left.sources(), right.sources());
@@ -1768,6 +1846,348 @@ mod tests {
             right_census.minute_bars,
             left_census.minute_bars.saturating_add(1)
         );
+    }
+
+    /// GAP12-7 and GAP4-47: no minute on a LATER day can move an earlier day's mapping,
+    /// on any rung.
+    ///
+    /// Each extra minute is off-session on a day after the whole signal stream: 16:20
+    /// sits past every stub rung's formula minute (15:30, 15:34, 15:44 and 16:14), and
+    /// 15:40 past the `2min` and `10min` ones. Before D-0943 either raised the slice-
+    /// wide threshold and turned the earlier days' last buckets from mapped into
+    /// `MissingClosingMinute` on `2min`, `10min`, `30min` and `60min`.
+    #[test]
+    fn a_later_days_off_session_minute_cannot_change_an_earlier_mapping() {
+        let references = warm_references();
+        for rung in RUNGS {
+            let (signal, minute) = resampled(WARM_FIRST..WARM_LAST, rung, regular, |_, _| true);
+            let mut prefix = warm_column(&signal, &references);
+            let fresh = prefix.clone();
+            let prefix_census = overlay(&signal, &minute, rung, nse_close, &mut prefix);
+            assert!(
+                prefix_census.is_ok(),
+                "{rung}min prefix refused: {prefix_census:?}"
+            );
+            let prefix_census = prefix_census.expect("checked above");
+            for extra in [16 * 60 + 20, 15 * 60 + 40] {
+                let mut extended = minute.clone();
+                extended.push(signal_bar(WARM_LAST, extra, 9_000_000));
+                let mut appended = fresh.clone();
+                let census = overlay(&signal, &extended, rung, nse_close, &mut appended);
+                assert!(
+                    census.is_ok(),
+                    "{rung}min with a later {extra}-minute bar refused: {census:?}"
+                );
+                let census = census.expect("checked above");
+                assert_eq!(
+                    prefix.bits(),
+                    appended.bits(),
+                    "{rung}min bits, extra {extra}"
+                );
+                assert_eq!(
+                    prefix.known(),
+                    appended.known(),
+                    "{rung}min known, extra {extra}"
+                );
+                assert_eq!(prefix.sources(), appended.sources(), "{rung}min sources");
+                assert_eq!(prefix_census.overlaid, census.overlaid);
+            }
+        }
+    }
+
+    /// The minute a truncated session's last bucket owes on `rung`: the formula's
+    /// `t + rung - 1`, pulled back onto 15:29 when it runs past the close.
+    fn owed(day: i64, opens: i64, rung: i64) -> i64 {
+        ts(
+            day,
+            opens
+                .saturating_add(rung)
+                .saturating_sub(1)
+                .min(CLOSE_MINUTE),
+        )
+    }
+
+    /// GAP12-5: a session truncated inside its last bucket refuses alike on every rung.
+    ///
+    /// Before D-0943 the stub rungs clamped onto the day's last STORED minute, so with
+    /// 15:29 missing `2min`, `10min`, `30min` and `60min` mapped the last bucket onto
+    /// 15:28 while `3min`, `5min` and `15min` refused for 15:29; with the day stopping
+    /// at 15:16, `30min` and `60min` mapped onto 15:16 while `15min` refused for 15:29.
+    /// Now each rung owes `min(t + rung - 1, 15:29)` and refuses naming exactly that.
+    #[test]
+    fn a_truncated_final_stub_bucket_refuses_on_every_stub_rung() {
+        let truncated = 1_201_i64;
+        let shapes: [(&str, i64); 2] = [
+            ("15:29 missing", CLOSE_MINUTE - 1),
+            ("stops at 15:16", 15 * 60 + 16),
+        ];
+        for (shape, last_kept) in shapes {
+            for rung in RUNGS {
+                let (signal, minute) = resampled(1_200..1_203, rung, regular, |day, minute| {
+                    day != truncated || minute <= last_kept
+                });
+                let source = signal
+                    .iter()
+                    .rposition(|bar| crate::ist_day(bar.ts_micros) == truncated)
+                    .expect("the truncated day keeps signal bars");
+                let last = signal.get(source).expect("rposition indexes signal");
+                let opens = last
+                    .ts_micros
+                    .saturating_sub(ts(truncated, 0))
+                    .div_euclid(MINUTE_MICROS);
+                let expected_ts_micros = owed(truncated, opens, rung);
+                let result = overlay(
+                    &signal,
+                    &minute,
+                    rung,
+                    nse_close,
+                    &mut crate::column::Column::default(),
+                );
+                if expected_ts_micros <= ts(truncated, last_kept) {
+                    assert!(
+                        result.is_ok(),
+                        "{shape}, {rung}min: the owed minute is stored, yet {result:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        result,
+                        Err(ExactMinuteGapRefusal::MissingClosingMinute {
+                            source,
+                            expected_ts_micros,
+                        }),
+                        "{shape}, {rung}min mapped a truncated bucket onto a stored minute"
+                    );
+                }
+            }
+        }
+        // The rows the finding names, pinned rather than derived, so `owed` cannot be
+        // wrong in the same way as the code: 15:29 at 10, 15, 30 and 60 minutes.
+        for rung in [10, 15, 30, 60] {
+            let (signal, minute) = resampled(1_200..1_203, rung, regular, |day, minute| {
+                day != truncated || minute <= 15 * 60 + 16
+            });
+            assert!(
+                matches!(
+                    overlay(&signal, &minute, rung, nse_close, &mut crate::column::Column::default()),
+                    Err(ExactMinuteGapRefusal::MissingClosingMinute { expected_ts_micros, .. })
+                        if expected_ts_micros == ts(truncated, if rung == 10 { 15 * 60 + 24 } else { CLOSE_MINUTE })
+                ),
+                "{rung}min"
+            );
+        }
+    }
+
+    /// Intact sessions resolve on every rung, the `2min` bucket opening ON the close
+    /// included: it opens at 15:29, owes 15:30, and the close it is pulled back to is
+    /// its own open — the `close >= t` boundary taken with equality.
+    #[test]
+    fn intact_sessions_resolve_on_every_rung_including_a_bucket_opening_on_the_close() {
+        for rung in RUNGS {
+            let (signal, mut minute) = resampled(1_200..1_203, rung, regular, |_, _| true);
+            assert!(
+                overlay(
+                    &signal,
+                    &minute,
+                    rung,
+                    nse_close,
+                    &mut crate::column::Column::default()
+                )
+                .is_ok(),
+                "{rung}min over intact sessions"
+            );
+            // Move 15:29 on the middle day: every rung's last bucket must now name it.
+            let close = ts(1_201, CLOSE_MINUTE);
+            let bar = minute
+                .iter_mut()
+                .find(|bar| bar.ts_micros == close)
+                .expect("15:29 is stored");
+            bar.close = bar.close.saturating_add(7);
+            bar.high = bar.high.max(bar.close);
+            let source = signal
+                .iter()
+                .rposition(|bar| crate::ist_day(bar.ts_micros) == 1_201)
+                .expect("the day has signal bars");
+            let signal_close = signal.get(source).expect("indexes").close;
+            assert_eq!(
+                overlay(
+                    &signal,
+                    &minute,
+                    rung,
+                    nse_close,
+                    &mut crate::column::Column::default()
+                ),
+                Err(ExactMinuteGapRefusal::SignalCloseMismatch {
+                    source,
+                    signal_close,
+                    minute_close: signal_close.saturating_add(7),
+                }),
+                "{rung}min's last bucket did not resolve against 15:29 itself"
+            );
+        }
+    }
+
+    /// A bucket opening AFTER the caller's close is never pulled back onto it.
+    ///
+    /// A 60-minute bucket stamped 15:30 owes 16:29. The close, 15:29, precedes the
+    /// bucket, so pricing the bucket there would use a bar it does not contain: the
+    /// target stays 16:29 and the join refuses for it. If the vendor really stored
+    /// 16:29 the formula's minute is honoured, exactly as on a full-length bucket.
+    #[test]
+    fn a_bucket_opening_after_the_session_close_is_never_pulled_back_onto_it() {
+        let (mut signal, mut minute) = resampled(1_200..1_202, 60, regular, |_, _| true);
+        signal.push(signal_bar(1_201, CLOSE_MINUTE + 1, 2_600_000));
+        let source = signal.len().saturating_sub(1);
+        assert_eq!(
+            overlay(
+                &signal,
+                &minute,
+                60,
+                nse_close,
+                &mut crate::column::Column::default()
+            ),
+            Err(ExactMinuteGapRefusal::MissingClosingMinute {
+                source,
+                expected_ts_micros: ts(1_201, 16 * 60 + 29),
+            })
+        );
+        minute.push(signal_bar(1_201, 16 * 60 + 29, 2_600_000));
+        assert!(
+            overlay(
+                &signal,
+                &minute,
+                60,
+                nse_close,
+                &mut crate::column::Column::default()
+            )
+            .is_ok(),
+            "a stored formula minute must still be honoured"
+        );
+    }
+
+    /// A Muhurat-style short session: the caller's close for that day is its own.
+    ///
+    /// One day trades 13:45-14:44 only. On the 09:15 grid its last `60min` bucket opens
+    /// 14:15 and owes 15:14; the caller says that day closes at 14:44, so it maps there.
+    /// The retired rule read 15:29 off the regular days around it and refused 15:14.
+    /// With 14:44 itself missing, every rung whose last bucket covers it refuses for
+    /// 14:44 and none maps onto 14:43.
+    #[test]
+    fn a_short_session_closes_at_the_callers_close_for_that_day() {
+        const SHORT: i64 = 1_201;
+        const SHORT_CLOSE: i64 = 14 * 60 + 44;
+        let session = |day: i64| {
+            if day == SHORT {
+                Some((13 * 60 + 45, SHORT_CLOSE))
+            } else {
+                regular(day)
+            }
+        };
+        let close = |day: i64| {
+            u16::try_from(if day == SHORT {
+                SHORT_CLOSE
+            } else {
+                CLOSE_MINUTE
+            })
+            .ok()
+        };
+        for rung in RUNGS {
+            let (signal, minute) = resampled(1_200..1_203, rung, session, |_, _| true);
+            assert!(
+                overlay(
+                    &signal,
+                    &minute,
+                    rung,
+                    close,
+                    &mut crate::column::Column::default()
+                )
+                .is_ok(),
+                "{rung}min over an intact short session"
+            );
+            let (signal, minute) = resampled(1_200..1_203, rung, session, |day, minute| {
+                day != SHORT || minute != SHORT_CLOSE
+            });
+            let source = signal
+                .iter()
+                .rposition(|bar| crate::ist_day(bar.ts_micros) == SHORT)
+                .expect("the short day has signal bars");
+            let opens = signal
+                .get(source)
+                .expect("indexes")
+                .ts_micros
+                .saturating_sub(ts(SHORT, 0))
+                .div_euclid(MINUTE_MICROS);
+            let result = overlay(
+                &signal,
+                &minute,
+                rung,
+                close,
+                &mut crate::column::Column::default(),
+            );
+            if opens.saturating_add(rung).saturating_sub(1) >= SHORT_CLOSE && opens <= SHORT_CLOSE {
+                assert_eq!(
+                    result,
+                    Err(ExactMinuteGapRefusal::MissingClosingMinute {
+                        source,
+                        expected_ts_micros: ts(SHORT, SHORT_CLOSE),
+                    }),
+                    "{rung}min"
+                );
+            } else {
+                assert!(result.is_ok(), "{rung}min: {result:?}");
+            }
+        }
+    }
+
+    /// A day the caller cannot place keeps the formula's minute, and so does a close no
+    /// minute-of-day can be: the clamp never invents a session end.
+    ///
+    /// Full-length rungs never needed the clamp and still resolve; stub rungs refuse for
+    /// the formula minute on every day, the first included. An empty day between two
+    /// sessions — no minutes and no signal bars — changes nothing on either side.
+    #[test]
+    fn an_unplaced_day_keeps_the_formula_minute_and_an_empty_day_changes_nothing() {
+        let unknown = |_day: i64| -> Option<u16> { None };
+        let beyond = |_day: i64| -> Option<u16> { Some(u16::MAX) };
+        let session = |day: i64| if day == 1_201 { None } else { regular(day) };
+        for rung in RUNGS {
+            let (signal, minute) = resampled(1_200..1_203, rung, session, |_, _| true);
+            assert!(
+                overlay(
+                    &signal,
+                    &minute,
+                    rung,
+                    nse_close,
+                    &mut crate::column::Column::default()
+                )
+                .is_ok(),
+                "{rung}min across an empty day"
+            );
+            for close in [&unknown as &dyn Fn(i64) -> Option<u16>, &beyond] {
+                let result = overlay(
+                    &signal,
+                    &minute,
+                    rung,
+                    close,
+                    &mut crate::column::Column::default(),
+                );
+                if 375 % rung == 0 {
+                    assert!(result.is_ok(), "{rung}min divides the session: {result:?}");
+                } else {
+                    let first_stub = signal
+                        .iter()
+                        .position(|bar| bar.ts_micros == ts(1_200, CLOSE_MINUTE - (375 % rung) + 1))
+                        .expect("the first day's stub bucket");
+                    assert_eq!(
+                        result,
+                        Err(ExactMinuteGapRefusal::MissingClosingMinute {
+                            source: first_stub,
+                            expected_ts_micros: ts(1_200, CLOSE_MINUTE - (375 % rung) + rung),
+                        }),
+                        "{rung}min with no caller close"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

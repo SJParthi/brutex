@@ -1686,6 +1686,7 @@ fn build_candidate_signal_column(
         signal_length_micros,
         evaluation.widths,
         Calendar::charter(),
+        crate::stored::nse_session_close_minute,
         &mut signal_column,
     )
     .map_err(|why| {
