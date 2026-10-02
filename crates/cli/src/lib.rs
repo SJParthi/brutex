@@ -11559,6 +11559,10 @@ impl Consistency {
 /// worth failing the screen over, because the cell it came from is still a
 /// valid measurement. The row simply reports no consistency rather than a
 /// fabricated one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts (D-1184)"
+)]
 fn consistency_of(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -11567,6 +11571,7 @@ fn consistency_of(
     side: runner::excursion::Side,
     exits: &grid::Grid,
     cell: &grid::Cell,
+    facts: &runner::trade::SliceFacts,
 ) -> Option<Consistency> {
     // `Chosen` is `Cell`'s four exit fields and nothing else, so the variant
     // that won is re-expressed rather than re-searched. Re-searching would risk
@@ -11577,7 +11582,8 @@ fn consistency_of(
         tsl: cell.tsl,
         ttp: cell.ttp,
     };
-    let (_, rows) = grid::per_trade(
+    // Over the caller's facts (D-1184): `per_trade` rebuilt them per row.
+    let (_, rows) = grid::per_trade_over(
         bars,
         column,
         &scored.mask,
@@ -11589,6 +11595,7 @@ fn consistency_of(
             trails: &exits.trails,
         },
         chosen,
+        facts,
     )?;
     if rows.is_empty() {
         return None;
@@ -12508,7 +12515,16 @@ fn measure_top(
             },
             &facts_again,
         );
-        row.consistency = consistency_of(bars, column, row.scored, horizon, side, &g, &row.cell);
+        row.consistency = consistency_of(
+            bars,
+            column,
+            row.scored,
+            horizon,
+            side,
+            &g,
+            &row.cell,
+            &facts_again,
+        );
     }
 }
 
@@ -25924,8 +25940,17 @@ mod tests {
         );
         let cell = *exits.best().expect("the grid must hold a best variant");
 
-        let measured = consistency_of(&bars, &run.column, scored, horizon, side, &exits, &cell)
-            .expect("a variant with trades must re-walk into per-trade rows");
+        let measured = consistency_of(
+            &bars,
+            &run.column,
+            scored,
+            horizon,
+            side,
+            &exits,
+            &cell,
+            &runner::trade::SliceFacts::of(&bars, &run.column),
+        )
+        .expect("a variant with trades must re-walk into per-trade rows");
         let (_, rows) = grid::per_trade(
             &bars,
             &run.column,

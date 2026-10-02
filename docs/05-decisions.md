@@ -44492,3 +44492,44 @@ is recorded in `docs/06-limits.md` and not made here.
 1 with a refused bar at 3 is priced; the time-exit variant and a hole on the
 stop bar are not. With the old count test the first assertion fails.
 
+### D-1184 — The remaining per-candidate replays reuse one `SliceFacts` per slice — 2026-10-02
+
+**Finding.** W3-runner4-0, the code half D-1181 handed over. D-1141, D-1145 and
+D-1146 had already moved the resolved-policy doors, the walk-forward OOS pass
+and the in-sample walk onto hoisted facts. This entry closes the per-candidate
+callers that still rebuilt `SliceFacts::of(bars, column)`, an O(B) value, on
+every call:
+
+* `grid::replay_universe_v1` built facts per call, and the V4 anchored-search
+  OOS loop calls it once per pending candidate through
+  `ResolvedExitGridV1::replay_selected`. It now takes `facts`. The loop builds
+  `SliceFacts::of(trade_test, &projected_oos)` once per fold, beside the
+  digests D-1143 hoisted, and calls the new crate-visible
+  `replay_selected_over`. A hoisted value that does not cover the OOS series is
+  refused, never replaced by a fresh build. The public `replay_selected` and
+  `replay_selected_universe` still build their own.
+* `EvaluatedExpressionOosV1::materialize(ordinal)` called
+  `materialize_expression_cell`, which built facts per ordinal. The later
+  result now keeps the facts it priced its grid with and materialises over them.
+* `cli::candidate_trades::Capture::materialize` called `materialize_cell` /
+  `materialize_expression_cell` per captured candidate. The capture now builds
+  its facts on first use (`OnceLock`) and passes them to the new public
+  `grid::materialize_cell_over` and the now-public
+  `grid::materialize_expression_cell_over`.
+* `cli`'s `consistency_of` called `grid::per_trade` once per screened row. It
+  now takes the `facts_again` its caller already built and calls the new
+  `grid::per_trade_over`.
+
+`evaluate`, `evaluate_with`, `evaluate_families`, `materialize_cell`,
+`materialize_expression_cell`, `per_trade` and `with_levels` keep their
+signatures and still build facts per call. They are one-shot doors. Every loop
+named above now uses an `_over` form. `cli::institutional_evidence::from_exact_replay`
+still calls `materialize_cell`; nothing in the workspace calls it.
+
+**No output changes.** The facts are a pure function of the bars and the column,
+so every grid, cell, row and digest is byte-identical.
+`the_hoisted_replay_doors_equal_the_per_call_doors` compares the new doors
+with the old ones. `the_per_candidate_replays_reuse_one_slice_facts_per_slice`
+and `cli::candidate_trades::tests::materialisation_reuses_one_slice_facts_per_capture`
+are source-shape tests and fail on the previous tree.
+

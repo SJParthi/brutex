@@ -2676,8 +2676,33 @@ pub fn per_trade(
     ladders: Ladders<'_>,
     variant: Chosen,
 ) -> Option<(Cell, Vec<TradeRow>)> {
+    let facts = crate::trade::SliceFacts::of(bars, column);
+    per_trade_over(bars, column, mask, horizon, side, ladders, variant, &facts)
+}
+
+/// [`per_trade`] over slice facts the caller built once (D-1184).
+///
+/// `per_trade` builds [`crate::trade::SliceFacts`] per call. A report that
+/// replays one variant for each of many rows on one slice builds them once and
+/// passes them here. `facts` must be [`crate::trade::SliceFacts::of`] the same
+/// `bars` and `column`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are per_trade's own"
+)]
+#[must_use]
+pub fn per_trade_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: Chosen,
+    facts: &crate::trade::SliceFacts,
+) -> Option<(Cell, Vec<TradeRow>)> {
     let mut rows = Vec::new();
-    let cell = levelled(
+    let cell = levelled_over(
         bars,
         column,
         mask,
@@ -2686,6 +2711,7 @@ pub fn per_trade(
         ladders,
         variant,
         Some(&mut rows),
+        facts,
     )
     .cell?;
     Some((cell, rows))
@@ -2749,7 +2775,34 @@ pub fn materialize_cell(
     selected: &Cell,
 ) -> Result<Vec<TradeRow>, String> {
     let facts = crate::trade::SliceFacts::of(bars, column);
-    CellReplay::prepare(bars, column, mask, horizon, side, grid, &facts).materialize(selected)
+    materialize_cell_over(bars, column, mask, horizon, side, grid, selected, &facts)
+}
+
+/// [`materialize_cell`] over slice facts the caller built once (D-1184).
+///
+/// `materialize_cell` builds [`crate::trade::SliceFacts`] per call, an O(B)
+/// value. A caller that materialises one cell for each of many candidates on
+/// one slice builds the facts once and passes them here. `facts` must be
+/// [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
+///
+/// # Errors
+///
+/// The same reconciliation refusals as [`materialize_best`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are materialize_cell's own"
+)]
+pub fn materialize_cell_over(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    grid: &Grid,
+    selected: &Cell,
+    facts: &crate::trade::SliceFacts,
+) -> Result<Vec<TradeRow>, String> {
+    CellReplay::prepare(bars, column, mask, horizon, side, grid, facts).materialize(selected)
 }
 
 /// [`materialize_cell`] for MANY cells of one grid: the cell-independent work
@@ -2868,12 +2921,18 @@ pub fn materialize_expression_cell(
 /// [`materialize_expression_cell`] over slice facts the caller already holds
 /// -- the attested training token carries them (D-1141), so a per-ordinal
 /// replay no longer rebuilds them. The program walk itself is still per call;
-/// `docs/06-limits.md` names that bound.
+/// `docs/06-limits.md` names that bound. Public since D-1184 so `cli`'s
+/// candidate capture can pass the facts it builds once per slice. `facts` must
+/// be [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
+///
+/// # Errors
+///
+/// As [`materialize_expression_cell`].
 #[expect(
     clippy::too_many_arguments,
     reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are the public replay's own"
 )]
-pub(crate) fn materialize_expression_cell_over(
+pub fn materialize_expression_cell_over(
     bars: &[Candle],
     column: &Column,
     expression: &crate::expression::Expression,
@@ -3152,11 +3211,20 @@ pub(crate) struct ReplayUniverseV1 {
 ///
 /// # Cost
 ///
-/// O(B + C·(H + L)) time and O(B + C·L + C) transient space: `walk_over`
-/// derives slice facts over B bars, L is the complete resolved crossing-table
-/// width (including armed target×trail slots), and each of C candidates
-/// materializes exact excursions through a hold of at most H bars. This is a
-/// chosen-coordinate publication path, not an inner sweep-cell operation.
+/// O(R + C·(H + L)) time and O(C·L + C) transient space for R column rows: L
+/// is the complete resolved crossing-table width (including armed target×trail
+/// slots), and each of C candidates materializes exact excursions through a
+/// hold of at most H bars. This is a chosen-coordinate publication path, not an
+/// inner sweep-cell operation.
+///
+/// `facts` must be [`crate::trade::SliceFacts::of`] the same `bars` and
+/// `column`. They are taken rather than built (D-1184): the V4 OOS loop calls
+/// this once per pending candidate over one fold's slice, and the O(B) facts
+/// are a property of that slice.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts"
+)]
 pub(crate) fn replay_universe_v1(
     bars: &[Candle],
     column: &Column,
@@ -3165,9 +3233,9 @@ pub(crate) fn replay_universe_v1(
     side: Side,
     ladders: Ladders<'_>,
     chosen: Chosen,
+    facts: &crate::trade::SliceFacts,
 ) -> Result<ReplayUniverseV1, crate::exit_grid_policy::ExitGridErrorV1> {
-    let facts = crate::trade::SliceFacts::of(bars, column);
-    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), &facts);
+    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
     let requested_paths = u64::try_from(timed.occupancy.len()).map_err(|_| {
         crate::exit_grid_policy::ExitGridErrorV1::ReplayEvidenceRefused(
             "candidate count does not fit the V1 receipt",
@@ -5916,6 +5984,98 @@ mod exit_family_tests {
             !materialize.contains("walk_over("),
             "per-cell replay walks nothing"
         );
+    }
+
+    /// D-1184, source shape: the remaining per-candidate callers pass the
+    /// slice facts they built once. `replay_universe_v1` takes them; the V4
+    /// OOS loop builds one per fold and replays over it; a later expression
+    /// result materialises every ordinal over the facts built with its grid.
+    #[test]
+    fn the_per_candidate_replays_reuse_one_slice_facts_per_slice() {
+        let grid_source = include_str!("grid.rs");
+        let built = concat!("SliceFacts", "::of(");
+        let replay = grid_source
+            .split_once("pub(crate) fn replay_universe_v1(")
+            .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+            .unwrap_or_default();
+        assert!(
+            !replay.is_empty() && !replay.contains(built),
+            "replay takes facts"
+        );
+
+        let validate = include_str!("validate.rs");
+        let oos_loop = validate
+            .split_once("let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));")
+            .map(|(_, rest)| {
+                rest.split_once("oos_all.push(")
+                    .map_or(rest, |(body, _)| body)
+            })
+            .unwrap_or_default();
+        assert!(
+            oos_loop.contains("replay_selected_over("),
+            "the loop replays over hoisted facts"
+        );
+        let in_loop = oos_loop
+            .split_once("for (ordinal, candidate) in pending.iter().enumerate() {")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        assert!(
+            !in_loop.is_empty() && !in_loop.contains(built),
+            "no facts per pending candidate"
+        );
+
+        let later = include_str!("expression_oos.rs");
+        let materialize = later
+            .split_once("pub fn materialize(&self, ordinal: usize)")
+            .map(|(_, rest)| rest.split_once("\n    }\n").map_or(rest, |(body, _)| body))
+            .unwrap_or_default();
+        assert!(
+            materialize.contains("materialize_expression_cell_over("),
+            "a later ordinal is materialised over the facts built with its grid"
+        );
+    }
+
+    /// D-1184: the hoisted doors answer exactly what the per-call doors answer.
+    #[test]
+    fn the_hoisted_replay_doors_equal_the_per_call_doors() {
+        for sessions in [3_i64, 5] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = column(&bars);
+            let facts = SliceFacts::of(&bars, &column);
+            let horizon = Horizon::bars(15).expect("nonzero horizon");
+            for side in [Side::Long, Side::Short] {
+                let mask = ConditionMask::default();
+                let grid = super::evaluate_over(
+                    &bars,
+                    &column,
+                    &mask,
+                    horizon,
+                    side,
+                    Levels::derived(3),
+                    &facts,
+                );
+                for cell in grid.cells.iter().take(8) {
+                    assert_eq!(
+                        super::materialize_cell(&bars, &column, &mask, horizon, side, &grid, cell),
+                        super::materialize_cell_over(
+                            &bars, &column, &mask, horizon, side, &grid, cell, &facts
+                        ),
+                    );
+                    let ladders = crate::excursion::Ladders {
+                        stops: &grid.stops,
+                        targets: &grid.targets,
+                        trails: &grid.trails,
+                    };
+                    let chosen = super::Chosen::from_cell(cell);
+                    assert_eq!(
+                        super::per_trade(&bars, &column, &mask, horizon, side, ladders, chosen),
+                        super::per_trade_over(
+                            &bars, &column, &mask, horizon, side, ladders, chosen, &facts
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     #[test]

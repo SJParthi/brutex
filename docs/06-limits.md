@@ -10020,4 +10020,20 @@ not:
   conservative (a trade is refused, none is invented). Fixing it needs
   `Occupancy` to carry the first refused offset and the first missing-minute
   offset, which changes the walk's output.
+- **`SliceFacts` per candidate: what is left after D-1184.** The per-candidate
+  loops now build facts once per slice (see D-1184 for the list), so the D-1181
+  bullet above describes the public one-shot doors only: `evaluate`,
+  `evaluate_with`, `evaluate_families`, `materialize_cell`,
+  `materialize_expression_cell`, `per_trade` and `with_levels` still build
+  facts per call at O(B). The public `replay_selected`,
+  `replay_selected_universe` and `replay_global_witness` also build them per
+  call. `cli`'s global-replay callers use those per candidate and were not
+  moved. Not timed.
+- **V4 OOS replay: the walk is already O(OOS rows) (correction to D-1143).**
+  The D-1143 bullet says each pending candidate's walk is O(prefix rows).
+  `project_oos_fold` drops every pre-OOS row from the projected column, so the
+  walk visits OOS rows only. What was O(E_prefix) per candidate was the
+  `SliceFacts` build over `trade_test`, which D-1184 hoists to once per fold.
+  The attestation term (BLAKE3 over `trade_test` and the column, bar and
+  source validation) is still per candidate.
 

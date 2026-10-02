@@ -104,6 +104,10 @@ pub struct EvaluatedExpressionOosV1<'a> {
     support_sessions: u64,
     digest: [u8; 32],
     refusals: Vec<super::super::ExecutionRefusalBitsV1>,
+    /// The later slice's facts, built once in `evaluate_expression_oos` and
+    /// reused by every [`Self::materialize`] (D-1184). They are a function of
+    /// `bars` and `column`, both borrowed immutably for this value's life.
+    facts: crate::trade::SliceFacts,
 }
 impl EvaluatedExpressionOosV1<'_> {
     /// Identity of the complete later program, source, frozen grid and measured cells.
@@ -145,7 +149,9 @@ impl EvaluatedExpressionOosV1<'_> {
             .cells
             .get(ordinal)
             .ok_or("later expression coordinate absent")?;
-        crate::grid::materialize_expression_cell(
+        // Over the facts built once with the grid (D-1184): one per ordinal
+        // was an O(B) rebuild per materialised coordinate.
+        crate::grid::materialize_expression_cell_over(
             self.bars,
             self.column,
             self.anchor.program(),
@@ -153,6 +159,7 @@ impl EvaluatedExpressionOosV1<'_> {
             self.side,
             &self.grid,
             cell,
+            &self.facts,
         )
     }
 }
@@ -212,6 +219,7 @@ impl ResearchResolvedExitGridV1 {
                 view.side(),
             )
             .map_err(super::display)?;
+        let facts = crate::trade::SliceFacts::of(bars, column);
         let grid = crate::grid::evaluate_resolved_expression_policy_v1(
             bars,
             column,
@@ -219,7 +227,7 @@ impl ResearchResolvedExitGridV1 {
             anchor.horizon,
             view.side(),
             &view,
-            &crate::trade::SliceFacts::of(bars, column),
+            &facts,
         )?;
         view.validate_complete_grid(&grid).map_err(super::display)?;
         let (summary, support_sessions) = summarize(column, bars, anchor.program())?;
@@ -255,6 +263,7 @@ impl ResearchResolvedExitGridV1 {
             support_sessions,
             digest,
             refusals,
+            facts,
         })
     }
 }

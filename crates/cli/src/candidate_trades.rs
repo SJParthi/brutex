@@ -198,6 +198,11 @@ pub struct Capture<'a> {
     column: &'a Column,
     expression: Option<&'a Expression>,
     state: Mutex<State>,
+    /// `SliceFacts::of(bars, column)`, built on the first materialisation and
+    /// shared by every later one (D-1184). Each call used to rebuild it, an
+    /// O(B) value per captured candidate. A capture that materialises nothing
+    /// builds nothing.
+    facts: std::sync::OnceLock<runner::trade::SliceFacts>,
 }
 
 impl<'a> Capture<'a> {
@@ -256,6 +261,7 @@ impl<'a> Capture<'a> {
             column,
             expression,
             state: Mutex::new(State::default()),
+            facts: std::sync::OnceLock::new(),
         })
     }
 
@@ -453,8 +459,11 @@ impl<'a> Capture<'a> {
         let horizon = Horizon::bars(u32::try_from(tier.horizon).map_err(io_error)?)
             .ok_or("candidate horizon is zero")?;
         let side = crate::side_of_direction(evaluated.direction);
+        let facts = self
+            .facts
+            .get_or_init(|| runner::trade::SliceFacts::of(self.bars, self.column));
         match self.expression {
-            Some(expression) => grid::materialize_expression_cell(
+            Some(expression) => grid::materialize_expression_cell_over(
                 self.bars,
                 self.column,
                 expression,
@@ -462,8 +471,9 @@ impl<'a> Capture<'a> {
                 side,
                 evaluated.grid,
                 cell,
+                facts,
             ),
-            None => grid::materialize_cell(
+            None => grid::materialize_cell_over(
                 self.bars,
                 self.column,
                 evaluated.mask,
@@ -471,6 +481,7 @@ impl<'a> Capture<'a> {
                 side,
                 evaluated.grid,
                 cell,
+                facts,
             ),
         }
     }

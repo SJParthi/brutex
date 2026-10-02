@@ -2710,6 +2710,10 @@ fn walk_forward_exact_grid_v4(
             // The OOS slices are the fold's, not the candidate's: hashed once
             // here (D-1143) rather than three times per pending candidate.
             let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));
+            // And the OOS slice facts with them (D-1184): `replay_selected`
+            // built `SliceFacts::of(trade_test, &projected_oos)` once per
+            // pending candidate, an O(E_prefix) value no candidate changes.
+            let oos_facts = crate::trade::SliceFacts::of(trade_test, &projected_oos);
             for (ordinal, candidate) in pending.iter().enumerate() {
                 let resolved = match candidate.side {
                     Direction::Long => &long,
@@ -2726,11 +2730,12 @@ fn walk_forward_exact_grid_v4(
                     feed: execution.feed(),
                 };
                 let execution_run = ExecutionRunV1::with_digests(&run, &oos_digests)?;
-                let replay = resolved.replay_selected(
+                let replay = resolved.replay_selected_over(
                     oos,
                     &projected_oos,
                     &candidate.selected,
                     execution_run,
+                    &oos_facts,
                 )?;
                 let outcome = replay.cell().ok_or(
                     AnchoredSearchValidationRefusalV4::IncompleteCandidateOos {
