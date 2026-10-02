@@ -42,3 +42,5 @@ Updated: 2026-10-02 17:20 UTC. Budget rule: max 2 agents; stop at 98% weekly usa
 Note 14:40: #22 landed on main; merged main into all 11 open lane-3 PRs (append-only ledger conflicts, resolver scratchpad/append_resolve.py). #38 fixed gate 1c (test literals).
 
 17:05: #54 cli knob race fix (test-only, main), ported into #31. #39 and #47 fixed gate 11. #44 gate 11 under local diagnosis. B7 worker running; C1 (probeapi-1, D-1200) worker started. Local gate runners: scratchpad gate11.sh, gate12.sh.
+
+17:32: Parthi rule: NO new PRs. Push to fix/cloud-* branches only; lane 1 builds one final PR at the end.
