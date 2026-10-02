@@ -36,7 +36,7 @@ Updated: 2026-10-02 17:20 UTC. Budget rule: max 2 agents; stop at 98% weekly usa
 | C1 api hardening | probeapi-1, probeapi-2, probeapi-3 (api half) | fix/cloud-probeapi-1 | D-1200 | pushed bd31d53c, no PR (rule) | |
 | C2 pull | o1api-44, probestore-1 | fix/cloud-o1api-44 | D-1201 | pushed ad0ac021, no PR (rule) | |
 | C3 api low | probeapi-4, -5, -7, rustonly-4, o1api-3, -4, -21 | fix/cloud-probeapi-4 | D-1202 | pushed ec68d72f, no PR (rule) | |
-| C4 pull low | o1api-33, -34, -36, -39, -54, probestore-2 | fix/cloud-o1api-33 | D-1203 | worker running | |
+| C4 pull low | o1api-33, -34, -36, -39, -54, probestore-2 | fix/cloud-o1api-33 | D-1203 | pushed 3409661b, no PR (rule); o1api-33 stated not fixed | |
 | C5 docs/tests | o1runner-9, o1runner-10, rustonly-3, audit-root | fix/cloud-o1runner-9 | D-1204 | pushed 6a56942c, no PR (rule); audit-root covered by #43 | |
 
 Note 14:40: #22 landed on main; merged main into all 11 open lane-3 PRs (append-only ledger conflicts, resolver scratchpad/append_resolve.py). #38 fixed gate 1c (test literals).
