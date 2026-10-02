@@ -44159,3 +44159,46 @@ tree that no longer exists.
 - A module-first token outside a table row is not read, as before.
 
 Invariant CIG-18.
+
+### D-1115 — Gate 11 rule 6 reads method chains, and rule 5c's awk is linear — 2026-10-02
+
+**What was wrong.** Finding AC-gates-law-3. Rule 6 grepped
+`.iter().find(`, `.position(` and `.rposition(` one corpus line at a time.
+Past 100 columns `cargo fmt` breaks a chain before every `.`, so the
+formatter's default shape for a long expression could add a data-bounded
+search with no allowance raised. This is not an evasion; it is what `cargo fmt`
+does.
+
+**The choice.**
+- Rule 6 reads `chained`, the corpus with each record whose code begins with
+  `.` folded onto the record above it in the same file. The fold keeps that
+  record's `FILE:LINE`.
+- A fixture of three chains, one of them at a file boundary, must yield
+  exactly three hits before the corpus is read.
+- On this tree the fold finds 76 sites against 35 declared: 41 more in 29
+  files. A spot check of five found fixed tables or one record's own fields.
+  Five is not 41, so the 41 are pinned per file in `allow_scan_unread`, labelled
+  measured and not classified. That list may only shrink.
+- Rule 5c's attribute walk built a regex from each line's own `FILE:LINE`.
+  Under mawk, which keeps every regex it compiles, that made the step
+  quadratic: a local run did not finish in 50 minutes. It is now a constant
+  pattern with the same match, and the whole gate runs in seconds.
+
+**Measured.**
+- Before the fold, a function ending
+  `values\n    .iter()\n    .find(..)` in `crates/core/src/price.rs` would pass
+  rule 6, because no line holds the whole pattern.
+- With the fold, rule 6 refused it at `price.rs:590`, 1 occurrence with 0
+  allowed.
+- On the real tree the gate passes.
+
+**Limits.**
+- A chain with another call between `.iter()` and `.find(`, such as
+  `.iter().copied().find(`, is still outside the rule's pattern. That was true
+  before this change and is unchanged.
+- A trailing `//` comment on the line before a `.` continuation lands inside
+  the joined record and can split the pattern.
+- The 41 sites are recorded as unread in `docs/06-limits.md`.
+
+Invariant CIG-19.
+

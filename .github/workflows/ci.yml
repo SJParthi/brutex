@@ -6717,9 +6717,91 @@ jobs:
                 "$allow_panic" \
                 'CLAUDE.md section 4 — degrade loudly or refuse, never die'
 
+          # MEASURED, NOT YET CLASSIFIED (D-1115). These are the chained
+          # searches rule 6 could not see until it read chains rather than
+          # lines: 41 sites in 29 files, counted by the fold below at the
+          # commit that added it. Unlike `allow_scan` above, nobody has yet
+          # opened each one and written its bound here. A spot check of five
+          # found five fixed tables or one record's own fields (telemetry's
+          # `Record::field`, vocab's `TABLE` name lookup, rolling's expiry
+          # flags, vendor's window caps, the grid's baseline cell), but five
+          # is not 41. They are pinned so that a NEW chained search is refused
+          # from this commit on. Moving an entry up into `allow_scan` with its
+          # bound written beside it is the follow-up that `docs/06-limits.md`
+          # records; this list may only shrink.
+          allow_scan_unread='
+          crates/api/src/autopilot.rs 1
+          crates/api/src/booleanjson.rs 2
+          crates/api/src/expressionsearchjson.rs 1
+          crates/api/src/indexstoprankingjson.rs 1
+          crates/api/src/pullrun.rs 1
+          crates/api/src/server.rs 1
+          crates/cli/src/boolean_campaign_codec.rs 2
+          crates/cli/src/boolean_qualification_reader.rs 1
+          crates/cli/src/boolean_rung_scope.rs 1
+          crates/cli/src/candidate_universe.rs 1
+          crates/cli/src/global_replay_v4.rs 1
+          crates/cli/src/index_stop_qualification_numeric.rs 1
+          crates/cli/src/index_stop_search.rs 1
+          crates/cli/src/index_stop_store.rs 1
+          crates/cli/src/index_stop_vix_codec.rs 1
+          crates/cli/src/population_v6.rs 1
+          crates/cli/src/pre_admission_data.rs 1
+          crates/cli/src/stored.rs 1
+          crates/cli/src/strict_range_knobs.rs 1
+          crates/pull/src/cash_auction.rs 1
+          crates/pull/src/config.rs 2
+          crates/pull/src/rolling.rs 3
+          crates/pull/src/vendor.rs 5
+          crates/runner/src/grid.rs 2
+          crates/runner/src/research_family.rs 1
+          crates/runner/src/signal_candle_stop.rs 2
+          crates/runner/src/validate.rs 2
+          crates/telemetry/src/record.rs 1
+          crates/vocab/src/expression.rs 1
+          '
+          # One entry per file for `check`, which reads the first match only.
+          allow_scan_all=$(printf '%s\n%s\n' "$allow_scan" "$allow_scan_unread" \
+                           | awk 'NF { s[$1] += $2 } END { for (f in s) print f, s[f] }' | sort)
+          # RULE 6 READS METHOD CHAINS, NOT LINES (D-1115, AC-gates-law-3). Past
+          # 100 columns `cargo fmt` breaks a chain before every `.`, so
+          # `xs\n    .iter()\n    .find(` -- the formatter's default, not an
+          # evasion -- never matched a one-line pattern, and any long expression
+          # could add a data-bounded search with the allowance unraised.
+          # `chained` folds each corpus record whose code starts with `.`
+          # (leading blanks dropped) onto the record above it in the same file,
+          # keeping that record's `FILE:LINE`, so a chain is one record and is
+          # counted once. Its self-test runs first: a broken fold is a refusal,
+          # not a smaller count.
+          chain='
+            function out() { if (have) print buf; have = 0 }
+            {
+              p = index($0, ":"); f = substr($0, 1, p - 1); r = substr($0, p + 1)
+              q = index(r, ":"); code = substr(r, q + 1)
+              t = code; sub(/^[ \t]+/, "", t)
+              if (have && f == lastf && substr(t, 1, 1) == ".") { buf = buf t; next }
+              out(); buf = $0; lastf = f; have = 1
+            }
+            END { out() }
+          '
+          printf '%s\n' \
+            'a.rs:1:    let x = xs' 'a.rs:2:        .iter()' 'a.rs:3:        .position(|v| v == 1);' \
+            'a.rs:4:    let y = ys.iter().find(|v| ok(v));' \
+            'b.rs:1:        .iter()' 'b.rs:2:    .find(|v| v)' > "$work/chain-fixture"
+          awk "$chain" "$work/chain-fixture" > "$work/chain-out"
+          got=$( { grep -cE '\.iter\(\)\.(find|position|rposition)\(' "$work/chain-out" || true; } )
+          if [ "$got" != "3" ] || ! grep -qx 'a.rs:1:    let x = xs.iter().position(|v| v == 1);' "$work/chain-out"; then
+            echo "GATE 11 RULE 6's CHAIN FOLD FAILED ITS SELF-TEST (expected 3 hits, one per chain and none across files, got ${got}):"
+            cat "$work/chain-out"
+            exit 1
+          fi
+          chained="$work/chained"
+          awk "$chain" "$corpus" > "$chained"
+
           check 6 '\.iter\(\)\.(find|position|rposition)\(' \
-                "$allow_scan" \
-                'CLAUDE.md section 3 rule 4 — a search must be bounded by a compile-time table, never by the data'
+                "$allow_scan_all" \
+                'CLAUDE.md section 3 rule 4 — a search must be bounded by a compile-time table, never by the data' \
+                "$chained"
 
           check 7 '\.contains\(&' \
                 "$allow_member" \
@@ -6788,7 +6870,12 @@ jobs:
           awk -F: '
             {
               p = $1; n = $2; t = $0
-              sub("^" p ":" n ":", "", t); sub(/^[ \t]+/, "", t)
+              # A constant pattern, not `"^" p ":" n ":"`: that built a new
+              # regex on every line, and mawk keeps each one it compiles, so
+              # the step went quadratic in the corpus and ran for over half an
+              # hour where it now takes seconds (D-1115). Same match: no path
+              # holds a colon and the line number is digits.
+              sub(/^[^:]*:[0-9]*:/, "", t); sub(/^[ \t]+/, "", t)
               if (d <= 0) {
                 if (t !~ /^#\[(allow|expect)\(/) next
                 acc = t; sp = p; sn = n; d = gsub(/\[/, "[", t) - gsub(/\]/, "]", t)

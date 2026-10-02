@@ -9879,3 +9879,23 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Forty-one chained searches rule 6 now sees and nobody has classified — D-1115, 2 October 2026
+
+CI gate 11 rule 6 reads method chains as of D-1115. It found 41
+`.iter().find(` / `.position(` / `.rposition(` sites in 29 files that the
+line-based grep had never shown. They are pinned per file in
+`allow_scan_unread`, so a new one is refused. **None has been opened and
+classified.** The list sits beside `allow_scan`, whose entries each carry a
+written bound.
+
+A spot check of five found a fixed table or one record's own fields each time:
+- `telemetry::record::Record::field`
+- vocab's `TABLE` lookup by name
+- `pull::rolling`'s expiry flags
+- `pull::vendor`'s window caps
+- the grid's baseline cell
+
+Five of 41 is not a measurement of the rest. Until each entry is moved into
+`allow_scan` with its bound, none of these sites is shown to be bounded by a
+compile-time table rather than by the data.
