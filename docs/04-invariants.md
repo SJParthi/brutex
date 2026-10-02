@@ -5354,3 +5354,12 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Recovery seeding and plan ordering cost — api-06 (D-1380, D-1381)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| Seeding a recovery plan costs the same number of record syncs whatever its window count (3 for 2 windows and for 40), and a rerun adds nothing. | `api::recovery::tests::seeding_a_plan_costs_the_same_record_syncs_for_two_windows_as_for_forty` | ✓ |
+| Preparing a successor costs the same number of record syncs whatever its scope (2 for 2 windows and for 40), and a repeat writes and syncs nothing. | `api::recovery::tests::preparing_a_successor_costs_the_same_record_syncs_for_two_windows_as_for_forty` | ✓ |
+| A seed batch is one sync whatever its size, replays exactly as single appends would, refuses a known, repeated or invalid key whole and before any I/O without poisoning, and on a failed sync publishes nothing and poisons. | `api::recovery_journal::tests::a_seed_batch_syncs_once_whatever_its_size_and_replays_as_single_appends`; `a_seed_batch_naming_a_known_or_repeated_key_refuses_whole_and_unpoisoned`; `a_failed_seed_batch_sync_publishes_nothing_and_poisons` | ✓ |
+| Ordering a plan computes each window's rank exactly once and yields the same order and plan identity as before. | `api::recovery::tests::ordering_a_plan_ranks_each_window_exactly_once_at_any_size` | ✓ |
