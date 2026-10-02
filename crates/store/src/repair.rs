@@ -11,7 +11,7 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::file::{BarFile, StoreError, survey};
+use crate::file::{Admission, BarFile, StoreError, survey};
 use crate::flock::Flock;
 use crate::format::Bar;
 use crate::header::Header;
@@ -248,6 +248,10 @@ pub fn publish(
         return Err(RepairError::RowLimit);
     }
     survey(merged)?;
+    // THE SAME PATH-DERIVED ADMISSION `BarFile::append` asks (D-0915): a
+    // revision is a write boundary too, and a merged bar outside the month or
+    // off the rung's grid would otherwise publish through it.
+    Admission::new(path.month(), path.timeframe().secs()).admit(merged)?;
     check_header(expected_source)?;
     let revision_root = revision.root(root);
     let physical = path.to_path_buf(&revision_root);

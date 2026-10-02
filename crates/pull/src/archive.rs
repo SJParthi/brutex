@@ -29,9 +29,31 @@
 //! pretending otherwise would be the false-claim shape this repository keeps
 //! catching itself in.
 //!
-//! What is bounded: [`MAX_MEMBERS`] caps the walk, one file is open at a time,
-//! and each file's rows are decoded and handed on rather than accumulated
-//! across the whole directory. Peak memory is one file, not one archive.
+//! What is bounded: [`MAX_MEMBERS`] caps the `.csv` members a walk decodes or
+//! rejects, the ones a census rejects counted with the ones it decodes,
+//! [`MAX_MEMBER_BYTES`] caps one member's text before it is read (D-1362), and
+//! one file is open at a time.
+//!
+//! **MEMORY IS NOT BOUNDED TO ONE FILE, AND THIS PARAGRAPH USED TO SAY IT
+//! WAS.** It said each file's rows were decoded and passed along, never
+//! gathered, and the walk has never done that. `descend` pushes every decoded
+//! [`Member`], rows and all, onto the one vector the whole walk shares, and
+//! [`read_dir`] returns that vector, so every decoded row of the folder is
+//! held at once when the walk returns. Held by
+//! `tests::every_decoded_member_is_held_until_the_walk_returns`.
+//!
+//! The ingest path depends on that. [`crate::ingest::from_dir`] calls
+//! [`read_dir`] and writes nothing until it returns, so a member that will not
+//! decode refuses the folder before any bar reaches the store, wherever the
+//! member sorts. Held by
+//! `pipeline::a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written`.
+//! Handing members on one at a time would give that up or would need a second
+//! decoding pass, and neither is decided here. The ceilings are counts:
+//! [`MAX_MEMBERS`] members, decoded and rejected together, each decoded one
+//! refused by [`csv::decode`] past [`crate::fetch::MAX_ROWS`] rows. A census
+//! also keeps one finding per rejected member, its path and at most
+//! [`MAX_FINDING_BYTES`] of its refusal with a note of what was not kept.
+//! `docs/06-limits.md` records it, D-0720 and D-0725.
 //!
 //! Ordering the members is O(n log n) and **it happens once per walk**, at the
 //! foot of [`walk`] rather than at the foot of each directory. It used to sit
@@ -55,7 +77,9 @@
 //! rather than asserted here:
 //! `pull::pipeline::a_directory_past_the_member_cap_is_refused_at_the_cap` for
 //! the cap — a directory one member past [`MAX_MEMBERS`] is refused at the cap
-//! rather than walked to the end and then complained about — and
+//! rather than walked to the end and then complained about — with
+//! `pull::pipeline::a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+//! for the census walk, and
 //! `tests::the_members_are_sorted_once_per_walk_not_once_per_directory` for the
 //! ordering.
 
@@ -70,7 +94,44 @@ use crate::fetch::RawRow;
 /// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary. One
 /// GDFL day holds 12,132 contracts, so this is roughly four such days and still
 /// refuses a directory somebody pointed at their home folder.
+///
+/// **A census counts the members it rejects as well as the ones it decodes.**
+/// It compared only the decoded ones, so [`read_dir_reporting`] over a folder
+/// of malformed files read every one of them, past this cap, and kept a
+/// finding for each. Held by
+/// `pull::pipeline::a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`,
+/// D-0725.
 pub const MAX_MEMBERS: usize = 50_000;
+
+/// The most bytes of a decoder's refusal one census finding keeps.
+///
+/// A refusal that quotes a field quotes it whole, and a field is as long as
+/// its line, so a finding that kept the whole sentence was bounded only by the
+/// file. A longer sentence keeps its first bytes up to this bound, cut back to
+/// a character boundary, and a note of how many bytes it did not keep. A
+/// sentence that fits is kept whole.
+///
+/// **Chosen, not measured.** No real refusal's length has been measured here.
+/// Rendered around an empty field, each [`CsvError`] refusal the sizing test
+/// walks is shorter than this, so an ordinary field fits beside it. The walk
+/// goes through a match on [`CsvError`] and on the date format with no
+/// wildcard arm, so a new variant must be named there; one appended with an
+/// arm of its own returning `None`, while the last variant's arm still
+/// returns `None`, is named but not walked. Held by
+/// `pull::pipeline::a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal`,
+/// `tests::a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` and
+/// `tests::every_refusal_sentence_fits_the_finding_cap_before_its_field`,
+/// D-0725.
+pub const MAX_FINDING_BYTES: usize = 1024;
+
+/// The most bytes one member may hold before it is refused unread.
+///
+/// An engineering bound, not a vendor fact: 256 MiB is [`crate::fetch::MAX_ROWS`]
+/// rows at 268 bytes each, and the longest observed row is GDFL's ten-field
+/// line in `docs/08-vendor-samples.md`, under 80 bytes. A member larger than
+/// this cannot be a file the decoder would accept without also being mostly
+/// blank lines, and reading it whole first is the size bomb. D-1362.
+pub const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Why a directory did not yield rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,9 +172,19 @@ pub enum ArchiveError {
         /// The decoder's own refusal, which names the line.
         why: CsvError,
     },
+    /// A member larger than [`MAX_MEMBER_BYTES`], refused before it is read.
+    MemberTooLarge {
+        /// Which one.
+        path: PathBuf,
+        /// Its size in bytes, or the bytes read when it grew past the bound
+        /// after its size was checked.
+        bytes: u64,
+        /// The bound.
+        cap: u64,
+    },
     /// More members than [`MAX_MEMBERS`].
     TooManyMembers {
-        /// How many were seen before stopping.
+        /// How many were seen before stopping, decoded and rejected together.
         members: usize,
         /// The bound.
         cap: usize,
@@ -153,6 +224,16 @@ impl core::fmt::Display for ArchiveError {
             Self::MemberMalformed { ref path, ref why } => {
                 write!(f, "{}: {why}", path.display())
             }
+            Self::MemberTooLarge {
+                ref path,
+                bytes,
+                cap,
+            } => write!(
+                f,
+                "{} holds {bytes} bytes; the cap is {cap} — refused before it \
+                 was read",
+                path.display()
+            ),
             Self::TooManyMembers { members, cap } => write!(
                 f,
                 "the directory holds at least {members} members; the cap is {cap}"
@@ -342,7 +423,9 @@ fn note_refused(dir: &Path, members: &[Member], why: &ArchiveError) {
 /// # Cost
 ///
 /// O(members) — a bulk import visits every file, and that is inherent. One file
-/// is open at a time and peak memory is one file's rows, not the directory's.
+/// is open at a time. Memory is every decoded row of the walk, not one file's:
+/// the returned vector holds them all, and the module doc says why the ingest
+/// path depends on that.
 pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveError> {
     let mut out = Vec::new();
     let mut passed = Passed {
@@ -379,7 +462,39 @@ pub struct Rejected {
     /// The file, so the operator can look at the one that is different.
     pub path: PathBuf,
     /// Why, in the decoder's own words — the field count it found and expected.
+    ///
+    /// At most [`MAX_FINDING_BYTES`] of them. A longer sentence, one quoting a
+    /// long field, keeps its first bytes and a note of how many it did not
+    /// keep. D-0725.
     pub why: String,
+}
+
+/// A rejected member's refusal as a census keeps it.
+///
+/// Whole when it fits in [`MAX_FINDING_BYTES`]. Otherwise its first bytes up
+/// to that bound, cut back to a character boundary, then
+/// ` [trimmed: N of M bytes not kept]`. The note says a sentence was cut, so a
+/// trimmed finding is never read as the whole one.
+///
+/// The sentence is rendered whole before it is cut, so a rejected member costs
+/// its refusal's length for that moment, as reading the member whole already
+/// costs its file's. What the census keeps is the cut copy, allocated to its
+/// own length.
+fn finding(why: &CsvError) -> String {
+    let whole = why.to_string();
+    if whole.len() <= MAX_FINDING_BYTES {
+        return whole;
+    }
+    let end = whole.floor_char_boundary(MAX_FINDING_BYTES);
+    let note = format!(
+        " [trimmed: {} of {} bytes not kept]",
+        whole.len().saturating_sub(end),
+        whole.len()
+    );
+    let mut kept = String::with_capacity(end.saturating_add(note.len()));
+    kept.push_str(whole.get(..end).unwrap_or_default());
+    kept.push_str(&note);
+    kept
 }
 
 /// WHAT A MEMBER THAT WILL NOT DECODE DOES TO THE WALK.
@@ -425,6 +540,23 @@ enum Malformed {
 /// # Errors
 ///
 /// Every [`read_dir`] error except [`ArchiveError::MemberMalformed`].
+///
+/// # Cost
+///
+/// [`read_dir`]'s time and more memory than [`read_dir`]'s. The
+/// returned vector holds every decoded row of the walk, and beside it the
+/// census keeps one [`Rejected`] per member that would not decode: its path
+/// and at most [`MAX_FINDING_BYTES`] of its refusal with a note of what was not
+/// kept. Decoded and rejected members count together against
+/// [`MAX_MEMBERS`], so a folder of malformed files is refused at the cap
+/// rather than read to its end. Every member visited, decoded or rejected, is
+/// read whole first. Held by
+/// `pull::pipeline::a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+/// and `pull::pipeline::a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal`.
+///
+/// A census writes nothing, so unlike the ingest path it has no need to hold
+/// the rows all at once; it does because it shares this walk.
+/// `docs/06-limits.md` records that as well, D-0720 and D-0725.
 pub fn read_dir_reporting(
     dir: &Path,
     columns: Columns,
@@ -494,7 +626,8 @@ fn walk(
     // call had returned — its result was already "every member, by path". The
     // inner sorts only re-ordered a prefix that the outer one was about to
     // order again, and nothing between them reads a position: the loop only
-    // pushes, and the `MAX_MEMBERS` guard reads `out.len()`. `sort_by` is
+    // pushes, and the `MAX_MEMBERS` guard reads `out.len()` and
+    // `rejected.len()`, lengths and not positions. `sort_by` is
     // stable, so even two members carrying the same path — which a filesystem
     // cannot yield, though the type permits it — come out in the same relative
     // order either way. CLAUDE.md §3 rule 5, same inputs same outputs byte for
@@ -639,17 +772,20 @@ fn descend(
         {
             return Err(ArchiveError::PathEscapes { path });
         }
-        if out.len() >= MAX_MEMBERS {
+        // THE REJECTED MEMBERS COUNT TOO. This read `out.len()` alone, and a
+        // census walk (`Malformed::Collect`) pushes a malformed member onto
+        // `rejected`, never onto `out`, so a folder of malformed files was
+        // read past the cap. An ingest walk's `rejected` stays empty, so its
+        // count is the one it always was. D-0725, D-0953 (W1-pull1-2).
+        let seen = out.len().saturating_add(rejected.len());
+        if seen >= MAX_MEMBERS {
             return Err(ArchiveError::TooManyMembers {
-                members: out.len(),
+                members: seen,
                 cap: MAX_MEMBERS,
             });
         }
 
-        let bytes = fs::read(&path).map_err(|e| ArchiveError::MemberUnreadable {
-            path: path.clone(),
-            detail: e.to_string(),
-        })?;
+        let bytes = read_bounded(&path)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ArchiveError::MemberNotText { path: path.clone() })?;
         // THE ONE REFUSAL THE CENSUS TURNS INTO A FINDING. `Refuse` is
@@ -662,7 +798,7 @@ fn descend(
                 }
                 Malformed::Collect => {
                     rejected.push(Rejected {
-                        why: why.to_string(),
+                        why: finding(&why),
                         path,
                     });
                     continue;
@@ -685,6 +821,44 @@ fn descend(
     // so ordering here ordered the whole walk's accumulator once per directory.
     // It happens exactly once now, in `walk`, after this recursion unwinds.
     Ok(())
+}
+
+/// One member's bytes, refused past [`MAX_MEMBER_BYTES`] before they are read.
+///
+/// This was `fs::read`, which reads whatever the file holds. [`csv::decode`]
+/// caps ROWS, but it runs after the whole file is in memory, and blank lines
+/// are not rows, so a file of any size could be read in full before anything
+/// refused it. The length is checked from the open handle's metadata first,
+/// and the read is then capped one byte past the bound, so a file that grows
+/// between the check and the read is caught too. D-1362.
+fn read_bounded(path: &Path) -> Result<Vec<u8>, ArchiveError> {
+    use std::io::Read as _;
+    let unreadable = |e: std::io::Error| ArchiveError::MemberUnreadable {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let too_large = |bytes: u64| ArchiveError::MemberTooLarge {
+        path: path.to_path_buf(),
+        bytes,
+        cap: MAX_MEMBER_BYTES,
+    };
+    let file = fs::File::open(path).map_err(unreadable)?;
+    let declared = file.metadata().map_err(unreadable)?.len();
+    if declared > MAX_MEMBER_BYTES {
+        return Err(too_large(declared));
+    }
+    // A capacity hint only: `declared` is at most `MAX_MEMBER_BYTES`, which
+    // fits a `usize` on every target this builds for, and a hint of zero
+    // would only cost reallocations, never a wrong answer.
+    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let read = file
+        .take(MAX_MEMBER_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if read as u64 > MAX_MEMBER_BYTES {
+        return Err(too_large(read as u64));
+    }
+    Ok(bytes)
 }
 
 /// Order a walk's members by path — the ONE place it happens, and the one
@@ -750,8 +924,11 @@ pub fn total_rows(members: &[Member]) -> usize {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
-    use super::{ArchiveError, SORTS, read_dir};
-    use crate::csv::Columns;
+    use super::{
+        ArchiveError, MAX_FINDING_BYTES, MAX_MEMBER_BYTES, MAX_MEMBERS, SORTS, finding, read_dir,
+        read_dir_reporting,
+    };
+    use crate::csv::{Columns, CsvError};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -928,6 +1105,314 @@ mod tests {
         assert!(
             matches!(why, ArchiveError::MemberMalformed { ref path, .. } if *path == odd),
             "the refusal must name the member a level down, not the folder: {why}"
+        );
+    }
+
+    /// **THE WALK HOLDS EVERY MEMBER IT DECODED, ROWS AND ALL, UNTIL IT
+    /// RETURNS.** D-0720.
+    ///
+    /// The module doc said peak memory was one file, while the walk returned
+    /// one vector holding every member's rows. This pins what the walk does,
+    /// so the sentence that now describes it is checked against the code.
+    ///
+    /// A seventh member carries three rows, so the row total cannot pass by
+    /// coinciding with the member count.
+    #[test]
+    fn every_decoded_member_is_held_until_the_walk_returns() {
+        let scratch = Scratch::new();
+        let root = two_levels(&scratch);
+        fs::write(root.join("Options").join("THREE.csv"), ONE_ROW.repeat(3)).expect("three rows");
+
+        let members = read_dir(&root, Columns::TrueDataIndex).expect("the folder walks");
+
+        assert_eq!(
+            members.len(),
+            7,
+            "every member is in the one returned vector"
+        );
+        assert_eq!(
+            super::total_rows(&members),
+            9,
+            "and every row of every member is in it at the same time: six \
+             one-row members and one of three"
+        );
+        assert!(
+            members.iter().all(|member| !member.rows.is_empty()),
+            "no member was handed on and emptied before the walk returned"
+        );
+
+        // THE CENSUS WALK HOLDS THE SAME ROWS, though it writes nothing.
+        let (reported, rejected) =
+            super::read_dir_reporting(&root, Columns::TrueDataIndex).expect("the census walk");
+        assert!(rejected.is_empty(), "every member decodes");
+        assert_eq!(
+            super::total_rows(&reported),
+            9,
+            "the census walk returns every row too"
+        );
+    }
+
+    /// **THE MODULE NO LONGER CLAIMS ONE FILE OF PEAK MEMORY.** D-0720.
+    ///
+    /// Both sentences were false, and
+    /// `every_decoded_member_is_held_until_the_walk_returns` shows why. The
+    /// needles are assembled at run time, so this test's own source cannot
+    /// match them.
+    #[test]
+    fn the_walk_does_not_claim_one_file_of_peak_memory() {
+        let source = include_str!("archive.rs");
+        for needle in [
+            format!("{} {}", "Peak memory is one file,", "not one archive"),
+            format!(
+                "{} {}",
+                "peak memory is one file's rows,", "not the directory's"
+            ),
+        ] {
+            assert!(
+                !source.contains(&needle),
+                "archive.rs still claims {needle:?}, and the walk holds every \
+                 decoded member until it returns"
+            );
+        }
+    }
+
+    /// **A FINDING IS WHOLE UP TO THE CAP, AND TRIMMED PAST IT.** D-0725.
+    ///
+    /// Three sentences around the boundary: one exactly `MAX_FINDING_BYTES`
+    /// long, kept whole; one a byte longer, which keeps the cap's worth and
+    /// notes the one byte it did not keep; and one whose cap falls inside a
+    /// three-byte character, which is cut back to the last whole character
+    /// rather than split or dropped.
+    #[test]
+    fn a_finding_is_whole_up_to_the_cap_and_trimmed_past_it() {
+        let time = |got: String| CsvError::TimeMalformed { line: 1, got };
+        let frame = time(String::new()).to_string().len();
+
+        // EXACTLY AT THE CAP: whole.
+        let at = time("A".repeat(MAX_FINDING_BYTES - frame));
+        let whole = at.to_string();
+        assert_eq!(
+            whole.len(),
+            MAX_FINDING_BYTES,
+            "the fixture sits on the cap"
+        );
+        assert_eq!(finding(&at), whole, "a sentence that fits is kept whole");
+
+        // ONE BYTE PAST IT: the cap's worth, and a note of the one byte.
+        let past = time("A".repeat(MAX_FINDING_BYTES + 1 - frame));
+        let whole = past.to_string();
+        assert_eq!(
+            finding(&past),
+            format!(
+                "{} [trimmed: 1 of {} bytes not kept]",
+                whole.get(..MAX_FINDING_BYTES).expect("ASCII"),
+                MAX_FINDING_BYTES + 1
+            )
+        );
+
+        // THE CAP INSIDE A CHARACTER: cut back to the last whole one.
+        let wide = time("\u{20ac}".repeat(MAX_FINDING_BYTES));
+        let whole = wide.to_string();
+        let end = (0..=MAX_FINDING_BYTES)
+            .rev()
+            .find(|&at| whole.is_char_boundary(at))
+            .expect("the start is a boundary");
+        assert!(
+            end < MAX_FINDING_BYTES,
+            "the fixture puts the cap inside a character, at {end}"
+        );
+        assert_eq!(
+            finding(&wide),
+            format!(
+                "{} [trimmed: {} of {} bytes not kept]",
+                whole.get(..end).expect("a boundary"),
+                whole.len() - end,
+                whole.len()
+            ),
+            "every whole character up to the cap, and none of the one it splits"
+        );
+    }
+
+    /// **EVERY REFUSAL SENTENCE FITS THE FINDING CAP BEFORE ITS FIELD IS
+    /// ADDED.** D-0725.
+    ///
+    /// `MAX_FINDING_BYTES` says an ordinary field fits beside any sentence the
+    /// decoder writes, and this is the check behind it: each refusal, rendered
+    /// around an empty field, is shorter than the cap, so a trimmed finding is
+    /// one whose field was long.
+    ///
+    /// **WALKED, NOT LISTED.** The refusals were a hand list, and `CsvError`
+    /// is `#[non_exhaustive]`, so a variant added later was checked by nothing.
+    /// The walk now goes through `after`, whose match on `CsvError` and on
+    /// `DateFormat` has no wildcard arm, so a new variant does not compile
+    /// until it is named there. As with `csv`'s layout walk, a variant
+    /// appended with an arm of its own returning `None`, while the last
+    /// variant's arm still returns `None`, is named but not walked. Date
+    /// formats are walked in the order they are declared.
+    #[test]
+    fn every_refusal_sentence_fits_the_finding_cap_before_its_field() {
+        use crate::vendor::DateFormat;
+
+        /// `refusal`'s successor in declaration order, rendered around an
+        /// empty field and the widest numbers, or `None` after the last. Each
+        /// date format is its own step.
+        fn after(refusal: &CsvError) -> Option<CsvError> {
+            const fn next_format(format: DateFormat) -> Option<DateFormat> {
+                match format {
+                    DateFormat::DashedYmd => Some(DateFormat::CompactYmd),
+                    DateFormat::CompactYmd => Some(DateFormat::SlashedDmy),
+                    DateFormat::SlashedDmy => Some(DateFormat::CompactDmy),
+                    DateFormat::CompactDmy => Some(DateFormat::DashedYmdMidnight),
+                    DateFormat::DashedYmdMidnight => None,
+                }
+            }
+            let line = usize::MAX;
+            let got = String::new();
+            match *refusal {
+                CsvError::FieldCount { .. } => Some(CsvError::DateMalformed {
+                    line,
+                    got,
+                    format: DateFormat::DashedYmd,
+                }),
+                CsvError::DateMalformed { format, .. } => Some(match next_format(format) {
+                    Some(format) => CsvError::DateMalformed { line, got, format },
+                    None => CsvError::TimeMalformed { line, got },
+                }),
+                CsvError::TimeMalformed { .. } => Some(CsvError::PriceMalformed { line, got }),
+                CsvError::PriceMalformed { .. } => {
+                    Some(CsvError::OpenInterestSentinel { line, got })
+                }
+                CsvError::OpenInterestSentinel { .. } => Some(CsvError::HeaderMismatch {
+                    got,
+                    want: crate::csv::GDFL_HEADER,
+                }),
+                CsvError::HeaderMismatch { .. } => Some(CsvError::TooManyRows {
+                    rows: usize::MAX,
+                    cap: usize::MAX,
+                }),
+                CsvError::TooManyRows { .. } => None,
+            }
+        }
+
+        let mut walked = Vec::new();
+        let mut next = Some(CsvError::FieldCount {
+            line: usize::MAX,
+            got: usize::MAX,
+            want: usize::MAX,
+        });
+        while let Some(refusal) = next {
+            assert!(
+                walked.len() < 64,
+                "the walk ends: {} steps so far, the last {refusal:?}",
+                walked.len()
+            );
+            if let CsvError::DateMalformed { format, .. } = refusal {
+                let before = walked
+                    .iter()
+                    .filter(|seen| matches!(seen, CsvError::DateMalformed { .. }))
+                    .count();
+                assert_eq!(
+                    format as usize, before,
+                    "{format:?} is walked in the order it is declared"
+                );
+            }
+            let sentence = refusal.to_string();
+            assert!(
+                sentence.len() < MAX_FINDING_BYTES,
+                "{} bytes before any field: {sentence}",
+                sentence.len()
+            );
+            assert_eq!(finding(&refusal), sentence, "and it is kept whole");
+            next = after(&refusal);
+            walked.push(refusal);
+        }
+        assert!(
+            matches!(walked.last(), Some(CsvError::TooManyRows { .. })),
+            "the walk reaches the last variant declared: {walked:?}"
+        );
+    }
+
+    /// **A CENSUS STOPS AT THE MEMBER CAP WHETHER THE MEMBERS DECODE OR NOT.**
+    ///
+    /// W1-pull1-2. The cap read `out.len()`, which counts ACCEPTED members only,
+    /// so under `Malformed::Collect` a folder of members that all fail to decode
+    /// was read in full, every file opened and every rejection kept, with no
+    /// bound at all. The cap now counts every member the walk visits.
+    #[test]
+    fn a_census_of_malformed_members_is_refused_at_the_member_cap() {
+        let scratch = Scratch::new();
+        let root = scratch.root.join("feed");
+        fs::create_dir_all(&root).expect("a scratch feed");
+        for i in 0..=MAX_MEMBERS {
+            fs::write(root.join(format!("F{i}.csv")), "20221003,09:15:01\n")
+                .expect("two fields, not five");
+        }
+
+        let got = read_dir_reporting(&root, Columns::TrueDataIndex);
+        // Counts, not the vectors: fifty thousand rejections would bury the
+        // failure message this test exists to print.
+        let seen = got
+            .as_ref()
+            .map(|(kept, rejected)| (kept.len(), rejected.len()));
+        assert!(
+            matches!(
+                got,
+                Err(ArchiveError::TooManyMembers {
+                    members: MAX_MEMBERS,
+                    cap: MAX_MEMBERS,
+                })
+            ),
+            "the census must stop AT the bound, counting the members it \
+             rejected; (kept, rejected) = {seen:?}"
+        );
+    }
+
+    /// A MEMBER PAST THE BYTE CAP IS REFUSED BEFORE IT IS READ.
+    ///
+    /// The walk used `fs::read`, so a member of any size was read whole before
+    /// the decoder's row cap could refuse it — and a file of blank lines is
+    /// never refused by a row cap at all. The file here is sparse, so the test
+    /// costs no disk; before the fix it cost a 256 MiB allocation and came back
+    /// as a field-count refusal instead. D-1362.
+    #[test]
+    fn a_member_past_the_byte_cap_is_refused_before_it_is_read() {
+        let scratch = Scratch::new();
+        let root = scratch.root.join("feed");
+        fs::create_dir_all(&root).expect("a feed folder");
+        fs::write(root.join("ALPHA.csv"), ONE_ROW).expect("a member");
+        let big = root.join("BIG.csv");
+        fs::File::create(&big)
+            .expect("a member")
+            .set_len(MAX_MEMBER_BYTES + 1)
+            .expect("a sparse length");
+
+        let why = read_dir(&root, Columns::TrueDataIndex).expect_err("past the cap");
+        assert_eq!(
+            why,
+            ArchiveError::MemberTooLarge {
+                path: big.clone(),
+                bytes: MAX_MEMBER_BYTES + 1,
+                cap: MAX_MEMBER_BYTES,
+            }
+        );
+        let text = why.to_string();
+        assert!(text.contains("BIG.csv"), "{text}");
+        assert!(text.contains("refused before it was read"), "{text}");
+
+        // The census path refuses it too: a size bomb is a fault, not a member
+        // of another product.
+        assert!(matches!(
+            super::read_dir_reporting(&root, Columns::TrueDataIndex),
+            Err(ArchiveError::MemberTooLarge { .. })
+        ));
+
+        // Without it the folder reads, so the refusal was the size alone.
+        fs::remove_file(&big).expect("remove the bomb");
+        assert_eq!(
+            read_dir(&root, Columns::TrueDataIndex)
+                .expect("reads")
+                .len(),
+            1
         );
     }
 }

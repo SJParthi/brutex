@@ -30,27 +30,183 @@ impl Drop for Scratch {
     }
 }
 
+/// Every route the server registers that the invocation journal does NOT
+/// record, each with the reason. A new route must land in [`AUDITED`] or here,
+/// by name, or the test below fails. D-0952.
+pub(crate) const EXEMPT: &[(&str, &str)] = &[
+    ("/dashboard", PAGE),
+    ("/instruments", PAGE),
+    ("/audit", PAGE),
+    ("/store", PAGE),
+    ("/bars", PAGE),
+    ("/logs", PAGE),
+    ("/pull", PAGE),
+    ("/masters", PAGE),
+    ("/masters.js", PAGE),
+    ("/typeahead.js", PAGE),
+    ("/health", PAGE),
+    ("/instruments.json", DATA),
+    ("/feeds.json", DATA),
+    ("/universes.json", DATA),
+    ("/calendar.json", DATA),
+    ("/vocab.json", DATA),
+    ("/indexmap.json", DATA),
+    ("/folder.json", DATA),
+    ("/bars.json", DATA),
+    ("/gaps.json", DATA),
+    ("/bars/window.json", DATA),
+    ("/store.json", DATA),
+    ("/verify.json", DATA),
+    ("/audit.json", DATA),
+    ("/logs.json", DATA),
+    ("/pull/spot", DATA),
+    ("/pull/fno", DATA),
+    ("/pull/run", DATA),
+    ("/pull/recovery", DATA),
+    ("/pull/recovery.json", DATA),
+    ("/pull/run.json", DATA),
+    ("/pull/run/stop", DATA),
+    ("/autopilot.json", DATA),
+    ("/universe/resolve", DATA),
+    ("/autopilot/pause", DATA),
+    ("/autopilot/resume", DATA),
+    ("/autopilot/control", DATA),
+    ("/ingest/status.json", DATA),
+    ("/ingest/queue", DATA),
+    ("/masters/refresh", DATA),
+    ("/masters/status.json", DATA),
+    ("/index-stop.json", INDEX_STOP),
+    ("/index-stop-candles.json", INDEX_STOP),
+    ("/engine/index-stop-launch.json", INDEX_STOP),
+    ("/index-stop-qualification.json", INDEX_STOP),
+    ("/index-stop-ranking.json", INDEX_STOP),
+    ("/index-stop-vix.json", INDEX_STOP),
+    (
+        "/backtest/audit.json",
+        "the journal's own reader, excluded so inspection cannot recurse (D-0568)",
+    ),
+    (
+        "/inspection.json",
+        "the audited router's application-mode probe; not a sweep result or control",
+    ),
+];
+const PAGE: &str = "a page, script or health check; not a sweep result or control";
+const DATA: &str = "a store, pull, ingest, master or autopilot route; D-0568 selects sweep \
+     result and control requests only";
+const INDEX_STOP: &str = "an index-stop read or launch probe no decision has selected for \
+     journaling; left open by D-0952, not decided";
+
+/// The registered routes that are not [`EXEMPT`]: what the journal must
+/// cover, read off the router rather than off [`AUDITED`].
+pub(crate) fn journaled_by_registration() -> Vec<String> {
+    registered_routes()
+        .into_iter()
+        .filter(|route| !EXEMPT.iter().any(|(path, _)| path == route))
+        .collect()
+}
+
+/// Every path `.route(` registers in the production audited router: the route
+/// table and the one extra route `audited_router_serving` adds. Comment lines
+/// are skipped first, because the table's own comments quote a `.route(` that
+/// is deliberately absent.
+pub(crate) fn registered_routes() -> Vec<String> {
+    let source = include_str!("server.rs");
+    let from = source
+        .find("pub fn audited_router_serving(")
+        .expect("the audited router is defined");
+    let to = from
+        + source[from..]
+            .find(".fallback(move |request: axum::extract::Request|")
+            .expect("the route table ends at its fallback");
+    let code: String = source[from..to]
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(|line| [line, "\n"])
+        .collect();
+    let mut routes = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find(".route(") {
+        rest = rest[at + ".route(".len()..].trim_start();
+        let path = rest
+            .strip_prefix('"')
+            .and_then(|tail| tail.split_once('"'))
+            .map(|(path, _)| path)
+            .expect("every route is registered with a literal path");
+        routes.push(path.to_owned());
+    }
+    routes
+}
+
 #[test]
-fn only_actual_fixed_result_and_control_routes_are_audited() {
-    for path in [
-        "/backtest/run",
-        "/backtest.json",
-        "/candidate-trades.json",
-        "/boolean-candidates.json",
-        "/boolean-statistics.json",
-        "/boolean-admission.json",
-        "/boolean-qualification.json",
-        "/boolean-qualified-campaign.json",
-        "/boolean-qualified-search.json",
-        "/boolean-oos.json",
-    ] {
-        assert_eq!(audited_route(path), Some(path));
+fn every_registered_route_is_audited_or_exempt_by_name() {
+    let routes = registered_routes();
+    // A parser that stops matching would pass every check below on nothing.
+    assert!(
+        routes.len() >= AUDITED.len() + EXEMPT.len(),
+        "parsed only {} routes",
+        routes.len()
+    );
+    let mut seen = std::collections::HashSet::new();
+    for route in &routes {
+        let route = route.as_str();
+        assert!(seen.insert(route), "{route} is registered twice");
+        let audited = AUDITED.contains(&route);
+        let exempt = EXEMPT.iter().any(|(path, _)| *path == route);
         assert!(
-            include_str!("server.rs").contains(&format!("\"{path}\"")),
-            "the route must actually be registered"
+            audited != exempt,
+            "{route} must be in exactly one of AUDITED and EXEMPT \
+             (audited {audited}, exempt {exempt})"
         );
     }
+    assert_eq!(routes.len(), AUDITED.len() + EXEMPT.len(), "a stale entry");
+    for route in AUDITED {
+        assert!(
+            routes.iter().any(|r| r == route),
+            "{route} is audited, not registered"
+        );
+        let found = audited_route(route).expect("an audited route maps");
+        assert_eq!(found, route);
+        // The label is the list's own static, never the request's bytes.
+        assert!(std::ptr::eq(found, route));
+        assert_eq!(AUDITED.iter().filter(|other| **other == route).count(), 1);
+    }
+    for (route, why) in EXEMPT {
+        assert!(
+            routes.iter().any(|r| r == route),
+            "{route} is exempt, not registered"
+        );
+        assert_eq!(audited_route(route), None, "{route}");
+        assert!(!why.is_empty());
+    }
+}
+
+#[test]
+fn no_near_spelling_of_an_audited_route_is_audited() {
+    for route in AUDITED {
+        let upper = route.to_ascii_uppercase();
+        let without = &route[1..];
+        let near = [
+            format!("{route}/"),
+            format!("/{route}"),
+            format!("{route}?token=secret"),
+            format!("{route}#x"),
+            format!("{route}\0"),
+            format!(" {route}"),
+            format!("{route} "),
+            format!("/api{route}"),
+            route.replacen('/', "//", 1),
+            route.replacen('/', "/%2F", 1),
+            upper,
+            without.to_owned(),
+            route[..route.len() - 1].to_owned(),
+        ];
+        for path in near {
+            assert_eq!(audited_route(&path), None, "{path:?}");
+        }
+    }
     for path in [
+        "",
+        "/",
         "/backtest/audit.json",
         "/health",
         "/_app/immutable/x.js",
@@ -59,6 +215,7 @@ fn only_actual_fixed_result_and_control_routes_are_audited() {
     ] {
         assert_eq!(audited_route(path), None);
     }
+    assert_eq!(audited_route(&"/".repeat(1 << 16)), None);
     assert_eq!(
         public_method(&axum::http::Method::from_bytes(b"SECRET").unwrap()),
         "OTHER"
@@ -388,4 +545,184 @@ fn oldest_invocation_ends_the_exact_newest_first_cursor() {
     let after = read_page(Some(ID_BASE + 1));
     assert_eq!(after["records"], serde_json::json!([]));
     assert_eq!(after.get("next_before"), Some(&serde_json::Value::Null));
+}
+
+/// **A TERMINAL OWED WHILE EVERY DETAIL SLOT IS TAKEN STILL RECORDS THE
+/// HANDLER'S REAL OUTCOME, AND THE CLIENT GETS THE HANDLER'S REAL ANSWER.**
+///
+/// The handler saturates the shared pool itself, after the start was written
+/// and before the terminal runs: the shape four concurrent detail reads give a
+/// `POST /backtest/run` that already launched its engine task. Until D-0952 the
+/// terminal's `detail::run` answered `Saturated`, the armed attempt was dropped,
+/// its `Drop` wrote `Cancelled`/0 on the Tokio worker, and the client got a 503
+/// saying the handler already ran. Every outcome class is tried, a handler's
+/// own 429 included, and the slots are proven saturated before each terminal.
+#[tokio::test]
+async fn a_terminal_owed_while_every_slot_is_taken_records_the_handlers_real_outcome() {
+    let apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    for (status, expected) in [
+        (StatusCode::OK, Phase::Completed),
+        (StatusCode::ACCEPTED, Phase::Completed),
+        (StatusCode::NO_CONTENT, Phase::Completed),
+        (StatusCode::BAD_REQUEST, Phase::Refused),
+        (StatusCode::TOO_MANY_REQUESTS, Phase::Refused),
+        (StatusCode::INTERNAL_SERVER_ERROR, Phase::Failed),
+        (StatusCode::SERVICE_UNAVAILABLE, Phase::Failed),
+    ] {
+        let held = std::sync::Mutex::new(Vec::new());
+        let response = request_audited(root.0.clone(), "POST /backtest/run".to_owned(), async {
+            let mut taken = crate::detail::take_every_free_slot(&apart);
+            assert!(!taken.is_empty(), "the begin's own slot was returned");
+            held.lock().unwrap().append(&mut taken);
+            // Proof the pool is full at the moment the terminal is owed.
+            assert_eq!(
+                crate::detail::run(|| ()).await,
+                Err(crate::detail::RunError::Saturated)
+            );
+            (status, "the handler's own body").into_response()
+        })
+        .await;
+        assert_eq!(response.status(), status, "the handler's answer is kept");
+        let id: u64 = response
+            .headers()
+            .get("x-brutex-request-audit")
+            .expect("the terminal settled and stamped the id")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"the handler's own body");
+        let record = journal::read(&root.0, id).unwrap().unwrap();
+        assert_eq!(record.phase, expected, "{status}");
+        assert_eq!(record.response_status, status.as_u16());
+        assert_eq!(record.label, "POST /backtest/run");
+        // The owed slot was returned; only the test's own are still held.
+        assert_eq!(
+            crate::detail::run(|| ()).await,
+            Err(crate::detail::RunError::Saturated)
+        );
+        held.lock().unwrap().clear();
+        assert_eq!(crate::detail::run(|| 7).await, Ok(7));
+    }
+    let rows = journal::page(&root.0, None, 32).unwrap();
+    assert_eq!(rows.len(), 7);
+    assert!(rows.iter().all(|row| row.phase != Phase::Cancelled));
+}
+
+/// **AN OWED TASK IS NEVER REFUSED, AND IT COUNTS AGAINST NEW WORK WHILE IT
+/// RUNS.** With every free slot taken, `run_owed` still runs; while it runs, a
+/// slot freed by the test is not enough for `run`, because the owed task holds
+/// one past the cap. Once it returns, everything it took is back. D-0952.
+#[tokio::test]
+async fn an_owed_task_runs_past_a_full_pool_and_counts_while_it_runs() {
+    let apart = crate::detail::apart_from_slot_owners().await;
+    let mut taken = crate::detail::take_every_free_slot(&apart);
+    assert!(!taken.is_empty());
+    assert_eq!(
+        crate::detail::run(|| ()).await,
+        Err(crate::detail::RunError::Saturated)
+    );
+    let (entered, inside) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let owed = tokio::spawn(crate::detail::run_owed(move || {
+        entered.send(()).unwrap();
+        wait.recv().unwrap();
+        "owed"
+    }));
+    tokio::task::spawn_blocking(move || inside.recv().unwrap())
+        .await
+        .unwrap();
+    // One slot back from the test: the owed task's past-the-cap slot still
+    // fills the pool, so new work is refused.
+    drop(taken.pop());
+    assert_eq!(
+        crate::detail::run(|| ()).await,
+        Err(crate::detail::RunError::Saturated)
+    );
+    release.send(()).unwrap();
+    assert_eq!(owed.await.unwrap(), Ok("owed"));
+    // Now the slot the test returned is free again.
+    assert_eq!(crate::detail::run(|| 1).await, Ok(1));
+    drop(taken);
+    for _ in 0..crate::detail::MAX_CONCURRENT * 3 {
+        assert_eq!(crate::detail::run_owed(|| 2).await, Ok(2));
+    }
+    assert_eq!(crate::detail::run(|| 3).await, Ok(3));
+}
+
+/// **WHAT ONE AUDITED REQUEST LEAVES ON DISK, MEASURED.** Each finished
+/// request adds one 256-byte start to `index.bin` and one new file of exactly
+/// two 256-byte records (start and terminal) in the one flat directory, and
+/// nothing is ever removed: the directory's entry count and the bytes on disk
+/// grow with every request ever served, which `docs/06-limits.md` states under
+/// D-0952. Reading a page stays at most 32 rows however many exist.
+#[tokio::test]
+async fn each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed() {
+    let _apart = crate::detail::apart_from_slot_owners().await;
+    let root = Scratch::new();
+    let dir = root.0.join("audit/invocations-v1");
+    for served in 1..=40_u64 {
+        let response = request_audited(root.0.clone(), "GET /live.json".to_owned(), async {
+            StatusCode::OK.into_response()
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            u64::try_from(names.len()).unwrap(),
+            served + 1,
+            "one file per request, plus the index"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.join("index.bin")).unwrap().len(),
+            256 * served
+        );
+        let own = dir.join(format!("{:020}.bin", ID_BASE + served));
+        assert_eq!(std::fs::metadata(own).unwrap().len(), 512);
+        assert!(
+            (1..=served).all(|ordinal| dir.join(format!("{:020}.bin", ID_BASE + ordinal)).exists()),
+            "no earlier record is rotated away"
+        );
+    }
+    assert_eq!(journal::page(&root.0, None, 32).unwrap().len(), 32);
+}
+
+/// **THE GROWTH IS WRITTEN WHERE A LIMIT IS LOOKED FOR.** `docs/06-limits.md`
+/// had no line for the journal's per-request growth; D-0568 said only that
+/// storage grows with history. W1-api3-0, D-0952.
+#[test]
+fn the_journals_per_request_growth_is_stated_in_the_limits() {
+    let limits = include_str!("../../../docs/06-limits.md");
+    let section = limits
+        .split("\n## ")
+        .find(|section| section.contains("D-0952"))
+        .expect("a D-0952 section in docs/06-limits.md");
+    // Line breaks and sentence case are the document's to choose.
+    let section = section
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    for phrase in [
+        "audit/invocations-v1/",
+        "one new file per audited request",
+        "256 bytes",
+        "no retention, rotation or sharding",
+        "directory's entry count",
+        "run_owed",
+        "not bounded by `max_concurrent`",
+    ] {
+        assert!(section.contains(phrase), "missing {phrase:?}");
+    }
+    for route in AUDITED {
+        assert!(section.contains(&format!("`{route}`")), "{route}");
+        assert_eq!(route, route.to_lowercase(), "compared lower-cased");
+    }
 }

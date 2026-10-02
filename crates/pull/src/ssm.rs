@@ -241,13 +241,31 @@ impl AwsIdentity {
     /// [`SsmError`] naming the variable that was missing, so an operator is
     /// told which one to set rather than that "AWS failed".
     pub fn from_env() -> Result<Self, SsmError> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] over any lookup, so the rule is testable without
+    /// mutating the process environment — `std::env::set_var` needs `unsafe`
+    /// and this crate forbids it.
+    ///
+    /// # An empty value is an UNSET value
+    ///
+    /// `AWS_ACCESS_KEY_ID=` exported empty — the common way a CI step or a
+    /// shell "clears" a variable — used to be read as a key id of zero
+    /// characters. That identity is not one: it signs a request AWS refuses
+    /// with a fault naming neither the variable nor the file, and because
+    /// [`Self::discover`] stops at the first identity it builds, an empty
+    /// export also SHADOWED a complete `~/.aws/credentials`. AWS's own
+    /// resolvers treat an empty variable as absent and move on; so does this.
+    /// D-1372.
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, SsmError> {
         let read = |name: &str| -> Result<String, SsmError> {
-            std::env::var(name).map_err(|_| {
+            non_blank(lookup(name)).ok_or_else(|| {
                 SsmError::unreachable(format!(
                     "the AWS identity is not in this process's environment: \
-                     {name} is unset. This is the AWS key that proves you may \
-                     READ the parameter — not the broker token, which is what \
-                     comes back from it."
+                     {name} is unset or empty. This is the AWS key that proves \
+                     you may READ the parameter — not the broker token, which \
+                     is what comes back from it."
                 ))
             })
         };
@@ -255,8 +273,10 @@ impl AwsIdentity {
             key_id: read("AWS_ACCESS_KEY_ID")?,
             secret: read("AWS_SECRET_ACCESS_KEY")?,
             // Absent for a long-lived key, present for anything temporary.
-            // Absence is not a failure and must not be reported as one.
-            session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
+            // Absence is not a failure and must not be reported as one — and
+            // an empty token is absence, or it would be SIGNED and sent as an
+            // `x-amz-security-token` of nothing.
+            session_token: non_blank(lookup("AWS_SESSION_TOKEN")),
         })
     }
 
@@ -359,11 +379,13 @@ impl AwsIdentity {
             let Some((name, value)) = line.split_once('=') else {
                 continue;
             };
-            let value = value.trim().to_owned();
+            // An empty value is no value (D-1372): `aws_access_key_id =` with
+            // nothing after it does not make the profile complete.
+            let value = non_blank(Some(value.trim().to_owned()));
             match name.trim() {
-                "aws_access_key_id" => key_id = Some(value),
-                "aws_secret_access_key" => secret = Some(value),
-                "aws_session_token" => token = Some(value),
+                "aws_access_key_id" => key_id = value,
+                "aws_secret_access_key" => secret = value,
+                "aws_session_token" => token = value,
                 _ => {}
             }
         }
@@ -381,6 +403,14 @@ impl AwsIdentity {
             ))),
         }
     }
+}
+
+/// `None` for an absent value and for one that is empty or only whitespace.
+///
+/// One rule for both identity sources, so the environment and the file cannot
+/// disagree about whether a blank key is a key. D-1372.
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
 }
 
 /// Lower-case hex, which is the only encoding `SigV4` accepts.
@@ -501,10 +531,31 @@ impl Signable<'_> {
     ///
     /// # Errors
     ///
-    /// [`SecretError::Unavailable`] for a timestamp that cannot hold a date,
+    /// [`SecretError::Unreachable`] for a timestamp that cannot hold a date,
     /// which is this module refusing its own malformed input rather than
-    /// signing something meaningless.
+    /// signing something meaningless — and for a `region` that is not
+    /// [`crate::config::REGION`].
+    ///
+    /// # Why the region is checked HERE, and not only in the configuration
+    ///
+    /// `CLAUDE.md` §8 fixes the region: credentials are read from Parameter
+    /// Store in `ap-south-1`. `config` refuses any other region in the local
+    /// file, but this function and [`get_parameter`] are `pub` and took the
+    /// region as a free string, so any caller holding an identity could sign
+    /// and send a read to every other region's Parameter Store — the same
+    /// parameter path resolved against a different store. The rule was held by
+    /// one caller's discipline rather than by the one function every read
+    /// passes through. A signature is the last point before a packet exists,
+    /// so this is where the refusal sits. D-1371.
     pub fn authorization(&self, id: &AwsIdentity) -> Result<String, SsmError> {
+        if self.region != crate::config::REGION {
+            return Err(SsmError::unreachable(format!(
+                "refusing to sign a Parameter Store read for region {:?}: \
+                 CLAUDE.md §8 reads credentials from {} and nowhere else",
+                self.region,
+                crate::config::REGION
+            )));
+        }
         let date = self.date().ok_or_else(|| {
             SsmError::unreachable(format!(
                 "{:?} is not an AWS timestamp; it must be YYYYMMDDTHHMMSSZ",
@@ -622,7 +673,7 @@ const _: () = {
 ///
 /// # Errors
 ///
-/// [`SecretError::Unavailable`] when the body is not JSON, or does not carry
+/// [`SecretError::Unreachable`] when the body is not JSON, or does not carry
 /// `Parameter.Value` — named separately, because "AWS said no" and "AWS said
 /// something this build does not understand" are different faults with
 /// different fixes.
@@ -667,6 +718,25 @@ pub fn host_for(region: &str) -> String {
 ///
 /// The condition below reads `identity.session_token`, the same field
 /// `Signable` carries, so the two cannot drift.
+/// The headers every `GetParameter` request carries whatever the identity.
+///
+/// # Why a function and not two literals at the call site
+///
+/// GAP2-38: the action this crate sends was named by a private constant that
+/// only [`get_parameter`] read, and no test named the literal. Changing
+/// [`TARGET`] to any other SSM action — `PutParameter` among them — would have
+/// compiled, passed every test, and turned the read-only credential path into
+/// a writer. `docs/04-invariants.md` P-05 claims a credential is read and never
+/// written; that claim is now pinned on the bytes that go on the wire, by
+/// `ssm::tests::the_only_action_on_the_wire_is_get_parameter`, because
+/// [`get_parameter`] takes its fixed headers from here and nowhere else.
+///
+/// `x-amz-date` and `authorization` are not here: both vary per request.
+#[must_use]
+pub const fn fixed_headers() -> [(&'static str, &'static str); 2] {
+    [("content-type", CONTENT_TYPE), ("x-amz-target", TARGET)]
+}
+
 fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
     match identity.session_token.as_deref() {
         Some(token) => vec![("x-amz-security-token", token)],
@@ -694,7 +764,9 @@ fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
 /// # Errors
 ///
 /// [`SsmError`] for a socket that did not answer, a status that is not 200, or
-/// a body this build cannot read. AWS's own error code is mapped to the port's
+/// a body this build cannot read, and before any socket for a `region` that is
+/// not [`crate::config::REGION`] (see [`Signable::authorization`]). AWS's own
+/// error code is mapped to the port's
 /// vocabulary — `AccessDeniedException` and `ParameterNotFound` send an operator
 /// to opposite places and must not be flattened into "it failed".
 pub async fn get_parameter(
@@ -720,10 +792,14 @@ pub async fn get_parameter(
 
     let mut request = client
         .post(format!("https://{host}/"))
-        .header("content-type", CONTENT_TYPE)
-        .header("x-amz-target", TARGET)
         .header("x-amz-date", stamp)
         .header("authorization", authorization);
+    // THE ACTION COMES FROM ONE PLACE, AND A TEST NAMES IT. See
+    // `fixed_headers`: this is the line that makes the read-only claim a
+    // property of the bytes sent rather than of a constant's spelling.
+    for (name, value) in fixed_headers() {
+        request = request.header(name, value);
+    }
 
     // A temporary credential MUST transmit the header its own signature covers.
     //
@@ -1147,6 +1223,42 @@ mod tests {
         assert_ne!(header, later, "one second changes the signature");
     }
 
+    /// `CLAUDE.md` §8: one region, and a signature for any other is refused.
+    ///
+    /// Before D-1371 `authorization` signed for whatever `region` it was handed,
+    /// so `get_parameter` — `pub`, taking the region as a free string — would
+    /// send a credential read to any region's Parameter Store. Only `config`
+    /// refused a foreign region, and only for the one caller that goes
+    /// through it. No network is touched: the refusal is before the client.
+    #[test]
+    fn a_signature_for_any_region_but_the_one_section_8_names_is_refused() {
+        for region in ["us-east-1", "ap-south-2", "AP-SOUTH-1", "ap-south-1 ", ""] {
+            let foreign = Signable {
+                host: "ssm.us-east-1.amazonaws.com",
+                region,
+                stamp: "20260807T120000Z",
+                body: "{}",
+                session_token: None,
+            };
+            let Err(SsmError { detail, kind }) = foreign.authorization(&identity()) else {
+                panic!("{region:?} is not ap-south-1 and must not be signed for")
+            };
+            assert_eq!(kind, SecretError::Unreachable, "{region:?}");
+            assert!(detail.contains("ap-south-1"), "{detail}");
+            assert!(detail.contains("§8"), "{detail}");
+        }
+        // And the one region the law names still signs.
+        let home = Signable {
+            host: "ssm.ap-south-1.amazonaws.com",
+            region: crate::config::REGION,
+            stamp: "20260807T120000Z",
+            body: "{}",
+            session_token: None,
+        };
+        let header = home.authorization(&identity()).expect("ap-south-1 signs");
+        assert!(header.contains("/ap-south-1/ssm/aws4_request"), "{header}");
+    }
+
     /// A timestamp too short to hold a date is refused, not sliced.
     #[test]
     fn a_malformed_timestamp_is_refused_rather_than_signed() {
@@ -1323,6 +1435,69 @@ mod tests {
         assert!(detail.contains("aws_secret_access_key"), "{detail}");
     }
 
+    /// An empty key is no key, in the file and in the environment alike.
+    ///
+    /// Before D-1372 `aws_access_key_id =` with nothing after it completed a
+    /// profile, and an empty exported `AWS_ACCESS_KEY_ID` built an identity
+    /// that shadowed the file in `discover`. Both signed a request AWS refuses
+    /// with a fault naming neither source.
+    #[test]
+    fn an_empty_key_is_refused_as_missing_and_never_signs() {
+        for (tag, body) in [
+            (
+                "empty-id",
+                "[default]\naws_access_key_id =\naws_secret_access_key = shhh\n",
+            ),
+            (
+                "empty-secret",
+                "[default]\naws_access_key_id = AKIAEXAMPLE\naws_secret_access_key =   \n",
+            ),
+        ] {
+            let path = file_holding(tag, body);
+            let Err(SsmError { detail, .. }) = AwsIdentity::from_credentials_file(&path, "default")
+            else {
+                panic!("{tag}: a blank half of the pair is no pair")
+            };
+            assert!(detail.contains("aws_secret_access_key"), "{detail}");
+        }
+
+        // A blank token is absence, not a token of nothing that gets signed.
+        let path = file_holding(
+            "empty-token",
+            "[default]\naws_access_key_id = AKIAEXAMPLE\n\
+             aws_secret_access_key = shhh\naws_session_token =\n",
+        );
+        let id = AwsIdentity::from_credentials_file(&path, "default").expect("a full pair");
+        assert_eq!(id.session_token, None);
+
+        // The environment, through the same lookup `from_env` uses.
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        let Err(SsmError { detail, .. }) = AwsIdentity::from_lookup(env(&[
+            ("AWS_ACCESS_KEY_ID", ""),
+            ("AWS_SECRET_ACCESS_KEY", "shhh"),
+        ])) else {
+            panic!("an empty exported key id must not become an identity")
+        };
+        assert!(detail.contains("AWS_ACCESS_KEY_ID"), "{detail}");
+        assert!(detail.contains("empty"), "{detail}");
+
+        let id = AwsIdentity::from_lookup(env(&[
+            ("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"),
+            ("AWS_SECRET_ACCESS_KEY", "shhh"),
+            ("AWS_SESSION_TOKEN", ""),
+        ]))
+        .expect("a full pair");
+        assert_eq!(id.key_id, "AKIAEXAMPLE");
+        assert_eq!(id.session_token, None, "an empty token is not sent");
+    }
+
     /// An absent file names the path it looked at, not "no credentials".
     #[test]
     fn an_absent_file_names_the_path_and_says_which_secret_this_is() {
@@ -1336,5 +1511,43 @@ mod tests {
             detail.contains("not the broker token"),
             "the two secrets are told apart in the refusal itself: {detail}"
         );
+    }
+
+    /// GAP2-38 / D-0948: the one SSM action this crate sends is
+    /// `GetParameter`, named by its literal, on the headers `get_parameter`
+    /// actually transmits — and the body asks for exactly a name and
+    /// decryption, nothing that could write.
+    ///
+    /// Before this, `TARGET` was read by `get_parameter` and by a signing test
+    /// that interpolated the constant into its own expectation, so changing it
+    /// to `PutParameter` passed every test.
+    #[test]
+    fn the_only_action_on_the_wire_is_get_parameter() {
+        let headers = fixed_headers();
+        let targets: Vec<&str> = headers
+            .iter()
+            .filter(|(name, _)| *name == "x-amz-target")
+            .map(|(_, value)| *value)
+            .collect();
+        assert_eq!(targets, ["AmazonSSM.GetParameter"]);
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| *name == "content-type"
+                    && *value == "application/x-amz-json-1.1")
+        );
+        for (name, value) in headers {
+            assert!(
+                !value.contains("Put") && !value.contains("Delete"),
+                "{name}: {value}"
+            );
+        }
+        let sent: serde_json::Value =
+            serde_json::from_str(&body("/anorg/anenv/avendor/afield", true)).expect("json body");
+        let object = sent.as_object().expect("an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["Name", "WithDecryption"]);
+        assert_eq!(object["WithDecryption"], serde_json::Value::Bool(true));
     }
 }

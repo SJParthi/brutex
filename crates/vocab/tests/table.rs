@@ -674,3 +674,327 @@ fn the_documented_headroom_is_the_table_it_describes() {
         "the table has outgrown the mask; widen `WORDS` in the same change"
     );
 }
+
+/// `CROSSINGS` names only live, two-sided levels, and each tuple is one
+/// level's — `docs/04-invariants.md` CX-04.
+///
+/// `table::CROSSINGS`' own doc and `indicators::evaluator` both cited this test
+/// by name while it did not exist (D-0957). It catches the off-by-one that doc
+/// warns about: a tuple whose `up` belongs to the next level, or whose state
+/// pair is two halves of different levels, sets the wrong edge and nothing in
+/// the resulting mask looks wrong.
+#[test]
+fn the_crossing_map_names_only_live_two_sided_levels() {
+    assert_eq!(table::CROSSINGS.len(), 17, "seventeen two-sided levels");
+    let mut seen = BTreeSet::new();
+    for level in &table::CROSSINGS {
+        let positions = [
+            level.above,
+            level.below,
+            level.up,
+            level.down,
+            level.first,
+            level.second,
+            level.later,
+        ];
+        for position in positions {
+            assert!(table::is_live(position), "position {position} is not live");
+            assert!(
+                seen.insert(position),
+                "position {position} appears twice in the crossing map"
+            );
+        }
+        let name = |position: u16| table::name(position).unwrap();
+        let above = name(level.above);
+        let subject = above
+            .strip_prefix("close_above_")
+            .unwrap_or_else(|| panic!("{above} is not a close_above_ state"));
+        assert!(!subject.is_empty(), "{above} names no level");
+        for (position, prefix) in [
+            (level.below, "close_below_"),
+            (level.up, "crossed_up_"),
+            (level.down, "crossed_down_"),
+            (level.first, "first_cross_"),
+            (level.second, "second_cross_"),
+            (level.later, "third_plus_cross_"),
+        ] {
+            assert_eq!(
+                name(position),
+                format!("{prefix}{subject}"),
+                "position {position} belongs to another level than {above}"
+            );
+        }
+    }
+    assert_eq!(seen.len(), 17 * 7, "every position is distinct");
+}
+
+/// The text before `## 1.`: what a reader of `docs/03-vocabulary.md` meets first.
+fn document_header() -> &'static str {
+    VOCABULARY_DOC
+        .split("\n## 1. ")
+        .next()
+        .expect("split always yields a first piece")
+}
+
+/// **The document's opening states the table as it is, not as it shipped.**
+///
+/// It said "74 conditions", "The mask is `u128`" and "54 more conditions can be
+/// added" long after the table passed 128 positions, and the one note saying so
+/// sat in §8, near the end of the file. §2 said the evaluator produces "one
+/// `u128`". Nothing read either. D-0791.
+#[test]
+fn the_document_opening_states_the_current_table_and_mask() {
+    let width = usize::try_from(ConditionMask::BITS).unwrap();
+    let header = document_header()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for fact in [
+        format!("{COUNT} positions"),
+        format!("{width} bits"),
+        format!("{} free", width - COUNT),
+        "`ConditionMask`".to_owned(),
+    ] {
+        assert!(
+            header.contains(&fact),
+            "the opening of docs/03-vocabulary.md must say `{fact}`: {header}"
+        );
+    }
+    for stale in ["The mask is `u128`", "54 more conditions can be added"] {
+        assert!(
+            !header.contains(stale),
+            "the opening still says `{stale}`: {header}"
+        );
+    }
+    let section_2 = VOCABULARY_DOC
+        .split("\n## 2. ")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("§2 exists");
+    assert!(
+        !section_2.contains("one `u128`"),
+        "§2 still says the evaluator produces one `u128`"
+    );
+    assert!(
+        section_2.contains("one `ConditionMask`"),
+        "§2 must name the mask type the evaluator produces"
+    );
+    let section_6 = VOCABULARY_DOC
+        .split("\n## 6. ")
+        .nth(1)
+        .and_then(|rest| rest.split("\n## ").next())
+        .expect("§6 exists");
+    assert!(
+        section_6.contains("**Superseded by §8, kept for the record.**"),
+        "§6 still reads 74 live bits in a `u128` and must say, where it stands, \
+         that §8 replaces it"
+    );
+}
+
+/// **Every row of a position that never fires says so in the row itself.**
+///
+/// The three §5 tombstones 6, 19 and 25 were rows exactly like a live row, so
+/// a reader of §5 alone would build a mask on a bit that is always false. Every
+/// row naming a retired position must carry `retired` and the live position it
+/// duplicated; every row naming a void one must carry `void`; no live row may
+/// carry either. D-0791.
+#[test]
+fn every_row_of_a_non_live_position_carries_its_status() {
+    let mut retired_rows = 0usize;
+    let mut void_rows = 0usize;
+    for line in VOCABULARY_DOC.lines() {
+        let Some((index, _)) = names_from(line).first().cloned() else {
+            continue;
+        };
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        let status_cells = cells.get(3..).unwrap_or(&[]).join(" ");
+        match TABLE[usize::from(index)].status {
+            BitStatus::Live => assert!(
+                !status_cells.contains("retired") && !status_cells.contains("void"),
+                "live position {index} is marked non-live: {line}"
+            ),
+            BitStatus::Retired { duplicate_of } => {
+                retired_rows += 1;
+                assert!(
+                    status_cells.contains("retired")
+                        && status_cells.contains(&format!("duplicates {duplicate_of}")),
+                    "position {index} is retired as a duplicate of {duplicate_of}, and its \
+                     row does not say so: {line}"
+                );
+            }
+            BitStatus::Void { .. } => {
+                void_rows += 1;
+                assert!(
+                    status_cells.contains("void"),
+                    "position {index} is void, and its row does not say so: {line}"
+                );
+            }
+        }
+    }
+    let retired = TABLE
+        .iter()
+        .filter(|row| matches!(row.status, BitStatus::Retired { .. }))
+        .count();
+    let void = TABLE
+        .iter()
+        .filter(|row| matches!(row.status, BitStatus::Void { .. }))
+        .count();
+    assert!(
+        retired_rows >= retired && void_rows >= void,
+        "every non-live position has a row: {retired_rows} rows of {retired} retired, \
+         {void_rows} rows of {void} void"
+    );
+}
+
+/// Every `` N `name` `` pair in the document's prose: a bit number, one space,
+/// and a backticked lower-case identifier. Table rows are skipped by
+/// construction, because their number is followed by ` |`, not by a space and
+/// a backtick.
+fn prose_bit_names(document: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for line in document.lines() {
+        let pieces: Vec<&str> = line.split('`').collect();
+        for pair in pieces.windows(2).step_by(2) {
+            let (before, name) = (pair[0], pair[1]);
+            let Some(lead) = before.strip_suffix(' ') else {
+                continue;
+            };
+            let digits = lead.len() - lead.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            let is_name = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            if let (Ok(index), true) = (lead[lead.len() - digits..].parse::<usize>(), is_name) {
+                found.push((index, name.to_owned()));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_prose_scanner_takes_a_numbered_name_and_nothing_else() {
+    assert_eq!(
+        prose_bit_names(
+            "sets 37 `prior_n_bullish` and 31 `bar_up`/31 `bar_bearish`\n\
+             | 30 | `bar_bullish` |\n\
+             one `u128`, 7 `Not_A_Name`, 8 ``, 9`tight` and x `word`\n"
+        ),
+        vec![
+            (37, "prior_n_bullish".to_owned()),
+            (31, "bar_up".to_owned()),
+            (31, "bar_bearish".to_owned()),
+        ],
+    );
+}
+
+/// **A bit named in prose is named correctly.** The document said "31
+/// `bar_up`", a condition that does not exist; position 31 is `bar_bearish`.
+/// No test read prose names. D-0791.
+#[test]
+fn every_bit_named_in_prose_is_that_bits_name() {
+    let named = prose_bit_names(VOCABULARY_DOC);
+    assert!(
+        !named.is_empty(),
+        "the scanner found no prose bit names; the D-0109 note names several"
+    );
+    for (index, name) in named {
+        let row = TABLE
+            .get(index)
+            .unwrap_or_else(|| panic!("prose names position {index}, past the table"));
+        assert_eq!(
+            row.name, name,
+            "docs/03-vocabulary.md names position {index} `{name}`; it is `{}`",
+            row.name
+        );
+    }
+}
+
+/// Every present-tense position count in this crate's prose is the table's count.
+///
+/// [`the_widths_in_this_crates_prose_match_its_constants`] polices `N-bit` and `N-word`
+/// and says outright that it does not try to police every number. An audit
+/// (`ET-vocabulary-conditions-bits-2`) found the gap it leaves: five sentences stating
+/// the table's current size, next free position, headroom or live count each quoted a
+/// value the table had since outgrown by appends.
+///
+/// Each shape below states the CURRENT table, not its history, so it can be pinned to
+/// a constant without a false positive on legitimate narrative. Every shape must also
+/// be found at least once: a shape that matches nothing checks nothing, and rewording
+/// a sentence away from its shape must move the shape here too.
+#[test]
+fn the_present_tense_position_counts_in_this_crates_prose_match_the_table() {
+    const LIB: &str = include_str!("../src/lib.rs");
+    const MASK: &str = include_str!("../src/mask.rs");
+    const TABLE_SRC: &str = include_str!("../src/table.rs");
+    const TOLERANCE: &str = include_str!("../src/tolerance.rs");
+    let count = u32::try_from(COUNT).expect("the table fits a u32");
+    let shapes: [(&str, &str, &str, &str, u32); 7] = [
+        ("src/lib.rs", LIB, "the ", " positions, their names", count),
+        ("src/lib.rs", LIB, "| 3 | ", " positions in a", count),
+        ("src/mask.rs", MASK, "defines ", " positions", count),
+        (
+            "src/table.rs",
+            TABLE_SRC,
+            "The bit table. ",
+            " positions",
+            count,
+        ),
+        (
+            "src/table.rs",
+            TABLE_SRC,
+            "which is ",
+            " today",
+            u32::from(NEXT_FREE),
+        ),
+        (
+            "src/table.rs",
+            TABLE_SRC,
+            "the **",
+            "** positions between",
+            ConditionMask::BITS - count,
+        ),
+        (
+            "src/tolerance.rs",
+            TOLERANCE,
+            "of the ",
+            " live positions",
+            LIVE.popcount(),
+        ),
+    ];
+    for (name, text, before, after, expected) in shapes {
+        let mut found = 0_u32;
+        for (at, _) in text.match_indices(before) {
+            let rest = &text[at + before.len()..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() || !rest[digits.len()..].starts_with(after) {
+                continue;
+            }
+            assert_eq!(
+                digits.parse::<u32>().expect("ascii digits parse"),
+                expected,
+                "{name} says `{before}{digits}{after}`, and the table's current value is \
+                 {expected}"
+            );
+            found += 1;
+        }
+        assert!(
+            found > 0,
+            "{name} no longer contains `{before}<N>{after}`, so this shape checks nothing"
+        );
+    }
+    // The spelled-out half of tolerance.rs's opening sentence, checked here because
+    // its digit half is one of the shapes above.
+    let live_near = TABLE
+        .iter()
+        .filter(|d| d.status == BitStatus::Live && d.kind == Kind::Near)
+        .count();
+    assert_eq!(
+        live_near, 81,
+        "tolerance.rs says eighty-one live positions are `near_*`"
+    );
+    assert!(
+        TOLERANCE.contains("Eighty-one of the "),
+        "tolerance.rs restated its near count"
+    );
+}

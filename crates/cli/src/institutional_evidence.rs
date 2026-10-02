@@ -664,7 +664,8 @@ impl FamilyTestEvidenceV1 {
     ///
     /// # Errors
     ///
-    /// Refuses absent identities, invalid/non-finite probabilities, mismatched
+    /// Refuses absent identities, invalid/non-finite probabilities, a p-value
+    /// that is not an exact bootstrap fraction `k/(draws+1)`, mismatched
     /// family denominators, a noncanonical Romano--Wolf alpha, or an
     /// out-of-range candidate index.
     pub fn from_runner(
@@ -715,8 +716,8 @@ impl FamilyTestEvidenceV1 {
                 white.strategies
             ));
         }
-        let white_ppm = probability_ppm("White Reality Check", white.p_value)?;
-        let spa_ppm = probability_ppm("SPA", spa.p_value)?;
+        let white_p = bootstrap_fraction("White Reality Check", white)?;
+        let spa_p = bootstrap_fraction("SPA", spa)?;
         let candidate_rejected = romano_wolf.is_rejected(candidate_index).ok_or_else(|| {
             format!(
                 "family candidate index {candidate_index} is outside Romano-Wolf family size {}",
@@ -734,13 +735,13 @@ impl FamilyTestEvidenceV1 {
             strategy_digest,
             durable_statistics_completion_digest: None,
             fwer_p_value_ppm: ObservedU64V1::Unmeasured,
-            spa_p_value_ppm: ObservedU64V1::Measured(spa_ppm),
+            spa_p_value_ppm: ObservedU64V1::Measured(spa_p.ppm()),
             bootstrap_draws: ObservedU64V1::Measured(bootstrap_draws),
             bootstrap_strategies: ObservedU64V1::Measured(bootstrap_strategies),
             bootstrap_periods: ObservedU64V1::Measured(bootstrap_periods),
-            white_reality_p_value_ppm: ObservedU64V1::Measured(white_ppm),
+            white_reality_p_value_ppm: ObservedU64V1::Measured(white_p.ppm()),
             romano_wolf_p_value_ppm: ObservedU64V1::Unmeasured,
-            white_reality_decision: if white.clears() {
+            white_reality_decision: if white_p.rejects_at_ppm(CANONICAL_FWER_ALPHA_PPM) {
                 HypothesisDecisionV1::RejectedNull
             } else {
                 HypothesisDecisionV1::DidNotReject
@@ -845,8 +846,8 @@ impl FamilyTestEvidenceV1 {
                 "durable family statistics retain different White/SPA source bits".to_owned(),
             );
         }
-        let white_ppm = probability_ppm("White Reality Check", white.p_value)?;
-        let spa_ppm = probability_ppm("SPA", spa.p_value)?;
+        let white_p = bootstrap_fraction("White Reality Check", white)?;
+        let spa_p = bootstrap_fraction("SPA", spa)?;
         let candidate_rejected = statistics
             .romano_wolf_rejects_at_ppm(CANONICAL_FWER_ALPHA_PPM)
             .ok_or_else(|| {
@@ -859,13 +860,13 @@ impl FamilyTestEvidenceV1 {
             strategy_digest,
             durable_statistics_completion_digest: Some(statistics.completion_digest()),
             fwer_p_value_ppm: ObservedU64V1::Measured(statistics.fwer_p_value_ppm()),
-            spa_p_value_ppm: ObservedU64V1::Measured(spa_ppm),
+            spa_p_value_ppm: ObservedU64V1::Measured(spa_p.ppm()),
             bootstrap_draws: ObservedU64V1::Measured(statistics.draws()),
             bootstrap_strategies: ObservedU64V1::Measured(statistics.strategies()),
             bootstrap_periods: ObservedU64V1::Measured(statistics.periods()),
-            white_reality_p_value_ppm: ObservedU64V1::Measured(white_ppm),
+            white_reality_p_value_ppm: ObservedU64V1::Measured(white_p.ppm()),
             romano_wolf_p_value_ppm: ObservedU64V1::Measured(statistics.romano_wolf_p_value_ppm()),
-            white_reality_decision: if white.clears() {
+            white_reality_decision: if white_p.rejects_at_ppm(CANONICAL_FWER_ALPHA_PPM) {
                 HypothesisDecisionV1::RejectedNull
             } else {
                 HypothesisDecisionV1::DidNotReject
@@ -2069,34 +2070,84 @@ pub(crate) fn wilson_lower_ppm(wins: u64, trades: u64, expected_bp: i64) -> Resu
     Ok(projected)
 }
 
+/// One runner bootstrap p-value as the exact fraction it was computed from.
+///
+/// # Why the fraction and not the `f64`
+///
+/// The runner computes `(beaten + 1) / (draws + 1)` (`runner::bootstrap`), an
+/// exact rational that the `f64` only approximates. Two things went wrong when
+/// this module worked on the `f64`:
+///
+/// - the White decision was `Verdict::clears`, `p < 0.05`, while the ppm beside
+///   it was compared against a `<=` maximum, so `p = 250/5000` stored `50_000`
+///   (passing a `<= 50_000` maximum) beside `DidNotReject`;
+/// - `ceil(p * 1e6)` overshot exact boundaries: `79.0 / 5000.0 * 1e6` is
+///   `15800.000000000002` in `f64`, so `79/5000` projected to `15_801`.
+///
+/// Both now come from the integers: the ppm is `ceil(k * PPM / d)`, rounding
+/// AWAY from significance for the reason D-0602 gives (a floor makes a finding
+/// look stronger against a maximum), and the decision is `k * PPM <= d * alpha`,
+/// the same inclusive rule as `romano_wolf_rejects_at_ppm`. GAP5-54, D-0930.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BootstrapFraction {
+    numerator: u64,
+    denominator: u64,
+}
+
+impl BootstrapFraction {
+    /// `ceil(numerator * PPM / denominator)`, at most `PPM`.
+    fn ppm(self) -> u64 {
+        crate::institutional_statistics::ceiling_ppm_of(self.numerator, self.denominator)
+    }
+
+    /// The exact inclusive decision at `alpha_ppm`.
+    fn rejects_at_ppm(self, alpha_ppm: u64) -> bool {
+        u128::from(self.numerator) * u128::from(PPM)
+            <= u128::from(self.denominator) * u128::from(alpha_ppm)
+    }
+}
+
+/// `2^53`: every integer up to it is an exact `f64`, so a denominator no
+/// larger converts without rounding.
+const EXACT_F64_INTEGER: u64 = 1 << 53;
+
 #[expect(
     clippy::float_arithmetic,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "bootstrap probabilities are full-precision statistics, never prices; ppm exists only as the canonical admission comparison projection"
+    reason = "recovers the integer numerator behind a full-precision bootstrap p-value, then proves the recovery bit-for-bit"
 )]
-/// Project a p-value into integer ppm, rounding AWAY from significance.
+/// Recover the exact `k/(draws+1)` behind a runner bootstrap p-value.
 ///
-/// # Why `ceil` and not `floor`
-///
-/// This feeds `white_reality_p_value_ppm` and `spa_p_value_ppm`, which are
-/// compared against MAXIMA. Flooring moves a p-value down, which is toward
-/// significance: a bootstrap p-value is an exact rational `k/(draws+1)`, so at
-/// a million draws the granularity reaches this projection and
-/// `p = 50001/1000001 ~ 0.0500005` floored to `50_000` PASSES a `<= 50_000`
-/// gate the true value fails.
-///
-/// `outcome::milli` carries a doc block on exactly this principle and lands on
-/// the other side of it -- its truncation is "systematically toward zero, which
-/// is the direction that makes every finding look slightly weaker". Here the
-/// same truncation made findings look stronger. A rounding rule is only safe
-/// once you know which way the comparison runs. D-0602.
-fn probability_ppm(name: &str, value: f64) -> Result<u64, String> {
+/// Refuses, rather than rounds, a value the runner cannot have produced: one
+/// outside finite `[0,1]`, zero (the runner's numerator carries `+ 1`), or one
+/// whose recovered `k/(draws+1)` does not reproduce its bits exactly.
+fn bootstrap_fraction(name: &str, verdict: &Verdict) -> Result<BootstrapFraction, String> {
+    let value = verdict.p_value;
     if !value.is_finite() || !(0.0..=1.0).contains(&value) {
         return Err(format!("{name} p-value is outside finite [0,1]"));
     }
-    Ok((value * PPM as f64).ceil() as u64)
+    let denominator = u64::try_from(verdict.draws)
+        .ok()
+        .and_then(|draws| draws.checked_add(1))
+        .filter(|denominator| *denominator <= EXACT_F64_INTEGER)
+        .ok_or_else(|| {
+            format!(
+                "{name} draws {} exceed the denominators an f64 p-value holds exactly",
+                verdict.draws
+            )
+        })?;
+    let numerator = (value * denominator as f64).round() as u64;
+    if numerator == 0 || (numerator as f64 / denominator as f64).to_bits() != value.to_bits() {
+        return Err(format!(
+            "{name} p-value {value} is not an exact bootstrap fraction k/(draws+1) over {denominator}"
+        ));
+    }
+    Ok(BootstrapFraction {
+        numerator,
+        denominator,
+    })
 }
 
 fn require_digest(name: &str, digest: &[u8; 32]) -> Result<(), String> {
@@ -2146,12 +2197,12 @@ fn ist_day(micros: i64) -> Result<i64, String> {
 )]
 mod tests {
     use super::{
-        ADMISSION_EVIDENCE_SOURCE_MATRIX_V1, DataCompletenessSourceV1, EvidenceAvailabilityV1,
-        EvidenceSourceV1, FamilyTestEvidenceV1, FullPrecisionStatisticsSourceV1,
-        INSTITUTIONAL_EVIDENCE_BLOCKERS_V1, IndependentSessionsEvidenceV1,
-        InstitutionalCompletenessV1, InstitutionalEvidenceSourcesV1, ValidationEvidenceV1,
-        build_institutional_evidence_v1, checked_weakest_period_return, probability_ppm,
-        validation_values,
+        ADMISSION_EVIDENCE_SOURCE_MATRIX_V1, DataCompletenessSourceV1, EXACT_F64_INTEGER,
+        EvidenceAvailabilityV1, EvidenceSourceV1, FamilyTestEvidenceV1,
+        FullPrecisionStatisticsSourceV1, INSTITUTIONAL_EVIDENCE_BLOCKERS_V1,
+        IndependentSessionsEvidenceV1, InstitutionalCompletenessV1, InstitutionalEvidenceSourcesV1,
+        ValidationEvidenceV1, bootstrap_fraction, build_institutional_evidence_v1,
+        checked_weakest_period_return, validation_values,
     };
     use brutex_core::instrument::{Exchange, InstrumentKey};
     use engine::Ladder;
@@ -2516,19 +2567,144 @@ mod tests {
         ]
     }
 
+    #[allow(
+        clippy::float_arithmetic,
+        reason = "a p-value literal written as the exact fraction the runner divides"
+    )]
     fn family_verdicts() -> (Verdict, Verdict) {
         let white = Verdict {
             statistic: 4.0,
-            p_value: 0.01,
+            // Exact `(beaten + 1) / (draws + 1)` values, as the runner produces:
+            // a p-value that is not one is refused (GAP5-54, D-0930).
+            p_value: 1.0 / 101.0,
             draws: 100,
             strategies: 3,
             periods: 300,
         };
         let spa = Verdict {
-            p_value: 0.02,
+            p_value: 2.0 / 101.0,
             ..white
         };
         (white, spa)
+    }
+
+    /// The White decision and both ppm projections come from one exact
+    /// `k/(draws+1)` fraction, so the decision cannot disagree with a `<=` ppm
+    /// ceiling at the same alpha, and an exact boundary is not pushed over it.
+    ///
+    /// Before this row the decision was `Verdict::clears`, `p < 0.05`, while
+    /// the ppm was `ceil(p * 1e6)`: `p = 250/5000` stored `50_000` (which passes
+    /// a `<= 50_000` ceiling) beside `DidNotReject`, and `79/5000` projected to
+    /// `15_801` because `79.0 / 5000.0 * 1e6` is `15800.000000000002` in `f64`.
+    /// GAP5-54, D-0930.
+    #[allow(
+        clippy::float_arithmetic,
+        reason = "p-value literals written as the exact fractions the runner divides, and the f64 overshoot this row replaced"
+    )]
+    #[test]
+    fn family_ppm_and_white_decision_come_from_one_exact_fraction() {
+        assert_eq!(
+            (79.0_f64 / 5_000.0 * 1e6).ceil().to_bits(),
+            15_801.0_f64.to_bits(),
+            "the float projection this row replaced overshoots 79/5000"
+        );
+        let family = family_returns();
+        let romano_wolf = romano_wolf_receipt(&family, 4_999, 7, DEFAULT_BLOCK, 50_000)
+            .expect("aligned family has a complete Romano-Wolf receipt");
+        let white = Verdict {
+            statistic: 4.0,
+            p_value: 250.0 / 5_000.0,
+            draws: 4_999,
+            strategies: 3,
+            periods: 300,
+        };
+        let spa = Verdict {
+            p_value: 79.0 / 5_000.0,
+            ..white
+        };
+        let measure = |white: &Verdict| {
+            let EvidenceSourceV1::Measured(measured) = FamilyTestEvidenceV1::from_runner(
+                digest(1),
+                digest(2),
+                digest(3),
+                1,
+                Some(white),
+                Some(&spa),
+                Some(&romano_wolf),
+            )
+            .expect("one reconciled family") else {
+                unreachable!("reconciled family must be measured");
+            };
+            measured
+        };
+        let measured = measure(&white);
+        assert_eq!(
+            measured.white_reality_p_value_ppm,
+            ObservedU64V1::Measured(50_000),
+            "250/5000 is exactly 50,000 ppm"
+        );
+        assert_eq!(
+            measured.white_reality_decision,
+            HypothesisDecisionV1::RejectedNull,
+            "a p-value that passes a <= 50,000 ppm ceiling rejects at 5%"
+        );
+        assert_eq!(
+            measured.spa_p_value_ppm,
+            ObservedU64V1::Measured(15_800),
+            "79/5000 is exactly 15,800 ppm, not 15,801"
+        );
+
+        let above = measure(&Verdict {
+            p_value: 251.0 / 5_000.0,
+            ..white
+        });
+        assert_eq!(
+            above.white_reality_p_value_ppm,
+            ObservedU64V1::Measured(50_200)
+        );
+        assert_eq!(
+            above.white_reality_decision,
+            HypothesisDecisionV1::DidNotReject
+        );
+
+        // A p-value the runner cannot have produced has no exact fraction to
+        // decide from, so it is refused rather than rounded: `(beaten + 1) /
+        // (draws + 1)` is never zero and never falls between two of its steps.
+        for (left, right) in [
+            (
+                Verdict {
+                    p_value: 0.050_000_1,
+                    ..white
+                },
+                spa,
+            ),
+            (
+                white,
+                Verdict {
+                    p_value: 0.050_000_1,
+                    ..spa
+                },
+            ),
+            (
+                Verdict {
+                    p_value: 0.0,
+                    ..white
+                },
+                spa,
+            ),
+        ] {
+            let why = FamilyTestEvidenceV1::from_runner(
+                digest(1),
+                digest(2),
+                digest(3),
+                1,
+                Some(&left),
+                Some(&right),
+                Some(&romano_wolf),
+            )
+            .expect_err("no exact bootstrap fraction");
+            assert!(why.contains("not an exact bootstrap fraction"), "{why}");
+        }
     }
 
     #[test]
@@ -3276,11 +3452,45 @@ mod tests {
         });
     }
 
+    #[allow(
+        clippy::float_arithmetic,
+        reason = "one third written as the exact fraction the runner divides"
+    )]
     #[test]
     fn invalid_probabilities_are_refused_instead_of_clamped() {
-        assert!(probability_ppm("test", f64::NAN).is_err());
-        assert!(probability_ppm("test", 1.000_001).is_err());
-        assert_eq!(probability_ppm("test", 0.05).expect("in domain"), 50_000);
+        let verdict = |p_value: f64, draws: usize| Verdict {
+            statistic: 1.0,
+            p_value,
+            draws,
+            strategies: 1,
+            periods: 2,
+        };
+        for value in [f64::NAN, 1.000_001, -0.1] {
+            let why = bootstrap_fraction("test", &verdict(value, 19)).expect_err("out of domain");
+            assert!(why.contains("outside finite [0,1]"), "{why}");
+        }
+        let twentieth = bootstrap_fraction("test", &verdict(0.05, 19)).expect("1/20");
+        assert_eq!(twentieth.ppm(), 50_000);
+        assert!(
+            twentieth.rejects_at_ppm(50_000),
+            "the boundary is inclusive"
+        );
+        assert!(!twentieth.rejects_at_ppm(49_999));
+
+        let third = bootstrap_fraction("test", &verdict(1.0 / 3.0, 2)).expect("1/3");
+        assert_eq!(third.ppm(), 333_334, "rounded up, away from significance");
+
+        let widest = u64_usize(EXACT_F64_INTEGER - 1);
+        let certain = bootstrap_fraction("test", &verdict(1.0, widest)).expect("k = d = 2^53");
+        assert_eq!(certain.ppm(), PPM);
+        for draws in [widest + 1, usize::MAX] {
+            let why = bootstrap_fraction("test", &verdict(1.0, draws)).expect_err("too wide");
+            assert!(why.contains("exceed the denominators"), "{why}");
+        }
+    }
+
+    fn u64_usize(value: u64) -> usize {
+        usize::try_from(value).expect("a 64-bit target")
     }
 
     #[test]

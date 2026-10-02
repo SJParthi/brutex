@@ -42,17 +42,27 @@
 //! [`Catalogue::resolve`] is O(1) when the symbol is published verbatim — a
 //! hash lookup — and a bounded scan of the catalogue otherwise. The scan is
 //! not O(1) and this module does not pretend it is. [`Catalogue::index`]
-//! exists so it is paid once, at master load, after which every lookup
-//! through [`Mapping::get`] is a hash hit. That is the shape §3 rule 4 asks
-//! for: the per-operation cost on the hot path is constant, and the
-//! non-constant part happens once and is stated.
+//! pays it once per distinct collapsed symbol, after which every lookup
+//! through [`Mapping::get`] is a hash hit.
+//!
+//! **That is not the path production takes.** The one production caller is
+//! `api::indexmap::join`, which calls [`Catalogue::resolve`] directly --
+//! `nse.matcher.resolve(&symbol)` -- for each feed index symbol on every
+//! `GET /indexmap.json`, after re-reading the catalogue from disk, and once
+//! more before that for a symbol the feed renames (`index_alias_source`).
+//! [`Catalogue::index`] is called only by this module's tests. So on the live
+//! route each resolve of a symbol not published verbatim costs one scan of the
+//! catalogue, O(catalogue rows x collapsed name length), at most two resolves
+//! per feed symbol, and a request costs that times the number of feed symbols. The route claims no §3 rule 4
+//! bound (its own `# Cost` section says so), and this one is not claimed
+//! either. D-0961.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
 //! `CLAUDE.md` §3 rule 6: a structural argument is not a
 //! measurement, however sound it is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The evidence behind a resolution. Never discarded — a caller that treats
 /// an inference as proof is the invention §3 rule 1 forbids.
@@ -222,10 +232,18 @@ impl Catalogue {
         S: AsRef<str>,
     {
         let mut mapping = Mapping::default();
+        let symbols = symbols.into_iter();
+        // Every collapsed key is remembered once it has been tried, refused as
+        // well as resolved, so a symbol repeated in the master is scanned and
+        // reported once, under the first spelling that arrived. The memo used
+        // to be `resolved` alone, so a refusal was rescanned and reported again
+        // per repeat. Reserved from the iterator's lower size hint, as
+        // `work::Selection::of` is. D-0960.
+        let mut tried: HashSet<String> = HashSet::with_capacity(symbols.size_hint().0);
         for symbol in symbols {
             let symbol = symbol.as_ref();
             let key = collapse(symbol);
-            if mapping.resolved.contains_key(&key) {
+            if !tried.insert(key.clone()) {
                 continue;
             }
             match self.resolve(symbol) {
@@ -282,6 +300,10 @@ impl Mapping {
     }
 
     /// Every symbol that did not resolve, with its reason, sorted by symbol.
+    ///
+    /// One row per collapsed key: a refused symbol that arrives again under
+    /// the same key, in any spelling, is not reported again, and the row keeps
+    /// the first spelling that arrived. D-0960.
     #[must_use]
     pub fn refused(&self) -> &[(String, Unresolved)] {
         &self.refused
@@ -438,6 +460,33 @@ mod tests {
             [
                 ("INDIA VIX".to_owned(), Unresolved::Absent),
                 ("NIFTY GS 8 13YR".to_owned(), Unresolved::Absent),
+            ]
+        );
+    }
+
+    /// W1-pull3-8 (D-0960). A refused symbol repeated in the master was
+    /// rescanned and pushed into `refused` once per repeat, because the only
+    /// memo was the resolved map. Both refusal kinds are repeated here under
+    /// other spellings of the same collapsed key; each is reported once, under
+    /// the first spelling that arrived.
+    #[test]
+    fn a_refused_symbol_repeated_in_the_master_is_reported_once() {
+        let nse = Catalogue::from_names(["Nifty Bank", "Nifty Bank Extra", "Nifty Private Bank"]);
+        let mapping = nse.index([
+            "INDIA VIX",
+            "NIFTY BK",
+            "India-Vix",
+            "INDIA VIX",
+            "nifty bk",
+            "NIFTY PVT BANK",
+            "NIFTY PVT BANK",
+        ]);
+        assert_eq!(mapping.resolved(), 1);
+        assert_eq!(
+            mapping.refused(),
+            [
+                ("INDIA VIX".to_owned(), Unresolved::Absent),
+                ("NIFTY BK".to_owned(), Unresolved::Ambiguous(3)),
             ]
         );
     }

@@ -469,6 +469,7 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
     crate::server::credentialed_source(feed, &spec)
         .await
         .map(|(source, _vendor)| source)
+        .map_err(|unread| unread.why)
 }
 
 /// `POST /masters/refresh` — download every master, public and credentialed.
