@@ -256,6 +256,48 @@ pub fn window(total: usize, page: Page) -> Result<Window, String> {
             "run owns {total_u64} detail rows; one request verifies at most {MAX_RESULT_ROWS}. No prefix was read or exposed"
         ));
     }
+    seek_window(total, page)
+}
+
+/// [`window`] for a reader that SEEKS to one page and never holds the result.
+///
+/// [`MAX_RESULT_ROWS`] bounds what a request holds and verifies, and it is the
+/// right refusal for a reader that loads every row of a run before it slices
+/// one page. A fixed-stride reader that seeks to `offset` and reads at most
+/// `page.limit` rows holds one page whatever the total, so the cap protects
+/// nothing there, and applying it refused every page of a result above 4,096
+/// rows, page 0 included: an audit keeps `audit_keep()` ranked rows, 10,000 by
+/// default, so its ranked evidence was never readable (W1-api6-5, D-0954).
+///
+/// The total is still bounded, by the caller's byte cap on the file it seeks
+/// in, and the page by [`MAX_PAGE_ROWS`]. Every other check is [`window`]'s:
+/// a page past a non-empty result, or any non-zero page of an empty one, is
+/// refused rather than returned as a plausible empty list. O(1) arithmetic,
+/// pinned at every boundary by
+/// `api::detail::a_seeked_window_has_no_hold_cap_and_keeps_every_other_refusal`.
+///
+/// ONE MORE REFUSAL, because [`Page::parse`] still caps the page NUMBER at
+/// [`MAX_PAGE`]: at `limit` rows a page, only `(MAX_PAGE + 1) * limit` rows
+/// are addressable. A result larger than that is refused on every page with
+/// the smallest limit that reaches all of it, rather than served with a
+/// `next_page` the parser would then refuse. At the default 256 that is
+/// 1,048,576 rows, more than any 64 MiB file of 64-byte or wider rows holds.
+///
+/// # Errors
+///
+/// Refuses a result the requested limit cannot page to its end, an offset
+/// outside the result, or a coordinate that cannot be represented on this
+/// machine.
+pub fn seek_window(total: usize, page: Page) -> Result<Window, String> {
+    let total_u64 = u64::try_from(total).unwrap_or(u64::MAX);
+    let addressable = MAX_PAGE.saturating_add(1).saturating_mul(page.limit);
+    if total_u64 > addressable {
+        let needed = total_u64.div_ceil(MAX_PAGE.saturating_add(1));
+        return Err(format!(
+            "result owns {total_u64} rows and `limit={}` addresses only the first {addressable} of them within page {MAX_PAGE}; ask `limit={needed}` or more. No prefix was read or exposed",
+            page.limit
+        ));
+    }
     let offset = page.offset();
     if total == 0 && page.number > 0 {
         return Err(format!(
@@ -557,8 +599,8 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
 )]
 mod tests {
     use super::{
-        Cached, IDENTITY_REFUSAL, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, Selector,
-        preflight, run, window,
+        Cached, IDENTITY_REFUSAL, MAX_PAGE, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_RESULT_ROWS,
+        MAX_SCAN_BYTES, Page, Selector, preflight, run, seek_window, window,
     };
 
     /// ONLY AN ABSENT LEDGER IS AN ABSENCE.
@@ -826,6 +868,58 @@ mod tests {
         let whole = window(2, Page::parse("").expect("page")).expect("whole");
         assert!(whole.complete);
         assert!(window(2, Page::parse("page=1&limit=2").expect("page")).is_err());
+    }
+
+    /// A seeked page is bounded by its own limit, not by the hold cap, and it
+    /// still refuses every coordinate `window` refuses. W1-api6-5, D-0954.
+    #[test]
+    fn a_seeked_window_has_no_hold_cap_and_keeps_every_other_refusal() {
+        let page = |query: &str| Page::parse(query).expect("a valid page");
+        let held = usize::try_from(MAX_RESULT_ROWS).expect("fits");
+        let pages = usize::try_from(MAX_PAGE + 1).expect("fits");
+        // The hold cap: `window` still refuses one row past it, at page 0.
+        assert!(window(held, page("")).is_ok());
+        let refused = window(held + 1, page("")).expect_err("held cap");
+        assert!(
+            refused.contains("one request verifies at most"),
+            "{refused}"
+        );
+        // A seeked window over the same totals is a page, not a refusal.
+        for total in [held, held + 1, 10_000] {
+            let first = seek_window(total, page("")).expect("page 0");
+            assert_eq!((first.start, first.end, first.complete), (0, 256, false));
+            assert_eq!(first.next_page, Some(1));
+            let last_page = (total - 1) / 256;
+            let last = seek_window(total, page(&format!("page={last_page}"))).expect("last");
+            assert_eq!(
+                (last.start, last.end, last.next_page),
+                (last_page * 256, total, None)
+            );
+            assert!(seek_window(total, page(&format!("page={}", last_page + 1))).is_err());
+        }
+        // The empty result: page 0 only, and it is complete.
+        let empty = seek_window(0, page("")).expect("empty page 0");
+        assert_eq!(
+            (empty.start, empty.end, empty.complete, empty.next_page),
+            (0, 0, true, None)
+        );
+        assert!(seek_window(0, page("page=1")).is_err());
+        // Addressability: exactly (MAX_PAGE + 1) * limit rows is pageable to
+        // its last row at the largest page number; one more is refused on
+        // page 0 with the smallest limit that would reach it.
+        let reach = pages * usize::try_from(MAX_PAGE_ROWS).expect("fits");
+        let deepest = seek_window(reach, page(&format!("page={MAX_PAGE}"))).expect("deepest");
+        assert_eq!((deepest.end, deepest.next_page), (reach, None));
+        let over = seek_window(reach + 1, page("")).expect_err("past the deepest page");
+        assert!(
+            over.contains(&format!("ask `limit={}`", MAX_PAGE_ROWS + 1)),
+            "{over}"
+        );
+        let narrow = seek_window(pages + 1, page("limit=1")).expect_err("limit 1");
+        assert!(narrow.contains("ask `limit=2`"), "{narrow}");
+        assert!(seek_window(pages, page(&format!("page={MAX_PAGE}&limit=1"))).is_ok());
+        // usize::MAX is a total no page can reach, and refusing it cannot overflow.
+        assert!(seek_window(usize::MAX, page("")).is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]

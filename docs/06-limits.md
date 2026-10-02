@@ -9907,3 +9907,43 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Sweep slot, sweep evidence, journal and census opens — D-0954, 2 October 2026
+
+- **A sweep-evidence page is O(page), not O(total), and the total is no longer
+  capped at 4,096.** `/sweep-evidence.json` reads the attempt's lifecycle
+  twice (as before) and seeks to one page of at most 256 fixed-stride rows;
+  the window is O(1) arithmetic. The total is bounded only by the 64 MiB file
+  cap. At `limit = L` only `(MAX_PAGE + 1) × L` rows are addressable, and a
+  larger result is refused on every page naming the limit that reaches it; at
+  the default 256 that is 1,048,576 rows, above the most any 64 MiB evidence
+  file holds. Not timed.
+- **A `/backtest/run.json` poll still escapes and sends the whole report.**
+  The snapshot taken under the slot lock is now a reference count per text
+  field, but a finished run's report (and a refusal that carries it) is
+  JSON-escaped and transferred on every poll: O(report bytes) per poll, on the
+  blocking pool for a finished run. The other fields the clone copies (two
+  short strings and the boxed Boolean and single-stop statuses) are not
+  measured. No escaped copy is cached.
+- **A sweep marker older than the newest 4 MiB of CLI log is still unknown.**
+  The lifecycle walk is capped at `logs::SCAN_BYTES`; when no sweep marker lies
+  inside it, status is `unknown` and browser launch refuses, whether or not
+  that sweep is still running. The log cannot say, so this is the refusal, not
+  a defect; it is reached when more than 4 MiB of other records followed the
+  newest sweep's marker.
+- **Admission latency is unchanged; who waits for it changed.** Admission
+  still does file-system work with no constant bound (canonicalization, the
+  lease, a log walk of up to 8 MiB, launch preparation, an audit `begin` with
+  its syncs, a telemetry marker), on the blocking pool. A poll now holds the
+  slot for one clone and never waits on that work. A second admission still
+  waits for the first, behind the process-wide `ADMISSION` mutex, on a
+  blocking thread. Not timed.
+- **The journal makes at most one directory per append.** `create_dir` of
+  `audit/` replaces `create_dir_all`; a missing store root refuses the append
+  instead of being recreated, so a pull into a root that does not exist loses
+  its journal record loudly, by name.
+- **A census manifest read is one nonblocking open, one `fstat` and one read
+  capped at `MAX_MANIFEST_BYTES + 1`.** A FIFO, character device or other
+  non-regular file is refused unread. On targets other than Linux
+  x86_64/aarch64 and macOS the open carries no `O_NONBLOCK` and a FIFO there
+  can still hold the read; no such target is built or tested here.
