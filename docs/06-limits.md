@@ -3647,7 +3647,7 @@ in their own rows.
 | Where | What | Why it cannot execute |
 |---|---|---|
 | `lib.rs` 178, 187–191 | the concurrent-`install` arm | Needs two `install` calls to interleave inside a few instructions. `OnceLock` is per **process**, so a test cannot retry — it gets one attempt per binary. Already named in the source. |
-| `sink.rs` 1309 | `resume_seq`'s `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail on that path. **Was 1099, 1107 on 2026-08-11 and is one line now** — the file grew above it and one of the two returns is reached by the workspace profile's wider set of callers. |
+| `sink.rs` 1309 | `resume_seq`'s `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail on that path. **Was 1099, 1107 on 2026-08-11 and is one line now** — the file grew above it and one of the two returns is reached by the workspace profile's wider set of callers. **Retired 2026-10-02 (D-1327):** `resume_seq` became `resume_point`, which has no such line. |
 | `tail.rs` 401–403 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is on the path that opened it, which IS tested. **Was 378–380** — the same three lines, moved down by growth above them. |
 | `clock.rs` 41 | `now_millis`'s pre-epoch arm | Needs a host clock set before 1970. `millis_of` is tested directly with `before_epoch = true`; what is dark is the routing. |
 
@@ -3724,6 +3724,19 @@ iterations, so the count no longer follows thread timing. Gate 20 declares
 `sink.rs` 21, totaling 33. The two lines removed were the second wait's sleep
 and the closing brace before it; no other uncovered `sink.rs` line is a wait.
 The workspace profile in CI must still reproduce 21.
+
+**2026-10-02 follow-up (D-1327).** D-1326 replaced `resume_seq` with
+`resume_point` and `last_record`, which use `?` and `map_or` and have no
+early-return lines. The `return 0` in the `sink.rs` 1309 row above no longer
+exists, so that row is retired. Gate 20 declares `sink.rs` 20, totaling 32.
+Measured with `cargo llvm-cov -p telemetry` on a root container, origin then
+this change, the uncovered `sink.rs` count went 53 → 51. The two lines that
+left were both `resume_seq` `return 0` arms. The other 30 lines in that 51
+come from four permission-based tests that fail as root (the audit-root item,
+claimed elsewhere), and they are the same 30 in both runs. `tail.rs` stays 3:
+the new tail tests add no uncovered line, and the three are still the
+`fstat`-failure arm. **Not yet shown:** that the workspace profile in CI
+counts exactly 20.
 
 **What this does not do.** It does not make the `coverage` job pass. That job
 also runs `--fail-under-lines 100` over the whole workspace, and the workspace

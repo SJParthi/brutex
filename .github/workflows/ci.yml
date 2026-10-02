@@ -7702,7 +7702,8 @@ jobs:
           # `assert!` evaluates only when it FAILS, and methods on `Target`
           # doubles that a given test never calls. Line 1309 is the only one on
           # a production path, and it is `resume_seq`'s `return 0` that
-          # docs/06-limits.md §54 already accounts for.
+          # docs/06-limits.md §54 already accounts for. D-1327: that line is
+          # gone (`resume_point` has none), so `sink.rs` is declared 20.
           #
           # docs/06-limits.md §54 measured the earlier set with
           # `cargo llvm-cov -p telemetry`; this gate runs after the workspace
@@ -7715,7 +7716,7 @@ jobs:
           level.rs 1
           lib.rs 6
           record.rs 1
-          sink.rs 21
+          sink.rs 20
           tail.rs 3
           '
           cargo llvm-cov report --locked --text > /tmp/cov.txt

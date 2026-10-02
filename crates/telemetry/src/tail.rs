@@ -93,14 +93,22 @@ pub const DEFAULT_MAX_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 /// Measured before this cap: 40 ms over 1 MiB and **2.91 s over 8 MiB**, a 4.0x
 /// rise per doubling.
 ///
-/// 64 KiB is far above any line this crate can write. The event ceilings bound
-/// one at roughly 2.2 KiB of content, and JSON escaping cannot inflate that
-/// past about 14 KiB even if every byte needs a `\u00XX`. So a run longer than
+/// 64 KiB is above any line this crate can write, by a margin of about a third
+/// rather than the fourfold this paragraph used to claim. The event ceilings
+/// bound one at **6,832 bytes of content** — target 48, message 256, and twelve
+/// fields of a 32-byte key and a 512-byte value — and JSON escaping inflates a
+/// control byte sixfold to `\u00XX`, so the widest line is just over **41 KB**.
+/// (It said ~2.2 KiB and ~14 KiB, which was the arithmetic while a string value
+/// was capped at 128 bytes; raising that cap to 512 did not update it. D-1323.)
+/// Pinned by
+/// `the_widest_line_the_writer_can_produce_fits_the_reader_and_round_trips`,
+/// which builds that line and reads it back. A ceiling raised again must keep
+/// that test green, or this bound must move with it. So a run longer than
 /// this is not a line of ours: it is a corrupt file, a foreign file, or a file
 /// somebody hand-edited — all of which a reader handed a log folder must
 /// survive rather than exhaust memory on.
 ///
-/// It is the same figure `resume_seq` uses for "further back than any line can
+/// It is the same figure `sink::last_record` uses for "further back than any line can
 /// reach", and for the same reason.
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
@@ -426,7 +434,10 @@ fn walked(dir: &Path, keep_files: u8, query: &Query) -> Tail {
             return out;
         }
         read_already.push(id);
-        out.files_read = out.files_read.saturating_add(1);
+        // `files_read` is NOT counted here. It is counted by `walk_back` on the
+        // first block it actually reads, because a file whose walk is refused
+        // by a spent scan budget, or whose first read fails, gave no bytes —
+        // and `Tail::files_read` counts files the walk read bytes from. D-1321.
         let newest_file = core::mem::take(&mut first_file);
         match walk_back(&mut file, &path, len, newest_file, limit, query, &mut out) {
             // Gave up with bytes still unread in THIS file, so something older
@@ -481,13 +492,25 @@ fn walk_back(
     // not finished being written. Skipped and reported, never decoded.
     let mut drop_fragment = false;
     let mut first_block = true;
+    // THE BYTES BEING CARRIED ARE THE TAIL OF A RUN ALREADY REFUSED AS TOO
+    // WIDE, and already counted once in `malformed`. Until the newline that
+    // starts the run is reached, more of it is dropped without a second count,
+    // and the run's own head — the bytes after that newline — is stepped over
+    // rather than decoded as if it were a line. Without this one 200 KB run
+    // read as four bad lines. D-1320.
+    let mut overlong = false;
 
     while pos > 0 {
-        if out.bytes_read >= query.max_scan_bytes {
+        // WHAT IS LEFT OF THE BUDGET, and the block is cut to it. Checking the
+        // budget and then reading a whole block read up to `READ_BLOCK - 1`
+        // bytes past `max_scan_bytes`, which the crate root says a query never
+        // does. D-1322.
+        let budget = query.max_scan_bytes.saturating_sub(out.bytes_read);
+        if budget == 0 {
             out.hit_scan_cap = true;
             return Stop::Stopped;
         }
-        let take = READ_BLOCK.min(pos);
+        let take = READ_BLOCK.min(pos).min(budget);
         pos = pos.saturating_sub(take);
         let block = match read_block(file, pos, take) {
             Ok(block) => block,
@@ -500,9 +523,14 @@ fn walk_back(
 
         let mut work = block;
         work.append(&mut carry);
-        if core::mem::take(&mut first_block) && newest_file && work.last() != Some(&b'\n') {
-            out.partial_tail = true;
-            drop_fragment = true;
+        if core::mem::take(&mut first_block) {
+            // The first block this file GAVE, so this is where it becomes a
+            // file the walk read bytes from. D-1321.
+            out.files_read = out.files_read.saturating_add(1);
+            if newest_file && work.last() != Some(&b'\n') {
+                out.partial_tail = true;
+                drop_fragment = true;
+            }
         }
 
         let mut end = work.len();
@@ -515,6 +543,12 @@ fn walk_back(
             let line = work.get(at.saturating_add(1)..end).unwrap_or(&[]);
             end = at;
             if core::mem::take(&mut drop_fragment) {
+                // A torn tail that was also overlong is this same fragment:
+                // counted once at the cap, dropped here, never decoded.
+                overlong = false;
+                continue;
+            }
+            if core::mem::take(&mut overlong) {
                 continue;
             }
             if take_line(line, limit, query, out) {
@@ -529,7 +563,10 @@ fn walk_back(
         // Counted as malformed, which is what the reader already says about
         // bytes it stepped over — one number, one meaning.
         if carry.len() > MAX_LINE_BYTES {
-            out.malformed = out.malformed.saturating_add(1);
+            // ONCE PER RUN, not once per time the carry refills past the cap.
+            if !core::mem::replace(&mut overlong, true) {
+                out.malformed = out.malformed.saturating_add(1);
+            }
             carry.clear();
         }
     }
@@ -539,7 +576,7 @@ fn walk_back(
     // so every byte of this file has been read. Whether anything OLDER exists is
     // a question about the NEXT file, and `walked` answers it by looking rather
     // than by assuming the worst.
-    if !drop_fragment && take_line(&carry, limit, query, out) {
+    if !drop_fragment && !overlong && take_line(&carry, limit, query, out) {
         return Stop::Exhausted;
     }
     Stop::Unfinished
@@ -1529,7 +1566,7 @@ mod tests {
     /// * *"sequence numbers arrive strictly decreasing within one answer, so a
     ///   number that does not decrease is a repeat and can be dropped with one
     ///   comparison."* They do not. `Sink::open` resumes the count from the
-    ///   CURRENT file, and `resume_seq` documents that a wiped, absent or
+    ///   newest non-empty file, and `resume_point` documents that a
     ///   corrupted tail restarts the numbering at zero. Walking backwards
     ///   across such a restart the numbers go 3, 2, 1 and then 6 — and that
     ///   rule would throw away every event written before the restart, which is
@@ -1548,9 +1585,13 @@ mod tests {
         let dir = scratch("restart");
         let sink = filled(&dir, 6);
         drop(sink);
-        // A ROLL BY HAND, then a sink opened on a set whose current file is
-        // gone: the numbering restarts, exactly as `resume_seq` says it does.
+        // A ROLL BY HAND, then a sink opened on a set whose current file holds
+        // nothing that decodes: the numbering restarts, exactly as
+        // `resume_point` says it does. (An EMPTY current file no longer
+        // restarts it — `resume_point` then reads the rolled file beneath,
+        // D-1326 — so the fixture's current file holds one damaged line.)
         std::fs::rename(current_path(&dir), rotated_path(&dir, 1)).expect("roll");
+        std::fs::write(current_path(&dir), b"not a record\n").expect("a damaged line");
         let sink = filled(&dir, 3);
 
         let found = tail(&dir, 8, &Query::last(MAX_LIMIT));
@@ -1562,6 +1603,10 @@ mod tests {
              of them is a repeat: {found:?}"
         );
         assert_eq!(found.files_read, 2, "two files, and both were read");
+        assert_eq!(
+            found.malformed, 1,
+            "the damaged line is counted, not returned"
+        );
         // `missing` is the span from the newest number to the oldest, less the
         // records held; across a restart the newest number is SMALLER than
         // numbers further back, so the span is 3 and the answer saturates to
@@ -1693,6 +1738,199 @@ mod tests {
             Some(2),
             "it stopped at the limit rather than reading on: {short:?}"
         );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The decodable lines `filled` would write, as bytes, for a hand-built file.
+    fn sink_lines(name: &str, n: u32) -> Vec<Vec<u8>> {
+        let dir = scratch(name);
+        let _sink = filled(&dir, n);
+        let bytes = std::fs::read(current_path(&dir)).expect("the sink's own file");
+        let _ignored = std::fs::remove_dir_all(&dir);
+        bytes
+            .split_inclusive(|&b| b == b'\n')
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
+
+    /// **ONE OVERLONG RUN IS ONE MALFORMED LINE, HOWEVER MANY BLOCKS IT SPANS.**
+    ///
+    /// `malformed` is documented as "lines that would not decode". The carry
+    /// cap used to add one every time the carry passed `MAX_LINE_BYTES`, and
+    /// then the run's own HEAD — the bytes after the newline before it, cut off
+    /// from the rest by the cap — was decoded as if it were a line and counted
+    /// again. A 200 KB run between two good lines read as four bad lines.
+    /// D-1320.
+    #[test]
+    fn an_overlong_run_is_one_malformed_line_however_many_blocks_it_spans() {
+        let dir = scratch("overlong-once");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let lines = sink_lines("overlong-once-src", 2);
+        let mut file = lines[0].clone();
+        file.extend(std::iter::repeat_n(b'x', MAX_LINE_BYTES * 3 + 17));
+        file.push(b'\n');
+        file.extend_from_slice(&lines[1]);
+        std::fs::write(current_path(&dir), &file).expect("write");
+
+        let out = tail(&dir, 1, &Query::last(MAX_LIMIT));
+        let seqs: Vec<u64> = out.records.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![2, 1], "both good lines either side are found");
+        assert_eq!(out.malformed, 1, "one run, one count: {out:?}");
+        assert!(!out.partial_tail);
+        assert_eq!(out.bytes_read, file.len() as u64);
+
+        // THE SAME RUN AS THE NEWEST FILE'S UNTERMINATED TAIL: still one count,
+        // and still reported as a partial tail.
+        let mut torn = lines[0].clone();
+        torn.extend(std::iter::repeat_n(b'x', MAX_LINE_BYTES * 3 + 17));
+        std::fs::write(current_path(&dir), &torn).expect("write");
+        let out = tail(&dir, 1, &Query::last(MAX_LIMIT));
+        assert_eq!(out.records.len(), 1, "the line before the run is found");
+        assert_eq!(out.malformed, 1, "the run is counted once: {out:?}");
+        assert!(out.partial_tail);
+
+        // AND AS THE FILE'S FIRST LINE, where no newline precedes it.
+        let mut first = vec![b'x'; MAX_LINE_BYTES * 2 + 5];
+        first.push(b'\n');
+        first.extend_from_slice(&lines[1]);
+        std::fs::write(current_path(&dir), &first).expect("write");
+        let out = tail(&dir, 1, &Query::last(MAX_LIMIT));
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(out.malformed, 1, "a leading run is counted once: {out:?}");
+        assert!(out.reached_oldest);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE SCAN BUDGET IS A CEILING ON BYTES READ, NOT ON BLOCKS STARTED.**
+    ///
+    /// The cap was checked before each block and the block was then read
+    /// whole, so `scanning_at_most(100)` read 8,192 bytes — and the crate root
+    /// says a query "reads at most [`Query::max_scan_bytes`]". Every caller
+    /// sizing a budget (`api::logs::SCAN_BYTES`) was promised a bound that was
+    /// up to one block short of the truth. D-1322.
+    #[test]
+    fn the_scan_budget_is_never_exceeded_by_a_single_byte() {
+        let dir = scratch("budget-exact");
+        let sink = filled(&dir, 700);
+        for budget in [1, 100, READ_BLOCK - 1, READ_BLOCK + 1, READ_BLOCK * 3 + 7] {
+            let out = tail(
+                &dir,
+                sink.keep_files(),
+                &Query::last(10)
+                    .from_target("never.matches.anything")
+                    .scanning_at_most(budget),
+            );
+            assert_eq!(out.bytes_read, budget, "read exactly the budget: {out:?}");
+            assert!(out.hit_scan_cap);
+            assert!(!out.reached_oldest);
+            assert!(out.records.is_empty());
+        }
+        // A budget of zero reads nothing and says it stopped.
+        let none = tail(
+            &dir,
+            sink.keep_files(),
+            &Query::last(10).scanning_at_most(0),
+        );
+        assert_eq!(none.bytes_read, 0);
+        assert!(none.hit_scan_cap);
+        assert_eq!(none.files_read, 0, "and read no file");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FILE THE BUDGET NEVER REACHED WAS NOT READ.**
+    ///
+    /// `files_read` is documented as the files "the walk read bytes from". It
+    /// was counted before the walk looked at its budget, so a budget spent
+    /// exactly on the newest file still counted the next one, which was opened
+    /// and given not one read. D-1321.
+    #[test]
+    fn a_file_the_spent_budget_never_reached_is_not_counted_as_read() {
+        let dir = scratch("budget-files");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(2048)
+                .with_keep_files(4),
+        )
+        .expect("opens");
+        for i in 0..40u32 {
+            assert!(sink.emit(&Event::info("t", "m").with("i", i)).is_written());
+        }
+        assert!(rotated_path(&dir, 1).exists(), "it rolled");
+        let newest = std::fs::metadata(current_path(&dir)).unwrap().len();
+        assert!(newest > 0 && newest < READ_BLOCK);
+
+        let out = tail(
+            &dir,
+            sink.keep_files(),
+            &Query::last(MAX_LIMIT).scanning_at_most(newest),
+        );
+        assert_eq!(out.bytes_read, newest);
+        assert!(out.hit_scan_cap, "the rolled file was left unread: {out:?}");
+        assert!(!out.reached_oldest);
+        assert_eq!(
+            out.files_read, 1,
+            "only the newest file gave bytes: {out:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE WIDEST LINE THE WRITER CAN PRODUCE, AND IT FITS THE READER.**
+    ///
+    /// `MAX_LINE_BYTES` and `event::MAX_STR_VALUE_BYTES` each stated the worst
+    /// line, and both were wrong: one said ~2.2 KiB of content and ~14 KiB
+    /// escaped (true only while a string value was capped at 128), the other
+    /// ~6.5 KB (which ignores that escaping is sixfold). Every capped part at
+    /// its ceiling, every byte a control character, every number at its widest:
+    /// the line is over 40 KB. It must still be under the reader's 64 KiB, be
+    /// found by `tail`, and decode to exactly what was written. D-1323.
+    #[test]
+    fn the_widest_line_the_writer_can_produce_fits_the_reader_and_round_trips() {
+        use crate::event::{
+            MAX_FIELDS, MAX_KEY_BYTES, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES, MAX_TARGET_BYTES,
+        };
+        let control = |n: usize| "\u{1}".repeat(n);
+        let target = control(MAX_TARGET_BYTES);
+        let message = control(MAX_MESSAGE_BYTES);
+        let key = control(MAX_KEY_BYTES);
+        let value = control(MAX_STR_VALUE_BYTES);
+        let mut event = Event::error(&target, &message);
+        for _ in 0..MAX_FIELDS {
+            event = event.with(&key, value.as_str());
+        }
+        let event = event.with("past the ceiling", u64::MAX);
+
+        let mut line = Vec::new();
+        crate::encode::line(
+            &mut line,
+            u64::MAX,
+            i64::from(i32::MAX) * 1000,
+            u64::MAX,
+            &event,
+        );
+        let content = MAX_TARGET_BYTES
+            + MAX_MESSAGE_BYTES
+            + MAX_FIELDS * (MAX_KEY_BYTES + MAX_STR_VALUE_BYTES);
+        assert_eq!(content, 6_832, "the content ceiling the docs now state");
+        let width = line.len();
+        assert!(width > 6 * content, "escaping is sixfold: {width}");
+        assert!(
+            width < MAX_LINE_BYTES,
+            "and still inside the reader: {width}"
+        );
+
+        let back = crate::record::Record::decode(&line[..line.len() - 1]).expect("decodes");
+        assert!(back.matches(&event), "round trip is exact");
+        assert_eq!(back.seq, u64::MAX);
+        assert_eq!(back.run, u64::MAX);
+
+        let dir = scratch("widest");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert!(sink.emit(&event).is_written());
+        assert!(sink.emit(&event).is_written());
+        let out = tail(&dir, sink.keep_files(), &Query::last(10));
+        assert_eq!(out.records.len(), 2, "both found: {out:?}");
+        assert_eq!(out.malformed, 0);
+        assert!(out.records.iter().all(|r| r.matches(&event)));
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }

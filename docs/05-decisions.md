@@ -43718,3 +43718,129 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-1320 — Count one overlong run in `tail` as one malformed line — 2026-10-02
+
+**What was wrong.** `Tail::malformed` is documented as "lines that would not
+decode". `walk_back` refuses a carry past `MAX_LINE_BYTES` and counted a
+malformed line each time the carry refilled past the cap, then decoded the
+run's head (the bytes after the newline that starts it) as if it were a line
+and counted it again. Measured on origin: a 196,625-byte run between two good
+lines gave `malformed: 3`.
+
+**The change.** A local `overlong` flag. The first refusal counts once and
+sets it, later refusals of the same run do not count, and the run's head is
+stepped over without being decoded. A torn tail that is also overlong stays
+one count. Pinned by T-28,
+`tail::tests::an_overlong_run_is_one_malformed_line_however_many_blocks_it_spans`.
+The cost is one `bool` per file walk.
+
+### D-1321 — `Tail::files_read` counts a file when its first block is read — 2026-10-02
+
+**What was wrong.** `walked` counted a file before `walk_back` checked the
+scan budget, so a budget spent exactly on the newest file still counted the
+rolled file behind it, which got no read at all. Measured on origin:
+`files_read: 2` with `bytes_read` equal to the newest file's length.
+
+**The change.** The count moves into `walk_back`, on the first successful
+block, which also leaves a file whose first read fails uncounted. Pinned by
+T-29, `tail::tests::a_file_the_spent_budget_never_reached_is_not_counted_as_read`.
+
+### D-1322 — Cut the last block to the scan budget so `max_scan_bytes` is exact — 2026-10-02
+
+**What was wrong (cost).** The crate root says a query "reads at most
+`Query::max_scan_bytes`". The walk checked the budget and then read a whole
+`READ_BLOCK`, so it overshot by up to 8,191 bytes. Measured on origin:
+`scanning_at_most(1)` read 8,192 bytes. `api::logs::SCAN_BYTES` and
+`api::sweeprun` size their reads with this budget.
+
+**The change.** Each read is `min(READ_BLOCK, bytes left in file, budget
+left)`, and a budget of zero stops before any read. The bound is now exact,
+and per-query cost stays O(budget), unchanged in class. Pinned by T-30,
+`tail::tests::the_scan_budget_is_never_exceeded_by_a_single_byte`.
+
+### D-1323 — Correct the stated width of the widest event line — 2026-10-02
+
+**What was false.** `tail::MAX_LINE_BYTES` said the event ceilings bound a
+line at "roughly 2.2 KiB of content" and "about 14 KiB" escaped.
+`event::MAX_STR_VALUE_BYTES` said the worst line is "≈ 6.5 KB, an order of
+magnitude inside" 64 KiB. The first was the arithmetic from before string
+values were raised from 128 to 512 bytes, and the second left out the sixfold
+`\u00XX` escaping.
+
+**The truth, pinned.** The content is 48 + 256 + 12 × (32 + 512) = 6,832
+bytes. Escaped, the widest line is just over 41 KB, which is inside 64 KiB by
+about a third. Both comments now say so.
+`tail::tests::the_widest_line_the_writer_can_produce_fits_the_reader_and_round_trips`
+(T-31) builds that line, asserts it is over 6 × 6,832 bytes and under
+`MAX_LINE_BYTES`, and round-trips it through `Sink` and `tail`. This is a
+documentation fix. The bound held before and holds now.
+
+### D-1324 — The telemetry set is bounded at 64 MiB while rotation works, not "forever" — 2026-10-02
+
+**What was false.** The crate root said the whole crate "occupies at most
+64 MiB, forever", and `DEFAULT_KEEP_FILES` said "a 64 MiB ceiling on this
+crate's entire footprint, forever". After the first failed roll,
+`rotation_broken` stops rotation for the life of the sink (its own documented design,
+held by `a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event`),
+and the current file then grows without a bound. A single line wider than a
+`MIN_FILE_BYTES` bound also passes the bound
+(`a_first_event_larger_than_the_whole_bound_does_not_roll_an_empty_file`).
+
+**The change.** Documentation only. Both sentences now state the bound as
+holding while rotation works and name the degradation and where it is
+reported (`Health::rotation_failures`, `current_bytes`, `is_loud`).
+
+### D-1325 — A reopened sink resumes its `ms` floor from the last line on disk — 2026-10-02
+
+**What was wrong.** `Inner::last_at` clamps `ms` so that `ms` order is file
+order. `tail` ends a `since` walk at the first record older than the floor,
+and relies on that order. `Sink::around` started the floor at zero, so a
+process restarted with its clock behind the last line on disk (NTP stepping a
+rebooted host back, or a restored VM) wrote an older line after a newer one.
+Measured on origin with a line stamped a day ahead: `since(ahead − 1 h)`
+returned `[]`, although the line on disk matched.
+
+**The change.** `resume_seq` becomes `resume_point` and returns the `seq` and
+the `ms` of the same last decodable record. `Sink::open` passes both to
+`around`. `with_target` still starts at zero, because it has no file to read.
+The cost is unchanged: one 64 KiB read at open. The known trade-off is that a
+line stamped in the future pins later stamps to it, across restarts as well
+as within a process. That is the clamp's existing in-process behaviour, now
+applied consistently. Pinned by T-32,
+`sink::tests::a_restart_behind_the_last_stamp_keeps_ms_in_file_order`.
+
+### D-1326 — Resume the sequence from the newest NON-EMPTY file in the set — 2026-10-02
+
+**What was wrong.** The resume read only the current file. After a roll has
+renamed the current file to `.1`, the set holds an empty current file if the
+append that follows fails or the process dies, and the same happens if the
+current file is removed. The numbering then restarted at zero on top of `.1`.
+`reserve_run_id` resumes from that number, so a restarted process re-issued
+run ids that events in `.1` still carry, which breaks the guarantee its
+`reserved_run` comment states. Measured on origin: `next_seq` 1 where 6 was
+due.
+
+**The change.** `resume_point` takes the first non-empty file, newest first,
+and reads one 64 KiB block at its end. If that file is non-empty but nothing
+in it decodes, the numbering still restarts at zero, as documented. An older
+file is not consulted then, because its number could be lower than lines the
+corrupt file still holds. The cost at open is at most `keep_files` `stat`s and
+one read. `tail::tests::a_restarted_sequence_is_not_mistaken_for_a_repeat`
+built its restart with an absent current file, which is exactly this case, so
+its fixture now uses a current file holding one damaged line, and it
+additionally asserts that line is counted. Pinned by T-33,
+`sink::tests::an_empty_current_file_resumes_from_the_rolled_one_beneath_it`.
+
+### D-1327 — Gate 20 declares `sink.rs` 20 after `resume_seq`'s `return 0` was removed — 2026-10-02
+
+D-1326 rewrote the resume as `resume_point` and `last_record`, and the
+declared uncovered production line in `sink.rs` (`resume_seq`'s guarded
+`return 0`, `docs/06-limits.md` §54, row 1309) no longer exists. Gate 20
+compares an exact count in both directions, so the declaration moves from 21
+to 20 in the same commit. A crate-scoped `cargo llvm-cov -p telemetry` on
+this root container counted `sink.rs` 53 → 51 and `tail.rs` 3 → 3, and the
+only lines that left were the two `return 0` arms. The 30 lines over CI's
+figure belong to four permission tests that fail as root, which is the
+audit-root item and is outside this change. **Not yet shown:** the CI
+workspace profile reproducing 20.
