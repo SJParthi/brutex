@@ -237,6 +237,8 @@ impl Expression {
     /// answer. The scratch stack is [`scratch_slots`] wide for this program, 8,
     /// 64 or 576 slots, so the slots cleared before the walk are at most
     /// `4.5 * len + 8` and never the full wire capacity for a short rule.
+    /// Proved by
+    /// `vocab::expression::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
     #[must_use]
     pub fn evaluate(&self, truth: ConditionMask, known: ConditionMask) -> Truth {
         match scratch_slots(self.len) {
