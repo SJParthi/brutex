@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Spans loaded for one number are stated — audit 2026-10-02 o1cli-5
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1CLI-5 — **`docs/06-limits.md` states that `elite_descend_in_points_inner`, `reference_of_span` (via `screen_arm`), `screen_range_in_points` and `descent_bar_count` each load a whole span for one number before the work they hand off loads it again, one extra O(span bars) load per command, and why the header record count cannot replace it; and the code still does exactly that.** The test reads the section and each function body, including the chain `screen_range` → `screen_range_inner` → `screen_range_kernel` to its own load. Sharing a load fails it and withdraws the limit | `the_span_loaded_for_one_number_is_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_5.rs` | ✓ |
+
 ### The audit kernel's second context read is stated — audit 2026-10-02 o1cli-4
 
 | Invariant | Test that proves it | Status |
