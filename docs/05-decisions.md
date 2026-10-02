@@ -44026,3 +44026,47 @@ swept crate whose `src/lib.rs` is not tracked. The text clauses stay.
 does not record its alias. Clause A pins three of the four swept crates'
 dependency sets, which closes the second case for those three. Invariant
 CIG-15.
+
+### D-1111 — Gates 13b and 13c read what cargo builds, not what is declared — 2026-10-02
+
+**What was wrong.** Finding rustonly-6. Gate 13 checks declared and resolved
+names against the banned runtimes. `ring` is a C library and is in `Cargo.lock`
+as an optional entry. With `ring` turned back on, here by a direct `ring`
+dependency in `crates/pull` (the audit used a `rustls` feature), cargo compiled
+it, and gate 13 still printed its success line. Only `cargo deny`, which is not
+run locally, stood between the workspace and a vendored C binding. That breaks
+`CLAUDE.md` §2.
+
+**The choice.** Gate 13b runs
+`cargo tree --workspace --locked --offline -e normal,build,dev` for the host
+target. It refuses any package whose name is in a family on its list: gate 13's
+runtimes plus `ring`, `aws-lc-rs`, `aws-lc-sys`, `cc` and `openssl-sys`. Each
+refusal prints `cargo tree -i` for that package. A lock-only optional entry is
+legal; a built one is not.
+
+Gate 13c reads `cargo build --message-format=json`. It refuses a build script
+that reports any `linked_libs`. It also refuses one that leaves a `.o`, `.a`,
+`.obj`, `.lib`, `.so`, `.dylib` or `.dll` in its `out_dir`. This catches a C
+compile that uses no listed crate name.
+
+Both steps self-test on a fixture before they read the tree.
+`core::banned_lists::the_three_banned_lists_agree` now also pins gate 13b's
+list to the vocab forbidden list joined with `deny.toml`'s native crates.
+Gate 13's own success line no longer claims "built".
+
+**Measured.**
+- On this tree, gate 13b read 203 packages and gate 13c read 25 build-script
+  runs. Both passed.
+- With `ring = "0.17"` added to `crates/pull` and the lockfile updated offline,
+  gate 13b failed and named `ring v0.17.14 <- pull`. Gate 13 passed on that
+  same tree.
+
+**Limits.**
+- `cargo tree` covers the host target only. A dependency gated on another
+  `cfg(target_os)` is not read.
+- Gate 13c sees native output only where a build script reports it or writes
+  it to its `out_dir`.
+- `cargo deny check` was not run locally.
+
+Invariant CIG-16.
+

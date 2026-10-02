@@ -60,15 +60,25 @@ fn forbidden() -> BTreeSet<String> {
 /// The names gate 13 bans, read from the workflow, with the shell's spelling of the
 /// banned word expanded.
 fn gate_13_banned() -> BTreeSet<String> {
+    workflow_list("      - name: Gate 13 ", "banned")
+}
+
+/// The names gate 13b refuses in the host build graph. D-1111.
+fn gate_13b_banned() -> BTreeSet<String> {
+    workflow_list("      - name: Gate 13b ", "banned_built")
+}
+
+/// The whitespace-separated `VARIABLE="..."` list in the named workflow step.
+fn workflow_list(step_header: &str, variable: &str) -> BTreeSet<String> {
     let step = WORKFLOW
-        .split("      - name: Gate 13 ")
+        .split(step_header)
         .nth(1)
-        .expect("the workflow has a gate 13 step");
+        .expect("the workflow has the step");
     let list = step
-        .split_once("\n          banned=\"")
+        .split_once(&format!("\n          {variable}=\""))
         .and_then(|(_, rest)| rest.split_once('"'))
         .map(|(list, _)| list)
-        .expect("gate 13 declares its list as banned=\"...\"");
+        .expect("the step declares its list as VARIABLE=\"...\"");
     list.split_whitespace()
         .map(|n| n.replace("${snake}", WORD))
         .collect()
@@ -91,7 +101,8 @@ fn deny_toml_denied() -> BTreeSet<String> {
         .collect()
 }
 
-/// Gate 13 bans exactly `FORBIDDEN` less [`C_BINDINGS`]. `deny.toml` denies every
+/// Gate 13 bans exactly `FORBIDDEN` less [`C_BINDINGS`]; gate 13b bans all of
+/// `FORBIDDEN` and [`DENIED_NATIVE`] in the host build graph. `deny.toml` denies every
 /// entry of `FORBIDDEN` except those that spell the banned word, which gate 15
 /// refuses in a `.toml` and which gate 13 and the vocab test hold instead, and
 /// beyond them only [`DENIED_NATIVE`].
@@ -111,6 +122,18 @@ fn the_three_banned_lists_agree() {
         gate_13_banned(),
         runtimes,
         "gate 13's list and FORBIDDEN differ"
+    );
+
+    // Gate 13b refuses, in what cargo BUILDS, every runtime and every native crate.
+    let built: BTreeSet<String> = forbidden
+        .iter()
+        .cloned()
+        .chain(DENIED_NATIVE.iter().map(|n| (*n).to_owned()))
+        .collect();
+    assert_eq!(
+        gate_13b_banned(),
+        built,
+        "gate 13b's list differs from FORBIDDEN and the denied native crates"
     );
 
     let want: BTreeSet<String> = forbidden

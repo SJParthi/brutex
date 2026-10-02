@@ -2510,7 +2510,11 @@ jobs:
             echo "docs/05-decisions.md entry beside it."
             exit 1
           fi
-          echo "OK — no foreign runtime is declared, resolved, or built for."
+          # The line said "declared, resolved, or built for", and an audit built
+          # `ring`'s C under it (rustonly-6): this step reads manifests and the
+          # lock and cannot see what a feature switches on. Gates 13b and 13c
+          # in the build job are what read the build (D-1111).
+          echo "OK — no foreign runtime is declared or resolved by name (gates 13b and 13c read what is built)."
 
       - name: Gate 15 — the forbidden word appears in no tracked file
         run: |
@@ -7782,9 +7786,133 @@ jobs:
           done
           echo "OK — wasm-bindgen, js-sys and web-sys are unreachable on the host graph."
 
+      - name: Gate 13b — nothing banned is in the host build graph
+        if: steps.probe.outputs.has_crates == 'true'
+        run: |
+          set -euo pipefail
+          # WHY THIS EXISTS (rustonly-6, D-1111). Gate 13 reads manifests and the
+          # lock, and the lock lists every OPTIONAL dependency whether or not a
+          # feature enables it -- so `ring`, which vendors C and assembly, sits in
+          # Cargo.lock today unbuilt, and switching on the feature that builds it
+          # changes no tracked line gate 13 reads. An audit did exactly that
+          # through a TLS feature: 30 object files were compiled and gate 13
+          # printed its success line and exited 0. Only `cargo deny` stood
+          # between that tree and a green build.
+          #
+          # This step asks cargo what it BUILDS for the host: `cargo tree -e
+          # normal,build,dev` over the whole workspace is every package compiled
+          # into a binary, a build script or a test, with features resolved. Any
+          # package in the family (the name, or the name followed by `-` or `_`)
+          # of a banned runtime or a banned native crate is refused. The list is
+          # gate 13's runtimes plus the native crates `deny.toml` denies and the
+          # C binding the vocab test forbids; `crates/core/tests/banned_lists.rs`
+          # fails the build when this list and those drift.
+          #
+          # The matcher proves itself first on a fixture holding `ring`, so a
+          # pattern that matched nothing would be a red build, not a pass.
+          snake="$(printf 'py')thon"
+          banned_built="
+          pyo3 c${snake} rust${snake}-vm ${snake}3-sys
+          mlua rlua hlua lua lua-src luajit-src
+          rquickjs quickjs quickjs-rs duktape boa_engine deno_core v8 rusty_v8
+          mozjs rhai
+          napi neon node-bindgen
+          jni j4rs
+          ruby-sys magnus rutie
+          ext-php-rs
+          ring aws-lc-rs aws-lc-sys cc openssl-sys
+          "
+          pattern=$(printf '%s\n' $banned_built | sed 's/.*/&|&[-_][A-Za-z0-9_-]+/' | paste -sd'|')
+          pattern="^(${pattern}) v"
+          fixture=$(printf '%s\n' 'serde v1.0.0' 'ring v0.17.14' 'rustls v0.23.0' 'cc v1.2.0' 'ccache-sys v1.0.0' 'luau v1.0.0')
+          caught=$(grep -cE "$pattern" <<< "$fixture" || true)
+          if [ "$caught" != 2 ]; then
+            echo "GATE 13B'S MATCHER IS BROKEN: it caught $caught of the fixture's 2 banned lines."
+            exit 1
+          fi
+          tree=$(cargo tree --workspace --locked --offline -e normal,build,dev \
+                   --prefix none --format '{p}' | sort -u)
+          [ -n "$tree" ] || { echo "GATE 13B READ AN EMPTY BUILD GRAPH."; exit 1; }
+          hits=$(grep -E "$pattern" <<< "$tree" || true)
+          echo "host build graph: $(grep -c . <<< "$tree") package(s)"
+          if [ -n "$hits" ]; then
+            printf 'BANNED PACKAGE IN THE HOST BUILD GRAPH:\n%s\n' "$hits"
+            for p in $(awk '{print $1}' <<< "$hits"); do
+              echo "--- why $p is built:"
+              cargo tree --workspace --locked --offline -e normal,build,dev -i "$p" | head -20
+            done
+            echo
+            echo "CLAUDE.md section 2 forbids a vendored binding to another language"
+            echo "without exception. Lock-only optional entries are legal; a built"
+            echo "one is not."
+            exit 1
+          fi
+          echo "OK — no banned runtime or native crate is built for the host."
+
       - name: Gate 4 — locked, offline
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo build --workspace --locked --offline --all-targets
+
+      - name: Gate 13c — no build script compiled or linked native code
+        if: steps.probe.outputs.has_crates == 'true'
+        run: |
+          set -euo pipefail
+          # The second half of rustonly-6 (D-1111). Gate 13b refuses a banned
+          # NAME in the build graph; a crate not on any list can still compile
+          # C through its build script. Gate 4 has just built every target, so
+          # this repeats that build -- fresh, so it compiles nothing -- asking
+          # cargo for its messages. Every `build-script-executed` message names
+          # the libraries the script asked rustc to link and the directory it
+          # wrote into. A script that links a native library, or leaves an
+          # object or archive in its output directory, is refused: there is no
+          # allowlist, because measured today every one of them links nothing
+          # and leaves no object behind.
+          #
+          # The extraction proves itself first on two fixture messages, one
+          # clean and one that links `ring_core`, so a pattern that matched
+          # nothing would be a red build, not a pass.
+          linked() {
+            grep '"reason":"build-script-executed"' "$1" \
+              | { grep -o '"linked_libs":\[[^]]*\]' || true; } \
+              | { grep -v '"linked_libs":\[\]' || true; }
+          }
+          fx="${RUNNER_TEMP:-/tmp}/gate13c-fixture.json"
+          printf '%s\n' \
+            '{"reason":"build-script-executed","package_id":"a","linked_libs":[],"out_dir":"/x"}' \
+            '{"reason":"build-script-executed","package_id":"ring","linked_libs":["static=ring_core"],"out_dir":"/y"}' \
+            > "$fx"
+          [ "$(linked "$fx" | grep -c .)" = 1 ] \
+            || { echo "GATE 13C'S EXTRACTION IS BROKEN on its own fixture."; exit 1; }
+          msgs="${RUNNER_TEMP:-/tmp}/gate13c-build.json"
+          cargo build --workspace --locked --offline --all-targets --message-format=json > "$msgs"
+          n=$(grep -c '"reason":"build-script-executed"' "$msgs" || true)
+          [ "$n" -gt 0 ] || { echo "GATE 13C SAW NO BUILD SCRIPT RUN. libc has one; the read is broken."; exit 1; }
+          bad=0
+          libs=$(linked "$msgs")
+          if [ -n "$libs" ]; then
+            printf 'A BUILD SCRIPT LINKS A NATIVE LIBRARY:\n%s\n' "$libs"
+            bad=1
+          fi
+          : > "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt"
+          while IFS= read -r dir; do
+            [ -d "$dir" ] || continue
+            find "$dir" -type f \( -name '*.o' -o -name '*.obj' -o -name '*.a' -o -name '*.lib' \
+                 -o -name '*.so' -o -name '*.dylib' -o -name '*.dll' \) \
+              >> "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt"
+          done < <(grep '"reason":"build-script-executed"' "$msgs" \
+                   | { grep -o '"out_dir":"[^"]*"' || true; } | sed 's/^"out_dir":"//; s/"$//')
+          if [ -s "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt" ]; then
+            echo "A BUILD SCRIPT LEFT NATIVE OBJECTS IN ITS OUTPUT DIRECTORY:"
+            sed 's/^/  /' "${RUNNER_TEMP:-/tmp}/gate13c-objects.txt"
+            bad=1
+          fi
+          echo "read ${n} build-script run(s)"
+          if [ "$bad" -ne 0 ]; then
+            echo "CLAUDE.md section 2 forbids a vendored binding to another language"
+            echo "and native code compiled through a build script, without exception."
+            exit 1
+          fi
+          echo "OK — no build script linked or compiled native code."
 
       - name: Gate 6b — clippy
         if: steps.probe.outputs.has_crates == 'true'
