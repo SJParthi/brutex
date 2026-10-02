@@ -46386,3 +46386,60 @@ in `read_probability_v2` and `read_probability_v3`); it is the verdict, re-deriv
 from the floor ppm slots, that cannot carry the correct failure.
 
 **Proof.** `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`.
+### D-0976 — Price a ranked row from the compiler's widths, and pin the header to them — 2026-09-29
+
+**What was wrong (W3-runner4-3).** The `crates/runner/src/rank.rs` module
+header said a `Scored` was 120 bytes, pricing `Edge` at 64 for eight fields.
+`Edge` in `crates/runner/src/outcome.rs` declares fourteen: `n`, `mean_paisa`,
+`wins`, `win_sum`, `adverse_sum`, `favourable_sum`, `losses`, `loss_sum`,
+`min_win_paisa`, `max_win_paisa`, `max_loss_paisa`, `mismatched`, `refused`,
+`t`. The peak it derived from that width (67 MB at `keep = 10_000` on fourteen
+cores) and the `top_of` comment's forty-chunk example (48 MB, against 1.2 MB)
+were understated with it.
+
+**The change.** The header and the `top_of` comment now state `Scored` 168
+bytes (`ConditionMask` 48, `hits` 8, `Edge` 112), a heap row
+`Marked<Scored>` 176 bytes, the chunk-heap peak at about 98.6 MB
+(56 x 10,000 x 176), and the forty-chunk example at 70.4 MB against 1.8 MB.
+No code path changed; this is a documentation correction, so no run identity
+moves.
+
+**Why a test and not another hand count.** This paragraph has now carried a
+stale width three times. `rank::tests::the_header_widths_and_peak_are_the_measured_type_widths`
+builds every figure above from `core::mem::size_of` and requires the source to
+contain it, so the next field added to `Edge` fails the build until the text
+moves. It also requires `Scored` to be its three fields with no padding and
+every lens wrapper (`ByPayoff`, `ByPath`, `ByAsymmetry`) to have the
+`Marked<Scored>` width. On `origin/main` (2c209309) the test fails with
+`stale width in rank.rs`, naming the phrase it expected: a `Scored` of 168
+bytes, `ConditionMask` 48, `hits` 8, `Edge` 112.
+
+### D-0977 — Refuse a p-value outside [0, 1] in Benjamini–Hochberg instead of counting it — 2026-09-29
+
+**What was wrong (GAP5-53).** `runner::significance::benjamini_hochberg`
+sorted with `f64::total_cmp` and counted every value at or below its rank's
+threshold. `total_cmp` puts `-NaN` first and `+NaN` last, so on `origin/main`
+`[-NaN, 0.04]` answered 2, `[NaN, 0.04]` answered 0, and `[-1, 0.9]` answered
+1: the sign bit of a NaN decided the count, and a negative value was a
+finding. Measured by a probe test on 2c209309:
+`left: (2, 0, 1)`, `right: (0, 0, 0)`.
+
+**The change.** The function returns `Option<usize>` and answers `None`,
+before sorting, when any value is NaN of either sign, infinite, below zero or
+above one. A p-value outside `[0, 1]` is a defect upstream; counting it, or
+silently dropping it, would be the fallback §4 bans. Both ends of `[0, 1]` are
+still answered. The function has no caller outside its own tests (`git grep
+benjamini_hochberg -- crates/` names only `crates/runner/src/significance.rs`;
+the one other tracked mention is gate 8's sort comment in
+`.github/workflows/ci.yml`, whose "three tests, which pass at most six
+elements" was already wrong about the hundred-element Bonferroni test and is
+now one test short as well; that comment is left for the gate's own owner and
+recorded here as stale), so no report and no run identity changes.
+`significance::tests::benjamini_hochberg_refuses_a_value_that_is_not_a_probability`
+proves it.
+
+**Not done.** The ledger row also asked for a charter source row for
+Benjamini and Hochberg (1995). This change adds none: no source for it is
+recorded in `docs/00-charter.md`, and writing one without reading the source
+would be the invention §3 rule 1 forbids. The citation remains UNVERIFIED in
+the charter's sense.

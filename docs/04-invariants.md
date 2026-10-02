@@ -5620,3 +5620,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | C4-RUNNER-06: when the exact PBO, family-wise Romano--Wolf, SPA, White or candidate Romano--Wolf probability floors to a ppm within its policy ceiling while the exact fraction is above it, `evaluate_v2_projection`, `evaluate_v3_projection` and `evaluate_v3_exact_grid_projection` refuse with `ProbabilityProjection` naming that gate; values within every ceiling are decided, and an SPA floor above its ceiling is decided as a failed SPA gate. | `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it` | ✓ |
+## C4 runner fixes, batch 06 — D-0976, D-0977
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C4-RUNNER-06-01 | **The ranked-row widths in `rank.rs` are the compiler's.** The module header's `Scored`, `ConditionMask` and `Edge` widths, the `Marked<Scored>` heap-row width, the fourteen-core `keep = 10_000` chunk-heap peak and the `top_of` forty-chunk example are each built from `size_of` and must appear in the source; `Scored` is its three fields with no padding, and every lens wrapper has the `Marked<Scored>` width. D-0976 | `runner::rank::tests::the_header_widths_and_peak_are_the_measured_type_widths` | ✓ |
+| C4-RUNNER-06-02 | **Benjamini–Hochberg refuses a value that is not a probability.** Any `-NaN`, `NaN`, negative, above-one or infinite value answers `None` and leaves the slice unsorted; `0.0` and `1.0` are answered. D-0977 | `runner::significance::tests::benjamini_hochberg_refuses_a_value_that_is_not_a_probability` | ✓ |
