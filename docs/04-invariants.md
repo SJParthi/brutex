@@ -5393,3 +5393,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | `walk_forward_core`'s OOS pass builds `SliceFacts` for `(trade_test, confined)` once, and the chosen candidate's level-less walk reuses them through `walk_over`. | `runner::validate::tests::the_chosen_oos_walk_reuses_the_folds_test_facts` | ✓ |
+
+### One level-less walk per in-sample candidate — W3-runner5-4 (D-1146)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `grid::evaluate_from_walk` over the caller's own `walk_over` equals `grid::evaluate_over` byte for byte, and `walk_forward_core`'s in-sample pricing body takes exactly one walk per candidate. | `runner::grid::exit_family_tests::a_grid_from_the_callers_walk_equals_evaluate_over` · `runner::validate::tests::the_in_sample_pass_walks_each_candidate_once` | ✓ |

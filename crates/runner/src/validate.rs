@@ -4636,27 +4636,30 @@ fn walk_forward_core(
                 let own = direction_from_training_edge(
                     crate::outcome::edge(train_column, &forward, &item.mask).mean_paisa,
                 );
-                let g = crate::grid::evaluate_over(
-                    trade_train,
-                    train_column,
-                    &item.mask,
-                    horizon,
-                    side_of(own),
-                    crate::grid::Levels::derived(rungs),
-                    &facts,
-                );
-                let cell = g.sharpest().or_else(|| g.best())?;
-                if cell.trades == 0 {
-                    return None;
-                }
-                let s = Summary::of(&crate::trade::walk_over(
+                // ONE WALK, NOT TWO (D-1146). `evaluate_over` walked the mask
+                // on `side_of(own)` -- direction `own` -- to seed its grid, and
+                // the summary below walked the identical arguments again. The
+                // walk is taken once and both read it.
+                let timed = crate::trade::walk_over(
                     trade_train,
                     train_column,
                     &item.mask,
                     horizon,
                     own,
                     &facts,
-                ));
+                );
+                let g = crate::grid::evaluate_from_walk(
+                    trade_train,
+                    side_of(own),
+                    crate::grid::Levels::derived(rungs),
+                    &timed,
+                    &facts,
+                );
+                let cell = g.sharpest().or_else(|| g.best())?;
+                if cell.trades == 0 {
+                    return None;
+                }
+                let s = Summary::of(&timed);
                 // The pick is built ONCE and used twice: by the out-of-sample pass,
                 // so it can apply this candidate's TRAINING exit to the test bars,
                 // and by the fold's own winner. Built before the `best` comparison
@@ -6381,6 +6384,27 @@ mod tests {
     /// `considered`, so a reintroduced cap kept it green. Source shape, because
     /// no fixture can tell a count-of-input from a count-of-output while the
     /// two are equal.
+    /// D-1146 (W3-runner5-4). The in-sample pricing body walks each candidate
+    /// once and reads both the grid and the summary from that walk. Source
+    /// shape, because the doubled walk gave the same answer.
+    #[test]
+    fn the_in_sample_pass_walks_each_candidate_once() {
+        let source = include_str!("validate.rs");
+        let start = source.find(concat!("let assessed: Vec<Option<Assessed>>", " = closed"));
+        assert!(start.is_some(), "the in-sample pricing loop must exist");
+        let rest = source.get(start.unwrap_or_default()..).unwrap_or_default();
+        let end = rest.find(".collect();");
+        assert!(end.is_some(), "the loop must end in its indexed collect");
+        let body = rest.get(..end.unwrap_or_default()).unwrap_or_default();
+        assert_eq!(body.matches("walk_over(").count(), 1, "exactly one walk");
+        assert!(body.contains("evaluate_from_walk("));
+        assert!(body.contains("Summary::of(&timed)"));
+        assert!(
+            !body.contains("evaluate_over("),
+            "evaluate_over walks again"
+        );
+    }
+
     #[test]
     fn priced_is_counted_from_what_the_pricing_loop_returned() {
         let source = include_str!("validate.rs");

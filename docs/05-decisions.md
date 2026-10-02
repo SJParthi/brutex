@@ -43957,3 +43957,28 @@ pre-sizes with `try_reserve_exact` and writes each admitted pair in O(1).
 **Test.** `validate::tests::the_chosen_oos_walk_reuses_the_folds_test_facts`,
 a source-shape test (the two forms give equal `Trades`), fails on the previous
 tree, where the line read `Summary::of(&walk(trade_test, ..))`.
+
+### D-1146 — Walk each in-sample candidate once and read both its grid and its summary from that walk — 2026-10-02
+
+**Finding.** W3-runner5-4. `walk_forward_core`'s in-sample `par_iter` called
+`grid::evaluate_over(.., side_of(own), ..)`, which takes
+`trade::walk_over(.., direction_of(side_of(own)), &facts)` first. For every
+candidate with a trading cell it then called `trade::walk_over(.., own,
+&facts)` with identical arguments, because `direction_of(side_of(d)) == d`.
+That is a second O(train rows + trades) walk per candidate, kept only for the
+`Summary`. The pass comment said the body "prices a full exit grid ... AND
+walks them again", but never said the second walk duplicated the first.
+
+**The change.** New crate-private `grid::evaluate_from_walk(bars, side,
+levels, &timed, facts)`, which is `evaluate_over` minus its walk. The pass
+walks once, builds the grid from that walk, and takes `Summary::of(&timed)`.
+The grid and the summary are byte-identical. A candidate with a trading cell
+is now walked once instead of twice; one without was walked once and still
+is.
+
+**Tests.** `grid::exit_family_tests::a_grid_from_the_callers_walk_equals_evaluate_over`
+covers empty, one-session and eight-session input, both sides, two ladders and
+a mask that hits nothing.
+`validate::tests::the_in_sample_pass_walks_each_candidate_once` (source shape)
+fails on the previous tree. All of `runner`'s walk-forward fixtures, including
+the pinned fold outcomes, are unchanged.

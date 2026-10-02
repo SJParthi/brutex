@@ -1953,6 +1953,23 @@ pub fn evaluate_families_over(
     evaluate_timed(bars, side, levels, &timed, facts, families)
 }
 
+/// [`evaluate_over`] over a level-less walk the caller already took (D-1146).
+///
+/// `timed` must be `trade::walk_over(bars, column, mask, horizon, d, facts)`
+/// with `d` the [`Side`]'s direction -- exactly the walk `evaluate_over` takes
+/// first. A caller that needs both the grid and that walk's own `Summary`
+/// (`validate`'s in-sample pass) then walks once instead of twice, and the grid
+/// is byte-identical.
+pub(crate) fn evaluate_from_walk(
+    bars: &[Candle],
+    side: Side,
+    levels: Levels<'_>,
+    timed: &crate::trade::Trades,
+    facts: &crate::trade::SliceFacts,
+) -> Grid {
+    evaluate_timed(bars, side, levels, timed, facts, ExitFamilies::All)
+}
+
 /// Evaluate an explicit Boolean expression using the common exit-grid passes.
 /// The caller must bind the complete expression and these exact pricing inputs
 /// in its run identity; the referenced mask alone is insufficient.
@@ -5564,6 +5581,41 @@ mod exit_family_tests {
             }
         }
         assert!(compared > 0, "the fixture must exercise at least one cell");
+    }
+
+    /// D-1146. A grid evaluated from the caller's own level-less walk equals
+    /// `evaluate_over` byte for byte, on empty, one-session and eight-session
+    /// input, both sides, two ladder shapes and a mask that hits nothing.
+    #[test]
+    fn a_grid_from_the_callers_walk_equals_evaluate_over() {
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        let never = (0..384).fold(ConditionMask::default(), ConditionMask::with_bit);
+        for sessions in [0_i64, 1, 8] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = column(&bars);
+            let facts = SliceFacts::of(&bars, &column);
+            for mask in [ConditionMask::default(), never] {
+                for side in [Side::Long, Side::Short] {
+                    for levels in [Levels::derived(3), Levels::derived(1)] {
+                        let timed = crate::trade::walk_over(
+                            &bars,
+                            &column,
+                            &mask,
+                            horizon,
+                            super::direction_of(side),
+                            &facts,
+                        );
+                        assert_eq!(
+                            super::evaluate_from_walk(&bars, side, levels, &timed, &facts),
+                            super::evaluate_over(
+                                &bars, &column, &mask, horizon, side, levels, &facts
+                            ),
+                            "{sessions} {side:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// D-1141, source shape: the per-candidate resolved-policy doors and the
