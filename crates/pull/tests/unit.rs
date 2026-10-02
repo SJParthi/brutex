@@ -7963,7 +7963,7 @@ fn a_reservation_is_one_call_and_never_outruns_admit() {
     let mut replay = fresh();
     for (k, instant) in at.iter().enumerate() {
         assert_eq!(
-            replay.admit(instant.expect("granted")),
+            replay.admit(instant.expect("Granted")),
             Verdict::Admit,
             "reservation {k} at {instant:?}"
         );
