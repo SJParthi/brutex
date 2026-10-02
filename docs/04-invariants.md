@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Legacy grid ratio flag is inert — W3-runner3-6 (D-1140)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| On the legacy `grid::evaluate` path, `Levels::ratios` does not change the grid: the result with `ratios: true` equals the result with `ratios: false`, and every (stop, target) pair with no trail is a priced cell. Exact ratio admission is never applied to a quantile target rung. | `runner::grid::exit_family_tests::ratio_flag_keeps_every_stop_and_target_cell` | ✓ |

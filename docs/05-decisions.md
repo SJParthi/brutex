@@ -43718,3 +43718,42 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-1140 — Stop applying exact ratio admission to the quantile target, so `ratios: true` keeps every stop-and-target cell — 2026-10-02
+
+**Finding.** W3-runner3-6. In `runner::grid::evaluate_timed`, `Levels::ratios`
+built a `stop × target` admission bitmap with `pairs_at_a_ratio`, which is
+exact equality `target == stop × r / 100`. That test is sound only against a
+targets ladder built as the union of every `stop × ratio`. Since
+`single_far_target` the targets ladder is one quantile rung of the favourable
+moves, which equals a ratio product only by coincidence, so every cell carrying
+both a fixed stop and a fixed target was refused. Measured on
+`synthetic::sessions(8)` with `Levels { ratios: true, ..derived(4) }`: long
+cells 56 → 44 and SL+TP cells 12 → 0 (target `[71]`, stops `[46, 47, 50]`);
+short SL+TP cells 12 → 0. Production passes `ratios: true` (`cli` lib,
+`pool`, `expression_pricing`).
+
+**The ratio union was unreachable.** `single_far_target` returns `None` only
+when no favourable move is positive. That is exactly when `derived_ratios`
+returns empty, so the `ratio_targets` arm could never run, and the bitmap was
+the flag's only effect.
+
+**The change.** The legacy grid no longer builds a ratio bitmap.
+`derived_ratios`, `ratio_targets` and `pairs_at_a_ratio` are removed, and
+`Levels::ratios` stays as a recorded request field that is inert on this path.
+Its doc now says so. The resolved V1 policy (`exit_grid_policy`) keeps its own
+ratio admission over ladders it resolves itself and is untouched.
+
+**This changes outputs, on purpose.** Every legacy `grid::evaluate*` call with
+`ratios: true` now returns the same grid as with `ratios: false`: the SL+TP
+cells (and, under `ExitFamilies::All`, every stop-and-target combination with
+trails) that were silently missing are priced and can be selected. A run that
+used `ratios: true` and is re-run may pick a different best cell. The run
+identity is unchanged, because `ratios` is part of the recorded parameters and
+the code commit is a term.
+
+**Tests.** `grid::exit_family_tests::ratio_flag_keeps_every_stop_and_target_cell`
+fails on the previous tree ("ratios must be inert" on 8 sessions, Long) and
+passes now. It covers empty, one-session and eight-session input, both sides,
+three ladder shapes, and a rerun. `exit_family_cells_equal_legacy_on_synthetic_bars`
+lost the `!levels.ratios` exemption that had excused the empty SL+TP family.

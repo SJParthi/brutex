@@ -1474,36 +1474,19 @@ pub struct Levels<'a> {
     /// A stop the caller wants tried, merged into the stops ladder as an
     /// ordinary rung. `None` leaves the ladder as built.
     pub forced: Option<Ppm>,
-    /// Reward-to-risk ratios, in hundredths -- `200` is 2.00.
+    /// Retained request flag for reward-to-risk ratio targets. **Inert on the
+    /// legacy grid since D-1140**, and stated rather than removed because it
+    /// is part of every caller's recorded parameters.
     ///
-    /// # What this collapses
-    ///
-    /// With `None` the targets ladder is independent of the stops and the grid
-    /// is the full cross product: at a half-point step reaching twenty points
-    /// that is 27,637,321 cells per combination, and 226 trillion over the 8.19
-    /// million combinations 81 months produce.
-    ///
-    /// With `Some`, the targets ladder becomes the deduped UNION of every
-    /// `stop * ratio`, one crossing table still covers all of them, and
-    /// `pairs_at_a_ratio` prices only the pairs an operator would trade. The
-    /// same twenty-point reach costs about 1,440 cells -- nineteen thousand
-    /// times less for the same question.
-    ///
-    /// It is the operator's own rule expressed as a COORDINATE: "the smallest
-    /// win must be at least twice the largest loss" is 1:2, and 1:2 becomes a
-    /// column the search sweeps rather than a filter applied to levels chosen
-    /// some other way.
-    /// Sweep the targets as RATIOS of each stop rather than as an independent
-    /// ladder, with the ceiling derived from the data.
-    ///
-    /// `true` makes the targets ladder the deduped union of every
-    /// `stop * ratio`, where the ratios come from `derived_ratios` -- reaching
-    /// as far as the largest favourable move any trade actually made, divided
-    /// by the tightest stop. Nothing about the ladder is a typed number.
-    ///
-    /// `false` leaves the targets independent of the stops, which is the full
-    /// cross product: at a half-point step reaching twenty points that is
-    /// 27,637,321 cells per combination against about 1,440 here.
+    /// It once made the targets ladder the union of every `stop * ratio` and
+    /// admitted only the exact (stop, target) pairs on a ratio. Since the
+    /// target became one quantile rung ([`single_far_target`]) that union was
+    /// unreachable, and the exact-equality admission applied to the quantile
+    /// rung refused every stop-and-target cell. The grid is now identical with
+    /// `true` and `false`; the test
+    /// `ratio_flag_keeps_every_stop_and_target_cell` pins that. The resolved V1
+    /// policy (`exit_grid_policy`) carries its own ratio admission and does not
+    /// read this flag.
     pub ratios: bool,
 }
 
@@ -1607,7 +1590,7 @@ struct Candidate {
 /// fourteen stops, one target affords **forty-eight** trail rungs inside
 /// [`thin_to_budget`]'s 24,000 cells, where six targets afford eight.
 ///
-/// # Why a quantile and not [`derived_ratios`]'s ceiling
+/// # Why a quantile and not the ratio ceiling (`derived_ratios`, removed by D-1140)
 ///
 /// This shape shipped once taking `ratio_set.last()`. That ceiling is
 /// `favourable.iter().max() · 100 / tightest_stop` -- a MAXIMUM over a
@@ -1630,7 +1613,7 @@ struct Candidate {
 ///
 /// # Why this returns a rung rather than a ratio
 ///
-/// [`ratio_targets`] multiplies every stop by every ratio, so even ONE ratio
+/// `ratio_targets` (removed by D-1140) multiplied every stop by every ratio, so even ONE ratio
 /// yields up to `stops.len()` target values, which [`thin_to_budget`] then cuts
 /// to three. Both the ceiling shape and the full-ladder shape priced three
 /// targets, never one. Building the [`Ladder`] directly is what makes "one
@@ -1650,86 +1633,6 @@ fn single_far_target(favourable: &[Ppm]) -> Option<Ladder> {
     let at = if at > last { last } else { at };
     let (_, &mut target, _) = ran.select_nth_unstable(at);
     Ladder::new(vec![target])
-}
-
-fn derived_ratios(favourable: &[Ppm], stops: &[Ppm]) -> Vec<i64> {
-    let (Some(&tightest), Some(&best)) = (stops.first(), favourable.iter().max()) else {
-        return Vec::new();
-    };
-    if tightest <= 0 || best <= 0 {
-        return Vec::new();
-    }
-    // In hundredths, the same units `Levels::ratios` and `Rules::min_rr_bp` use.
-    let ceiling = i128::from(best).saturating_mul(100) / i128::from(tightest);
-    let ceiling = i64::try_from(ceiling).unwrap_or(i64::MAX).max(100);
-
-    let mut out: Vec<i64> = Vec::with_capacity(64);
-    let mut r = 100_i64;
-    // A quarter of the way up, and a tenth: the two places the step widens.
-    let (near, mid) = (ceiling / 10, ceiling / 4);
-    while r <= ceiling && out.len() < 512 {
-        out.push(r);
-        let step = if r < near.max(300) {
-            25
-        } else if r < mid.max(1_000) {
-            100
-        } else {
-            ceiling / 20
-        };
-        r = r.saturating_add(step.max(25));
-    }
-    out
-}
-
-fn ratio_targets(stops: &[Ppm], ratios: &[i64]) -> Option<Ladder> {
-    let mut all: Vec<Ppm> = Vec::with_capacity(stops.len().saturating_mul(ratios.len()));
-    for &stop in stops {
-        for &r in ratios {
-            // `i128` for the same reason `pairs_at_a_ratio` uses it: a wide
-            // stop times a large ratio can leave `i64`, and a wrap would put a
-            // rung somewhere nobody asked for.
-            let want = i128::from(stop).saturating_mul(i128::from(r)) / 100;
-            if let Ok(v) = Ppm::try_from(want)
-                && v > 0
-            {
-                all.push(v);
-            }
-        }
-    }
-    all.sort_unstable();
-    all.dedup();
-    Ladder::new(all)
-}
-
-/// Is target rung `ti` one of the ratios of stop rung `si`?
-///
-/// # Exact, not approximate
-///
-/// The targets ladder is built as the union of `stop * ratio` over every stop
-/// and every ratio, so the product is a value that IS in the ladder rather than
-/// one that has to be matched within a tolerance. A tolerance here would admit
-/// neighbouring rungs at a half-point step and quietly widen the search back
-/// toward the cross product it exists to avoid.
-///
-/// Ratios are hundredths — `200` is 2.00 — for the reason §7 gives: a ratio
-/// printed beside a rule is compared by the person reading it, and a float
-/// compared is a float that can disagree with itself.
-///
-/// # Cost
-///
-/// **O(ratios)**, and ratios is a handful. It runs per (stop, target) index
-/// pair, which is index arithmetic in a loop that would otherwise call
-/// [`one_variant`] — a walk over every candidate. Skipping that is the point.
-fn pairs_at_a_ratio(stops: &[Ppm], targets: &[Ppm], si: usize, ti: usize, ratios: &[i64]) -> bool {
-    let (Some(&stop), Some(&target)) = (stops.get(si), targets.get(ti)) else {
-        return false;
-    };
-    ratios.iter().any(|&r| {
-        // `i128` because a stop in ppm times a ratio in hundredths can exceed
-        // `i64` on a wide ladder, and a wrap would silently match the wrong rung.
-        let want = i128::from(stop).saturating_mul(i128::from(r)) / 100;
-        want == i128::from(target)
-    })
 }
 
 /// The stops ladder: quantiles of the observed adverse moves, plus the
@@ -2207,28 +2110,27 @@ fn evaluate_timed(
     } else {
         merged(&Ladder::new(stops_ppm.to_vec()).unwrap_or_default(), forced)
     };
-    // THE TARGETS LADDER IS THE UNION OF EVERY `stop * ratio`, WHEN RATIOS ARE
-    // GIVEN.
+    // THE RATIO ADMISSION IS GONE FROM THIS PATH, AND HERE IS WHY (D-1140).
     //
-    // Building it as the union rather than per stop is what keeps ONE crossing
-    // table covering every target an operator could ask about. `crossings`
-    // precomputes each candidate's exit offsets against fixed ladders, and that
-    // table is the whole reason a per-variant exit decision is three integer
-    // compares; a ladder rebuilt per stop would rebuild the table with it.
+    // This block once built the targets ladder as the union of every
+    // `stop * ratio` (`ratio_targets`, over `derived_ratios`) and then admitted
+    // only the (stop, target) cells where `target == stop * ratio / 100`
+    // EXACTLY (`pairs_at_a_ratio`). Exact equality is sound only against the
+    // ladder it built. When `single_far_target` replaced that ladder with one
+    // quantile rung, the union arm became unreachable -- `single_far_target`
+    // is `None` only when no favourable move is positive, and that is exactly
+    // when `derived_ratios` is empty -- while the exact-equality bitmap kept
+    // being applied to the quantile rung, which matches `stop * r / 100` only
+    // by coincidence. Every cell carrying both a fixed stop and a fixed target
+    // was refused: measured on `synthetic::sessions(8)` with `ratios: true`
+    // over `derived(4)`, long cells 56 -> 44 and SL+TP 12 -> 0, short SL+TP
+    // 12 -> 0. Production passes `ratios: true`.
     //
-    // So the ladder holds every product, the crossing table covers them all
-    // once, and `pairs_at_a_ratio` in the loop below picks out the cells that
-    // are a stop paired with ITS ratios. The union is small: forty stops times
-    // six ratios is at most 240 values, and heavily overlapping -- 10pt at 1:2
-    // and 20pt at 1:1 are both 20pt, one rung.
-    // The ratio ladder is derived from THIS combination's own excursions, so a
-    // signal that never ran more than three points gets a ladder that stops
-    // there rather than pricing four hundred rungs nothing reached.
-    let ratio_set = if ratios {
-        derived_ratios(&favourable, stops.rungs())
-    } else {
-        Vec::new()
-    };
+    // `Levels::ratios` is therefore inert on this legacy path: the grid is the
+    // same cells with or without it. The resolved V1 policy
+    // (`exit_grid_policy`) keeps its own ratio admission over ladders it
+    // resolves itself, and is untouched.
+    let _ = ratios;
     // ONE FAR TARGET, AND THE FALLBACK LADDER ONLY WHEN THERE IS NONE.
     //
     // # This comment argued the opposite of the line below it
@@ -2270,13 +2172,7 @@ fn evaluate_timed(
     // The `unwrap_or_else` arm is reached only when NOTHING ran favourable, at
     // which point there is no level to derive and the older ladder is the
     // honest fallback rather than an invented number.
-    let targets = single_far_target(&favourable).unwrap_or_else(|| {
-        if ratio_set.is_empty() {
-            ladder_of(&favourable)
-        } else {
-            ratio_targets(stops.rungs(), &ratio_set).unwrap_or_else(|| ladder_of(&favourable))
-        }
-    });
+    let targets = single_far_target(&favourable).unwrap_or_else(|| ladder_of(&favourable));
     // THINNED TO WHAT THE CELL COUNT CAN AFFORD, AND THIS IS THE WALL EVERY
     // OTHER BOUND MISSED.
     //
@@ -2316,23 +2212,6 @@ fn evaluate_timed(
     let trails = ladder_of(&favourable);
     let targets = thin_to_budget(targets, stops.rungs().len(), trails.rungs().len());
 
-    let ratio_bitmap = if ratio_set.is_empty() {
-        None
-    } else {
-        let mut bitmap = Vec::new();
-        for stop in 0..stops.len() {
-            for target in 0..targets.len() {
-                bitmap.push(pairs_at_a_ratio(
-                    stops.rungs(),
-                    targets.rungs(),
-                    stop,
-                    target,
-                    &ratio_set,
-                ));
-            }
-        }
-        Some(bitmap)
-    };
     let cell_capacity = families.variants(stops.len(), targets.len(), trails.len());
     evaluate_timed_with_exact_ladders(
         bars,
@@ -2342,7 +2221,7 @@ fn evaluate_timed(
         stops,
         targets,
         trails,
-        ratio_bitmap.as_deref(),
+        None,
         Vec::with_capacity(cell_capacity),
         families,
     )
@@ -5382,19 +5261,93 @@ mod exit_family_tests {
                     assert_eq!(shared, selected, "sharing facts must not change results");
                     if family != ExitFamilies::All {
                         assert!(selected.baseline().is_none());
-                        if !levels.ratios || family == ExitFamilies::SlTtp {
-                            assert!(!selected.cells.is_empty());
-                            assert!(selected.cells.iter().any(|cell| cell.trades > 0));
-                            assert_eq!(
-                                selected.cells.len(),
-                                family.variants(
-                                    selected.stops.len(),
-                                    selected.targets.len(),
-                                    selected.trails.len(),
-                                )
-                            );
-                        }
+                        // No `ratios` exemption: D-1140 removed the guard that
+                        // excused an empty SL+TP family under `ratios: true`.
+                        assert!(!selected.cells.is_empty(), "{side:?} {family:?}");
+                        assert!(selected.cells.iter().any(|cell| cell.trades > 0));
+                        assert_eq!(
+                            selected.cells.len(),
+                            family.variants(
+                                selected.stops.len(),
+                                selected.targets.len(),
+                                selected.trails.len(),
+                            )
+                        );
                     }
+                }
+            }
+        }
+    }
+
+    /// D-1140. `Levels::ratios` applied an exact `target == stop * r / 100`
+    /// admission to a target ladder that was one QUANTILE rung, so every cell
+    /// with both a fixed stop and a fixed target was refused (long 12 -> 0,
+    /// short 12 -> 0 on this fixture). The flag is now inert on the legacy
+    /// grid, and the stop-and-target cells are all present.
+    #[test]
+    fn ratio_flag_keeps_every_stop_and_target_cell() {
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        let mask = ConditionMask::default();
+        // Empty, one session, and the production-shaped fixture.
+        for sessions in [0_i64, 1, 8] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = column(&bars);
+            for side in [Side::Long, Side::Short] {
+                for base in [
+                    Levels::derived(4),
+                    Levels::derived(1),
+                    Levels {
+                        rungs: 4,
+                        step_ppm: Some(20),
+                        stops_ppm: &[8, 16, 32, 64],
+                        forced: Some(30),
+                        ratios: false,
+                    },
+                ] {
+                    let plain = super::evaluate(&bars, &column, &mask, horizon, side, base);
+                    let ratioed = super::evaluate(
+                        &bars,
+                        &column,
+                        &mask,
+                        horizon,
+                        side,
+                        Levels {
+                            ratios: true,
+                            ..base
+                        },
+                    );
+                    assert_eq!(ratioed, plain, "{sessions} {side:?}: ratios must be inert");
+                    let both = ratioed
+                        .cells
+                        .iter()
+                        .filter(|cell| {
+                            cell.stop.is_some()
+                                && cell.target.is_some()
+                                && cell.tsl.is_none()
+                                && cell.ttp.is_none()
+                        })
+                        .count();
+                    assert_eq!(
+                        both,
+                        ratioed.stops.len() * ratioed.targets.len(),
+                        "{sessions} {side:?}: every (stop, target) pair is a cell"
+                    );
+                    if sessions == 8 {
+                        assert!(both > 0, "{side:?}: the fixture must carry SL+TP cells");
+                    }
+                    // Rerun is byte-identical.
+                    let again = super::evaluate(
+                        &bars,
+                        &column,
+                        &mask,
+                        horizon,
+                        side,
+                        Levels {
+                            ratios: true,
+                            ..base
+                        },
+                    );
+                    assert_eq!(again, ratioed);
                 }
             }
         }
