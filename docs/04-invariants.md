@@ -5359,3 +5359,15 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Calendar derivation: withheld months, single flight, counted reads (D-0950)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A month inside a derived calendar's span whose daily rung was not read whole (absent at the daily rung, or a record failed its checks) is `Unmeasured` day by day, is named in `Report::withheld`, and appears in `/calendar.json`'s `withheld` runs; no day of it is `Closed`. Months whose daily rung was read keep their closed days. | `api::calendar_of::tests::a_month_held_only_at_the_minute_rung_is_withheld_not_closed`, `api::calendar_of::tests::a_corrupt_daily_month_is_withheld_not_served_as_holidays` | ✓ |
+| `Calendar::withhold_closed` changes only `Closed` days inside the span, is idempotent, and leaves open days and the 2021-02-24 override open. | `pull::calendar::tests::withholding_turns_only_closed_days_inside_the_span_into_unmeasured` | ✓ |
+| `agree` withholds a day no reading proved shut and never names a withholding reading silent. | `api::calendar_of::agreement::a_day_no_reading_proved_shut_is_withheld_and_withholding_is_not_silence` | ✓ |
+| `derive` classifies each distinct traded day into its civil month once, not once per month. | `api::calendar_of::tests::derive_classifies_each_traded_day_once_not_once_per_month` | ✓ |
+| `Report::records_read` equals the daily records plus the minute records of walked months, and nothing else. | `api::calendar_of::tests::a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked` | ✓ |
+| Concurrent misses on one series and stamp run one derivation and share its answer; a leader that unwinds strands no follower and keeps nothing. | `api::calendar_of::tests::concurrent_misses_on_one_key_derive_once_and_share_the_answer`, `api::calendar_of::tests::a_leader_that_unwinds_strands_no_follower_and_keeps_nothing` | ✓ |
+| `/calendar.json` and `/gaps.json`'s peer vote derive on the blocking pool behind `MAX_CALENDAR_CONCURRENT` admission. | `api::server::calendar_route_tests::the_calendar_routes_derive_on_the_blocking_pool_behind_admission`, `api::detail::tests::a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot` | ✓ |

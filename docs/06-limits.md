@@ -9907,3 +9907,49 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## The calendar derivation reads records, one positional read each — D-0950
+
+W1-api2-1, W1-api2-0 and W1-api2-11 asked what `calendar_of::derive` costs and
+where it runs. Answered here, read from the code and counted by tests; nothing
+below is timed.
+
+* **Per derivation, O(records), not O(1).** `read_days` reads every record of
+  every daily month the census names, and `read_minute_spans` every record of
+  every minute month whose counter does not equal `sessions × 375`. Each record
+  is one `read_record`, which is one positional read of 56 bytes plus the
+  block's checksum check. A month whose counter matches costs one header read
+  and no record. `Report::records_read` counts exactly these reads, and
+  `a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked`
+  pins the count on a fixture (1 + 2 daily records and 749 walked minute
+  records). A month is a constant bound only for a well-formed file (about
+  23 daily records, about 8,250 minute records): `records()` is whatever the
+  file holds. It is not made O(1) because which days traded is what the daily
+  records say; no counter answers it. The 0.28 s per instrument in the module
+  header remains **UNVERIFIED as a measurement**.
+* **The civil-month bookkeeping is now O(days), not O(months × days).** Each
+  distinct traded day is classified once, as it is first read, and each month
+  reads only its own days (W1-api2-0). The minute pass then costs one map
+  probe per day of the month, O(log days) each.
+  `derive_classifies_each_traded_day_once_not_once_per_month` counts the
+  classifications: 48 for 48 days over 24 months, where the old shape made
+  1,152. Withholding the months the daily rung did not read costs one step per
+  civil month in the span and one slot per withheld day.
+* **Where it runs.** `/calendar.json` and `/gaps.json`'s peer vote now derive
+  on the blocking pool behind their own admission,
+  `detail::MAX_CALENDAR_CONCURRENT` = 8, separate from the detail pool's 4.
+  A ninth concurrent request is answered 429 rather than queued. Concurrent
+  misses on one series and stamp derive once and share the answer; a follower
+  waits on a condition variable for the leader. Followers do not count
+  against the admission bound twice, but each holds a blocking thread while it
+  waits. Not changed: `folder::answer`, `indexmap::Published::read` and the
+  rest of `/gaps.json` (`audit_one`) still read the store inline on an async
+  worker, which W1-api2-11 also names. Their cost is not measured.
+* **Days a month's daily rung did not prove are withheld, not closed.** A
+  month inside the span that the census holds only at another rung, that it
+  does not hold at all, or whose daily records failed their checks is now
+  `Unmeasured` day by day and named in `/calendar.json`'s `withheld` runs
+  (R9-api-law-0, W1-api2-9). **The `/ingest` page does not read `withheld`
+  yet.** It still treats an in-span day absent from `days` as a holiday, so
+  the page shows those days as "NSE holiday" until `web/` reads the field and
+  `web/build` is rebuilt (Gate W1). That rebuild was not done in this change.

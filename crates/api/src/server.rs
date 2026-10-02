@@ -2393,7 +2393,7 @@ async fn gaps_json(
         )
     };
 
-    let asked = match Addressed::parse(query) {
+    let mut asked = match Addressed::parse(query) {
         Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
@@ -2486,7 +2486,21 @@ async fn gaps_json(
             unreadable: Vec::new(),
         }
     } else {
-        peer_calendar(&site, &asked)
+        // OFF THE ASYNC WORKERS, AND ADMITTED: the peer vote derives one
+        // calendar per peer series on a miss. W1-api2-11, D-0950.
+        let peers_site = std::sync::Arc::clone(&site);
+        match crate::detail::run_calendar(move || {
+            let peers = peer_calendar(&peers_site, &asked);
+            (asked, peers)
+        })
+        .await
+        {
+            Ok((back, peers)) => {
+                asked = back;
+                peers
+            }
+            Err(why) => return calendar_admission_refused(&why),
+        }
     };
     let mut months = Vec::with_capacity(span.len());
     for month in &span {
@@ -5337,7 +5351,7 @@ impl Site {
         // is: once, at startup. See census::held_entries.
         let entries = census::held_entries(&censuses);
         Self {
-            calendars: std::sync::Mutex::new(std::collections::HashMap::new()),
+            calendars: crate::calendar_of::Cache::default(),
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
             budgets: std::sync::Mutex::new(feed_budgets()),
@@ -31156,7 +31170,46 @@ async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> CalendarAnswer {
-    calendar_json_reading(&site, &uri, census_now_stamped)
+    // OFF THE ASYNC WORKERS, AND ADMITTED. This ran inline: a census read on a
+    // moved stamp and, on a miss, a derivation per spot series (0.28 s each,
+    // documented) blocked a Tokio worker, and a flood or a post-pull herd
+    // blocked them all. It now runs on the blocking pool behind its own
+    // bounded admission, and concurrent misses on one series share one
+    // derivation (`calendar_of::Cache`). Saturation answers 429 with a reason
+    // rather than queueing without bound. W1-api2-11, D-0950.
+    match crate::detail::run_calendar(move || {
+        calendar_json_reading(&site, &uri, census_now_stamped)
+    })
+    .await
+    {
+        Ok(answer) => answer,
+        Err(why) => calendar_admission_refused(&why),
+    }
+}
+
+/// The answer a calendar-deriving route gives when its blocking work was not
+/// admitted or could not be joined. W1-api2-11, D-0950.
+fn calendar_admission_refused(why: &crate::detail::RunError) -> CalendarAnswer {
+    let status = if matches!(why, crate::detail::RunError::Saturated) {
+        axum::http::StatusCode::TOO_MANY_REQUESTS
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "error": format!(
+                "calendar derivation not admitted ({why:?}): at most {} run at once, \
+                 off the async workers; retry",
+                crate::detail::MAX_CALENDAR_CONCURRENT
+            )
+        })
+        .to_string(),
+    )
 }
 
 /// [`calendar_json`], with the census it derives from passed in.

@@ -43764,3 +43764,77 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0950 — Withhold the calendar months the daily rung did not read, derive each series once under concurrency and off the async workers, and state what a derivation reads — 2026-10-02
+
+**What was wrong.** Five audit findings, all in `crates/api/src/calendar_of.rs`.
+
+* *R9-api-law-0 and W1-api2-9 (bugs).* `Calendar::from_observed` fills every
+  unobserved day between the first and last observed day with `Closed`.
+  `derive` adds days only from the daily rung, so a month whose daily file is
+  absent (the census holds it at the minute rung only), or whose daily records
+  failed their checks (`read_days` refuses the whole month), became a run of
+  `Closed` days. `json()` omits closed days, so `/calendar.json` answered 200
+  with that month missing and nothing saying why. D-0695's fourth repair
+  closed only the held-file-that-did-not-open case; its text and `cached`'s
+  doc called the minute-only month correct to keep, which was true of keeping
+  it and not of what it said.
+* *W1-api2-0 (cost).* The minute pass asked `in_month` of every traded day for
+  every month, twice when the counter matched: O(months × days) calls to
+  `Day::from_days`, on every cache miss and once per spot series on the
+  exchange branch.
+* *W1-api2-1 (cost).* `read_days` and `read_minute_spans` do one positional
+  read per record, and nothing in `docs/06-limits.md` said so.
+* *W1-api2-11 (cost/robustness).* `calendar_json` had no `.await`, so a miss
+  derived every spot series on a Tokio worker; `gaps_json` derived its peer
+  vote the same way; and `cached` released its lock before deriving, so
+  concurrent misses on one key each derived it.
+
+**The change.**
+
+1. `pull::calendar::Calendar::withhold_closed(from, to)` turns the `Closed`
+   days of a range inside the span into `Unmeasured` and leaves open days,
+   including the 2021-02-24 override, alone. `derive` records which months'
+   daily rung was read whole and withholds every other civil month in the
+   span, naming each in `Report::withheld`. `agree` treats an `Unmeasured`
+   reading as no vote (not "silent"), and withholds a day no reading proved
+   shut, including a day in the gap between two readings' spans. `json()`
+   carries a `withheld` array of `{from, to}` runs. A derivation that withheld
+   or could not read a month writes one `api.calendar` `withheld` event at
+   Warn. A calendar with withheld months is still kept under its stamp: what
+   it says is now true of the store until the manifest moves.
+2. `derive` files each traded day under its civil month once, as it is first
+   read, and each month's counter and full-session marking read only that
+   month's days.
+3. `Report::records_read` counts the record reads, and `docs/06-limits.md`
+   states the O(records) bound. The walk is not made O(1): which days traded
+   is what the daily records say.
+4. `calendar_of::Cache` is a struct (same `lock()` for the kept map) with a
+   flight per key and stamp: one request derives, the rest wait and are given
+   its answer; a leader that unwinds abandons the flight and a waiter leads
+   again. `/calendar.json` and `/gaps.json`'s peer vote run through
+   `detail::run_calendar`, a blocking-pool admission of 8 separate from the
+   detail pool, answering 429 when saturated.
+
+**Tests.** Each failed against the pre-change code where it can be run there
+(the fields it reads were added as inert shims for that run):
+`a_month_held_only_at_the_minute_rung_is_withheld_not_closed` (February came
+out `Closed`), `a_corrupt_daily_month_is_withheld_not_served_as_holidays`
+(0 of 29 days of a corrupt leap-year February unmeasured; also a December
+across the year boundary and a corrupt first month outside the span),
+`derive_classifies_each_traded_day_once_not_once_per_month` (1,152
+classifications for 48 days), `a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked`,
+`the_derivation_walk_is_named_in_the_limits_document`,
+`concurrent_misses_on_one_key_derive_once_and_share_the_answer`,
+`a_leader_that_unwinds_strands_no_follower_and_keeps_nothing`,
+`a_day_no_reading_proved_shut_is_withheld_and_withholding_is_not_silence`,
+`withholding_turns_only_closed_days_inside_the_span_into_unmeasured`, and the
+route tests in `calendar_route_tests.rs`. The single-flight tests count
+derivations and hold the leader open until every follower is waiting, so
+their result does not depend on timing.
+
+**Not done.** The `/ingest` page does not read `withheld` and still shows a
+withheld in-span day as a holiday; that needs `web/` and a `web/build`
+rebuild (Gate W1). `folder::answer`, `indexmap::Published::read` and the rest
+of `/gaps.json` still read inline on async workers. `docs/06-limits.md`
+records both.
