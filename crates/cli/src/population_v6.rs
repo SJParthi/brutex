@@ -105,10 +105,8 @@ const POLICY_DOMAIN: &[u8] = b"brutex-population-admission-v4-policy\0";
 const GENERATION_DOMAIN: &[u8] = b"brutex-population-v6-generation\0";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 

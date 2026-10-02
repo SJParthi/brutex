@@ -85,10 +85,8 @@ const LOCK_FILE: &str = "population-finalization-v3.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_FINALIZATION_V3_ROW_BYTES);
 const _: () =

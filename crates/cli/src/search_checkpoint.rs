@@ -328,10 +328,7 @@ fn open_owner(path: &Path) -> Result<File, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100);
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20_000);
+        options.custom_flags(store::open_flags::O_NOFOLLOW);
     }
     // create_new never follows an existing symlink, including a dangling one.
     // The existing-file door deliberately has no create flag, so refusal can

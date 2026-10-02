@@ -94,10 +94,8 @@ const RUNNER_EVIDENCE_OFFSET: usize = RUNNER_HEADER_BYTES + RUNNER_POLICY_BYTES;
 const RUNNER_VERDICT_OFFSET: usize = RUNNER_EVIDENCE_OFFSET + RUNNER_EVIDENCE_BYTES;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(RUNNER_VERDICT_OFFSET + RUNNER_VERDICT_BYTES == RUNNER_DECISION_BYTES);
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);

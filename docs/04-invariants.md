@@ -126,6 +126,14 @@ The negative-price comparisons overlap with ordering refusals; these fixtures
 do not establish a distinct non-equivalent killed mutant for each sign check.
 Branch execution is not a mutation result or a complete coverage measurement.
 
+### No-follow open flags are per architecture — D-0980
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| S-NOFOLLOW-01 | **`store::open_flags::O_NOFOLLOW` is the UAPI value for the target's architecture, not the OS.** x86_64 Linux/Android `1 << 17`, aarch64 Linux/Android `0x8000` (bit 17 is `O_LARGEFILE` there), macOS `0x100`; `O_NONBLOCK` is `0x800` on both Linux architectures and `0x4` on macOS. No other target has a constant, and `cli` refuses to compile for Linux on any other architecture. The aarch64 and macOS rows run only on those hosts; CI runs the x86_64 row | `store::open_flags::x86_64_linux_values_are_the_uapi_ones` · `store::open_flags::aarch64_linux_nofollow_is_not_the_x86_bit` · `store::open_flags::macos_values_are_the_sdk_ones` | ✓ |
+| S-NOFOLLOW-02 | **The flag refuses a final symlink with `ELOOP` on the host that runs the test**, while a plain open of the same link reads the target and a flagged open of a regular file succeeds | `store::open_flags::the_flag_refuses_a_final_symlink_that_a_plain_open_follows` | ✓ |
+| S-NOFOLLOW-03 | **No `.rs` file under `crates/` other than `crates/store/src/open_flags.rs` carries a hex literal whose value is the x86_64 no-follow bit**, in any spelling (separators, leading zeros, case, suffix). On unfixed code it named 24 sites across `cli` and `store` | `store::open_flags::no_crate_hard_codes_the_x86_64_no_follow_bit_outside_open_flags` · `store::open_flags::the_literal_detector_matches_every_spelling_and_nothing_wider` | ✓ |
+
 ## The batch sweep — `cli sweep-all`, every stored month in one run
 
 | # | Must hold | Proven by | |

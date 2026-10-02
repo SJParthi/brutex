@@ -127,10 +127,8 @@ const FORCED_STOP_DISABLED_TAG: u8 = 0;
 const FORCED_STOP_INCLUDE_TAG: u8 = 1;
 const FORCED_STOP_REQUIRE_TAG: u8 = 2;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PARAMETER_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V3_PARAMETER_BYTES);
 const _: () = assert!(PERCENTILE_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V3_PERCENTILE_BYTES);
