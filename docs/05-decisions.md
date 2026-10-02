@@ -43718,3 +43718,57 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0994 — Replay a retained Candidate's Execution V3 dispositions once per exact row set, not once per reauthentication — 2026-10-02
+
+**What happened.** `cli::step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte`
+took about 58 of the 65 minutes of a full `cargo test --workspace` on a
+4-core box. Run alone from the same `test` profile binary on that box it took
+55m05s (3,304.90 s reported by libtest, load average 4.9 at start, 2.0 at
+the end).
+
+**Why, measured rather than read.** The profile is already `opt-level = 3`
+(`[profile.test]` inherits `[profile.dev]`), so the build profile was not the
+lever. 43 `gdb` stack samples of the test thread, taken about 25 s apart
+from its start, put 37 inside
+`RetainedStoredExecutionContextV1::execution_v3_replay`: a full rebuild of the
+`CandidateUniverseProductionSourceV1`, its BLAKE3 data digests over every
+signal, minute and daily bar, and a fresh Runner replay of every Long and
+Short disposition. The callers were the nested before/after
+reauthentication doors. `CommittedStoredPopulationV5::execution_v3_source`
+replays both families; `commit_stored_execution_v3` calls it twice;
+`CommittedStoredExecutionV3::ordered_authenticated_dispositions` calls it
+twice; `require_committed_execution_rung_v1` calls that plus one more;
+`CommittedStoredAllRungExecutionV3::require_live_topology` repeats that for
+every rung; and `PreparedSelectionV5::from_committed_execution` makes four
+more. That is dozens of identical replays per rung per pass, and the test
+makes two passes over eight rungs.
+
+**Why the repeats proved nothing.** The replay reads only the capability's
+private retained context (owned bars, grids, policies), its retained
+Candidate receipt and the authenticated Candidate rows. Neither of the first
+two has a `&mut` path after construction. Recomputing the same deterministic
+function of the same inputs can only return the remembered value. What can
+change between calls is on disk, and every call still re-checks that.
+
+**The change.** `CommittedStoredCandidatePreAdmissionV1` holds one
+`OnceLock` memo: the first successful replay and the complete row set it was
+computed from. `execution_v3_replay_authority` still requires the admitted
+root before and after, still reopens and fully authenticates the Candidate
+ledger through `authenticated_candidate_population_rows`, and still calls the
+strict source guard. Only then, if the fresh rows equal the remembered rows
+exactly, does it return the remembered authority instead of replaying. A
+different row set is replayed in full, and a failed replay is not
+remembered. No other check, door or file changed. The all-rung test was not
+edited: every assertion, input and code path it had is still there, and each
+fresh commit (both passes) still runs the full replay once per family.
+
+**Measured after.** The same test, same box, same profile: 8m14.8s
+(494.81 s, load average 4.3 at start, 4.8 at the end). The remaining time is
+the two Candidate sweep passes and the disk-backed reauthentication reads,
+which are real work.
+`cli::step3_orchestrator::execution_v3_replay_runs_once_per_exact_row_set_and_still_reauthenticates_live_inputs`
+pins the bound: one replay for three calls on unchanged rows, equality with
+an independent replay, a full replay for a different row set, and a refusal
+before the replay when a Candidate byte is flipped. `docs/04-invariants.md`
+XR-01 and XR-02; `docs/06-limits.md` records what stays non-constant.

@@ -9879,3 +9879,24 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## The Execution V3 replay is remembered per row set; the reauthentication around it is not constant — D-0994, 2 October 2026
+
+* **What is constant now.** A retained stored Candidate capability runs its
+  Execution V3 replay once per exact authenticated row set. A repeat call
+  with the same rows does a fresh disk reauthentication and a row-set
+  comparison, then clones the remembered authority.
+* **What is not.** That comparison and that clone are linear in the
+  Candidate row count. The reauthentication on every call (root identity,
+  a read-only reopen of the Candidate ledger, per-record decode and BLAKE3
+  verification, Pre-Admission and Base Evidence scans) is linear in the
+  ledger bytes. It is not memoised, because it is the part that can observe
+  a change. The nested before/after doors of Population V5, Execution V3
+  and Selection V5 still multiply those reads. They no longer multiply the
+  replay.
+* **Memory.** Each capability keeps one copy of its authenticated rows and
+  one replay authority for its whole life.
+* **Measured once, on one shared 4-core box.** The all-rung test went from
+  55m05s to 8m14.8s (load average about 5 at both starts). Two runs, no
+  repeats, no bench. A different load gives different numbers. UNVERIFIED as
+  a bench (`CLAUDE.md` §3 rule 6).

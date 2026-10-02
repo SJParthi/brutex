@@ -5354,3 +5354,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Execution V3 replay memo — D-0994
+
+| ID | Invariant | Named proof | Status |
+|---|---|---|---|
+| XR-01 | **A retained stored Candidate capability runs its full Execution V3 replay once per exact authenticated row set, and never answers a call from memory without re-proving the live inputs.** The first `execution_v3_replay_authority` call replays in full; two more calls on unchanged rows replay nothing and return values equal to the first and to an independent full replay of the same rows; a different row set is replayed in full and is not answered with the remembered value; and after one byte of the Candidate row file is flipped the call refuses without reaching the replay, although a remembered replay exists. | `cli::step3_orchestrator::execution_v3_replay_runs_once_per_exact_row_set_and_still_reauthenticates_live_inputs` | ✓ |
+| XR-02 | **The memo changes no published byte.** The eight-rung Population, Execution and Selection chain publishes the same files, written once and then reused byte for byte on the exact retry, with the same written counts, the same corrupted-completion refusal and the same strict-admission refusal it asserted before D-0994; the test was not edited. | `cli::step3_orchestrator::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte` | ✓ |
