@@ -5387,3 +5387,9 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | `FoldResult::priced` is counted from the pricing loop's returned vector, not from its input, so `priced == considered` fails when any cap truncates the loop. | `runner::validate::tests::priced_is_counted_from_what_the_pricing_loop_returned` · `runner::validate::tests::every_candidate_the_sweep_produced_is_priced_and_none_is_skipped` | ✓ |
 | `Validated::held_up` counts a chosen fold by its chosen exit's out-of-sample total when one exists (strictly positive), and by the level-less walk only when none does. Unchosen folds never count. | `runner::validate::tests::held_up_counts_the_chosen_exit_and_not_the_level_less_walk` | ✓ |
+
+### One slice-fact build per OOS fold — o1runner-4 (D-1145)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `walk_forward_core`'s OOS pass builds `SliceFacts` for `(trade_test, confined)` once, and the chosen candidate's level-less walk reuses them through `walk_over`. | `runner::validate::tests::the_chosen_oos_walk_reuses_the_folds_test_facts` | ✓ |

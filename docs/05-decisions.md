@@ -43931,3 +43931,29 @@ covers six disagreeing folds, the empty set, one fold and the
 `i64::MAX`/`i64::MIN` extremes. Checked by reverting `held_up` to
 `out_of_sample.worst_case_positive()`: it fails, and so does the remaining
 half of the old test. No output changes.
+
+### D-1145 — Walk the chosen candidate's level-less OOS path over the fold's existing slice facts — 2026-10-02
+
+**Finding.** o1runner-4. `walk_forward_core`'s out-of-sample pass builds
+`test_facts = SliceFacts::of(trade_test, confined)` once for its candidate
+loop. It then priced the chosen candidate's level-less summary with
+`trade::walk`, which builds the identical `SliceFacts::of(trade_test,
+confined)` again: one redundant O(B_test) `HashMap`, the prefix vectors and the
+median pass per fold.
+
+**The change.** That walk is `trade::walk_over(.., &test_facts)`. `walk` is
+`walk_over` over freshly built facts of the same two arguments, so the
+`Trades` and the `Summary` are identical. `validate.rs` no longer imports
+`walk`. No output changes.
+
+**o1runner-6 is already fixed.** It pointed at the legacy grid's stop × target
+ratio table: `pairs_at_a_ratio`, run against up to 512 ratios per pair with no
+pre-sizing. D-1140 removed that table, `pairs_at_a_ratio`, `derived_ratios`
+and `ratio_targets`. The table refused every stop-and-target cell, and the
+ratio-union ladder it was built for was unreachable. Nothing on the legacy path
+builds a ratio table now. The resolved V1 policy's `ratio_bitmap_of` already
+pre-sizes with `try_reserve_exact` and writes each admitted pair in O(1).
+
+**Test.** `validate::tests::the_chosen_oos_walk_reuses_the_folds_test_facts`,
+a source-shape test (the two forms give equal `Trades`), fails on the previous
+tree, where the line read `Summary::of(&walk(trade_test, ..))`.

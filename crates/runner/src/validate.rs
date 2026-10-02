@@ -57,7 +57,7 @@ use crate::exit_grid_policy::{
 use crate::identity::{Params, Run, data_digest};
 use crate::outcome::Horizon;
 use crate::split::Shape;
-use crate::trade::{Trades, walk};
+use crate::trade::Trades;
 use costs::fill::Direction;
 
 /// What one combination did over one set of bars.
@@ -4923,7 +4923,17 @@ fn walk_forward_core(
                     .map(|outcome| outcome.pessimistic.unwrap_or_default())
                     .collect();
                 // THE SIDE TRAINING CHOSE, not the one a whole-span rank did.
-                let plain = Summary::of(&walk(trade_test, confined, &mask, horizon, chosen_side));
+                //
+                // Over `test_facts` (D-1145): `walk` rebuilt the identical
+                // `SliceFacts::of(trade_test, confined)` built above.
+                let plain = Summary::of(&crate::trade::walk_over(
+                    trade_test,
+                    confined,
+                    &mask,
+                    horizon,
+                    chosen_side,
+                    &test_facts,
+                ));
 
                 // THE CHOSEN EXIT, APPLIED. `docs/06-limits.md` §70 recorded
                 // that this fold reported a chosen stop beside an out-of-sample
@@ -7437,6 +7447,31 @@ mod tests {
     ///
     /// Scoped to the `par_iter` body rather than the file, so an unrelated
     /// `with_levels` elsewhere in this module does not fail it.
+    /// D-1145 (o1runner-4). The chosen candidate's level-less OOS walk reuses
+    /// the fold's `test_facts` instead of `trade::walk`, which rebuilt the same
+    /// facts. Source shape: both forms give the same `Trades`.
+    #[test]
+    fn the_chosen_oos_walk_reuses_the_folds_test_facts() {
+        let source = include_str!("validate.rs");
+        let anchor = "let test_facts = crate::trade::SliceFacts::of(trade_test, confined);";
+        let at = source.find(anchor);
+        assert!(at.is_some(), "the OOS pass must build its facts once");
+        let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+        let end = rest.find("THE CHOSEN EXIT, APPLIED");
+        assert!(
+            end.is_some(),
+            "the scanned region must end before the levelled pass"
+        );
+        let region = rest
+            .get(anchor.len()..end.unwrap_or_default())
+            .unwrap_or_default();
+        let plain = region.find("let plain = Summary::of(");
+        assert!(plain.is_some(), "the level-less walk must be in the region");
+        let tail = region.get(plain.unwrap_or_default()..).unwrap_or_default();
+        assert!(tail.contains("walk_over(") && tail.contains("&test_facts,"));
+        assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
+    }
+
     #[test]
     fn the_out_of_sample_pass_hoists_the_slice_facts_out_of_its_candidate_loop() {
         let source = include_str!("validate.rs");
