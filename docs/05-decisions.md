@@ -44102,3 +44102,21 @@ fails if the stale call returns. It also counts the `FillBar::new` and
 `fills_at` calls in `round_trip` and the `.at_timestamp(` probe in
 `horizon_bar`, so the doc and the code cannot drift apart unnoticed. The test
 fails on the previous text.
+
+### D-1181 — `SliceFacts` is rebuilt per candidate on the grid entry points, and §113 says so — 2026-10-02
+
+**What was wrong (audit W3-runner4-0).** `docs/06-limits.md` §113 said the
+`SliceFacts` preparation costs "are per-slice costs, not per-candidate costs".
+`runner::grid` calls `SliceFacts::of(bars, column)` inside `evaluate`,
+`evaluate_with`, `evaluate_families`, `evaluate_resolved_policy_v1`,
+`evaluate_resolved_expression_policy_v1`, `materialize_expression_cell` and
+`replay_universe_v1`. Their callers in `expression_execution`,
+`expression_oos`, `exit_grid_policy`, `validate` and `cli::candidate_trades`
+call them once per candidate. Every candidate therefore pays the O(B)
+acceptance copy, prefix tables, timestamp map and square-off table.
+
+**Change.** Documentation only. §113 now limits its claim to callers that hoist
+`SliceFacts`, and the D-1170-onward section of `docs/06-limits.md` lists the
+entry points that do not. The code fix is to take `&SliceFacts` from the caller,
+in `crates/runner/src/grid.rs`. Another lane owns that file, so it is handed
+over rather than made here. No output changes. Nothing is timed.

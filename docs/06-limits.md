@@ -6464,7 +6464,10 @@ For B execution bars, the checked evaluator replay costs O(B) time and retains
 O(B) acceptance bits. `SliceFacts` then builds an O(B) refusal-prefix table, an
 O(B) accepted-timestamp index and O(B) session facts. The acceptance bitmap is
 shared by reference across candidate and grid walks; cloning it does not copy B
-verdicts. These are per-slice costs, not per-candidate costs.
+verdicts. These are per-slice costs, not per-candidate costs, **only where
+the caller hoists `SliceFacts`.** Several entry points do not: see D-1181
+and the D-1170-onward section at the end of this file. Where a caller does
+not hoist, the O(B) build is paid per candidate.
 
 One membership read and one inclusive path-refusal query are worst-case O(1):
 the latter is two prefix reads and a subtraction. Exact-deadline lookup through
@@ -9902,3 +9905,17 @@ The text above is kept as it was written.
   the column), whatever `H` the operator sets. The working set is
   `min(H, bars in one session)` entries. Not timed. No bench row covers `edge`
   or the ranking pass.
+* **`SliceFacts` is O(B) per CANDIDATE on several grid entry points, not per
+  slice (D-1181).** §113 called these per-slice costs. That holds only where
+  the caller builds `SliceFacts` once and passes it to `trade::walk_over`.
+  `runner::grid` builds a fresh one with `SliceFacts::of(bars, column)` inside
+  `evaluate`, `evaluate_with`, `evaluate_families`,
+  `evaluate_resolved_policy_v1`, `evaluate_resolved_expression_policy_v1`,
+  `materialize_expression_cell` and `replay_universe_v1`. Each of those is
+  called once per candidate, from `expression_execution`, `expression_oos`,
+  `exit_grid_policy`, `validate` and `cli::candidate_trades`. So the
+  acceptance copy, the two prefix tables, the timestamp map and the square-off
+  table are rebuilt for every candidate, at O(B) time and memory. `trade::walk`
+  documents the same cost for itself. The fix is to take `&SliceFacts` from
+  the caller, which is a `grid.rs` change and was not made by this lane. Not
+  timed.
