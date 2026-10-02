@@ -43764,3 +43764,132 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0956 — Say why a vendor's 30min and 60min bars are refused, state rung raggedness per venue, and correct four pull comments that described code that is not there — 2026-10-02
+
+**Cloud audit GAP12-8, GAP12-11, GAP2-43, W1-pull4-2 and W1-pull4-3. All five
+were documentation defects. Code behaviour stays the same; the commit adds four
+tests and one count assertion, and each pins a corrected claim to code.**
+
+**GAP12-8: the refusal of a vendor's 30min and 60min bars named a reason that
+had stopped being true.** `Granularity::store_timeframe` said it refused
+`Minute30` and `Hour1` because `pull::fold`'s grid is anchored at IST midnight,
+so a 30-minute session would open with a 15-minute stub stamped 09:00. But
+`fold` anchors every intraday rung at the 09:15 open, and
+`pull::ingest::derive_all` files 30min and 60min bars folded from the minute
+without asking `store_timeframe`. A const block beside the function was meant
+to catch the anchor move. It did not fire, because it asserted the 555-minute
+arithmetic and never ran the fold. A trailing comment then said
+`store_timeframe` "is therefore free to file all of them", which the code
+under it contradicted.
+
+*The decision is NO: a vendor-served 30min or 60min bar is still refused.
+The refusal now gives its real reason.* For a bar a vendor serves, the stamp
+is the vendor's. Two grids are plausible: one counted from IST midnight and
+one counted from the open. At 1, 3, 5 and 15 minutes they are the same grid,
+because each divides 555. At 30 and 60 they differ. `docs/00-charter.md`
+records that Kite publishes `30minute` and `60minute` and that Groww's interval
+table runs `2minute`…`4hour`. Neither it nor `docs/08-vendor-samples.md` says
+where one of those bars is stamped, so the vendor's grid is **UNVERIFIED**.
+Filing such a bar under a 09:15-anchored directory could present 15 or 45
+minutes of trade as a whole bar. No feed declares either rung today, so no
+shipped request reaches this refusal. Its job is to make a future declaration
+bring a captured sample. `Timeframe::aligns_with_the_open` keeps deciding it
+and is re-documented as "the midnight-counted grid lands on 09:15", which is
+exactly "the two grids coincide". Choosing YES would have needed that sample.
+
+*Corrected text:* the `store_timeframe` comment and its `#[allow]` reason; the
+const block's comment, with the stale "ANCHOR MOVED" section deleted; two
+comments and two messages in `every_rung_the_store_ships_carries_a_timeframe_and_the_rest_refuse`;
+`store::path::Timeframe`'s `MINUTE_2`, `MINUTE_3`, `MINUTE_10`, `MINUTE_30`,
+`MINUTE_60` and `aligns_with_the_open` docs; the doc of
+`only_the_rungs_that_divide_555_start_a_session_on_time`; the header of
+`crates/pull/tests/anchor.rs`; and invariant RG-02, which said every directory
+had a store timeframe.
+
+*D-0603 corrected here, because the ledger is append-only.* D-0603 says "on
+the IST clock grid the 30min and 60min buckets stamped 15:00 close at 15:30 and
+16:00". On the stored grid the fold writes, the session's last 30min and 60min
+buckets on the 375-minute index session are both stamped **15:15**. Their
+nominal closes are 15:45 and 16:15, and each holds 15 minutes of trade
+(`crates/indicators/src/anchored.rs` measured the 60min file's seventh record
+of each day at 15:15). D-0603's conclusion is unchanged: the last bucket
+closes at or after 15:30, so no minute can follow it.
+
+*Test:* `pull::anchor::store_timeframe_follows_the_fold_anchor` runs the fold
+for every intraday rung with a directory. It requires the first bar at 09:15,
+and `store_timeframe().is_some()` exactly when the midnight-counted grid has
+an edge at that stamp. The refused set must be exactly `[Minute30, Hour1]`.
+**It passes on `main` before this change**, because this was a documentation
+defect. With the fold's intraday anchor reverted to midnight by hand, the
+build compiled (so the const block stayed silent) and the test failed: `30min:
+the fold's first bar must begin at the 09:15 open`, left `1751340600`, right
+`1751341500`. Invariant RG-G128-a.
+
+**GAP12-11: raggedness belongs to the venue, not the rung.** `fold.rs`, the
+`vendor.rs` table removed above, and `indicators::anchored`'s
+`overlay_exact_minute_gapfib` doc said only 2, 10, 30 and 60 minutes end the
+day short. That holds for a 375-minute session only. Lengths come from the
+venue row (`Venue::hours_on` and the dated cash close in
+`cash_auction::Schedule::close`):
+
+| Venue session | Length | Rungs (of 1, 2, 3, 5, 10, 15, 30, 60) with a short last bar |
+|---|---:|---|
+| index, any date; cash or derivatives before 2026-08-03; cash not auction-eligible after | 375 | 2, 10, 30, 60 |
+| equity derivatives from 2026-08-03 | 385 | 2, 3, 10, 15, 30, 60 |
+| cash, auction-eligible, continuous session from 2026-08-03 | 360 | none |
+
+On 385 minutes, the 3min last bar holds 1 minute at 15:39 and the 15min last
+bar holds 10 minutes at 15:30. The `fold.rs` and `anchored.rs` text now gives
+the length per venue. *Test:*
+`pull::anchor::derived_rung_stub_minutes_follow_the_venue_session` takes the
+length from the venue row for six venue and date cases. At each of the eight
+rungs it requires no diagnostic, a last bar of `length % width` minutes (or a
+full bar), stamped on the grid, and the right bar count. It also names the two
+385-minute cases. It passes on `main`. Invariant RG-G128-b.
+
+**GAP2-43: two comments credited `pull::totp` with work it never did.**
+Groww's `Auth` row said the vendor's `api-key` "is spent by `pull::totp` to
+MINT the daily token". CI group 18 said `totp.rs` exists "so a stale broker
+token can be RECOGNISED". Neither is wired. `CLAUDE.md` §8 forbids the mint,
+and a stale token is re-read from Parameter Store. This build reads only
+`access-token` for Groww (`key_field: None`; `api::server`'s credential reader
+fetches `key_field` only when it is `Some`). The charter's "TOTP-derived daily
+token" describes the token, which is minted outside this repository. Both
+comments are corrected. *Test:* `pull::totp::no_path_outside_this_module_computes_a_code`
+walks every `.rs` under `crates/*/src` (more than 100 files, asserted). It
+fails on any file other than `totp.rs` that names `code_at`/`code_at_counter`
+or glob-imports the module. A probe file under `crates/core/src/` that named
+the function failed it by path. The needles are written upper-case and lowered
+at run time so gate 1d sees no new literal. Invariant P-G243-a.
+
+**W1-pull4-2: RG-07 said the opposite of its test.** The row read "No
+descriptor carries a day-level window cap or a daily interval word". Its named
+test pins Zerodha at 2,000 days with `day`, Groww at 180 days with `1day`, and
+none for the other three, each by an exhaustive `match`. The row now states
+the per-feed rule. Groww's 180-day figure is cited in the descriptor from
+`Groww Docs/11-backtesting.md`. `docs/00-charter.md`'s Groww row "Window cap,
+daily" still reads UNVERIFIED/absent. That disagreement is left for a charter
+edit and is not resolved here.
+
+**W1-pull4-3: two cost-argument premises gave the wrong count.**
+`granularity_verdict`'s doc, its test's doc and GF-03 said "4 × 11"; with
+`FEED_COUNT = 5` the matrix is 5 × 11. `HttpSpec::listing_words` said its table
+holds "two" classes, but `Listing` has three variants and Groww ships three
+rows. The same doc also said Groww "says nothing about an index", which the
+charter's Groww row "Index segment word" (`CASH`) contradicts. Both bounds
+held all along. Now `every_feed_answers_every_rung_with_one_of_two_verdicts`
+asserts `(Feed::ALL.len(), FEED_COUNT, GRANULARITY_COUNT) == (5, 5, 11)` and
+that every cell was answered. The new
+`pull::vendor::every_listing_table_holds_at_most_one_row_per_class` takes the
+class count from an exhaustive `match` and requires no duplicate class, at most
+three rows, and three for Groww. Invariants GF-03 (updated) and GF-W143-a.
+
+**Left open.** `runner::resample::bucket_of` buckets on an IST-midnight grid,
+and its doc says the store's fold does the same. At 60 minutes the fold now
+uses the open grid, so the two may disagree on hourly bars. That is outside
+these five findings and is not changed here. `web/src/routes/ingest/+page.svelte`
+labels a rung with no `store_timeframe` "no store directory", which is false
+for 30min and 60min. No other cost changed, so `docs/06-limits.md` is
+untouched. Not added to `docs/11-findings.md`, which records the 2026-08-11
+sweep.

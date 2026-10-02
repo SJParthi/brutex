@@ -173,11 +173,19 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     //
     // THE FAULT IS THE ANCHOR, NOT THE RUNG. Anchored at the OPEN, every rung's
     // first bar of the day begins exactly at 09:15. What is left over is a
-    // SHORT LAST BAR, because 375 session-minutes does not divide by 2, 10, 30
-    // or 60 either — and a trailing stub is a different object from a leading
-    // one. The last bar covers 15:15-15:30, is stamped correctly, and holds the
-    // trades that happened in it. The leading stub was mislabelled. One is a
-    // short final bar; the other is a lie.
+    // SHORT LAST BAR wherever the VENUE's session length does not divide by the
+    // rung — and that is a property of the venue row, not of the rung. The
+    // 375-minute index session leaves one at 2, 10, 30 and 60; the 385-minute
+    // equity-derivatives session from 2026-08-03 leaves one at 2, 3, 10, 15, 30
+    // and 60 (a 1-minute 3min bar and a 10-minute 15min bar at 15:39 and
+    // 15:30); the 360-minute continuous session of a cash security eligible
+    // for the closing auction leaves none. Pinned against
+    // `complete_minutes_for_venue` by
+    // `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`
+    // (D-0956). A trailing stub is a different object from a leading one: it
+    // is stamped correctly and holds the trades that happened in it. The
+    // leading stub was mislabelled. One is a short final bar; the other is a
+    // lie.
     //
     // THE DAILY RUNG KEEPS MIDNIGHT, and that is not a special case for its own
     // sake. A day-wide bucket anchored at the open would run 09:15 to 09:15 —

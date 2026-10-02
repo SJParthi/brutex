@@ -728,10 +728,14 @@ jobs:
           '
 
           # ---- group 18: RFC 6238 APPENDIX B, and the words beside it.
-          # crates/pull/src/totp.rs implements TOTP so a stale broker token can
-          # be RECOGNISED. It never mints one -- CLAUDE.md section 8 forbids it,
-          # because a local mint would invalidate the token another system
-          # shares -- and this gate seeing these six numbers is the evidence
+          # crates/pull/src/totp.rs is an RFC 6238 code generator that nothing
+          # outside its own tests calls: no path in this build trades a code
+          # for a token, and nothing uses it to recognise a stale one either
+          # (a stale token is re-read from Parameter Store, CLAUDE.md section
+          # 8). It never mints -- section 8 forbids it, because a local mint
+          # would invalidate the token another system shares; the test
+          # pull::totp::no_path_outside_this_module_computes_a_code pins
+          # that, D-0956. This gate seeing these six numbers is the evidence
           # that the implementation is pinned to the published vectors rather
           # than to whatever it happens to produce.
           #

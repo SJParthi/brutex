@@ -558,4 +558,81 @@ mod tests {
             "128 base32 characters are 80 key bytes"
         );
     }
+
+    /// **NO PATH OUTSIDE THIS MODULE COMPUTES A CODE.** D-0956.
+    ///
+    /// Two comments said otherwise: `pull::vendor`'s Groww `Auth` row said the
+    /// vendor's `api-key` "is spent by `pull::totp` to MINT the daily token",
+    /// and CI's group-18 note said this module exists "so a stale broker token
+    /// can be RECOGNISED". Neither was ever wired. `CLAUDE.md` §8 forbids the
+    /// first outright, and a stale token is re-read from Parameter Store, not
+    /// recognised by a code. This walks every `.rs` file under `crates/*/src`
+    /// and fails on any that names this module's two code functions or
+    /// glob-imports it, so the day something trades a code for a token it has
+    /// to delete this test, in the open, to do it.
+    ///
+    /// Strict on purpose: it does not try to tell a `#[cfg(test)]` module from
+    /// production code. A test elsewhere that needs a code computes it here.
+    #[test]
+    fn no_path_outside_this_module_computes_a_code() {
+        use std::path::{Path, PathBuf};
+
+        // Upper-case and lowered at run time so this file adds no lower-case
+        // segment-shaped literal to `crates/pull` (CI gate 1d).
+        let needle = "CODE_AT".to_ascii_lowercase();
+        let glob = "TOTP::*".to_ascii_lowercase();
+        let source = "SRC".to_ascii_lowercase();
+
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates = manifest.parent().expect("crates/pull sits under crates/");
+        let workspace = crates
+            .parent()
+            .expect("crates/ sits under the workspace root");
+        let this = workspace.join(file!());
+        assert!(this.is_file(), "file!() resolves from the workspace root");
+
+        let mut stack: Vec<PathBuf> = std::fs::read_dir(crates)
+            .expect("crates/ is readable")
+            .map(|entry| entry.expect("a directory entry").path().join(&source))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        let mut scanned = 0_usize;
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a source directory is readable") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("RS"))
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a source file is UTF-8");
+                if path == this {
+                    // The module's own text is the control: it must contain the
+                    // needle, or the needle is wrong and the walk proves nothing.
+                    assert!(
+                        text.contains(&needle),
+                        "the needle names this module's functions"
+                    );
+                    continue;
+                }
+                scanned += 1;
+                if text.contains(&needle) || text.contains(&glob) {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        // Not vacuous: thirteen crates' sources were read, not an empty walk.
+        assert!(scanned > 100, "only {scanned} source files were read");
+        assert!(
+            offenders.is_empty(),
+            "a TOTP code is computed outside pull::totp — CLAUDE.md section 8 \
+             forbids minting a token here, and nothing else needs one: {offenders:?}"
+        );
+    }
 }

@@ -614,11 +614,15 @@ fn last_stored_minute_by_day(exact_minute: &[Candle]) -> HashMap<i64, i64> {
 ///
 /// # The day's LAST bucket is short, and this demanded a minute that cannot exist
 ///
-/// `t + signal_length - 1 minute` assumes every signal bar is full length. The NSE
-/// session is 375 minutes — 09:15 through 15:29 inclusive — and of the eight swept
-/// rungs **375 divides only by `1min`, `3min`, `5min` and `15min`.** On the other four
-/// the day's final bucket is a stub, and the closing minute the formula asked for is
-/// after the close:
+/// `t + signal_length - 1 minute` assumes every signal bar is full length. Which
+/// rungs end the day short is set by the VENUE's session length, not by the rung. The
+/// NSE index session is 375 minutes — 09:15 through 15:29 inclusive — and of the
+/// eight swept rungs **375 divides only by `1min`, `3min`, `5min` and `15min`.** The
+/// equity-derivatives session from 2026-08-03 is 385 minutes, which divides only by
+/// `1min` and `5min`, so there `3min` and `15min` end with a 1- and a 10-minute bar
+/// as well (`pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`,
+/// D-0956). On the index file measured below, the other four rungs' final bucket is a
+/// stub, and the closing minute the formula asked for is after the close:
 ///
 /// | Rung | Bars per day | Last bar opens | Formula demanded | Exists |
 /// |---|---:|---|---|---|
