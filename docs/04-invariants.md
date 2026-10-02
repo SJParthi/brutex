@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Exact-minute overlay merges each row in whole-mask operations — audit 2026-10-02 o1engine-40
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1ENGINE-40 — **`Column::replace_exact_positions` folds the family into one mask once per call and merges every row through `overlay_exact` in six-word mask operations, with exactly the result of the per-bit walk it replaced.** Against an independent per-bit reference over the `GapFib` family (11), the ORB-plus-`GapFib` family (31), the empty family and all 384 positions, on zero, all-ones, alternating-word and single-bit rows, availability and evidence: truth and availability outside the family are unchanged, inside it they are the evidence's (availability plus truth), and evidence outside the family is ignored. The per-row loop names no per-position loop | `indicators::column::tests::the_exact_minute_merge_is_whole_mask_and_agrees_with_the_per_bit_walk` | ✓ |
