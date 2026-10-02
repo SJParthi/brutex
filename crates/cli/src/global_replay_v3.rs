@@ -44,7 +44,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use brutex_core::blake3::Hasher;
@@ -2916,14 +2916,10 @@ where
                 path.display()
             )
         })?;
-    for record in records.iter().copied() {
-        file.write_all(&encode(record)?).map_err(|why| {
-            format!(
-                "Global Replay V3 append file {} could not write a complete fixed record: {why}",
-                path.display()
-            )
-        })?;
-    }
+    // The same rollback law as V1 and V2: a refused append leaves this file
+    // exactly as long as it was (D-0926).
+    crate::global_replay::append_encoded_with(&mut file, path, records.iter().copied().map(encode))
+        .map_err(|why| format!("Global Replay V3 append refused: {why}"))?;
     file.sync_all().map_err(|why| {
         format!(
             "Global Replay V3 append file {} could not synchronize: {why}",
@@ -3351,6 +3347,7 @@ fn block_slice<'a, T>(
 #[cfg(test)]
 mod tests {
     use std::cell::Cell as CounterCell;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -3899,6 +3896,49 @@ mod tests {
         let reopened = commit_prepared_global_replay_v3(root.path(), bounds, &prepared)?;
         assert!(!reopened.was_written());
         assert_eq!(reopened.audit()?, authority);
+        Ok(())
+    }
+
+    fn refuse_the_second(record: u8) -> Result<[u8; 8], String> {
+        if record == 2 {
+            Err("injected encode refusal".to_owned())
+        } else {
+            Ok([record; 8])
+        }
+    }
+
+    /// A V3 append whose second record refuses to encode after the first was
+    /// written leaves the file exactly as long as it was before the call, and
+    /// says so; an append that encodes leaves both records. Without the
+    /// rollback the first record's eight bytes stayed behind.
+    #[test]
+    fn a_refused_v3_append_leaves_the_file_exactly_as_long_as_it_was() -> Result<(), String> {
+        let root = TempRoot::new("append-rollback")?;
+        let path = root.path().join("records");
+        std::fs::write(&path, [7_u8; 5]).map_err(|why| format!("cannot seed file: {why}"))?;
+        let Err(why) = append_records(&path, &[1_u8, 2], refuse_the_second) else {
+            return Err("the second record did not refuse".to_owned());
+        };
+        assert_eq!(
+            std::fs::read(&path).map_err(|e| format!("cannot read back: {e}"))?,
+            vec![7_u8; 5],
+            "{why}"
+        );
+        assert!(
+            why.starts_with("Global Replay V3 append refused: "),
+            "{why}"
+        );
+        assert!(why.contains("injected encode refusal"), "{why}");
+        assert!(why.contains("rolled back to byte 5"), "{why}");
+
+        append_records(&path, &[1_u8, 3], refuse_the_second)?;
+        let mut expected = vec![7_u8; 5];
+        expected.extend([1_u8; 8]);
+        expected.extend([3_u8; 8]);
+        assert_eq!(
+            std::fs::read(&path).map_err(|e| format!("cannot read back: {e}"))?,
+            expected
+        );
         Ok(())
     }
 }

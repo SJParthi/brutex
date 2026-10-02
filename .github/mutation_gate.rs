@@ -132,8 +132,94 @@ fn require_results(
     Ok(())
 }
 
+/// `a/b/../c` is `a/c`; `.` segments vanish. A path that climbs above its
+/// root keeps the `..` it cannot resolve, so it never equals a tracked path.
+fn normalized(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if out.last().is_some_and(|last| *last != "..") => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out.join("/")
+}
+
+/// The path a unified-diff header line names: `--- a/X`, `+++ b/X` or
+/// `diff --git a/X b/Y` (whose `b/` side is taken, as git writes it).
+fn header_path(line: &str) -> Option<&str> {
+    if let Some(rest) = line.strip_prefix("diff --git a/") {
+        return rest.split_once(" b/").map(|(_, b)| b);
+    }
+    line.strip_prefix("--- a/")
+        .or_else(|| line.strip_prefix("+++ b/"))
+}
+
+/// cargo-mutants names a file by the path its `#[path]` mount spells, so
+/// `crates/cli/src/../build_provenance.rs` is never the
+/// `crates/cli/build_provenance.rs` git's diff names, and `--in-diff` matched
+/// nothing in such a file (GAP14-56, D-1119). Every diff section whose
+/// normalized path cargo-mutants walks under another spelling is emitted once
+/// per spelling with its three header paths replaced; every other section is
+/// emitted unchanged.
+fn respell(diff: &str, walked: &str) -> String {
+    let mut spellings: std::collections::BTreeMap<String, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for spelled in walked.lines().filter(|line| !line.is_empty()) {
+        let plain = normalized(spelled);
+        if plain != spelled {
+            spellings.entry(plain).or_default().push(spelled);
+        }
+    }
+    let mut sections: Vec<Vec<&str>> = Vec::new();
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("diff --git ") || sections.is_empty() {
+            sections.push(Vec::new());
+        }
+        if let Some(section) = sections.last_mut() {
+            section.push(line);
+        }
+    }
+    let mut out = String::new();
+    for section in sections {
+        let path = section
+            .first()
+            .and_then(|line| header_path(line.trim_end_matches('\n')))
+            .map(normalized);
+        let Some(names) = path.as_ref().and_then(|p| spellings.get(p)) else {
+            out.extend(section);
+            continue;
+        };
+        for name in names {
+            for line in &section {
+                let bare = line.trim_end_matches('\n');
+                let ending = &line[bare.len()..];
+                if bare.starts_with("diff --git ") {
+                    out.push_str(&format!("diff --git a/{name} b/{name}{ending}"));
+                } else if bare.starts_with("--- a/") {
+                    out.push_str(&format!("--- a/{name}{ending}"));
+                } else if bare.starts_with("+++ b/") {
+                    out.push_str(&format!("+++ b/{name}{ending}"));
+                } else {
+                    out.push_str(line);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     match args {
+        [mode, diff, walked] if mode == "respell" => {
+            let read = |p: &str| {
+                std::fs::read_to_string(p).map_err(|why| format!("cannot read {p}: {why}"))
+            };
+            print!("{}", respell(&read(diff)?, &read(walked)?));
+        }
         [mode, list] if mode == "plan" => {
             let all = read_cases(Path::new(list))?;
             eprintln!(
@@ -169,7 +255,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 assigned.len(), caught.len(), unviable.len()
             );
         }
-        _ => return Err("use plan LIST, partition ALL ASSIGNED INDEX/TOTAL, or verify ASSIGNED RESULTS EXIT_STATUS".to_owned()),
+        _ => return Err("use respell DIFF WALKED_FILES, plan LIST, partition ALL ASSIGNED INDEX/TOTAL, or verify ASSIGNED RESULTS EXIT_STATUS".to_owned()),
     }
     Ok(())
 }
@@ -256,6 +342,49 @@ mod tests {
         assert!(require_results(&assigned, &assigned, &[], &assigned[..1], &[], "0").is_err());
         assert!(require_results(&assigned, &assigned, &[], &[], &assigned[..1], "0").is_err());
         assert!(require_results(&assigned, &assigned, &[], &[], &[], "4").is_err());
+    }
+
+    #[test]
+    fn a_path_mounted_file_is_named_as_cargo_mutants_walks_it() {
+        let diff = "diff --git a/crates/cli/build_provenance.rs b/crates/cli/build_provenance.rs\n\
+                    index 1..2 100644\n\
+                    --- a/crates/cli/build_provenance.rs\n\
+                    +++ b/crates/cli/build_provenance.rs\n\
+                    @@ -1 +1 @@\n\
+                    -a\n\
+                    +b\n\
+                    diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs\n\
+                    --- a/crates/cli/src/lib.rs\n\
+                    +++ b/crates/cli/src/lib.rs\n\
+                    @@ -1 +1 @@\n\
+                    -c\n\
+                    +d\n";
+        let walked = "crates/cli/src/lib.rs\ncrates/cli/src/../build_provenance.rs\n\
+                      crates/cli/src/./sub/../../build_provenance.rs\n";
+        let out = respell(diff, walked);
+        // Both spellings get the section, with every header renamed.
+        for name in [
+            "crates/cli/src/../build_provenance.rs",
+            "crates/cli/src/./sub/../../build_provenance.rs",
+        ] {
+            assert!(
+                out.contains(&format!("diff --git a/{name} b/{name}\n")),
+                "{out}"
+            );
+            assert!(out.contains(&format!("--- a/{name}\n")), "{out}");
+            assert!(out.contains(&format!("+++ b/{name}\n")), "{out}");
+        }
+        assert!(!out.contains("a/crates/cli/build_provenance.rs"), "{out}");
+        assert_eq!(out.matches("+b\n").count(), 2);
+        // A file walked under its own name passes through untouched.
+        assert!(out.ends_with(
+            "diff --git a/crates/cli/src/lib.rs b/crates/cli/src/lib.rs\n\
+             --- a/crates/cli/src/lib.rs\n+++ b/crates/cli/src/lib.rs\n@@ -1 +1 @@\n-c\n+d\n"
+        ));
+        // Nothing walked under another name: the diff is returned byte for byte.
+        assert_eq!(respell(diff, "crates/cli/src/lib.rs\n"), diff);
+        assert_eq!(normalized("crates/cli/src/../x.rs"), "crates/cli/x.rs");
+        assert_eq!(normalized("../x.rs"), "../x.rs");
     }
 
     #[test]

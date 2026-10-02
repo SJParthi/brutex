@@ -10,18 +10,31 @@
 //! ```text
 //! MAX_ITERATIONS = BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS
 //!                  + FINAL_EVALUATION
-//!                = 2 + 8 + 64 + 1
-//!                = 75
+//!                = 2 + 8 + 75 + 1
+//!                = 86
 //! ```
 //!
-//! and 75 is not a hope. The bisection performs **exactly**
+//! and 86 is not a hope. The bisection performs **exactly**
 //! [`BISECTION_STEPS`] halvings of `[MIN_VOLATILITY, MAX_VOLATILITY]` with no
-//! early exit and no data-dependent branch: `(5 − 1e-6) / 2^64 ≈ 2.7e-19`,
-//! narrower than one unit in the last place of any volatility in that band.
+//! early exit and no data-dependent branch: `(5 − 1e-6) / 2^75 ≈ 1.32e-22`,
+//! narrower than `ulp(1e-6) = 2^-72 ≈ 2.12e-22`, the finest unit in the last
+//! place in that band, and so narrower than every one. 75 is the least count
+//! that does it; 74 leaves `2.65e-22`.
 //! It cannot take longer on a hard input, because it does not look at the
 //! input to decide when to stop.
 //!
-//! **It says 75 and not 72 because three evaluations were not being counted.**
+//! **It was 64 halvings, and the sentence above was false for small
+//! volatilities.** `(5 − 1e-6) / 2^64 ≈ 2.71e-19` is wider than one ulp of any
+//! volatility below `2^-9`, by up to a factor of about 1,280 at the floor, and
+//! a bisected solve at `σ ≈ 1e-5` was measured stopping with its two ends 160
+//! ulps apart. W1-greeks1-1, D-0921;
+//! `greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band`
+//! and `greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility`
+//! fail at 64. That is a statement about the bracket the code holds, not about
+//! distance to the true volatility, which the quote's own rounding governs.
+//!
+//! **It said 75 and not 72 because three evaluations were not being counted**
+//! (before the halvings went from 64 to 75).
 //! The two that establish the bracket and the one at the answer are model
 //! evaluations like any other, and the first version of this crate reported a
 //! ceiling that left them out — on the one crate whose selling point is an
@@ -44,7 +57,7 @@
 //! **That table was taken on the calibration harness, whose rescuer was Brent
 //! and whose bisection exited early — not on the code in this file.** It is
 //! why the shape below was chosen; it is not a measurement of the shape below.
-//! What is measured on *this* code is a worst total of **75**, which is also
+//! What is measured on *this* code is a worst total of **86**, which is also
 //! its arithmetic ceiling, by
 //! `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound`
 //! and by `greeks::solver::the_reported_cost_is_every_model_evaluation`.
@@ -135,7 +148,12 @@ pub const NEWTON_STEPS: u32 = 8;
 
 /// The number of halvings the bisection performs. Not a cap — a count. It
 /// performs exactly this many, every time.
-pub const BISECTION_STEPS: u32 = 64;
+///
+/// 75 because it is the least count whose exact-arithmetic bracket,
+/// `(MAX_VOLATILITY − MIN_VOLATILITY) / 2^75 ≈ 1.32e-22`, is narrower than one
+/// unit in the last place of [`MIN_VOLATILITY`] (`2^-72 ≈ 2.12e-22`), the
+/// finest in the band. It was 64, whose `2.71e-19` is not. D-0921.
+pub const BISECTION_STEPS: u32 = 75;
 
 /// The two evaluations that establish the bracket, at
 /// [`MIN_VOLATILITY`] and [`MAX_VOLATILITY`], before the search begins.
@@ -152,7 +170,7 @@ pub const FINAL_EVALUATION: u32 = 1;
 /// The largest total number of model evaluations one solve can cost —
 /// **every** evaluation, not only the ones inside the search.
 ///
-/// `2 + 8 + 64 + 1 = 75`. A refused solve costs the same, because the refusal
+/// `2 + 8 + 75 + 1 = 86`. A refused solve costs the same, because the refusal
 /// is decided from the final evaluation.
 pub const MAX_ITERATIONS: u32 =
     BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS + FINAL_EVALUATION;
@@ -383,12 +401,26 @@ impl Checked {
     /// Exactly [`BISECTION_STEPS`] halvings. No early exit, no tolerance test,
     /// no stagnation detection: the cost of this function does not depend on
     /// any input value, and the final bracket is narrower than one unit in the
-    /// last place of anything inside it.
+    /// last place of anything inside it: in exact arithmetic it would be
+    /// `1.32e-22` wide against `ulp(MIN_VOLATILITY) ≈ 2.12e-22`, so the `f64`
+    /// ends finish equal or adjacent. That much is arithmetic for the exact
+    /// halving; for the rounded midpoints the code computes it is measured, on
+    /// every bisected solve of the shared grid and of true volatilities down
+    /// to `1.5e-6`, not proved for every input. D-0921.
     ///
     /// The caller has already established that the price is strictly between
     /// the model prices at the two ends, so the bracket is real before the
     /// first halving and stays real after every one of them.
     fn bisect(&self, price: f64, kind: OptionKind) -> f64 {
+        let (low, high) = self.bracket(price, kind);
+        0.5 * (low + high)
+    }
+
+    /// The bracket after exactly [`BISECTION_STEPS`] halvings, `(low, high)`
+    /// with the model price below the quote at `low` and at or above it at
+    /// `high`. Separate from [`Checked::bisect`] only so a test can see the
+    /// bracket the answer is the midpoint of, rather than the answer alone.
+    fn bracket(&self, price: f64, kind: OptionKind) -> (f64, f64) {
         let mut low = MIN_VOLATILITY;
         let mut high = MAX_VOLATILITY;
         for _ in 0..BISECTION_STEPS {
@@ -399,7 +431,7 @@ impl Checked {
                 high = middle;
             }
         }
-        0.5 * (low + high)
+        (low, high)
     }
 }
 
@@ -581,7 +613,7 @@ mod tests {
         // `spent + BISECTION_STEPS` by construction, so a test that READ the
         // field was arithmetically incapable of noticing that three
         // evaluations -- the two bracket ends and the one at the answer --
-        // were never counted. The real cost was 75 against a documented
+        // were never counted. The real cost was 75 (at 64 halvings) against a documented
         // ceiling of 72, on the one crate whose selling point is an arithmetic
         // ceiling.
         //
@@ -685,7 +717,7 @@ mod tests {
         // tell a counter that counts from one that does not. Both floors are
         // asserted here: a Newton solve spends at least one search evaluation
         // on top of the three that are not part of the search, and a bisection
-        // solve spends its 64 halvings PLUS the Newton steps that preceded
+        // solve spends its 75 halvings PLUS the Newton steps that preceded
         // them.
         let fixed = BRACKET_EVALUATIONS + FINAL_EVALUATION;
         let contract = at_the_money();
@@ -703,7 +735,7 @@ mod tests {
 
         // Deep in the money at a low volatility, where Newton crawls towards
         // the answer and is still crawling when its cap arrives: the full
-        // 8 + 64.
+        // 8 + 75.
         let stubborn = Contract {
             spot: 100.0,
             strike: 50.0,
@@ -720,7 +752,7 @@ mod tests {
 
         // And the other end of the same arm: far out of the money at a low
         // volatility, vega underflows on the FIRST evaluation and Newton
-        // leaves immediately. One Newton step plus the 64 halvings.
+        // leaves immediately. One Newton step plus the 75 halvings.
         let hopeless = Contract {
             spot: 100.0,
             strike: 125.0,
@@ -998,5 +1030,132 @@ mod tests {
         );
         assert!(found.uncertainty <= MAX_RELATIVE_UNCERTAINTY);
         assert!(found.vega > 0.0);
+    }
+
+    /// One unit in the last place of a positive, finite, normal `value`, taken
+    /// from its bits rather than typed in: the next representable number up,
+    /// minus the number.
+    fn ulp(value: f64) -> f64 {
+        f64::from_bits(value.to_bits() + 1) - value
+    }
+
+    /// The width `[MIN_VOLATILITY, MAX_VOLATILITY]` would have after `steps`
+    /// halvings in exact arithmetic. Multiplying by a power of two is exact in
+    /// `f64` here, so the only rounding is in the subtraction.
+    fn exact_width_after(steps: u32) -> f64 {
+        let steps = i32::try_from(steps).expect("a step count fits in i32");
+        (MAX_VOLATILITY - MIN_VOLATILITY) * 0.5_f64.powi(steps)
+    }
+
+    #[test]
+    fn the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band() {
+        // The claim the module documentation makes about the bisection, as
+        // ARITHMETIC. A unit in the last place only grows with magnitude, so
+        // the finest one in the band is at its floor, `MIN_VOLATILITY`. If the
+        // bracket is narrower than that one, it is narrower than every one.
+        //
+        // At 64 halvings this failed: the width was 2.71e-19 and
+        // `ulp(1e-6)` is 2.12e-22, so for any volatility below 2^-9 the claim
+        // was false by up to a factor of about 1,280. W1-greeks1-1, D-0921.
+        let finest = ulp(MIN_VOLATILITY);
+        assert!(finest <= ulp(MAX_VOLATILITY));
+        assert!(finest <= ulp(0.2));
+        let width = exact_width_after(BISECTION_STEPS);
+        println!(
+            "after {BISECTION_STEPS} halvings: width {width:e} against ulp({MIN_VOLATILITY:e}) \
+             {finest:e}; one fewer: {:e}",
+            exact_width_after(BISECTION_STEPS - 1)
+        );
+        assert!(
+            width < finest,
+            "{BISECTION_STEPS} halvings leave {width:e}, wider than ulp({MIN_VOLATILITY:e}) \
+             = {finest:e}"
+        );
+        // And it is the LEAST such count, so the ceiling is not padded: one
+        // halving fewer is not enough.
+        assert!(
+            exact_width_after(BISECTION_STEPS - 1) >= finest,
+            "{} halvings would already do",
+            BISECTION_STEPS - 1
+        );
+    }
+
+    #[test]
+    fn a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility() {
+        // End to end. The arithmetic above is about a bracket in exact
+        // arithmetic; this is about the `f64` bracket the code actually holds
+        // when it stops. On every quote that reaches the bisection -- the
+        // shared grid, plus true volatilities from 1.5e-6 to 1e-4 near the
+        // money, where Newton leaves the band after one or two steps -- the two
+        // ends must be the same number or adjacent numbers, the model price
+        // must be below the quote at one and at or above it at the other, and
+        // the answer must be one of the two.
+        //
+        // What this does NOT say: that the answer is within an ulp of the TRUE
+        // volatility. The quote is a computed price, and its own rounding moves
+        // the crossing by far more than an ulp of a volatility -- the closeness
+        // to the truth is asserted to G-08's 1e-4 relative bound and printed, and the gap
+        // between the two is `docs/06-limits.md` §29's subject, not this one.
+        let mut cases = grid();
+        for truth in [1.5e-6_f64, 1e-5, 1e-4] {
+            for offset in [-2.0_f64, -1.0, 1.0, 2.0] {
+                for years in [1.0_f64 / 365.0, 0.25, 1.0] {
+                    let spot = 100.0;
+                    cases.push((
+                        Contract {
+                            spot,
+                            strike: spot * (offset * truth * years.sqrt()).exp(),
+                            years_to_expiry: years,
+                            rate: 0.0,
+                            carry: 0.0,
+                        },
+                        truth,
+                    ));
+                }
+            }
+        }
+        let mut bisected = 0_u32;
+        let mut tiny = 0_u32;
+        let mut worst = 0.0_f64;
+        for (contract, truth) in cases {
+            for kind in [OptionKind::Call, OptionKind::Put] {
+                let quoted = contract.price(truth, kind).expect("priced");
+                let Ok(found) = contract.implied_volatility(quoted, kind) else {
+                    continue;
+                };
+                if found.method == Method::Newton {
+                    continue;
+                }
+                bisected += 1;
+                let checked = contract.check().expect("checked");
+                let (low, high) = checked.bracket(quoted, kind);
+                assert!(
+                    low <= high && high <= low + ulp(low),
+                    "the bracket [{low:e}, {high:e}] is {} ulps wide at {contract:?} {kind:?}",
+                    (high - low) / ulp(low)
+                );
+                assert!(checked.greeks(low, kind).price < quoted);
+                assert!(checked.greeks(high, kind).price >= quoted);
+                assert!(
+                    found.volatility == low || found.volatility == high,
+                    "the answer {:e} is not an end of [{low:e}, {high:e}]",
+                    found.volatility
+                );
+                let relative = (found.volatility / truth - 1.0).abs();
+                worst = worst.max(relative);
+                assert!(relative <= 1e-4, "{relative:e} at {contract:?} {kind:?}");
+                if truth < 2.0_f64.powi(-9) {
+                    tiny += 1;
+                }
+            }
+        }
+        println!(
+            "bisected {bisected} accepted solves, {tiny} of them below 2^-9; \
+             worst relative distance to the true volatility {worst:e}"
+        );
+        assert!(
+            tiny > 0,
+            "no solve below 2^-9 reached the bisection, which is the regime this test is for"
+        );
     }
 }

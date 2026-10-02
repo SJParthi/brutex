@@ -429,8 +429,9 @@ pub fn merge(sources: &[Source]) -> Merged {
         }
     }
 
-    // PRE-SIZED, so a probe is O(1) in the WORST case and not merely on
-    // average.
+    // PRE-SIZED, so the map never grows or rehashes during the loop. A probe
+    // is still expected O(1), not worst-case O(1): the reservation removes
+    // rehash spikes, not collision chains. D-0904.
     //
     // A `HashMap` that grows reallocates and rehashes every key it holds. That
     // is amortised O(1) per insert, which is the honest description — but it
@@ -447,8 +448,8 @@ pub fn merge(sources: &[Source]) -> Merged {
     //
     // It over-reserves when two vendors name the same instrument — which is the
     // common case, and the point of merging. That is bounded waste (one entry
-    // per duplicate, freed when the map is dropped) traded for a bound that
-    // holds in the worst case rather than on average.
+    // per duplicate, freed when the map is dropped) traded for no growth
+    // during the loop, which is all the reservation buys.
     // WHICH MASTERS WERE ACTUALLY READ — the set every cross-check is asked
     // of. Taken from the sources handed in, never from `Vendor::MASTERED`: a
     // vendor that publishes a master and did not supply one here can neither
@@ -1338,5 +1339,39 @@ mod tests {
             vec![("F&O underlyings", 0, 0), ("NIFTY Total Market", 0, 0)]
         );
         assert!(m.single_vendor_members().is_empty());
+    }
+
+    /// THE RESERVATION BUYS NO REHASH, NOT A WORST-CASE PROBE. D-0904.
+    ///
+    /// The comment above `by_key` once said pre-sizing made a probe "O(1) in
+    /// the WORST case and not merely on average", contradicting the doc on
+    /// `merge` and `CLAUDE.md` §3 rule 4: reserving capacity prevents growth,
+    /// not collision chains. No test can time a collision chain, so this reads
+    /// this file's production half and refuses either worst-case wording.
+    /// Proven by `api::merge::no_comment_claims_a_worst_case_constant_probe`,
+    /// this test, which is what Gate 12 asks a cost sentence to name.
+    #[test]
+    fn no_comment_claims_a_worst_case_constant_probe() {
+        let production = include_str!("merge.rs")
+            .split_once("\n#[cfg(test)]\n")
+            .expect("the tests follow the production code")
+            .0
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ");
+        for claim in [
+            "o(1) in the worst case",
+            "holds in the worst case rather than on average",
+        ] {
+            assert!(
+                !production.contains(claim),
+                "merge.rs still claims {claim:?}"
+            );
+        }
+        assert!(
+            production.contains("probes have expected o(1) cost"),
+            "the expected-cost statement on `merge` is kept"
+        );
     }
 }

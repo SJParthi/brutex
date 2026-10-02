@@ -150,6 +150,16 @@ impl ContractName {
         let exchange = Exchange::parse(ex).map_err(|_| ContractError::UnknownExchange {
             found: ex.to_owned(),
         })?;
+        // `Symbol::new` upper-cases ASCII letters, which is right for a vendor
+        // symbol and wrong here: `NSE-nifty-...` and `NSE-NIFTY-...` are two
+        // directory names, and folding one onto the other gives them one
+        // `InstrumentKey` and renders the first back as a path that is not it.
+        // The underlying is exact, like every field but the month. D-1330.
+        if under.bytes().any(|b| b.is_ascii_lowercase()) {
+            return Err(ContractError::BadUnderlying {
+                found: under.to_owned(),
+            });
+        }
         let underlying = Symbol::new(under).map_err(|_| ContractError::BadUnderlying {
             found: under.to_owned(),
         })?;
@@ -272,6 +282,19 @@ fn parse_expiry(text: &str) -> Result<Expiry, ContractError> {
     let (Some(d), Some(m), Some(y)) = (text.get(0..2), text.get(2..5), text.get(5..7)) else {
         return Err(bad());
     };
+    // `u8::from_str` and `u16::from_str` accept a leading `+`, so `+1Apr20`
+    // would parse to the expiry of `01Apr20`: two directory names, one
+    // `InstrumentKey`. The same injectivity test `parse_strike` applies:
+    // require plain digits so a novel spelling is a refusal. W3-lake1-3.
+    // This closes the signed day and year only; it does not make expiry
+    // parsing injective over directory names. The month's case tolerance,
+    // which the module header grants on purpose, still reads `01APR20` and
+    // `01Apr20` as one expiry and renders both as `01Apr20` —
+    // `the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts`
+    // asserts exactly that — so those two spellings still share a key.
+    if !d.bytes().chain(y.bytes()).all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
     let day: u8 = d.parse().map_err(|_| bad())?;
     let yy: u16 = y.parse().map_err(|_| bad())?;
     let month = parse_month(m)?;
@@ -676,6 +699,71 @@ mod tests {
         for rupees in [1_u32, 9, 10, 4_600, 10_000, 69_000] {
             let name = format!("NSE-NIFTY-01Apr20-{rupees}-CE");
             let c = ContractName::parse(&name).expect("a plain strike parses");
+            assert_eq!(c.to_string(), name);
+        }
+    }
+
+    /// `u8::from_str` and `u16::from_str` accept a leading `+`, so without a
+    /// digit guard `+1Apr20` parses to the same expiry as `01Apr20` and
+    /// `01Apr+0` to the same as `01Apr00`: two directory names, one
+    /// `InstrumentKey`, and a `Display` that renders the signed one back as a
+    /// name that does not exist. W3-lake1-3.
+    #[test]
+    fn a_signed_day_or_year_is_refused_rather_than_aliased_onto_another_contract() {
+        for signed in [
+            "NSE-NIFTY-+1Apr20-10000-CE",
+            "NSE-NIFTY-01Apr+0-10000-CE",
+            "NSE-NIFTY-+1Apr+0-10000-CE",
+            "NSE-BANKNIFTY-+4Apr24-FUT",
+        ] {
+            match ContractName::parse(signed) {
+                Err(ContractError::BadExpiryShape { found }) => {
+                    assert!(found.contains('+'), "the refusal names it: {found}");
+                }
+                other => panic!("{signed} must be refused, got {other:?}"),
+            }
+        }
+
+        // The digit spellings they aliased onto still parse and round-trip.
+        for plain in ["NSE-NIFTY-01Apr20-10000-CE", "NSE-NIFTY-01Apr00-10000-CE"] {
+            let c = ContractName::parse(plain).expect("a plain expiry parses");
+            assert_eq!(c.to_string(), plain);
+        }
+    }
+
+    /// **The underlying is NOT case-tolerant, and it was.**
+    ///
+    /// The module header says every field but the month must be exactly as the
+    /// lake writes it, and the exchange and the side are refused in lower case.
+    /// The underlying went through `Symbol::new`, which upper-cases ASCII
+    /// letters, so `NSE-nifty-01Apr20-10000-CE` parsed to the same
+    /// `InstrumentKey` as `NSE-NIFTY-01Apr20-10000-CE` and rendered back as the
+    /// upper-case name: two directory names, one identity, and a round trip
+    /// that does not return the directory it came from (D-1330).
+    #[test]
+    fn a_lower_case_underlying_is_refused_rather_than_folded_onto_the_real_one() {
+        for name in [
+            "NSE-nifty-01Apr20-10000-CE",
+            "NSE-Nifty-01Apr20-10000-CE",
+            "NSE-bankNIFTY-24Apr24-FUT",
+        ] {
+            match ContractName::parse(name) {
+                Err(ContractError::BadUnderlying { found }) => {
+                    assert!(name.contains(&found), "the refusal names {found}");
+                    assert!(found.bytes().any(|b| b.is_ascii_lowercase()));
+                }
+                other => panic!("{name} must be refused, got {other:?}"),
+            }
+        }
+        // The characters real underlyings use still parse and round-trip:
+        // digits, `&`, `_` and `-` cannot appear (the last splits the name),
+        // so only the first three are driven.
+        for name in [
+            "NSE-M&M-25Apr24-FUT",
+            "NSE-BAJAJ_AUTO-25Apr24-FUT",
+            "NSE-NIFTY50-25Apr24-FUT",
+        ] {
+            let c = ContractName::parse(name).expect("an upper-case underlying parses");
             assert_eq!(c.to_string(), name);
         }
     }

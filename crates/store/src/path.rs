@@ -354,13 +354,13 @@ impl Timeframe {
     ///
     /// The operator's gap-leg rule reads *yesterday's last candle* against
     /// *today's first candle*, and three minutes is the rung it is written for.
-    /// It is also the coarsest rung that divides the session cleanly: the fold
-    /// grid is anchored at IST midnight and the open is 555 minutes past it, so
-    /// a rung aligns with 09:15 exactly when it divides 555. One, three, five
-    /// and fifteen do. **Thirty and sixty do not** — 555/30 = 18.5 — which
-    /// leaves their first bar of the day a 15- and 45-minute stub. A rule that
-    /// names "the first candle" means something different on those two rungs,
-    /// and the difference is not a rounding error.
+    /// Its first bar of the day is a full bar on any grid: the open is 555
+    /// minutes past IST midnight and three divides 555, so a grid counted from
+    /// midnight and one counted from the open coincide. `pull::fold` counts
+    /// from the open, so every intraday rung it writes — thirty and sixty
+    /// included — begins the day at 09:15. A short bar, where a rung leaves
+    /// one, is the session's LAST, and which rungs leave one depends on the
+    /// venue's session length (D-0956).
     pub const MINUTE_3: Self = Self {
         secs: 180,
         name: "3min",
@@ -402,10 +402,12 @@ impl Timeframe {
 
     /// Two-minute bars.
     ///
-    /// **Does not divide 555** — 277.5 — so under a grid anchored at IST
-    /// midnight its first bar of the day would open at 09:14 and hold one
-    /// minute of trade. [`Self::aligns_with_the_open`] answers `false` for it
-    /// and every writer must ask, exactly as the thirty and sixty rungs do.
+    /// **Does not divide 555** — 277.5 — so a grid counted from IST midnight
+    /// would open the day at 09:14 with one minute of trade.
+    /// [`Self::aligns_with_the_open`] answers `false` for it. `pull::fold`
+    /// counts from the open, so the bars it files here begin at 09:15; the
+    /// predicate matters to a writer whose bars arrive on someone else's
+    /// grid (D-0956).
     ///
     /// It is in [`Self::KNOWN`] because the store's job is to have somewhere to
     /// FILE a rung, and the alignment question belongs to whoever produces the
@@ -427,7 +429,8 @@ impl Timeframe {
     /// Ten-minute bars.
     ///
     /// **Does not divide 555** — 55.5 — so the same caution as [`Self::MINUTE_2`]
-    /// applies: a midnight-anchored grid gives it a five-minute opening stub.
+    /// applies: a grid counted from midnight would give it a five-minute opening
+    /// stub, and the open-anchored grid `pull::fold` writes does not.
     pub const MINUTE_10: Self = Self {
         secs: 600,
         name: "10min",
@@ -439,15 +442,21 @@ impl Timeframe {
         name: "15min",
     };
 
-    /// Thirty-minute bars. **Leaves a 15-minute stub at the open** — 555/30 is
-    /// 18.5 — so the session's first bar is half length. See [`Self::MINUTE_3`].
+    /// Thirty-minute bars. **Does not divide 555** — 18.5 — so a grid counted
+    /// from IST midnight would open the session with a 15-minute stub stamped
+    /// 09:00. `pull::fold` counts from the open, so the bars it files here
+    /// begin at 09:15, and the 375-minute index session ends with a 15-minute
+    /// bar at 15:15. See [`Self::MINUTE_3`] and D-0956.
     pub const MINUTE_30: Self = Self {
         secs: 1_800,
         name: "30min",
     };
 
-    /// Sixty-minute bars. **Stubs at BOTH ends** — a 45-minute first bar and a
-    /// 30-minute last bar. See [`Self::MINUTE_3`].
+    /// Sixty-minute bars. **Does not divide 555** — 9.25 — so a grid counted
+    /// from IST midnight would open the session with a 45-minute stub stamped
+    /// 09:00. `pull::fold` counts from the open, so the bars it files here
+    /// begin at 09:15, and the 375-minute index session ends with a 15-minute
+    /// bar at 15:15. See [`Self::MINUTE_3`] and D-0956.
     pub const MINUTE_60: Self = Self {
         secs: 3_600,
         name: "60min",
@@ -501,12 +510,16 @@ impl Timeframe {
     /// A rung's bars align with the open exactly when its length divides this.
     pub const OPEN_MINUTES_PAST_IST_MIDNIGHT: u32 = 9 * 60 + 15;
 
-    /// Does a session's first bar on this rung start exactly at 09:15?
+    /// Does a grid counted from IST midnight on this rung land on 09:15?
     ///
-    /// False means the rung's opening bar is a stub, because the fold grid is
-    /// anchored at IST midnight rather than at the open. A rule that reads "the
-    /// first candle of the day" is reading a partial bar on those rungs, and
-    /// [`Self::MINUTE_3`] records why that matters.
+    /// Equivalently: do the midnight-counted grid and the open-counted grid
+    /// coincide at this rung? It is NOT a statement about `pull::fold`, which
+    /// counts every intraday rung from the open, so every bar it files begins
+    /// the session at 09:15 whatever this answers. False means a bar that
+    /// arrives already stamped by someone else — a vendor's bar at this rung —
+    /// could sit on either grid, and the two put the first edge at different
+    /// minutes. `pull::vendor::Granularity::store_timeframe` refuses such a bar
+    /// on that ground. D-0956.
     #[must_use]
     pub const fn aligns_with_the_open(self) -> bool {
         self.secs.is_multiple_of(60)
@@ -576,6 +589,64 @@ impl YearMonth {
     pub const fn month(self) -> u8 {
         self.month
     }
+
+    /// The month's IST span, `[from, until)` in epoch microseconds.
+    ///
+    /// # IST, because that is how a bar is assigned to a file
+    ///
+    /// `pull::ingest::months_in` files a bar under
+    /// `IstMoment::from_epoch_secs(ts).day().year_month()`, so the month `2024-06`
+    /// is 2024-06-01 00:00 IST up to, not including, 2024-07-01 00:00 IST. A UTC
+    /// span would move both edges by five and a half hours and refuse the first
+    /// 330 minutes of every month the writer legitimately sends here.
+    /// `pull::session` asserts at compile time that its offset equals
+    /// [`IST_OFFSET_SECS`], so the two cannot drift.
+    ///
+    /// # O(1)
+    ///
+    /// Two civil-to-day conversions, each a fixed handful of integer
+    /// operations; no table, no loop. Every legal month (`1970..=9999`) is
+    /// inside `i64` microseconds with five orders of magnitude to spare, so
+    /// the arithmetic cannot overflow. The constant shape is read from the
+    /// source; no bench times it, so the cost is UNVERIFIED as a measurement
+    /// (`docs/06-limits.md`, D-0915). The values are pinned by
+    /// `store::admission::the_ist_month_bounds_are_the_ones_pull_assigns`.
+    #[must_use]
+    pub const fn ist_bounds_micros(self) -> (i64, i64) {
+        let year = self.year as i64;
+        let month = self.month as i64;
+        let (next_year, next_month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
+        (
+            ist_midnight_micros(year, month),
+            ist_midnight_micros(next_year, next_month),
+        )
+    }
+}
+
+/// The IST offset from UTC, in seconds: +05:30.
+///
+/// A copy of `pull::session::IST_OFFSET_SECS`, which this crate cannot name —
+/// `pull` depends on `store`. `pull::session` pins the two equal with a
+/// compile-time assertion.
+pub const IST_OFFSET_SECS: i64 = 5 * 3_600 + 30 * 60;
+
+/// 00:00 IST on the first of `month` in `year`, in epoch microseconds.
+///
+/// Howard Hinnant's `days_from_civil`, specialised to the first of a month.
+/// Called only with `year` in `1970..=10000` and `month` in `1..=12`.
+const fn ist_midnight_micros(year: i64, month: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let shifted = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * shifted + 2) / 5;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days * 86_400 - IST_OFFSET_SECS) * 1_000_000
 }
 
 impl fmt::Display for YearMonth {

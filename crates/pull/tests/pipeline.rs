@@ -46,12 +46,15 @@
 
 use brutex_core::vendor::Vendor;
 use std::collections::HashSet;
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::mem::discriminant;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pull::archive::{self, ArchiveError, MAX_MEMBERS};
+use pull::archive::{self, ArchiveError, MAX_FINDING_BYTES, MAX_MEMBERS};
 use pull::csv::{Columns, CsvError, decode};
 use pull::fetch::{
     self, BarRequest, BarSource, FakeSource, FetchError, MAX_ROWS, ParallelArrays, RawRow,
@@ -148,7 +151,12 @@ fn every_archive_refusal_prints_a_sentence_of_its_own() {
             members: 7,
             cap: MAX_MEMBERS,
         },
-        ArchiveError::PathEscapes { path },
+        ArchiveError::PathEscapes { path: path.clone() },
+        ArchiveError::MemberTooLarge {
+            path,
+            bytes: 9,
+            cap: 8,
+        },
     ];
 
     let mut sentences = HashSet::with_capacity(cases.len());
@@ -193,6 +201,15 @@ fn every_archive_refusal_prints_a_sentence_of_its_own() {
 #[cfg(unix)]
 #[test]
 fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words() {
+    support::where_permission_binds(
+        "a_directory_that_will_not_open_is_refused_with_the_operating_systems_words",
+        a_directory_that_will_not_open_is_refused_with_the_operating_systems_words_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("UNLISTABLE");
@@ -231,6 +248,15 @@ fn a_directory_that_will_not_open_is_refused_with_the_operating_systems_words() 
 #[cfg(unix)]
 #[test]
 fn a_member_that_will_not_open_stops_the_walk_and_names_the_member() {
+    support::where_permission_binds(
+        "a_member_that_will_not_open_stops_the_walk_and_names_the_member",
+        a_member_that_will_not_open_stops_the_walk_and_names_the_member_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_member_that_will_not_open_stops_the_walk_and_names_the_member_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("UNREADABLE");
@@ -320,6 +346,119 @@ fn a_directory_past_the_member_cap_is_refused_at_the_cap() {
     );
 }
 
+/// **A CENSUS COUNTS THE MEMBERS IT REJECTS AGAINST THE SAME CAP.** D-0725.
+///
+/// [`archive::read_dir_reporting`] keeps a member that will not decode as a
+/// finding and walks on. The cap compared only the members that had decoded,
+/// so a folder of malformed files was read to its end, past [`MAX_MEMBERS`],
+/// and kept one finding for every one of them.
+///
+/// Every even-numbered member is empty and decodes to no rows; every odd one
+/// is one field where five are declared, and is rejected. Either kind alone
+/// stays under the cap, so only a count of both reaches it. Which kind the
+/// walk meets first is the filesystem's order, and the number of members seen
+/// when the cap is reached does not depend on it.
+#[test]
+fn a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects() {
+    let scratch = Scratch::new("CENSUSCAP");
+    let dir = scratch.root.join("ARCHIVE");
+    fs::create_dir_all(&dir).expect("a scratch archive");
+    for i in 0..=MAX_MEMBERS {
+        let body = if i % 2 == 0 { "" } else { "x\n" };
+        fs::write(dir.join(format!("F{i}.csv")), body).expect("a member");
+    }
+
+    let refused = match archive::read_dir_reporting(&dir, Columns::TrueDataIndex) {
+        Ok((members, rejected)) => panic!(
+            "the census walked past the cap: {} decoded and {} rejected, {} \
+             members against a cap of {MAX_MEMBERS}",
+            members.len(),
+            rejected.len(),
+            members.len() + rejected.len()
+        ),
+        Err(why) => why,
+    };
+    assert_eq!(
+        refused,
+        ArchiveError::TooManyMembers {
+            members: MAX_MEMBERS,
+            cap: MAX_MEMBERS,
+        },
+        "the census stops AT the bound, its rejected members counted with the \
+         ones that decoded"
+    );
+}
+
+/// **A CENSUS FINDING KEEPS AT MOST [`MAX_FINDING_BYTES`] OF ITS REFUSAL.**
+/// D-0725.
+///
+/// A refusal that quotes a field quotes it whole, and a field is as long as
+/// its line. A finding kept the decoder's sentence whole, so its length was
+/// bounded only by the file. The one here quotes a date field of 1,000,000
+/// bytes and keeps its first [`MAX_FINDING_BYTES`] bytes and a note of how
+/// many it did not keep. A refusal that fits is kept whole, in the decoder's
+/// own words.
+#[test]
+fn a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal() {
+    let scratch = Scratch::new("FINDING");
+    let dir = scratch.root.join("ARCHIVE");
+    fs::create_dir_all(&dir).expect("a scratch archive");
+    let field = "A".repeat(1_000_000);
+    fs::write(dir.join("WIDE.csv"), format!("{field},09:15:01,1,0,0\n")).expect("a member");
+    fs::write(dir.join("SHORT.csv"), "20221003,09:15:01,38445.65\n").expect("three fields");
+
+    let (members, rejected) =
+        archive::read_dir_reporting(&dir, Columns::TrueDataIndex).expect("the census walks");
+    assert!(members.is_empty(), "neither member decodes");
+    assert_eq!(rejected.len(), 2, "both are findings");
+
+    let wide = rejected
+        .iter()
+        .find(|bad| bad.path.ends_with("WIDE.csv"))
+        .expect("the wide member is a finding");
+    let whole = CsvError::DateMalformed {
+        line: 1,
+        got: field,
+        format: DateFormat::CompactYmd,
+    }
+    .to_string();
+    let expected = format!(
+        "{} [trimmed: {} of {} bytes not kept]",
+        &whole[..MAX_FINDING_BYTES],
+        whole.len() - MAX_FINDING_BYTES,
+        whole.len()
+    );
+    // Compared without printing either side: a failure here is a sentence a
+    // million bytes long.
+    assert!(
+        wide.why == expected,
+        "the first {MAX_FINDING_BYTES} bytes of the sentence and a note of the \
+         rest; got {} bytes, ending {:?}",
+        wide.why.len(),
+        wide.why.get(wide.why.len().saturating_sub(48)..)
+    );
+    assert!(
+        wide.why.capacity() < 2 * MAX_FINDING_BYTES,
+        "and it holds no more than it shows: capacity {}",
+        wide.why.capacity()
+    );
+
+    let short = rejected
+        .iter()
+        .find(|bad| bad.path.ends_with("SHORT.csv"))
+        .expect("the short member is a finding");
+    assert_eq!(
+        short.why,
+        CsvError::FieldCount {
+            line: 1,
+            got: 3,
+            want: 5,
+        }
+        .to_string(),
+        "a refusal under the cap is kept whole, in the decoder's own words"
+    );
+}
+
 // ===========================================================================
 // crate::csv — the refusals, and the arms the shipped layouts do not take
 // ===========================================================================
@@ -349,6 +488,10 @@ fn every_csv_refusal_prints_a_sentence_of_its_own() {
         CsvError::TooManyRows {
             rows: MAX_ROWS,
             cap: MAX_ROWS,
+        },
+        CsvError::HeaderMismatch {
+            got: "NOT A HEADER".to_owned(),
+            want: pull::csv::GDFL_HEADER,
         },
     ];
 
@@ -1284,6 +1427,77 @@ fn a_member_that_cannot_be_stored_is_named_and_the_run_carries_on() {
         !done.balances(),
         "a run with a failed member does not balance, whatever the arithmetic \
          says"
+    );
+}
+
+/// **A MEMBER THAT WILL NOT DECODE REFUSES THE FOLDER BEFORE ANY BAR IS
+/// WRITTEN, EVEN WHEN IT SORTS LAST.** D-0720.
+///
+/// `archive::read_dir` holds every decoded member until it returns, and
+/// `ingest::from_dir` writes nothing until then. That is why a folder walk's
+/// memory is every row of the folder rather than one file's, and this is the
+/// property the accumulation pays for: a complete member that sorts FIRST is
+/// not written ahead of a malformed one that sorts LAST.
+///
+/// The second run, over the same folder with the malformed member removed,
+/// is the control. It stores the complete member's 375 bars, so the empty
+/// store in the first run is the refusal's doing and not the fixture's.
+#[test]
+fn a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written() {
+    use std::fmt::Write as _;
+
+    let scratch = Scratch::new("SORTSLAST");
+    let mut complete = String::new();
+    for minute in 555..930 {
+        writeln!(
+            complete,
+            "20221003,{:02}:{:02}:00,38445.65,0,0",
+            minute / 60,
+            minute % 60
+        )
+        .expect("fixture string");
+    }
+    let dir = folder_of(
+        &scratch,
+        &[
+            ("AAAA", &complete),
+            ("ZZZZ", "20221003,09:15:01,38445.65\n"),
+        ],
+    );
+    let store = store_of(&scratch);
+    let request = request();
+
+    let refused =
+        pull::ingest::from_dir(&dir, &store, plan_over(&request, "NSE", PriceScale::Paisa))
+            .expect_err("three fields is not five");
+    assert!(
+        matches!(refused, ArchiveError::MemberMalformed { ref path, .. }
+            if path.ends_with("ZZZZ.csv")),
+        "the refusal names the member that sorts last: {refused}"
+    );
+    let written: Vec<PathBuf> = fs::read_dir(&store)
+        .expect("the store root lists")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    assert!(
+        written.is_empty(),
+        "nothing reached the store, not even the member that sorts first: \
+         {written:?}"
+    );
+
+    fs::remove_file(dir.join("ZZZZ.csv")).expect("remove the malformed member");
+    let done = pull::ingest::from_dir(&dir, &store, plan_over(&request, "NSE", PriceScale::Paisa))
+        .expect("the complete member alone ingests");
+    assert_eq!(
+        done.bars_stored, 375,
+        "the control stores the complete member"
+    );
+    assert!(
+        fs::read_dir(&store)
+            .expect("the store root lists")
+            .next()
+            .is_some(),
+        "and the control writes into the store"
     );
 }
 

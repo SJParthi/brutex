@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -108,10 +108,8 @@ const EVIDENCE_BASE_VALUES_BYTES: usize = 340;
 const EVIDENCE_STATISTICS_OFFSET: usize = RUNNER_HEADER_BYTES + EVIDENCE_BASE_VALUES_BYTES;
 const EVIDENCE_WALK_OFFSET: usize = 800;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () =
     assert!(DECISION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_ADMISSION_V3_DECISION_BYTES);
@@ -4567,9 +4565,32 @@ fn read_fixed_at<const N: usize>(
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationAdmissionV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Admission V3 fixed record: {why}"))
+    append_with_rollback(file, raw, Write::write_all)
+}
+
+/// Appends one fixed record, and on a write error (ENOSPC, EIO) truncates the
+/// file back to the length it had before this record. Without that a partial
+/// `write_all` left a ragged tail, and every later open, read-only included,
+/// refused the file's already committed authorities as "ragged length".
+fn append_with_rollback(
+    file: &mut File,
+    raw: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), PopulationAdmissionV3Refusal> {
+    let end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("cannot append Admission V3 fixed record: {why}"))?;
+    let Err(why) = write(file, raw) else {
+        return Ok(());
+    };
+    match file.set_len(end) {
+        Ok(()) => Err(format!(
+            "cannot append Admission V3 fixed record: {why}; truncated back to {end} bytes"
+        )),
+        Err(rollback) => Err(format!(
+            "cannot append Admission V3 fixed record: {why}; truncation back to {end} bytes also failed: {rollback}"
+        )),
+    }
 }
 
 fn open_root_directory(
@@ -6619,5 +6640,53 @@ mod tests {
             PopulationAdmissionV3Ledger::open_read(&linked.path().join("ledger-link"), bounds(),)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_partial_append_error_truncates_back_and_committed_authority_stays_readable() {
+        let prepared = prepared();
+        let root = TestRoot::new("partial-append-error");
+        persist_population_admission_v3(root.path(), bounds(), &prepared)
+            .expect("persist committed fixture");
+        let raw = encode_decision(prepared.decisions.first().expect("first decision"))
+            .expect("encode decision");
+        for file_name in [DECISION_FILE, COMPLETION_FILE] {
+            let path = root.path().join(file_name);
+            let before = std::fs::read(&path).expect("read committed bytes");
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open committed file");
+            let refusal = append_with_rollback(&mut file, &raw, |file, raw| {
+                file.write_all(&raw[..raw.len() / 2])?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed write must refuse");
+            assert!(
+                refusal.contains("injected short write") && refusal.contains("truncated back"),
+                "refusal `{refusal}` must name the write error and the rollback"
+            );
+            drop(file);
+            assert_eq!(
+                std::fs::read(&path).expect("reread committed bytes"),
+                before,
+                "{file_name} must hold exactly its committed records"
+            );
+            let reader = PopulationAdmissionV3Ledger::open_read(root.path(), bounds())
+                .expect("committed authority stays readable");
+            assert!(
+                reader
+                    .reopen_structural_receipt(&prepared.source.block_id)
+                    .expect("look up committed receipt")
+                    .is_some()
+            );
+        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join(DECISION_FILE))
+            .expect("open for untouched write");
+        append_with_rollback(&mut file, &raw, |_, _| Ok(())).expect("a clean write succeeds");
     }
 }

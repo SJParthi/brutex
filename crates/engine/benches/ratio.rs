@@ -342,12 +342,13 @@ fn support_costs_the_same_per_bar_at_every_depth() -> bool {
     ok
 }
 
-/// `n` distinct offered positions, pre-sized as production k=1 pre-sizes them.
+/// `n` distinct offered positions, pre-sized as production k=1 pre-sizes them
+/// and filled through the production [`engine::primitives::offer`].
 fn offered_of(n: usize) -> std::collections::HashSet<u32> {
     let mut set = std::collections::HashSet::with_capacity(n);
     let end = u32::try_from(n).unwrap_or(u32::MAX);
     for position in 0..end {
-        set.insert(position);
+        engine::primitives::offer(&mut set, position);
     }
     set
 }
@@ -360,6 +361,11 @@ fn offered_of(n: usize) -> std::collections::HashSet<u32> {
 /// Production performs it only at k=1: `offered` is a pre-sized `HashSet<u32>`
 /// and `insert` returning false rejects a repeated position. At k≥2 the prefix
 /// join is injective and there is no candidate-dedup table to benchmark.
+///
+/// The insert is [`engine::primitives::offer`], the function
+/// `Ladder::first_level` itself calls, not a bench-local `insert` that only
+/// resembles it: until D-0924 this row built and probed its own set, so an O(n)
+/// regression in the production operation would have left it green.
 ///
 /// So this varies that exact production-shaped table and nothing else: 1,000 /
 /// 10,000 / 100,000 already accepted positions, followed by repeated insertion
@@ -385,7 +391,7 @@ fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
         let total = once_ps(|| {
             let mut rejected = 0_usize;
             for _ in 0..REPS {
-                if !black_box(&mut *set).insert(black_box(0)) {
+                if !engine::primitives::offer(black_box(&mut *set), black_box(0)) {
                     rejected = rejected.saturating_add(1);
                 }
             }
@@ -419,6 +425,9 @@ fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
 /// pushes that fit in already allocated storage, using the exact `Itemset`
 /// element type production retains.
 ///
+/// The push is [`engine::primitives::append`], the function the batch drain
+/// itself calls per frequent candidate (D-0924), not a bench-local `push`.
+///
 /// The vector is allocated before the timer and cleared between trials. That
 /// keeps allocator behavior out of an append measurement and matches a live
 /// level after its pre-sizing step. It does **not** prove an individual push is
@@ -434,7 +443,7 @@ fn result_append_costs_the_same_however_many_are_held() -> bool {
         let total = once_ps(|| {
             out.clear();
             for _ in 0..n {
-                out.push(black_box(one));
+                engine::primitives::append(&mut out, black_box(one));
             }
             black_box(out.len())
         });
@@ -466,42 +475,108 @@ fn result_append_costs_the_same_however_many_are_held() -> bool {
 /// measured. An audit found it; that is exactly the defect CI gate 12 exists to
 /// catch, and it was written while fixing gate-12 defects.
 ///
+/// # And then it measured a stand-in, which is the same defect again
+///
+/// The first version of this row timed `a.union(b).popcount()` over a
+/// bench-local vector, under a comment saying that was "exactly as
+/// `next_level` does". It was not: production performs no popcount per pair,
+/// and what it does perform -- the subset prune and the meaning prune -- was
+/// never timed. Since D-0924 the row walks the production per-pair screen
+/// through [`engine::primitives::JoinProbe`], over frontiers indexed by the
+/// production `JoinIndex`.
+///
 /// The budget is in pair iterations rather than seconds because seconds are a
 /// claim about a machine. That only works if a pair costs the same everywhere in
-/// the walk, which is what this measures: a mask union and a popcount, against a
-/// frontier ten times larger. If the per-pair cost drifted with frontier size the
-/// budget would mean different amounts of work at different depths, and a bound
-/// that changes meaning is not a bound.
+/// the walk at a given depth, which is what this measures: every 2-subset of 15
+/// positions (105 masks, 455 pairs) against every 2-subset of 45 (990 masks,
+/// 14,190 pairs), all k=3 candidates with every subset frequent, so each pair
+/// performs the union, its one non-parent subset probe and the meaning prune.
+/// The per-pair cost DOES grow with depth, through the subset prune; that is
+/// C-E-12's row and `docs/06-limits.md`'s, not a defect here.
 fn one_join_pair_costs_the_same_at_every_frontier_width() -> bool {
-    let pair_ps = |width: usize| -> u128 {
-        // A frontier of `width` distinct single-bit masks, joined pairwise
-        // exactly as `next_level` does: union, then popcount.
-        let frontier: Vec<ConditionMask> = (0..width)
-            .map(|i| {
-                let bit = u32::try_from(i).unwrap_or(0) % ConditionMask::BITS;
-                ConditionMask::default().with_bit(bit)
+    let pair_ps = |positions: u32| -> Option<u128> {
+        let frontier: Vec<Itemset> = (0..positions)
+            .flat_map(|low| {
+                (low.saturating_add(1)..positions).map(move |high| Itemset {
+                    mask: ConditionMask::default().with_bit(low).with_bit(high),
+                    hits: 1,
+                })
             })
             .collect();
-        let pairs = u128::try_from(width.saturating_mul(width.saturating_sub(1)) / 2)
-            .unwrap_or(1)
-            .max(1);
+        let probe = engine::primitives::JoinProbe::try_new(&frontier).ok()?;
+        let (pairs, survivors) = probe.screen_every_pair();
+        // C(m, 3) pairs, each one a k=3 candidate whose every subset is in the
+        // frontier. Anything else means the fixture is not measuring a pair.
+        let m = u64::from(positions);
+        let expected = m * m.saturating_sub(1) * m.saturating_sub(2) / 6;
+        if pairs != expected || survivors == 0 || probe.width() != frontier.len() {
+            return None;
+        }
+        let reps = (2_000_000 / pairs).max(1);
         let total = once_ps(|| {
-            let mut acc = 0_u32;
-            for (i, a) in frontier.iter().enumerate() {
-                for b in frontier.iter().skip(i.saturating_add(1)) {
-                    acc = acc.wrapping_add(black_box(a).union(black_box(b)).popcount());
-                }
+            let mut acc = 0_u64;
+            for _ in 0..reps {
+                acc = acc.wrapping_add(black_box(&probe).screen_every_pair().1);
             }
             black_box(acc)
         });
-        total / pairs
+        Some(total / u128::from(pairs.saturating_mul(reps)).max(1))
     };
 
-    ratio(
-        "C-E-08 one join pair: 100-wide frontier -> 1,000-wide",
-        pair_ps(100),
-        pair_ps(1_000),
-    )
+    match (pair_ps(15), pair_ps(45)) {
+        (Some(narrow), Some(wide)) => ratio(
+            "C-E-08 one join pair: 105-wide frontier -> 990-wide",
+            narrow,
+            wide,
+        ),
+        _ => refuse("C-E-08: the join probe did not walk the pairs the fixture builds"),
+    }
+}
+
+/// C-E-12 — one subset-prune probe costs the same at every depth.
+///
+/// # Why this row exists, and why it is a per-PROBE row
+///
+/// The subset prune makes one `MaskSet` probe per set bit of a candidate
+/// below its two parents, so a candidate that survives costs `k - 2` probes:
+/// the per-candidate cost is Theta(k), bounded by the 384-bit mask but not
+/// constant. It had no row, and its own doc called it both "O(1)" and "a
+/// 384-probe loop". `docs/06-limits.md` now names the Theta(k); this row pins
+/// the part that must not drift, the cost of ONE probe, from k=4 (2 probes) to
+/// k=320 (318 probes). The frontier is every (k-1)-subset of one k-set, so the
+/// join forms exactly one pair and every probe hits. The ratio is one-sided
+/// because the union and the meaning prune are fixed work amortised over more
+/// probes at larger k. D-0924.
+fn one_subset_probe_costs_the_same_at_every_depth() -> bool {
+    let probe_ps = |k: u32| -> Option<u128> {
+        let set = (0..k).fold(ConditionMask::default(), ConditionMask::with_bit);
+        let frontier: Vec<Itemset> = (0..k)
+            .map(|dropped| Itemset {
+                mask: set.without_bit(dropped),
+                hits: 1,
+            })
+            .collect();
+        let probe = engine::primitives::JoinProbe::try_new(&frontier).ok()?;
+        if probe.screen_every_pair() != (1, 1) {
+            return None;
+        }
+        let probes = u64::from(k.saturating_sub(2)).max(1);
+        let reps = (2_000_000 / probes).max(1);
+        let total = once_ps(|| {
+            let mut acc = 0_u64;
+            for _ in 0..reps {
+                acc = acc.wrapping_add(black_box(&probe).screen_every_pair().1);
+            }
+            black_box(acc)
+        });
+        Some(total / u128::from(probes.saturating_mul(reps)).max(1))
+    };
+    match (probe_ps(4), probe_ps(320)) {
+        (Some(shallow), Some(deep)) => {
+            growth_ratio("C-E-12 one subset probe: k=4 -> k=320", shallow, deep)
+        }
+        _ => refuse("C-E-12: the join probe did not form the single all-frequent pair"),
+    }
 }
 
 /// C-E-09 — the live support path is flat across the mask's entire width.
@@ -721,6 +796,7 @@ fn main() {
     ok &= support_costs_the_same_whether_bars_match_or_not();
     ok &= fingerprinted_support_costs_the_same_whether_bars_match_or_not();
     ok &= one_join_pair_costs_the_same_at_every_frontier_width();
+    ok &= one_subset_probe_costs_the_same_at_every_depth();
     ok &= duplicate_rejection_costs_the_same_however_much_is_seen();
     ok &= result_append_costs_the_same_however_many_are_held();
     ok &= live_support_is_flat_across_the_entire_mask_width();

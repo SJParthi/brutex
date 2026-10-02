@@ -4,8 +4,11 @@
 //! midnight lands on 09:15 only where the rung divides 555 — three, five and
 //! fifteen do; two, ten, thirty and sixty do not. Under that anchor each of
 //! those four opened the day with a bar stamped BEFORE the open holding part of
-//! the session, which is why `store_timeframe` refused thirty and sixty and why
-//! the operator's ladder — 2, 3, 5, 10, 15, 30, 60 — could not exist.
+//! the session, which is why `store_timeframe` first refused thirty and sixty
+//! and why the operator's ladder — 2, 3, 5, 10, 15, 30, 60 — could not exist.
+//! `store_timeframe` still refuses a VENDOR's bar at thirty and sixty, for a
+//! different reason that `store_timeframe_follows_the_fold_anchor` below pins:
+//! the vendor's grid at those rungs is UNVERIFIED. D-0956.
 //!
 //! `crate::fold` anchors an intraday rung at the OPEN. This asserts it against a
 //! real session rather than against the arithmetic that motivated it, because a
@@ -422,5 +425,327 @@ fn venue_hours_do_not_override_an_exceptional_calendar_session() {
                 .all(|why| why.contains("exceptional session"))
         );
         assert!(!diagnostics.is_empty());
+    }
+}
+
+/// IST midnight of `day`, as a UTC epoch second.
+fn midnight_of(day: pull::session::Day) -> i64 {
+    i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS
+}
+
+/// **A DAY WHOSE SESSION LENGTH IS UNMEASURED IS WITHHELD ONCE, FOR ITS OWN
+/// REASON.** GAP12-12, D-0955.
+///
+/// A pre-2025 Muhurat is `OpenLengthUnmeasured`: the exchange traded and the
+/// calendar does not state for how long, so no minute count can complete a
+/// bucket. Each bucket used to be reported as "incomplete or invalid minute
+/// coverage ... historical gap refill requires a versioned store repair", which
+/// `ingest::derive` rewrites into "restore complete minute source" — a repair
+/// that does not exist, once per bucket. Checked at every width from one minute
+/// to an hour, with a regular day after it whose buckets must still complete.
+#[test]
+fn an_unmeasured_length_day_is_withheld_once_with_its_own_reason() {
+    use pull::calendar::DayKind;
+    use pull::session::Day;
+    let muhurat = Day::new(2020, 11, 14).unwrap();
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(muhurat.days_from_epoch())),
+        DayKind::OpenLengthUnmeasured,
+        "the premise: the calendar withholds this day's length"
+    );
+    // Sixty minutes from 18:15 IST, which is the shape the 2025 Muhurat had.
+    let evening = midnight_of(muhurat) + (18 * 60 + 15) * 60;
+    let mut bars: Vec<_> = (0..60).map(|m| minute(evening + m * 60)).collect();
+    // A regular session after it: 2020-11-17, a Tuesday.
+    let regular = midnight_of(Day::new(2020, 11, 17).unwrap()) + 555 * 60;
+    bars.extend((0..SESSION_MINUTES).map(|m| minute(regular + m * 60)));
+    for secs in [60_u32, 300, 900, 3600] {
+        let (complete, diagnostics) =
+            pull::fold::complete_minutes(&bars, Bucket::of_secs(secs).unwrap()).unwrap();
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "{secs}s: one sentence for the day, not one per bucket: {diagnostics:?}"
+        );
+        let why = &diagnostics[0];
+        assert!(why.contains("unmeasured"), "{secs}s: {why}");
+        assert!(
+            !why.contains("incomplete") && !why.contains("historical gap refill"),
+            "{secs}s: not a coverage fault, so nothing for derive to rewrite into a repair: {why}"
+        );
+        assert!(
+            complete
+                .iter()
+                .all(|bar| bar.ts_micros >= regular * 1_000_000),
+            "{secs}s: nothing from the unmeasured day is certified"
+        );
+        assert_eq!(
+            complete.iter().map(|bar| bar.volume).sum::<i64>(),
+            SESSION_MINUTES,
+            "{secs}s: and the regular day after it still completes whole"
+        );
+    }
+    // A single bar on that day is still one sentence; no bars is none.
+    let (_, one) = pull::fold::complete_minutes(&bars[..1], Bucket::of_secs(300).unwrap()).unwrap();
+    assert_eq!(one.len(), 1, "{one:?}");
+    let (none, nothing) = pull::fold::complete_minutes(&[], Bucket::of_secs(300).unwrap()).unwrap();
+    assert!(none.is_empty() && nothing.is_empty());
+}
+
+/// **BARS ON A MEASURED CLOSED DAY ARE A STORE DEFECT, NAMED ONCE.** GAP12-12.
+///
+/// A Sunday with a whole session's minutes on it: the calendar says the
+/// exchange did not trade, so the bars are a defect in what was stored, not a
+/// hole a refill could close.
+#[test]
+fn bars_on_a_closed_day_are_named_once_as_a_store_defect() {
+    use pull::calendar::DayKind;
+    use pull::session::Day;
+    let sunday = Day::new(2025, 7, 6).unwrap();
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(sunday.days_from_epoch())),
+        DayKind::Closed,
+        "the premise: a measured weekend"
+    );
+    let open = midnight_of(sunday) + 555 * 60;
+    let bars: Vec<_> = (0..SESSION_MINUTES)
+        .map(|m| minute(open + m * 60))
+        .collect();
+    for secs in [60_u32, 300, 3600] {
+        let (complete, diagnostics) =
+            pull::fold::complete_minutes(&bars, Bucket::of_secs(secs).unwrap()).unwrap();
+        assert!(complete.is_empty(), "{secs}s: nothing certified");
+        assert_eq!(diagnostics.len(), 1, "{secs}s: {diagnostics:?}");
+        assert!(
+            diagnostics[0].contains("closed") && diagnostics[0].contains("store defect"),
+            "{secs}s: {}",
+            diagnostics[0]
+        );
+        assert!(!diagnostics[0].contains("historical gap refill"));
+    }
+}
+
+/// **A BUCKET'S VOLUME THAT LEAVES `i64` IS REFUSED, NOT CAPPED.**
+/// ET-bars-candles-store-4, D-0955.
+///
+/// The fold refused a timestamp it could not shift, on the stated ground that
+/// saturating files a wrong bar, and then saturated the volume sum. Both ends of
+/// the range, the exact boundary, and two full buckets that must not interact.
+#[test]
+fn a_bucket_whose_volume_leaves_i64_is_refused_not_capped() {
+    let five = Bucket::of_secs(300).unwrap();
+    let pair = |first: i64, second: i64| {
+        let mut a = minute(OPEN_UTC);
+        a.volume = first;
+        let mut b = minute(OPEN_UTC + 60);
+        b.volume = second;
+        vec![a, b]
+    };
+    for (first, second) in [(i64::MAX, 1), (1, i64::MAX), (i64::MIN, -1), (-1, i64::MIN)] {
+        assert_eq!(
+            fold(&pair(first, second), five),
+            Err(pull::fold::FoldError::VolumeOverflow {
+                at: 1,
+                bucket: OPEN_UTC * 1_000_000
+            }),
+            "{first} + {second}"
+        );
+        assert!(
+            pull::fold::fold_from_bars(&pair(first, second), five, Bucket::MINUTE).is_err(),
+            "the minute path refuses too"
+        );
+        assert!(
+            matches!(
+                pull::fold::complete_minutes(&pair(first, second), five),
+                Err(pull::fold::FoldError::VolumeOverflow { .. })
+            ),
+            "and so does derivation's completeness fold"
+        );
+    }
+    let rendered = pull::fold::FoldError::VolumeOverflow { at: 1, bucket: 7 }.to_string();
+    assert!(
+        rendered.contains("Refused rather than saturated") && rendered.contains("an i64"),
+        "{rendered}"
+    );
+    // Exactly at either end is a legal sum, and stays exact.
+    assert_eq!(
+        fold(&pair(i64::MAX - 1, 1), five).unwrap()[0].volume,
+        i64::MAX
+    );
+    assert_eq!(
+        fold(&pair(i64::MIN + 1, -1), five).unwrap()[0].volume,
+        i64::MIN
+    );
+    // Two buckets each holding i64::MAX never meet.
+    let mut apart = pair(i64::MAX, i64::MAX);
+    apart[1].ts_micros = (OPEN_UTC + 300) * 1_000_000;
+    let out = fold(&apart, five).unwrap();
+    assert_eq!(
+        out.iter().map(|bar| bar.volume).collect::<Vec<_>>(),
+        [i64::MAX; 2]
+    );
+}
+
+/// **`store_timeframe` FOLLOWS THE FOLD'S REAL ANCHOR, not a comment about it.**
+///
+/// The `const` block beside `store_timeframe` asserted the 555-minute
+/// arithmetic and kept passing when `crate::fold` moved its intraday anchor
+/// from IST midnight to the open, so the refusal of a vendor's 30min and 60min
+/// bars went on citing a fold stub that no longer existed. This runs the fold.
+///
+/// For every intraday rung the store ships a directory for:
+///
+/// 1. the fold's first bar of a session is stamped at 09:15 — the anchor, read
+///    from the fold's output rather than from its constants; and
+/// 2. `store_timeframe` files a VENDOR's bar at the rung exactly when the grid
+///    counted from IST midnight has an edge at that same first stamp — that
+///    is, when a vendor's bar lands on a stored edge whichever of the two
+///    grids it was stamped on. Where they differ, the vendor's grid is
+///    UNVERIFIED and the bar is refused. D-0956.
+///
+/// A rung the store ships no directory for must answer `None`, and the daily
+/// rung, which is not on an intraday grid, must answer `Some`.
+#[test]
+fn store_timeframe_follows_the_fold_anchor() {
+    use pull::vendor::{Granularity, Grid};
+    use store::path::Timeframe;
+
+    let midnight_utc = OPEN_UTC - i64::from(Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT) * 60;
+    let mut refused = Vec::new();
+    let mut intraday_seen = 0_usize;
+    for rung in Granularity::ALL {
+        let directory = Timeframe::KNOWN
+            .iter()
+            .any(|known| known.as_str() == rung.dir());
+        match rung.grid() {
+            Grid::Intraday(secs) if directory => {
+                intraday_seen += 1;
+                let width = i64::from(secs);
+                let bucket = Bucket::of_secs(secs).expect("a real width");
+                let out = fold(&session(), bucket).expect("a session in order");
+                let first = out.first().expect("a session yields bars").ts_micros / 1_000_000;
+                assert_eq!(
+                    first, OPEN_UTC,
+                    "{rung}: the fold's first bar must begin at the 09:15 open"
+                );
+                let midnight_edge = midnight_utc + (first - midnight_utc).div_euclid(width) * width;
+                let grids_agree = midnight_edge == first;
+                assert_eq!(
+                    rung.store_timeframe().is_some(),
+                    grids_agree,
+                    "{rung}: a vendor's bar is filable exactly when the midnight-\
+                     counted grid and the fold's open-anchored grid share the \
+                     first edge (midnight edge {}s before the open)",
+                    first - midnight_edge
+                );
+                if !grids_agree {
+                    refused.push(rung);
+                }
+            }
+            Grid::Intraday(_) | Grid::Event | Grid::Weekly => {
+                assert_eq!(
+                    rung.store_timeframe(),
+                    None,
+                    "{rung}: no store directory, so nowhere to file it"
+                );
+            }
+            Grid::Daily => assert!(rung.store_timeframe().is_some(), "{rung}"),
+        }
+    }
+    // Not vacuous: the seven intraday rungs with a directory were all asked,
+    // and the refusal is exactly the two whose grids disagree.
+    assert_eq!(intraday_seen, 7, "1s, 1, 3, 5, 15, 30 and 60 minutes");
+    assert_eq!(refused, [Granularity::Minute30, Granularity::Hour1]);
+}
+
+/// **WHICH RUNG ENDS THE DAY SHORT IS A PROPERTY OF THE VENUE, NOT THE RUNG.**
+///
+/// The docs said only 2, 10, 30 and 60 minutes are ragged. That is true of a
+/// 375-minute session and nothing else: the equity-derivatives session from
+/// 2026-08-03 runs 385 minutes, where 3 and 15 minutes end with a 1- and a
+/// 10-minute bar too, and the continuous session of a cash security eligible
+/// for the closing auction runs 360, where nothing is ragged. The length here
+/// is read from the venue row (`Venue::hours_on`, and the dated cash close),
+/// never written down, so any doc table has to be derived the same way.
+/// D-0956.
+#[test]
+fn derived_rung_stub_minutes_follow_the_venue_session() {
+    use pull::fold::complete_minutes_with_cash_schedule;
+    use pull::session::Day;
+    use pull::vendor::Venue;
+
+    let pre = Day::new(2026, 7, 31).unwrap();
+    let post = Day::new(2026, 8, 3).unwrap();
+    // (venue, day, cash eligible for the closing auction, session minutes the
+    // venue row must produce). The last column is the claim under test; the
+    // computation below takes the length from the row and checks it against it.
+    let cases = [
+        (Venue::NseIndex, pre, false, 375_i64),
+        (Venue::NseIndex, post, false, 375),
+        (Venue::NseDerivatives, pre, false, 375),
+        (Venue::NseDerivatives, post, false, 385),
+        (Venue::NseCash, post, false, 375),
+        (Venue::NseCash, post, true, 360),
+    ];
+    for (venue, day, eligible, claimed) in cases {
+        let hours = venue.hours_on(day).unwrap();
+        let mut schedule = pull::cash_auction::Schedule::default();
+        schedule.insert(day, eligible).unwrap();
+        let close = if venue == Venue::NseCash {
+            i64::from(schedule.close(day).unwrap())
+        } else {
+            i64::from(hours.close_minute())
+        };
+        let length = close - i64::from(hours.open_minute());
+        assert_eq!(
+            length, claimed,
+            "{venue} on {day:?}: the venue row's length"
+        );
+        let midnight = i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS;
+        let open = midnight + i64::from(hours.open_minute()) * 60;
+        let bars: Vec<_> = (0..length).map(|m| minute(open + m * 60)).collect();
+        for width in [1_i64, 2, 3, 5, 10, 15, 30, 60] {
+            let bucket = Bucket::of_secs(u32::try_from(width * 60).unwrap()).unwrap();
+            let (complete, diagnostics) =
+                complete_minutes_with_cash_schedule(&bars, bucket, venue, Some(&schedule)).unwrap();
+            assert!(
+                diagnostics.is_empty(),
+                "{venue} {width}min: {diagnostics:?}"
+            );
+            let stub = length % width;
+            let last_minutes = if stub == 0 { width } else { stub };
+            let last = complete.last().unwrap();
+            assert_eq!(
+                last.volume, last_minutes,
+                "{venue} on {day:?} at {width}min: the last bar holds {last_minutes} minute(s)"
+            );
+            assert_eq!(
+                last.ts_micros,
+                (open + (length - last_minutes) * 60) * 1_000_000,
+                "{venue} on {day:?} at {width}min: the short bar is the LAST, stamped on the grid"
+            );
+            assert_eq!(
+                i64::try_from(complete.len()).unwrap(),
+                length / width + i64::from(stub != 0),
+                "{venue} at {width}min"
+            );
+        }
+    }
+
+    // THE TWO CASES THE OLD TABLE GOT WRONG, named rather than only computed.
+    let hours = Venue::NseDerivatives.hours_on(post).unwrap();
+    let midnight = i64::from(post.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS;
+    let open = midnight + i64::from(hours.open_minute()) * 60;
+    let bars: Vec<_> = (0..385).map(|m| minute(open + m * 60)).collect();
+    for (width, stub, opens_at) in [(3_u32, 1_i64, 15 * 60 + 39), (15, 10, 15 * 60 + 30)] {
+        let (complete, _) = pull::fold::complete_minutes_for_venue(
+            &bars,
+            Bucket::of_secs(width * 60).unwrap(),
+            Venue::NseDerivatives,
+        )
+        .unwrap();
+        let last = complete.last().unwrap();
+        assert_eq!(last.volume, stub, "{width}min on the 385-minute session");
+        assert_eq!(last.ts_micros, (midnight + opens_at * 60) * 1_000_000);
     }
 }

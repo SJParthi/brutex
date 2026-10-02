@@ -18,10 +18,12 @@
 //!
 //! * a candidate that **hits** against one that **misses**, because a branchless
 //!   test must not be faster when the answer is no;
-//! * a miss in **word 0** against a miss in **word 5**, because an early-exit
-//!   loop would return sooner on the first and that is precisely the
-//!   implementation `hits` refuses to be;
-//! * a **1-bit** candidate against a **234-bit** one, because the cost must not
+//! * a miss in **word 0** against a miss in **word 5**, because a branchless
+//!   `hits` reads all six words whichever one fails. This pair is evidence
+//!   only: an early-exit word loop measured 1.09x to 2.06x across words 1 to 5,
+//!   under the 3.0x ceiling, so it passes this row. The guard against that loop
+//!   is the source-shape test named below (D-0917);
+//! * a **1-bit** candidate against one requiring every live bit (`LIVE`), because the cost must not
 //!   depend on how much the candidate requires — that is what lets the Apriori
 //!   ladder walk to any depth without the per-test cost growing with `k`.
 //!
@@ -82,23 +84,29 @@ fn cost_ps<T>(reps: u32, mut op: impl FnMut() -> T) -> u128 {
 
 /// Prints one measurement and returns whether it stayed under the ceiling.
 ///
-/// A zero baseline is a FAILURE and not a pass. An operation that timed at zero
-/// picoseconds was optimised away, and a ratio against nothing is not a
+/// Both directions breach, as in `crates/engine/benches/ratio.rs`. An input that
+/// is CHEAPER than the baseline is as much a data dependence as one that is
+/// dearer, and a one-sided check passed every such case (D-0917).
+///
+/// A zero on either side is a FAILURE and not a pass. An operation that timed
+/// at zero picoseconds was optimised away, and a ratio against nothing is not a
 /// measurement — reporting it as ok is the fallback `CLAUDE.md` §4 bans.
 fn ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
-    if base_ps == 0 {
-        println!("  {label:<58} UNMEASURABLE — the 1x baseline timed at zero");
+    if base_ps == 0 || at_ps == 0 {
+        println!("  {label:<58} UNMEASURABLE — a side timed at zero");
         return false;
     }
-    let permille = at_ps * 1_000 / base_ps;
-    let ok = permille <= CEILING_PERMILLE;
+    let up = at_ps * 1_000 / base_ps;
+    let down = base_ps * 1_000 / at_ps;
+    let ok = up.max(down) <= CEILING_PERMILLE;
     println!(
-        "  {label:<58} {:>8} ps -> {:>8} ps   ratio {}.{:03}x  {}",
+        "  {label:<58} {:>8} ps -> {:>8} ps   ratio {}.{:03}x  {} {}",
         base_ps,
         at_ps,
-        permille / 1_000,
-        permille % 1_000,
-        if ok { "ok" } else { "BREACH" }
+        up / 1_000,
+        up % 1_000,
+        if ok { "ok" } else { "BREACH" },
+        if down > up { "(cheaper)" } else { "" },
     );
     ok
 }
@@ -182,14 +190,15 @@ fn all_live_bits() -> ConditionMask {
 ///
 /// The rows above measure the MASK. They say nothing about the TABLE, and the
 /// two are different operations on different data — one is six words of
-/// register arithmetic, the other is a bounds-checked index into 280 rows of
-/// static memory.
+/// register arithmetic, the other is a bounds-checked index into `TABLE`'s
+/// rows (370 today) of static memory.
 ///
 /// # Why the index has to vary, and why a miss is included
 ///
-/// A direct index costs the same everywhere; **a scan does not**. Looking up
-/// position 0, position 279 and a position past the end is what separates them:
-/// a linear search would be flat at 0 and linear at 279, and would walk the
+/// A direct index costs the same everywhere; **an early-exit scan does not**.
+/// Looking up position 0, the last allocated position (`NEXT_FREE - 1`) and a
+/// position past the end is what separates them: an early-exit linear search
+/// would be cheap at 0 and dear at the last position, and would walk the
 /// whole table before answering the miss. That is the only shape this row can
 /// usefully refuse, so it is the shape it measures.
 fn a_condition_lookup_costs_the_same_wherever_it_lands() -> bool {
@@ -257,12 +266,24 @@ fn a_hit_and_a_miss_cost_the_same() -> bool {
 
 /// C-V-02 — WHERE the miss happens does not change the cost.
 ///
-/// This is the measurement that would catch an early-exit loop, which is the
-/// implementation `hits` exists to not be. A loop returning on the first
-/// non-matching word is fast on a candidate that fails in word 0 and slow on
-/// one that fails in word 5, so the sweep's cost would depend on which
-/// conditions a combination happens to require — a constant-time guarantee that
-/// holds only on average, which §3 rule 4 does not accept.
+/// A loop returning on the first non-matching word is cheaper on a candidate
+/// that fails in word 0 than on one that fails in word 5, so the sweep's cost
+/// would depend on which conditions a combination happens to require — a
+/// constant-time guarantee that holds only on average, which §3 rule 4 does not
+/// accept.
+///
+/// **This row is not the guard against that loop, and says so.** Audit findings
+/// ET-o1-proof-coverage-3 and -13 replaced the body of `hits` with an early-exit
+/// word loop and measured 1.093x, 1.275x, 1.560x, 1.895x and 2.056x for words 1
+/// to 5: rising with the word, but under [`CEILING_PERMILLE`]. Six words of
+/// register arithmetic are too cheap for the exit to cost more than the call
+/// around it, and a ceiling tight enough to refuse 2.06x would be inside a
+/// shared runner's noise, so Gate 8 would flake. The guard is the source-shape
+/// unit test `vocab::mask::hits_does_the_same_work_for_every_input`, which
+/// refuses `while`, `for`, `loop`, `return`, `if`, `match`, `&&` and `||` in the
+/// body. This row is evidence that the compiled function agrees (D-0917).
+/// [`ratio`] breaches in both directions, so a word that became CHEAPER than
+/// word 0 fails here too.
 fn a_miss_costs_the_same_in_every_word() -> bool {
     let bar = ConditionMask::ZERO;
     let first = one_bit_in_word(0);
@@ -291,7 +312,7 @@ fn a_miss_costs_the_same_in_every_word() -> bool {
 /// C-V-03 — HOW MUCH the candidate requires does not change the cost.
 ///
 /// The claim §6 rests on. The Apriori ladder walks upward from k=1 with no
-/// depth parameter, and that is only affordable if evaluating a k=234
+/// depth parameter, and that is only affordable if evaluating a k=|LIVE|
 /// combination costs what a k=1 one costs. A per-bit cost would make the
 /// ladder's total work quadratic in depth and the absent parameter would be a
 /// performance bug rather than a design decision.

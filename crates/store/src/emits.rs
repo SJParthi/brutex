@@ -304,11 +304,11 @@ fn drive_commit_refused(_root: &Path) -> Handed {
 
 /// A verification asked of a file carrying no checksums: `note_unverifiable`.
 ///
-/// No writer in this workspace sets [`FLAG_CHECKSUMS`] — `docs/04-invariants.md`
-/// S-06 and S-06b — so the operator who first trips this is the one running the
-/// first build that turns checksums on, against files every build before it
-/// wrote. Their file is not corrupt; it predates the flag, and the line is the
-/// only place that distinction survives.
+/// `store::file::initialise` sets [`FLAG_CHECKSUMS`] on every month it
+/// creates, so only a direct `block::verify` of a flag-clear header — a month
+/// an earlier build wrote — trips this; `docs/04-invariants.md` S-06b,
+/// corrected by D-0957. That file is not corrupt; it predates the flag, and the
+/// line is the only place that distinction survives.
 fn drive_block_unverifiable(_root: &Path) -> Handed {
     let plain = Header::genesis(SYMBOL, 60, 0)
         .advance(1, T0, T0)

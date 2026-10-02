@@ -63,9 +63,11 @@ fn main() -> std::process::ExitCode {
     // HIDES a failure; this one names it, above the report, on the same screen.
     let where_events_went = cli::install_log();
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`, never `args`: the latter panics on an argument that is not
+    // valid UTF-8, exiting 101 before the line below can say where events
+    // went. The library refuses such a word as a misuse instead. D-0998.
     let mut out = String::new();
-    let code = cli::run_durable(&args, &mut out);
+    let code = cli::run_durable_os(std::env::args_os().skip(1), &mut out);
     // PRINTED ON SUCCESS TOO, and that is the change. It used to print only on
     // failure, so a run whose events landed somewhere `/logs` does not read
     // looked exactly like a run that was fully observable. `install_log`'s doc

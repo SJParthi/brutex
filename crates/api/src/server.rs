@@ -2393,7 +2393,7 @@ async fn gaps_json(
         )
     };
 
-    let asked = match Addressed::parse(query) {
+    let mut asked = match Addressed::parse(query) {
         Ok(asked) => asked,
         Err(why) => return refuse(why),
     };
@@ -2486,7 +2486,21 @@ async fn gaps_json(
             unreadable: Vec::new(),
         }
     } else {
-        peer_calendar(&site, &asked)
+        // OFF THE ASYNC WORKERS, AND ADMITTED: the peer vote derives one
+        // calendar per peer series on a miss. W1-api2-11, D-0950.
+        let peers_site = std::sync::Arc::clone(&site);
+        match crate::detail::run_calendar(move || {
+            let peers = peer_calendar(&peers_site, &asked);
+            (asked, peers)
+        })
+        .await
+        {
+            Ok((back, peers)) => {
+                asked = back;
+                peers
+            }
+            Err(why) => return calendar_admission_refused(&why),
+        }
     };
     let mut months = Vec::with_capacity(span.len());
     for month in &span {
@@ -4520,8 +4534,13 @@ fn store_body(
 ///
 /// # Cost
 ///
-/// O(1) per entry, and the walk is the ask: a scrub of a vendor is a scrub of
-/// every month it claims. Nothing is sorted and nothing is read whole.
+/// One bar file opened per held entry (its header and two records read), and
+/// the walk is the ask: a scrub of a vendor is a scrub of every month it
+/// claims. Nothing is sorted. The walk itself is `Manifest::newest`, which
+/// builds a set over the manifest's whole append log, so a request is
+/// `O(log length)` in memory plus `O(E_v)` file opens. This said "O(1) per entry
+/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-0953;
+/// `docs/06-limits.md`'s D-0953 section.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -5077,6 +5096,9 @@ pub struct Site {
     pub census: CensusCache,
     /// Encoded responses for one exact immutable census snapshot.
     census_wire: store_wire::Cache,
+    /// `/audit.json`'s per-feed month rollups for one exact census snapshot.
+    /// See [`crate::audit_json::RollupCache`]. D-0732.
+    pub(crate) audit_rollup: crate::audit_json::RollupCache,
     /// The run the operator started, if one is in flight or has just ended.
     ///
     /// # Why it is state on the site and not a global
@@ -5134,9 +5156,14 @@ pub struct Site {
     reload_lock: std::sync::Mutex<()>,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
     pub censuses: Vec<census::VendorCensus>,
-    /// The coverage grid's instrument axis — every series the censuses hold,
-    /// plus the two the engine sweeps. Sorted, so a row's ordinal is stable
-    /// across reloads and restarts.
+    /// The coverage grid's instrument axis AT STARTUP — every series the boot
+    /// censuses held, plus the two the engine sweeps. Sorted, so a row's
+    /// ordinal is stable across reloads and restarts.
+    ///
+    /// **No request draws from it.** `/store?show=gaps` built its axis here,
+    /// so a series first pulled after boot had no row until a restart. It now
+    /// takes `census::held_series` over the request's own fresh census. UC-20,
+    /// D-0953.
     pub series: Vec<census::Series>,
     /// Folders holding CSVs, walked once at startup rather than per render.
     pub folders: Vec<String>,
@@ -5160,6 +5187,13 @@ pub struct Site {
     /// [`Site::load`], which only the served process calls — and left
     /// [`Broker::Refused`] everywhere else.
     pub broker: Broker,
+    /// Where a pull reads its broker credential from.
+    ///
+    /// Parameter Store in every constructor. A scripted source exists only
+    /// under `cfg(test)`, and it is what lets the shipped pull loops be driven
+    /// against a loopback vendor that rejects a token, with no AWS involved.
+    /// See [`crate::credential_law`]. D-0948.
+    pub credentials: crate::credential_law::Credentials,
     /// Where the manifests were read from, named on the page so an absence is
     /// actionable rather than mysterious.
     pub store_root: PathBuf,
@@ -5182,14 +5216,11 @@ pub struct Site {
     pub autopilot: autopilot::Control,
     /// When the manifests above were read, in epoch seconds.
     ///
-    /// **A counter on this page is as old as this process.** The censuses are
-    /// read once into an `Arc<Site>` — D-0039, and re-reading them per request
-    /// is the O(entries) cost that split exists to remove — so a pull performed
-    /// by *this running server* is on disk and in the journal while these
-    /// counters still say what they said at startup. That is a real staleness
-    /// and it is now said out loud on `/store` rather than left for an operator
-    /// to discover: [`store_html`] compares this against the newest audit
-    /// record, which is one 256-byte read.
+    /// [`store_html`] compared this against the newest audit record and warned
+    /// that its counters were this process's startup read. Every half of that
+    /// page now reads the census fresh (D-0352, and D-0953 for the gaps view
+    /// and the census notes), so the warning had become false and is gone.
+    /// UC-20. This stays the time the boot snapshot above was taken.
     pub loaded_at: i64,
 }
 
@@ -5292,10 +5323,12 @@ impl Site {
             .parsed
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = held.generation.wrapping_add(1);
         *held = Parsed {
             read,
             at: parsed_at,
             targets,
+            generation,
         };
         Ok(summary)
     }
@@ -5337,9 +5370,10 @@ impl Site {
         // is: once, at startup. See census::held_entries.
         let entries = census::held_entries(&censuses);
         Self {
-            calendars: std::sync::Mutex::new(std::collections::HashMap::new()),
+            calendars: crate::calendar_of::Cache::default(),
             census: std::sync::Mutex::new(None),
             census_wire: store_wire::Cache::default(),
+            audit_rollup: crate::audit_json::RollupCache::default(),
             budgets: std::sync::Mutex::new(feed_budgets()),
             // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
             // holding one would answer `/pull/run.json` for a run nobody asked
@@ -5357,6 +5391,7 @@ impl Site {
                 // stamp would answer a different one.
                 at: std::time::SystemTime::now(),
                 targets,
+                generation: 0,
             }),
             censuses,
             series,
@@ -5366,6 +5401,7 @@ impl Site {
             // on, so a test constructing a `Site` any other way cannot reach a
             // broker by omission.
             broker: Broker::Refused,
+            credentials: crate::credential_law::Credentials::Ssm,
             store_root,
             // NOT STARTED HERE, AND PAUSED UNLESS ASKED. This is the controls
             // and the status only; the task that acts on them is spawned by
@@ -5525,6 +5561,14 @@ pub struct Parsed {
     pub at: std::time::SystemTime,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
+    /// Zero at load, and moved by every [`Site::reparse`] that swaps a universe
+    /// in. A refused reparse leaves it alone, as it leaves the universe.
+    ///
+    /// A counter rather than [`Self::at`], because two parses can carry the
+    /// same timestamp on a coarse or stepped clock and a counter cannot.
+    /// `autopilot::SeriesCache` compares it to know whether its work lists are
+    /// still the universe's (W1-api1-1, D-0949).
+    pub generation: u64,
 }
 
 /// How many instruments each spot target names.
@@ -6162,6 +6206,41 @@ fn land_bodies_scheduled(
     // Snapshot before any source append. Observations explain refusals only;
     // Runtime preserves the static authority even when all index feeds agree.
     let observed_calendar = ingestion_observations(landed, site);
+    land_bodies_observed(
+        landed,
+        site,
+        cash_schedule,
+        bodies,
+        observed_calendar.as_deref(),
+    )
+}
+
+/// [`land_bodies_scheduled`], with the index observation already taken.
+///
+/// # Why the observation is a parameter
+///
+/// `land_spot` lands one instrument one body at a time, and it called
+/// [`land_bodies_scheduled`] per body, so [`ingestion_observations`] ran per
+/// body too. Each body's append rewrites the vendor's manifest, which moves the
+/// stamp `census_now` is keyed on. So every body after the first missed the
+/// census cache, read every vendor manifest whole, sorted and deduplicated
+/// every entry, and then missed the calendar cache and derived the index
+/// calendar again over the same months. On a first fill that is every body.
+/// W1-api5-0, D-0953.
+///
+/// `land_spot` now takes the observation ONCE per instrument, before its first
+/// body appends, and hands it to every body. That is still a snapshot before
+/// any source append, which is what the observation must be. A body's own
+/// window never needs an earlier body's bars: bodies are disjoint windows, and
+/// the observation is diagnostic, never schedule authority. The cost that
+/// remains per instrument is written in `docs/06-limits.md`'s D-0953 section.
+fn land_bodies_observed(
+    landed: &BrokerWindow,
+    site: &Site,
+    cash_schedule: Option<&pull::cash_auction::Schedule>,
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+    observed_calendar: Option<&pull::calendar::Calendar>,
+) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
         // THE INSTRUMENT'S OWN CLASS, WHICH DECIDES THE SESSION CLOCK.
@@ -6185,7 +6264,7 @@ fn land_bodies_scheduled(
     };
     let plan = pull::ingest::Plan {
         cash_schedule,
-        calendar: observed_calendar.as_deref().map_or_else(
+        calendar: observed_calendar.map_or_else(
             pull::calendar::Runtime::default,
             pull::calendar::Runtime::from_observed,
         ),
@@ -6528,6 +6607,15 @@ pub(crate) struct BrokerRun {
     /// on [`CREDENTIAL_DEAD`], a control character no sentence can forge, and
     /// lands here. D-0351.
     pub credential_dead: bool,
+    /// Why the run stopped over its credential, decided by a comparison.
+    ///
+    /// `Some` only when the run actually stopped on it: the vendor rejected the
+    /// token and the one re-read returned the same value or failed, or the
+    /// credential configuration is unusable. `credential_dead` above records
+    /// that a vendor refused. This records what the re-read found, and it is
+    /// the only thing `autopilot::FeedState::observe` may halt a feed on as a
+    /// dead credential. `CLAUDE.md` §8, GAP2-36 and GAP2-37, D-0948.
+    pub credential_stop: Option<crate::credential_law::CredentialStop>,
 }
 
 impl BrokerRun {
@@ -6544,6 +6632,25 @@ impl BrokerRun {
             why: why.clone(),
         });
         self.refused.push(why);
+    }
+
+    /// Reads a credential death out of a window that landed its first chunks.
+    ///
+    /// `prefix_or_refusal` keeps the chunks that landed and puts the refusal in
+    /// `unfetched`, marker first. Unread, this lost the verdict: the next
+    /// instrument was sent the dead token, and the marker reached the
+    /// operator's page as a control character. Strips the marker and answers
+    /// whether the vendor rejected the credential. GAP2-36, D-0948.
+    fn lift_credential_death(&mut self, landed: &mut BrokerWindow) -> bool {
+        let Some(unfetched) = landed.unfetched.as_mut() else {
+            return false;
+        };
+        if !unfetched.starts_with(CREDENTIAL_DEAD) {
+            return false;
+        }
+        *unfetched = unfetched.trim_start_matches(CREDENTIAL_DEAD).to_owned();
+        self.credential_dead = true;
+        true
     }
 
     /// Preserve partial writes, but never certify an interrupted basket.
@@ -7270,6 +7377,32 @@ fn observed_cash_source_days(
         .collect()
 }
 
+/// One member's windows into the store, its shortfall and every landing failure
+/// on the rolling log. Split from `broker_run` to keep that loop under the
+/// workspace line ceiling; the sequence is unchanged.
+async fn land_broker_member(
+    landed: &BrokerWindow,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    site: &Site,
+    dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
+    month: &str,
+    asked: &ingest::SpotRequest,
+) -> pull::ingest::Ingested {
+    let mut landed_one = land_spot(landed, instrument, site, dated).await;
+    note_short_window(
+        &landed.instrument,
+        landed.unfetched.as_deref(),
+        &mut landed_one,
+    );
+    // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A FAILURE, and
+    // it is a different one from a refusal — the socket worked and the store did
+    // not. Both belong on the page; only naming the first would hide the disk.
+    for failure in &landed_one.failures {
+        note_member_failure(failure, month, asked, site);
+    }
+    landed_one
+}
+
 async fn land_spot(
     landed: &BrokerWindow,
     instrument: &brutex_core::instrument::InstrumentKey,
@@ -7277,13 +7410,20 @@ async fn land_spot(
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
 ) -> pull::ingest::Ingested {
     let mut done = pull::ingest::Ingested::default();
+    // ONE OBSERVATION PER INSTRUMENT, NOT ONE PER BODY. Each body's append
+    // moves the manifest stamp, so a per-body observation re-read every vendor
+    // manifest and re-derived the index calendar once per body. Taken here,
+    // before the first append, it is the same snapshot-before-append the
+    // observation has always been. See `land_bodies_observed`. W1-api5-0, D-0953.
+    let observed_calendar = ingestion_observations(landed, site);
     for bodies in landed.bodies.chunks(1) {
         match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
-            Ok(schedule) => done.absorb(land_bodies_scheduled(
+            Ok(schedule) => done.absorb(land_bodies_observed(
                 landed,
                 site,
                 schedule.as_ref(),
                 bodies,
+                observed_calendar.as_deref(),
             )),
             Err(why) => {
                 let _noted = telemetry::emit(
@@ -7522,6 +7662,9 @@ pub(crate) async fn broker_run(
     // pays the whole 5xx ladder to learn what the previous one already found
     // out. Counted here, three of them agreeing is the vendor being down.
     let mut vendor_down_streak = 0u32;
+    // THE RUN'S CREDENTIAL MEMORY: what the last request carried and what is
+    // known to be dead. See `credential_law::Watch`.
+    let mut watch = crate::credential_law::Watch::default();
     for (index, instrument) in targets.iter().enumerate() {
         // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
         // month is five to thirty-seven minutes on this store, and an operator
@@ -7553,7 +7696,8 @@ pub(crate) async fn broker_run(
                 since: std::time::Instant::now(),
             });
         });
-        match broker_window(asked, instrument, site).await {
+        // Whether the vendor rejected the credential on this instrument.
+        let rejected = match broker_window(asked, instrument, site, &mut watch).await {
             Err(why) => {
                 // THE MARKER IS READ AND REMOVED HERE, so it never reaches an
                 // operator and never reaches the journal. One instrument that
@@ -7593,8 +7737,12 @@ pub(crate) async fn broker_run(
                 site.autopilot
                     .fail(&instrument.underlying.to_string(), &month, &why);
                 out.record_refusal(instrument.underlying.as_str(), why);
+                marked.credential_dead
             }
-            Ok(landed) => {
+            Ok(mut landed) => {
+                // A DEATH AFTER THE FIRST CHUNK ARRIVES HERE, NOT ABOVE. See
+                // `BrokerRun::lift_credential_death`.
+                let rejected = out.lift_credential_death(&mut landed);
                 // ANY SUCCESS CLEARS THE BREAKER. The vendor answered, so
                 // whatever the previous instruments met was not an outage —
                 // and a streak that survived a success would eventually halt a
@@ -7602,21 +7750,16 @@ pub(crate) async fn broker_run(
                 vendor_down_streak = breaker_next(vendor_down_streak, false);
                 out.reached += 1;
                 out.origin.clone_from(&landed.origin);
-                let mut landed_one = land_spot(&landed, instrument, site, &mut dated).await;
-                note_short_window(
-                    &landed.instrument,
-                    landed.unfetched.as_deref(),
-                    &mut landed_one,
-                );
-                // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A
-                // FAILURE, and it is a different one from a refusal — the
-                // socket worked and the store did not. Both belong on the page;
-                // only naming the first would hide the disk.
-                for failure in &landed_one.failures {
-                    note_member_failure(failure, &month, asked, site);
-                }
+                let landed_one =
+                    land_broker_member(&landed, instrument, site, &mut dated, &month, asked).await;
                 out.total.absorb(landed_one);
+                rejected
             }
+        };
+        // `CLAUDE.md` §8: A REJECTED TOKEN IS RE-READ ONCE, HERE. See
+        // `credential_halts`, which says what this loop used to do instead.
+        if credential_halts(&mut watch, site, asked.feed, rejected, &mut out, index).await {
+            break;
         }
         // THE BREAKER, AFTER BOTH ARMS SO EITHER CAN HAVE MOVED IT.
         if breaker_trips(vendor_down_streak) {
@@ -7636,6 +7779,70 @@ pub(crate) async fn broker_run(
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     note_run_finished(&out, out.total.balances(), claimed_run);
     out
+}
+
+/// `CLAUDE.md` §8 for one spot instrument: re-read once after a rejection, and
+/// say whether the run must stop.
+///
+/// The loop used to go straight to the next instrument. That instrument's own
+/// read returned the same dead value, so the vendor was sent it again, once per
+/// instrument, for the whole universe (GAP2-36). Now exactly one re-read
+/// follows each rejection. A rotated value lets the run continue, and the next
+/// instrument reads its own credential as before. The same value, a re-read
+/// that fails, or a configuration fault recorded by `broker_window` stops the
+/// run, and the stop names how many instruments were not asked. It is never a
+/// loop and never a mint. D-0948.
+async fn credential_halts(
+    watch: &mut crate::credential_law::Watch,
+    site: &Site,
+    feed: pull::vendor::Feed,
+    rejected: bool,
+    out: &mut BrokerRun,
+    index: usize,
+) -> bool {
+    if rejected {
+        let _rotated_or_halted = watch.reread(&site.credentials, feed).await;
+    }
+    let Some((stop, why)) = watch.stop() else {
+        return false;
+    };
+    out.credential_stop = Some(*stop);
+    let done = index.saturating_add(1);
+    out.stopped = Some(format!(
+        "{why} Stopped after {done} of {} instruments; the {} after it were not asked.",
+        out.attempted,
+        out.attempted.saturating_sub(done)
+    ));
+    true
+}
+
+/// One rejection on an F&O walk: re-read once, and either hand the walk a wire
+/// carrying the rotated token or say why it must stop.
+///
+/// Shared by `roll_every` and `fno_land`, which both used to send the token
+/// the vendor had just rejected to every remaining cell or contract (GAP2-36).
+///
+/// # Errors
+///
+/// The verdict and the reason, when the walk must stop. D-0948.
+async fn reread_wire(
+    watch: &mut crate::credential_law::Watch,
+    site: &Site,
+    feed: pull::vendor::Feed,
+    given: &Wire,
+    rotated: &mut Option<Wire>,
+) -> Result<(), (crate::credential_law::CredentialStop, String)> {
+    match watch.reread(&site.credentials, feed).await {
+        crate::credential_law::Reread::Rotated(source) => {
+            *rotated = Some(Wire {
+                source: (*source).sharing(shared_governor(site, feed)),
+                spec: given.spec,
+                store_vendor: given.store_vendor,
+            });
+            Ok(())
+        }
+        crate::credential_law::Reread::Halted(stop, why) => Err((stop, why)),
+    }
 }
 
 /// Exact recovery unit, using the existing mapping, credential, rate-limit,
@@ -9682,18 +9889,28 @@ async fn read_credential(
     config: &pull::config::CredentialConfig,
     vendor: brutex_core::vendor::Vendor,
     auth: pull::vendor::Auth,
-) -> Result<pull::http::Credential, String> {
-    let stamp = pull::ssm::now_stamp().map_err(|why| why.detail)?;
-    let read = async |field: &str| -> Result<String, String> {
-        let path = config
-            .path_for(vendor, field)
-            .map_err(|why| format!("the parameter path for {field:?} could not be built: {why}"))?;
+) -> Result<pull::http::Credential, crate::credential_law::Unreadable> {
+    use crate::credential_law::Unreadable;
+    // CLASSED, NOT FLATTENED. A clock that cannot sign and a path that cannot
+    // be built are configuration; Parameter Store's own answer is classed by
+    // its kind, so a timeout or a 5xx is transport and an `AccessDenied` is
+    // configuration. GAP2-37: a flattened string sent all of them to one halt.
+    let stamp = pull::ssm::now_stamp().map_err(|why| Unreadable::configuration(why.detail))?;
+    let read = async |field: &str| -> Result<String, Unreadable> {
+        let path = config.path_for(vendor, field).map_err(|why| {
+            Unreadable::configuration(format!(
+                "the parameter path for {field:?} could not be built: {why}"
+            ))
+        })?;
         pull::ssm::get_parameter(identity, config.region(), &path.to_string(), &stamp)
             .await
             .map_err(|why| {
-                format!(
-                    "this feed's credential field {field:?} could not be read: {}",
-                    why.detail
+                Unreadable::of_secret(
+                    why.kind,
+                    format!(
+                        "this feed's credential field {field:?} could not be read: {}",
+                        why.detail
+                    ),
                 )
             })
     };
@@ -9738,20 +9955,24 @@ async fn read_credential(
 pub(crate) async fn credentialed_source(
     feed: pull::vendor::Feed,
     spec: &pull::vendor::HttpSpec,
-) -> Result<(pull::http::HttpSource, brutex_core::vendor::Vendor), String> {
+) -> Result<(pull::http::HttpSource, brutex_core::vendor::Vendor), crate::credential_law::Unreadable>
+{
+    use crate::credential_law::Unreadable;
     let Some(home) = std::env::var_os("HOME") else {
-        return Err("HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned());
+        return Err(Unreadable::configuration(
+            "HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned(),
+        ));
     };
     let config_path = pull::config::default_config_path(std::path::Path::new(&home));
     let config = pull::config::CredentialConfig::load(&config_path).map_err(|why| {
-        format!(
+        Unreadable::configuration(format!(
             "the credential configuration at {} is not usable: {why}",
             config_path.display()
-        )
+        ))
     })?;
 
-    let identity =
-        pull::ssm::AwsIdentity::discover().map_err(|why| format!("no AWS identity: {why}"))?;
+    let identity = pull::ssm::AwsIdentity::discover()
+        .map_err(|why| Unreadable::configuration(format!("no AWS identity: {why}")))?;
 
     // WHICH BROKER, FROM THE REQUEST — not hardcoded. `CLAUDE.md`: adding a
     // vendor is a row in `pull::vendor`, and a route that names one defeats
@@ -9774,14 +9995,14 @@ pub(crate) async fn credentialed_source(
     // nowhere to file its bars yet", and saying the first would misdirect. The
     // message names the real gap.
     let vendor = feed.store_vendor().ok_or_else(|| {
-        format!(
+        Unreadable::configuration(format!(
             "{} has no store prefix. Bars are filed under bars/<vendor>/, and \
              filing one broker's prices under another's path destroys the \
              per-vendor independence D-0019 exists for — so nothing is pulled \
              until {} has a row in brutex_core::vendor::Vendor.",
             feed.display(),
             feed.display()
-        )
+        ))
     })?;
     let credential = read_credential(&identity, &config, vendor, spec.auth).await?;
 
@@ -9791,7 +10012,8 @@ pub(crate) async fn credentialed_source(
     // `crate::vendor`, not an edit here, and this is the line that keeps that
     // true — Groww and Dhan differ in six of those fields and share every line
     // of code below.
-    let source = pull::http::HttpSource::new(*spec, credential).map_err(|why| why.to_string())?;
+    let source = pull::http::HttpSource::new(*spec, credential)
+        .map_err(|why| Unreadable::configuration(why.to_string()))?;
 
     Ok((source, vendor))
 }
@@ -9800,6 +10022,7 @@ async fn broker_window(
     asked: &ingest::SpotRequest,
     instrument: &brutex_core::instrument::InstrumentKey,
     site: &Site,
+    watch: &mut crate::credential_law::Watch,
 ) -> Result<BrokerWindow, String> {
     // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
     // THAT ANSWERS "IS THIS A BROKER".
@@ -9898,7 +10121,19 @@ async fn broker_window(
     let feed = asked.feed;
     // THE CREDENTIAL AND THE SOCKET, in one place shared with expired F&O
     // discovery. The sequence this replaced is unchanged; it moved.
-    let (source, vendor) = credentialed_source(feed, &spec).await?;
+    //
+    // AND THE RUN'S WATCH SEES BOTH OUTCOMES. A configuration fault stops the
+    // run instead of failing every remaining instrument the same way, and a
+    // value this run already saw rejected is refused BEFORE the socket.
+    // `CLAUDE.md` §8, GAP2-36, D-0948.
+    let (source, vendor) = match site.credentials.source(feed).await {
+        Ok(read) => read,
+        Err(failed) => {
+            watch.unreadable(feed, &failed);
+            return Err(failed.why);
+        }
+    };
+    watch.admit(feed, &source)?;
     // AND IT ASKS THIS SITE'S GOVERNOR, not one of its own.
     //
     // `HttpSource::new` builds a private governor from the descriptor, which is
@@ -10901,9 +11136,24 @@ struct FnoLanded {
     priced: PricedCount,
     /// The first few reasons, verbatim, capped at five.
     why: Vec<String>,
+    /// Why the walk stopped over its credential, when it did. `CLAUDE.md` §8,
+    /// D-0948.
+    credential_stop: Option<crate::credential_law::CredentialStop>,
 }
 
 impl FnoLanded {
+    /// Counts one refused contract and keeps its reason, without the marker.
+    /// Answers whether the vendor rejected the credential, which `fno_land`
+    /// must re-read before the next contract. D-0948.
+    fn record_refusal(&mut self, refusal: &str) -> bool {
+        self.failed = self.failed.saturating_add(1);
+        if self.why.len() < 5 {
+            self.why
+                .push(refusal.trim_start_matches(CREDENTIAL_DEAD).to_owned());
+        }
+        refusal.starts_with(CREDENTIAL_DEAD)
+    }
+
     /// A failed census or derived rung does not undo a committed source append.
     /// Exact retries offer bars again but commit none; count before deciding
     /// whether the contract completed and may proceed to pricing.
@@ -11096,7 +11346,14 @@ async fn fno_land(
             .map(|e| e.last_ts_micros)
     };
 
+    // `CLAUDE.md` §8 OVER THE CONTRACTS, as `roll_every` does over its cells.
+    // One re-read per rejection; a rotated value carries on and the same value
+    // stops the walk. GAP2-36, D-0948.
+    let mut watch = crate::credential_law::Watch::sending(&wire.source);
+    let mut rotated: Option<Wire> = None;
+    let given = wire;
     'contracts: for found in wanted {
+        let wire = rotated.as_ref().unwrap_or(given);
         attempted = attempted.saturating_add(1);
 
         // WHAT THIS CONTRACT STILL OWES — its months, less the ones already
@@ -11117,9 +11374,18 @@ async fn fno_land(
         let bodies = match fetched.result {
             Fetched::Bodies(bodies) => bodies,
             Fetched::ContractRefused(refusal) => {
-                out.failed = out.failed.saturating_add(1);
-                if out.why.len() < 5 {
-                    out.why.push(refusal);
+                if out.record_refusal(&refusal)
+                    && let Err((stop, why)) =
+                        reread_wire(&mut watch, site, asked.feed, given, &mut rotated).await
+                {
+                    out.credential_stop = Some(stop);
+                    out.why.insert(0, why);
+                    // EVERY CONTRACT AFTER THIS ONE WAS NOT ASKED, and each is
+                    // a contract that did not land.
+                    out.failed = out
+                        .failed
+                        .saturating_add(wanted.len().saturating_sub(attempted));
+                    break 'contracts;
                 }
                 continue;
             }
@@ -11357,9 +11623,19 @@ async fn fetch_chain_chunks(
                 bodies.push((*chunk, body));
             }
             Err(refusal) => {
+                // THE MARKER STAYS AT THE HEAD. `with_retry` writes
+                // `CREDENTIAL_DEAD` first; prefixing the symbol in front of it
+                // buried the verdict mid-string, where no reader looks, so
+                // `fno_land` sent the dead token to every remaining contract.
+                let dead = refusal.starts_with(CREDENTIAL_DEAD);
+                let refusal = refusal.trim_start_matches(CREDENTIAL_DEAD);
                 return FetchedBatch {
                     rows_read,
-                    result: Fetched::ContractRefused(format!("{}: {refusal}", found.vendor_symbol)),
+                    result: Fetched::ContractRefused(format!(
+                        "{}{}: {refusal}",
+                        if dead { CREDENTIAL_DEAD } else { "" },
+                        found.vendor_symbol
+                    )),
                 };
             }
         }
@@ -11731,7 +12007,7 @@ async fn fno_walk(
     // this point would be one permit spent on nothing: `credentialed_source`
     // reads AWS Parameter Store, not the vendor, so no vendor request happens
     // between here and the walk.
-    let wire = match credentialed_source(asked.feed, &spec).await {
+    let wire = match site.credentials.source(asked.feed).await {
         Ok((source, store_vendor)) => Wire {
             // THE SHARED GOVERNOR, and THIS is the path that made the split
             // cost something. A 429 on the discovery walk halved the source's
@@ -11742,12 +12018,12 @@ async fn fno_walk(
             spec,
             store_vendor,
         },
-        Err(why) => {
+        Err(failed) => {
             return page.say(
                 facts,
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 audit::Outcome::NotStarted,
-                &why,
+                &failed.why,
             );
         }
     };
@@ -12992,6 +13268,48 @@ struct Rolled {
     priced: PricedCount,
 }
 
+impl Rolled {
+    /// Folds one cell's answer into the walk, and answers whether the vendor
+    /// rejected the credential on it, which `roll_every` must re-read before
+    /// the next cell. The marker never reaches a stored reason. D-0948.
+    fn absorb(&mut self, one: Result<Self, String>) -> bool {
+        match one {
+            Ok(done) => {
+                self.rows_read = self.rows_read.saturating_add(done.rows_read);
+                self.stored = self.stored.saturating_add(done.stored);
+                self.declined = self.declined.saturating_add(done.declined);
+                self.priced.absorb_count(&done.priced);
+                // A RUN THAT PARTLY FAILED IS NOT AN `Err`, and its failures
+                // must not vanish into `Ok`.
+                //
+                // `roll_one` used to `?` on the first group it could not name
+                // or file, so every such failure arrived here as `Err(said)`
+                // and was counted. Now that it counts and continues — which is
+                // what stops one bad strike discarding 251 good ones — those
+                // counts live INSIDE the `Ok`, and dropping them here would
+                // trade a run that died loudly for one that succeeds quietly
+                // while having lost groups.
+                self.failed = self.failed.saturating_add(done.failed);
+                for said in done.why {
+                    if self.why.len() < pull::pricing::REASONS_KEPT {
+                        self.why.push(said);
+                    }
+                }
+                false
+            }
+            Err(said) => {
+                let dead = said.starts_with(CREDENTIAL_DEAD);
+                note_run_failure(
+                    &mut self.failed,
+                    &mut self.why,
+                    said.trim_start_matches(CREDENTIAL_DEAD).to_owned(),
+                );
+                dead
+            }
+        }
+    }
+}
+
 /// The request plan belongs to the whole walk, independently of row outcomes.
 #[derive(Debug, Default, PartialEq)]
 struct RollingWalk {
@@ -12999,6 +13317,9 @@ struct RollingWalk {
     planned: usize,
     /// Acknowledged rows and failures accumulated from the planned cells.
     done: Rolled,
+    /// Why the walk stopped over its credential, when it did. The cells after
+    /// that point were not asked. `CLAUDE.md` §8, D-0948.
+    credential_stop: Option<crate::credential_law::CredentialStop>,
 }
 
 /// How many rows priced, how many refused, and why.
@@ -13286,7 +13607,17 @@ async fn fetch_rolling(
         wire.source.post_json(endpoint, body.clone())
     })
     .await
-    .map_err(|why| format!("{label}: {why}"))?;
+    // THE VERDICT TRAVELS OUT, MARKER FIRST. This flattened the refusal to its
+    // prose, so `roll_every` could not tell a dead token from a bad strike and
+    // sent the dead token to every remaining cell (GAP2-36). The marker is the
+    // spot path's own `CREDENTIAL_DEAD`, read and stripped by `roll_every`.
+    .map_err(|why| {
+        if why.credential_dead {
+            format!("{CREDENTIAL_DEAD}{label}: {why}")
+        } else {
+            format!("{label}: {why}")
+        }
+    })?;
     pull::rolling::read(&answer, rolling, option_type, wire.spec.prices)
         .map_err(|why| format!("{label}: {why}"))
 }
@@ -13595,7 +13926,14 @@ async fn roll_every(
         planned,
     );
 
-    for flag in &cadences {
+    // `CLAUDE.md` §8 OVER THE CROSS PRODUCT. The walk was built with one source
+    // and sent its token to every cell, including every cell after the vendor
+    // had rejected it (GAP2-36). A rejection now gets one re-read. A rotated
+    // value is sent to the remaining cells, and the same value or a failed
+    // re-read ends the walk here.
+    let mut watch = crate::credential_law::Watch::sending(&wire.source);
+    let mut rotated: Option<Wire> = None;
+    'cells: for flag in &cadences {
         // EVERY ORDINAL THE VENDOR SERVES. THE NARROWING IS GONE.
         //
         // This read `.take(ORDINALS_ASKED)`, a `const usize = 1` carrying the
@@ -13651,7 +13989,7 @@ async fn roll_every(
                         let one = roll_one(
                             asked,
                             site,
-                            wire,
+                            rotated.as_ref().unwrap_or(wire),
                             security_id,
                             word,
                             flag,
@@ -13664,42 +14002,28 @@ async fn roll_every(
                             last_settled,
                         )
                         .await;
-                        match one {
-                            Ok(done) => {
-                                out.rows_read = out.rows_read.saturating_add(done.rows_read);
-                                out.stored = out.stored.saturating_add(done.stored);
-                                out.declined = out.declined.saturating_add(done.declined);
-                                out.priced.absorb_count(&done.priced);
-                                // A RUN THAT PARTLY FAILED IS NOT AN `Err`, and
-                                // its failures must not vanish into `Ok`.
-                                //
-                                // `roll_one` used to `?` on the first group it
-                                // could not name or file, so every such failure
-                                // arrived here as `Err(said)` and was counted.
-                                // Now that it counts and continues — which is
-                                // what stops one bad strike discarding 251 good
-                                // ones — those counts live INSIDE the `Ok`, and
-                                // dropping them here would trade a run that
-                                // died loudly for one that succeeds quietly
-                                // while having lost groups.
-                                out.failed = out.failed.saturating_add(done.failed);
-                                for said in done.why {
-                                    if out.why.len() < pull::pricing::REASONS_KEPT {
-                                        out.why.push(said);
-                                    }
-                                }
-                            }
-                            Err(said) => {
-                                note_run_failure(&mut out.failed, &mut out.why, said);
-                            }
+                        if out.absorb(one)
+                            && reread_wire(&mut watch, site, asked.feed, wire, &mut rotated)
+                                .await
+                                .is_err()
+                        {
+                            break 'cells;
                         }
                     }
                 }
             }
         }
     }
+    let credential_stop = watch.stop().map(|(stop, why)| {
+        note_run_failure(&mut out.failed, &mut out.why, why.clone());
+        *stop
+    });
     say_walk_finished(asked, out.stored, out.failed, out.declined, planned);
-    RollingWalk { planned, done: out }
+    RollingWalk {
+        planned,
+        done: out,
+        credential_stop,
+    }
 }
 
 /// Whether this underlying had contracts on that cadence at all over the window.
@@ -13744,8 +14068,11 @@ fn cadence_has_contracts(
 ///
 /// # Cost
 ///
-/// One dated-table lookup per call, while planning and before a request is
-/// issued. The full plan and walk remain proportional to their chunk counts.
+/// A bounded number of dated-table lookups per call, while planning and before
+/// a request is issued: `costs::expiry`'s module documentation states "at most
+/// `dated::MAX_LATER_ROWS + 1` passes on the weekly one" (D-0770) and at most
+/// three table lookups on the monthly path. No input raises that bound. The
+/// full plan and walk remain proportional to their chunk counts.
 fn cadence_has_contracts_on(
     asked: &ingest::FnoRequest,
     rolling: &pull::vendor::RollingSpec,
@@ -13983,13 +14310,39 @@ async fn fno_roll(
     rolling_receipt(page, facts, done)
 }
 
+/// The receipt rows for a walk that stopped over its credential.
+///
+/// The stop is stated rather than left to be inferred from a short count. The
+/// credential fact is the same exact line the spot receipt carries, so
+/// `autopilot::credential_fault_in_page` reads the verdict rather than guessing
+/// at prose. It appears only when a re-read returned the same value. D-0948.
+fn credential_stop_facts(
+    facts: &mut Vec<(&'static str, String)>,
+    stop: Option<crate::credential_law::CredentialStop>,
+) {
+    if let Some(stop) = stop {
+        facts.push((
+            "Stopped",
+            "the walk stopped over its credential; nothing after that point was asked".to_owned(),
+        ));
+        if stop == crate::credential_law::CredentialStop::SameValue {
+            facts.push(("Credential", CREDENTIAL_FACT.to_owned()));
+        }
+    }
+}
+
 /// Render and durably record the rolling walk's independently measured counts.
 fn rolling_receipt(
     page: &FnoPage<'_>,
     mut facts: Vec<(&'static str, String)>,
     walk: RollingWalk,
 ) -> (axum::http::StatusCode, String) {
-    let RollingWalk { planned, done } = walk;
+    let RollingWalk {
+        planned,
+        done,
+        credential_stop,
+    } = walk;
+    credential_stop_facts(&mut facts, credential_stop);
     let Rolled {
         rows_read,
         stored,
@@ -14195,8 +14548,10 @@ async fn fno_report(
         settled,
         why,
         priced,
+        credential_stop,
     } = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
+    credential_stop_facts(&mut facts, credential_stop);
     // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
     // that resumes stores fewer bars than one that starts cold, and without
     // this row that difference is indistinguishable from a run that lost them.
@@ -14678,13 +15033,23 @@ pub fn store_html(
     } else {
         // The product, as before: bounded by construction, so the last page is
         // a division rather than a walk and `?page=999` clamps.
-        let total = census::grid_rows(site.series.len());
+        //
+        // THE AXIS AND THE CELLS FROM THE SAME FRESH READING AS EVERY OTHER
+        // HALF OF THIS PAGE. They came from `site.series` and `site.censuses`,
+        // both filled once in `Site::new`, so after a pull by this process the
+        // gaps view still drew the startup store: a series first pulled since
+        // boot had no row, and a month landed since boot was a hollow cell
+        // beside a vendor card counting it. UC-20, D-0953. The axis is
+        // `held_series` over this request's censuses: O(keys log keys) per
+        // `show=gaps` request, written in `docs/06-limits.md`'s D-0953 section.
+        let series = census::held_series(&censuses);
+        let total = census::grid_rows(series.len());
         let last = total.saturating_sub(1) / PAGE_ROWS;
         let page = page.min(last);
         (
             census::coverage_page(
-                &site.series,
-                &site.censuses,
+                &series,
+                &censuses,
                 today,
                 page.saturating_mul(PAGE_ROWS),
                 PAGE_ROWS,
@@ -14699,37 +15064,22 @@ pub fn store_html(
          header, and every grid cell is one hash probe",
         site.store_root.display()
     )];
-    // A COUNTER ON THIS PAGE IS AS OLD AS THIS PROCESS, and until now nothing
-    // said so. The censuses are read once into an `Arc<Site>` (D-0039), so a
-    // pull run by this very server lands on disk and in the journal while these
-    // cards still say what they said at startup. The audit journal is what
-    // makes the staleness detectable in constant time: one 256-byte read of the
-    // newest record, compared against the second the site was loaded.
+    // NO "STARTUP READ" WARNING ANY MORE, BECAUSE THERE IS NO STARTUP READ ON
+    // THIS PAGE. Two notes said a pull had run since the manifests were read
+    // and that the counters were this process's startup read. D-0352 made the
+    // rows and the vendor cards fresh, and D-0953 made the gaps view and the
+    // census notes fresh, so both notes had become false: they told the
+    // operator to restart to see what the page was already showing. UC-20.
     let journal = site.journal();
     let log = journal.look();
-    if let Some(record) = newest_record(&journal, &log)
-        && record.at_unix_secs >= site.loaded_at
-    {
-        // TWO NOTES, EACH UNDER `render::clamp`'s 160-byte ceiling. One long
-        // note would be cut mid-sentence by the renderer, and a truncated
-        // warning is a warning nobody finishes reading.
-        notes.push(format!(
-            "UNCHECKED — a pull ran at {}; these manifests were read at {}. \
-             Restart to refresh, or see /audit.",
-            ist_stamp(record.at_unix_secs),
-            ist_stamp(site.loaded_at)
-        ));
-        notes.push(
-            "The counters below are this process's startup read; re-reading them \
-             per request is the cost D-0039 removed."
-                .to_owned(),
-        );
-    }
     let trouble = journal_trouble(&log);
     if !trouble.is_empty() {
         notes.push(format!("UNAVAILABLE — audit journal {trouble}"));
     }
-    notes.extend(site.censuses.iter().map(census::VendorCensus::note));
+    // THE NOTES FROM THIS REQUEST'S CENSUSES, not `site.censuses`. The boot
+    // snapshot printed "UNAVAILABLE — no manifest" beside a fresh vendor card
+    // counting months, on every view of this page. UC-20, D-0953.
+    notes.extend(censuses.iter().map(census::VendorCensus::note));
     let mut notes = render::Notes::build(&notes);
     // The master notes ride along, because an `UNAVAILABLE` master is why the
     // grid may be down to the two swept series — but ALREADY PREPARED. Cloning
@@ -16331,8 +16681,14 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
             // address and pid into this file after taking the lock, and reading a
             // locked file is not itself a locked operation.
+            //
+            // THE FIRST LINE ONLY. A holder stamps one line. A file stamped by a
+            // build that did not cut it to its own stamp can still carry an
+            // older, longer holder's tail after that line, and quoting the whole
+            // file showed the operator a second, stale pid as though it held the
+            // store. R9-api-cx-2, D-0953.
             let held_by = std::fs::read_to_string(&path).unwrap_or_default();
-            let held_by = held_by.trim();
+            let held_by = held_by.lines().next().unwrap_or_default().trim();
             release_root(&key);
             return Err(format!(
                 "REFUSED: another brutex api is already serving this store.\n  \
@@ -16353,8 +16709,16 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     };
     // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
     // written by the instance that actually holds it.
+    //
+    // AND CUT TO THE STAMP'S OWN LENGTH. The file is opened without truncation,
+    // because truncating before the lock is held would erase a live holder's
+    // stamp. So a previous holder whose stamp was longer left its tail after
+    // this one, and the file named two pids. The length is set after the write,
+    // so a refused reader sees this stamp's line first at every moment, and the
+    // reader quotes only that line. R9-api-cx-2, D-0953.
     let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes());
+    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes())
+        .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)));
     Ok(ServeLock {
         held: Some(file),
         root: key,
@@ -18434,6 +18798,113 @@ mod tests {
         );
     }
 
+    /// **One instrument's bodies land on ONE index observation, so landing
+    /// them reads no vendor manifest when the census is warm.** W1-api5-0,
+    /// D-0953.
+    ///
+    /// `land_spot` landed each body through `land_bodies_scheduled`, which
+    /// took the observation itself. Each body's append rewrote Zerodha's
+    /// manifest and moved the census stamp, so every body after the first
+    /// missed the census cache and read every manifest whole: three reads for
+    /// four bodies here, and one per body on a real first fill. The observation
+    /// is now taken once per instrument, before the first append.
+    ///
+    /// Four one-day bodies, the first of them on the day the daily bar proves,
+    /// and a fifth that is EMPTY: an empty answer lands nothing and must cost
+    /// nothing either.
+    #[tokio::test]
+    async fn one_instrument_lands_every_body_on_one_index_observation() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, _) = readiness_fixture("observation-once", "INE002A01018");
+        let days = [
+            day(2026, 9, 1),
+            day(2026, 9, 2),
+            day(2026, 9, 3),
+            day(2026, 9, 4),
+        ];
+        let midnight = |date: Day| i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+        let row = |timestamp| RawRow {
+            timestamp,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 0,
+            open_interest: None,
+        };
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let first = Window::new(days[0], days[0]).unwrap();
+        let mut landed = BrokerWindow {
+            listing: Listing::Index,
+            contract: None,
+            unfetched: None,
+            instrument: "NIFTY".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "INDEX",
+            store_vendor: Vendor::Zerodha,
+            window: first,
+            granularity: Granularity::Day1,
+            bodies: vec![(
+                first,
+                RawWindow {
+                    rows: vec![row(midnight(days[0]))],
+                },
+            )],
+        };
+        let daily = super::land_one(&landed, &site);
+        assert_eq!(daily.bars_committed, 1, "{:?}", daily.failures);
+
+        landed.granularity = Granularity::Minute1;
+        landed.window = Window::new(days[0], day(2026, 9, 5)).unwrap();
+        landed.bodies = days
+            .iter()
+            .map(|&date| {
+                (
+                    Window::new(date, date).unwrap(),
+                    RawWindow {
+                        rows: (0..375)
+                            .map(|minute| row(midnight(date) + (555 + minute) * 60))
+                            .collect(),
+                    },
+                )
+            })
+            .chain(std::iter::once((
+                Window::new(day(2026, 9, 5), day(2026, 9, 5)).unwrap(),
+                RawWindow { rows: Vec::new() },
+            )))
+            .collect();
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .unwrap();
+        let manifest = pull::manifest::manifest_path(&site.store_root, Vendor::Zerodha);
+        // WARM: the census and the calendar both cached at the current stamp.
+        let warm = super::ingestion_observations(&landed, &site).expect("NIFTY is observed");
+        assert!(warm.sessions() > 0);
+        let base = census::manifest_reads::of(&manifest);
+        let mut dated = std::collections::HashMap::new();
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.members, 5, "every body landed: {done:?}");
+        assert_eq!(done.bars_committed, 4 * 375, "{:?}", done.failures);
+        assert_eq!(
+            census::manifest_reads::of(&manifest) - base,
+            0,
+            "landing five bodies of one instrument read the manifest per body"
+        );
+        // AND THE NEXT INSTRUMENT'S OBSERVATION STILL SEES THE NEW STORE: the
+        // stamp moved, so it reads once, and once only.
+        let after = super::ingestion_observations(&landed, &site).expect("NIFTY is observed");
+        assert!(after.sessions() >= warm.sessions());
+        assert_eq!(census::manifest_reads::of(&manifest) - base, 1);
+    }
+
     async fn cash_month_replay_fixture(
         tag: &str,
     ) -> (Site, BrokerWindow, brutex_core::instrument::InstrumentKey) {
@@ -18754,11 +19225,43 @@ mod tests {
             .unwrap();
             let id =
                 u32::try_from(brutex_core::universe::fnv1a("NIFTY") & u64::from(u32::MAX)).unwrap();
-            let mut file = store::file::BarFile::open_or_create(&root, path, id).unwrap();
-            file.append(&rows).unwrap();
-            let source_path = file.path().to_owned();
+            // FORGED AS A PRE-D-0915 FILE. The write boundary now refuses an
+            // off-grid stamp (`StoreError::OffGrid`), so a 1min file holding
+            // them can only be one written before that refusal existed — and
+            // such files are what this reader's own defence still faces. Laid
+            // by hand: unsealed (flags 0, the legacy shape the reader accepts
+            // without a `.crc`), genesis in slot 0, the commit in slot 1.
+            let genesis = store::header::Header::genesis(id, 60, 0);
+            let committed = genesis
+                .advance(
+                    u64::try_from(rows.len()).unwrap(),
+                    rows.first().unwrap().ts_micros,
+                    rows.last().unwrap().ts_micros,
+                )
+                .unwrap();
+            let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).unwrap()];
+            for commit in [genesis.commit().unwrap(), committed.commit().unwrap()] {
+                let at = usize::try_from(commit.offset).unwrap();
+                image
+                    .iter_mut()
+                    .skip(at)
+                    .zip(commit.bytes)
+                    .for_each(|(dst, src)| *dst = src);
+            }
+            for row in &rows {
+                image.extend_from_slice(&row.image());
+            }
+            let source_path = path.to_path_buf(&root);
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            std::fs::write(&source_path, &image).unwrap();
+            assert_eq!(
+                store::file::BarFile::open_existing(&root, path, id)
+                    .unwrap()
+                    .records(),
+                u64::try_from(rows.len()).unwrap(),
+                "the forged legacy month opens and holds every off-grid row"
+            );
             let before = std::fs::read(&source_path).unwrap();
-            drop(file);
             let audit = audit_one(&site, &asked, asked.month, None, None);
             assert_eq!(audit.invalid_timestamps, if extra { 1 } else { 375 });
             assert_eq!(audit.expected, 0, "no coverage claim on invalid input");
@@ -19295,6 +19798,81 @@ mod tests {
         );
         drop(second);
         drop(child);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The serve lock names exactly one holder: the one that holds it.**
+    /// R9-api-cx-2, D-0953.
+    ///
+    /// `serve.lock` is opened without truncation, so a holder whose stamp was
+    /// shorter than the last one left that one's tail in the file, and a
+    /// refused instance quoted the whole file: two pids, one of them stale,
+    /// shown as the holder. The holder now cuts the file to its own stamp, and
+    /// the refusal quotes the first line only, which also covers a file left
+    /// long by a holder that predates the cut.
+    #[test]
+    fn the_serve_lock_names_only_its_holder_after_a_longer_stale_stamp() {
+        let root = crate::scratch::path("serve-lock-stale-tail");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let lock_path = root.join(SERVE_LOCK);
+        // A MEBIBYTE OF STALE STAMPS, multi-line, with the widest address and
+        // pid a stamp can carry.
+        let stale =
+            "addr=[2001:db8::ffff:ffff]:65535 pid=4294967295\nGARBAGE pid=31337\n".repeat(16_384);
+        std::fs::write(&lock_path, &stale).expect("a stale lock file");
+
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("an address");
+        let taken = take_serve_lock(&root, addr).expect("a free store");
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("reads"),
+            format!("addr={addr} pid={}\n", std::process::id()),
+            "the file is this holder's stamp and nothing after it"
+        );
+        drop(taken);
+
+        // A HOLDER THAT DID NOT CUT: its short stamp over the stale megabyte.
+        std::fs::write(&lock_path, &stale).expect("stale again");
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("the lock file"),
+            lock_path.clone(),
+        )
+        .expect("nothing else holds it");
+        std::io::Write::write_all(&mut &*squatter, b"addr=127.0.0.1:8080 pid=4242\n")
+            .expect("stamp");
+        let refused = take_serve_lock(&root, addr).expect_err("the store is held");
+        assert!(
+            refused.contains("held by: addr=127.0.0.1:8080 pid=4242\n"),
+            "{refused}"
+        );
+        for stale_word in ["4294967295", "GARBAGE", "31337", "2001:db8"] {
+            assert!(!refused.contains(stale_word), "{stale_word}: {refused}");
+        }
+        drop(squatter);
+
+        // AN EMPTY FIRST LINE IS "NOT YET STAMPED", never the stale line after it.
+        std::fs::write(&lock_path, format!("\n{stale}")).expect("an unstamped head");
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("the lock file"),
+            lock_path.clone(),
+        )
+        .expect("nothing else holds it");
+        let refused = take_serve_lock(&root, addr).expect_err("the store is held");
+        assert!(
+            refused.contains("had not yet stamped the file"),
+            "{refused}"
+        );
+        assert!(!refused.contains("4294967295"), "{refused}");
+        drop(squatter);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -21535,25 +22113,66 @@ mod tests {
         assert!(!first.contains("class=\"pager\""), "{first}");
     }
 
+    /// A Dhan manifest at `root` holding one 1-minute month of each named
+    /// index series, written whole as a pull's install leaves it.
+    fn publish_index_months(root: &Path, symbols: &[&str], month: store::path::YearMonth) {
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        // A DISTINCT MODIFIED TIME PER PUBLICATION, set explicitly below, so
+        // the census cache's stamp moves whatever the filesystem's resolution.
+        static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut manifest = Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest");
+        for name in symbols {
+            manifest
+                .record(Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(name).expect("a symbol"),
+                        timeframe: store::path::Timeframe::MINUTE_1,
+                        month,
+                    },
+                    rows: 8_250,
+                    first_ts_micros: 1_751_350_800_000_000,
+                    last_ts_micros: 1_751_363_940_000_000,
+                })
+                .expect("records");
+        }
+        let path = manifest_path(root, Vendor::Dhan);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, manifest.image()).expect("writes");
+        let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("reopens")
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + tick),
+            )
+            .expect("stamps");
+    }
+
     #[test]
     fn the_store_grid_pages_when_it_is_larger_than_one_page() {
         // 200 rows per page against 36 months means the pager appears at six
         // instruments. Without a fixture that large the paging arms are code no
         // test enters.
+        //
+        // EIGHT HELD SERIES ON DISK, PLUS THE TWO SWEPT ONES THE AXIS ALWAYS
+        // NAMES, is ten. This set `site.series` by hand; the gaps view now draws
+        // its axis from the request's own census (UC-20, D-0953), so the ten
+        // rows have to be in a manifest to be on the page.
         let dir = agreeing("storepager");
-        let mut site = site("storepager", &dir);
-        site.series = (0..10)
-            .filter_map(|i| {
-                Some(census::Series {
-                    contract: None,
-                    exchange: brutex_core::instrument::Exchange::Nse,
-                    segment: brutex_core::instrument::Segment::Index,
-                    symbol: brutex_core::symbol::Symbol::new(&format!("IDX{i:02}")).ok()?,
-                    timeframe: store::path::Timeframe::MINUTE_1,
-                })
-            })
-            .collect();
-        assert_eq!(census::grid_rows(site.series.len()), 360);
+        let site = site("storepager", &dir);
+        let names: Vec<String> = (0..8).map(|i| format!("IDX{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        publish_index_months(
+            &site.store_root,
+            &names,
+            store::path::YearMonth::new(2026, 8).expect("a month"),
+        );
+        let (censuses, _) = census_now(&site);
+        assert_eq!(census::grid_rows(census::held_series(&censuses).len()), 360);
 
         let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(first.contains("page 1 of 2"), "{first}");
@@ -26703,8 +27322,16 @@ mod tests {
         };
         let outer = span("async fn broker_window", "broker_window");
         let helper = span("async fn credentialed_source", "credentialed_source");
+        // D-0948 put `Credentials::source` between the two, so a run's watch
+        // sees every read. Its production arm is the helper, pinned here, so
+        // splicing the helper in at that call is still the executed sequence.
+        assert!(
+            include_str!("credential_law.rs")
+                .contains("Self::Ssm => crate::server::credentialed_source(feed, &spec).await"),
+            "the production credential source is still the helper"
+        );
         let call = outer
-            .find("credentialed_source(feed, &spec)")
+            .find("site.credentials.source(feed)")
             .expect("broker_window reaches its credential and socket through the helper");
         let body = format!("{}{helper}{}", &outer[..call], &outer[call..]);
         let body = body.as_str();
@@ -27789,20 +28416,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The store page says out loud that its counters predate a pull this
-    /// process has since performed.
+    /// The store page no longer calls its counters a startup read after a pull,
+    /// because they are not one. UC-20, D-0953.
+    ///
+    /// This test pinned two notes: "UNCHECKED — a pull ran at …; these
+    /// manifests were read at …" and "the counters below are this process's
+    /// startup read". Every half of the page now reads the census per request,
+    /// so both told the operator to restart to see what the page already
+    /// showed. A journal record newer than the site's load must leave the page
+    /// without either, in both views.
     #[test]
-    fn the_store_page_says_when_its_counters_are_older_than_the_last_pull() {
+    fn the_store_page_no_longer_calls_fresh_counters_a_startup_read() {
         let dir = agreeing("storestale");
         let site = site("storestale", &dir);
-        let fresh = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
-        assert!(
-            !fresh.contains("these manifests were read at"),
-            "nothing has happened yet: {fresh}"
-        );
-
-        // A record stamped after the site loaded is exactly the case the note
-        // exists for: the bars and the manifest moved, and these cards did not.
         let later = std::time::SystemTime::now() + std::time::Duration::from_mins(1);
         site.journal()
             .append(&audit::Record::refused(
@@ -27813,25 +28439,82 @@ mod tests {
                 "",
             ))
             .expect("appends");
-        let stale = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
+        for query in ["show=gaps", ""] {
+            let page = store_ok(&site, day(2026, 8, 7), 0, query);
+            assert!(
+                !page.contains("UNCHECKED — a pull ran at"),
+                "{query}: {page}"
+            );
+            assert!(!page.contains("startup read"), "{query}: {page}");
+            assert!(!page.contains("Restart to refresh"), "{query}: {page}");
+        }
+    }
+
+    /// **`/store?show=gaps` draws its axis, its cells and its census notes from
+    /// the census as it is now, not as it was at boot.** UC-20, D-0953.
+    ///
+    /// The site loads over an empty store. A pull then publishes a manifest
+    /// holding NIFTY and a series nobody held at boot, and a second pull grows
+    /// it again. Before the fix the gaps view still drew two rows of hollow
+    /// cells from `site.series` and `site.censuses`, and every view printed
+    /// "dhan: UNAVAILABLE — no manifest" beside a vendor card counting months.
+    #[test]
+    fn the_gaps_view_and_the_census_notes_read_the_store_as_it_is_now() {
+        let dir = agreeing("storegapsfresh");
+        let site = site("storegapsfresh", &dir);
+        let today = day(2026, 8, 7);
+        let august = store::path::YearMonth::new(2026, 8).expect("a month");
+
+        let boot = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            stale.contains("UNCHECKED — a pull ran at"),
-            "the staleness is named, not left to be discovered: {stale}"
+            boot.contains("72 instrument-month(s) in the grid"),
+            "{boot}"
         );
-        // IT SURVIVES THE RENDERER'S CLAMP WHOLE. `render::clamp` cuts a note
-        // past 160 bytes at its last comma and appends "… and N more", so a
-        // warning that is too long is a warning whose second half nobody reads.
-        // Asserting the closing tag right after the last word is what proves
-        // this one was not cut — a `contains("Restart")` would pass on a
-        // truncated note too.
+        assert!(!boot.contains("class=\"sw q4\""), "nothing held: {boot}");
+        assert!(boot.contains("dhan: UNAVAILABLE — no manifest"), "{boot}");
+
+        // THE FIRST PULL: NIFTY, and NEWIDX, which the boot axis never named.
+        publish_index_months(&site.store_root, &["NIFTY", "NEWIDX"], august);
+        for query in ["show=gaps", ""] {
+            let page = store_ok(&site, today, 0, query);
+            assert!(
+                !page.contains("dhan: UNAVAILABLE — no manifest"),
+                "{query}: the boot census note is gone: {page}"
+            );
+            assert!(
+                page.contains("dhan: 2 month(s), 16500 row(s)"),
+                "{query}: the note is this request's census: {page}"
+            );
+        }
+        let after = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            stale.contains("Restart to refresh, or see /audit.</li>"),
-            "the whole note reaches the page, uncut: {stale}"
+            after.contains("108 instrument-month(s) in the grid"),
+            "three series on the axis, the new one included: {after}"
         );
+        assert!(after.contains("NSE-INDEX-NEWIDX"), "{after}");
+        assert_eq!(
+            after.matches("class=\"sw q4\"").count(),
+            2,
+            "both held months are filled cells: {after}"
+        );
+        assert!(after.contains("held, 8250 row(s)"), "{after}");
+
+        // A SECOND PULL, AND A PAST-THE-END PAGE: the axis grows again and the
+        // clamp lands on the new last page, not the boot one.
+        let many: Vec<String> = (0..8).map(|i| format!("LATE{i:02}")).collect();
+        let mut names: Vec<&str> = many.iter().map(String::as_str).collect();
+        names.extend(["NIFTY", "NEWIDX"]);
+        publish_index_months(&site.store_root, &names, august);
+        let grown = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            stale.contains("class=\"loud\""),
-            "UNCHECKED is one of the words that makes a note loud: {stale}"
+            grown.contains("396 instrument-month(s) in the grid"),
+            "{grown}"
         );
+        assert!(grown.contains("page 1 of 2"), "{grown}");
+        let clamped = store_ok(&site, today, 999, "show=gaps");
+        assert!(clamped.contains("page 2 of 2"), "{clamped}");
+        assert!(clamped.contains("showing 196"), "{clamped}");
+        let _ = std::fs::remove_dir_all(&site.store_root);
     }
 
     /// A vendor on loopback that answers once, and reports it was reached.
@@ -30752,7 +31435,10 @@ pub(crate) fn hex32(bytes: [u8; 32]) -> String {
 /// and this is an operator route rather than a bar path, so **the per-operation
 /// bound of §3 rule 4 is not claimed for it** — saying otherwise would be the
 /// measurement §3 rule 6 forbids inventing. The join walks the index symbols
-/// the feed lists, not the master's several hundred thousand rows.
+/// the feed lists, not the master's several hundred thousand rows. Finding
+/// those symbols is a filter over every key of the merged universe, so a
+/// request is O(catalogue bytes + U). W1-api5-9, D-0953; `docs/06-limits.md`'s
+/// D-0953 section.
 async fn indexmap_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -30822,10 +31508,18 @@ async fn indexmap_json(
 ///
 /// # Cost
 ///
-/// One map probe per series on a hit, keyed on the stamp the census's own
-/// `stat` calls already took; a re-derivation only after the vendor's manifest
-/// has been rewritten, which is what a pull does. See
+/// The calendar itself is one map probe per series on a hit, keyed on the stamp
+/// the census's own `stat` calls already took, and a re-derivation only after
+/// the vendor's manifest has been rewritten, which is what a pull does. See
 /// [`crate::calendar_of::cached`].
+///
+/// **The request around those probes is not that cheap, and this paragraph
+/// used to stop before saying so.** Both branches collect, sort and dedup the
+/// asked feed's census entries (`held_entries`, `O(E_v log E_v)`) on every
+/// request, and the exchange branch adds three key `String`s and a deep clone
+/// of each spot series' calendar, then `agree` over every day. W1-api5-5,
+/// D-0953; `docs/06-limits.md`'s D-0953 section, which
+/// `api::server::cost_limits_tests` pins to this source.
 /// The condition vocabulary, so a stored mask can be read as names.
 ///
 /// # Why this route exists at all
@@ -31115,7 +31809,46 @@ async fn calendar_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> CalendarAnswer {
-    calendar_json_reading(&site, &uri, census_now_stamped)
+    // OFF THE ASYNC WORKERS, AND ADMITTED. This ran inline: a census read on a
+    // moved stamp and, on a miss, a derivation per spot series (0.28 s each,
+    // documented) blocked a Tokio worker, and a flood or a post-pull herd
+    // blocked them all. It now runs on the blocking pool behind its own
+    // bounded admission, and concurrent misses on one series share one
+    // derivation (`calendar_of::Cache`). Saturation answers 429 with a reason
+    // rather than queueing without bound. W1-api2-11, D-0950.
+    match crate::detail::run_calendar(move || {
+        calendar_json_reading(&site, &uri, census_now_stamped)
+    })
+    .await
+    {
+        Ok(answer) => answer,
+        Err(why) => calendar_admission_refused(&why),
+    }
+}
+
+/// The answer a calendar-deriving route gives when its blocking work was not
+/// admitted or could not be joined. W1-api2-11, D-0950.
+fn calendar_admission_refused(why: &crate::detail::RunError) -> CalendarAnswer {
+    let status = if matches!(why, crate::detail::RunError::Saturated) {
+        axum::http::StatusCode::TOO_MANY_REQUESTS
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        serde_json::json!({
+            "error": format!(
+                "calendar derivation not admitted ({why:?}): at most {} run at once, \
+                 off the async workers; retry",
+                crate::detail::MAX_CALENDAR_CONCURRENT
+            )
+        })
+        .to_string(),
+    )
 }
 
 /// [`calendar_json`], with the census it derives from passed in.
@@ -31441,6 +32174,10 @@ mod calendar_route_tests;
 mod census_request_tests;
 
 #[cfg(test)]
+#[path = "cost_limits_tests.rs"]
+mod cost_limits_tests;
+
+#[cfg(test)]
 #[path = "bars_window_route_tests.rs"]
 mod bars_window_route_tests;
 
@@ -31453,6 +32190,10 @@ mod gap_peer_route_tests;
 #[cfg(test)]
 #[path = "fno_boundary_tests.rs"]
 mod fno_boundary_tests;
+
+#[cfg(test)]
+#[path = "credential_law_tests.rs"]
+mod credential_law_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]

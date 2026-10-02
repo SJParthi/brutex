@@ -209,6 +209,50 @@ impl Fixture {
     }
 }
 
+/// Moves record `index`'s stamp by `delta_micros` in place, resealing its
+/// checksum block and, at either end, the header slot, exactly as the writer
+/// would have.
+///
+/// **A FILE FROM BEFORE D-0915.** `BarFile::append` now refuses an off-grid
+/// stamp (`StoreError::OffGrid`), so a sealed month holding one can only be a
+/// file written before that refusal existed. Those files still exist and this
+/// reader's own malformed-span refusal is what still faces them, so the state
+/// is laid by hand rather than abandoned.
+fn forge_pre_admission_stamp(path: &std::path::Path, index: u64, delta_micros: i64) {
+    use store::format::{HEADER_LEN, Row};
+    let mut bytes = fs::read(path).expect("the sealed month");
+    let region = usize::try_from(HEADER_LEN).expect("region");
+    let header = store::header::Header::read_region(&bytes[..region], bytes.len() as u64)
+        .expect("a committed header");
+    let layout = store::layout::Layout::for_version(header.format_version).expect("layout");
+    let at = usize::try_from(layout.offset_of(index).expect("offset")).expect("offset");
+    let mut bar = Bar::read_from(&bytes[at..at + Bar::LEN]).expect("a record");
+    bar.ts_micros += delta_micros;
+    bytes[at..at + Bar::LEN].copy_from_slice(&bar.image());
+    let block = index / layout.records_per_block();
+    let (start, end) = layout
+        .covered_byte_range(block, header.n_valid)
+        .expect("covered range");
+    let span = &bytes[usize::try_from(start).expect("s")..usize::try_from(end).expect("e")];
+    let sum = store::block::seal(layout, header.n_valid, block, span).expect("seal");
+    let crc_path = path.with_extension("crc");
+    let mut crc = fs::read(&crc_path).expect("the sidecar");
+    let entry = usize::try_from(block * 4).expect("entry");
+    crc[entry..entry + 4].copy_from_slice(&sum.to_le_bytes());
+    let mut resealed = header;
+    if index == 0 {
+        resealed.first_ts_micros = bar.ts_micros;
+    }
+    if index + 1 == header.n_valid {
+        resealed.last_ts_micros = bar.ts_micros;
+    }
+    let commit = resealed.commit().expect("a header image");
+    let slot = usize::try_from(commit.offset).expect("slot");
+    bytes[slot..slot + commit.bytes.len()].copy_from_slice(&commit.bytes);
+    fs::write(path, &bytes).expect("rewrite the month");
+    fs::write(&crc_path, &crc).expect("rewrite the sidecar");
+}
+
 fn generated_session(month: u8, date: u8) -> Vec<Bar> {
     let civil = pull::session::Day::new(2025, month, date).expect("date");
     let day = i64::from(civil.days_from_epoch());
@@ -504,12 +548,8 @@ fn stored_screens_reject_off_grid_execution_before_creating_an_attempt() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Fixture::warmed();
-    fixture.rewrite_owned_minutes(|day, rows| {
-        if day == 2 {
-            rows[0].ts_micros += 1;
-        }
-    });
     let path = fixture.path(5, Timeframe::MINUTE_1);
+    forge_pre_admission_stamp(&path, 0, 1);
     let before = fs::read(&path).expect("owned off-grid execution stream");
     let checksum = path.with_extension("crc");
     let proof = fs::read(&checksum).expect("matching raw-record checksum");
@@ -562,6 +602,7 @@ fn public_screen_admission_preserves_rung_and_build_or_feed_refusals() {
             20_000,
             policy,
             Some(13),
+            &mut crate::ScreenCache::default(),
         );
         assert_eq!(plain, attempted);
         assert!(plain.starts_with("refused: "), "{plain}");
@@ -2236,5 +2277,70 @@ fn every_stored_report_over_a_stock_states_corporate_actions_are_unchecked() {
             }
         }
     }
+    crate::knobs::clear_all();
+}
+
+/// **A support descent loads its stored inputs once, and answers byte for byte
+/// as a fresh load does.** o1cli-1, D-0997.
+///
+/// Every step of an `elite` descent re-ran the whole screen kernel, which
+/// loaded the signal span, the one-minute execution span and both contexts and
+/// rebuilt the anchored column, though none of that depends on the support
+/// threshold. Measured before the fix: two steps, two loads. Now two steps over
+/// one shared cache cost one load, the pages equal two uncached screens over an
+/// identical store, and a cache handed a different question loads afresh.
+#[test]
+fn a_descent_loads_its_stored_inputs_once() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fresh = Fixture::warmed();
+    let cached = Fixture::warmed();
+    let supports = [1_000_000, 500_000, 20_000];
+    crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+    let expected: Vec<String> = supports
+        .iter()
+        .map(|support| fresh.screen("5min", *support).expect("fresh step"))
+        .collect();
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 3);
+
+    crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+    let mut cache = crate::ScreenCache::default();
+    let request = |support_ppm| crate::StoredScreenRequest {
+        root: cached.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: cached.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-stored-screen-fixture",
+    };
+    let got: Vec<String> = supports
+        .iter()
+        .map(|support| {
+            crate::screen_range_kernel_cached(request(*support), &mut cache).expect("cached step")
+        })
+        .collect();
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 1);
+    let fresh_root = fresh.root.display().to_string();
+    let cached_root = cached.root.display().to_string();
+    for (want, page) in expected.iter().zip(&got) {
+        assert!(page.contains("RESULT RECORDED"), "{page}");
+        assert_eq!(&page.replace(&cached_root, &fresh_root), want);
+    }
+
+    // A different question is never answered from the held span.
+    let other = crate::StoredScreenRequest {
+        rung: "1min",
+        ..request(1_000_000)
+    };
+    let one_minute = crate::screen_range_kernel_cached(other, &mut cache).expect("1min");
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 2);
+    assert_ne!(one_minute.replace(&cached_root, &fresh_root), expected[0]);
     crate::knobs::clear_all();
 }

@@ -822,6 +822,61 @@ mod tests {
         assert_eq!(cal.expected_bars(99), None);
     }
 
+    /// **A WITHHELD STRETCH IS UNMEASURED, NEVER CLOSED, AND NEVER LOSES A
+    /// SESSION.** D-0950: a stretch whose daily rung was not read cannot claim
+    /// the exchange was shut on it.
+    #[test]
+    fn withholding_turns_only_closed_days_inside_the_span_into_unmeasured() {
+        let build = || {
+            Calendar::from_observed(&[
+                Observed::from_runs(100, &[(555, 929)]),
+                Observed::from_runs(103, &[]),
+                Observed::from_runs(106, &[(555, 929)]),
+            ])
+        };
+        let mut cal = build();
+        assert_eq!(cal.kind_of(101), DayKind::Closed, "the premise");
+        // Ranges reaching past both ends clamp to the span; the open days in
+        // it, sized or not, are left alone.
+        assert_eq!(cal.withhold_closed(i64::MIN, i64::MAX), 4);
+        for day in [101, 102, 104, 105] {
+            assert_eq!(cal.kind_of(day), DayKind::Unmeasured, "day {day}");
+            assert_eq!(cal.expected_bars(day), None, "day {day}");
+        }
+        assert_eq!(cal.kind_of(100), DayKind::Open(Session::full()));
+        assert_eq!(cal.kind_of(103), DayKind::OpenLengthUnmeasured);
+        assert_eq!(cal.sessions(), 3);
+        assert_eq!((cal.first_day(), cal.last_day()), (100, 106), "span kept");
+        // A rerun changes nothing: idempotent.
+        assert_eq!(cal.withhold_closed(i64::MIN, i64::MAX), 0);
+
+        // One day, exactly; an inverted range; a range wholly outside.
+        let mut one = build();
+        assert_eq!(one.withhold_closed(102, 102), 1);
+        assert_eq!(one.kind_of(101), DayKind::Closed);
+        assert_eq!(one.kind_of(102), DayKind::Unmeasured);
+        assert_eq!(one.withhold_closed(105, 104), 0);
+        assert_eq!(one.withhold_closed(0, 99), 0);
+        assert_eq!(one.withhold_closed(107, i64::MAX), 0);
+        assert_eq!(one.kind_of(104), DayKind::Closed);
+
+        // An empty calendar has nothing to withhold.
+        let mut empty = Calendar::from_observed(&[]);
+        assert_eq!(empty.withhold_closed(i64::MIN, i64::MAX), 0);
+        assert_eq!(empty.span(), 0);
+
+        // The regulator-proved outage day stays open even when withheld.
+        let mut outage = Calendar::from_observed(&[
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY - 1, &[(555, 929)]),
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY + 1, &[(555, 929)]),
+        ]);
+        assert_eq!(outage.withhold_closed(i64::MIN, i64::MAX), 0);
+        assert!(matches!(
+            outage.kind_of(SYSTEMS_OUTAGE_DAY),
+            DayKind::Open(_)
+        ));
+    }
+
     /// **A DAY WITH A DAILY BAR AND NO MINUTE SERIES KEEPS ITS OWN ANSWER.**
     ///
     /// The five pre-2025 Muhurat sessions arrive here with NO runs at all, and
@@ -987,6 +1042,9 @@ mod tests {
 pub struct Calendar {
     first: i64,
     kinds: Vec<DayKind>,
+    /// How many of `kinds` are open, counted once by [`Self::from_observed`]
+    /// so [`Self::sessions`] answers without a walk. W1-pull1-4, D-0953.
+    sessions: u32,
 }
 
 /// Calendar input for ingestion, distinct from the observed display calendar.
@@ -1058,6 +1116,77 @@ mod runtime_tests {
         );
     }
 
+    /// **A CALENDAR ENDING ON `i64::MAX` NAMES `i64::MAX` AS ITS LAST DAY.**
+    ///
+    /// `last_day` computed `first.saturating_add(len).saturating_sub(1)`. The
+    /// add saturated first and the subtraction then stepped back one, so a
+    /// one-day calendar on `i64::MAX` reported `i64::MAX - 1`: a last day
+    /// BEFORE the only day it holds, contradicting its own `kind_of`. D-1390.
+    #[test]
+    fn a_calendar_ending_on_the_last_i64_names_it_as_its_last_day() {
+        let high = Calendar::from_observed(&[Observed::from_runs(i64::MAX, &[(555, 929)])]);
+        assert_eq!(high.kind_of(i64::MAX), DayKind::Open(Session::full()));
+        assert_eq!(high.first_day(), i64::MAX);
+        assert_eq!(
+            high.last_day(),
+            i64::MAX,
+            "the day it holds, not one before"
+        );
+
+        let two = Calendar::from_observed(&[
+            Observed::from_runs(i64::MAX - 1, &[(555, 929)]),
+            Observed::from_runs(i64::MAX, &[(555, 929)]),
+        ]);
+        assert_eq!(two.last_day(), i64::MAX);
+        assert_eq!(two.span(), 2);
+
+        // Unchanged away from the edge, and for the empty calendar.
+        assert_eq!(
+            Calendar::from_observed(&[Observed::from_runs(100, &[(555, 929)])]).last_day(),
+            100
+        );
+        let empty = Calendar::from_observed(&[]);
+        assert_eq!(empty.last_day(), empty.first_day() - 1);
+    }
+
+    /// **ANY RUN PAST [`MAX_WINDOWS`] IS DROPPED, NOT MERGED.**
+    ///
+    /// `Observed::from_runs` named this test as the pin on its behaviour, and
+    /// no test of this name existed. Merging would reinstate the 180-bar
+    /// midday-break over-count; dropping under-counts. The returned session
+    /// carries no marker that a run was dropped — `count` is simply
+    /// [`MAX_WINDOWS`] — so the caller that walked the day is the only place
+    /// a third run is visible. D-1391.
+    #[test]
+    fn a_third_window_is_dropped_rather_than_merged() {
+        let three = Observed::from_runs(19_784, &[(555, 599), (690, 749), (800, 809)]).session;
+        assert_eq!(
+            three.map(|s| usize::from(s.count)),
+            Some(MAX_WINDOWS),
+            "three runs are a session of MAX_WINDOWS windows"
+        );
+        assert_eq!(
+            three.map(Session::bars),
+            Some(45 + 60),
+            "the third run's 10 bars are dropped"
+        );
+        assert_eq!(
+            three.map(|s| s.expects(805)),
+            Some(false),
+            "the dropped run is not owed"
+        );
+        assert_eq!(
+            three.map(|s| s.expects(650)),
+            Some(false),
+            "and the gap between runs is not merged in"
+        );
+        assert_eq!(
+            Observed::from_runs(19_784, &[(555, 599), (690, 749)]).session,
+            three,
+            "identical to the two-run session: nothing marks the drop"
+        );
+    }
+
     #[test]
     fn unknown_observed_lengths_and_empty_calendars_carry_no_authority() {
         let observed = Calendar::from_observed(&[Observed::from_runs(LAST_DAY + 1, &[])]);
@@ -1099,13 +1228,18 @@ impl Observed {
     /// Build a session from contiguous runs, as a caller walking a day finds
     /// them.
     ///
-    /// **Runs past [`MAX_WINDOWS`] are dropped and the count says so** rather
-    /// than being merged into the span. Merging would silently reinstate the
-    /// 180-bar over-count this signature exists to remove; dropping under-counts
-    /// instead, which reports fewer owed bars and therefore never invents a
-    /// hole. Nothing in the operator's store needs a third window, and
-    /// `a_third_window_is_dropped_rather_than_merged` pins the behaviour so a
-    /// venue that does is a visible surprise rather than a wrong number.
+    /// **Runs past [`MAX_WINDOWS`] are dropped** rather than merged into the
+    /// span. Merging would silently reinstate the 180-bar over-count this
+    /// signature exists to remove; dropping under-counts instead, which reports
+    /// fewer owed bars and therefore never invents a hole.
+    ///
+    /// **Nothing in the returned value marks the drop.** `count` is
+    /// [`MAX_WINDOWS`] whether two runs or ten were given, and the session is
+    /// identical to the two-run one, so a caller that must notice a third
+    /// window has to compare `runs.len()` with [`MAX_WINDOWS`] itself — the
+    /// count does not "say so". Nothing in the operator's store needs a third
+    /// window, and `a_third_window_is_dropped_rather_than_merged` pins the
+    /// behaviour. D-1391.
     #[must_use]
     pub fn from_runs(day: i64, runs: &[(u16, u16)]) -> Self {
         if runs.is_empty() {
@@ -1153,15 +1287,31 @@ impl Calendar {
             return Self {
                 first: 0,
                 kinds: Vec::new(),
+                sessions: 0,
             };
         };
         let last = observed.iter().map(|o| o.day).max().unwrap_or(first);
         // The span is bounded by the store's own extent, so this cannot be
         // unbounded; a `usize` that would not fit is a span of 5 billion days.
-        let span = usize::try_from(last - first).unwrap_or(0).saturating_add(1);
+        //
+        // CHECKED, because `last - first` overflows `i64` when the two sit near
+        // opposite ends of it, and the workspace builds with `overflow-checks`
+        // on in release too. A span that does not fit is treated exactly as
+        // the `try_from` already treated one: the calendar holds the first day
+        // alone and every other day reads `Unmeasured`, not known, never
+        // `Closed`. ET-bars-candles-store-5, D-0953.
+        let span = last
+            .checked_sub(first)
+            .and_then(|gap| usize::try_from(gap).ok())
+            .unwrap_or(0)
+            .saturating_add(1);
         let mut kinds = vec![DayKind::Closed; span];
         for entry in observed {
-            let Ok(at) = usize::try_from(entry.day - first) else {
+            let Some(at) = entry
+                .day
+                .checked_sub(first)
+                .and_then(|gap| usize::try_from(gap).ok())
+            else {
                 continue;
             };
             let Some(slot) = kinds.get_mut(at) else {
@@ -1179,12 +1329,26 @@ impl Calendar {
         // records a halt from 11:40, a 15-minute pre-open from 15:30, and normal
         // trading 15:45–17:00. Index-bar availability is separately refused by
         // `classify_spot_index_against`.
-        if let Ok(at) = usize::try_from(SYSTEMS_OUTAGE_DAY - first)
+        if let Some(at) = SYSTEMS_OUTAGE_DAY
+            .checked_sub(first)
+            .and_then(|gap| usize::try_from(gap).ok())
             && let Some(slot) = kinds.get_mut(at)
         {
             *slot = DayKind::Open(IRREGULAR[0].1);
         }
-        Self { first, kinds }
+        // THE ONE WALK `sessions` USED TO REPEAT ON EVERY CALL, done once here
+        // and after the override, so the SEBI day counts as the open day it is.
+        let sessions = kinds
+            .iter()
+            .filter(|k| matches!(k, DayKind::Open(_) | DayKind::OpenLengthUnmeasured))
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX);
+        Self {
+            first,
+            kinds,
+            sessions,
+        }
     }
 
     /// The first day this calendar knows.
@@ -1205,8 +1369,16 @@ impl Calendar {
         // nine quintillion days, and saturating there is the safe direction
         // because it can only ever make the range look SMALLER, never claim a
         // day nobody measured.
+        //
+        // ADD `span - 1`, NOT `span` THEN SUBTRACT ONE. The second order
+        // saturated at `i64::MAX` first and then stepped back, so a one-day
+        // calendar on `i64::MAX` reported its last day as `i64::MAX - 1` —
+        // a day before the only day it holds. D-1390.
         let span = i64::try_from(self.kinds.len()).unwrap_or(i64::MAX);
-        self.first.saturating_add(span).saturating_sub(1)
+        match span.checked_sub(1) {
+            Some(tail) if tail >= 0 => self.first.saturating_add(tail),
+            _ => self.first.saturating_sub(1),
+        }
     }
 
     /// How many days it covers.
@@ -1223,7 +1395,13 @@ impl Calendar {
     /// measurement, however sound it is.
     #[must_use]
     pub fn kind_of(&self, epoch_day: i64) -> DayKind {
-        let Ok(at) = usize::try_from(epoch_day - self.first) else {
+        // CHECKED, as `Runtime::unverified_reason` already was: a day near
+        // either end of `i64` is one this calendar cannot index, which is
+        // `Unmeasured`, not a panic. ET-bars-candles-store-5, D-0953.
+        let Some(at) = epoch_day
+            .checked_sub(self.first)
+            .and_then(|gap| usize::try_from(gap).ok())
+        else {
             return DayKind::Unmeasured;
         };
         self.kinds.get(at).copied().unwrap_or(DayKind::Unmeasured)
@@ -1239,14 +1417,137 @@ impl Calendar {
         }
     }
 
+    /// Turn every [`DayKind::Closed`] day in `from..=to` that lies inside this
+    /// calendar's span into [`DayKind::Unmeasured`], and answer how many changed.
+    ///
+    /// **`Closed` is a claim, and only a daily rung that was read can make it.**
+    /// [`Self::from_observed`] fills every day between the first and last
+    /// observed day with `Closed`, which is right only for a stretch whose daily
+    /// rung was read whole. A caller that knows a stretch was NOT read (its daily
+    /// file is absent, or one of its records failed its checks) withholds that
+    /// stretch here, so the gap reads as "not measured" rather than as a run of
+    /// holidays that never happened. D-0950.
+    ///
+    /// Open days are left alone: a bar is proof, wherever it came from, and the
+    /// 2021-02-24 regulator override stays open. Days outside the span are
+    /// already `Unmeasured`. An empty or inverted range changes nothing.
+    ///
+    /// # Cost
+    ///
+    /// O(days in `from..=to` ∩ span): one slot visited per day, no allocation.
+    pub fn withhold_closed(&mut self, from: i64, to: i64) -> u32 {
+        let last = self.last_day();
+        let (from, to) = (from.max(self.first), to.min(last));
+        let mut changed = 0_u32;
+        if from > to {
+            return changed;
+        }
+        let (Ok(start), Ok(end)) = (
+            usize::try_from(from.saturating_sub(self.first)),
+            usize::try_from(to.saturating_sub(self.first)),
+        ) else {
+            return changed;
+        };
+        for slot in self
+            .kinds
+            .iter_mut()
+            .take(end.saturating_add(1))
+            .skip(start)
+        {
+            if *slot == DayKind::Closed {
+                *slot = DayKind::Unmeasured;
+                changed = changed.saturating_add(1);
+            }
+        }
+        changed
+    }
+
     /// Days the exchange traded, counting both open kinds.
+    ///
+    /// O(1): the count is taken once by [`Self::from_observed`] and held. It
+    /// used to filter every day of the span on each call. W1-pull1-4, D-0953.
     #[must_use]
-    pub fn sessions(&self) -> u32 {
-        self.kinds
-            .iter()
-            .filter(|k| matches!(k, DayKind::Open(_) | DayKind::OpenLengthUnmeasured))
-            .count()
-            .try_into()
-            .unwrap_or(u32::MAX)
+    pub const fn sessions(&self) -> u32 {
+        self.sessions
+    }
+}
+
+#[cfg(test)]
+mod extreme_day_tests {
+    use super::*;
+
+    /// **AN EXTREME DAY IS UNMEASURED, NEVER A PANIC.**
+    ///
+    /// ET-bars-candles-store-5. `kind_of` subtracted `self.first` from the day
+    /// unchecked, and `from_observed` did the same three times, so a day near
+    /// either end of `i64` panicked with "attempt to subtract with overflow",
+    /// in release too, because the workspace sets `overflow-checks = true`.
+    #[test]
+    fn an_extreme_day_is_unmeasured_rather_than_a_panic() {
+        let from_one = Calendar::from_observed(&[Observed::from_runs(1, &[(555, 929)])]);
+        assert_eq!(from_one.kind_of(i64::MIN), DayKind::Unmeasured);
+        assert_eq!(from_one.kind_of(i64::MAX), DayKind::Unmeasured);
+        assert_eq!(from_one.expected_bars(1), Some(375));
+
+        let from_minus_one = Calendar::from_observed(&[Observed::from_runs(-1, &[(555, 929)])]);
+        assert_eq!(from_minus_one.kind_of(i64::MAX), DayKind::Unmeasured);
+        assert_eq!(from_minus_one.kind_of(i64::MIN), DayKind::Unmeasured);
+        assert_eq!(from_minus_one.expected_bars(-1), Some(375));
+
+        // BOTH ENDS AT ONCE: the span does not fit, so the calendar holds the
+        // first day alone and every other day reads as not known, never as
+        // `Closed`, which would be a claim about a day it cannot index.
+        let both = Calendar::from_observed(&[
+            Observed::from_runs(i64::MIN, &[]),
+            Observed::from_runs(i64::MAX, &[]),
+        ]);
+        assert_eq!(both.first_day(), i64::MIN);
+        assert_eq!(both.span(), 1);
+        assert_eq!(both.kind_of(i64::MIN), DayKind::OpenLengthUnmeasured);
+        assert_eq!(both.kind_of(i64::MAX), DayKind::Unmeasured);
+        assert_eq!(both.kind_of(0), DayKind::Unmeasured);
+        assert_eq!(both.sessions(), 1);
+
+        // THE SEBI OVERRIDE DAY is past the end of this one-day calendar, so it
+        // stays unmeasured rather than panicking on `SYSTEMS_OUTAGE_DAY - first`.
+        let lowest = Calendar::from_observed(&[Observed::from_runs(i64::MIN, &[])]);
+        assert_eq!(lowest.span(), 1);
+        assert_eq!(lowest.kind_of(SYSTEMS_OUTAGE_DAY), DayKind::Unmeasured);
+        assert_eq!(lowest.kind_of(i64::MIN), DayKind::OpenLengthUnmeasured);
+    }
+
+    /// **`sessions` IS COUNTED ONCE, AT CONSTRUCTION, NOT PER CALL.**
+    ///
+    /// W1-pull1-4. It filtered the whole `kinds` vector on every call, so its
+    /// cost grew with the observed span. The proof it no longer scans: empty
+    /// `kinds` after construction and the answer does not move. A scan would
+    /// answer zero.
+    #[test]
+    fn sessions_is_counted_once_at_construction_not_per_call() {
+        let mut cal = Calendar::from_observed(&[
+            Observed::from_runs(100, &[(555, 929)]),
+            Observed::from_runs(102, &[]),
+            Observed::from_runs(104, &[(555, 929)]),
+        ]);
+        assert_eq!(
+            cal.sessions(),
+            3,
+            "two measured sessions and one unmeasured"
+        );
+        cal.kinds.clear();
+        assert_eq!(cal.sessions(), 3, "the count is held, not recomputed");
+
+        // The SEBI override is counted too: it is written after the observed
+        // fold, onto a day the store left `Closed`.
+        let around_outage = Calendar::from_observed(&[
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY - 1, &[(555, 929)]),
+            Observed::from_runs(SYSTEMS_OUTAGE_DAY + 1, &[(555, 929)]),
+        ]);
+        assert_eq!(around_outage.sessions(), 3);
+        // And overwriting an open day with the override is not counted twice.
+        let on_outage =
+            Calendar::from_observed(&[Observed::from_runs(SYSTEMS_OUTAGE_DAY, &[(555, 929)])]);
+        assert_eq!(on_outage.sessions(), 1);
+        assert_eq!(Calendar::from_observed(&[]).sessions(), 0);
     }
 }

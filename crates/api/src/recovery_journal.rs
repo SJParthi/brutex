@@ -60,6 +60,26 @@ const UNVERIFIED_OFFSET: usize = 856;
 const RESERVED_OFFSET: usize = 864;
 const CRC_OFFSET: usize = 1_020;
 const REPLAY_BUFFER_BYTES: usize = RECORD_LEN * 64;
+
+#[cfg(test)]
+std::thread_local! {
+    /// Every replay this thread ran, as (journal file name, records read).
+    ///
+    /// Test-only. It lets a test COUNT the per-request replays that
+    /// `docs/06-limits.md` states, rather than argue them from the source. D-0907.
+    pub(crate) static REPLAYS: core::cell::RefCell<Vec<(String, u64)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Notes one completed replay of `path`, `bytes` long, in [`REPLAYS`].
+#[cfg(test)]
+fn trace(path: &Path, bytes: u64) {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    REPLAYS.with(|seen| seen.borrow_mut().push((name, bytes / RECORD_LEN_U64)));
+}
 /// Maximum events a read-only status poll may request; larger limits refuse.
 pub(crate) const MAX_TAIL_RECORDS: usize = 256;
 const _: () = assert!(BODY_OFFSET + MAX_BODY_BYTES == MISSING_OFFSET);
@@ -310,6 +330,8 @@ impl Journal {
             &mut BufReader::with_capacity(REPLAY_BUFFER_BYTES, &mut file),
             bytes,
         )?;
+        #[cfg(test)]
+        trace(path, bytes);
         if file.metadata()?.len() != bytes {
             return Err(invalid_data(
                 "recovery journal length changed during locked replay",
@@ -371,19 +393,92 @@ impl Journal {
         Ok(())
     }
 
+    /// Persist several NEW work units under ONE sync, then publish them all.
+    ///
+    /// For seeding a plan's queued windows, where [`Journal::append`] would
+    /// sync once per window: a plan of `n` windows paid `n` record syncs on a
+    /// request that waits for them, up to the 100,000-unit bound. This writes
+    /// the `n` fixed-stride images, syncs once and checks the filename once,
+    /// so the sync count no longer grows with the plan. D-1380.
+    ///
+    /// Only keys this journal has never seen are accepted, each once: a batch
+    /// is a seed, never a state transition, so no counter or status already on
+    /// disk can be moved by it.
+    ///
+    /// # Errors
+    /// An invalid body, a key already present (in the journal or earlier in
+    /// the batch) refuses the whole batch before any I/O and does not poison
+    /// the handle. Any length/write/sync uncertainty poisons it and publishes
+    /// nothing. Complete records written before a failure may survive on disk;
+    /// they are new queued units, and reopening replays them as such, exactly
+    /// as it would a single append whose sync failed.
+    pub(crate) fn append_new(&mut self, records: Vec<Record>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "recovery journal is poisoned after uncertain I/O; drop and reopen it",
+            ));
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut images = Vec::new();
+        images
+            .try_reserve(records.len())
+            .map_err(io::Error::other)?;
+        let mut fresh = std::collections::HashSet::new();
+        fresh.try_reserve(records.len()).map_err(io::Error::other)?;
+        for record in &records {
+            images.push(record.image()?);
+            if self.latest.contains_key(&record.key) || !fresh.insert(record.key) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "a seed batch may only name new, distinct recovery keys",
+                ));
+            }
+        }
+        self.latest
+            .try_reserve(records.len())
+            .map_err(io::Error::other)?;
+        self.order
+            .try_reserve(records.len())
+            .map_err(io::Error::other)?;
+        let next_bytes = u64::try_from(records.len())
+            .ok()
+            .and_then(|count| count.checked_mul(RECORD_LEN_U64))
+            .and_then(|bytes| self.bytes.checked_add(bytes))
+            .ok_or_else(|| {
+                io::Error::other("recovery journal length cannot fit its next records")
+            })?;
+        if let Err(error) = self.persist_all(&images) {
+            self.poisoned = true;
+            return Err(error);
+        }
+        for record in records {
+            publish(&mut self.latest, &mut self.order, record);
+        }
+        self.bytes = next_bytes;
+        Ok(())
+    }
+
     fn persist(&mut self, image: &[u8; RECORD_LEN]) -> io::Result<()> {
+        self.persist_all(core::slice::from_ref(image))
+    }
+
+    fn persist_all(&mut self, images: &[[u8; RECORD_LEN]]) -> io::Result<()> {
         self.check_named_file()?;
         if self.io.length()? != self.bytes {
             return Err(invalid_data(
                 "locked recovery journal length changed; refused to append after foreign bytes",
             ));
         }
-        self.io.write_all(image).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("recovery append may be partial: {error}"),
-            )
-        })?;
+        for image in images {
+            self.io.write_all(image).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("recovery append may be partial: {error}"),
+                )
+            })?;
+        }
         self.io.durable_sync().map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -505,7 +600,27 @@ impl JournalIo for File {
     }
 
     fn durable_sync(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        counted::SYNCS.with(|count| count.set(count.get() + 1));
         self.sync_all()
+    }
+}
+
+/// Test-only operation count, per thread, so a cost test can measure how many
+/// record syncs one coordinator call costs at two sizes without timing
+/// anything. Never compiled into a release build. D-1380.
+#[cfg(test)]
+pub(crate) mod counted {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Record-file `sync_all` calls made by [`super::Journal`] appends.
+        pub(crate) static SYNCS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Record syncs on this thread since the last call, and reset.
+    pub(crate) fn take_syncs() -> u64 {
+        SYNCS.with(|count| count.replace(0))
     }
 }
 
@@ -536,6 +651,8 @@ pub(crate) fn snapshot(path: &Path) -> io::Result<Index> {
         &mut BufReader::with_capacity(REPLAY_BUFFER_BYTES, &mut *file),
         metadata.len(),
     )?;
+    #[cfg(test)]
+    trace(path, metadata.len());
     unchanged_snapshot(metadata.len(), file.metadata()?.len())?;
     file.release()?;
     Ok(index)
@@ -1427,6 +1544,71 @@ mod tests {
             _lock: None,
         };
         (journal, memory)
+    }
+
+    /// A SEED BATCH IS ONE SYNC WHATEVER ITS SIZE, AND REFUSES BEFORE I/O.
+    /// D-1380.
+    #[test]
+    fn a_seed_batch_syncs_once_whatever_its_size_and_replays_as_single_appends() {
+        for size in [1_u8, 2, 40] {
+            let (mut journal, memory) = faulty();
+            let batch: Vec<_> = (0..size).map(record).collect();
+            journal.append_new(batch.clone()).expect("batch");
+            let state = memory.lock().expect("fixture");
+            assert_eq!(state.syncs, 1, "{size} records, one sync");
+            assert_eq!(state.bytes.len(), RECORD_LEN * usize::from(size));
+            let scratch = Scratch::new();
+            std::fs::write(scratch.path(), &state.bytes).expect("persist image");
+            drop(state);
+            let reopened = Journal::open(&scratch.path()).expect("replay");
+            assert_eq!(reopened.order, journal.order);
+            assert_eq!(reopened.latest, journal.latest);
+            assert_eq!(journal.order.len(), usize::from(size));
+            assert_eq!(journal.bytes, RECORD_LEN_U64 * u64::from(size));
+        }
+        let (mut journal, memory) = faulty();
+        journal.append_new(Vec::new()).expect("empty batch");
+        assert_eq!(memory.lock().expect("fixture").syncs, 0, "nothing, no sync");
+    }
+
+    #[test]
+    fn a_seed_batch_naming_a_known_or_repeated_key_refuses_whole_and_unpoisoned() {
+        let (mut journal, memory) = faulty();
+        journal.append(record(1)).expect("first");
+        let mut empty = record(9);
+        empty.body.clear();
+        for batch in [
+            vec![record(2), record(1)],
+            vec![record(3), record(3)],
+            vec![record(4), empty],
+        ] {
+            assert!(journal.append_new(batch).is_err());
+            assert_eq!(journal.order, vec![[1; 32]]);
+            assert!(!journal.poisoned);
+            let state = memory.lock().expect("fixture");
+            assert_eq!(state.bytes.len(), RECORD_LEN, "nothing written");
+            assert_eq!(state.syncs, 1);
+        }
+        journal.append_new(vec![record(2)]).expect("still usable");
+        assert_eq!(journal.order, vec![[1; 32], [2; 32]]);
+    }
+
+    #[test]
+    fn a_failed_seed_batch_sync_publishes_nothing_and_poisons() {
+        let (mut journal, memory) = faulty();
+        memory.lock().expect("fixture").fail_sync = true;
+        assert!(journal.append_new(vec![record(1), record(2)]).is_err());
+        assert!(journal.latest.is_empty() && journal.order.is_empty());
+        assert_eq!(journal.bytes, 0);
+        assert!(journal.poisoned);
+        memory.lock().expect("fixture").fail_sync = false;
+        assert!(
+            journal
+                .append_new(vec![record(3)])
+                .expect_err("poisoned")
+                .to_string()
+                .contains("poisoned")
+        );
     }
 
     #[test]
