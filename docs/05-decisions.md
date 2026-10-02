@@ -43844,3 +43844,104 @@ only lines that left were the two `return 0` arms. The 30 lines over CI's
 figure belong to four permission tests that fail as root, which is the
 audit-root item and is outside this change. **Not yet shown:** the CI
 workspace profile reproducing 20.
+### D-1370 — `split_window`'s documentation says a capped chunk may cross a month — 2026-10-02
+
+**What was false.** The rustdoc of `pull::session::split_window` opened with
+seven lines about `DropCensus`'s private tests (a doc block that had drifted
+off the test module and onto the function), then said every chunk is *"inside
+one calendar month"*; its `None` paragraph said the month boundary *"binds at
+every rung"*; and its loop comment, headed *"AND NEVER ACROSS A MONTH
+BOUNDARY"*, said each chunk ends at the earlier of the cap, the last day and
+the month end, because `fetch::land` refuses a cross-month batch. The code has
+done none of that for a capped rung since the month clamp was removed:
+`ingest::months_in` splits a landed batch into one file per month, and RG-04
+and MR-38 in `docs/04-invariants.md` already state the current rule. With
+`Some(cap)` the chunk ends at the earlier of the cap and the window's last day;
+only `None` is bounded by the month.
+
+**The change.** Documentation only; no behaviour changed. The `DropCensus`
+paragraph moved back onto `session::tests`. The function doc, the `None`
+paragraph and the loop comment now state the rule the code follows, and a
+doctest on `split_window` pins it: a 2026-07-15..=2026-08-20 window at
+`Some(30)` has a first chunk ending 2026-08-13 (it crosses into August), and
+at `None` one ending 2026-07-31. The stale first paragraph of the
+`a_chunk_fills_the_cap_and_the_chunks_tile_the_window` doc, which still said
+every chunk lands in one month, was removed. **No fail-before test exists for
+this one:** the behaviour was already right and only the prose was wrong, so
+the doctest passes on the old code too. It stops the prose drifting again.
+
+### D-1371 — Parameter Store reads are signed only for `ap-south-1` — 2026-10-02
+
+**What was wrong.** `CLAUDE.md` §8 reads credentials from Parameter Store in
+`ap-south-1`. `pull::config` refuses any other region in the local file, but
+`pull::ssm::get_parameter` and `Signable::authorization` are `pub` and took the
+region as a free string, so any caller holding an AWS identity could sign and
+send a credential read to another region's store. The shipped caller
+(`api::server`, through `config.region()`) respected the rule. The function
+every read goes through did not enforce it.
+
+**The change.** `Signable::authorization` refuses any `region` other than
+`pull::config::REGION`, byte for byte, with an `SsmError` of kind
+`Unreachable` that names §8 and the one region. `get_parameter` signs before
+it builds a client, so a foreign region is refused before any socket exists.
+Two doc references to a `SecretError::Unavailable` variant that does not
+exist now name `SecretError::Unreachable`, which is what the code returns.
+Test: `pull::ssm::tests::a_signature_for_any_region_but_the_one_section_8_names_is_refused`
+fails on the old code (`"us-east-1" is not ap-south-1 and must not be signed
+for`) and passes after. It touches no network. Cost: one string comparison of
+at most ten bytes per read, O(1).
+
+### D-1372 — An empty AWS key is treated as missing, in the environment and the credentials file — 2026-10-02
+
+**What was wrong.** `AwsIdentity::from_env` took an exported-but-empty
+`AWS_ACCESS_KEY_ID` (the usual way a shell or CI step "clears" one) as a key
+id of zero characters. `from_credentials_file` took `aws_access_key_id =`
+with no value as a complete profile. Either way the identity signed a request
+AWS refuses with a fault that names neither source. Because `discover` stops
+at the first identity it builds, an empty export also shadowed a complete
+`~/.aws/credentials`. An empty `AWS_SESSION_TOKEN` or `aws_session_token` was
+signed and sent as a security token with no value.
+
+**The change.** One helper, `non_blank`, treats an absent, empty or
+all-whitespace value as `None` for both sources. `from_env` now goes through
+`from_lookup`, which takes the lookup as an argument so the rule can be tested
+without `std::env::set_var` (the crate forbids `unsafe`). Test:
+`pull::ssm::tests::an_empty_key_is_refused_as_missing_and_never_signs` fails
+on the old code (`empty-id: a blank half of the pair is no pair`) and passes
+after. The broker credential is untouched: this is the AWS identity that
+authorises the read, and §8's rules for the value read back are unchanged.
+
+### D-1373 — In a TOTP secret, `=` padding is accepted only at the end — 2026-10-02
+
+**What was wrong.** `pull::totp::base32_decode` skipped `=` wherever it
+appeared. `GEZD=GNBV` therefore decoded to the same key as `GEZDGNBV`, and
+`=GEZDGNBV` did too. A secret with a mis-keyed `=` produced a code that looked
+valid but came from a different key, and the vendor rejected it with nothing
+in this repository saying why. This is the failure that
+`a_bad_character_is_refused_and_not_skipped` exists to prevent. The function's
+own doc also said there is *"no padding to handle"* while the code handled it.
+
+**The change.** RFC 4648 §6 padding is a tail. Once a `=` has been read, only
+more `=` or a display separator may follow. A base32 data character after it
+is refused as `TotpError::NotBase32 { byte: b'=' }`. A trailing run of
+padding is still skipped, so every secret that decoded before and was well
+formed still decodes to the same key. Test:
+`pull::totp::tests::padding_inside_the_secret_is_refused_and_only_a_tail_is_skipped`
+fails on the old code (`"GEZD=GNBV" has data after padding`, left
+`Ok([49, 50, 51, 52, 53])`) and passes after. Cost: one boolean per character
+inside the loop, which is already bounded by `MAX_SECRET_LEN`.
+
+### D-1374 — `STEP_SECONDS` no longer claims the charter records a broker's TOTP step — 2026-10-02
+
+**What was false.** The doc of `pull::totp::STEP_SECONDS` said 30 s is *"what
+every broker documented in `docs/00-charter.md` uses"*. The charter records no
+TOTP step length for any broker. Its only TOTP fact is Groww's *"TOTP-derived
+daily token, reset 06:00 IST"*. The sentence was a vendor claim with no
+source, which `CLAUDE.md` §3 rule 1 forbids.
+
+**The change.** Documentation only. The constant stays at 30, cited to RFC
+6238 §4's default, and any given broker's step is marked **UNVERIFIED**. The
+RFC 6238 Appendix B vectors that `the_rfc_6238_sha1_vectors_reproduce_exactly`
+checks are unchanged and still pass. No code path in `totp.rs` exchanges a
+code for a token. It computes the code and nothing else, so §8's ban on
+minting holds in this file.
