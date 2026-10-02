@@ -602,6 +602,7 @@ fn public_screen_admission_preserves_rung_and_build_or_feed_refusals() {
             20_000,
             policy,
             Some(13),
+            &mut crate::ScreenCache::default(),
         );
         assert_eq!(plain, attempted);
         assert!(plain.starts_with("refused: "), "{plain}");
@@ -2276,5 +2277,70 @@ fn every_stored_report_over_a_stock_states_corporate_actions_are_unchecked() {
             }
         }
     }
+    crate::knobs::clear_all();
+}
+
+/// **A support descent loads its stored inputs once, and answers byte for byte
+/// as a fresh load does.** o1cli-1, D-0997.
+///
+/// Every step of an `elite` descent re-ran the whole screen kernel, which
+/// loaded the signal span, the one-minute execution span and both contexts and
+/// rebuilt the anchored column, though none of that depends on the support
+/// threshold. Measured before the fix: two steps, two loads. Now two steps over
+/// one shared cache cost one load, the pages equal two uncached screens over an
+/// identical store, and a cache handed a different question loads afresh.
+#[test]
+fn a_descent_loads_its_stored_inputs_once() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fresh = Fixture::warmed();
+    let cached = Fixture::warmed();
+    let supports = [1_000_000, 500_000, 20_000];
+    crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+    let expected: Vec<String> = supports
+        .iter()
+        .map(|support| fresh.screen("5min", *support).expect("fresh step"))
+        .collect();
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 3);
+
+    crate::SCREEN_SPAN_LOADS.with(|loads| loads.set(0));
+    let mut cache = crate::ScreenCache::default();
+    let request = |support_ppm| crate::StoredScreenRequest {
+        root: cached.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: cached.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-stored-screen-fixture",
+    };
+    let got: Vec<String> = supports
+        .iter()
+        .map(|support| {
+            crate::screen_range_kernel_cached(request(*support), &mut cache).expect("cached step")
+        })
+        .collect();
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 1);
+    let fresh_root = fresh.root.display().to_string();
+    let cached_root = cached.root.display().to_string();
+    for (want, page) in expected.iter().zip(&got) {
+        assert!(page.contains("RESULT RECORDED"), "{page}");
+        assert_eq!(&page.replace(&cached_root, &fresh_root), want);
+    }
+
+    // A different question is never answered from the held span.
+    let other = crate::StoredScreenRequest {
+        rung: "1min",
+        ..request(1_000_000)
+    };
+    let one_minute = crate::screen_range_kernel_cached(other, &mut cache).expect("1min");
+    assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 2);
+    assert_ne!(one_minute.replace(&cached_root, &fresh_root), expected[0]);
     crate::knobs::clear_all();
 }
