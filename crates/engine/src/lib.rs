@@ -102,8 +102,9 @@ pub mod column;
 /// [`Sweep::levels`] keeps every survivor of every level to the end of the run,
 /// and that retention -- not the search space -- is what reached 7.4 GB and an
 /// exit 137 on a full-range sweep. [`keep::Streamed`] is the same walk holding
-/// two levels instead of all of them; [`keep::Best`] is the bounded retention a
-/// caller feeds from the level boundary. Neither is a depth parameter and the
+/// two levels instead of all of them; [`keep::Best`] is a bounded retention a
+/// caller could feed from the level boundary, and no production caller does
+/// (D-0762). Neither is a depth parameter and the
 /// module header says why at length.
 pub mod keep;
 pub mod resume;
@@ -4193,21 +4194,20 @@ mod tests {
         let exits = count_exits(shipping);
         // The owned column is on the sweep's hot path. `support` now has no
         // early exit at all: even the empty mask takes the same fixed-width hit
-        // test on every bar. `support_fingerprinted` keeps one empty-mask return
-        // because its reserved identity cannot be produced by the ordinary fold.
+        // test on every bar, and `support_fingerprinted` folds the empty mask like
+        // any other candidate (D-0761).
         let column_src = include_str!("column.rs");
         let column_exits = count_exits(column_src.split("#[cfg(test)]").next().unwrap_or(""));
         assert_eq!(
-            column_exits, 2,
-            "crates/engine/src/column.rs may leave early in exactly two places: \
+            column_exits, 1,
+            "crates/engine/src/column.rs may leave early in exactly one place: \
              `set_positions`' iterator returning `None` when one word is exhausted, \
-             which is how an iterator ends, and `support_fingerprinted` returning \
-             the reserved EVERY_BAR identity for the empty mask. `support` itself \
+             which is how an iterator ends. `support_fingerprinted` has no early \
+             exit: the empty mask folds like any other candidate. `support` itself \
              has no early exit: every candidate, including empty, performs one \
-             fixed-six-word hit test per bar. A THIRD exit could truncate a support \
-             count or make its cost depend on the answer. The fingerprint return \
-             cannot truncate a count: it returns `self.bars()`, the maximum score, \
-             and `the_fingerprinted_count_is_the_plain_count` holds both functions \
+             fixed-six-word hit test per bar. A SECOND exit could truncate a support \
+             count or make its cost depend on the answer, and \
+             `the_fingerprinted_count_is_the_plain_count` holds both functions \
              to the same answer on over a thousand candidates."
         );
         assert_eq!(
@@ -4232,9 +4232,10 @@ mod tests {
              about which bit is highest, so they are read together.\n\
              \x20 THE MEANING PRUNE -- a candidate whose ONE new pair restates \
              itself or cannot hold. `vocab::implication` proves the pivot chain \
-             exact from `daily.rs:206-215` and the single shared band half at \
-             `daily.rs:579`; anti-monotonicity cannot reach it, because both \
-             bits are frequent and so is their union. It advances rather than \
+             exact from `DailyLevels::from_previous_session` and the single \
+             shared band half `bits_with` binds before its loop; \
+             anti-monotonicity cannot reach it, because both bits are \
+             frequent and so is their union. It advances rather than \
              truncating -- the level still enumerates every other pair. It \
              shares the subset prune's skip since D-0924.\n\
              \x20 AND THE TEN THAT WERE ALREADY HERE:\n\

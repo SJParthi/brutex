@@ -1147,15 +1147,28 @@ impl fmt::Display for Window {
     }
 }
 
-/// The two facts about [`DropCensus`] that no external test can reach.
-///
-/// Everything else about this module is proved from outside, in
-/// `crates/pull/tests/unit.rs`, because that is where a caller stands. These
-/// two are here because the counters are private and the only public way to
-/// raise one is [`DropCensus::count`], which would need 4,294,967,295 calls.
-/// A saturating add nobody ever saturates is a claim, not a behaviour.
 /// Split a window into consecutive legal chunks, each at most `cap_days` long
-/// and each inside one calendar month.
+/// — or, when the vendor published no cap, each inside one calendar month.
+///
+/// **A capped chunk may cross a month boundary, and that is the design.** This
+/// read *"each inside one calendar month"*, and the comments below said the
+/// month bound "binds at every rung". Neither has been true since the month
+/// clamp was removed for capped rungs (`ingest::months_in` now splits a landed
+/// batch into one file per month, `docs/04-invariants.md` RG-04 and MR-38):
+/// with `Some(cap)` the chunk ends at the earlier of the cap and the window's
+/// last day, and the month is not consulted. D-1370.
+///
+/// ```
+/// # use pull::session::{Day, SessionError, Window, split_window};
+/// let window = Window::new(Day::new(2026, 7, 15)?, Day::new(2026, 8, 20)?)?;
+/// // Capped: the first chunk runs straight across July into August.
+/// let capped = split_window(window, Some(30))?;
+/// assert_eq!(capped[0].to().to_string(), "2026-08-13");
+/// // Uncapped: the month is the only bound left.
+/// let uncapped = split_window(window, None)?;
+/// assert_eq!(uncapped[0].to().to_string(), "2026-07-31");
+/// # Ok::<(), SessionError>(())
+/// ```
 ///
 /// # Why this exists
 ///
@@ -1177,10 +1190,10 @@ impl fmt::Display for Window {
 /// The cap is per (feed, rung) — `crate::vendor::HttpSpec::window_cap_days` —
 /// and a rung the charter records no figure for has none to apply. That is
 /// `None`, and it means *the vendor puts no bound on this request*. It does
-/// **not** mean the window goes out whole: the MONTH BOUNDARY below binds at
-/// every rung, because the store addresses one month per file whatever the bar
-/// length is. The caller that read `None` as "send it whole" is the caller this
-/// argument was widened to remove.
+/// **not** mean the window goes out whole: with no cap the MONTH BOUNDARY is
+/// the bound, so one unbounded request for a seven-year window is never sent.
+/// The caller that read `None` as "send it whole" is the caller this argument
+/// was widened to remove.
 ///
 /// # The split
 ///
@@ -1209,30 +1222,21 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
     let mut chunks = Vec::new();
     let mut start = first;
     while start <= last {
-        // AND NEVER ACROSS A MONTH BOUNDARY.
+        // THE MONTH BOUNDS ONLY AN UNCAPPED RUNG.
         //
-        // The store addresses ONE MONTH PER FILE, and `fetch::land` refuses a
-        // batch that spans two: "bars span 2026-07 to 2026-08; the store
-        // addresses one month per file and splitting is the caller's decision,
-        // not this one's". This IS that caller, and it was not splitting.
+        // This comment used to say "AND NEVER ACROSS A MONTH BOUNDARY" and that
+        // the chunk ends at the earlier of the cap, the last day and the month
+        // end. The code below has not done that since the clamp was removed for
+        // capped rungs: `fetch::land` / `ingest::one` no longer refuse a batch
+        // spanning two months, `ingest::months_in` writes one file per month
+        // out of it, and clamping cost 81 requests where a 2,000-day cap needs
+        // 2. So: with a published cap the chunk ends at the earlier of the cap
+        // and the operator's last day; with none it ends at the earlier of the
+        // month end and the last day. D-1370.
         //
-        // Measured on a real 37-day, 774-instrument pull: 6,907,286 rows read,
-        // 5,496,790 stored, and 699 MEMBERS FAILED — every instrument whose
-        // window crossed July into August. The vendor answered, the bars
-        // decoded, and the store refused them at the write boundary for a
-        // reason the caller could have prevented.
-        //
-        // So the chunk ends at the earlier of: the vendor's day cap WHEN IT
-        // PUBLISHED ONE, the operator's last day, and the last day of the month
-        // `start` falls in. `cap_days - 1` because both ends are INCLUDED: a
-        // 30-day chunk starting at day 0 ends at day 29, not day 30. Off by one
-        // here would make every chunk one day over the vendor's cap, which is
-        // the failure this function exists to prevent and would be invisible
-        // until the vendor refused.
-        //
-        // With no published cap the month is the only bound, and it is enough
-        // to keep every chunk writable — `cap_days` is the vendor's rule and
-        // `month_end` is the store's, and only the second one is ours to know.
+        // `cap_days - 1` because both ends are INCLUDED: a 30-day chunk starting
+        // at day 0 ends at day 29, not day 30. Off by one here would make every
+        // chunk one day over the vendor's cap.
         let month_end = Day::from_days(start)?.end_of_month().days_from_epoch();
         let capped = match cap_days {
             Some(cap) => start.saturating_add(cap - 1),
@@ -1295,6 +1299,16 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
     reason = "the same exception every test module in this workspace takes: a \
               test that cannot panic cannot fail."
 )]
+/// The two facts about [`DropCensus`] that no external test can reach.
+///
+/// Everything else about this module is proved from outside, in
+/// `crates/pull/tests/unit.rs`, because that is where a caller stands. These
+/// two are here because the counters are private and the only public way to
+/// raise one is [`DropCensus::count`], which would need 4,294,967,295 calls.
+/// A saturating add nobody ever saturates is a claim, not a behaviour.
+///
+/// This paragraph sat above `split_window` and rendered as the first lines of
+/// THAT function's documentation (D-1370).
 mod tests {
     use super::{DropCensus, DropReason};
 
@@ -1397,13 +1411,6 @@ mod month_boundary {
         Day::new(y, m, d).expect("a real calendar date")
     }
 
-    /// EVERY CHUNK LANDS IN EXACTLY ONE MONTH, AND THE CHUNKS TILE THE WINDOW.
-    ///
-    /// Not a style preference. `fetch::land` refuses a batch spanning two
-    /// months by name, so a chunk that spans one is a fetch the vendor
-    /// answered and the store threw away. This is the regression test for a
-    /// measured failure: 37 days, 774 instruments, 699 members failed with
-    /// "bars span 2026-07 to 2026-08".
     /// **A chunk fills the vendor's cap, and the store splits it afterwards.**
     ///
     /// This used to assert that no chunk ever spanned two months, because

@@ -312,6 +312,7 @@ impl ResolvedGridViewV1<'_> {
         let grid = crate::grid::evaluate_resolved_expression_policy_v1(
             attested.bars,
             attested.column,
+            &attested.facts,
             run.program(),
             attested.horizon,
             self.side(),
@@ -454,9 +455,10 @@ impl ResolvedGridViewV1<'_> {
         let cell = validated
             .cell(ordinal)
             .ok_or("expression replay ordinal is absent")?;
-        crate::grid::materialize_expression_cell(
+        crate::grid::materialize_expression_cell_over(
             attested.bars,
             attested.column,
+            &attested.facts,
             evaluation.program(),
             evaluation.horizon,
             evaluation.side,

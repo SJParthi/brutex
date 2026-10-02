@@ -46,7 +46,7 @@ const SOURCES: [(&str, &str); 8] = [
 /// Every test file, held to the same rule. A float that only appears in a test
 /// is still a float in this crate, and a test is where one would arrive first:
 /// it is the natural place to reach for `0.618` rather than `618`.
-const TEST_SOURCES: [(&str, &str); 8] = [
+const TEST_SOURCES: [(&str, &str); 9] = [
     ("tests/expression.rs", include_str!("expression.rs")),
     (
         "tests/expression_search.rs",
@@ -55,6 +55,10 @@ const TEST_SOURCES: [(&str, &str); 8] = [
     (
         "tests/expression_search_readiness.rs",
         include_str!("expression_search_readiness.rs"),
+    ),
+    (
+        "tests/implication_pointers.rs",
+        include_str!("implication_pointers.rs"),
     ),
     ("tests/mask.rs", include_str!("mask.rs")),
     ("tests/no_float.rs", include_str!("no_float.rs")),

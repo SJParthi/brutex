@@ -977,3 +977,22 @@ An initial implementation or previous release's green checks do not clear new
 source automatically. D-0548's seven exact allocation/guard mutation replays all
 failed their tests as intended; fresh campaign coverage remains395/412 lines and
 69/84 branches, so it does not close the whole-crate100% requirement.
+
+## Grammar search limits recorded but not changed — OPEN (D-0751 to D-0754)
+
+Three grammar-search defects were resolved by stating them, not by changing
+the code. Each stays open here so a recorded limit is not read as a closed one.
+
+* **One node is not O(1) (D-0753).** Each grammar choice revalidates its whole
+  prefix, so per-node cost grows with the prefix up to the 1,151-instruction
+  capacity. The time per node is UNMEASURED. Closing it needs an incremental
+  validator whose per-position state `decode` can rebuild, and a bench.
+* **A node budget does not bound progress (D-0752).** Nodes between two
+  candidates grow with the alphabet and can exceed one checkpoint replay.
+  Pruning refused leaves moves the node counts and pause points a saved search
+  depends on (the D-0752 test fails on its pinned counts under it), so it is
+  left for a decision of its own.
+* **Displayed text cannot always be re-entered (D-0751).** `cli
+  expression-stored` and the explicit program catalog both parse operator
+  text, and a displayed candidate can exceed the parser's nesting or byte
+  limit. The exact round trip is the wire encoding.

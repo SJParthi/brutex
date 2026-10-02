@@ -301,7 +301,10 @@ fn the_catalog_counts_a_fifo_month_and_does_not_hold_it() {
     let out = catalog::walk(&scratch.root).expect("the walk runs");
     let months: Vec<String> = out.held.iter().map(|h| h.month.to_string()).collect();
     assert_eq!(months, vec!["2024-06".to_owned()], "only the real month");
-    assert_eq!(out.census.not_regular, 2, "the FIFO and the link to it");
+    // D-0766 never follows a link below `bars/`, so the link is `linked`
+    // and only the FIFO itself is `not_regular`.
+    assert_eq!(out.census.not_regular, 1, "the FIFO");
+    assert_eq!(out.census.linked, 1, "the link to it");
     assert_eq!(out.census.spot, 1);
     assert_eq!(out.census.other_kind, 2, "the real .lock and .crc");
     assert_eq!(out.census.seen, 5);

@@ -1698,6 +1698,30 @@ fn header() -> [u8; HEADER_BYTES] {
     raw
 }
 
+/// True when the held file is shorter than the header and every byte it holds
+/// equals the constant header's byte at that offset: the residue of a crash
+/// before the header write reached disk, and nothing else.
+fn holds_torn_header(file: &mut File) -> Result<bool, PopulationAdmissionV4Refusal> {
+    let len = file
+        .metadata()
+        .map_err(|why| format!("cannot stat Admission V4 data: {why}"))?
+        .len();
+    let Some(kept) = usize::try_from(len)
+        .ok()
+        .filter(|kept| *kept < HEADER_BYTES)
+    else {
+        return Ok(false);
+    };
+    let mut raw = [0_u8; HEADER_BYTES];
+    let prefix = raw
+        .get_mut(..kept)
+        .ok_or_else(|| "Admission V4 torn header range is invalid".to_owned())?;
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(prefix))
+        .map_err(|why| format!("cannot read Admission V4 torn header: {why}"))?;
+    Ok(header().get(..kept) == Some(&*prefix))
+}
+
 fn verify_header(file: &mut File) -> Result<(), PopulationAdmissionV4Refusal> {
     let mut raw = [0_u8; HEADER_BYTES];
     file.seek(SeekFrom::Start(0))
@@ -2543,10 +2567,16 @@ impl PopulationAdmissionV4Ledger {
                 .map_err(|why| format!("cannot shared-lock Admission V4 reader: {why}"))?;
         }
         let opened = (|| {
-            let (mut data_file, data_created) = open_child(&data_path, writable)?;
+            let (mut data_file, created) = open_child(&data_path, writable)?;
+            // A crash between creating the file and syncing its header leaves
+            // an empty file or a strict prefix of the constant header. Only
+            // the writer, under the exclusive lock, rewrites that; a reader
+            // and any other short content still refuse in `verify_header`.
+            let data_created = created || (writable && holds_torn_header(&mut data_file)?);
             if data_created {
                 data_file
-                    .write_all(&header())
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| data_file.write_all(&header()))
                     .and_then(|()| data_file.sync_all())
                     .map_err(|why| format!("cannot initialize Admission V4 data: {why}"))?;
             }
@@ -3023,9 +3053,32 @@ fn append_raw(
     file: &mut File,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationAdmissionV4Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Admission V4 record: {why}"))
+    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
+}
+
+/// Appends one record, and on a write error (ENOSPC, EIO) truncates the file
+/// back to the length it had before this record. Without that a partial
+/// `write_all` left a ragged tail, and every later open, read-only included,
+/// refused the file's already committed authorities as ragged.
+fn append_with_rollback(
+    file: &mut File,
+    raw: &[u8; RECORD_BYTES],
+    write: impl FnOnce(&mut File, &[u8; RECORD_BYTES]) -> std::io::Result<()>,
+) -> Result<(), PopulationAdmissionV4Refusal> {
+    let end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("cannot append Admission V4 record: {why}"))?;
+    let Err(why) = write(file, raw) else {
+        return Ok(());
+    };
+    match file.set_len(end) {
+        Ok(()) => Err(format!(
+            "cannot append Admission V4 record: {why}; truncated back to {end} bytes"
+        )),
+        Err(rollback) => Err(format!(
+            "cannot append Admission V4 record: {why}; truncation back to {end} bytes also failed: {rollback}"
+        )),
+    }
 }
 
 fn open_root(
@@ -3771,5 +3824,116 @@ mod tests {
             next.sync_all().expect("sync replacement bytes");
             assert!(authority.finalization_projection().is_err());
         }
+    }
+
+    #[test]
+    fn a_partial_append_error_truncates_back_and_committed_authority_stays_readable() {
+        let root = TestRoot::new("partial-append-error");
+        let value = prepared(
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            5,
+        );
+        commit_population_admission_v4(root.path(), bounds(), value.clone())
+            .expect("write committed fixture");
+        let path = root.path().join(DATA_FILE);
+        let before = std::fs::read(&path).expect("read committed bytes");
+        let raw = encoded_block(&value, 1).expect("encode next block")[0];
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open committed file");
+        let refusal = append_with_rollback(&mut file, &raw, |file, raw| {
+            file.write_all(&raw[..RECORD_BYTES / 2])?;
+            Err(std::io::Error::other("injected short write"))
+        })
+        .expect_err("a failed write must refuse");
+        assert!(
+            refusal.contains("injected short write") && refusal.contains("truncated back"),
+            "refusal `{refusal}` must name the write error and the rollback"
+        );
+        drop(file);
+        assert_eq!(
+            std::fs::read(&path).expect("reread committed bytes"),
+            before
+        );
+        PopulationAdmissionV4Ledger::open_read(root.path(), bounds())
+            .expect("committed authority stays readable");
+        let reused = commit_population_admission_v4(root.path(), bounds(), value)
+            .expect("exact rerun reuses the committed authority");
+        assert!(matches!(&reused, PopulationAdmissionV4Commit::Reused(_)));
+    }
+
+    #[test]
+    fn empty_or_torn_header_prefix_is_reinitialized_by_the_writer_only() {
+        let reference = TestRoot::new("header-reference");
+        let value = prepared(
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            4,
+        );
+        commit_population_admission_v4(reference.path(), bounds(), value.clone())
+            .expect("write uncrashed reference");
+        let expected = std::fs::read(reference.path().join(DATA_FILE)).expect("read reference");
+        for kept in [0, 1, HEADER_BYTES / 2, HEADER_BYTES - 1] {
+            let root = TestRoot::new("torn-header");
+            File::create(root.path().join(LOCK_FILE)).expect("create crashed lock");
+            std::fs::write(root.path().join(DATA_FILE), &header()[..kept])
+                .expect("write crashed header prefix");
+            assert!(PopulationAdmissionV4Ledger::open_read(root.path(), bounds()).is_err());
+            assert_eq!(
+                std::fs::read(root.path().join(DATA_FILE)).expect("reread after reader"),
+                &header()[..kept],
+                "a reader must not repair the file"
+            );
+            let committed = commit_population_admission_v4(root.path(), bounds(), value.clone())
+                .unwrap_or_else(|why| panic!("writer must recover {kept} header bytes: {why}"));
+            assert!(matches!(
+                &committed,
+                PopulationAdmissionV4Commit::Written(_)
+            ));
+            assert_eq!(
+                std::fs::read(root.path().join(DATA_FILE)).expect("reread recovered"),
+                expected
+            );
+            PopulationAdmissionV4Ledger::open_read(root.path(), bounds())
+                .expect("reader opens recovered ledger");
+        }
+
+        let foreign = TestRoot::new("foreign-short-header");
+        let mut garbage = header()[..HEADER_BYTES / 2].to_vec();
+        garbage[0] ^= 1;
+        std::fs::write(foreign.path().join(DATA_FILE), &garbage).expect("write foreign bytes");
+        assert!(commit_population_admission_v4(foreign.path(), bounds(), value).is_err());
+        assert_eq!(
+            std::fs::read(foreign.path().join(DATA_FILE)).expect("reread foreign bytes"),
+            garbage
+        );
+    }
+
+    #[test]
+    fn a_whole_header_is_not_rewritten_by_the_writer() {
+        let root = TestRoot::new("whole-header");
+        let path = root.path().join(DATA_FILE);
+        std::fs::write(&path, header()).expect("write whole header");
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("open whole header")
+            .set_modified(stamp)
+            .expect("stamp whole header");
+        drop(
+            PopulationAdmissionV4Ledger::open_write(root.path(), bounds())
+                .expect("writer opens whole header"),
+        );
+        let metadata = std::fs::metadata(&path).expect("stat whole header");
+        assert_eq!(metadata.len(), HEADER_BYTES as u64);
+        assert_eq!(
+            metadata.modified().expect("read modified time"),
+            stamp,
+            "a writer must not rewrite a header that is already whole"
+        );
     }
 }

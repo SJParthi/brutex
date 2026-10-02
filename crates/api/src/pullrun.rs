@@ -39,8 +39,11 @@
 //!
 //! O(1) per leg beyond the leg's own work: the group lookup is a linear scan of
 //! the vendor list, which is bounded by the number of feeds this build has
-//! (four), not by the number of legs. The pass loop holds one `Progress` and
-//! one checkpoint per leg; nothing accumulates per pass.
+//! (`pull::vendor::FEED_COUNT`), not by the number of legs. That bound holds
+//! because [`legs_from`] refuses a leg naming no feed (D-0906), which
+//! `a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds`
+//! pins. The pass loop holds one `Progress` and one checkpoint per leg;
+//! nothing accumulates per pass.
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -404,12 +407,14 @@ impl Refusal {
 /// # Errors
 ///
 /// [`Refusal::NothingAsked`] for a body with no `leg`, and
-/// [`Refusal::Malformed`] naming the first leg that could not be read.
+/// [`Refusal::Malformed`] naming the first leg that could not be read,
+/// whose route is not served, or whose vendor is no feed this build has.
 ///
 /// # Cost
 ///
 /// One pass over the body. O(n) in its length and nothing worse -- there is no
-/// per-leg scan of the legs already read.
+/// per-leg scan of the legs already read. Each leg's vendor is compared
+/// with the fixed feed list, `pull::vendor::FEED_COUNT` names long.
 pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
     let mut legs = Vec::new();
     for field in body.split('&') {
@@ -430,6 +435,16 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         let Some(route) = Route::parse(route) else {
             return Err(Refusal::Malformed(decoded));
         };
+        // A vendor this build does not have is a wiring fault, named like an
+        // unknown route. It is also what keeps `by_feed`'s group count, and
+        // so `conduct`'s chain count, bounded by the feeds rather than by the
+        // distinct strings a form can carry. D-0906.
+        if !pull::vendor::Feed::ALL
+            .iter()
+            .any(|feed| feed.wire() == vendor)
+        {
+            return Err(Refusal::Malformed(decoded));
+        }
         legs.push(Leg {
             route,
             vendor: vendor.to_owned(),
@@ -450,9 +465,11 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
 /// # Cost
 ///
 /// The group lookup scans the vendors found so far, which is bounded by the
-/// number of feeds this build has rather than by the number of legs -- four,
-/// not four thousand. The sort is per group and `sort_by_key` is stable, so two
-/// legs on one rung keep the order the operator ticked them in.
+/// number of feeds this build has (`pull::vendor::FEED_COUNT`) rather than by
+/// the number of legs, for legs [`legs_from`] admitted: it refuses a vendor
+/// that is no feed (D-0906). Legs built by hand are not checked here. The
+/// sort is per group and `sort_by_key` is stable, so two legs on one rung
+/// keep the order the operator ticked them in.
 #[must_use]
 pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
     let mut groups: Vec<(String, Vec<Leg>)> = Vec::new();
@@ -478,8 +495,16 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 ///
 /// # Cost
 ///
-/// One manifest read per vendor per pass — four reads, not four per leg. It is
-/// deliberately outside the per-leg path.
+/// NOT O(1) on a miss. On a cache hit, five `stat`s (six when no manifest
+/// answered) and no manifest read. On the first call after any vendor's
+/// manifest moved, a whole `census::read_all` of all five vendors and a sort
+/// of every held entry: O(manifest bytes + E log E), growing with the store.
+/// During a pull every committed leg moves a manifest, so the conductor's
+/// calls (start, before and after each pass, every [`ROWS_TICK`], end) and
+/// recovery's call after each attempt miss. Outside the per-leg path; the
+/// census a miss builds is shared with every other `census_now` caller.
+/// `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)" says why a
+/// header-only read is not used. UNMEASURED.
 pub(crate) fn rows_now(site: &Site) -> u64 {
     let (censuses, _) = crate::server::census_now(site);
     censuses
@@ -1217,6 +1242,53 @@ mod tests {
         assert_eq!(Route::parse(""), None);
         assert_eq!(Route::Spot.path(), "/pull/spot");
         assert_eq!(Route::Fno.path(), "/pull/fno");
+    }
+
+    /// A vendor this build does not have refuses the whole run, so the groups
+    /// `by_feed` builds can never outnumber the feeds.
+    ///
+    /// `by_feed` finds a leg's group by scanning the groups already built, and
+    /// `conduct` spawns one chain per group. Both costs are bounded by the
+    /// group count, and the group count is bounded by the feed count ONLY if
+    /// every leg names a real feed. Before D-0906 `legs_from` copied the vendor
+    /// unchecked, so a form of invented vendor names grew one group and one
+    /// chain per distinct name. W1-api3-3.
+    #[test]
+    fn a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds() {
+        let invented: Vec<String> = (0..=pull::vendor::FEED_COUNT)
+            .map(|n| field("/pull/spot", &format!("nofeed{n}"), "1day", "x", "a=1"))
+            .collect();
+        match legs_from(&invented.join("&")) {
+            Err(Refusal::Malformed(named)) => assert!(
+                named.contains("nofeed0"),
+                "the refusal quotes the leg that named no feed: {named}"
+            ),
+            other => panic!("a leg naming no feed must be refused, got {other:?}"),
+        }
+        // One invented vendor among real ones still refuses the whole run.
+        let mixed = [
+            field("/pull/spot", "dhan", "1day", "d", "a=1"),
+            field("/pull/spot", "Dhan", "1day", "d", "a=1"),
+        ]
+        .join("&");
+        assert!(
+            matches!(legs_from(&mixed), Err(Refusal::Malformed(_))),
+            "a vendor is matched on its exact wire spelling"
+        );
+        // Every feed this build has is accepted, and they group into exactly
+        // one chain each -- the bound the cost argument above names.
+        let every: Vec<String> = pull::vendor::Feed::ALL
+            .iter()
+            .flat_map(|feed| {
+                [
+                    field("/pull/spot", feed.wire(), "1day", "d", "a=1"),
+                    field("/pull/spot", feed.wire(), "1min", "m", "b=2"),
+                ]
+            })
+            .collect();
+        let groups = by_feed(legs_from(&every.join("&")).expect("every feed is a vendor"));
+        assert_eq!(groups.len(), pull::vendor::FEED_COUNT);
+        assert!(groups.iter().all(|(_, legs)| legs.len() == 2));
     }
 
     /// The ladder, and the one position an unranked rung must never take.

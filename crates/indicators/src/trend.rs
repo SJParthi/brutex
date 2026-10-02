@@ -437,9 +437,10 @@ impl SuperTrend {
             }
         };
         self.trend = trend;
-        if let Ok(next) = i64::try_from(stop) {
-            self.stop = Some(next);
-        }
+        // Same policy as the seed: a stop `i64` cannot hold is absent, not the previous
+        // leg's level kept under the new trend. The next candle then reseeds, exactly as
+        // it does after an unrepresentable seed.
+        self.stop = i64::try_from(stop).ok();
     }
 }
 
@@ -2252,15 +2253,17 @@ mod the_stop_on_both_sides {
         );
     }
 
-    /// A stop that will not fit `i64` is refused, and the last good one stands.
+    /// A flip whose new stop will not fit `i64` leaves the stop absent, never stale.
     ///
     /// `supertrend_mult` is a public `i128` with no ceiling, so the band is only as
     /// bounded as its caller. The multiplier below is not one any operator would set: it
     /// is the coarse thing that puts `mid + band` past the top of `i64` while every price
     /// stays ordinary paisa, which is the only way to reach the conversion's failing arm.
-    /// A wrapped stop would be a plausible wrong price, which §4 bans outright.
+    /// A wrapped stop would be a plausible wrong price, which §4 bans outright; so would
+    /// the previous leg's stop kept under the new trend, which is on the wrong side of
+    /// price and would decide positions 64/65 and the next bar's flip (ET-indicators-4).
     #[test]
-    fn a_stop_that_will_not_fit_i64_is_refused_and_the_last_good_one_stands() {
+    fn a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale() {
         let mut s = SuperTrend::new(TrendThresholds {
             supertrend_mult: 1_000_000_000_000_000_000_000,
             ..TrendThresholds::CLASSICAL
@@ -2285,8 +2288,17 @@ mod the_stop_on_both_sides {
         assert_eq!(s.trend(), Trend::Down, "the flip itself is still recorded");
         assert_eq!(
             s.stop(),
-            Some(2_500_000),
-            "an unrepresentable band must leave the last good stop in place, never wrap it"
+            None,
+            "an unrepresentable flip must leave no stop, not the long leg's stop under a short trend"
+        );
+        // Under the stale stop this close above 2_500_000 would flip straight back to
+        // long on the old leg's level. With the stop absent the candle reseeds instead,
+        // and that band is out of range too, so the stop stays absent.
+        s.fold(&bar(120_000_000, 2_501_000, 2_499_000, 2_500_500));
+        assert_eq!(
+            s.stop(),
+            None,
+            "an out-of-range band keeps the stop absent on the next candle as well"
         );
     }
 

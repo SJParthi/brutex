@@ -766,16 +766,27 @@ impl InstitutionalStatisticsAuthorityV1 {
         self.record.spa_p_value()
     }
 
-    /// Exact-count-derived full-family probability projection.
+    /// Exact-count-derived full-family probability projection, rounded up.
+    ///
+    /// # Why this is not the stored field
+    ///
+    /// The V1 row stores `exact_ppm`, a FLOOR, and keeps storing it: its bytes
+    /// and its `validate` are a format version, never mutated in place. But this
+    /// value feeds `max_fwer_p_value_ppm`, a `<=` maximum, and a floor moves a
+    /// p-value toward passing: `50_001 / 1_000_001` floored to `50_000` passed a
+    /// `<= 50_000` gate that [`Self::romano_wolf_rejects_at_ppm`] refuses at the
+    /// same alpha. So the admission projection is recomputed from the retained
+    /// exact counts, rounding away from significance. W2-cli7-6, D-0930.
     #[must_use]
-    pub const fn fwer_p_value_ppm(&self) -> u64 {
-        self.record.fwer_p_value_ppm
+    pub fn fwer_p_value_ppm(&self) -> u64 {
+        ceiling_ppm(self.record.familywise_p_value)
     }
 
-    /// Exact-count-derived selected-candidate adjusted probability projection.
+    /// Exact-count-derived selected-candidate adjusted probability projection,
+    /// rounded up for the reason [`Self::fwer_p_value_ppm`] gives.
     #[must_use]
-    pub const fn romano_wolf_p_value_ppm(&self) -> u64 {
-        self.record.romano_wolf_p_value_ppm
+    pub fn romano_wolf_p_value_ppm(&self) -> u64 {
+        ceiling_ppm(self.record.adjusted_p_value)
     }
 
     /// Exact candidate decision at an operator-supplied ppm alpha.
@@ -1481,6 +1492,25 @@ fn exact_ppm(probability: DurableExactProbabilityV1) -> Result<u64, String> {
         .map_err(|_| "institutional statistics ppm projection does not fit u64".to_owned())
 }
 
+/// `ceil(numerator * PPM / denominator)` over a fraction a validated row holds.
+///
+/// `DurableExactProbabilityV1::validate` holds `1 <= numerator <= denominator`.
+fn ceiling_ppm(probability: DurableExactProbabilityV1) -> u64 {
+    ceiling_ppm_of(probability.numerator, probability.denominator)
+}
+
+/// `ceil(numerator * PPM / denominator)`, rounding AWAY from significance.
+///
+/// Every caller holds `numerator <= denominator` and `denominator >= 1`, so the
+/// quotient is at most `PPM` and the conversion cannot fail; were it ever to,
+/// `PPM` is certainty of non-significance, which fails every maximum.
+/// Shared by this module and `institutional_evidence` so the two projections
+/// cannot drift apart. D-0930.
+pub(crate) fn ceiling_ppm_of(numerator: u64, denominator: u64) -> u64 {
+    let projected = (u128::from(numerator) * u128::from(PPM)).div_ceil(u128::from(denominator));
+    u64::try_from(projected).unwrap_or(PPM)
+}
+
 fn usize_to_u64(name: &str, value: usize) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| format!("institutional statistics {name} does not fit u64"))
 }
@@ -1663,6 +1693,76 @@ mod tests {
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .expect("append raw institutional statistics fixture");
+    }
+
+    /// The admission-facing ppm projections round AWAY from significance.
+    ///
+    /// They feed `max_fwer_p_value_ppm` and `max_romano_wolf_p_value_ppm`,
+    /// which are `<=` maxima, so a floor moves a p-value toward passing:
+    /// `50_001 / 1_000_001` floored to `50_000` passed a `<= 50_000` gate that
+    /// the exact decision at the same alpha refuses. The row below is a valid
+    /// V1 row exactly as the V1 writer stores it (its ppm fields are the floor
+    /// `exact_ppm` projection); the getters must not hand that floor on.
+    /// W2-cli7-6, D-0930.
+    #[test]
+    fn ppm_projections_never_pass_a_maximum_the_exact_count_fails() {
+        let row = |draws: u64, adjusted: u64, familywise: u64| {
+            let mut record = prepared(1).record;
+            let denominator = draws + 1;
+            record.draws = draws;
+            record.strict_exceedances = 0;
+            record.initial_p_value = DurableExactProbabilityV1 {
+                numerator: 1,
+                denominator,
+            };
+            record.adjusted_p_value = DurableExactProbabilityV1 {
+                numerator: adjusted,
+                denominator,
+            };
+            record.familywise_p_value = DurableExactProbabilityV1 {
+                numerator: familywise,
+                denominator,
+            };
+            record.fwer_p_value_ppm = exact_ppm(record.familywise_p_value).expect("valid fraction");
+            record.romano_wolf_p_value_ppm =
+                exact_ppm(record.adjusted_p_value).expect("valid fraction");
+            record.validate().expect("a row the V1 writer would store");
+            InstitutionalStatisticsAuthorityV1 {
+                record,
+                completion_digest: digest(9),
+            }
+        };
+        let authority = row(1_000_000, 50_001, 50_001);
+        assert_eq!(
+            authority.record.romano_wolf_p_value_ppm, 50_000,
+            "the V1 row stores the floor, and stays byte-identical"
+        );
+        assert_eq!(
+            authority.romano_wolf_rejects_at_ppm(50_000),
+            Some(false),
+            "the exact count does not clear 5%"
+        );
+        assert_eq!(
+            authority.romano_wolf_p_value_ppm(),
+            50_001,
+            "so the selected-candidate projection must not read 50,000"
+        );
+        assert_eq!(
+            authority.fwer_p_value_ppm(),
+            50_001,
+            "and neither may the full-family projection"
+        );
+
+        // An exact boundary is not pushed over it: 50,000/1,000,000 is 50,000.
+        let exact = row(999_999, 50_000, 1);
+        assert_eq!(exact.romano_wolf_rejects_at_ppm(50_000), Some(true));
+        assert_eq!(exact.romano_wolf_p_value_ppm(), 50_000);
+        assert_eq!(exact.fwer_p_value_ppm(), 1);
+
+        // Certainty projects to exactly one million.
+        let certain = row(1_000_000, 1_000_001, 1_000_001);
+        assert_eq!(certain.romano_wolf_p_value_ppm(), PPM);
+        assert_eq!(certain.fwer_p_value_ppm(), PPM);
     }
 
     #[test]

@@ -1382,7 +1382,7 @@ impl Evaluator {
     ///
     /// The union of nine sources' own `positions()` — eight modules and the current-day
     /// Fibonacci rung range — so it cannot drift from them: adding a position to a
-    /// module adds it here, plus the four this type computes itself. 238 positions today,
+    /// module adds it here, plus the four this type computes itself. 328 positions today,
     /// which is every live bit in the table.
     #[must_use]
     pub fn positions() -> Vec<u16> {

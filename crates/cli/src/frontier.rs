@@ -1129,21 +1129,52 @@ impl Frontier {
     /// handle and opening fresh, which is the one O(rows) path a cache should
     /// ever take.
     ///
+    /// **A read-only handle refreshes exactly as [`Self::open_read_bounded`]
+    /// indexes.** A bad seal, a sealed row with an invalid schema and a
+    /// non-contiguous duplicate are recorded and skipped, never refused, so a
+    /// handle opened over damaged history stays O(delta) per refresh. Until
+    /// W2-cli5-0 this ran the writer's integrity gate first, so every refresh
+    /// of such a handle was refused, `api`'s cache dropped it, and the next
+    /// request reopened it at O(rows): a refusal and a full walk alternated.
+    /// `a_read_only_handle_over_damaged_history_refreshes_by_the_delta` pins
+    /// the refreshed index to a fresh open's. A writer handle keeps the strict
+    /// path, which refuses. D-0913.
+    ///
+    /// **A read-only refresh holds the SHARED lock** while it measures and
+    /// reads, as [`Self::read`] does and `results::Results::refresh` does.
+    /// `append_all` writes under the exclusive lock, so the refresh waits for
+    /// an append in progress rather than seeing part of one. Recording damage
+    /// instead of refusing makes this necessary: a torn row read outside the
+    /// lock would be indexed as a bad seal and kept in a cached handle that no
+    /// longer drops itself.
+    /// `a_read_only_refresh_waits_for_an_append_in_progress` pins it.
+    ///
     /// # Errors
     ///
-    /// The same refusals `absorb_new_rows` makes: a shrunken file, a ragged
-    /// tail, an unreadable row, or a duplicate identity whose blocks are not
+    /// Both kinds refuse a shrunken file, a ragged tail or an unreadable row,
+    /// and a read-only handle also refuses a shared-lock or unlock failure.
+    /// A writer handle also refuses the damage it has already recorded, a bad
+    /// seal, an invalid schema or a duplicate identity whose blocks are not
     /// contiguous.
     pub fn refresh(&mut self) -> Result<(), Refusal> {
-        self.absorb_new_rows()
+        if !self.require_parent {
+            return self.absorb_new_rows();
+        }
+        self.file.lock_shared().map_err(|why| {
+            format!("the frontier file could not be locked for refreshing: {why}")
+        })?;
+        let absorbed = self.absorb_read_only();
+        let released = self
+            .file
+            .unlock()
+            .map_err(|why| format!("the frontier file could not be unlocked: {why}"));
+        absorbed.and(released)
     }
 
-    /// Absorbs whole rows appended since this handle opened.
-    ///
-    /// O(rows appended by other writers), which is zero on the ordinary
-    /// result-set path because its outer lock serialises all four children.
-    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
-        self.refuse_integrity_failure_for_write()?;
+    /// The whole-row length a refresh may absorb up to, or the reason there
+    /// is none: the file shrank below what this handle already indexed, or
+    /// its length is not a header plus whole rows.
+    fn absorbable_len(&self) -> Result<u64, Refusal> {
         let len = self
             .file
             .metadata()
@@ -1162,6 +1193,38 @@ impl Frontier {
                 self.path.display()
             ));
         }
+        Ok(len)
+    }
+
+    /// A read-only handle's refresh: the rows past `scanned`, each indexed by
+    /// [`index_row`], the one rule [`index_of`] applies at open.
+    fn absorb_read_only(&mut self) -> Result<(), Refusal> {
+        let len = self.absorbable_len()?;
+        let at = self.scanned;
+        self.file
+            .seek(SeekFrom::Start(at))
+            .map_err(|why| format!("frontier row at byte {at} could not be seeked: {why}"))?;
+        let mut buffered = std::io::BufReader::new(&mut self.file);
+        let mut raw = [0_u8; STRIDE_BYTES];
+        while self.scanned.saturating_add(STRIDE) <= len {
+            let at = self.scanned;
+            buffered
+                .read_exact(&mut raw)
+                .map_err(|why| format!("frontier row at byte {at} could not be read: {why}"))?;
+            let index = at.saturating_sub(HEADER) / STRIDE;
+            index_row(&mut self.blocks, &mut self.write_refusal, index, &raw);
+            self.scanned = self.scanned.saturating_add(STRIDE);
+        }
+        Ok(())
+    }
+
+    /// Absorbs whole rows appended since this handle opened.
+    ///
+    /// O(rows appended by other writers), which is zero on the ordinary
+    /// result-set path because its outer lock serialises all four children.
+    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
+        self.refuse_integrity_failure_for_write()?;
+        let len = self.absorbable_len()?;
 
         let mut raw = [0_u8; STRIDE_BYTES];
         while self.scanned.saturating_add(STRIDE) <= len {
@@ -1604,50 +1667,62 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
         buffered
             .read_exact(&mut raw)
             .map_err(|why| format!("row {index} could not be read while indexing: {why}"))?;
-        if !Row::seal_matches(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("whole frontier row {index} whose integrity seal failed")
-            });
-            continue;
-        }
-        // A valid seal makes the identity bytes trustworthy, but it does not
-        // make an unknown schema byte meaningful. Decode every sealed row so a
-        // fresh writer inherits the same refusal a stale writer would have seen.
-        let mut identity = [0_u8; 32];
-        identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
-        if let Err(why) = Row::from_bytes(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("frontier row {index} is sealed but its schema is invalid: {why}")
-            });
-        }
-
-        match blocks.get_mut(&identity) {
-            Some(block) if block.first.saturating_add(block.count) == index => {
-                block.count = block.count.saturating_add(1);
-            }
-            Some(_) => {
-                write_refusal.get_or_insert_with(|| {
-                    format!(
-                        "frontier row {index} starts a non-contiguous duplicate block for run {}",
-                        hex(&identity)
-                    )
-                });
-            }
-            None => {
-                blocks.insert(
-                    identity,
-                    Block {
-                        first: index,
-                        count: 1,
-                    },
-                );
-            }
-        }
+        index_row(&mut blocks, &mut write_refusal, index, &raw);
     }
     Ok(Indexed {
         blocks,
         write_refusal,
     })
+}
+
+/// Index one whole row at `index`, recording the first integrity failure
+/// rather than refusing. Shared by [`index_of`] at open and by a read-only
+/// handle's refresh, so the two cannot index the same bytes differently.
+fn index_row(
+    blocks: &mut std::collections::HashMap<[u8; 32], Block>,
+    write_refusal: &mut Option<Refusal>,
+    index: u64,
+    raw: &[u8; STRIDE_BYTES],
+) {
+    if !Row::seal_matches(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("whole frontier row {index} whose integrity seal failed")
+        });
+        return;
+    }
+    // A valid seal makes the identity bytes trustworthy, but it does not
+    // make an unknown schema byte meaningful. Decode every sealed row so a
+    // fresh writer inherits the same refusal a stale writer would have seen.
+    let mut identity = [0_u8; 32];
+    identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
+    if let Err(why) = Row::from_bytes(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("frontier row {index} is sealed but its schema is invalid: {why}")
+        });
+    }
+
+    match blocks.get_mut(&identity) {
+        Some(block) if block.first.saturating_add(block.count) == index => {
+            block.count = block.count.saturating_add(1);
+        }
+        Some(_) => {
+            write_refusal.get_or_insert_with(|| {
+                format!(
+                    "frontier row {index} starts a non-contiguous duplicate block for run {}",
+                    hex(&identity)
+                )
+            });
+        }
+        None => {
+            blocks.insert(
+                identity,
+                Block {
+                    first: index,
+                    count: 1,
+                },
+            );
+        }
+    }
 }
 
 /// Writes the sixteen-byte header of a fresh file, and proves it was kept.
@@ -2101,6 +2176,152 @@ mod tests {
         assert!(
             duplicate.contains("already has a frontier block"),
             "{duplicate}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W2-cli5-0, D-0913: a read-only handle opened over damaged history must
+    /// refresh by absorbing only the new rows, indexing them exactly as a
+    /// fresh read-only open over the whole file would. It used to refuse every
+    /// refresh with the writer's integrity gate, so `api`'s cached handle was
+    /// dropped and reopened, O(rows), on every other request and the request
+    /// between them was refused.
+    #[test]
+    fn a_read_only_handle_over_damaged_history_refreshes_by_the_delta() {
+        let dir = root("read-only-damaged-refresh");
+        let path = Frontier::path(&dir);
+        let kept = row(0x71, 1);
+        {
+            let mut store = Frontier::open(&dir).expect("a fresh file opens");
+            store.append_all(&[kept]).expect("the healthy prefix");
+        }
+        let mut corrupt = row(0x72, 1).to_bytes();
+        *corrupt.get_mut(40).expect("a sealed payload byte") ^= 0x80;
+        append_raw(&path, &[corrupt]);
+
+        let mut reader = Frontier::open_read(&dir).expect("damaged history still opens read-only");
+        reader
+            .refresh()
+            .expect("nothing new: a read-only refresh must not refuse over damage it opened past");
+
+        let mut invalid = row(0x74, 1).to_bytes();
+        *invalid.get_mut(DIRECTION_AT).expect("the direction byte") = 2;
+        reseal(&mut invalid);
+        append_raw(
+            &path,
+            &[
+                row(0x73, 1).to_bytes(),
+                row(0x73, 2).to_bytes(),
+                corrupt,
+                invalid,
+                row(0x71, 2).to_bytes(),
+                row(0x75, 1).to_bytes(),
+            ],
+        );
+        reader
+            .refresh()
+            .expect("new rows past damage are absorbed, not refused");
+        reader.refresh().expect("a second refresh is a no-op");
+
+        let fresh = Frontier::open_read(&dir).expect("a fresh read-only open");
+        for identity in [0x71, 0x72, 0x73, 0x74, 0x75] {
+            assert_eq!(
+                reader.block(&[identity; 32]),
+                fresh.block(&[identity; 32]),
+                "run {identity:#x}: the refreshed index must equal a fresh open"
+            );
+        }
+        assert_eq!(
+            reader.block(&[0x71; 32]),
+            Some(super::Block { first: 0, count: 1 }),
+            "the repeated 0x71 row at 6 never widens its first block across 2..6"
+        );
+        assert_eq!(
+            reader.block(&[0x73; 32]),
+            Some(super::Block { first: 2, count: 2 })
+        );
+        assert_eq!(
+            reader.block(&[0x72; 32]),
+            None,
+            "a bad seal is never indexed"
+        );
+        assert_eq!(
+            reader.block(&[0x74; 32]),
+            Some(super::Block { first: 5, count: 1 }),
+            "a sealed invalid row is indexed and diagnosed at read time, as at open"
+        );
+        assert_eq!(
+            reader.block(&[0x75; 32]),
+            Some(super::Block { first: 7, count: 1 })
+        );
+        assert!(
+            reader
+                .read(5)
+                .expect_err("the invalid row is still diagnosed")
+                .contains("schema is invalid")
+        );
+        let mut writer = Frontier::open(&dir).expect("a writer opens over the damage");
+        let why = writer
+            .refresh()
+            .expect_err("a writer handle keeps the strict refresh");
+        assert!(why.contains("Append-only history is damaged"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W2-cli5-0, D-0913: a read-only refresh holds the shared lock, so it
+    /// waits for an append in progress under the exclusive lock instead of
+    /// indexing the half-written row as a bad seal. The peer lays down a whole
+    /// row's length of zeros under the lock, which is what an unlocked reader
+    /// could see mid-append, and only then writes the real row and unlocks.
+    #[test]
+    fn a_read_only_refresh_waits_for_an_append_in_progress() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let dir = root("read-only-refresh-waits");
+        let path = Frontier::path(&dir);
+        {
+            let mut store = Frontier::open(&dir).expect("a fresh file opens");
+            store.append_all(&[row(0x61, 1)]).expect("the first row");
+        }
+        let mut reader = Frontier::open_read(&dir).expect("a read-only open");
+        let mut peer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the appending peer opens");
+        peer.lock().expect("the peer holds the exclusive lock");
+        let at = peer.seek(SeekFrom::End(0)).expect("the end of the file");
+        peer.write_all(&[0_u8; STRIDE_BYTES])
+            .expect("a whole row's length, not yet the row");
+        peer.flush().expect("the placeholder is visible");
+
+        let refreshing = std::thread::spawn(move || {
+            let refreshed = reader.refresh();
+            (reader, refreshed)
+        });
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(
+            !refreshing.is_finished(),
+            "a read-only refresh must not finish while an append holds the exclusive lock"
+        );
+        peer.seek(SeekFrom::Start(at))
+            .expect("back to the placeholder");
+        peer.write_all(&row(0x62, 1).to_bytes())
+            .expect("the real row replaces it");
+        peer.sync_all().expect("the row is durable");
+        peer.unlock().expect("the append is complete");
+
+        let (reader, refreshed) = refreshing.join().expect("the refresh thread");
+        refreshed.expect("the refresh absorbs the whole row");
+        assert_eq!(
+            reader.block(&[0x62; 32]),
+            Some(super::Block { first: 1, count: 1 }),
+            "the refresh saw the finished row, never the placeholder"
+        );
+        assert!(
+            reader.write_refusal.is_none(),
+            "no damage was recorded: {:?}",
+            reader.write_refusal
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

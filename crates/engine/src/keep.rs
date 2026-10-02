@@ -239,6 +239,11 @@ fn weaker(held: &[Itemset], lower: usize, upper: usize) -> bool {
 ///
 /// **This is not a depth control.** See the module header: a cap of zero walks
 /// the same ladder as a cap of a million.
+///
+/// **No production path calls this.** No shipping source in this crate
+/// constructs it and no other crate's `src` names it: `runner::rank` feeds its
+/// own heap, so no run's retention, ranking or report depends on this type.
+/// `engine/tests/production_callers.rs` fails the day a caller appears (D-0762).
 #[derive(Clone, Debug, Default)]
 pub struct Best {
     cap: usize,

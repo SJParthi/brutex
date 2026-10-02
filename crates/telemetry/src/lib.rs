@@ -55,7 +55,17 @@
 //!
 //! * A file rolls at [`DEFAULT_MAX_FILE_BYTES`] — 8 MiB, roughly 33,000 events.
 //! * [`DEFAULT_KEEP_FILES`] files are kept — 8, including the one being
-//!   written. **The whole crate therefore occupies at most 64 MiB, forever.**
+//!   written. **The whole set therefore occupies about 64 MiB while rotation
+//!   works** — each file at most its bound, or one line past it when a single
+//!   line is wider than the bound itself (a 1 KiB `MIN_FILE_BYTES` file and a
+//!   41 KB line).
+//! * **Not forever.** The first failed roll stops rotation for the life of
+//!   the sink (`Sink`'s `rotation_broken`, which keeps the retained files from
+//!   being emptied one per event), and from then on the current file grows
+//!   without a bound until the process restarts. That is counted in
+//!   [`Health::rotation_failures`], visible in [`Health::current_bytes`] and
+//!   makes [`Health::is_loud`] true. This line used to say "at most 64 MiB,
+//!   forever", which no path in `sink` enforces. D-1324.
 //! * One event carries at most [`MAX_FIELDS`] fields; text past its ceiling is
 //!   cut on a character boundary and the line says `"cut":true`.
 //! * A tail query returns at most [`MAX_LIMIT`] events and reads at most

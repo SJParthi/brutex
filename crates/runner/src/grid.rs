@@ -2533,9 +2533,13 @@ fn enumerate_variants(
 /// not thin one. The resolution already bound TRAINING bytes, exact rungs,
 /// exact ratio coordinates and an exact cell count. This door applies those
 /// bytes directly and verifies the enumerator produced that complete count.
+///
+/// `facts` must be [`crate::trade::SliceFacts::of`] over these exact `bars`
+/// and `column`; the attested door derives it once per slice (D-0741).
 pub(crate) fn evaluate_resolved_policy_v1(
     bars: &[Candle],
     column: &Column,
+    facts: &crate::trade::SliceFacts,
     mask: &ConditionMask,
     horizon: Horizon,
     side: Side,
@@ -2543,19 +2547,22 @@ pub(crate) fn evaluate_resolved_policy_v1(
 ) -> Result<Grid, crate::exit_grid_policy::ExitGridErrorV1> {
     let exact = resolved.ladders()?;
     let cells = reserve_policy_cells_v1(resolved.cell_count())?;
-    let facts = crate::trade::SliceFacts::of(bars, column);
     let direction = match side {
         Side::Long => costs::fill::Direction::Long,
         Side::Short => costs::fill::Direction::Short,
     };
-    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction, &facts);
-    evaluate_resolved_timed(bars, side, &resolved.view(), &facts, &timed, exact, cells)
+    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction, facts);
+    evaluate_resolved_timed(bars, side, &resolved.view(), facts, &timed, exact, cells)
 }
 
 /// Complete policy coordinates for an explicit three-valued program.
+///
+/// `facts` must be [`crate::trade::SliceFacts::of`] over these exact `bars`
+/// and `column` (D-0741).
 pub(crate) fn evaluate_resolved_expression_policy_v1(
     bars: &[Candle],
     column: &Column,
+    facts: &crate::trade::SliceFacts,
     expression: &crate::expression::Expression,
     horizon: Horizon,
     side: Side,
@@ -2563,16 +2570,15 @@ pub(crate) fn evaluate_resolved_expression_policy_v1(
 ) -> Result<Grid, String> {
     let exact = resolved.ladders().map_err(|why| why.to_string())?;
     let cells = reserve_policy_cells_v1(resolved.cell_count()).map_err(|why| why.to_string())?;
-    let facts = crate::trade::SliceFacts::of(bars, column);
     let timed = crate::trade::walk_expression_over(
         bars,
         column,
         expression,
         horizon,
         direction_of(side),
-        &facts,
+        facts,
     )?;
-    evaluate_resolved_timed(bars, side, resolved, &facts, &timed, exact, cells)
+    evaluate_resolved_timed(bars, side, resolved, facts, &timed, exact, cells)
         .map_err(|why| why.to_string())
 }
 
@@ -2827,14 +2833,45 @@ pub fn materialize_expression_cell(
     grid: &Grid,
     selected: &Cell,
 ) -> Result<Vec<TradeRow>, String> {
-    let facts = crate::trade::SliceFacts::of(bars, column);
+    materialize_expression_cell_over(
+        bars,
+        column,
+        &crate::trade::SliceFacts::of(bars, column),
+        expression,
+        horizon,
+        side,
+        grid,
+        selected,
+    )
+}
+
+/// [`materialize_expression_cell`] over slice facts the caller already
+/// derived from these exact `bars` and `column`, so materializing every
+/// coordinate of one attested slice derives them once (D-0741).
+///
+/// # Errors
+/// As [`materialize_expression_cell`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the public signature plus the attested slice facts"
+)]
+pub(crate) fn materialize_expression_cell_over(
+    bars: &[Candle],
+    column: &Column,
+    facts: &crate::trade::SliceFacts,
+    expression: &crate::expression::Expression,
+    horizon: Horizon,
+    side: Side,
+    grid: &Grid,
+    selected: &Cell,
+) -> Result<Vec<TradeRow>, String> {
     let timed = crate::trade::walk_expression_over(
         bars,
         column,
         expression,
         horizon,
         direction_of(side),
-        &facts,
+        facts,
     )?;
     let mut rows = Vec::new();
     if timed.occupancy.is_empty() {
@@ -2871,7 +2908,7 @@ pub fn materialize_expression_cell(
         },
         Chosen::from_cell(selected),
         Some(&mut rows),
-        &facts,
+        facts,
         &timed,
     );
     if replay.cell.as_ref() != Some(selected) {

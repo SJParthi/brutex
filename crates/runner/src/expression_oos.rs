@@ -215,6 +215,7 @@ impl ResearchResolvedExitGridV1 {
         let grid = crate::grid::evaluate_resolved_expression_policy_v1(
             bars,
             column,
+            &crate::trade::SliceFacts::of(bars, column),
             anchor.program(),
             anchor.horizon,
             view.side(),

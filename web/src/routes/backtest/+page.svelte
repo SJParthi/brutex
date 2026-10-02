@@ -121,6 +121,7 @@
   import { placeIn } from '$lib/place.js';
   import { monthLabel } from '$lib/dates.js';
   import { rupee, group, exact } from '$lib/money.js';
+  import { chargeScope, coverScope, isSweptIndex } from '$lib/charge-scope.js';
   import {
     compareRuns,
     exactIntegerDelta,
@@ -2927,6 +2928,10 @@
    * is the reader's own statement that a build may not send it.
    * @property {number[]} [exit_rungs]
    * @property {string[]} mask_words
+   * The server's gross-of-every-charge note, sent on a cash-equity run only
+   * (`crates/api/src/backtest.rs`). OPTIONAL: an index run carries no key.
+   * `$lib/charge-scope.js` reads it. D-0946.
+   * @property {string} [equity_note]
    */
 
   /**
@@ -3254,8 +3259,7 @@
    * question.
    */
   const sweepSymbol = $derived([...pickedSymbols][0] ?? '');
-  const indexWorkflow = $derived(pickedSymbols.size === 0 || [...pickedSymbols].some(symbol =>
-    ['NIFTY', 'BANKNIFTY', 'NSE-NIFTY', 'NSE-BANKNIFTY'].includes(symbol)));
+  const indexWorkflow = $derived(pickedSymbols.size === 0 || [...pickedSymbols].some(isSweptIndex));
 
   /**
    * Toggle one key in a chosen set.
@@ -3614,7 +3618,7 @@
     if (!heldNow) return '';
     const parts = [
       `${exact(sweepMonths)} months on the intraday timeframes`,
-      'spot indices only'
+      coverScope(pickedSymbols)
     ];
     if (heldNow.daily.length > 0) {
       parts.push(
@@ -4096,6 +4100,13 @@
      and `matched` is the narrowest set that covers both. Not `sorted`: that
      would couple the drill to the sort order for nothing. */
   const openRun = $derived(matched.find((r) => r.index === openIndex) ?? null);
+  /**
+   * What the open run's figures are gross of. Zero levies only for a swept
+   * spot index the server did not mark with `equity_note`; a stock run is
+   * labelled gross of every charge and shows the server's note verbatim
+   * (`CLAUDE.md` §1). D-0946.
+   */
+  const openCharges = $derived(chargeScope(openRun));
 
   /**
    * Did the open run never open a trade?
@@ -9276,11 +9287,17 @@
                          TRUE, and its own doc says why: a spot index is not
                          tradeable and no order is placed, so there is no
                          brokerage, no STT, no stamp duty and no GST to charge.
-                         `crates/runner/src/audit.rs` states the same. The
-                         engine sweeps exactly two instruments, both spot
-                         indices (CLAUDE.md §1), so zero is the right answer and
-                         `costs::trip` having no caller on this path is the
-                         right shape — not a gap.
+                         `crates/runner/src/audit.rs` states the same. For a
+                         spot-index run zero is the right answer.
+
+                         FOR A CASH-EQUITY RUN IT IS NOT. D-0506 widened the
+                         sweep to the F&O cash equities, and a share trade pays
+                         every charge; CLAUDE.md §1 requires every such report
+                         to state it is gross of every charge. This line used to
+                         print `0.00%` for every run, a RELIANCE run included.
+                         `openCharges` (`$lib/charge-scope.js`) now prints zero
+                         only for a swept index the server did not mark with
+                         `equity_note`, and the gross label otherwise. D-0946.
 
                          What IS absent is the SPREAD, which is a fill-model
                          question and not a levy. `trade.rs`' own measured table
@@ -9290,8 +9307,11 @@
                          visible. -->
                     <div class="tt-q">
                       <span class="tt-k">Commission load</span>
-                      <span class="tt-qv">0.00%</span>
-                      <span class="tt-note">statutory charges are zero for spot indices · spread is not modeled</span>
+                      <span class="tt-qv" class:dim={openCharges.gross}>{openCharges.load}</span>
+                      <span class="tt-note">{openCharges.note}</span>
+                      {#if openCharges.serverNote}
+                        <span class="tt-note equity-note">{openCharges.serverNote}</span>
+                      {/if}
                     </div>
                   </div>
 
@@ -9489,7 +9509,7 @@
                   <h4 class="tt-h5">Margin utilization</h4>
                   <div class="tt-unavailable-panel not-applicable">
                     <span>
-                      <b>Not applicable.</b> The engine computes one-unit spot-index totals with no
+                      <b>Not applicable.</b> The engine computes one-unit totals with no
                       account, position size or broker, so there is no capital, margin call or
                       liquidation to measure.
                     </span>
@@ -10197,9 +10217,11 @@
                   One trade keeps its entry/exit times and bar positions, duration, worst-fill and
                   best-fill P&amp;L, cumulative worst-fill result, selected direction, and exact MAE/MFE
                   in paisa and ppm. Entry/exit prices and the exit-cause tag are not recorded, so
-                  those are not invented. Statutory charges are zero for this spot-index sweep;
-                  spread remains unmodeled.
+                  those are not invented. {openCharges.trades}
                 </p>
+                {#if openCharges.serverNote}
+                  <p class="tt-note2 equity-note">{openCharges.serverNote}</p>
+                {/if}
                 {#if tradeRowsWindow.total > 0}
                   <div class="series-nav trade-pages" aria-label="Trade pages">
                     <button
@@ -14326,6 +14348,11 @@
     font-size: 12px;
     color: var(--tv-muted);
     line-height: 1.55;
+  }
+  /* The server's `equity_note` keeps its own line breaks (D-0946). */
+  .tester .equity-note {
+    display: block;
+    white-space: pre-wrap;
   }
   .tester .tt-note2 b {
     color: var(--tv-label);
