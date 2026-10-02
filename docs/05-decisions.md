@@ -44206,3 +44206,335 @@ history and requires exactly three replays each of the plan journal,
 `drive`'s further open of `attempts.bin` runs after `seeded` and is not
 counted by that test. `reconcile_pending` (W1-api4-2) is stated from its
 source lines and is not counted by any test.
+### D-0710 — Make the commit-stamp tests decode a delta the proof reads, and pin the verifier's bounds — 2026-09-27
+
+GAP14-55. The tests of `crates/cli/build_provenance.rs` never decoded a delta.
+`plan_delta` deltified the first two blobs, and `verify` reads no blob object:
+`worktree_matches` hashes the working file instead. So no test reached
+`apply_delta` on the proof's path, the `REF_DELTA` arm never ran, and the
+loose-object hash check, the symlink content check and the linked-worktree
+watch could each be flipped with the whole suite green.
+
+**Reproduced first, on `origin/main` (96194c11).** `cargo mutants` does not
+discover this file (D-0691), so the evidence comes from a scratch crate outside
+any checkout that holds `origin/main`'s `build_provenance.rs` and
+`commit_stamp.rs` verbatim as library modules, run with `CARGO_TARGET_DIR`
+unset so each mutant builds in its own copy (its log reads `Dirty bpprobe`,
+then `Compiling bpprobe`). The full run printed `357 mutants tested in 8m: 131
+missed, 207 caught, 17 unviable, 2 timeouts`. The missed list includes every
+mutant the ledger names: `395:58` (`||` to `&&` in `read_bytes`), `479:54` (`+`
+to `-` and to `*` in the `REF_DELTA` depth), `571:5` (`apply_delta` replaced by
+`None`, `Some(vec![])`, `Some(vec![0])` and `Some(vec![1])`), `771:65` (`==` to
+`!=` for a symlink) and `69:24` (`==` to `!=` choosing the watched
+`packed-refs`).
+
+**The change is test-only.** Every hunk is inside `mod tests`. The fixture now
+stores HEAD's root tree, the first object below the commit that `verify`
+decodes, as an `OFS_DELTA` or a `REF_DELTA` against a base tree of 300
+pseudo-random bytes followed by the tree. The delta is one literal byte and a
+copy from offset 301 (0x12D, two offset bytes), and the fixture asserts the
+`OFS_DELTA` distance needs more than one seven-bit group. A copy one byte early
+must refuse. Further tests pin: every copy argument byte, a skipped byte, a copy
+with no offset byte and the implicit 0x10000 size; every way a delta can
+misdescribe its result; delta chains of exactly `MAX_DELTA_DEPTH` and one more
+on both delta paths; trees 128 levels below the root and one more; tree entry
+names and modes; loose objects whose body or declared size is false; pack
+entries whose header misstates a size; pack and pack-index versions and magic;
+every entry through the 64-bit offset table; an object found in a second pack
+past misses in the first; every object kind loose and packed; index versions,
+extensions, name lengths (including the saturated 0xFFF) and names; HEAD
+through packed refs and a traversing HEAD ref; a tracked symlink; an executable
+bit; a `.gitignore` comment; the watched directories; and a linked worktree
+watching the shared `packed-refs`.
+
+**After.** The same scratch crate holding this change's file printed `357
+mutants tested in 12m: 8 missed, 323 caught, 17 unviable, 9 timeouts`, and
+every mutant the ledger names above is in its caught list. Five of the 8
+survivors change nothing this platform can observe:
+
+- `247:9` and `318:13`, `||` to `&&` between "empty" and "starts with `/`" for
+  a ref or an index name. The next clause refuses any empty segment, which both
+  cases have.
+- `271:34`, `||` to `&&` skipping `#` and `^` lines in `packed-refs`. Neither
+  kind of line has the `<40 hex> <ref>` shape the lookup requires.
+- `787:5`, the `cfg(not(unix))` `executable`, which this platform does not
+  compile.
+- `1077:44`, `|` to `^` joining two hexadecimal nibbles, whose bits do not
+  overlap.
+
+The other three are survivors, not equivalents: `511:20` (`<` to `==` and to
+`<=`) and `511:40` (`+` to `-`), the pack index's minimum length
+`PACK_INDEX_HEADER + 40` (`if bytes.len() < PACK_INDEX_HEADER + 40`). A file
+they judge differently from the original is at most that long, so for it to
+list HEAD's tree its last 20 bytes, which must be the SHA-1 of every byte
+before them (`if Sha1::digest(bytes.get(..body_len)?).as_slice() !=
+bytes.get(body_len..)?`), overlap its own entry table. A fixture could build
+one only by searching for a digest whose bytes agree with that table.
+
+**Review round, 28 September: the three are caught.** That search was run once,
+offline, and its results are fixed in the test
+`a_pack_index_of_exactly_its_least_length_is_read_and_a_byte_shorter_is_not`.
+`pack_offset` reads no fanout word but the last, so the first carries a nonce:
+4,929 makes the SHA-1 of a 1,052-byte body name offset 2,298, and 235,050 makes
+that of a 1,051-byte body begin with the listed id's last byte and name offset
+34,834. The test asserts both properties, puts the object at that offset, and
+requires an index of exactly `PACK_INDEX_HEADER + 40` bytes to be read and one
+a byte shorter not to be. Each of the three mutants, applied alone in the
+scratch crate, fails it. The whole run over this file then printed `357 mutants
+tested in 13m: 5 missed, 326 caught, 17 unviable, 9 timeouts`: the five missed
+are the five listed above as unobservable, and the timeouts are the nine below.
+
+The nine timeouts are six mutants of `pack_offset`'s binary search (`527:15`,
+`528:26`, `528:34`, `528:41`, `532:54` twice) and three of `apply_delta`'s
+cursor (`580:16`, `587:20`, `601:24`, each `+=` to `-=`). A timeout is not
+counted as caught here. Gate 18 still cannot see this file, as D-0691 records,
+so a later change to it has mutation evidence only if its author collects it
+this way.
+
+### D-0711 — Hash a Boolean family's source once in cli and attest each side once, not per program — 2026-09-27
+
+W2-cli2-3. For every program × side of a Boolean catalog family, `produce_side`
+in `crates/cli/src/boolean_candidate_v1.rs` ran two passes that read no
+program: `runner::identity::data_digest_with_daily_reference` over the signal,
+exact-minute and daily streams, and `attest_training` over the side's TRAINING
+slice. `execution_run` in `boolean_oos_v1.rs` ran the same digest for every
+program × side of the later comparison. The runner documents the attestation
+as the once-per-slice half: a caller "pricing many candidates over one slice
+reads the slice once and not once per candidate" (`attest_training`,
+`crates/runner/src/exit_grid_policy.rs`).
+
+**Reproduced first, on `origin/main` (96194c11).** With a thread-local counter
+added at each of those three call sites and nothing else changed, the test
+fixture's three-program family made 6 digests and 6 attestations in TRAINING
+(`left: (6, 6)`), and its later comparison 6 digests (`left: (6, 0)`).
+
+**The change.** `SourceDigest` hashes the three streams the first time a
+program asks and returns the stored digest after; `PricedSide` attests its side
+the first time a program prices it and returns the stored attestation after.
+Both live for one family's `compute`, and the later comparison holds its own
+`SourceDigest`. In cli the same family now makes 1 digest and 2 attestations,
+and its later comparison 1 digest. These are cli's passes only; the runner's,
+below, are unchanged, so the family still hashes its three streams once per
+program × side as well as once in cli. With only the reuse removed (each call
+hashing or attesting again, the counters kept) the two tests fail again with
+`(6, 6)` and `(6, 0)`.
+
+**First use, not ahead of the loop.** A refusal of either pass still meets the
+first program's first side where it did on `origin/main`: the digest before
+that side's attempt begins, the attestation inside it. Hoisting the attestation
+ahead of the program loop would refuse before any per-program attempt exists,
+changing the evidence a refused family leaves. D-0716 adds the test that holds the
+attestation half (C4-CLI-13).
+
+**Same bytes.** The fixture family's identity and completion digest, and its
+later comparison's, printed from `origin/main` and from this change, are equal:
+training `0ba9c5e1…83de` completing `6b002064…a77b`, later comparison
+`6ae73684…7537` completing `7f455d4c…1b77`, from two fixture roots each.
+
+**Not closed here.** Each program × side still mints its run through
+`ExpressionExecutionRunV1::new_with_daily_reference`, whose runner constructor
+hashes the three streams again (`let expected_data_digest =
+crate::identity::data_digest_with_daily_reference(`), checks the execution
+subslice (`require_exact_execution_subslice(reference_minute_context,
+evaluated_execution_1m)?;`) and hashes the execution bars
+(`execution_digest: crate::identity::data_digest(exact_execution),`), and the
+later comparison's `evaluate_expression_oos` hashes the later bars per program
+(`let execution = crate::identity::data_digest(bars);`). Those are runner
+passes, ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner
+group, and recorded in `docs/06-limits.md`. W2-cli2-3 is therefore not
+closed: its ledger item counts these runner passes with the cli ones (`the
+cost is about 5-6 extra O(N) hashing/validation passes per program x side`),
+and only the two cli passes are removed here.
+
+### D-0712 — Save each AND checkpoint boundary's own level, never the whole history again — 2026-09-27
+
+AC-whp-o1-0. `cli::and_checkpoint`, which `stored_month_kernel` calls for
+`sweep-stored` and `sweep-audited-stored`, re-encoded every retained level into
+one in-memory buffer at every level boundary (`let payload = encode(view,
+&rows)?;`, then `journal.publish(&payload, MAX_BYTES)?`) under a 64 MiB
+admission (`const MAX_BYTES: u64 = 64 * 1024 * 1024;`).
+
+**Reproduced first, on `origin/main` (96194c11).** Twenty-one live conditions
+true together on two of three bars. Attempt 1 acknowledged depths 1 to 10 (21,
+210, 1,330, 5,985, 20,349, 54,264, 116,280, 203,490, 293,930 and 352,716
+survivors), built depth 11 and refused with `checkpoint sink refused:
+checkpoint I/O refused: AND checkpoint exceeds 64 MiB byte admission`. Attempt
+2 under the same identity acknowledged depth 10 again, rebuilt depth 11 and
+refused with the same words. The test
+`a_production_history_past_64_mib_completes_and_replays_without_recomputing`,
+run there with only a namespace constant added, failed with that error.
+
+**The change: version 2, `and-checkpoint-v2`.** At the boundary for depth `k`
+the level's engine bytes, from the new `CheckpointView::write_current_to`, are
+published as chunk entries of at most 32 MiB of level bytes (`CHUNK_BYTES`),
+each headed by `BRTXAC02`, the depth, its index within the level and the
+sequence of the boundary before it. Then one boundary record, `BRTXAB02`: the
+depth rows, this boundary's engine prefix from the new
+`CheckpointView::write_prefix_to` (header, offers, exclusions), and each level's
+chunks by sequence, length and seal. Resuming reads the newest boundary record,
+or, when the newest entry is a chunk an interrupted boundary never
+acknowledged, the boundary that chunk names, and streams the prefix and every
+chunk through `Checkpoint::read_from`, each chunk checked against its recorded
+seal, length, depth and index. The final boundary and every chunk it names are
+reopened before a rankable run returns, as the whole version-1 payload was.
+`write_to` is now `write_prefix_to` followed by every level as
+`write_current_to` writes it, and an engine test holds a boundary's prefix
+followed by every level saved so far equal to `write_to` byte for byte.
+
+**After.** The same production-size test completes: 2,097,151 survivors, a
+history over 64 MiB, and a replay of the completed identity makes one callback
+and publishes nothing. With `and_checkpoint.rs` alone put back to `origin/main`
+and that test run against it, it fails again with the version-1 refusal.
+
+**Not changed.** The walk, the depth rows, the ranking and the run's nine
+identity terms. The version-1 namespace is still accepted by `Journal::open`,
+and nothing writes it. A version-1 journal is not resumed by this build: the
+stored run identity carries the build's commit (`let id = identity(&Run {` …
+`commit,` in `stored_month_kernel`), so a journal an earlier build wrote was
+never under this build's identity. The retained history is still held in
+memory, as `docs/20-sweep-resume.md` states. What a boundary still writes, and
+what resuming reads, is recorded in `docs/06-limits.md`.
+
+### D-0713 — Record that a resumed Boolean campaign rung prices its pinned families again — 2026-09-27
+
+W2-cli2-8. Recorded, not fixed.
+
+**Reproduced first, on `origin/main` (96194c11).** A one-rung (1min) campaign
+is refused after its Families stage was published, by a regular file where the
+statistics namespace must be created: the row is saved `Refused` with the
+family's completion pin and no statistics link. With the file removed the same
+campaign resumes and completes the rung under the same pin, and the family's
+latest candidate attempt is 9 where the attempt that produced the pin was 1:
+the pinned family was priced again. `execute_rung` hands the rung to
+`prepared.input.run(rung, &prepared.programs, out, |stage| {` with no pins,
+and `produce_identified` always reaches `let produced = compute(&request,
+&source, identity, commit);`. The recorded pins are only compared (`"campaign
+retry candidate completion differs"`).
+
+**Why it is not fixed here.** Skipping a pinned family needs the family back
+as the `CommittedBooleanFamilyV1` that statistics consumes by value
+(`statistics::produce(root, families, plan.procedure, plan.bounds)?`). That
+value carries runner capabilities the saved body does not hold: each selected
+row's `SelectedExpressionExitV1`, each program × side's
+`ExpressionTrainingAnchorV1` and both sides' resolutions. The body reader
+rebuilds rows with `selected: None,`. Reopening a pinned family without pricing
+it therefore needs a runner-side way to re-mint those capabilities from sealed
+bytes, which is a design change to the runner's capability model rather than a
+cli repair.
+
+**The limit, stated.** A resume skips only a rung already completed
+(`.is_some_and(|row| row.status == Status::Completed)`); any other row goes
+back through `execute_rung`, whose run maps every family of the scope
+(`self.scope.families()` then `.par_iter()`). So a rung saved `Refused`, as
+tested, or left `Running` by an interrupted process, prices all its families
+again, pinned or not, and the recorded pin must equal the new one or the retry
+refuses. It is recorded in `docs/06-limits.md` and pinned by
+`a_resumed_refused_rung_prices_its_pinned_family_again`, which a fix must
+change.
+
+### D-0714 — Release each AND checkpoint chunk before a replay reads the next — 2026-09-28
+
+Review finding on D-0712. The `Replay` comment in `cli::and_checkpoint` said "at
+most one chunk is held beside the checkpoint being rebuilt", and no test backed
+it. `Replay::load` read the next chunk (`let saved =
+self.journal.read(piece.sequence, self.limits.entry)?;`) while `self.chunk`
+still owned the previous one, which was dropped only at `self.chunk =
+saved.payload;`. So two chunk payloads, each up to `CHUNK_BYTES` of level bytes
+and a header, were live at once.
+
+**Reproduced first, at 1648a0f8.** `a_replay_releases_each_chunk_before_reading_the_next`
+reads level 1's chunk, then points the replay at an entry the journal never
+published: the read fails, and the test requires level 1's chunk to be released
+already. Against 1648a0f8's `and_checkpoint.rs` it failed at that assertion
+("level 1's chunk was released before entry 999 was read").
+
+**The change.** `load` sets `self.chunk = Vec::new();` before the read, and the
+test passes. Only that line separates the two runs' `load`.
+
+**Not changed.** A replay still streams every chunk once, and the checkpoint it
+rebuilds is still held whole in memory (`docs/20-sweep-resume.md`).
+
+### D-0715 — Reserve each AND checkpoint level's chunk buffer once, whole — 2026-09-28
+
+Review finding on D-0712, a cleanup: no memory figure was claimed. `Chunks::write`
+reserved `CHUNK_HEADER` when a chunk began and `now.len()` for each write, at
+most eight bytes a call from the engine's word writer, and took the buffer with
+`std::mem::take` before every publish. So each chunk's buffer grew by repeated
+reallocation from its header, and the next chunk began again from nothing.
+
+**Reproduced first, at 1648a0f8.** `a_levels_chunks_share_one_buffer_reserved_whole`
+writes a 2,400-byte level eight bytes at a time under 1,024-byte chunks.
+Against 1648a0f8's `and_checkpoint.rs` it failed at its first check, that after
+the first write the buffer holds a chunk header and a whole chunk.
+
+**The change.** When a chunk begins with a buffer below `full` capacity, `full`
+being the header and a whole chunk, the buffer is reserved
+`try_reserve_exact(full)`, and after each publish the same buffer is cleared and
+put back. The reservation is therefore made once per level and no later byte
+grows or moves the buffer: the test counts exactly one reservation, where it is
+made, across three chunks published as 1,024, 1,024 and 352 bytes, and holds the
+buffer's pointer and capacity over all 300 writes (D-0716: the pointer alone
+cannot tell reuse from a chunk freed and allocated again at the same address). The per-write
+`try_reserve` is gone, since no write passes a full chunk.
+
+**The cost, stated.** A level smaller than a chunk still reserves a whole one:
+`CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however few bytes the
+level writes. Not timed, and what the allocator commits for it is not measured.
+
+### D-0716 — Pin the AND checkpoint's depth-row check, its one reservation and its named-chunk refusal, and the attestation's place — 2026-10-01
+
+Round-4 review findings on D-0711, D-0712 and D-0715.
+
+**The depth-row check had lost its test.** Version 2 deleted
+`wrapper_counters_lengths_and_bounded_writer_refuse_without_truncation`, the one
+test that changed a recovered record's depth-row counters and required
+`validate_rows` to refuse, and its replacement altered only the reconciliation
+byte, which `DepthRow::from_words` refuses before `validate_rows` runs. The
+round-4 review found every AND checkpoint test passing with `validate_rows`
+returning `Ok(())` at once.
+`recovered_depth_rows_must_agree_with_the_replayed_search` changes one counter
+at a time in the depth-2 record's bytes (depth 1's admissions and pair
+iterations; depth 2's generated candidates, admissions, pair iterations below
+its admissions and pair iterations of `u64::MAX`), and a row history shorter than
+the replayed levels; each refuses in `validate_rows`' own words (C4-CLI-12).
+With `validate_rows` returning `Ok(())` at once it fails.
+
+**One reservation per level, counted where it is made.** D-0715's test held the
+buffer's pointer and capacity, and a chunk freed and allocated again at the same
+size came back at the same address, so it also passed with the buffer dropped
+after each publish. `Chunks::write` now reserves only when the buffer's capacity
+is below a whole chunk, and a test-only thread-local counter at that call
+(`RESERVATIONS`) lets the test require exactly one reservation for a three-chunk
+level (C4-CLI-11). With the buffer dropped after each publish the count is
+three and the test fails.
+
+**The attestation's place is held by a test.** D-0711 and the `PricedSide` doc
+comment said a refused TRAINING attestation stays inside the first program's
+attempt, and the round-4 review found every Boolean test passing with the
+attestation hoisted ahead of the program loop. A test-only hook (`ATTEST_FAULT`) makes the first
+attestation refuse and records the newest evidence attempt as it does:
+`a_refused_attestation_is_recorded_inside_the_first_sides_attempt` requires
+that attempt to be an `Expression` attempt still running, then `Refused`, with
+the family's `BooleanCandidates` attempt `Refused` after it and one attestation
+tried (C4-CLI-13). Hoisted, the newest attempt when the attestation runs is the
+family's, and the test fails.
+
+**A named chunk that cannot be read says which.** A chunk the newest boundary
+names that had vanished, or lost its completion marker, refused a resume with
+the operating system's words alone. `read_named` now carries the chunk's
+sequence, its one-based depth and its index beside the journal's reason, for the
+replay and for the final re-read alike (C4-CLI-14).
+
+**Documented, not changed.** `recover` reads the newest entry and at most one
+more, but only after `Journal::open` has listed the identity's whole entry
+directory; version 2 writes at least two entries a boundary, and orphans stay.
+`docs/06-limits.md` states that scan. `docs/22-expression-search.md` named
+`and-checkpoint-v1` as the AND namespace; it now names `and-checkpoint-v2`.
+
+**Kept open, not fixed here.** W2-cli2-8 (D-0713): a resumed `Refused` or
+`Running` campaign rung prices its pinned families again, because
+`statistics::produce` takes `CommittedBooleanFamilyV1` by value and the saved-body
+reader rebuilds rows with `selected: None`; skipping them needs a runner
+constructor that re-mints a family's capabilities from its sealed bytes. The
+runner's per program × side digests (W3-runner2-3, W3-runner2-4, W3-runner2-5)
+stay with the runner group, as D-0711 records.

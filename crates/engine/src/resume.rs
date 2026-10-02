@@ -339,10 +339,33 @@ impl CheckpointView<'_> {
 
     /// Encode the fixed version using constant scratch space.
     ///
+    /// Exactly [`Self::write_prefix_to`] followed by every retained level and
+    /// then the current one, each as [`Self::write_current_to`] writes it.
+    ///
     /// # Errors
     /// Propagates any write failure. This writes no cryptographic envelope;
     /// sealing, flushing, durable publication and identity binding belong to the caller.
     pub fn write_to(&self, writer: &mut impl Write) -> Result<(), Error> {
+        self.write_prefix_to(writer)?;
+        for level in self.retired.iter().chain(std::iter::once(self.current)) {
+            write_level(writer, level)?;
+        }
+        Ok(())
+    }
+
+    /// Encode everything [`Self::write_to`] writes before its first level: the
+    /// header with this boundary's counters and level count, the offered
+    /// positions and the exclusions.
+    ///
+    /// It writes `192 + 8 × offered + 24 × excluded` bytes, and no level. A
+    /// durable caller that has already saved every earlier level writes this
+    /// and [`Self::write_current_to`] at a boundary, not the whole history;
+    /// the prefix of its newest boundary followed by every level in depth
+    /// order is byte for byte what [`Self::write_to`] writes there.
+    ///
+    /// # Errors
+    /// Propagates any write failure.
+    pub fn write_prefix_to(&self, writer: &mut impl Write) -> Result<(), Error> {
         writer.write_all(&MAGIC)?;
         words(writer, [VERSION, u64::from(vocab::VOCAB_VERSION)])?;
         writer.write_all(&self.identity)?;
@@ -385,26 +408,38 @@ impl CheckpointView<'_> {
                 ],
             )?;
         }
-        for level in self.retired.iter().chain(std::iter::once(self.current)) {
-            words(
-                writer,
-                [
-                    u64::from(level.k),
-                    crate::len_u64(level.frequent.len()),
-                    level.generated,
-                    level.duplicates,
-                    level.excluded,
-                    level.pruned,
-                    level.infrequent,
-                ],
-            )?;
-            for item in &level.frequent {
-                words(writer, item.mask.words())?;
-                words(writer, [item.hits])?;
-            }
-        }
         Ok(())
     }
+
+    /// Encode the current level alone, as [`Self::write_to`] writes it among
+    /// the others: `56 + 56 × survivors` bytes, whatever the retained levels
+    /// hold.
+    ///
+    /// # Errors
+    /// Propagates any write failure.
+    pub fn write_current_to(&self, writer: &mut impl Write) -> Result<(), Error> {
+        write_level(writer, self.current)
+    }
+}
+
+fn write_level(writer: &mut impl Write, level: &Frontier) -> Result<(), Error> {
+    words(
+        writer,
+        [
+            u64::from(level.k),
+            crate::len_u64(level.frequent.len()),
+            level.generated,
+            level.duplicates,
+            level.excluded,
+            level.pruned,
+            level.infrequent,
+        ],
+    )?;
+    for item in &level.frequent {
+        words(writer, item.mask.words())?;
+        words(writer, [item.hits])?;
+    }
+    Ok(())
 }
 
 type Reporter<'a> = &'a mut dyn FnMut(&CheckpointView<'_>) -> Result<(), String>;

@@ -135,6 +135,7 @@ impl Journal {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"

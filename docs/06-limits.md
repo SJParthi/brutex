@@ -10023,3 +10023,102 @@ called by both `snapshot` and `Journal::open_at`), and nothing compacts one.
   counted by any test.
 
 Not timed. W1-api4-0, W1-api4-1, W1-api4-2.
+## The commit-stamp verifier's mutation evidence, measured — D-0710, 27 September 2026
+
+Gate 18 still cannot mutate `crates/cli/build_provenance.rs` (D-0691), so the
+figures below come from a scratch crate outside any checkout that holds the file
+and `commit_stamp.rs` verbatim, run with `CARGO_TARGET_DIR` unset so each mutant
+is rebuilt in its own copy.
+
+- **Before D-0710, on `origin/main`:** `357 mutants tested in 8m: 131 missed,
+  207 caught, 17 unviable, 2 timeouts`.
+- **After D-0710's first round:** `357 mutants tested in 12m: 8 missed, 323
+  caught, 17 unviable, 9 timeouts`.
+- **After its review round, 28 September:** `357 mutants tested in 13m: 5
+  missed, 326 caught, 17 unviable, 9 timeouts`.
+- **The five survivors** are listed in D-0710 and change nothing observable on
+  this platform: three redundant `||` clauses, the non-Unix `executable` and
+  `|` between disjoint nibbles. The three the first round left on the pack
+  index's minimum-length pre-check are caught by a pack index built at exactly
+  that length, and one a byte shorter, from a searched nonce (D-0710).
+- **The nine timeouts** are six mutants of `pack_offset`'s binary search and
+  three of `apply_delta`'s cursor, named in D-0710. They are reported, not
+  counted as caught.
+
+## Boolean catalog passes per program × side — D-0711, 27 September 2026
+
+- **Once per family now, in cli only.** cli's own three-stream source digest
+  (`SourceDigest`), in TRAINING and in the later comparison, and each side's
+  TRAINING attestation (`PricedSide`). Counted, not timed: 1 cli digest and 2
+  attestations for the fixture's three-program family, and 1 cli digest for
+  its later comparison (C4-CLI-05). The family's three-stream digests are not
+  one: the runner hashes the same streams again for every program × side, as
+  the next item states.
+- **Still once per program × side, in the runner.** Minting each run through
+  `ExecutionRunV1::new_with_daily_reference` hashes the three streams again
+  (`let expected_data_digest =
+  crate::identity::data_digest_with_daily_reference(`), checks the execution
+  subslice (`require_exact_execution_subslice(reference_minute_context,
+  evaluated_execution_1m)?;`) and hashes the execution bars (`execution_digest:
+  crate::identity::data_digest(exact_execution),`); the later comparison's
+  `evaluate_expression_oos` hashes the later bars (`let execution =
+  crate::identity::data_digest(bars);`). None of these is timed here. They are
+  ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner group.
+
+## The AND checkpoint journal, per boundary — D-0712, 27 September 2026
+
+The stored AND sweep's checkpoint is version 2 (`and-checkpoint-v2`). The
+sentence above that cold AND checkpoint payloads admit 64 MiB still holds per
+journal entry; it no longer bounds the retained history, because no entry holds
+more than one chunk of one level.
+
+- **What a boundary writes.** The new level's engine bytes, `56 + 56 ×
+  survivors` (C4-CLI-06, C4-CLI-08), as chunk entries of at most 32 MiB of level
+  bytes (`CHUNK_BYTES`, which C4-CLI-06's production test holds at `32 << 20`),
+  then one boundary
+  record of `BOUNDARY_HEADER + rows × (DEPTH_BYTES + 8) + prefix + pieces ×
+  PIECE_BYTES` bytes (`boundary_bytes`), the prefix being `192 + 8 × offered +
+  24 × excluded` (C4-CLI-08).
+- **What still grows at every boundary.** The boundary record is written whole
+  each time and lists every depth row and every chunk of every level, so it
+  grows with the depth count and the chunk count. Not timed.
+- **What no longer happens.** Earlier levels are not re-encoded or re-written,
+  and a history past one entry's admission completes: 2,097,151 survivors
+  through the production door (C4-CLI-06).
+- **What still reads the whole history.** A resumed attempt streams every
+  chunk through the engine's decoder, and a completed walk reopens every chunk
+  once before it returns, as version 1 reopened its one payload. The retained
+  history is still held in memory, as `docs/20-sweep-resume.md` states. A
+  replay holds one chunk payload at a time: it releases each before it reads
+  the next (C4-CLI-10).
+- **One buffer per level.** A level's chunks are written through one buffer,
+  reserved whole at the level's first byte and reused for each of its chunks
+  (C4-CLI-11): `CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however
+  few bytes the level writes. Not timed.
+- **Orphans.** A boundary interrupted after its chunks leaves them in the
+  journal unreferenced, and the next attempt rebuilds that one level
+  (C4-CLI-07).
+- **The admission that remains.** A boundary record that cannot fit one entry
+  refuses, naming its size and the admission (C4-CLI-07).
+- **The journal's open-time scan.** Every walk, fresh or resumed, first opens
+  its journal, and `Journal::open` lists the identity's whole entry directory
+  with `read_dir`, refusing past `DIRECTORY_LIMIT` entries, before recovery
+  reads anything. Version 2 publishes at least two entries per boundary, one
+  or more chunks and then the boundary record (20 chunks and a boundary record
+  per depth in C4-CLI-06's SMALL fixture), and orphaned chunks stay in the
+  directory, so that scan lists more entries than version 1's one entry per
+  boundary. The scan is linear in the entry count. Not timed.
+- **A named chunk that cannot be read.** A chunk the newest boundary names that
+  has vanished or lost its completion marker refuses the resume, or the final
+  re-read, naming its sequence, depth and index beside the journal's reason
+  (C4-CLI-14). A refused rerun runs no callback and publishes nothing.
+
+## A resumed Boolean campaign rung prices its pinned families again — D-0713, 27 September 2026
+
+A resume skips only a rung already `Completed`. A rung saved `Refused`, or left
+`Running` by an interrupted process, goes back through `execute_rung`, which
+prices every family of the rung again even where the family's completion pin is
+recorded; the new pin must equal the recorded one or the retry refuses.
+Reproduced and pinned by C4-CLI-09. The cost is the rung's complete catalog
+pricing, paid again on each such resume. Not timed. Not fixed: reopening a
+pinned family needs runner capabilities its saved body does not hold (D-0713).
