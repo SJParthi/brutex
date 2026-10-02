@@ -1097,15 +1097,26 @@ impl ResolvedLaddersV1 {
 /// keeps this token, and hands it to
 /// [`ResolvedExitGridV1::evaluate_with_attested`] per run.
 ///
-/// The token holds borrows and fixed-size data only, so it is `Sync` and one
-/// of them can be shared across a parallel candidate loop. Its fields are
-/// private and it carries the digest of the resolution that minted it, so it
-/// cannot be built by hand and cannot be spent on another resolution.
+/// The token holds borrows, fixed-size data and one shared
+/// [`crate::trade::SliceFacts`], so it is `Sync` and one of them can be shared
+/// across a parallel candidate loop. Its fields are private and it carries the
+/// digest of the resolution that minted it, so it cannot be built by hand and
+/// cannot be spent on another resolution.
+///
+/// # The slice facts are attested once too (D-1141)
+///
+/// The per-run door used to build `SliceFacts::of(bars, column)` inside
+/// `grid::evaluate_resolved_policy_v1` on every call -- an O(B) `HashMap` of B
+/// timestamps, two prefix vectors of B + 1, the forced-exit table and a median
+/// pass -- so the "per-candidate half" re-read every bar per candidate. The
+/// facts are a function of the bars and the column alone, the two things this
+/// token already binds, so they are built here and shared behind an `Arc`.
+/// That is also why the token is `Clone` and no longer `Copy`.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace times the
 /// attestation it hoists, so the saving is read from the source rather than
 /// measured. `CLAUDE.md` §3 rule 6.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct AttestedTrainingV1<'a> {
     resolution_digest: [u8; 32],
     bars: &'a [Candle],
@@ -1113,6 +1124,29 @@ pub struct AttestedTrainingV1<'a> {
     horizon: Horizon,
     column_digest: [u8; 32],
     evaluation_spec: EvaluationSpecToken,
+    facts: std::sync::Arc<crate::trade::SliceFacts>,
+}
+
+impl AttestedTrainingV1<'_> {
+    /// The per-slice facts built once at attestation.
+    pub(crate) fn facts(&self) -> &crate::trade::SliceFacts {
+        &self.facts
+    }
+}
+
+impl std::fmt::Debug for AttestedTrainingV1<'_> {
+    /// The facts are derived from `bars` and `column` and carry no `Debug`
+    /// of their own; every identity-bearing field is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttestedTrainingV1")
+            .field("resolution_digest", &self.resolution_digest)
+            .field("bars", &self.bars)
+            .field("column", &self.column)
+            .field("horizon", &self.horizon)
+            .field("column_digest", &self.column_digest)
+            .field("evaluation_spec", &self.evaluation_spec)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One complete grid produced by
@@ -2022,6 +2056,7 @@ impl ResolvedExitGridV1 {
             attested.horizon,
             self.side(),
             self,
+            attested.facts(),
         )?;
         Ok(EvaluatedExitGridV1 {
             resolution_digest: self.digest,

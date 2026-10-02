@@ -43757,3 +43757,59 @@ fails on the previous tree ("ratios must be inert" on 8 sessions, Long) and
 passes now. It covers empty, one-session and eight-session input, both sides,
 three ladder shapes, and a rerun. `exit_family_cells_equal_legacy_on_synthetic_bars`
 lost the `!levels.ratios` exemption that had excused the empty SL+TP family.
+
+### D-1141 — Build slice facts once per attested slice, and replay many cells of one grid from one prepared walk — 2026-10-02
+
+**Findings.** W3-runner3-1, W3-runner3-2 and W3-runner5-2.
+
+* `grid::materialize_cell` → `per_trade` → `levelled` built
+  `SliceFacts::of(bars, column)`, walked the mask and measured every candidate
+  path's crossings on every call. `cli`'s candidate universe
+  (`append_validated_grid_rows`) calls it once per cell of every member and
+  side, so one member-side paid O(cells × (B + signals + C·(span + L))) where
+  O(B + signals + C·(span + L)) once plus O(C) per cell is enough. The
+  `per_trade` doc said it is called "on the handful of combinations a report
+  names", and `docs/06-limits.md` §113 said the slice-fact costs "are per-slice
+  costs, not per-candidate costs". On this path both were false.
+* `grid::evaluate_resolved_policy_v1` and
+  `grid::evaluate_resolved_expression_policy_v1` built the slice facts on
+  every call. They are reached once per candidate and side through
+  `ResolvedExitGridV1::evaluate_with_attested` (V4 walk-forward population,
+  `validate.rs` `evaluate_one`) and the expression door, whose doc says "no bar
+  is re-read" there. That was an O(B) `HashMap` build, two prefix vectors, the
+  forced-exit table and a median pass per candidate.
+
+**The change.**
+
+1. `AttestedTrainingV1` now carries the slice facts behind an `Arc`, built once
+   in `attest_training`. They depend only on the bars and the column, which
+   the token already binds. The token is `Clone` and is no longer `Copy`. Its
+   `Debug` is hand-written because `SliceFacts` has none.
+2. Both resolved-policy doors take `facts` and build none. The attested callers
+   pass the token's facts. `expression_oos`, which is not attested, builds them
+   once per call as before.
+3. `levelled_timed` is split into `PreparedReplay::of` (the variant-independent
+   walk and crossing table) and `PreparedReplay::variant` (one fold over the
+   prepared candidates). The split moves code and does not change it.
+4. New public `grid::CellReplay`: `prepare` once per grid, then `materialize`
+   per cell. `materialize_cell` is now `CellReplay` with a one-cell loop.
+   `cli::candidate_universe::append_validated_grid_rows` prepares once per
+   member-side and materialises each cell from it.
+5. `materialize_expression_coordinate` replays through a new crate-private
+   `materialize_expression_cell_over` with the attested facts. It no longer
+   rebuilds them per ordinal. The program walk is still per ordinal; see
+   `docs/06-limits.md`.
+
+**No output changes.** Every replayed cell and row is byte-identical. The only
+moved work is work that did not read the candidate or the cell.
+
+**Tests.**
+`grid::exit_family_tests::cell_replay_materializes_every_cell_exactly_as_materialize_cell`
+compares the shared replay with a fresh `materialize_cell` for every cell, on
+empty, one-session and eight-session input, both sides, and a mask that hits
+nothing. It also covers reuse idempotence and a refused forged cell.
+`grid::exit_family_tests::per_candidate_doors_take_their_slice_facts_rather_than_build_them`
+is a source-shape test, because the hoisted and unhoisted answers are equal. It
+fails on the previous tree, where both resolved doors contained
+`SliceFacts::of(`. The existing split-versus-combined attested tests in
+`exit_grid_policy` still pass, so the attested facts give the same grid.

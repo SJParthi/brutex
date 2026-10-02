@@ -5360,3 +5360,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | On the legacy `grid::evaluate` path, `Levels::ratios` does not change the grid: the result with `ratios: true` equals the result with `ratios: false`, and every (stop, target) pair with no trail is a priced cell. Exact ratio admission is never applied to a quantile target rung. | `runner::grid::exit_family_tests::ratio_flag_keeps_every_stop_and_target_cell` | ✓ |
+
+### Slice facts are per slice and cell replay is per grid — W3-runner3-1, W3-runner3-2, W3-runner5-2 (D-1141)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| One `grid::CellReplay` prepared per (mask, side, grid) materialises every cell to the same rows, or the same refusal, as a fresh `grid::materialize_cell`. This holds on empty input, one session, eight sessions, both sides and a mask that hits nothing. Reusing the replay is idempotent, and a cell the grid never held is refused. | `runner::grid::exit_family_tests::cell_replay_materializes_every_cell_exactly_as_materialize_cell` | ✓ |
+| The per-candidate resolved-policy doors (`evaluate_resolved_policy_v1`, `evaluate_resolved_expression_policy_v1`) and `CellReplay::materialize` build no `SliceFacts`, and `materialize` walks nothing. The facts come from the attested slice token. | `runner::grid::exit_family_tests::per_candidate_doors_take_their_slice_facts_rather_than_build_them` | ✓ |

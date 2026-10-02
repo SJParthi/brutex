@@ -9879,3 +9879,35 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Slice facts per slice, cell replay per grid, and what is still linear — D-1141, 2 October 2026
+
+§113 above says the `SliceFacts` builds "are per-slice costs, not
+per-candidate costs". Until D-1141 that was false on three live paths: the
+resolved-policy grid doors and the per-cell `materialize_cell` all built them
+per call. The text of §113 is kept as written. What now holds, and what does
+not:
+
+- **Attested training grids.** `attest_training` builds the facts once. Each
+  `evaluate_with_attested` and `evaluate_expression_with_attested` call pays
+  the walk, O(B + signals), plus O(C·(span + L)) crossings and O(cells·C)
+  folds. It pays no fact build. The walk is O(B) per candidate because
+  `trade::walk_over` visits every column row. That is `trade.rs`'s bound and
+  is not changed here.
+- **Candidate-universe cell replay.** Per member-side: one fact build O(B),
+  one walk and one crossing table. Then O(C) per cell. The member-side O(B)
+  remains for two reasons. `cli` still calls `evaluate_training_grid_attested`
+  per member-side, which re-attests (BLAKE3 over the training bytes and the
+  column). And the facts are rebuilt beside it, because the attested token is
+  not handed back to the caller. Hoisting attestation to the population is
+  the next step, and it is not taken here.
+- **Expression coordinate replay** (`materialize_expression_coordinate`, per
+  ordinal) no longer rebuilds the facts. It still re-walks the program and
+  re-measures crossings per ordinal: O(B + signals + C·(span + L)) per cell.
+  An expression analogue of `CellReplay` would make that O(C). Its empty-walk
+  rule differs from the mask path's (it compares an empty fold to the
+  selected cell), so it is not folded into `CellReplay`.
+- **`expression_oos`** builds the facts once per anchored call. It is not an
+  attested path.
+- Not measured. No bench times any of these; the bounds are read from the
+  source (`CLAUDE.md` §3 rule 6).

@@ -74,7 +74,7 @@ use runner::exit_grid_policy::{
     RangeResolutionV1, RationalPercentileV1, ResolvedExitGridV1, ValidatedExitGridV1,
     column_digest_v1, instrument_digest_v1,
 };
-use runner::grid::{Cell, Chosen, Ttp, materialize_cell};
+use runner::grid::{Cell, CellReplay, Chosen, Ttp};
 use runner::identity::{DailyReferenceBinding, Direction, Params, Run};
 use runner::outcome::Horizon;
 use runner::validate::{
@@ -2714,7 +2714,9 @@ pub(crate) fn pair_candidate_base_evidence_v2(
 ///
 /// The total is input-dependent: one naturally-extinct sweep plus one complete
 /// grid evaluation and validation per `(closed mask, direction)`. Every grid
-/// cell is then replayed over its exact execution series by `materialize_cell`;
+/// cell is then replayed over its exact execution series through one
+/// `runner::grid::CellReplay` per `(closed mask, direction)` -- the walk and
+/// crossing table once, then O(candidate paths) per cell (D-1141);
 /// its resulting `TradeRow` sequence is folded once for Base Evidence and once
 /// for accepted-session observations before the rows are dropped. Only the
 /// final Candidate/Base record projections are fixed-cost. Retained Candidate
@@ -4858,6 +4860,19 @@ fn append_validated_grid_rows(
     support: MaskSupportEvidenceV2,
     base_builder: &mut BaseEvidenceBuilderV2,
 ) -> Result<(), CandidateUniverseRefusal> {
+    // One walk and one crossing table for the whole grid, then O(C) per cell
+    // (D-1141). `materialize_cell` per cell rebuilt the slice facts, the walk
+    // and the crossings for every cell: O(cells x B) per member-side.
+    let facts = runner::trade::SliceFacts::of(execution_bars, execution_column);
+    let replay = CellReplay::prepare(
+        execution_bars,
+        execution_column,
+        &member.item.mask,
+        evaluated.horizon(),
+        evaluated.side(),
+        evaluated.grid(),
+        &facts,
+    );
     for ordinal in 0..evaluated.grid().cells.len() {
         let cell = validated.cell(ordinal).ok_or_else(|| {
             format!(
@@ -4887,16 +4902,7 @@ fn append_validated_grid_rows(
         };
         row.candidate_semantic_digest = candidate_semantic_digest(descriptor, &row);
         row.validate(Some(descriptor))?;
-        let trades = materialize_cell(
-            execution_bars,
-            execution_column,
-            &member.item.mask,
-            evaluated.horizon(),
-            evaluated.side(),
-            evaluated.grid(),
-            cell,
-        )
-        .map_err(|why| {
+        let trades = replay.materialize(cell).map_err(|why| {
             format!("candidate {direction:?} cell {ordinal} exact trade replay refused: {why}")
         })?;
         base_builder

@@ -219,6 +219,7 @@ impl ResearchResolvedExitGridV1 {
             anchor.horizon,
             view.side(),
             &view,
+            &crate::trade::SliceFacts::of(bars, column),
         )?;
         view.validate_complete_grid(&grid).map_err(super::display)?;
         let (summary, support_sessions) = summarize(column, bars, anchor.program())?;

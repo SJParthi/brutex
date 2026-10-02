@@ -316,6 +316,7 @@ impl ResolvedGridViewV1<'_> {
             attested.horizon,
             self.side(),
             self,
+            attested.facts(),
         )?;
         let mut support_sessions = 0_u64;
         let mut last_session = None;
@@ -454,7 +455,7 @@ impl ResolvedGridViewV1<'_> {
         let cell = validated
             .cell(ordinal)
             .ok_or("expression replay ordinal is absent")?;
-        crate::grid::materialize_expression_cell(
+        crate::grid::materialize_expression_cell_over(
             attested.bars,
             attested.column,
             evaluation.program(),
@@ -462,6 +463,7 @@ impl ResolvedGridViewV1<'_> {
             evaluation.side,
             &evaluation.grid,
             cell,
+            attested.facts(),
         )
     }
 }

@@ -2412,6 +2412,11 @@ fn enumerate_variants(
 /// not thin one. The resolution already bound TRAINING bytes, exact rungs,
 /// exact ratio coordinates and an exact cell count. This door applies those
 /// bytes directly and verifies the enumerator produced that complete count.
+///
+/// `facts` must be [`crate::trade::SliceFacts::of`] the same `bars` and
+/// `column`. They are taken rather than built (D-1141) because this door runs
+/// once per candidate and side, and the facts are O(B) per-slice work; the
+/// attestation token builds them once per slice.
 pub(crate) fn evaluate_resolved_policy_v1(
     bars: &[Candle],
     column: &Column,
@@ -2419,19 +2424,17 @@ pub(crate) fn evaluate_resolved_policy_v1(
     horizon: Horizon,
     side: Side,
     resolved: &crate::exit_grid_policy::ResolvedExitGridV1,
+    facts: &crate::trade::SliceFacts,
 ) -> Result<Grid, crate::exit_grid_policy::ExitGridErrorV1> {
     let exact = resolved.ladders()?;
     let cells = reserve_policy_cells_v1(resolved.cell_count())?;
-    let facts = crate::trade::SliceFacts::of(bars, column);
-    let direction = match side {
-        Side::Long => costs::fill::Direction::Long,
-        Side::Short => costs::fill::Direction::Short,
-    };
-    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction, &facts);
-    evaluate_resolved_timed(bars, side, &resolved.view(), &facts, &timed, exact, cells)
+    let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
+    evaluate_resolved_timed(bars, side, &resolved.view(), facts, &timed, exact, cells)
 }
 
 /// Complete policy coordinates for an explicit three-valued program.
+///
+/// `facts` as for [`evaluate_resolved_policy_v1`] (D-1141).
 pub(crate) fn evaluate_resolved_expression_policy_v1(
     bars: &[Candle],
     column: &Column,
@@ -2439,19 +2442,19 @@ pub(crate) fn evaluate_resolved_expression_policy_v1(
     horizon: Horizon,
     side: Side,
     resolved: &crate::exit_grid_policy::ResolvedGridViewV1<'_>,
+    facts: &crate::trade::SliceFacts,
 ) -> Result<Grid, String> {
     let exact = resolved.ladders().map_err(|why| why.to_string())?;
     let cells = reserve_policy_cells_v1(resolved.cell_count()).map_err(|why| why.to_string())?;
-    let facts = crate::trade::SliceFacts::of(bars, column);
     let timed = crate::trade::walk_expression_over(
         bars,
         column,
         expression,
         horizon,
         direction_of(side),
-        &facts,
+        facts,
     )?;
-    evaluate_resolved_timed(bars, side, resolved, &facts, &timed, exact, cells)
+    evaluate_resolved_timed(bars, side, resolved, facts, &timed, exact, cells)
         .map_err(|why| why.to_string())
 }
 
@@ -2653,20 +2656,78 @@ pub fn materialize_cell(
     grid: &Grid,
     selected: &Cell,
 ) -> Result<Vec<TradeRow>, String> {
-    let variant = Chosen::from_cell(selected);
-    let replay = per_trade(
-        bars,
-        column,
-        mask,
-        horizon,
-        side,
-        Ladders {
+    let facts = crate::trade::SliceFacts::of(bars, column);
+    CellReplay::prepare(bars, column, mask, horizon, side, grid, &facts).materialize(selected)
+}
+
+/// [`materialize_cell`] for MANY cells of one grid: the cell-independent work
+/// is done once in [`CellReplay::prepare`], and each
+/// [`CellReplay::materialize`] pays only the cell's own fold.
+///
+/// # Cost (D-1141)
+///
+/// `prepare` is the walk and the crossing table: O(B) for the caller's
+/// [`crate::trade::SliceFacts`] (built once by the caller, outside any loop),
+/// O(B + signals) for the walk, and O(C·(span + L)) for the crossings over C
+/// candidate paths. `materialize` is O(C) per cell -- one variant folded over
+/// the prepared candidates plus the row reconciliation -- and allocates only the
+/// rows it returns. Before this door `cli`'s candidate universe called
+/// [`materialize_cell`] per cell and paid the whole of `prepare`, facts
+/// included, once per cell: O(cells·B) per member-side.
+///
+/// The answer is byte-identical to [`materialize_cell`]: that function is now
+/// this one with a one-cell loop, and
+/// `cell_replay_materializes_every_cell_exactly_as_materialize_cell` pins it.
+pub struct CellReplay<'a> {
+    prepared: PreparedReplay<'a>,
+}
+
+impl<'a> CellReplay<'a> {
+    /// Walk `mask` once and measure every candidate path against `grid`'s own
+    /// ladders. `facts` must be [`crate::trade::SliceFacts::of`] the same
+    /// `bars` and `column`.
+    #[must_use]
+    pub fn prepare(
+        bars: &'a [Candle],
+        column: &Column,
+        mask: &ConditionMask,
+        horizon: Horizon,
+        side: Side,
+        grid: &'a Grid,
+        facts: &crate::trade::SliceFacts,
+    ) -> Self {
+        let timed = crate::trade::walk_over(bars, column, mask, horizon, direction_of(side), facts);
+        let ladders = Ladders {
             stops: &grid.stops,
             targets: &grid.targets,
             trails: &grid.trails,
-        },
-        variant,
-    );
+        };
+        Self {
+            prepared: PreparedReplay::of(bars, side, ladders, facts, &timed),
+        }
+    }
+
+    /// Replays one already-selected cell and proves its detail rows, exactly
+    /// as [`materialize_cell`] does.
+    ///
+    /// # Errors
+    ///
+    /// The same reconciliation refusals as [`materialize_best`].
+    pub fn materialize(&self, selected: &Cell) -> Result<Vec<TradeRow>, String> {
+        let mut rows = Vec::new();
+        let replay = self
+            .prepared
+            .variant(Chosen::from_cell(selected), Some(&mut rows))
+            .cell
+            .map(|cell| (cell, rows));
+        reconcile_replay(selected, replay)
+    }
+}
+
+fn reconcile_replay(
+    selected: &Cell,
+    replay: Option<(Cell, Vec<TradeRow>)>,
+) -> Result<Vec<TradeRow>, String> {
     let Some((replayed, rows)) = replay else {
         return if selected.trades == 0 {
             Ok(Vec::new())
@@ -2707,13 +2768,36 @@ pub fn materialize_expression_cell(
     selected: &Cell,
 ) -> Result<Vec<TradeRow>, String> {
     let facts = crate::trade::SliceFacts::of(bars, column);
+    materialize_expression_cell_over(
+        bars, column, expression, horizon, side, grid, selected, &facts,
+    )
+}
+
+/// [`materialize_expression_cell`] over slice facts the caller already holds
+/// -- the attested training token carries them (D-1141), so a per-ordinal
+/// replay no longer rebuilds them. The program walk itself is still per call;
+/// `docs/06-limits.md` names that bound.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts; the seven before it are the public replay's own"
+)]
+pub(crate) fn materialize_expression_cell_over(
+    bars: &[Candle],
+    column: &Column,
+    expression: &crate::expression::Expression,
+    horizon: Horizon,
+    side: Side,
+    grid: &Grid,
+    selected: &Cell,
+    facts: &crate::trade::SliceFacts,
+) -> Result<Vec<TradeRow>, String> {
     let timed = crate::trade::walk_expression_over(
         bars,
         column,
         expression,
         horizon,
         direction_of(side),
-        &facts,
+        facts,
     )?;
     let mut rows = Vec::new();
     if timed.occupancy.is_empty() {
@@ -2750,7 +2834,7 @@ pub fn materialize_expression_cell(
         },
         Chosen::from_cell(selected),
         Some(&mut rows),
-        &facts,
+        facts,
         &timed,
     );
     if replay.cell.as_ref() != Some(selected) {
@@ -3407,12 +3491,82 @@ fn levelled_timed(
     facts: &crate::trade::SliceFacts,
     timed: &crate::trade::Trades,
 ) -> ReplayOutcomeV1 {
-    if timed.occupancy.is_empty() {
-        return ReplayOutcomeV1 {
-            cell: None,
-            refused_paths: 0,
-        };
+    PreparedReplay::of(bars, side, ladders, facts, timed).variant(variant, trades)
+}
+
+/// The variant-INDEPENDENT half of a fixed-ladder replay: every candidate
+/// path of one (mask, side) walk, measured once against the ladders.
+///
+/// Split out of `levelled_timed` by D-1141 so a caller replaying MANY cells of
+/// one grid -- `cli`'s candidate universe materialises every cell of every
+/// member -- builds the slice facts, the walk and the crossing table once and
+/// pays only [`PreparedReplay::variant`] per cell. Nothing here reads the
+/// variant, so the split cannot change an answer.
+struct PreparedReplay<'a> {
+    bars: &'a [Candle],
+    side: Side,
+    ladders: Ladders<'a>,
+    /// `None` when the walk had no occupancy at all: the replay is then "no
+    /// priceable trade, nothing refused" whatever the variant.
+    candidates: Option<Vec<Candidate>>,
+    refused_paths: u64,
+}
+
+impl<'a> PreparedReplay<'a> {
+    /// O(C·(span + L)): one crossing walk per candidate path.
+    fn of(
+        bars: &'a [Candle],
+        side: Side,
+        ladders: Ladders<'a>,
+        facts: &crate::trade::SliceFacts,
+        timed: &crate::trade::Trades,
+    ) -> Self {
+        if timed.occupancy.is_empty() {
+            return Self {
+                bars,
+                side,
+                ladders,
+                candidates: None,
+                refused_paths: 0,
+            };
+        }
+        let (candidates, refused_paths) = replay_candidates(bars, side, ladders, facts, timed);
+        Self {
+            bars,
+            side,
+            ladders,
+            candidates: Some(candidates),
+            refused_paths,
+        }
     }
+
+    /// O(C): one exit setting folded over the prepared candidates.
+    fn variant(&self, variant: Chosen, trades: Option<&mut Vec<TradeRow>>) -> ReplayOutcomeV1 {
+        let Some(candidates) = self.candidates.as_deref() else {
+            return ReplayOutcomeV1 {
+                cell: None,
+                refused_paths: 0,
+            };
+        };
+        replay_variant(
+            self.bars,
+            self.side,
+            self.ladders,
+            candidates,
+            self.refused_paths,
+            variant,
+            trades,
+        )
+    }
+}
+
+fn replay_candidates(
+    bars: &[Candle],
+    side: Side,
+    ladders: Ladders<'_>,
+    facts: &crate::trade::SliceFacts,
+    timed: &crate::trade::Trades,
+) -> (Vec<Candidate>, u64) {
     // `occupancy` and not `trades`, for the reason `evaluate` gives:
     // exclusivity belongs to the variant being scored, not to the level-less
     // walk that found the signals. Exit-unpriceable paths remain block-only.
@@ -3481,7 +3635,18 @@ fn levelled_timed(
             .count(),
     )
     .unwrap_or(u64::MAX);
+    (candidates, refused_paths)
+}
 
+fn replay_variant(
+    bars: &[Candle],
+    side: Side,
+    ladders: Ladders<'_>,
+    candidates: &[Candidate],
+    refused_paths: u64,
+    variant: Chosen,
+    trades: Option<&mut Vec<TradeRow>>,
+) -> ReplayOutcomeV1 {
     let Chosen {
         stop,
         target,
@@ -3517,7 +3682,7 @@ fn levelled_timed(
     // is about. Found by an adversarial pass over the change that introduced it.
     let cell = one_variant(
         bars,
-        &candidates,
+        candidates,
         (
             ladders.stops.rungs(),
             ladders.targets.rungs(),
@@ -5351,6 +5516,88 @@ mod exit_family_tests {
                 }
             }
         }
+    }
+
+    /// D-1141. One [`super::CellReplay`] prepared per grid answers every cell
+    /// exactly as a fresh [`super::materialize_cell`] does, including a
+    /// zero-trade cell, a mask nothing hits, and empty input. Reuse is
+    /// idempotent: materialising the same cell twice returns the same rows.
+    #[test]
+    fn cell_replay_materializes_every_cell_exactly_as_materialize_cell() {
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        let never = (0..384).fold(ConditionMask::default(), ConditionMask::with_bit);
+        let mut compared = 0_usize;
+        for sessions in [0_i64, 1, 8] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = column(&bars);
+            let facts = SliceFacts::of(&bars, &column);
+            for mask in [ConditionMask::default(), never] {
+                for side in [Side::Long, Side::Short] {
+                    let grid = super::evaluate_over(
+                        &bars,
+                        &column,
+                        &mask,
+                        horizon,
+                        side,
+                        Levels::derived(3),
+                        &facts,
+                    );
+                    let replay = super::CellReplay::prepare(
+                        &bars, &column, &mask, horizon, side, &grid, &facts,
+                    );
+                    for cell in &grid.cells {
+                        let fresh = super::materialize_cell(
+                            &bars, &column, &mask, horizon, side, &grid, cell,
+                        );
+                        let shared = replay.materialize(cell);
+                        assert_eq!(shared, fresh, "{sessions} {side:?} {cell:?}");
+                        assert_eq!(replay.materialize(cell), shared, "reuse is idempotent");
+                        compared += 1;
+                    }
+                    // A cell the grid never held is refused, not invented.
+                    if let Some(first) = grid.cells.iter().find(|cell| cell.trades > 0) {
+                        let mut forged = *first;
+                        forged.pessimistic = forged.pessimistic.saturating_add(1);
+                        assert!(replay.materialize(&forged).is_err());
+                    }
+                }
+            }
+        }
+        assert!(compared > 0, "the fixture must exercise at least one cell");
+    }
+
+    /// D-1141, source shape: the per-candidate resolved-policy doors and the
+    /// per-cell replay build no slice facts and walk nothing. Their answers are
+    /// byte-identical to the hoisted form, so only the source can tell them
+    /// apart -- the same reason `validate`'s attestation gate is source-shape.
+    #[test]
+    fn per_candidate_doors_take_their_slice_facts_rather_than_build_them() {
+        let source = include_str!("grid.rs");
+        let body_of = |head: &str| {
+            let at = source.find(head);
+            assert!(at.is_some(), "{head} must exist");
+            let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+            // Up to the next column-0 brace: the end of a free function, or
+            // of the `impl` that holds a method.
+            let end = rest.find("\n}\n").unwrap_or(rest.len());
+            rest.get(..end).unwrap_or_default()
+        };
+        let built = concat!("SliceFacts", "::of(");
+        for head in [
+            "pub(crate) fn evaluate_resolved_policy_v1(",
+            "pub(crate) fn evaluate_resolved_expression_policy_v1(",
+        ] {
+            assert!(!body_of(head).contains(built), "{head} must take facts");
+        }
+        let materialize = body_of("    pub fn materialize(&self, selected: &Cell)");
+        assert!(
+            !materialize.contains(built),
+            "per-cell replay builds no facts"
+        );
+        assert!(
+            !materialize.contains("walk_over("),
+            "per-cell replay walks nothing"
+        );
     }
 
     #[test]
