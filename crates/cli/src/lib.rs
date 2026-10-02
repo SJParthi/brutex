@@ -4622,6 +4622,11 @@ fn stop_ladder_derived(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
 /// the whole walk is O(bars) with an amortised O(1) step — the bound §3 rule 4
 /// requires. The obvious `windows(hold).map(...)` would be O(bars × hold), which
 /// on the 1-minute series at a 60-bar hold is 36 million comparisons.
+///
+/// **UNVERIFIED — that bound is read off the source, not measured.** No bench
+/// row times this walk, and the `select_nth_unstable` that ends it is expected
+/// O(n) rather than worst-case O(n). The tests in this file prove the percentile it
+/// returns, not its cost.
 fn window_range_percentile(
     bars: &[indicators::Candle],
     hold: usize,

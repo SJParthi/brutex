@@ -44202,3 +44202,87 @@ does.
 
 Invariant CIG-19.
 
+### D-1116 — Gates 12 and 14 share one claim reader, and gate 12 excuses a block by its item — 2026-10-02
+
+**What was wrong.** There were two findings.
+
+The first is LATE-gates-and-ci tests-bite #8. Gate 14 said it used gate 12's
+trigger "character for character", but it scrubbed with one `sed` where gate 12
+ran five, and its non-claim noun list lacked `director(y|ies)`. A block that
+gate 12 excused as a financial `worst case` was a cost claim to gate 14.
+
+The second is AC-gates-o1-2. Gate 12's `allow_claim` was `FILE COUNT`.
+- `note_grid_progress` gained its UNVERIFIED.
+- Its slot went silently to `window_range_percentile`'s "O(1) amortised per
+  bar", which named no proof.
+- The log was unchanged, because an allowed file printed no locations.
+
+**The choice.**
+- The block reader, trigger, `notclaim` and scrub live in one region, marked
+  `>>> CLAIM READER` and `<<< CLAIM READER`, which is carried byte-identically
+  by both steps.
+- Gate 14 refuses unless there are exactly two copies and they are equal.
+  `crates/core/tests/claim_reader.rs` holds the same facts under `cargo test`.
+- The reader prints, for each block, the item it documents: the name below
+  it, `impl`, `//!` or `-`.
+- `allow_claim` entries are `FILE ITEM`. Each allowed block is printed with its
+  location, and an entry naming `-` or without exactly two fields is refused.
+- The one entry left is `crates/cli/src/lib.rs base_win_rate_bp`, where the
+  trigger is the English word "flat".
+- `window_range_percentile`'s doc now says UNVERIFIED, and `docs/06-limits.md`
+  records why.
+
+**Measured.**
+- Gate 12 on this tree: 397 claims, 1 naming nothing, and that one is allowed
+  by item.
+- With the UNVERIFIED removed, gate 12 refused
+  `crates/cli/src/lib.rs:4516 (window_range_percentile)`. The old `lib.rs 2`
+  entry would have passed it.
+- Deleting one `sed` line from gate 14's copy failed gate 14 with the diff.
+- Gate 14 on this tree: 374 claims, all crates covered.
+
+**Limits.**
+- The item is read from the first code line below a block. A block over a
+  macro invocation or an expression names `-`, and `-` cannot be allowlisted.
+- Two items with the same name in one file share an entry.
+
+Invariant CIG-20.
+
+### D-1117 — Gate 14 counts measurements and printed ids from tokens — 2026-10-02
+
+**What was wrong.** Finding AC-gates-o1-0. Layer 3 counted lines containing
+`ratio(` against `min_points`. That count had three defects:
+- It counted comments.
+- It counted `fn growth_ratio(` as a measurement.
+- The pins were never raised. Engine carried 12 call sites against a pin of 4,
+  vocab 12 against 7, and store 9 against 4.
+
+Layer 4 accepted an id if it appeared anywhere in the bench file. Every C-E id
+appears on a `///` line in another row's doc, so the mask-evaluation rows could
+be emptied with every text gate green.
+
+**The choice.**
+- Layer 3 counts lines of `source_scan code` output that call a helper whose
+  name ends in `ratio`. The convention `indicators`' `two_sided_ratio` was
+  named for still counts. Comments are blank, and a line declaring such a
+  helper is excluded.
+- Every pin is that count at this commit: core 3, pull 6, store 9, api 4,
+  costs 27, lake 6, telemetry 8, greeks 6, vocab 12, indicators 6, engine 12,
+  runner 3, cli 4. Each pin is equal to or higher than before.
+- Layer 4 counts an id as printed only when it is the first word of a decoded
+  string literal in the bench, as `printed_ids` in
+  `crates/core/tests/cost_invariants.rs` already does.
+
+**Measured.** In the vocab bench, commenting out one `ratio(` call and renaming
+the `C-V-01` label failed layer 3 with "11-of-12-measurement-points" and layer
+4 with "C-V-01: in-invariants=1 in-bench=0". The old layers passed both: 12
+lines still matched `ratio(` against a pin of 7, and `C-V-01` was still in a
+doc comment. On this tree the gate passes.
+
+**Limits.**
+- A string literal that contains `ratio(` would still count as a call.
+- The engine and runner benches are owned by other lines of work. Their pins
+  now bind any edit that removes a measurement from them.
+
+Invariant CIG-21.
+

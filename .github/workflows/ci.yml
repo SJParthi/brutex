@@ -7095,8 +7095,15 @@ jobs:
           #     `crates/cli/benches/ratio.rs` has four rows and all four are the
           #     results ledger. One `UNVERIFIED` in that block closes it, and that
           #     is a one-line edit for whoever owns the file next.
+          #
+          # ONE ENTRY NOW, AND IT NAMES ITS BLOCK (D-1116). `note_grid_progress`
+          # did gain its UNVERIFIED, and the freed slot was taken by
+          # `window_range_percentile`'s "O(1) amortised per bar", which named
+          # no proof; that block now says UNVERIFIED too. Entries are
+          # `FILE ITEM`, the item being the name below the doc block, so the
+          # one left can excuse `base_win_rate_bp` and nothing else.
           allow_claim='
-          crates/cli/src/lib.rs 2
+          crates/cli/src/lib.rs base_win_rate_bp
           '
 
           inv=docs/04-invariants.md
@@ -7172,6 +7179,66 @@ jobs:
           sort -u -o "$fns" "$fns"
           sort -u -o "$proving" "$proving"
 
+          # >>> CLAIM READER (D-1116). Byte-identical in gates 12 and 14, and
+          # gate 14 refuses if the two copies differ: one definition of "a
+          # cost claim", or a hole between the gate that asks for a proof and
+          # the gate that asks for a bench.
+          #
+          # `claim_blocks FILE` prints one TAB-separated record per maximal run
+          # of `///` or `//!` lines: FILE, first line, the ITEM it documents,
+          # the joined text. The item is the name after the first `fn`, else
+          # after the first `struct`/`enum`/`trait`/`const`/`static`/`type`/
+          # `mod`/`union`/`macro_rules!`, on the first code line below the
+          # block (attributes bracket-counted and skipped whole, blanks and
+          # `//` lines passed over); `impl` for an impl, `//!` for an inner
+          # block, `-` otherwise.
+          claim_blocks() {
+            awk -v F="$1" '
+              function item(t,   m) {
+                if (match(t, /(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                  m = substr(t, RSTART, RLENGTH); sub(/^.*fn[ \t]+/, "", m); return m
+                }
+                if (match(t, /(^|[^A-Za-z0-9_])(struct|enum|trait|const|static|type|mod|union|macro_rules!)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                  m = substr(t, RSTART, RLENGTH); sub(/^.*[ \t]/, "", m); return m
+                }
+                if (t ~ /(^|[^A-Za-z0-9_])impl([^A-Za-z0-9_]|$)/) return "impl"
+                return "-"
+              }
+              function emit(name) {
+                printf "%s\t%d\t%s\t%s\n", F, start, name, text
+                n = 0; text = ""; pending = 0; depth = 0
+              }
+              { l = $0; sub(/^[ \t]+/, "", l); gsub(/\t/, " ", l)
+                if (l ~ /^\/\/[\/!]/ && depth == 0) {
+                  if (pending) emit(inner ? "//!" : "-")
+                  if (n == 0) { start = NR; inner = (l ~ /^\/\/!/) }
+                  sub(/^\/\/[\/!]/, "", l)
+                  n++; text = text " " l
+                  next
+                }
+                if (n == 0) next
+                if (inner) { emit("//!"); next }
+                pending = 1
+                if (depth > 0) { depth += gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
+                if (l ~ /^#!?\[/) { depth = gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
+                if (l == "" || l ~ /^\/\//) next
+                emit(item(l)) }
+              END { if (n > 0) emit(inner ? "//!" : "-") }
+            ' "$1"
+          }
+          trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
+          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close|director(y|ies))s?'
+          # The non-cost senses of `flat` and `worst case`, removed before the
+          # trigger runs. Gate 12 carries the measurement behind each line.
+          claim_scrub() {
+            printf '%s' "$1" \
+              | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
+              | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
+              | sed -E "s/[Ff]lat +${notclaim}//g" \
+              | sed -E 's/[Ff]lat +(JSON|json) object//g' \
+              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g'
+          }
+          # <<< CLAIM READER
           # A block is a maximal run of consecutive `///` or `//!` lines. Any
           # other line ends it. One tab-separated record per block, so the
           # whole block can be searched as one string -- "within its own doc
@@ -7181,19 +7248,7 @@ jobs:
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             walked=$((walked + 1))
-            awk -v F="$f" '
-              function flush() {
-                if (n > 0) printf "%s\t%d\t%s\n", F, start, text
-                n = 0; text = ""
-              }
-              { l = $0; sub(/^[ \t]+/, "", l); gsub(/\t/, " ", l)
-                if (l ~ /^\/\/[\/!]/) {
-                  sub(/^\/\/[\/!]/, "", l)
-                  if (n == 0) start = NR
-                  n++; text = text " " l
-                } else flush() }
-              END { flush() }
-            ' "$f" >> "$blocks"
+            claim_blocks "$f" >> "$blocks"
           done < <(git ls-files 'crates/*.rs')
 
           nb=$(awk 'END{print NR}' "$blocks")
@@ -7208,14 +7263,13 @@ jobs:
             exit 1
           fi
 
-          trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          # `director(y|ies)` joins the list for the same reason every other noun
-          # on it is here: `crates/pull/src/archive.rs:818` says "not simply two
+          # `director(y|ies)` joins `notclaim` (in the claim reader above, so
+          # gate 14 reads it too) for the same reason every other noun on it
+          # is here: `crates/pull/src/archive.rs:818` says "not simply two
           # flat directories", which is a statement about a SHAPE ON DISK and
           # carries no cost claim at all. That block was refused by this gate on
           # the tree as committed, so widening the list here takes a live red to
           # green rather than pre-empting a hypothetical one.
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close|director(y|ies))s?'
 
           refused="$work/refused"; : > "$refused"
           claimed=0; by_test=0; by_path=0; by_row=0; by_unverified=0
@@ -7268,7 +7322,7 @@ jobs:
           }
 
           tab=$(printf '\t')
-          while IFS="$tab" read -r f ln text; do
+          while IFS="$tab" read -r f ln item text; do
             [ -n "${text-}" ] || continue
             # `flat` is stripped of its non-cost senses BEFORE the trigger runs,
             # so the exclusion cannot accidentally swallow a real claim in the
@@ -7328,13 +7382,7 @@ jobs:
             # `-i` on the substitution, because `FROM ONE-MINUTE BARS` and
             # `worst-case EXIT` are both real and a case-sensitive list caught
             # neither.
-            scrub=$(printf '%s' "$text" \
-                    | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
-                    | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
-                    | sed -E "s/[Ff]lat +${notclaim}//g" \
-                    | sed -E 's/[Ff]lat +(JSON|json) object//g' \
-                    | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g')
-            grep -qE "$trigger" <<< "$scrub" || continue
+            grep -qE "$trigger" <<< "$(claim_scrub "$text")" || continue
             claimed=$((claimed + 1))
             if grep -q 'UNVERIFIED' <<< "$text"; then
               by_unverified=$((by_unverified + 1))
@@ -7344,7 +7392,7 @@ jobs:
               test) by_test=$((by_test + 1)) ;;
               path) by_path=$((by_path + 1)) ;;
               row)  by_row=$((by_row + 1)) ;;
-              *)    printf '%s:%s\n' "$f" "$ln" >> "$refused" ;;
+              *)    printf '%s\t%s\t%s\n' "$f" "$ln" "$item" >> "$refused" ;;
             esac
           done < "$blocks"
 
@@ -7364,30 +7412,40 @@ jobs:
 
           bad=0
           echo
-          for f in $( { cut -d: -f1 "$refused" | sort -u; } ); do
-            c=$( { grep -c "^${f}:" "$refused" || true; } | tr -d ' ')
-            a=$( { printf '%s\n' "$allow_claim" | awk -v F="$f" '$1==F{print $2; exit}'; } || true)
-            [ -n "$a" ] || a=0
-            if [ "$c" -gt "$a" ]; then
-              printf '  REFUSED  %s — %s unproven claim(s), %s allowed\n' "$f" "$c" "$a"
-              { grep "^${f}:" "$refused" | sed 's/^/             doc block at /' | head -8; } || true
-              bad=1
+          # KEYED BY ITEM, NOT BY COUNT (D-1116, AC-gates-o1-2). The entry was
+          # `FILE COUNT`, so when one declared block stopped refusing, its slot
+          # silently went to the next unproven claim in the same file: the
+          # `note_grid_progress` block gained its UNVERIFIED, and
+          # `window_range_percentile`'s "amortised O(1) per bar" took its place
+          # with every line of this log unchanged. Each entry now names the
+          # item its block documents, every allowed block is printed with its
+          # location, and an entry may not name `-` (a block with no item).
+          while IFS="$tab" read -r f ln it; do
+            [ -n "$f" ] || continue
+            if [ "$it" != "-" ] && printf '%s\n' "$allow_claim" \
+                 | awk -v F="$f" -v I="$it" '$1==F && $2==I {k=1} END {exit !k}'; then
+              printf '  allowed  %s:%s (%s) — declared above\n' "$f" "$ln" "$it"
             else
-              printf '  allowed  %s — %s of %s\n' "$f" "$c" "$a"
+              printf '  REFUSED  %s:%s (%s) — a cost claim that names no proof\n' "$f" "$ln" "$it"
+              bad=1
             fi
-          done
+          done < "$refused"
           # Same two self-audits gate 11 carries. An entry naming a file that
           # is gone makes this gate read stronger than it is, so it is a
           # failure; an entry that no longer matches is only loose, and says so.
-          for p in $( { printf '%s\n' "$allow_claim" | awk 'NF{print $1}'; } ); do
-            if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
+          while read -r p it extra; do
+            [ -n "${p-}" ] || continue
+            if [ -z "${it-}" ] || [ -n "${extra-}" ] || [ "$it" = "-" ]; then
+              printf '  MALFORMED ALLOWLIST ENTRY — "%s %s %s" is not FILE ITEM\n' "$p" "${it-}" "${extra-}"
+              bad=1
+            elif ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
               printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
               bad=1
-            elif ! grep -q "^${p}:" "$refused"; then
+            elif ! awk -F'\t' -v F="$p" -v I="$it" '$1==F && $3==I {k=1} END {exit !k}' "$refused"; then
               printf '  ::warning title=Gate 12 allowlist is loose::'
-              printf '%s claims nothing unproven any more — drop the entry\n' "$p"
+              printf '%s %s claims nothing unproven any more — drop the entry\n' "$p" "$it"
             fi
-          done
+          done <<< "$allow_claim"
 
           echo
           if [ "$bad" -ne 0 ]; then
@@ -7569,18 +7627,26 @@ jobs:
           # min_points stay pinned at what each bench carried when its row was
           # added -- api 4, costs 27 -- because they bound the MEASUREMENT
           # count, not the id count, and nothing here adds a measurement.
+          # PINS RAISED TO WHAT EACH BENCH CARRIES, COUNTED BY TOKENS (D-1117,
+          # AC-gates-o1-0). The awk that counted them read comments as calls
+          # and `fn growth_ratio(` as a measurement, and the pins were never
+          # raised as benches grew: engine carried 12 call sites against a pin
+          # of 4, so eight comparisons could be deleted with this gate green.
+          # Layer 3 now counts call sites of a helper whose name ends in
+          # `ratio` in `source_scan code` output (comments blank, declarations
+          # excluded), and every pin below is that count at this commit.
           cover='
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
-          pull   crates/pull/benches/ratio.rs   4  C-11 C-12 C-13 C-26
-          store  crates/store/benches/ratio.rs  4  C-01 C-07 C-08 C-28 C-29
+          pull   crates/pull/benches/ratio.rs   6  C-11 C-12 C-13 C-26
+          store  crates/store/benches/ratio.rs  9  C-01 C-07 C-08 C-28 C-29
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
           lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
-          telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04
+          telemetry crates/telemetry/benches/ratio.rs 8  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
-          vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
-          indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
-          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
+          vocab     crates/vocab/benches/ratio.rs     12 C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
+          indicators crates/indicators/benches/ratio.rs 6  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
+          engine    crates/engine/benches/ratio.rs    12 C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
           runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
@@ -7589,6 +7655,7 @@ jobs:
           wf=.github/workflows/ci.yml
           work=$(mktemp -d)
           bad=0
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
 
           # ---- discovery: which crates claim a bound. -----------------------
           # Gate 12's block scanner and gate 12's trigger. A block is a maximal
@@ -7597,36 +7664,101 @@ jobs:
           # is attributed to the right file — gates 11, 12 and 13 all
           # word-split their paths and gate 15 was fixed for it; this gate is
           # written the fixed way from the start.
+          # >>> CLAIM READER (D-1116). Byte-identical in gates 12 and 14, and
+          # gate 14 refuses if the two copies differ: one definition of "a
+          # cost claim", or a hole between the gate that asks for a proof and
+          # the gate that asks for a bench.
+          #
+          # `claim_blocks FILE` prints one TAB-separated record per maximal run
+          # of `///` or `//!` lines: FILE, first line, the ITEM it documents,
+          # the joined text. The item is the name after the first `fn`, else
+          # after the first `struct`/`enum`/`trait`/`const`/`static`/`type`/
+          # `mod`/`union`/`macro_rules!`, on the first code line below the
+          # block (attributes bracket-counted and skipped whole, blanks and
+          # `//` lines passed over); `impl` for an impl, `//!` for an inner
+          # block, `-` otherwise.
+          claim_blocks() {
+            awk -v F="$1" '
+              function item(t,   m) {
+                if (match(t, /(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                  m = substr(t, RSTART, RLENGTH); sub(/^.*fn[ \t]+/, "", m); return m
+                }
+                if (match(t, /(^|[^A-Za-z0-9_])(struct|enum|trait|const|static|type|mod|union|macro_rules!)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                  m = substr(t, RSTART, RLENGTH); sub(/^.*[ \t]/, "", m); return m
+                }
+                if (t ~ /(^|[^A-Za-z0-9_])impl([^A-Za-z0-9_]|$)/) return "impl"
+                return "-"
+              }
+              function emit(name) {
+                printf "%s\t%d\t%s\t%s\n", F, start, name, text
+                n = 0; text = ""; pending = 0; depth = 0
+              }
+              { l = $0; sub(/^[ \t]+/, "", l); gsub(/\t/, " ", l)
+                if (l ~ /^\/\/[\/!]/ && depth == 0) {
+                  if (pending) emit(inner ? "//!" : "-")
+                  if (n == 0) { start = NR; inner = (l ~ /^\/\/!/) }
+                  sub(/^\/\/[\/!]/, "", l)
+                  n++; text = text " " l
+                  next
+                }
+                if (n == 0) next
+                if (inner) { emit("//!"); next }
+                pending = 1
+                if (depth > 0) { depth += gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
+                if (l ~ /^#!?\[/) { depth = gsub(/\[/, "[", l) - gsub(/\]/, "]", l); next }
+                if (l == "" || l ~ /^\/\//) next
+                emit(item(l)) }
+              END { if (n > 0) emit(inner ? "//!" : "-") }
+            ' "$1"
+          }
+          trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
+          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close|director(y|ies))s?'
+          # The non-cost senses of `flat` and `worst case`, removed before the
+          # trigger runs. Gate 12 carries the measurement behind each line.
+          claim_scrub() {
+            printf '%s' "$1" \
+              | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
+              | sed -E 's/[Ww]orst[ -][Cc]ase//g' \
+              | sed -E "s/[Ff]lat +${notclaim}//g" \
+              | sed -E 's/[Ff]lat +(JSON|json) object//g' \
+              | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g'
+          }
+          # <<< CLAIM READER
           tab=$(printf '\t')
+          # THE TWO READERS ARE ONE (D-1116, LATE tests-bite #8). This step said
+          # it used gate 12's trigger "character for character" and scrubbed
+          # with one `sed` where gate 12 ran five, so a block gate 12 excused
+          # as a financial `worst case` was a claim here, and the two gates
+          # disagreed about what a claim is. Both now carry the region between
+          # the `>>> CLAIM READER` and `<<< CLAIM READER` markers, and this step
+          # refuses unless there are exactly two and they are the same bytes.
+          awk -v W="$work" '
+            /^[ \t]*# >>> CLAIM READER/ { n++; on = 1 }
+            on { print > (W "/reader." n) }
+            /^[ \t]*# <<< CLAIM READER/ { on = 0 }
+            END { print n + 0 > (W "/readers") }' "$wf"
+          if [ "$(cat "$work/readers")" != 2 ] \
+             || ! cmp -s "$work/reader.1" "$work/reader.2"; then
+            echo "GATE 14: the claim reader is not one region shared by gates 12 and 14"
+            echo "  ($(cat "$work/readers") marked copies in ${wf})."
+            if [ -f "$work/reader.2" ]; then diff "$work/reader.1" "$work/reader.2" || true; fi
+            exit 1
+          fi
+          echo "the claim reader is byte-identical in gates 12 and 14"
+
           blocks="$work/blocks"; : > "$blocks"
           walked=0
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             walked=$((walked + 1))
-            awk -v F="$f" '
-              function flush() {
-                if (n > 0) printf "%s\t%d\t%s\n", F, start, text
-                n = 0; text = ""
-              }
-              { l = $0; sub(/^[ \t]+/, "", l); gsub(/\t/, " ", l)
-                if (l ~ /^\/\/[\/!]/) {
-                  sub(/^\/\/[\/!]/, "", l)
-                  if (n == 0) start = NR
-                  n++; text = text " " l
-                } else flush() }
-              END { flush() }
-            ' "$f" >> "$blocks"
+            claim_blocks "$f" >> "$blocks"
           done < <(git ls-files 'crates/*.rs' \
                    | grep '/src/' | grep -vE '/(tests|benches)/' || true)
 
-          trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close)s?'
-
           claims="$work/claims"; : > "$claims"
-          while IFS="$tab" read -r f ln text; do
+          while IFS="$tab" read -r f ln item text; do
             [ -n "${text-}" ] || continue
-            scrub=$(printf '%s' "$text" | sed -E "s/[Ff]lat +${notclaim}//g")
-            grep -qE "$trigger" <<< "$scrub" || continue
+            grep -qE "$trigger" <<< "$(claim_scrub "$text")" || continue
             printf '%s\t%s\t%s\n' "$(printf '%s' "$f" | cut -d/ -f2)" "$f" "$ln" \
               >> "$claims"
           done < "$blocks"
@@ -7752,7 +7884,14 @@ jobs:
             #               mask-evaluation bench's rule, so a human reads the
             #               shape rather than only the verdict
             #   exit        a breach leaves a non-zero status
-            npt=$(awk '/ratio\(/ && !/fn[ \t]+ratio\(/ { n++ } END { print n+0 }' "$b")
+            # Call sites only (D-1117): `source_scan code` blanks every comment,
+            # and a line that DECLARES a `...ratio` helper is not a measurement.
+            if ! "$scan" code "$b" > "$work/bench.code"; then
+              printf '  REFUSED  %s could not be lexed\n' "$b"
+              bad=1
+              continue
+            fi
+            npt=$(awk '/ratio[ \t]*\(/ && !/(^|[^A-Za-z0-9_])fn[ \t]+[A-Za-z0-9_]*ratio[ \t]*[(<]/ { n++ } END { print n+0 }' "$work/bench.code")
             nce=$( { grep -c 'CEILING' "$b" || true; } | tr -d ' ')
             miss=''
             [ "$nce" -ge 2 ] || miss="${miss} a-named-ceiling-compared-against"
@@ -7776,7 +7915,13 @@ jobs:
             for r in $rows; do
               inrow=0; inbench=0
               grep -qE "^\| *${r} *\|" "$inv" && inrow=1 || true
-              grep -qF -- "$r" "$b" && inbench=1 || true
+              # PRINTED means the first word of a string literal in the bench
+              # (D-1117), the rule `core/tests/cost_invariants.rs` already
+              # applies. A substring of the file was satisfied by any `///`
+              # line that mentioned the id, and every C-E id is mentioned in
+              # another row's doc.
+              "$scan" strings "$b" | cut -d: -f3- | awk '{print $1}' \
+                | grep -qxF -- "$r" && inbench=1 || true
               if [ "$inrow" -eq 1 ] && [ "$inbench" -eq 1 ]; then
                 printf '  ok       %s — %s is a row in %s and is printed\n' "$b" "$r" "$inv"
               else

@@ -9899,3 +9899,18 @@ A spot check of five found a fixed table or one record's own fields each time:
 Five of 41 is not a measurement of the rest. Until each entry is moved into
 `allow_scan` with its bound, none of these sites is shown to be bounded by a
 compile-time table rather than by the data.
+
+## The window-range percentile's per-bar bound is read off the source — D-1116, 2 October 2026
+
+`cli::window_range_percentile` sizes the stop ladder from the travel over each
+`hold`-bar window. It keeps two monotonic deques, so each bar index is pushed
+once and popped at most once: the walk is O(bars), with an amortised O(1) step
+per bar. A `select_nth_unstable` then places one index, which is expected O(n)
+and not worst-case O(n).
+
+**None of that is measured.** `crates/cli/benches/ratio.rs` has no row for
+this walk. The tests in `crates/cli/src/lib.rs` prove the percentile it
+returns, not its cost. The function's doc says UNVERIFIED for this reason.
+Gate 12 refused the claim once its allowlist was keyed by item rather than by
+count. A bench row that times two series of different lengths at one `hold`
+would close this.
