@@ -508,6 +508,38 @@ mod invariant_tests {
         assert!(printed.contains("offered: [], ") && printed.contains("digits: [], "));
     }
 
+    /// `W3-vocab1-0`: `docs/06-limits.md` says a sibling comparison can read a
+    /// whole operand. Equal siblings are admitted, and siblings that differ only
+    /// in their last instruction are told apart only there.
+    #[test]
+    fn a_sibling_comparison_can_read_the_whole_operand() {
+        let (a, b) = (Instruction::Bit(0), Instruction::Bit(1));
+        let (and, or) = (Instruction::And, Instruction::Or);
+        assert!(valid_prefix(&[a, b, and, a, b, and, and], 7));
+        assert!(valid_prefix(&[a, b, and, a, b, or, and], 7));
+        assert!(!valid_prefix(&[a, b, or, a, b, and, and], 7));
+    }
+
+    /// `W3-vocab1-3`, held by the lib tests too: equality ignores the scratch
+    /// program and sees every encoded field.
+    #[test]
+    fn equality_is_the_encoding_and_ignores_the_scratch_program() {
+        let start = Cursor::new(&[0, 369]).expect("live alphabet");
+        let mut cursor = start.clone();
+        let mut work = 0;
+        assert!(matches!(
+            cursor.advance(1, &mut work),
+            Ok(Step::Candidate(_))
+        ));
+        let decoded = Cursor::decode(&cursor.encode()).expect("own bytes decode");
+        assert!(
+            decoded.code != cursor.code,
+            "the candidate left its instruction in the scratch program"
+        );
+        assert!(decoded == cursor, "equal bytes compare equal");
+        assert!(cursor != start, "different progress compares unequal");
+    }
+
     #[test]
     fn corrupted_internal_cursor_indices_refuse_with_bounded_work() {
         let mut cursor = Cursor::new(&[0]).expect("live alphabet");

@@ -856,3 +856,92 @@ fn every_bit_named_in_prose_is_that_bits_name() {
         );
     }
 }
+
+/// Every present-tense position count in this crate's prose is the table's count.
+///
+/// [`the_widths_in_this_crates_prose_match_its_constants`] polices `N-bit` and `N-word`
+/// and says outright that it does not try to police every number. An audit
+/// (`ET-vocabulary-conditions-bits-2`) found the gap it leaves: five sentences stating
+/// the table's current size, next free position, headroom or live count each quoted a
+/// value the table had since outgrown by appends.
+///
+/// Each shape below states the CURRENT table, not its history, so it can be pinned to
+/// a constant without a false positive on legitimate narrative. Every shape must also
+/// be found at least once: a shape that matches nothing checks nothing, and rewording
+/// a sentence away from its shape must move the shape here too.
+#[test]
+fn the_present_tense_position_counts_in_this_crates_prose_match_the_table() {
+    const LIB: &str = include_str!("../src/lib.rs");
+    const MASK: &str = include_str!("../src/mask.rs");
+    const TABLE_SRC: &str = include_str!("../src/table.rs");
+    const TOLERANCE: &str = include_str!("../src/tolerance.rs");
+    let count = u32::try_from(COUNT).expect("the table fits a u32");
+    let shapes: [(&str, &str, &str, &str, u32); 7] = [
+        ("src/lib.rs", LIB, "the ", " positions, their names", count),
+        ("src/lib.rs", LIB, "| 3 | ", " positions in a", count),
+        ("src/mask.rs", MASK, "defines ", " positions", count),
+        (
+            "src/table.rs",
+            TABLE_SRC,
+            "The bit table. ",
+            " positions",
+            count,
+        ),
+        (
+            "src/table.rs",
+            TABLE_SRC,
+            "which is ",
+            " today",
+            u32::from(NEXT_FREE),
+        ),
+        (
+            "src/table.rs",
+            TABLE_SRC,
+            "the **",
+            "** positions between",
+            ConditionMask::BITS - count,
+        ),
+        (
+            "src/tolerance.rs",
+            TOLERANCE,
+            "of the ",
+            " live positions",
+            LIVE.popcount(),
+        ),
+    ];
+    for (name, text, before, after, expected) in shapes {
+        let mut found = 0_u32;
+        for (at, _) in text.match_indices(before) {
+            let rest = &text[at + before.len()..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() || !rest[digits.len()..].starts_with(after) {
+                continue;
+            }
+            assert_eq!(
+                digits.parse::<u32>().expect("ascii digits parse"),
+                expected,
+                "{name} says `{before}{digits}{after}`, and the table's current value is \
+                 {expected}"
+            );
+            found += 1;
+        }
+        assert!(
+            found > 0,
+            "{name} no longer contains `{before}<N>{after}`, so this shape checks nothing"
+        );
+    }
+    // The spelled-out half of tolerance.rs's opening sentence, checked here because
+    // its digit half is one of the shapes above.
+    let live_near = TABLE
+        .iter()
+        .filter(|d| d.status == BitStatus::Live && d.kind == Kind::Near)
+        .count();
+    assert_eq!(
+        live_near, 81,
+        "tolerance.rs says eighty-one live positions are `near_*`"
+    );
+    assert!(
+        TOLERANCE.contains("Eighty-one of the "),
+        "tolerance.rs restated its near count"
+    );
+}

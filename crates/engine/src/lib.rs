@@ -3961,9 +3961,10 @@ mod tests {
              about which bit is highest, so they are read together.\n\
              \x20 1 FILTER SKIP -- a candidate whose ONE new pair restates \
              itself or cannot hold. `vocab::implication` proves the pivot chain \
-             exact from `daily.rs:206-215` and the single shared band half at \
-             `daily.rs:579`; anti-monotonicity cannot reach it, because both \
-             bits are frequent and so is their union. It advances rather than \
+             exact from `DailyLevels::from_previous_session` and the single \
+             shared band half `bits_with` binds before its loop; \
+             anti-monotonicity cannot reach it, because both bits are \
+             frequent and so is their union. It advances rather than \
              truncating -- the level still enumerates every other pair.\n\
              \x20 AND THE TEN THAT WERE ALREADY HERE:\n\
              \x20 1 EMPTY-BATCH RETURN -- `drain` handing back an untouched \

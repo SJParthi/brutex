@@ -10,7 +10,7 @@
 //! | Module | Owns |
 //! |---|---|
 //! | [`mask`] | [`ConditionMask`], the six-word condition mask and the hit test |
-//! | [`table`] | the 365 positions, their names, and the three tombstones |
+//! | [`table`] | the 370 positions, their names, and the three tombstones |
 //! | [`tolerance`] | the `near_*` band half-width, which is UNPINNED |
 //! | [`error`] | every refusal the two above can produce |
 //!
@@ -73,7 +73,7 @@ pub use tolerance::Tolerance;
 /// | Version | Table |
 /// |---:|---|
 /// | 1 | the shipped 74 conditions in a `u128`, `docs/03-vocabulary.md` |
-/// | 3 | 365 positions in a [`ConditionMask`], six words wide, three of them tombstones |
+/// | 3 | 370 positions in a [`ConditionMask`], six words wide, three of them tombstones |
 ///
 /// Appending a condition at the next free position does **not** bump it: an
 /// append leaves every existing mask meaning exactly what it meant, which is

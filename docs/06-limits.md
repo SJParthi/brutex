@@ -10961,3 +10961,28 @@ exact `(1 + count) / (B + 1)` rule, and
 resulting decisions against `romano_wolf_adjusted_p_values_v1` over a
 3,000-decision grid. That is a grid, not a proof at every discrete equality
 boundary.
+### One expression-grammar node walks its whole prefix, not O(1) (D-0983)
+
+`vocab::expression_search::Cursor::advance` counts one unit of `work` per
+grammar node, and the unit is not constant. Every tried instruction revalidates
+the whole prefix it ends:
+
+* `let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;` then
+  `if !valid_prefix(prefix, usize::from(self.length)) {`.
+* `valid_prefix` zeroes a fixed stack, `let mut starts = [0_usize; MAX_INSTRUCTIONS];`
+  (`MAX_INSTRUCTIONS` is 1,151), and walks every instruction of the prefix,
+  `for (index, op) in code.iter().enumerate() {`.
+* At each `And` or `Or` it compares the two sibling operands as slices,
+  `if code.get(left..right) > code.get(right..index) {`.
+
+So one node costs a fixed 1,151-entry zeroing, a walk of every instruction up
+to `at`, which the fixed language bounds below 1,151 but which is not
+independent of it, and the sibling comparisons. Those are not claimed linear in
+`at`: the refusal is only `>`, so equal siblings are admitted, and siblings that
+differ only in their last instruction are told apart only there, so one
+comparison can read a whole operand
+(`a_sibling_comparison_can_read_the_whole_operand`). Their total per node is
+not measured or bounded here. The `work` counter and every node budget count
+nodes, not this walk. Nothing here is timed; the shape is read off the source, and
+`the_per_node_prefix_scan_the_limit_names_is_the_code` fails if any quoted line
+leaves `expression_search.rs` or this section.
