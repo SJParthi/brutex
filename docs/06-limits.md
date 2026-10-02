@@ -9907,3 +9907,18 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## The screen sorts every priced row twice (audit o1cli-6)
+
+- **`screen` sorts every priced row twice with a stable `sort_by_key`: once
+  on `money_key`, then on the calendar key after `measure_top`.** Each is
+  O(n log n) for n priced rows, up to `SCREEN_CAP_CEILING` (10,000,000), paid
+  once per screen, not per candidate or per bar. Only the top rows are
+  measured and printed, but selecting them first and sorting only those is
+  not equivalent here: `final_selection` falls back past the top rows to the
+  first row that traded, and the calendar key leads with `admitted`, so an
+  unmeasured row that passed the rules can rise above measured rows that did
+  not. Both read the whole order. Stated from the code's shape; not timed.
+  Held to the code by
+  `the_screens_two_full_sorts_are_stated_and_the_full_order_still_read` in
+  `crates/cli/tests/limits_o1cli_6.rs`.
