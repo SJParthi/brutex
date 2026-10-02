@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Expression search checks each choice incrementally — audit 2026-10-02 o1engine-23
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1ENGINE-23 — **The search's incremental prefix check (`Cursor::place`, run by `advance` and `decode`) admits exactly the prefixes the former full re-walk admitted.** Every prefix of every program of up to seven instructions over two leaves and NOT/AND/OR, at every declared length from its own to nine (over 100,000 comparisons), gets the same answer from both. The empty prefix, a prefix past the wire capacity, an irreducible stack, first-position underflow and the 576-leaf stack that exactly fits 1,151 instructions agree too. Across 5,000 live steps with backtracking nothing is recorded at or past `at`, and a cursor decoded from the saved bytes records exactly what the live one does, so resumption is unchanged | `vocab::expression_search::invariant_tests::the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did`; `vocab::expression_search::invariant_tests::a_resumed_search_records_exactly_what_the_live_one_does` | ✓ |

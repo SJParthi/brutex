@@ -9907,3 +9907,19 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Expression search checks one grammar choice incrementally (audit o1engine-23)
+
+- **Each `vocab::expression_search::Cursor::advance` node costs O(1) plus one
+  canonical-order comparison of the two subtrees a join combines, which is
+  bounded by the program length (at most 1,151 instructions), not O(1).**
+  Until this audit every node re-walked the whole partial program from the
+  start and cleared a 9.2 KB full-capacity array, so a node got slower as the
+  rule grew. The cursor now records, for each placed position, the start of
+  the subtree ending there and the stack depth after it, and checks a new
+  choice from those. The record is derived, never encoded: `CURSOR_BYTES`
+  stays 3,086 and `decode` rebuilds it in O(at). The sibling comparison is
+  kept because canonical order is defined by it. Stated from the code's
+  shape; not timed. Proved by
+  `vocab::expression_search::invariant_tests::the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did`
+  and `a_resumed_search_records_exactly_what_the_live_one_does`.

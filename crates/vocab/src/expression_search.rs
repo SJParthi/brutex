@@ -57,6 +57,14 @@ pub struct Cursor {
     // is the next rank to try. All later slots are zero.
     digits: [u16; MAX_INSTRUCTIONS],
     code: [Instruction; MAX_INSTRUCTIONS],
+    // Derived, never encoded. Before `at`, `starts[i]` is where the subtree
+    // ending at `i` begins and `depths[i]` is the stack depth after `i`. Every
+    // later slot is zero. Each is written only once the search moves past `i`
+    // and read only for positions before the one being placed, so a new
+    // choice is checked in O(1) plus one sibling comparison instead of
+    // re-walking the whole prefix over a cleared full-capacity array.
+    starts: [u16; MAX_INSTRUCTIONS],
+    depths: [u16; MAX_INSTRUCTIONS],
 }
 
 impl Cursor {
@@ -84,6 +92,8 @@ impl Cursor {
             finished: false,
             digits: [0; MAX_INSTRUCTIONS],
             code: [Instruction::Pad; MAX_INSTRUCTIONS],
+            starts: [0; MAX_INSTRUCTIONS],
+            depths: [0; MAX_INSTRUCTIONS],
         })
     }
 
@@ -122,6 +132,11 @@ impl Cursor {
                     self.code.fill(Instruction::Pad);
                 } else {
                     self.at -= 1;
+                    // The position returned to is chosen again, so what was
+                    // recorded when the search moved past it no longer holds.
+                    let back = usize::from(self.at);
+                    *self.starts.get_mut(back).ok_or(Refusal::Cursor)? = 0;
+                    *self.depths.get_mut(back).ok_or(Refusal::Cursor)? = 0;
                 }
                 // Backtracking is also bounded work; do not hide it behind a
                 // candidate-only counter that could run forever on exclusions.
@@ -132,10 +147,9 @@ impl Cursor {
             let instruction = self.instruction(rank).ok_or(Refusal::Cursor)?;
             let slot = self.code.get_mut(at).ok_or(Refusal::Cursor)?;
             *slot = instruction;
-            let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;
-            if !valid_prefix(prefix, usize::from(self.length)) {
+            let Some((start, depth)) = self.place(at) else {
                 continue;
-            }
+            };
             if at + 1 == usize::from(self.length) {
                 let mut code = self.code;
                 for slot in code.iter_mut().skip(usize::from(self.length)) {
@@ -146,9 +160,42 @@ impl Cursor {
                     len: usize::from(self.length),
                 }));
             }
+            *self.starts.get_mut(at).ok_or(Refusal::Cursor)? = start;
+            *self.depths.get_mut(at).ok_or(Refusal::Cursor)? = depth;
             self.at += 1;
         }
         Ok(Step::Paused)
+    }
+
+    /// What `self.code[at]` makes of the prefix `..=at`, read from what is
+    /// recorded for `..at`: the start of the subtree ending at `at` and the
+    /// stack depth after it.
+    ///
+    /// `None` when the instruction underflows the stack, joins two siblings out
+    /// of canonical order, or leaves more values than the instructions left in
+    /// `length` can reduce to one. Every check is O(1) except the sibling
+    /// comparison, which reads the two subtrees being joined and so is bounded
+    /// by `length`.
+    fn place(&self, at: usize) -> Option<(u16, u16)> {
+        let remaining = usize::from(self.length).checked_sub(at.checked_add(1)?)?;
+        let (below_start, below_depth) = match at.checked_sub(1) {
+            None => (0, 0),
+            Some(previous) => (*self.starts.get(previous)?, *self.depths.get(previous)?),
+        };
+        let (start, depth) = match self.code.get(at)? {
+            Instruction::Bit(_) => (u16::try_from(at).ok()?, below_depth.checked_add(1)?),
+            Instruction::Not if below_depth >= 1 => (below_start, below_depth),
+            Instruction::And | Instruction::Or if below_depth >= 2 => {
+                let right = usize::from(below_start);
+                let left = usize::from(*self.starts.get(right.checked_sub(1)?)?);
+                if self.code.get(left..right)? > self.code.get(right..at)? {
+                    return None;
+                }
+                (u16::try_from(left).ok()?, below_depth - 1)
+            }
+            _ => return None,
+        };
+        (usize::from(depth) - 1 <= remaining).then_some((start, depth))
     }
 
     fn instruction(&self, rank: u16) -> Option<Instruction> {
@@ -262,54 +309,12 @@ impl Cursor {
                 .ok_or(Refusal::Cursor)?;
             let instruction = cursor.instruction(rank).ok_or(Refusal::Cursor)?;
             *cursor.code.get_mut(index).ok_or(Refusal::Cursor)? = instruction;
-            if !valid_prefix(
-                cursor.code.get(..=index).ok_or(Refusal::Cursor)?,
-                usize::from(length),
-            ) {
-                return Err(Refusal::Cursor);
-            }
+            let (start, depth) = cursor.place(index).ok_or(Refusal::Cursor)?;
+            *cursor.starts.get_mut(index).ok_or(Refusal::Cursor)? = start;
+            *cursor.depths.get_mut(index).ok_or(Refusal::Cursor)? = depth;
         }
         Ok(cursor)
     }
-}
-
-fn valid_prefix(code: &[Instruction], length: usize) -> bool {
-    let Some(remaining) = length.checked_sub(code.len()) else {
-        return false;
-    };
-    let mut starts = [0_usize; MAX_INSTRUCTIONS];
-    let mut depth = 0_usize;
-    for (index, op) in code.iter().enumerate() {
-        match op {
-            Instruction::Bit(_) => {
-                let Some(slot) = starts.get_mut(depth) else {
-                    return false;
-                };
-                *slot = index;
-                depth += 1;
-            }
-            Instruction::Not if depth > 0 => {}
-            Instruction::And | Instruction::Or if depth >= 2 => {
-                let Some(&left) = starts.get(depth - 2) else {
-                    return false;
-                };
-                let Some(&right) = starts.get(depth - 1) else {
-                    return false;
-                };
-                if code.get(left..right) > code.get(right..index) {
-                    return false;
-                }
-                depth -= 1;
-            }
-            _ => return false,
-        }
-    }
-    // Both callers admit nonempty prefixes in order. Keep the empty/internal
-    // malformed case a refusal too: subtracting an absent stack item must not
-    // panic or accidentally admit a prefix.
-    depth
-        .checked_sub(1)
-        .is_some_and(|reductions| reductions <= remaining)
 }
 
 #[cfg(test)]
@@ -317,36 +322,171 @@ mod invariant_tests {
     #![allow(clippy::expect_used, clippy::indexing_slicing)]
     use super::*;
 
+    /// The full re-walk the search used before audit o1engine-23, kept as the
+    /// independent reference [`Cursor::place`] is checked against.
+    fn valid_prefix(code: &[Instruction], length: usize) -> bool {
+        let Some(remaining) = length.checked_sub(code.len()) else {
+            return false;
+        };
+        let mut starts = [0_usize; MAX_INSTRUCTIONS];
+        let mut depth = 0_usize;
+        for (index, op) in code.iter().enumerate() {
+            match op {
+                Instruction::Bit(_) => {
+                    let Some(slot) = starts.get_mut(depth) else {
+                        return false;
+                    };
+                    *slot = index;
+                    depth += 1;
+                }
+                Instruction::Not if depth > 0 => {}
+                Instruction::And | Instruction::Or if depth >= 2 => {
+                    let Some(&left) = starts.get(depth - 2) else {
+                        return false;
+                    };
+                    let Some(&right) = starts.get(depth - 1) else {
+                        return false;
+                    };
+                    if code.get(left..right) > code.get(right..index) {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                _ => return false,
+            }
+        }
+        // Both callers admit nonempty prefixes in order. Keep the empty/internal
+        // malformed case a refusal too: subtracting an absent stack item must not
+        // panic or accidentally admit a prefix.
+        depth
+            .checked_sub(1)
+            .is_some_and(|reductions| reductions <= remaining)
+    }
+
+    /// Whether the search's incremental check admits `code` as a prefix of a
+    /// program of `length` instructions, placing it one instruction at a time
+    /// exactly as `advance` and `decode` do.
+    fn admits(code: &[Instruction], length: usize) -> bool {
+        let Ok(length) = u16::try_from(length) else {
+            return false;
+        };
+        let mut cursor = Cursor::new(&[0]).expect("live alphabet");
+        cursor.length = length;
+        for (at, &instruction) in code.iter().enumerate() {
+            let Some(slot) = cursor.code.get_mut(at) else {
+                return false;
+            };
+            *slot = instruction;
+            let Some((start, depth)) = cursor.place(at) else {
+                return false;
+            };
+            cursor.starts[at] = start;
+            cursor.depths[at] = depth;
+        }
+        !code.is_empty()
+    }
+
+    /// THE INCREMENTAL CHECK ADMITS EXACTLY THE PREFIXES THE FULL RE-WALK DID.
+    /// Audit o1engine-23.
+    ///
+    /// Every prefix of every program of up to seven instructions over two
+    /// leaves and the three operators, at every declared length from its own
+    /// up to nine, gets the same answer from `admits` (what `advance` and
+    /// `decode` now run) as from `valid_prefix`. The worst cases ride along:
+    /// the empty prefix, a prefix past the wire capacity, a stack too deep to
+    /// reduce in time, underflow at the first position, and siblings out of
+    /// canonical order deep inside a nested join.
+    #[test]
+    fn the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did() {
+        let alphabet = [
+            Instruction::Bit(0),
+            Instruction::Bit(63),
+            Instruction::Not,
+            Instruction::And,
+            Instruction::Or,
+        ];
+        let mut code = Vec::with_capacity(7);
+        let mut compared = 0_u32;
+        let mut admitted = 0_u32;
+        for len in 1..=7_u32 {
+            for mut n in 0..5_usize.pow(len) {
+                code.clear();
+                for _ in 0..len {
+                    code.push(alphabet[n % 5]);
+                    n /= 5;
+                }
+                for length in code.len()..=9 {
+                    let want = valid_prefix(&code, length);
+                    assert_eq!(admits(&code, length), want, "{code:?} in {length}");
+                    compared += 1;
+                    admitted += u32::from(want);
+                }
+            }
+        }
+        assert!(
+            compared > 100_000 && admitted > 1_000,
+            "{compared} {admitted}"
+        );
+        for (code, length) in [
+            (&[][..], 0),
+            (&[][..], MAX_INSTRUCTIONS),
+            (&[Instruction::Bit(0); 3][..], 3),
+            (&[Instruction::And][..], 3),
+        ] {
+            assert!(!admits(code, length) && !valid_prefix(code, length));
+        }
+        let overfull = [Instruction::Bit(0); MAX_INSTRUCTIONS + 1];
+        assert!(!admits(&overfull, MAX_INSTRUCTIONS + 1));
+        let full = [Instruction::Bit(0); MAX_INSTRUCTIONS.div_ceil(2)];
+        assert!(admits(&full, MAX_INSTRUCTIONS));
+        assert!(!admits(&full, MAX_INSTRUCTIONS - 1));
+    }
+
+    /// A search that backtracks leaves nothing recorded at or past `at`, so a
+    /// cursor rebuilt from its saved bytes holds the same derived state.
+    #[test]
+    fn a_resumed_search_records_exactly_what_the_live_one_does() {
+        let mut live = Cursor::new(&[0, 369]).expect("live alphabet");
+        let mut work = 0;
+        let mut backtracked = false;
+        for _ in 0..5_000 {
+            let before = live.at;
+            live.advance(1, &mut work).expect("bounded step");
+            backtracked |= live.at < before;
+            let at = usize::from(live.at);
+            assert!(live.starts[at..].iter().all(|&s| s == 0));
+            assert!(live.depths[at..].iter().all(|&d| d == 0));
+            let resumed = Cursor::decode(&live.encode()).expect("saved cursor");
+            assert_eq!(resumed.starts, live.starts);
+            assert_eq!(resumed.depths, live.depths);
+        }
+        assert!(backtracked);
+    }
+
     #[test]
     fn prefix_validation_refuses_empty_overfull_and_unreducible_stacks() {
-        assert!(!valid_prefix(&[], 0));
-        assert!(!valid_prefix(&[], MAX_INSTRUCTIONS));
-        assert!(!valid_prefix(
+        assert!(!admits(&[], 0));
+        assert!(!admits(&[], MAX_INSTRUCTIONS));
+        assert!(!admits(
             &[Instruction::Bit(0); MAX_INSTRUCTIONS + 1],
             MAX_INSTRUCTIONS + 1
         ));
-        assert!(!valid_prefix(&[Instruction::Bit(0), Instruction::Not], 1));
+        assert!(!admits(&[Instruction::Bit(0), Instruction::Not], 1));
         // A later operand cannot repair a unary operator's earlier underflow.
         // This matters for the prefix validator independently of its callers,
         // which normally reject the one-token prefix before reaching this one.
-        assert!(!valid_prefix(&[Instruction::Not, Instruction::Bit(0)], 2));
-        assert!(!valid_prefix(
+        assert!(!admits(&[Instruction::Not, Instruction::Bit(0)], 2));
+        assert!(!admits(
             &[Instruction::Not, Instruction::Bit(0), Instruction::Not],
             3
         ));
-        assert!(!valid_prefix(
-            &[Instruction::Bit(0), Instruction::Bit(63)],
-            2
-        ));
-        assert!(valid_prefix(
-            &[Instruction::Bit(0), Instruction::Bit(63)],
-            3
-        ));
-        assert!(valid_prefix(
+        assert!(!admits(&[Instruction::Bit(0), Instruction::Bit(63)], 2));
+        assert!(admits(&[Instruction::Bit(0), Instruction::Bit(63)], 3));
+        assert!(admits(
             &[Instruction::Bit(0), Instruction::Bit(63), Instruction::And],
             3
         ));
-        assert!(!valid_prefix(
+        assert!(!admits(
             &[Instruction::Bit(63), Instruction::Bit(0), Instruction::And],
             3
         ));
