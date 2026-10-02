@@ -44632,3 +44632,39 @@ source-shape test and fails on the previous tree.
 support sessions, the exact grid and its seal, and the per-resolution envelope
 bounds. These depend on the program or the resolution.
 
+
+### D-1189 — Gate 11's outcome.rs and excursion.rs rows are tightened to the code — 2026-10-02
+
+**Finding.** Three gate 11 entries in `.github/workflows/ci.yml` no longer
+described the code they allow:
+
+* Rule 2 allowed `crates/runner/src/outcome.rs` 29 floats. The rule's own count
+  is 26, so the allowance had room for three new float sites nobody had read.
+* Rule 3 allowed `crates/runner/src/outcome.rs` one unsized map, as a SHAPE 3
+  row keyed by IST session day. D-1177 pre-sizes that map from an exact count
+  and the proved-day set from `required.len()`, so the file has no unsized map.
+  The gate printed the row as loose.
+* Rule 4's comment called `crates/runner/src/excursion.rs` "ONE sort" over
+  integer basis points. D-1172 replaced the sort with nested
+  `select_nth_unstable` calls over `Ppm` (parts per million), expected O(n) per
+  ladder, which leave the slice permuted rather than sorted.
+
+**Decision.** Set the rule 2 count to 26 and record the change as a tightening.
+Delete the rule 3 row and its SHAPE 3 sentence, and say why where the list
+ends. Rewrite the rule 4 comment to describe the selection. The rule 4 count
+stays 1, because the rule's pattern matches the selection's spelling.
+
+**Verified.** The gate 11 `run:` block was extracted to a script, its walk
+limited to `crates/runner/*.rs` and `crates/cli/*.rs`, and run on this tree. It
+reports `outcome.rs — 26 of 26` for rule 2, no rule 3 row for `outcome.rs`, and
+"OK — no banned construct outside the allowlist", with no REFUSED or STALE line.
+That run is not the whole-workspace gate. Rows for other crates print as loose
+in it only because their files were not walked.
+
+**Honest limit.** Under `mawk 1.3.4` in this container, the step's rule-5 lint
+scan ran more than 15 minutes without finishing. That scan strips a prefix with
+`sub("^" p ":" n ":", ...)`, which builds a regex for every line of a 240k-line
+scope file. The local run therefore used a copy that strips the same prefix
+with `substr`, which removes the same characters, and it finished in seconds.
+The checked-in gate is unchanged. Whether the CI runner's awk is affected was
+not measured.

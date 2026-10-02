@@ -4796,6 +4796,11 @@ jobs:
           #     Newey--West and payoff arithmetic the existing entry describes.
           #     The forward RETURN is paisa `i64` throughout and only the mean,
           #     the t-statistic and the ratios derived from them are floating.
+          #   runner/outcome.rs 29 -> 26 -- TIGHTENED, not raised: the entry
+          #     read 29 while this rule's own count measured 26 on 2026-10-02
+          #     (D-1189), so three float sites had left the module and the
+          #     allowance kept room for three new ones nobody had read. The
+          #     reason above is unchanged; only the slack is gone.
           #   runner/validate.rs 1 -- `direction_from_training_edge(mean_paisa:
           #     f64)`, and the parameter name is why it earns a sentence rather
           #     than a line. It is not a price: its only production caller passes
@@ -4844,7 +4849,7 @@ jobs:
           crates/runner/src/admission.rs 4
           crates/runner/src/bootstrap.rs 48
           crates/runner/src/bootstrap_family_pass.rs 17
-          crates/runner/src/outcome.rs 29
+          crates/runner/src/outcome.rs 26
           crates/runner/src/report.rs 3
           crates/runner/src/validate.rs 1
           crates/store/src/format.rs 14
@@ -5011,8 +5016,7 @@ jobs:
           # size is the number of DISTINCT keys and counting those needs the map.
           # `api/ladder.rs::earliest` is keyed by `(exchange, segment, symbol)` over
           # a month list; `api/server.rs::spot_months_by_identity` drops the
-          # timeframe from `(Series, YearMonth)`; `runner/outcome.rs` keys by IST
-          # session DAY over bars; `cli/population.rs::index_blocks`,
+          # timeframe from `(Series, YearMonth)`; `cli/population.rs::index_blocks`,
           # `population_admission_v4`, `population_finalization_v4` and
           # `population_statistics_v3` key by BLOCK over records, and a block's
           # length is a field inside it, so the block count is not `len / stride`.
@@ -5044,6 +5048,13 @@ jobs:
           # module headers say the opposite, at length, and gate 12 holds them to
           # it. It says only that no map here grows from an unreserved zero on a
           # path where the count was available, which is what law 2 asks.
+          #
+          # REMOVED, NOT LOOSENED: `runner/outcome.rs` was a SHAPE 3 row, its
+          # forced-close map keyed by IST session day. D-1177 counts the
+          # whole-minute 15:09 records first and reserves exactly that bound
+          # (`HashMap::with_capacity(candidates)`, and the proved-day set at
+          # `required.len()`), so the file has no unsized map left and its row
+          # was only loose. D-1189 deletes it; a new unsized map there is red.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
@@ -5089,7 +5100,6 @@ jobs:
           crates/cli/src/trades.rs 1
           crates/pull/src/nse.rs 1
           crates/runner/src/lib.rs 1
-          crates/runner/src/outcome.rs 1
           crates/runner/src/rank.rs 1
           crates/cli/src/pool.rs 1
           crates/pull/src/cash_auction.rs 3
@@ -5297,13 +5307,19 @@ jobs:
           # `read_reach`/`reach_of` and stopped being true of `read_census` at D-0141. The
           # bound is archive.rs's cap, not that sentence. Section 65 also records that NO
           # timing has been taken against a real purchased archive; none is claimed here.
-          # `crates/runner/src/excursion.rs` ONE sort, and a quantile IS an order
-          # statistic -- the same argument the significance.rs entry above makes
-          # about Benjamini-Hochberg. `Ladder::from_excursions` places its rungs at
-          # quantiles of the excursions the instrument actually produced, so that a
-          # stop level is "the level a fifth of moves reached" rather than a number
-          # somebody typed. Removing the sort does not make it cheaper; it makes it
-          # a different and wrong procedure.
+          # `crates/runner/src/excursion.rs` ONE SELECTION SITE, NOT A SORT, and a
+          # quantile IS an order statistic -- the same argument the significance.rs
+          # entry above makes about Benjamini-Hochberg. `Ladder::from_excursions`
+          # places its rungs at quantiles of the excursions the instrument actually
+          # produced, so that a stop level is "the level a fifth of moves reached"
+          # rather than a number somebody typed. This entry used to say "ONE sort";
+          # D-1172 replaced the full `sort_unstable` with `select_nth_unstable`
+          # called from the deepest rung position down, each inside the prefix the
+          # previous selection left, so the work is expected O(n) per ladder
+          # rather than Theta(n log n), and the slice is left PERMUTED, not sorted.
+          # It is still one occurrence because rule 4's pattern matches the
+          # selection's spelling. Removing the selection does not make it cheaper;
+          # it makes it a different and wrong procedure. (D-1189 corrects this text.)
           # WHAT BOUNDS IT: one entry per TRADE on the training bars, and
           # `crate::trade` takes non-overlapping positions with a minimum hold of one
           # bar, so the slice is at most the bar count and is usually far smaller --
@@ -5311,8 +5327,9 @@ jobs:
           # candidate count and NOT the frequent-itemset count, so it does not grow
           # with the sweep. Called once per fold at a `crate::validate` boundary,
           # never per bar and never on a request path.
-          # `sort_unstable` on `i64` and not a comparator: these are integer basis
-          # points, so there is no NaN and no partial order to get wrong.
+          # `select_nth_unstable` on `i64` (`Ppm`) and not a comparator: these are
+          # integer parts-per-million, so there is no NaN and no partial order to
+          # get wrong.
           # `crates/runner/src/pbo.rs` ONE sort, and a median IS an order statistic
           # -- the third time this rule meets that argument, after Benjamini-Hochberg
           # and the excursion quantiles. `probability_of_overfitting` sorts the
