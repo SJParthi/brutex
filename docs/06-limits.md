@@ -11178,6 +11178,43 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## The cold bar lookup is measured, and it has its own budget — D-0914, 2 October 2026
+
+**What was unmeasured.** C-28 and C-29 re-read one fixed index. `BarFile`
+remembers the one checksum block it verified last, so after the first call
+both rows timed only the WARM read: a relaxed load and a 56-byte `pread`. The
+COLD read — any read landing in a block other than the last one verified,
+which is every random access and every bisection probe — pays
+`verify_block_of` in full: the block `pread`, a four-byte sidecar `pread`, a
+CRC-32C over up to 4,088 bytes, and on the tail block an `fstat`. Nothing
+timed it, and until D-0914 it also allocated `vec![0u8; span]` on every call,
+and a second `vec!` on a tail block holding records past the commit.
+
+**What is measured now.** C-BC-01 cycles through fourteen indices in fourteen
+distinct blocks, block 0 to the tail, at 1×, 10× and 100× the record count, so
+every read is cold. Flat: 1.000×/0.964×, 1.011×/1.002×, 1.101×/1.060× over
+three runs after the change (0.990×/0.982× before it). The cold read is O(1) in
+the file; its constant is the block, which is a constant of the format.
+
+**The 800-floor budget does not hold for it, and that is stated rather than
+hidden.** C-BC-02 measured **2,066.247** floors before the allocation was
+removed and **2,394.687, 2,096.921, 2,443.033** after, on a shared `x86_64`
+host (4 cores, 8 concurrent builds) at floors of 1,407–1,624 ps — roughly
+2.6–3.1× C-29's 800, and about 15–17× the warm read's 124–144 floors on the
+same runs. The CRC is the bulk of it: C-07 times one block's seal alone at
+about 2.45 µs, roughly 1,500 floors. The cold read therefore carries its own
+budget, **10,000 floors**, sized on the worst observed with about 4× left over;
+C-29's 800 continues to bound the warm read and is unchanged.
+
+**What removing the allocation did and did not show.** The heap allocation is
+gone from both functions — C-BC-03 holds that by source shape, since
+`unsafe_code` is denied and a counting allocator is not available — but on this
+host the cold cost did **not** visibly fall: the post-change runs sit inside the
+pre-change run's noise. The claim made for the change is that the per-read cost
+no longer depends on the allocator, not that it is faster. A measurement on
+dedicated hardware, and one on the operator's `aarch64` machine where C-29 was
+first sized, has not been taken; both are **UNVERIFIED**.
+
 ## The Execution V3 replay is remembered per row set; the reauthentication around it is not constant — D-0994, 2 October 2026
 
 * **What is constant now.** A retained stored Candidate capability runs its
