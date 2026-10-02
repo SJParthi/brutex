@@ -1356,6 +1356,22 @@ jobs:
           # field.
           pull_asserted_number='2025-07 2025-08 401 42'
 
+          # ---- group 31: ONE WRONG REGION AND THREE CASE LABELS, all four
+          # offered by `ssm.rs` tests rather than emitted. D-1371, D-1372.
+          #
+          # `ap-south-2` is a real AWS region that is NOT the one CLAUDE.md §8
+          # names. `ssm.rs:1212` offers it beside `us-east-1` and two malformed
+          # spellings of `ap-south-1` to prove the client refuses to sign for
+          # any region but `ap-south-1`: the near miss is the point of the test,
+          # and it names no account, environment, vendor or field.
+          #
+          # `empty-id`, `empty-secret` and `empty-token` are the `assert!`
+          # labels of the three cases proving an empty AWS access key id,
+          # secret key or session token is refused before a request is signed.
+          # Hyphenated test-case names, never a segment of a parameter path.
+          # Declared on the owner's decision (PR #35), not widened by a gate.
+          ssm_region_fixture='ap-south-2 empty-id empty-secret empty-token'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1366,7 +1382,8 @@ jobs:
           ${rolling_word} ${rolling_scaffold} ${pull_fixture}
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
-          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}"
+          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
+          ${ssm_region_fixture}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build:
