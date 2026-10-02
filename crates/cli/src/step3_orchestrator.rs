@@ -654,6 +654,22 @@ pub(crate) struct CommittedStoredCandidatePreAdmissionV1 {
     committed: CommittedCandidatePreAdmissionV1,
     search: StoredSearchMemberV4,
     execution: RetainedStoredExecutionContextV1,
+    /// The first successful Execution V3 replay and the exact authenticated
+    /// Candidate rows it was computed from. D-0994.
+    execution_replay: ExecutionReplayMemoV1,
+}
+
+/// One remembered deterministic replay: its complete input row set and result.
+type ExecutionReplayMemoV1 = std::sync::OnceLock<(
+    Vec<AuthenticatedCandidatePopulationRowV1>,
+    CandidateExecutionReplayAuthorityV1,
+)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Full Execution V3 replays performed on this test thread. D-0994.
+    pub(crate) static EXECUTION_V3_REPLAYS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 impl CommittedStoredCandidatePreAdmissionV1 {
@@ -726,15 +742,50 @@ impl CommittedStoredCandidatePreAdmissionV1 {
 
     /// Rebuilds exact Runner terminal dispositions from this retained stored
     /// source and its freshly authenticated Candidate bytes.
+    ///
+    /// Every call re-proves the live inputs: the admitted root identity before
+    /// and after, a fresh read-only reopen and full authentication of the
+    /// Candidate ledger, and the strict source guard when one is retained.
+    /// What is not repeated is the replay itself once it has succeeded for the
+    /// exact same authenticated row set. That replay is a deterministic
+    /// function of this capability's private, immutable retained context and
+    /// Candidate receipt (no `&mut` path to either exists) plus those rows, so
+    /// recomputing it can only reproduce the remembered value. Before D-0994
+    /// the nested before/after reauthentication of Population V5, Execution V3
+    /// and Selection V5 re-ran it dozens of times per rung. A different row set
+    /// is never answered from the memo; it is replayed in full.
     pub(crate) fn execution_v3_replay_authority(
         &self,
     ) -> Result<CandidateExecutionReplayAuthorityV1, Step3OrchestratorRefusal> {
         self.root
             .require_same("before Candidate Execution V3 replay authentication")?;
         let rows = self.authenticated_candidate_population_rows()?;
-        let authority = self.execution.execution_v3_replay(&self.committed, &rows)?;
+        let authority = self.memoized_execution_v3_replay(&rows)?;
         self.root
             .require_same("after Candidate Execution V3 replay authentication")?;
+        Ok(authority)
+    }
+
+    /// The memo door behind [`Self::execution_v3_replay_authority`]. Only the
+    /// first successful replay is remembered, keyed by its complete row set.
+    fn memoized_execution_v3_replay(
+        &self,
+        rows: &[AuthenticatedCandidatePopulationRowV1],
+    ) -> Result<CandidateExecutionReplayAuthorityV1, Step3OrchestratorRefusal> {
+        self.execution.stored.require_current()?;
+        if let Some((remembered_rows, authority)) = self.execution_replay.get()
+            && remembered_rows.as_slice() == rows
+        {
+            return Ok(authority.clone());
+        }
+        #[cfg(test)]
+        EXECUTION_V3_REPLAYS.with(|count| count.set(count.get().saturating_add(1)));
+        let authority = self.execution.execution_v3_replay(&self.committed, rows)?;
+        // A lost race or an earlier different row set keeps the first memo;
+        // this call still returns its own freshly replayed authority.
+        let _first_success_only = self
+            .execution_replay
+            .set((rows.to_vec(), authority.clone()));
         Ok(authority)
     }
 
@@ -4806,6 +4857,71 @@ mod tests {
             StoredSpanLoadBoundV1::new(40_000)?,
             StoredSpanLoadBoundV1::new(128)?,
         )
+    }
+
+    /// D-0994: the replay is a deterministic function of immutable retained
+    /// inputs plus freshly authenticated rows, so it runs once per exact row
+    /// set; every call still re-reads and re-authenticates the live Candidate
+    /// ledger, and a different row set is never answered from the memo.
+    #[test]
+    fn execution_v3_replay_runs_once_per_exact_row_set_and_still_reauthenticates_live_inputs()
+    -> Result<(), Step3OrchestratorRefusal> {
+        let fixture = StoredSuccessFixture::new()?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let committed = committed_fixture_family(&fixture.source, "NIFTY", &long, &short)?;
+        let replays = || EXECUTION_V3_REPLAYS.with(std::cell::Cell::get);
+        let start = replays();
+
+        let first = committed.execution_v3_replay_authority()?;
+        assert_eq!(replays(), start + 1, "the first call replays in full");
+        let second = committed.execution_v3_replay_authority()?;
+        let third = committed.execution_v3_replay_authority()?;
+        assert_eq!(
+            replays(),
+            start + 1,
+            "unchanged authenticated rows reuse the one deterministic replay"
+        );
+        assert_eq!(second, first);
+        assert_eq!(third, first);
+
+        // The remembered value equals an independent full replay of the same rows.
+        let rows = committed.authenticated_candidate_population_rows()?;
+        let fresh = committed
+            .execution
+            .execution_v3_replay(&committed.committed, &rows)?;
+        assert_eq!(fresh, first);
+
+        // A different row set is replayed in full, never answered from the memo.
+        let shorter = rows
+            .get(..rows.len().saturating_sub(1))
+            .ok_or_else(|| "fixture produced no Candidate rows".to_owned())?;
+        assert!(
+            !shorter.is_empty(),
+            "the fixture must leave a non-empty prefix"
+        );
+        let different = committed.memoized_execution_v3_replay(shorter);
+        assert_eq!(replays(), start + 2, "a different row set must replay");
+        assert_ne!(different.as_ref().ok(), Some(&first));
+
+        // The memo never bypasses the live ledger: a flipped Candidate byte
+        // refuses even though a remembered replay exists.
+        let path = fixture.source.join("candidate-universe-rows-v1.bin");
+        let saved = fs::read(&path).map_err(|why| why.to_string())?;
+        let mut corrupted = saved.clone();
+        let last = corrupted
+            .last_mut()
+            .ok_or_else(|| "empty Candidate row file".to_owned())?;
+        *last ^= 1;
+        fs::write(&path, corrupted).map_err(|why| why.to_string())?;
+        assert!(committed.execution_v3_replay_authority().is_err());
+        assert_eq!(
+            replays(),
+            start + 2,
+            "a refused read never reaches the replay"
+        );
+        fs::write(&path, saved).map_err(|why| why.to_string())?;
+        Ok(())
     }
 
     fn first_selected_disposition(
