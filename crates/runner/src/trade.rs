@@ -307,10 +307,15 @@ impl Trades {
 /// # Cost
 ///
 /// One pass over the column. Per signal: one mask test, one same-day comparison,
-/// two `costs::fill::Bar` constructions and two `worst_case_fills`, each a fixed
-/// count of integer operations. The forced-close index comes from a table built
-/// once in [`forced_exits`], so no per-signal search walks the session.
-/// `CLAUDE.md` §3 rule 4.
+/// one [`SliceFacts::at_timestamp`] probe in `horizon_bar` (a `HashMap` lookup,
+/// so EXPECTED O(1), not worst-case), and in `round_trip` two
+/// `costs::fill::Bar` constructions and two [`costs::fill::fills_at`] calls —
+/// one at `Anchor::Open`, one at `Anchor::PrintedExtreme`. A signal whose exit
+/// cannot be priced pays at most one more `Bar` and two more `fills_at` in
+/// `entry_is_priceable`. Each is a fixed count of integer operations. The
+/// forced-close index comes from a table built once in [`forced_exits`], so no
+/// per-signal search walks the session. `CLAUDE.md` §3 rule 4. This paragraph
+/// named `worst_case_fills`, which nothing here calls — D-1180.
 ///
 /// **This entry point derives [`SliceFacts`] on the way in, so it is O(bars) and
 /// allocates the median-step sample per CALL.** That is the right cost for a
@@ -508,6 +513,28 @@ impl SliceFacts {
     #[must_use]
     pub fn at_timestamp(&self, timestamp: i64) -> Option<usize> {
         self.at_timestamp.get(&timestamp).copied()
+    }
+
+    /// Does the inclusive range `from..=to` hold a record the evaluator refused?
+    ///
+    /// `to` past the slice is clamped to its last bar, and a reversed range
+    /// holds nothing. Two prefix reads and one subtraction. This is what
+    /// separates a REFUSED record from a MISSING minute when
+    /// [`Self::path_accepts`] says no -- D-1176.
+    #[must_use]
+    pub fn refused_within(&self, from: usize, to: usize) -> bool {
+        let last = self.refused_prefix.len().saturating_sub(2);
+        let to = to.min(last);
+        if from > to {
+            return false;
+        }
+        let before = self.refused_prefix.get(from).copied().unwrap_or(0);
+        let after = self
+            .refused_prefix
+            .get(to.saturating_add(1))
+            .copied()
+            .unwrap_or(before);
+        after > before
     }
 
     /// Did every bar in the inclusive path `from..=to` pass the evaluator, and
@@ -1652,6 +1679,86 @@ mod tests {
         );
     }
 
+    /// KNOWN LOOK-AHEAD, PINNED SO IT CANNOT BE FORGOTTEN — D-1182.
+    ///
+    /// A [`indicators::column::Sourced::Signal`] slice takes its cadence from
+    /// the median gap over the WHOLE slice, so bars after a signal decide
+    /// whether that signal's next bar counts as "immediate". Here the first
+    /// six sessions are one-minute and every later session is thinned to two
+    /// minutes. On their own the dense sessions trade. With the later sessions
+    /// appended, the median becomes two minutes and the same dense-session
+    /// signals are refused as `too_late`. Nothing in those sessions changed.
+    ///
+    /// The shipping one-minute paths are reprojected to `Sourced::Fill`, whose
+    /// step is the fixed execution minute, so they do not read this median.
+    /// When a caller-supplied cadence replaces the median, this test must be
+    /// inverted to require equal dense-session trades. It is not a
+    /// specification of correct behaviour.
+    #[test]
+    fn a_signal_sourced_cadence_is_read_from_bars_after_the_signal() {
+        // The evaluator's first signal falls in the sixth session, so six whole
+        // sessions stay dense and fourteen after them are thinned to two
+        // minutes: about 2,600 two-minute gaps outvote 2,244 one-minute ones.
+        let dense = crate::synthetic::sessions(20);
+        let mut day_starts = dense
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| {
+                let [before, after] = pair else {
+                    return false;
+                };
+                indicators::ist_day(before.ts_micros) != indicators::ist_day(after.ts_micros)
+            })
+            .map(|(index, _)| index + 1);
+        let split = day_starts.nth(5).expect("at least seven sessions");
+        let (dense_part, thinned_part) = dense.split_at(split);
+        let prefix: Vec<_> = dense_part.to_vec();
+        let mut full = prefix.clone();
+        full.extend(
+            thinned_part
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| index % 2 == 1)
+                .map(|(_, bar)| bar),
+        );
+        let alone_column = Column::build(&prefix, &mut evaluator());
+        let full_column = Column::build(&full, &mut evaluator());
+        assert_eq!(alone_column.sourced(), indicators::column::Sourced::Signal);
+        let alone = super::SliceFacts::of(&prefix, &alone_column);
+        let joined = super::SliceFacts::of(&full, &full_column);
+        assert_eq!(alone.step_micros(), 60_000_000);
+        assert_eq!(
+            joined.step_micros(),
+            120_000_000,
+            "later sessions set the cadence the first session is walked at"
+        );
+        let early = |walked: &Trades| {
+            walked
+                .trades
+                .iter()
+                .filter(|trade| trade.signal_bar < prefix.len())
+                .count()
+        };
+        for direction in [Direction::Long, Direction::Short] {
+            let on_its_own = walk(
+                &prefix,
+                &alone_column,
+                &ConditionMask::ZERO,
+                h(5),
+                direction,
+            );
+            let with_future = walk(&full, &full_column, &ConditionMask::ZERO, h(5), direction);
+            assert!(on_its_own.reconciles() && with_future.reconciles());
+            assert!(early(&on_its_own) > 0, "the dense sessions trade alone");
+            assert_eq!(
+                early(&with_future),
+                0,
+                "the same dense-session signals are refused once later bars exist"
+            );
+        }
+    }
+
     /// The cadence cannot be learned from damaged evidence. When most stored
     /// neighbours are two minutes apart, the median is two minutes; the engine
     /// still requires the missing one-minute bar and refuses every delayed row.
@@ -2751,6 +2858,48 @@ mod tests {
         )
         .expect("the changed printed row remains valid");
         assert_ne!(changed, baseline, "the required 15:09 OHLCV was ignored");
+    }
+
+    /// `walk`'s `# Cost` paragraph names the fill calls the walk actually
+    /// makes. It named `worst_case_fills` while `round_trip` called `fills_at`
+    /// twice and `horizon_bar` probed a hash map it did not mention — D-1180.
+    #[test]
+    fn the_walk_cost_paragraph_names_the_calls_the_walk_makes() {
+        let source = include_str!("trade.rs");
+        let doc = source
+            .split_once("/// Walk one combination's signals into")
+            .and_then(|(_, rest)| rest.split_once("pub fn walk("))
+            .map(|(doc, _)| doc)
+            .expect("walk keeps its doc comment");
+        let cost = doc
+            .split_once("/// # Cost")
+            .map(|(_, cost)| cost)
+            .expect("walk keeps a cost section");
+        assert!(!cost.contains("two `worst_case_fills`"), "stale call named");
+        assert!(cost.contains("fills_at"));
+        assert!(cost.contains("Anchor::Open"));
+        assert!(cost.contains("Anchor::PrintedExtreme"));
+        assert!(cost.contains("at_timestamp"));
+        assert!(cost.contains("EXPECTED O(1)"));
+        // The calls the paragraph names are the calls the code makes.
+        let round_trip = source
+            .split_once("fn round_trip(")
+            .and_then(|(_, rest)| rest.split_once("fn entry_is_priceable("))
+            .map(|(body, _)| body)
+            .expect("round_trip remains bounded by entry_is_priceable");
+        let code: String = round_trip
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+        assert_eq!(code.matches("FillBar::new(").count(), 2);
+        assert_eq!(code.matches("fills_at(").count(), 2);
+        let horizon = source
+            .split_once("fn horizon_bar(")
+            .and_then(|(_, rest)| rest.split_once("fn actual_square_off("))
+            .map(|(body, _)| body)
+            .expect("horizon_bar remains bounded by actual_square_off");
+        assert_eq!(horizon.matches(".at_timestamp(").count(), 1);
     }
 
     /// The shipping sweep path brackets fills only by prices that actually
