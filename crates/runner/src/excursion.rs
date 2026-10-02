@@ -191,62 +191,55 @@ impl Ladder {
     /// `None` when nothing was observed, or when every observation was zero —
     /// an instrument that never moved has no ladder, and inventing one would be
     /// inventing a distribution.
+    ///
+    /// # Cost — selected, not sorted (D-1172)
+    ///
+    /// Only the rung positions are ever read, and they halve: rung `i` reads
+    /// position `(len - 1) / 2^(count - i + 1)`. So the sample is never sorted.
+    /// The deepest position is SELECTED over the whole slice, and each shallower
+    /// one is selected inside the prefix the previous selection left below it,
+    /// which is at most half as long. The selections total `n + n/2 + n/4 + …`,
+    /// expected O(n) per ladder and O(1) per trade. The full sort it replaces
+    /// was Θ(n log n) per candidate. The values are the same order statistics,
+    /// so the rungs are identical. `observed` is left PERMUTED, not sorted.
+    ///
+    /// Positions past the 64th halving are all zero, so only the last 65 rungs
+    /// can differ. The loop visits at most 65 positions, and neither the time
+    /// nor the reservation grows with a larger `count`. Proven identical by
+    /// `runner::excursion::the_selected_ladder_is_the_sorted_ladder_rung_for_rung`
+    /// and unsorted by `runner::excursion::from_excursions_does_not_sort_the_sample`;
+    /// the expected-O(n) figure itself is UNVERIFIED as a measurement.
     #[must_use]
     pub fn from_excursions(observed: &mut [Ppm], count: usize) -> Option<Self> {
         if observed.is_empty() || count == 0 {
             return None;
         }
-        observed.sort_unstable();
-        let mut rungs: Vec<Ppm> = Vec::with_capacity(count);
-        for i in 1..=count {
-            // GEOMETRIC, NOT UNIFORM, AND THE TIGHT END IS THE WHOLE REASON.
-            //
-            // # What uniform spacing could never reach
-            //
-            // This placed rung `i` at quantile `i / (count + 1)` — with four
-            // rungs, the 20th, 40th, 60th and 80th percentiles. The tightest
-            // stop the engine would ever try was therefore "the 20th percentile
-            // of whatever this signal happens to do", and on a loose signal that
-            // is 312 index points. Measured on a real 15-minute NIFTY run: not
-            // one of 1,024,058 combinations was ever tested against a stop
-            // tighter than that, so a combination that works ONLY with a tight
-            // stop could not be found, however many of them the sweep produced.
-            //
-            // Raising `count` does not help. Uniform quantiles subdivide the
-            // whole distribution evenly, so the tightest rung moves from the
-            // 20th percentile to the 10th to the 5th — linearly, while the
-            // interesting region is the first fraction of a percent.
-            //
-            // # The spacing, and why it is derived rather than chosen
-            //
-            // Rung `i` sits at quantile `1 / 2^(count - i)`, so with four rungs
-            // the ladder reads 12.5%, 25%, 50%, 100% of the way through the
-            // sorted excursions — halving toward the tight end each step down.
-            // A fifth rung adds 6.25% rather than shifting everything; a tenth
-            // reaches 0.2%. Depth buys TIGHTNESS instead of buying resolution in
-            // the middle, which is where nothing was ever in doubt.
-            //
-            // Nothing here is a level: every rung is still a value the data
-            // actually produced, read out of the sorted array at a different
-            // place. §3 rule 1 is untouched — no price is invented, and an
-            // operator supplies nothing.
-            // `count - i + 1`, not `count - i`: at `count - i` the last rung
-            // divides by one and lands on the MAXIMUM observation, and a rung no
-            // move can exceed is a rung nothing is ever measured against -- the
-            // invariant this function has always stated and which the first
-            // version of this geometric spacing silently broke. No test caught
-            // it; one is added below.
-            let from_top = count.saturating_sub(i).saturating_add(1);
-            let divisor = 1_usize.checked_shl(u32::try_from(from_top).unwrap_or(u32::MAX));
-            let at = match divisor {
-                // `1 << from_top` overflows only past 64 rungs, and a ladder
-                // that deep is asking for the single tightest observation.
-                None | Some(0) => 0,
-                Some(d) => observed.len().saturating_sub(1) / d,
-            };
-            let Some(&value) = observed.get(at.min(observed.len().saturating_sub(1))) else {
-                continue;
-            };
+        // Every rung position, in the ascending order the rungs are emitted.
+        // `from_top` past 64 would only repeat position zero, which the
+        // deduplication below collapses anyway.
+        let deepest = count.min(65);
+        let positions: Vec<usize> = (1..=deepest)
+            .map(|i| {
+                let from_top = deepest.saturating_sub(i).saturating_add(1);
+                rung_position(observed.len(), from_top)
+            })
+            .collect();
+        // SELECT FROM THE DEEPEST DOWN: each selection partitions the slice so
+        // that everything before its position is no larger, and the next,
+        // shallower position is then selected inside that prefix alone.
+        let mut values: Vec<Ppm> = vec![0; positions.len()];
+        let mut bound = observed.len();
+        for (slot, &at) in values.iter_mut().zip(&positions).rev() {
+            if at < bound {
+                if let Some(prefix) = observed.get_mut(..bound) {
+                    prefix.select_nth_unstable(at);
+                }
+                bound = at;
+            }
+            *slot = observed.get(at).copied().unwrap_or(0);
+        }
+        let mut rungs: Vec<Ppm> = Vec::with_capacity(deepest);
+        for value in values {
             if value > 0 && rungs.last() != Some(&value) {
                 rungs.push(value);
             }
@@ -273,6 +266,49 @@ impl Ladder {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.rungs.is_empty()
+    }
+}
+
+/// The sorted-order position a rung `from_top` halvings below the maximum
+/// reads, in a sample of `len` excursions.
+///
+/// # Geometric, not uniform, and the tight end is the whole reason
+///
+/// This placed rung `i` at quantile `i / (count + 1)` -- with four rungs, the
+/// 20th, 40th, 60th and 80th percentiles. The tightest stop the engine would
+/// ever try was therefore "the 20th percentile of whatever this signal happens
+/// to do", and on a loose signal that is 312 index points. Measured on a real
+/// 15-minute NIFTY run: not one of 1,024,058 combinations was ever tested
+/// against a stop tighter than that, so a combination that works ONLY with a
+/// tight stop could not be found, however many of them the sweep produced.
+///
+/// Raising `count` does not help. Uniform quantiles subdivide the whole
+/// distribution evenly, so the tightest rung moves from the 20th percentile to
+/// the 10th to the 5th -- linearly, while the interesting region is the first
+/// fraction of a percent.
+///
+/// # The spacing, and why it is derived rather than chosen
+///
+/// Rung `i` of `count` sits at quantile `1 / 2^(count - i + 1)`, halving toward
+/// the tight end each step down. A fifth rung adds a deeper one rather than
+/// shifting everything. Depth buys TIGHTNESS instead of buying resolution in the
+/// middle, which is where nothing was ever in doubt.
+///
+/// Nothing here is a level: every rung is still a value the data actually
+/// produced, read at a different order position. §3 rule 1 is untouched -- no
+/// price is invented, and an operator supplies nothing.
+///
+/// `count - i + 1`, not `count - i`: at `count - i` the last rung divides by one
+/// and lands on the MAXIMUM observation, and a rung no move can exceed is a rung
+/// nothing is ever measured against -- the invariant
+/// [`Ladder::from_excursions`] has always stated and which the first version of
+/// this geometric spacing silently broke.
+fn rung_position(len: usize, from_top: usize) -> usize {
+    match 1_usize.checked_shl(u32::try_from(from_top).unwrap_or(u32::MAX)) {
+        // `1 << from_top` overflows only past 64 halvings, and a ladder that
+        // deep is asking for the single tightest observation.
+        None | Some(0) => 0,
+        Some(d) => len.saturating_sub(1) / d,
     }
 }
 
@@ -402,6 +438,12 @@ pub struct Crossings {
     /// maxima wrong for every bar after it, so the honest unit of refusal is the
     /// PATH and not the bar.
     refused: usize,
+    /// The offset of the FIRST refused bar, or `None` when none was.
+    ///
+    /// Every crossing recorded BEFORE this offset was read off accepted bars only,
+    /// so a variant whose level exit falls strictly before it is fully priced.
+    /// [`Self::refused`] alone cannot say where the hole is -- D-1179.
+    first_refused: Option<usize>,
     /// The last offset walked, so a lookup can say "held to the end".
     last: usize,
     /// The LOWEST LOW seen from the entry bar up to each offset, in paisa.
@@ -481,6 +523,7 @@ impl Crossings {
             armed_ambiguous: Vec::new(),
             trail_count: trails.len(),
             refused: 0,
+            first_refused: None,
             last: 0,
             low_run: Vec::new(),
             high_run: Vec::new(),
@@ -652,6 +695,19 @@ impl Crossings {
     #[must_use]
     pub const fn refused(&self) -> usize {
         self.refused
+    }
+
+    /// The offset of the first refused bar on this path, or `None` when the
+    /// engine refused none -- D-1179.
+    ///
+    /// Every crossing at an offset strictly before it was read off accepted
+    /// bars only. A level exit there happened before the hole, so pricing it
+    /// needs no bar the engine could not read. A caller that refuses the whole
+    /// path on [`Self::refused`] alone also refuses those variants, and blocks
+    /// the position to the time exit although it had already closed.
+    #[must_use]
+    pub const fn first_refused(&self) -> Option<usize> {
+        self.first_refused
     }
 
     /// The worst the path had gone AGAINST `entry` by offset `offset`, in ppm.
@@ -981,6 +1037,25 @@ impl ActualClock {
 #[path = "excursion_clock_tests.rs"]
 mod clock_contract_tests;
 
+/// [`admit`], plus the location of the FIRST bar it refuses: `refused` alone is
+/// a count, and a count cannot say whether the hole sits before or after an
+/// exit. `(accepted, index, offset)` — `offset` is the bar's position in the
+/// path, which is what `Crossings::first_refused` reports. D-1179.
+fn admit_located(
+    out: &mut Crossings,
+    admission: &mut PathAdmission,
+    bar: &Candle,
+    (accepted, index, offset): (Option<&[bool]>, usize, usize),
+    priced: bool,
+) -> bool {
+    let refused_before = out.refused;
+    let admitted = admit(out, admission, bar, (accepted, index), priced);
+    if out.refused > refused_before && out.first_refused.is_none() {
+        out.first_refused = Some(offset);
+    }
+    admitted
+}
+
 fn crossings_with(
     bars: &[Candle],
     from: usize,
@@ -1057,7 +1132,8 @@ fn crossings_with(
         };
         // A BAR THE ENGINE REFUSED MAY NOT MOVE A RUNNING MAXIMUM, and a
         // non-positive entry may move nothing but the extremes. See [`admit`].
-        if !admit(&mut out, &mut admission, bar, (accepted, index), priced) {
+        let at = (accepted, index, offset);
+        if !admit_located(&mut out, &mut admission, bar, at, priced) {
             continue;
         }
         out.last = offset;
@@ -1445,7 +1521,51 @@ mod tests {
             assert!(checked.ambiguous().is_empty());
             assert!(checked.trail_ambiguous().is_empty());
             assert_eq!(checked.last(), 2, "the accepted suffix is still walked");
+            assert_eq!(checked.first_refused(), Some(1), "the hole is at offset 1");
         }
+    }
+
+    /// W3-runner2-7: the path says WHERE its first hole is, so a level exit
+    /// strictly before it is known to have been read off accepted bars only.
+    /// A stop crossed at offset 1 and a hole at offset 3: the stop stands.
+    #[test]
+    fn a_hole_after_a_level_exit_is_located_not_merely_counted() {
+        let bars = [
+            bar(0, 999, 1_001),
+            bar(1, 900, 1_001),
+            bar(2, 999, 1_001),
+            bar(3, 100, 5_000),
+            bar(4, 999, 1_001),
+            bar(5, 999, 1_001),
+        ];
+        let stops = ladder(&[50_000]);
+        let targets = ladder(&[50_000]);
+        let trails = ladder(&[50_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let one_hole = [true, true, true, false, true, true];
+        let c = crossings_checked(&bars, 0, 5, 1_000, Side::Long, ladders, &one_hole);
+        assert_eq!(c.stop_at(0), 1, "the stop fired on an accepted bar");
+        assert_eq!(c.refused(), 1);
+        assert_eq!(c.first_refused(), Some(3), "and the hole is after it");
+        assert!(c.stop_at(0) < c.first_refused().expect("a hole"));
+
+        // TWO HOLES: the FIRST is named. NONE: `None`. A non-positive entry
+        // counts nothing and locates nothing.
+        let two_holes = [true, false, true, false, true, true];
+        let c = crossings_checked(&bars, 0, 5, 1_000, Side::Long, ladders, &two_holes);
+        assert_eq!((c.refused(), c.first_refused()), (2, Some(1)));
+        let clean = [true; 6];
+        let c = crossings_checked(&bars, 0, 5, 1_000, Side::Long, ladders, &clean);
+        assert_eq!((c.refused(), c.first_refused()), (0, None));
+        let c = crossings_checked(&bars, 0, 5, 0, Side::Long, ladders, &one_hole);
+        assert_eq!((c.refused(), c.first_refused()), (0, None));
+        // A walk that does not start at zero reports an OFFSET, not an index.
+        let c = crossings_checked(&bars, 2, 5, 1_000, Side::Long, ladders, &one_hole);
+        assert_eq!(c.first_refused(), Some(1));
     }
 
     /// NO RUNG SITS ON THE MAXIMUM, AND DEPTH BUYS TIGHTNESS.
@@ -2314,5 +2434,121 @@ mod armed_tests {
         assert_eq!(c.trail_at(0), 1, "the plain trail still works");
         assert_eq!(c.armed_at(0, 0), NEVER, "and nothing can arm it");
         assert!(c.armed_ambiguous().is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod ladder_selection_tests {
+    use super::{Ladder, Ppm, rung_position};
+
+    /// The ladder as it was computed before D-1172: sort everything, then read
+    /// each rung position. The selection must reproduce it rung for rung.
+    fn sorted_reference(observed: &[Ppm], count: usize) -> Option<Vec<Ppm>> {
+        if observed.is_empty() || count == 0 {
+            return None;
+        }
+        let mut sorted = observed.to_vec();
+        sorted.sort_unstable();
+        let mut rungs: Vec<Ppm> = Vec::new();
+        for i in 1..=count.min(200) {
+            let from_top = count.min(200) - i + 1;
+            let at = rung_position(sorted.len(), from_top);
+            let value = *sorted.get(at).expect("a position inside the sample");
+            if value > 0 && rungs.last() != Some(&value) {
+                rungs.push(value);
+            }
+        }
+        Ladder::new(rungs).map(|l| l.rungs().to_vec())
+    }
+
+    /// A deterministic scramble with duplicates, zeros and negatives in it.
+    fn scrambled(n: usize, modulus: i64) -> Vec<Ppm> {
+        (0..n)
+            .map(|i| {
+                let k = i64::try_from(i).unwrap_or(0);
+                (k * 7_919 + 13) % modulus - modulus / 10
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_selected_ladder_is_the_sorted_ladder_rung_for_rung() {
+        let samples: Vec<Vec<Ppm>> = vec![
+            vec![5],
+            vec![0],
+            vec![-3],
+            vec![7, 7, 7, 7],
+            vec![0, 0, 9],
+            (1..=100).map(|x| x * 10).collect(),
+            (1..=100).rev().map(|x| x * 10).collect(),
+            scrambled(1, 50),
+            scrambled(2, 50),
+            scrambled(1_000, 97),
+            scrambled(4_097, 100_003),
+            vec![i64::MAX, i64::MIN, 0, 1, i64::MAX],
+        ];
+        for sample in &samples {
+            for count in [1_usize, 2, 3, 4, 8, 13, 63, 64, 65, 66, 200] {
+                let got =
+                    Ladder::from_excursions(&mut sample.clone(), count).map(|l| l.rungs().to_vec());
+                assert_eq!(
+                    got,
+                    sorted_reference(sample, count),
+                    "count {count} over {} values",
+                    sample.len()
+                );
+            }
+        }
+    }
+
+    /// A count far past the 65 positions that can differ costs nothing more:
+    /// the old loop ran `count` times and reserved `count` rungs, which at
+    /// `usize::MAX` was an allocation failure and an abort.
+    #[test]
+    fn an_absurd_rung_count_is_the_sixty_five_rung_ladder() {
+        let sample = scrambled(4_097, 100_003);
+        let deep = Ladder::from_excursions(&mut sample.clone(), usize::MAX);
+        let capped = Ladder::from_excursions(&mut sample.clone(), 65);
+        assert_eq!(deep, capped);
+        assert_eq!(
+            Ladder::from_excursions(&mut [], usize::MAX),
+            None,
+            "still no ladder from no sample"
+        );
+    }
+
+    /// Rerunning on the permuted slice the first call left behind gives the
+    /// same ladder: the result depends on the multiset, not on the order.
+    #[test]
+    fn the_ladder_is_independent_of_the_order_it_is_handed() {
+        let mut sample = scrambled(1_000, 97);
+        let first = Ladder::from_excursions(&mut sample, 8);
+        let again = Ladder::from_excursions(&mut sample, 8);
+        sample.reverse();
+        let reversed = Ladder::from_excursions(&mut sample, 8);
+        assert_eq!(first, again);
+        assert_eq!(first, reversed);
+    }
+
+    /// The live path selects; it does not sort.
+    #[test]
+    fn from_excursions_does_not_sort_the_sample() {
+        let source = include_str!("excursion.rs");
+        let start = source
+            .find("pub fn from_excursions")
+            .expect("the function exists");
+        let body = source
+            .get(start..)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("a body");
+        assert!(!body.contains("sort_unstable()"), "the full sort is back");
+        assert!(
+            body.contains("select_nth_unstable"),
+            "the selection is gone"
+        );
     }
 }

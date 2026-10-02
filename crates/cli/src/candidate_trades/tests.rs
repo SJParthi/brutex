@@ -499,6 +499,7 @@ fn real_screen_keeps_nonwinning_candidate_traces_and_actual_cap_across_tiers() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     )
     .expect("real first pricing pass");
     let selected = first.selected.expect("one candidate chosen");
@@ -514,6 +515,7 @@ fn real_screen_keeps_nonwinning_candidate_traces_and_actual_cap_across_tiers() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     )
     .expect("real second pricing pass");
     assert!(!second.admitted_any);
@@ -583,6 +585,7 @@ fn actual_screen_callback_failure_refuses_the_pass_and_never_seals_catalog() {
             recording: None,
             capture: Some(&capture),
         },
+        &runner::trade::SliceFacts::of(bars, column),
     );
     assert!(result.is_err());
     assert!(capture.finish().is_err());
@@ -820,4 +823,34 @@ fn expression_capture_replays_or_not_without_relabelling_the_same_referenced_and
 }
 fn root_for_limit() -> PathBuf {
     root()
+}
+
+/// D-1184, source shape: one capture materialises every candidate over ONE
+/// `SliceFacts`, built on first use, and the consistency pass replays each
+/// row over the facts its caller already built. Both answers equal the
+/// per-call doors, so only the source can tell the two apart.
+#[test]
+fn materialisation_reuses_one_slice_facts_per_capture() {
+    let source = include_str!("../candidate_trades.rs");
+    let body = source
+        .split_once("    fn materialize(\n")
+        .map(|(_, rest)| rest.split_once("\n    }\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    assert!(
+        body.contains(".get_or_init("),
+        "facts are built once per capture"
+    );
+    assert!(
+        body.contains("materialize_cell_over(")
+            && body.contains("materialize_expression_cell_over("),
+        "both replays take the shared facts"
+    );
+    assert!(!body.contains(concat!("SliceFacts", "::of(bars")));
+    let lib = include_str!("../lib.rs");
+    let consistency = lib
+        .split_once("fn consistency_of(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    assert!(consistency.contains("grid::per_trade_over("));
+    assert!(!consistency.contains("grid::per_trade("));
 }

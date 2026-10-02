@@ -8433,12 +8433,27 @@ fn trade_and_screen<'a>(
         screen_cap(),
         validate,
     );
+    // EVERY SLICE FACT ONCE FOR THIS SLICE (D-1190). Each tier's `screen`, its
+    // `measure_top` and the final exact rebuild below each built their own
+    // slice facts over `bars` and `column`, an O(B) value: up to two per tier
+    // plus two here. The facts are a pure function of `bars` and `column`, so sharing one
+    // changes no answer.
+    let facts = runner::trade::SliceFacts::of(bars, column);
     let ScreenResult {
         text: screened,
         selected,
         priced,
         admitted_any: _,
-    } = screen_cascade(bars, column, by_evidence, horizon, rules, pricing, validate)?;
+    } = screen_cascade(
+        bars,
+        column,
+        by_evidence,
+        horizon,
+        rules,
+        pricing,
+        validate,
+        &facts,
+    )?;
     if let Some(capture) = pricing.capture {
         capture.finish()?;
     }
@@ -8461,7 +8476,7 @@ fn trade_and_screen<'a>(
     // be able to survive. Passing 1 here is what produced a 14-point ceiling on a
     // sixty-minute trade.
     let stop_rungs = stop_ladder_ppm(bars, horizon.as_bars() as usize);
-    let exits = grid::evaluate(
+    let exits = grid::evaluate_over(
         bars,
         column,
         &selected.scored.mask,
@@ -8474,6 +8489,7 @@ fn trade_and_screen<'a>(
             ratios: true,
             stops_ppm: &stop_rungs,
         },
+        &facts,
     );
     let Some(cell) = exits.cells.iter().find(|cell| **cell == selected.cell) else {
         return Err(format!(
@@ -8481,7 +8497,7 @@ fn trade_and_screen<'a>(
             selected.direction
         ));
     };
-    let rows = grid::materialize_cell(
+    let rows = grid::materialize_cell_over(
         bars,
         column,
         &selected.scored.mask,
@@ -8489,13 +8505,15 @@ fn trade_and_screen<'a>(
         side,
         &exits,
         cell,
+        &facts,
     )?;
-    let taken = trade::walk(
+    let taken = trade::walk_over(
         bars,
         column,
         &selected.scored.mask,
         horizon,
         selected.direction,
+        &facts,
     );
     note_grid_finished(recording, priced.len(), by_evidence.len(), rows.len());
     Ok(TradeScreen {
@@ -11376,6 +11394,10 @@ pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 /// is shown — carried no documentation at all. Nothing in the build can catch
 /// this; it is caught by reading.
 #[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the per-slice facts built once by `trade_and_screen` (D-1190)"
+)]
+#[expect(
     clippy::too_many_lines,
     reason = "the ordered operator-policy, generated-tier, and mildest-fallback cascade is kept in one function so its selected rows and priced map cannot come from different tiers"
 )]
@@ -11391,6 +11413,9 @@ fn screen_cascade<'a>(
     // Whether to walk the tier ladder when the stated rules find nothing. A
     // SEARCH step passes false: it needs one bit, not 960 priced tiers.
     validate: bool,
+    // The slice facts over `bars` and `column`, built once per slice by
+    // `trade_and_screen` and shared by every tier's `screen` (D-1190).
+    facts: &runner::trade::SliceFacts,
 ) -> Result<ScreenResult<'a>, String> {
     let top = rules.top;
     let mut out = String::with_capacity(4_096);
@@ -11407,7 +11432,7 @@ fn screen_cascade<'a>(
     // So the stated policy is tried first and named in the output. The tier
     // ladder below it is the fallback — the "what IS there" answer — and not a
     // replacement for the question that was asked.
-    let yours = screen(bars, column, by_evidence, horizon, rules, pricing)?;
+    let yours = screen(bars, column, by_evidence, horizon, rules, pricing, facts)?;
     // THE BANNER ASKS "did anything PASS", not "is there a subject".
     //
     // `final_selection` now falls back to the best-ranked row that traded, so
@@ -11595,6 +11620,7 @@ fn screen_cascade<'a>(
             horizon,
             mildest.rules(top, reference),
             pricing,
+            facts,
         )?;
         if widest.selected.is_none() {
             let _ = writeln!(
@@ -11619,7 +11645,7 @@ fn screen_cascade<'a>(
 
     for (rank, tier) in ladder.iter().enumerate() {
         let rules = tier.rules(top, reference);
-        let body = screen(bars, column, by_evidence, horizon, rules, pricing)?;
+        let body = screen(bars, column, by_evidence, horizon, rules, pricing, facts)?;
         // The typed selection is the same final, post-consistency row the table
         // renders. Rendered wording is diagnostic, never a control protocol.
         if body.selected.is_none() {
@@ -11658,6 +11684,7 @@ fn screen_cascade<'a>(
             horizon,
             mildest.rules(top, reference),
             pricing,
+            facts,
         )?;
         out.push_str(&diagnostic.text);
         replace_priced(&mut final_priced, diagnostic.priced);
@@ -11745,6 +11772,10 @@ impl Consistency {
 /// worth failing the screen over, because the cell it came from is still a
 /// valid measurement. The row simply reports no consistency rather than a
 /// fabricated one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts (D-1184)"
+)]
 fn consistency_of(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -11753,6 +11784,7 @@ fn consistency_of(
     side: runner::excursion::Side,
     exits: &grid::Grid,
     cell: &grid::Cell,
+    facts: &runner::trade::SliceFacts,
 ) -> Option<Consistency> {
     // `Chosen` is `Cell`'s four exit fields and nothing else, so the variant
     // that won is re-expressed rather than re-searched. Re-searching would risk
@@ -11763,7 +11795,8 @@ fn consistency_of(
         tsl: cell.tsl,
         ttp: cell.ttp,
     };
-    let (_, rows) = grid::per_trade(
+    // Over the caller's facts (D-1184): `per_trade` rebuilt them per row.
+    let (_, rows) = grid::per_trade_over(
         bars,
         column,
         &scored.mask,
@@ -11775,6 +11808,7 @@ fn consistency_of(
             trails: &exits.trails,
         },
         chosen,
+        facts,
     )?;
     if rows.is_empty() {
         return None;
@@ -11858,6 +11892,8 @@ fn screen<'a>(
     horizon: Horizon,
     rules: Rules,
     pricing: Pricing<'_>,
+    // Built once per slice by `trade_and_screen` (D-1190), not once per tier.
+    facts: &runner::trade::SliceFacts,
 ) -> Result<ScreenResult<'a>, String> {
     let recording = pricing.recording;
     // Built ONCE for the whole screen: the same ladder judges every combination,
@@ -11935,10 +11971,10 @@ fn screen<'a>(
         ratios: true,
         stops_ppm: &stop_rungs,
     };
-    // EVERY SLICE FACT ONCE FOR THE WHOLE CANDIDATE LOOP. Both calibration and
-    // the real pass share this forced-exit table and spacing measurement.
-    let facts = runner::trade::SliceFacts::of(bars, column);
-    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence, &levels, &facts);
+    // EVERY SLICE FACT ONCE PER SLICE, NOT ONCE PER SCREEN (D-1190). Both
+    // calibration and the real pass share the caller's forced-exit table and
+    // spacing measurement, and so does every other tier's screen.
+    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence, &levels, facts);
     // THE PHASE THAT WAS SILENT. Everything above this line is per-run work; the
     // loop below prices every candidate against the whole exit grid and is where
     // a multi-hour sweep spends nearly all of its time. It said nothing at all
@@ -12041,7 +12077,7 @@ fn screen<'a>(
                 if let Some(capture) = pricing.capture {
                     capture.check()?;
                 }
-                let g = grid::evaluate_over(bars, column, &scored.mask, horizon, s, levels, &facts);
+                let g = grid::evaluate_over(bars, column, &scored.mask, horizon, s, levels, facts);
                 let shown = shown_cell(&g, rules);
                 if let (Some(capture), Some(tier)) = (pricing.capture, captured_tier.as_ref()) {
                     capture.record(
@@ -12193,7 +12229,7 @@ fn screen<'a>(
     // rule is ranked where it earned and printed beside the rule it broke.
     rows.sort_by_key(|r| money_key(&r.cell));
 
-    measure_top(&mut rows, bars, column, horizon, rules);
+    measure_top(&mut rows, bars, column, horizon, rules, facts);
 
     // THE CALENDAR RE-SORT, over the measured band only.
     //
@@ -12528,6 +12564,7 @@ fn measure_top(
     column: &indicators::column::Column,
     horizon: Horizon,
     rules: Rules,
+    facts: &runner::trade::SliceFacts,
 ) {
     // MEASURED AFTER THE SORT, AND ONLY FOR WHAT WILL BE PRINTED.
     //
@@ -12566,7 +12603,9 @@ fn measure_top(
     // and `column` in scope.
     let rungs_again = grid_rungs(bars);
     let step_ppm_again = grid_step_ppm(bars, horizon.as_bars() as usize);
-    let facts_again = runner::trade::SliceFacts::of(bars, column);
+    // The caller's facts, built once per slice by `trade_and_screen` (D-1190):
+    // this function used to build its own copy on every `screen`.
+
     // EVERY PRICED ROW, NOT A BAND. The band was the last constant that could
     // permanently exclude a combination from the reported top ten.
     //
@@ -12649,9 +12688,11 @@ fn measure_top(
                 ratios: true,
                 stops_ppm: &stop_rungs_again,
             },
-            &facts_again,
+            facts,
         );
-        row.consistency = consistency_of(bars, column, row.scored, horizon, side, &g, &row.cell);
+        row.consistency = consistency_of(
+            bars, column, row.scored, horizon, side, &g, &row.cell, facts,
+        );
     }
 }
 
@@ -26445,8 +26486,17 @@ mod tests {
         );
         let cell = *exits.best().expect("the grid must hold a best variant");
 
-        let measured = consistency_of(&bars, &run.column, scored, horizon, side, &exits, &cell)
-            .expect("a variant with trades must re-walk into per-trade rows");
+        let measured = consistency_of(
+            &bars,
+            &run.column,
+            scored,
+            horizon,
+            side,
+            &exits,
+            &cell,
+            &runner::trade::SliceFacts::of(&bars, &run.column),
+        )
+        .expect("a variant with trades must re-walk into per-trade rows");
         let (_, rows) = grid::per_trade(
             &bars,
             &run.column,
@@ -26510,6 +26560,57 @@ mod tests {
                 .unwrap_or(0),
             "WEAKEST must be the minimum across grains and not one of them"
         );
+    }
+
+    /// D-1190: one stored rung builds `SliceFacts` once, in `trade_and_screen`,
+    /// and every tier's `screen`, its `measure_top` and the final exact rebuild
+    /// borrow it. A source-shape test: the cost is an allocation count, and
+    /// no value at runtime says how many builds a function made.
+    #[test]
+    fn one_rung_screen_builds_its_slice_facts_once() {
+        let source = include_str!("lib.rs");
+        let body_of = |head: &str| -> String {
+            // Code lines only: the bodies keep comments that name the old
+            // per-call builds as history.
+            source
+                .split_once(head)
+                .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let build = concat!("SliceFacts", "::of(");
+        let trade = body_of("fn trade_and_screen<'a>(\n");
+        assert_eq!(trade.matches(build).count(), 1, "built once per slice");
+        for door in [
+            concat!("grid::evaluate", "("),
+            concat!("grid::materialize_cell", "("),
+            concat!("trade::walk", "("),
+        ] {
+            assert!(!trade.contains(door), "{door} rebuilds the facts");
+        }
+        for door in [
+            concat!("grid::evaluate_over", "("),
+            concat!("grid::materialize_cell_over", "("),
+            concat!("trade::walk_over", "("),
+        ] {
+            assert!(trade.contains(door), "{door} takes the shared facts");
+        }
+        for head in [
+            "fn screen_cascade<'a>(\n",
+            "fn screen<'a>(\n",
+            "fn measure_top(\n",
+        ] {
+            let body = body_of(head);
+            assert!(!body.is_empty(), "{head} is still in lib.rs");
+            assert!(
+                body.contains("facts: &runner::trade::SliceFacts,"),
+                "{head} takes the caller's facts"
+            );
+            assert_eq!(body.matches(build).count(), 0, "{head} builds none");
+        }
     }
 
     /// The weakest grain is the minimum, never the mean.

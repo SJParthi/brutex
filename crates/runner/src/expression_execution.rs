@@ -69,6 +69,22 @@ impl ExpressionExecutionRunV1 {
         Self::seal(run, program, source)
     }
 
+    /// [`Self::new_with_daily_reference`] over slice digests computed once by
+    /// [`crate::exit_grid_policy::ExecutionDigestsV1::of_daily_reference`]
+    /// (D-1143): no bar is hashed per run.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new_with_daily_reference`].
+    pub fn with_digests(
+        run: &Run<'_>,
+        program: &Expression,
+        digests: &crate::exit_grid_policy::ExecutionDigestsV1,
+    ) -> Result<Self, String> {
+        let source = ExecutionRunV1::with_digests(run, digests).map_err(display)?;
+        Self::seal(run, program, source)
+    }
+
     fn seal(run: &Run<'_>, program: &Expression, source: ExecutionRunV1) -> Result<Self, String> {
         if run.mask != program.referenced() {
             return Err(
@@ -312,11 +328,11 @@ impl ResolvedGridViewV1<'_> {
         let grid = crate::grid::evaluate_resolved_expression_policy_v1(
             attested.bars,
             attested.column,
-            &attested.facts,
             run.program(),
             attested.horizon,
             self.side(),
             self,
+            attested.facts(),
         )?;
         let mut support_sessions = 0_u64;
         let mut last_session = None;
@@ -458,12 +474,12 @@ impl ResolvedGridViewV1<'_> {
         crate::grid::materialize_expression_cell_over(
             attested.bars,
             attested.column,
-            &attested.facts,
             evaluation.program(),
             evaluation.horizon,
             evaluation.side,
             &evaluation.grid,
             cell,
+            attested.facts(),
         )
     }
 }

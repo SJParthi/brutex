@@ -524,7 +524,7 @@ mod tests {
     /// IST midnight of 2024-03-01 in micros.
     const MIDNIGHT_2024_03_01: i64 = 1_709_231_400_000_000;
 
-    /// One flat minute bar `minute` minutes past IST midnight of `day` days
+    /// One minute bar, all four prices equal, `minute` minutes past IST midnight of `day` days
     /// after 2024-03-01.
     fn dated_minute(day: i64, minute: i64) -> Bar {
         Bar {

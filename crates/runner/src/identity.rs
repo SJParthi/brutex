@@ -29,10 +29,22 @@
 //! identity "names the exact column they came from". A term that is only
 //! incidentally distinguishing is not an identity term.
 //!
-//! Adding it re-keys every run that can be computed. That is affordable exactly
-//! now and will not stay affordable: **nothing persists a `RunId` yet** — it is
-//! formatted into a report string and never written to the store — so there is
-//! no recorded corpus to migrate. Invariant X-14.
+//! Adding it re-keyed every run that could be computed. When D-0225 made that
+//! change no run identity had been recorded yet, so there was no corpus to
+//! migrate. Invariant X-14.
+//!
+//! # A `RunId` is persisted now, so a new term is a migration (D-1142)
+//!
+//! **That is no longer true, and the sentence that said so was the one a
+//! maintainer reads before adding a term.** `cli::results::Record::identity`
+//! writes the `RunId` into the append-only results ledger and deduplicates
+//! reruns on it; sweep evidence attempts and the AND-checkpoint journal are
+//! keyed by it; frontier and trade rows carry it. Changing what [`run_id`]
+//! hashes therefore splits every recorded run from its own rerun, and the
+//! ledger files one computation twice under two identities. A new term must
+//! arrive as a new, versioned identity domain with its own decision entry --
+//! the way [`data_digest_with_execution`] re-keys only the runs whose answer
+//! acquired a second series -- never as an edit to the existing encoding.
 //!
 //! # Why every field is length-prefixed
 //!
@@ -315,13 +327,12 @@ pub struct Run<'a> {
     /// carries `vendor`, documented as "the first path segment, never inferred",
     /// and no production path read it.
     ///
-    /// # Adding a term re-keys every run, and that is affordable exactly now
+    /// # Adding a term re-keys every run, and that is now a migration
     ///
-    /// Any new term changes every `RunId` this workspace can compute. That is
-    /// normally expensive; here it costs nothing, because **nothing persists a
-    /// `RunId`**. It is formatted into a report string and never written to the
-    /// store, so there is no recorded corpus to invalidate. The same change made
-    /// after run results are stored would be a migration.
+    /// Any new term changes every `RunId` this workspace can compute. When this
+    /// term was added (D-0225) no `RunId` had been recorded, so it cost
+    /// nothing. Results now persist the `RunId` (`cli::results::Record`), so
+    /// the same change today is a migration; see the module doc and D-1142.
     pub feed: &'a str,
 }
 
@@ -1435,6 +1446,34 @@ mod tests {
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
         );
         assert_eq!(id.bytes().len(), 32);
+    }
+
+    /// D-1142. A `RunId` is persisted (`cli::results::Record::identity`), so
+    /// the encoding is a stored format: this pins one identity byte for byte.
+    /// If a change makes it fail, every recorded run just split from its rerun.
+    /// The answer is a new versioned identity domain with its own decision, not
+    /// re-taking this constant. A `vocab::VOCAB_VERSION` bump re-keys on
+    /// purpose and is the one change that legitimately re-takes it.
+    #[test]
+    fn a_persisted_run_identity_does_not_drift() {
+        let k = key();
+        let id = identity(&run_over(
+            &k,
+            [7_u8; 32],
+            ConditionMask::default().with_bit(3),
+        ));
+        assert_eq!(
+            id.hex(),
+            "d33cd3169acbb4104fbed7e3b3568824303b32d91f6a2386e7e66bfe6a420b28"
+        );
+        // And the module no longer tells a maintainer that adding a term is
+        // free. Split so this test does not match itself.
+        let source = include_str!("identity.rs");
+        let claim = concat!("nothing persists a", " `RunId`");
+        assert!(
+            !source.contains(claim),
+            "the doc must not claim RunIds are unpersisted: cli::results records them"
+        );
     }
 
     #[test]

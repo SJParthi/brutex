@@ -916,8 +916,11 @@ fn position(fills: Fills, quantity: i64) -> Result<Position, CostError> {
     let sell_notional = leg_notional(fills.sell(), quantity, "the sell notional")?;
 
     // Both notionals are in `[0, i64::MAX]`: a `Fills` has no public
-    // constructor, so its buy leg is at least two ticks and its sell leg at
-    // least one, the quantity is strictly positive, and the multiplications
+    // constructor, so its buy leg is at least one tick (two on the worst case)
+    // and its sell leg at least one on every anchor -- the printed-extreme
+    // anchor only since D-1192, before which a negative low reached here and
+    // `i64::MIN` overflowed this subtraction -- the quantity is strictly
+    // positive, and the multiplications
     // above already refused anything that left `i64`. The difference of two
     // values in `[0, i64::MAX]` is in `[-i64::MAX, i64::MAX]`, so this
     // subtraction cannot overflow and there is no branch pretending it can.
@@ -2236,6 +2239,46 @@ mod tests {
         )
     }
 
+    /// D-1192. Every anchor, every constructible degenerate low, both
+    /// directions, a range of quantities: `charge_stack` answers `Ok` or a
+    /// named `Err` and never panics. Before D-1192 a printed-extreme sell at
+    /// `i64::MIN` panicked in `position` with "attempt to subtract with
+    /// overflow", and a low of -100 priced a sell fill at -₹1.00.
+    #[test]
+    fn no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill() {
+        use crate::fill::{Anchor, fills_at};
+        let tame = minted(15_000, 3_503, 50);
+        let lows = [i64::MIN, i64::MIN + 1, -100, -1, 0, 1, 4, 5, 9_000];
+        let mut checked = 0_u32;
+        for low in lows {
+            let odd = Bar::new(
+                Paisa::from_raw(10_000),
+                Paisa::from_raw(10_000),
+                Paisa::from_raw(low),
+            )
+            .expect("Bar::new admits any low");
+            let normal = Bar::flat(Paisa::from_raw(10_000)).expect("legal");
+            for anchor in [Anchor::Open, Anchor::AdverseExtreme, Anchor::PrintedExtreme] {
+                for direction in [Direction::Long, Direction::Short] {
+                    for (entry, exit) in [(normal, odd), (odd, normal), (odd, odd)] {
+                        let Ok(fills) = fills_at(entry, exit, direction, anchor) else {
+                            continue;
+                        };
+                        assert!(fills.sell() >= TICK_HELPER, "a sell below a tick priced");
+                        assert!(fills.buy() >= TICK_HELPER, "a buy below a tick priced");
+                        for quantity in [1, 65, i64::MAX] {
+                            // Ok or a named refusal; reaching the next line is
+                            // the assertion that nothing panicked.
+                            let _ = charge_stack(fills, quantity, &tame);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0);
+    }
+
     #[test]
     fn every_position_overflow_site_is_refused_by_name_and_never_wrapped() {
         let rates = minted;
@@ -2928,26 +2971,47 @@ mod tests {
 
     /// W3-costs1-1: a printed-extreme sell anchored on a low far below zero
     /// used to reach [`position`] as a negative notional, and the gross
-    /// subtraction its comment calls unable to overflow left `i64`. The sell is
-    /// floored at one tick, so it prices as a one-tick sale.
+    /// subtraction its comment calls unable to overflow left `i64`. D-0771
+    /// floored the sell at one tick; the merged tree refuses it by name instead
+    /// (D-1192), so it never reaches [`position`], and the worst case on the
+    /// same bars still absorbs it with its floor and prices without overflow.
     #[test]
-    fn a_printed_extreme_sell_below_zero_prices_at_the_floor_and_does_not_overflow() {
-        let fills = crate::fill::fills_at(
-            Bar::flat(Paisa::from_raw(100_00)).expect("legal"),
-            Bar::new(
-                Paisa::from_raw(-i64::MAX),
-                Paisa::from_raw(100_00),
-                Paisa::from_raw(-i64::MAX),
-            )
-            .expect("Bar::new admits a low below zero"),
-            Direction::Long,
-            crate::fill::Anchor::PrintedExtreme,
+    fn a_printed_extreme_sell_below_zero_is_refused_and_does_not_overflow() {
+        let entry = Bar::flat(Paisa::from_raw(100_00)).expect("legal");
+        let exit = Bar::new(
+            Paisa::from_raw(-i64::MAX),
+            Paisa::from_raw(100_00),
+            Paisa::from_raw(-i64::MAX),
         )
-        .expect("priced");
-        let charges =
-            charge_stack(fills, 1, &rates_on(Exchange::Nse, example_day())).expect("in range");
-        assert_eq!(charges.sell_notional(), TICK_HELPER);
-        assert_eq!(charges.buy_notional(), Paisa::from_raw(100_00));
-        assert_eq!(charges.gross_pnl().raw(), TICK_HELPER.raw() - 100_00);
+        .expect("Bar::new admits a low below zero");
+        assert_eq!(
+            crate::fill::fills_at(
+                entry,
+                exit,
+                Direction::Long,
+                crate::fill::Anchor::PrintedExtreme
+            ),
+            Err(CostError::BelowTick {
+                quantity: "sell printed-extreme fill",
+                value: -i64::MAX,
+            })
+        );
+        // The worst case on the same bars answers `Ok` or a named refusal, and
+        // where it prices, its sell is the one-tick floor and the charge stack
+        // computes without leaving `i64`.
+        match crate::fill::fills_at(
+            entry,
+            exit,
+            Direction::Long,
+            crate::fill::Anchor::AdverseExtreme,
+        ) {
+            Ok(fills) => {
+                assert_eq!(fills.sell(), TICK_HELPER);
+                let charges = charge_stack(fills, 1, &rates_on(Exchange::Nse, example_day()))
+                    .expect("in range");
+                assert_eq!(charges.sell_notional(), TICK_HELPER);
+            }
+            Err(refused) => assert!(matches!(refused, CostError::Overflow { .. })),
+        }
     }
 }

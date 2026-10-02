@@ -1688,6 +1688,8 @@ fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize>
 
 /// Mean of `series` taken at `index`.
 fn mean_at(series: &[i64], index: &[usize]) -> f64 {
+    #[cfg(test)]
+    MEAN_AT_CALLS.with(|n| n.set(n.get() + 1));
     if index.is_empty() {
         return 0.0;
     }
@@ -1695,6 +1697,12 @@ fn mean_at(series: &[i64], index: &[usize]) -> f64 {
         a + series.get(i).copied().unwrap_or(0) as f64
     });
     sum / index.len() as f64
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// `mean_at` evaluations on this thread (D-1197).
+    static MEAN_AT_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -2879,6 +2887,54 @@ mod stepdown_partition_tests {
             rejected.len() <= set.len(),
             "the total rejected can never exceed the input"
         );
+    }
+
+    /// o1runner-7 / D-1197: the stepdown computes each strategy's resampled
+    /// mean once per draw, not once per draw per ROUND, counted at `mean_at`
+    /// itself, and answers the same set on every rerun -- the set its receipt
+    /// carries. On the merged tree that property is held by D-0973's one-walk
+    /// stepdown; the null table D-1197 introduced was folded into it.
+    #[test]
+    fn the_stepdown_computes_each_null_statistic_once_and_answers_unchanged() {
+        // Ten strong strategies clear round zero; a moderate one, masked while
+        // they are in the maximum, clears a later round; one null never does.
+        let noise = |t: i64| ((t * 7_919) % 23) - 11;
+        let mut set: Vec<Vec<i64>> = (0..10)
+            .map(|s| (0..64).map(|t| 40 + s + noise(t + s)).collect())
+            .collect();
+        set.push((0..64).map(|t| 55 + 60 * noise(t * 3)).collect());
+        set.push((0..64).map(|t| noise(t * 5)).collect());
+        let draws = 150;
+        let before = super::MEAN_AT_CALLS.with(std::cell::Cell::get);
+        let rejected = romano_wolf(&set, draws, 5, DEFAULT_BLOCK, 50_000);
+        let calls = super::MEAN_AT_CALLS.with(std::cell::Cell::get) - before;
+        let rounds = rejected.last().map_or(0, |r| r.round) + 1;
+        assert!(
+            rounds >= 2,
+            "the fixture must take several rounds: {rejected:?}"
+        );
+        assert_eq!(
+            calls,
+            (set.len() * draws) as u64,
+            "one mean per strategy per draw"
+        );
+
+        // The per-round recomputation this test first compared against is
+        // gone: D-0973 replaced the rounded `1 - alpha` quantile with the exact
+        // `(1 + count) / (B + 1)` rule, so the old loop is no longer the
+        // reference. `exact_stepdown_tests` holds the new oracle (the adjusted
+        // receipt); here the answer is idempotent and is the receipt's set.
+        for seed in [1_u64, 5, 97, 2_026] {
+            let once = romano_wolf(&set, draws, seed, DEFAULT_BLOCK, 50_000);
+            assert_eq!(
+                once,
+                romano_wolf(&set, draws, seed, DEFAULT_BLOCK, 50_000),
+                "seed {seed}"
+            );
+            let receipt = super::romano_wolf_receipt(&set, draws, seed, DEFAULT_BLOCK, 50_000)
+                .expect("a valid family has a receipt");
+            assert_eq!(receipt.rejected(), once.as_slice(), "seed {seed}");
+        }
     }
 }
 
