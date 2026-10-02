@@ -150,6 +150,16 @@ impl ContractName {
         let exchange = Exchange::parse(ex).map_err(|_| ContractError::UnknownExchange {
             found: ex.to_owned(),
         })?;
+        // `Symbol::new` upper-cases ASCII letters, which is right for a vendor
+        // symbol and wrong here: `NSE-nifty-...` and `NSE-NIFTY-...` are two
+        // directory names, and folding one onto the other gives them one
+        // `InstrumentKey` and renders the first back as a path that is not it.
+        // The underlying is exact, like every field but the month. D-1330.
+        if under.bytes().any(|b| b.is_ascii_lowercase()) {
+            return Err(ContractError::BadUnderlying {
+                found: under.to_owned(),
+            });
+        }
         let underlying = Symbol::new(under).map_err(|_| ContractError::BadUnderlying {
             found: under.to_owned(),
         })?;
@@ -718,6 +728,43 @@ mod tests {
         for plain in ["NSE-NIFTY-01Apr20-10000-CE", "NSE-NIFTY-01Apr00-10000-CE"] {
             let c = ContractName::parse(plain).expect("a plain expiry parses");
             assert_eq!(c.to_string(), plain);
+        }
+    }
+
+    /// **The underlying is NOT case-tolerant, and it was.**
+    ///
+    /// The module header says every field but the month must be exactly as the
+    /// lake writes it, and the exchange and the side are refused in lower case.
+    /// The underlying went through `Symbol::new`, which upper-cases ASCII
+    /// letters, so `NSE-nifty-01Apr20-10000-CE` parsed to the same
+    /// `InstrumentKey` as `NSE-NIFTY-01Apr20-10000-CE` and rendered back as the
+    /// upper-case name: two directory names, one identity, and a round trip
+    /// that does not return the directory it came from (D-1330).
+    #[test]
+    fn a_lower_case_underlying_is_refused_rather_than_folded_onto_the_real_one() {
+        for name in [
+            "NSE-nifty-01Apr20-10000-CE",
+            "NSE-Nifty-01Apr20-10000-CE",
+            "NSE-bankNIFTY-24Apr24-FUT",
+        ] {
+            match ContractName::parse(name) {
+                Err(ContractError::BadUnderlying { found }) => {
+                    assert!(name.contains(&found), "the refusal names {found}");
+                    assert!(found.bytes().any(|b| b.is_ascii_lowercase()));
+                }
+                other => panic!("{name} must be refused, got {other:?}"),
+            }
+        }
+        // The characters real underlyings use still parse and round-trip:
+        // digits, `&`, `_` and `-` cannot appear (the last splits the name),
+        // so only the first three are driven.
+        for name in [
+            "NSE-M&M-25Apr24-FUT",
+            "NSE-BAJAJ_AUTO-25Apr24-FUT",
+            "NSE-NIFTY50-25Apr24-FUT",
+        ] {
+            let c = ContractName::parse(name).expect("an upper-case underlying parses");
+            assert_eq!(c.to_string(), name);
         }
     }
 }

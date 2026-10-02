@@ -860,4 +860,57 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), all.len(), "two column types render the same");
     }
+
+    /// **A variant with two fields of one type names each in its own place.**
+    ///
+    /// The substring check above cannot see a swapped pair: it looks for one
+    /// value, and `NoSuchRowGroup { asked: 9, held: 2 }` rendered as "row
+    /// group 2 asked for, file holds 9" still contains "9". Swapping `asked`
+    /// and `held`, or `day` and `month` in `ImpossibleDate`, survived the
+    /// whole crate's tests while sending an operator to the wrong row group or
+    /// a non-existent month (D-1333). The whole sentence is pinned instead.
+    #[test]
+    fn two_same_typed_fields_are_rendered_in_their_own_places() {
+        assert_eq!(
+            LakeError::NoSuchRowGroup { asked: 9, held: 2 }.to_string(),
+            "row group 9 asked for, file holds 2"
+        );
+        assert_eq!(
+            LakeError::Truncated {
+                len: 7,
+                minimum: 12
+            }
+            .to_string(),
+            "truncated parquet file: 7 bytes, the minimum is 12"
+        );
+        assert_eq!(
+            ContractError::ImpossibleDate {
+                day: 31,
+                month: 2,
+                year: 2025
+            }
+            .to_string(),
+            "2025-02-31 is not a real date"
+        );
+        let short = LakeError::ShortColumnChunk {
+            column: "high",
+            row: 41,
+            expected: 100,
+            arrived: 3,
+        }
+        .to_string();
+        assert!(
+            short.contains("100 expected, 3 arrived, diverging at row 41"),
+            "got: {short}"
+        );
+        let partial = LakeError::PartialGreeks {
+            row: 88,
+            present: 4,
+        }
+        .to_string();
+        assert!(
+            partial.starts_with("row 88 carries 4 of the 8"),
+            "got: {partial}"
+        );
+    }
 }

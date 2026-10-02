@@ -47329,3 +47329,53 @@ which failed before the change (`-19450` decoded as
 The same lane-4 commit also carried D-1310 (index promotion of `EQ` rows only)
 and D-1312 (ASCII-only trimming). Both duplicate D-0785 and D-0787, already on
 this branch, so neither was taken and neither number heads an entry.
+
+### D-1330 — A lake contract name's underlying is matched exactly, never case-folded — 2026-10-02
+
+**What was wrong.** `crates/lake/src/contract.rs`'s header says every field
+but the month must be exactly as the lake writes it, and the exchange and the
+side are refused in lower case. The underlying went through `Symbol::new`,
+which upper-cases ASCII letters, so `NSE-nifty-01Apr20-10000-CE` parsed to the
+same `InstrumentKey` as `NSE-NIFTY-01Apr20-10000-CE` and `Display` rendered it
+back as the upper-case name. Two directory names reached one identity — the
+type `CLAUDE.md` §3 rule 3 hashes into a run — and the round trip the header
+promises did not return the directory the name came from.
+
+**The change.** `ContractName::parse` refuses an underlying holding any ASCII
+lower-case byte as `BadUnderlying`, before `Symbol::new`. Case folding over
+underlyings is not injective the way it is over the twelve month tokens, so
+the month's tolerance is not extended to it. Cost: one pass over at most
+`MAX_NAME_BYTES` (64) bytes, bounded by the existing length check.
+
+**Not measured here.** The real lake is not on this machine, so "no real
+underlying is written in lower case" is UNVERIFIED by this change; the
+`#[ignore]`d round-trip test in `tests/refusals.rs` checks every real name and
+would show one. Test:
+`lake::contract::a_lower_case_underlying_is_refused_rather_than_folded_onto_the_real_one`.
+
+### D-1332 — The unknown-codec refusal gets a test that fails when the arm is removed — 2026-10-02
+
+**What was wrong.** `Columns::pages` refuses every codec but `UNCOMPRESSED`
+and `ZSTD` as `UnknownCodec`, and no test reached that arm. Replacing it with
+`_ => Codec::Uncompressed` left every lake test green, and that mutation is
+not a loud failure: the reader would treat SNAPPY bytes as raw values.
+
+**The change.** Test only. An uncompressed file's footer is patched so one
+column declares SNAPPY, GZIP or LZ4_RAW; the read must refuse naming that
+column and codec, and the unpatched file must decode. With the arm folded away
+the read succeeds and the test fails. Test:
+`lake::synthetic::a_column_under_an_unimplemented_codec_is_refused_by_name_not_read_as_raw`.
+
+### D-1333 — Lake error rendering is pinned where a field swap survived — 2026-10-02
+
+**What was wrong.** `error.rs`'s render test checks one substring per variant,
+so swapping two same-typed fields survived: `NoSuchRowGroup { asked: 9, held:
+2 }` rendered "row group 2 asked for, file holds 9" still contains "9", and
+`ImpossibleDate` with day and month swapped still contains "31".
+
+**The change.** Test only. The full sentence is pinned for the multi-field
+variants. Test: `lake::error::two_same_typed_fields_are_rendered_in_their_own_places`.
+The lane-4 commit also pinned `NotRepresentable`'s `source()`; that half is
+already held by `not_representable_exposes_its_core_error_as_the_source`
+(GAP14-64) and was not taken. The same lane's D-1331 (signed expiry) duplicates
+W3-lake1-3, already on this branch, and was not taken either.

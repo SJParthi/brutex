@@ -1400,7 +1400,7 @@ expired contract in there the lake is the only copy, so a file that is damaged
 must be *named*, never guessed at and never fatal — a reader that dies on one
 file takes the sweep that was part-way through the other 115 with it.
 
-**This section was one row and is now eight, and it is still not the crate's
+**This section was one row and is now ten, and it is still not the crate's
 full set.** The rest of `lake`'s invariants are not in this file yet. That is a
 gap and it is written down rather than papered over; see `docs/06-limits.md`.
 
@@ -1411,9 +1411,11 @@ gap and it is written down rather than papered over; see `docs/06-limits.md`.
 | L-03 | A shortfall on a **required** column is reported as the shortfall, not as `UnexpectedNull`. Byte loss and a vendor gap are different faults and the reader says which | `lake::refusals::a_short_chunk_on_a_required_column_names_the_shortfall_not_a_phantom_null`, `lake::reader::a_short_chunk_says_which_column_ran_out_where_and_by_how_much` | ✓ |
 | L-04 | Fewer values than the definition levels claim is refused, never resolved into a `None` on a row whose level says PRESENT | `lake::reader::fewer_values_than_the_levels_claim_is_refused_and_never_invents_a_null`, `lake::refusals::parquet_itself_refuses_a_page_whose_values_are_short_of_its_definition_levels` | ✓ |
 | L-05 | A leaf that is not a flat `OPTIONAL` primitive — nested, `REQUIRED` or `REPEATED` — is refused as `UnsupportedColumnShape` **at the schema gate**, before a page is decompressed, naming the column and both levels | `lake::refusals::a_nested_column_is_refused_rather_than_silently_decoding_to_all_null`, `lake::refusals::a_required_or_repeated_leaf_is_refused_by_name_rather_than_read_as_flat` | ✓ |
-| L-06 | Two distinct lake directory names never parse to one `InstrumentKey`. The month's case tolerance is injective over the twelve tokens; the strike carries no tolerance at all, and a leading zero is refused | `lake::contract::the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts`, `lake::contract::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract`, `lake::refusals::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract` | ✓ |
+| L-06 | Two distinct lake directory names never parse to one `InstrumentKey`. The month's case tolerance is injective over the twelve tokens; the strike carries no tolerance at all, and a leading zero is refused. The underlying is not case-folded (D-1330) | `lake::contract::the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts`, `lake::contract::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract`, `lake::refusals::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract`, `lake::contract::a_lower_case_underlying_is_refused_rather_than_folded_onto_the_real_one` | ✓ |
 | L-07 | Every refusal above fires on **damage only**: 1,737 real lake files across both layouts and seven years decode to the identical digest they did before the refusals existed | `lake::real_lake_regression::a_wide_sample_of_the_real_lake_decodes_with_no_refusal_and_a_stable_digest` | ◐ |
 | L-08 | Each of this crate's three `emit` sites **reaches a file**, driven through its production entry point and read back off disk. One line per file and no more; a schema refusal names the column and precedes the `lake.file` line for the same file; the level and the row count move with the outcome, so an empty lake and an unreadable one are not one line | `lake::page::a_refused_page_writes_its_reason_to_the_log`, `lake::events::every_file_this_reader_opens_or_refuses_writes_its_line_to_the_log` | ✓ |
+| L-09 | A column chunk under a codec this reader does not implement is refused as `UnknownCodec`, naming the column and the codec, and is never decoded as if uncompressed (D-1332) | `lake::synthetic::a_column_under_an_unimplemented_codec_is_refused_by_name_not_read_as_raw` | ✓ |
+| L-10 | A lake error names each of its same-typed fields in its own place (D-1333) | `lake::error::two_same_typed_fields_are_rendered_in_their_own_places` | ✓ |
 
 L-01 is not a hypothetical. `parquet`'s own `ColumnChunkMetaData::byte_range`
 ends in `assert!(col_start >= 0 && col_len >= 0)`, and the reader called it. A
