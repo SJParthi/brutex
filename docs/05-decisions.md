@@ -47706,7 +47706,7 @@ stamped 09:00 … 15:00, now says the fixture hand-builds those stamps.
 stamped-before-the-open bar is the leading stub `pull::fold` calls "a lie", and
 a resampled 60-minute run would not match the store's own 60-minute rung.
 
-Invariants RS-01, RS-02.
+Invariants RSM-01, RSM-02.
 
 ### D-1431 — `runner::resample` refuses its `i64` edges instead of saturating — 2026-10-02
 
@@ -47733,4 +47733,4 @@ the overflowing term.
 `pull::fold` still saturates its own volume sum; that is its file and is not
 changed here.
 
-Invariant RS-03.
+Invariant RSM-03.
