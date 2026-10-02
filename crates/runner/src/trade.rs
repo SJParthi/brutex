@@ -433,6 +433,11 @@ pub struct SliceFacts {
 #[cfg(test)]
 thread_local! {
     /// [`SliceFacts::of`] derivations run on this thread (test-only probe).
+    ///
+    /// The hoisting doors ([`crate::grid::CellReplayV1`] and
+    /// [`crate::exit_grid_policy::AttestedReplayV1`]) exist so a grid's cells and a
+    /// population's masks do not rebuild these facts; the count is how a test
+    /// proves that rather than reading it off the source. D-0990.
     static DERIVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 

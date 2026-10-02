@@ -52813,3 +52813,136 @@ a new caller would have to keep it. The count of 41 is D-1115's. At this commit
 the chain fold yields 46 records that no single corpus line matches; five of
 them are records whose later line also matches on its own, so they were already
 inside the older `allow_scan` counts. Invariant CIG-19b.
+
+### D-0990 — Seal the Candidate grid path's series-invariant work once per block, replay a grid's cells from one walk, and grow retained rows geometrically — 2026-10-02
+
+**What the audit found.** Findings W2-cli3-0, W2-cli3-1, W2-cli3-2 and
+W2-cli3-6, all on the per-`(closed mask, side)` path of
+`crates/cli/src/candidate_universe.rs`:
+
+* `append_validated_grid_rows` replayed every exit cell through
+  `runner::grid::materialize_cell`, which rebuilt `SliceFacts` (a `HashMap`
+  of every accepted bar, two `bars + 1` prefix vectors and the forced-exit
+  table) and re-walked the whole column for each cell: Θ(E) per cell.
+* `expand_population_side` and Execution V3's `replay_execution_side` built
+  `ExecutionRunV1::new_with_daily_reference` per mask and side, re-hashing
+  the signal, minute-context and daily streams and the evaluated slice
+  (Θ(S + M + D + E)), and called `evaluate_training_grid_attested`, which
+  re-attested the slice and rebuilt `SliceFacts` again.
+* `rows.try_reserve_exact(grid width)` grew the retained row vector by
+  exactly one grid per `(closed mask, side)`, so each grid moved the whole
+  buffer and the amortised-O(1) append of `CLAUDE.md` §3 rule 4 was lost.
+
+**The change.** Runner gains three doors, each minted only from the exact
+inputs it summarises:
+
+* `DailyReferenceRunSourceV1::new` seals the three-stream data digest, the
+  subslice proof and the evaluated slice's digest once;
+  `ExecutionRunV1::from_daily_reference_source` seals a run over it in O(1)
+  in the stream lengths. `new_with_daily_reference` now delegates to the
+  pair, so both produce the same value field for field. A source over other
+  streams fails the run's own `data_digest` term; a source over another
+  evaluated slice carries another execution digest, which the attested
+  series refuses.
+* `ResolvedExitGridV1::attest_training_replay` returns `AttestedReplayV1`:
+  the existing attestation plus one `SliceFacts` derived from the attested
+  bars and column themselves. `evaluate_with_attested_replay` prices a run
+  over those facts (same `EvaluatedExitGridV1` as `evaluate_with_attested`).
+  `AttestedReplayV1::cell_replay` refuses a grid from another resolution,
+  column, horizon or evaluator and returns `grid::CellReplayV1`, which holds
+  one level-less walk of the grid's mask; `CellReplayV1::materialize_cell`
+  replays one cell from it with the same fold and reconciliation as
+  `materialize_cell`. `grid::materialize_cell_over` is the facts-hoisted
+  one-off door.
+* The cli seals one `HoistedExecutionV1` (run source plus Long and Short
+  `AttestedReplayV1`) per Candidate block, lazily on the first closed mask so
+  a block that retires none refuses exactly what it refused before, and the
+  same for Execution V3 replay on its first group. Retained rows are reserved
+  with `try_reserve` after the unchanged `max_rows` check.
+
+**Cost after the change.** Per block: Θ(S + M + D + E) once and two
+attestations plus two `SliceFacts` derivations. Per `(closed mask, side)`: an
+O(1) run seal, two Θ(rows) column walks (one prices the grid, one is held for
+its cells) and the grid's own work. Per cell: O(paths × holding), independent
+of the slice length. The per-mask walk is not O(1); `docs/06-limits.md` §147
+states it. All of these are read from the source; no bench times them.
+
+**What did not change.** The produced rows: each replayed cell is compared
+with the one-off `materialize_cell` door and the hoisted grid with the per-run
+`evaluate_with_attested` door, field for field, in
+`an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts`,
+and two runs of the changed code produce one row and Base Evidence digest.
+No before-and-after digest of the unfixed code is recorded, so that equality
+is argued from those two door comparisons, not measured. No identity term or
+record byte was added or removed, and no refusal was added or removed, but
+the ORDER of refusals moved: both sides are now attested on the first closed
+member, before `expand_population_side`'s `max_rows` and reserve checks, so a
+bad input that used to fail with a per-side message can now fail first with
+the run-source or attestation refusal of either side.
+
+**Proven by** `runner::exit_grid_policy::tests::a_daily_reference_source_is_sealed_once_and_reproduces_every_run`,
+`runner::exit_grid_policy::tests::an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts`,
+`cli::candidate_universe::tests::candidate_grid_paths_hoist_every_series_invariant_out_of_the_mask_loop`,
+`cli::candidate_universe::tests::retained_candidate_rows_grow_geometrically_per_directional_grid`
+and
+`cli::candidate_universe::tests::candidate_production_seals_the_execution_series_once_for_every_closed_mask`.
+
+**Folded onto lane 2's runner doors (merge into `final/all-fixes`).** This
+entry was written as D-0960 on its branch; that number already belonged to an
+older entry, so it is D-0990 here. Lane 2 had fixed the same per-run and
+per-cell rebuilds independently, so on the combined branch the three doors
+above are the stronger of each pair rather than new types:
+`DailyReferenceRunSourceV1::new` and `from_daily_reference_source` are
+`ExecutionDigestsV1::of_daily_reference` and `ExecutionRunV1::with_digests`
+(D-1143); `AttestedReplayV1` is `AttestedTrainingV1`, which already carries the
+facts it derived at attestation (D-1141), so `attest_training_replay` and
+`evaluate_with_attested_replay` are `attest_training` and
+`evaluate_with_attested`, and `cell_replay` moved onto `AttestedTrainingV1`;
+`CellReplayV1` is `grid::CellReplay`, whose `prepare` also builds the crossing
+table, so a cell costs O(candidate paths) rather than O(paths × holding);
+`evaluate_resolved_policy_over_v1` is lane 2's `evaluate_resolved_policy_v1`,
+which already takes the facts. The cli per-block hoist, the geometric reserve,
+the refusal-order note and every test named above are kept unchanged in
+substance, adapted to those names.
+
+### D-0991 — Pin a candidate-trade catalog by generation after one cold hash, replay captured cells over facts derived once per capture, and count the fsyncs — 2026-10-02
+
+**What the audit found.** W2-cli2-6: `candidate_trades::pinned`, called twice
+by every `candidates_page` and `TradeReader::open` and once by every `tier`,
+re-read and BLAKE3-hashed the whole catalog and rebuilt its index, O(C) in
+captured candidate sides, per call. The module header's "Pages are bounded"
+read as a bound on page cost. W2-cli2-9: `Capture::record_inner` rescanned
+the cells (`shown_cell` plus a linear `contains`), replayed the selected cell
+through `materialize_cell` (Θ(bars) `SliceFacts` per candidate side), and its
+fsync cost had no limits entry; the header said only "UNVERIFIED performance".
+
+**The change.**
+
+* `Summary` carries the filesystem generation of `catalog.bin` from the cold
+  verification that proved its digest (`read_model`, or `pinned`'s first cold
+  call for a `Summary` that `Capture::finish` built). Later pins take the
+  shared lock and compare generations, an `fstat`/`stat` pair, plus the
+  bounded start-descriptor check, the same discipline `TradeReader::page`
+  already used. A rewritten, replaced or removed catalog is still refused.
+* `Capture` derives `SliceFacts` once, lazily, and replays each selected cell
+  through `grid::materialize_cell_over` or the new
+  `grid::materialize_expression_cell_over`. The `contains` scan is removed:
+  `shown_cell` returns only copies of the grid's own cells, so the existing
+  equality check already proves membership. That `shown_cell` recheck stays,
+  as an independent selection proof, and is O(cells).
+* The header now states each cost. A candidate side publishes two immutable
+  files, each with one data `fsync` and one directory `fsync`: four per side,
+  counted by a test-only counter rather than timed.
+
+**Proven by** `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change`,
+`cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses`
+and
+`cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side`.
+`docs/06-limits.md` §172 records what stays non-constant.
+
+**Renumbered at merge.** Written as D-0973 on its branch; that number already
+belonged to an older entry, so it is D-0991 here. `Capture`'s lazily derived
+facts were also added independently by D-1184; the combined branch keeps one
+field carrying both the D-1184 reuse and this entry's test-only derivation
+counter. `grid::materialize_expression_cell_over` was already public by
+D-1184, so it is not new on the combined branch.

@@ -235,7 +235,11 @@ impl<'a> ExecutionSeriesV1<'a> {
 /// runs over one slice -- the V4 walk-forward population (`validate.rs`
 /// `evaluate_one`, twice per closed mask), its OOS replay loop, and `cli`'s
 /// Boolean candidate catalogue (once per program and side) -- paid O(S + E)
-/// BLAKE3 per candidate for one answer.
+/// BLAKE3 per candidate for one answer. The Candidate universe and its
+/// Execution V3 replay are two more such callers: each sealed one run per
+/// `(closed mask, side)` and hashed the signal, minute-context and daily
+/// streams every time, so they now mint [`Self::of_daily_reference`] once per
+/// series and seal each run with [`ExecutionRunV1::with_digests`]. D-0990.
 ///
 /// The fields are private and the only constructors hash real bars in this
 /// process, so a holder cannot forge a digest: [`ExecutionRunV1::with_digests`]
@@ -294,6 +298,13 @@ impl ExecutionDigestsV1 {
     #[must_use]
     pub const fn data_digest(&self) -> [u8; 32] {
         self.expected_data_digest
+    }
+
+    /// Digest of the exact execution slice every run sealed against these
+    /// digests carries as its execution term.
+    #[must_use]
+    pub const fn execution_digest(&self) -> [u8; 32] {
+        self.execution_digest
     }
 }
 
@@ -1325,6 +1336,50 @@ impl AttestedTrainingV1<'_> {
     /// The per-slice facts built once at attestation.
     pub(crate) fn facts(&self) -> &crate::trade::SliceFacts {
         &self.facts
+    }
+
+    /// One level-less walk of `evaluated`'s mask over the attested slice, from
+    /// which every cell of its grid replays without re-walking.
+    ///
+    /// [`ResolvedExitGridV1::evaluate_with_attested`] already prices over the
+    /// facts this token derived once at attestation; before this door the
+    /// Candidate universe replayed each cell through
+    /// [`crate::grid::materialize_cell`], which derived the facts again per
+    /// CELL. Over a population of N closed masks with G cells per side that
+    /// was 2N(G + 1) derivations of one answer. This door lends the token's
+    /// facts to [`crate::grid::CellReplay::prepare`], so the walk and crossing
+    /// table are paid once per evaluated grid and each
+    /// [`crate::grid::CellReplay::materialize`] afterwards is independent of
+    /// the slice length. D-0990.
+    ///
+    /// # Errors
+    ///
+    /// [`ExitGridErrorV1::EvaluationResolutionMismatch`] when `evaluated` was
+    /// minted by another resolution, and
+    /// [`ExitGridErrorV1::TrainingSeriesMismatch`] when it priced another
+    /// column, horizon or evaluator.
+    pub fn cell_replay<'s>(
+        &'s self,
+        evaluated: &'s EvaluatedExitGridV1,
+    ) -> Result<crate::grid::CellReplay<'s>, ExitGridErrorV1> {
+        if evaluated.resolution_digest != self.resolution_digest {
+            return Err(ExitGridErrorV1::EvaluationResolutionMismatch);
+        }
+        if evaluated.column_digest != self.column_digest
+            || evaluated.horizon != self.horizon
+            || evaluated.evaluation_spec != self.evaluation_spec
+        {
+            return Err(ExitGridErrorV1::TrainingSeriesMismatch);
+        }
+        Ok(crate::grid::CellReplay::prepare(
+            self.bars,
+            self.column,
+            &evaluated.mask,
+            evaluated.horizon,
+            evaluated.side,
+            &evaluated.grid,
+            &self.facts,
+        ))
     }
 }
 
@@ -6343,6 +6398,368 @@ mod tests {
             ),
             Err(ExitGridErrorV1::RunIdentityMismatch("direction"))
         );
+    }
+
+    /// D-0990: the stream-derived identity terms are sealed ONCE per series.
+    ///
+    /// `new_with_daily_reference` hashed the signal, context and daily streams
+    /// and the evaluated slice for every run; the Candidate universe built one
+    /// per `(closed mask, side)`. The sealed source must reproduce every run
+    /// exactly while hashing the daily-reference digest once in total, and must
+    /// not authorize a run over other streams.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one identity test keeps the equality, the count and every refusal of the sealed source together"
+    )]
+    #[test]
+    fn a_daily_reference_source_is_sealed_once_and_reproduces_every_run() {
+        let signal = bars(20);
+        let reference_context = shifted_bars(120, 1);
+        let evaluated_execution = reference_context[10..100].to_vec();
+        let daily = shifted_bars(2, -1);
+        let eligibility = [1_u8, 1];
+        let excluded = [20_382_i64];
+        let reference = crate::identity::DailyReferenceBinding {
+            daily_bars: &daily,
+            eligibility: &eligibility,
+            schema: 1,
+            eligibility_policy: 2,
+            gap_overlay_policy: 3,
+            excluded_ist_days: &excluded,
+            daily_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            minute_integrity: crate::identity::ReferenceIntegrity::UnverifiedNoReceipt,
+            swept_series_calendar_policy: 4,
+        };
+        let digest = crate::identity::data_digest_with_daily_reference(
+            &signal,
+            &reference_context,
+            reference,
+        )
+        .expect("the complete daily binding");
+        let instrument = nifty();
+        let run_for = |bit: u32, direction| crate::identity::Run {
+            mask: ConditionMask::ZERO.with_bit(bit),
+            direction,
+            instrument: &instrument,
+            timeframe: "5min",
+            params: crate::identity::Params {
+                min_hits: 1,
+                ceiling: 10,
+                pair_budget: 10,
+                policy: 7,
+            },
+            data_digest: digest,
+            commit: "test-commit",
+            feed: "test-feed",
+        };
+
+        crate::identity::DAILY_REFERENCE_DIGESTS.with(|count| count.set(0));
+        let source = ExecutionDigestsV1::of_daily_reference(
+            &signal,
+            &reference_context,
+            &evaluated_execution,
+            reference,
+        )
+        .expect("the evaluated span is an exact context subslice");
+        let mut sealed = Vec::new();
+        for bit in 0..8 {
+            for direction in [Direction::Long, Direction::Short] {
+                sealed.push(
+                    ExecutionRunV1::with_digests(&run_for(bit, direction), &source)
+                        .expect("every run over the sealed streams seals"),
+                );
+            }
+        }
+        assert_eq!(
+            crate::identity::DAILY_REFERENCE_DIGESTS.with(std::cell::Cell::get),
+            1,
+            "sixteen runs over one series hash the three streams once, not once per run"
+        );
+        assert_eq!(source.data_digest(), digest);
+        assert_eq!(
+            source.execution_digest(),
+            crate::identity::data_digest(&evaluated_execution)
+        );
+        let mut index = 0;
+        for bit in 0..8 {
+            for direction in [Direction::Long, Direction::Short] {
+                let run = run_for(bit, direction);
+                assert_eq!(
+                    sealed.get(index).copied(),
+                    ExecutionRunV1::new_with_daily_reference(
+                        &run,
+                        &signal,
+                        &reference_context,
+                        &evaluated_execution,
+                        reference,
+                    )
+                    .ok(),
+                    "the sealed source is field-for-field the per-run constructor"
+                );
+                index += 1;
+            }
+        }
+        assert_eq!(
+            sealed.first().map(ExecutionRunV1::execution_digest),
+            Some(source.execution_digest())
+        );
+
+        // A source minted over OTHER streams carries another data digest, so
+        // the run's own `data_digest` term refuses it.
+        let other_signal = shifted_bars(20, 3);
+        let foreign = ExecutionDigestsV1::of_daily_reference(
+            &other_signal,
+            &reference_context,
+            &evaluated_execution,
+            reference,
+        )
+        .expect("the foreign streams are themselves well formed");
+        assert_ne!(foreign.data_digest(), source.data_digest());
+        assert_eq!(
+            ExecutionRunV1::with_digests(&run_for(0, Direction::Long), &foreign),
+            Err(ExitGridErrorV1::RunDataDigestMismatch)
+        );
+        // A source over another evaluated slice of the same context keeps the
+        // data digest and changes the execution digest the attested series
+        // later compares.
+        let narrower = ExecutionDigestsV1::of_daily_reference(
+            &signal,
+            &reference_context,
+            &reference_context[10..99],
+            reference,
+        )
+        .expect("a shorter exact subslice also seals");
+        assert_eq!(narrower.data_digest(), source.data_digest());
+        assert_ne!(narrower.execution_digest(), source.execution_digest());
+        // The ordinary run refusals still apply over a sealed source.
+        let undirected = run_for(0, Direction::Undirected);
+        assert_eq!(
+            ExecutionRunV1::with_digests(&undirected, &source),
+            Err(ExitGridErrorV1::UndirectedExecutionRun)
+        );
+        let untimed = crate::identity::Run {
+            timeframe: "",
+            ..run_for(0, Direction::Long)
+        };
+        assert_eq!(
+            ExecutionRunV1::with_digests(&untimed, &source),
+            Err(ExitGridErrorV1::MissingRunIdentity("timeframe"))
+        );
+        // Every stream refusal moved into the source unchanged.
+        assert_eq!(
+            ExecutionDigestsV1::of_daily_reference(&signal, &reference_context, &[], reference),
+            Err(ExitGridErrorV1::EmptyExecutionSeries)
+        );
+        let detached = shifted_bars(5, 9);
+        assert_eq!(
+            ExecutionDigestsV1::of_daily_reference(
+                &signal,
+                &reference_context,
+                &detached,
+                reference
+            ),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+        let malformed = crate::identity::DailyReferenceBinding {
+            eligibility: &eligibility[..1],
+            ..reference
+        };
+        assert_eq!(
+            ExecutionDigestsV1::of_daily_reference(
+                &signal,
+                &reference_context,
+                &evaluated_execution,
+                malformed
+            ),
+            Err(ExitGridErrorV1::DailyReferenceIdentityRefused(
+                crate::identity::DailyBindingRefusal::EligibilityLengthMismatch {
+                    daily: 2,
+                    eligibility: 1,
+                }
+            ))
+        );
+    }
+
+    /// D-0990: one attestation derives the slice facts once; pricing several
+    /// runs and replaying EVERY cell of every grid derives them zero more
+    /// times, and each replay is byte-identical to the one-off door.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one capability test keeps the count, the byte-identity, the zero-trade edge and every refusal together"
+    )]
+    #[test]
+    fn an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts() {
+        let input = crate::synthetic::sessions(6);
+        let instrument = nifty();
+        let resolved = policy()
+            .resolve(&instrument, &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let column = test_column(&input);
+        let series =
+            ExecutionSeriesV1::new(&instrument, "test-feed", "test-commit", [0xA5; 32], &input)
+                .expect("the synthetic series is well formed");
+        // A mask that fires, and one that names every condition and so cannot.
+        let firing = ConditionMask::ZERO;
+        let silent = (0..60).fold(ConditionMask::ZERO, ConditionMask::with_bit);
+        let masks = [firing, silent];
+
+        let derived_before = crate::trade::slice_facts_derived_on_this_thread();
+        let replay = resolved
+            .attest_training(series, &column, Horizon::DEFAULT)
+            .expect("the exact training slice attests");
+        let mut evaluated = Vec::new();
+        let mut replayed = Vec::new();
+        for mask in &masks {
+            let run = test_execution_run(&instrument, mask, resolved.side(), &input)
+                .expect("the synthetic run seals");
+            let grid = resolved
+                .evaluate_with_attested(&replay, run)
+                .expect("the attested slice prices");
+            let cells = replay.cell_replay(&grid).expect("own grid replays");
+            let rows: Vec<_> = grid
+                .grid()
+                .cells
+                .iter()
+                .map(|cell| cells.materialize(cell))
+                .collect();
+            replayed.push(rows);
+            evaluated.push(grid);
+        }
+        assert_eq!(
+            crate::trade::slice_facts_derived_on_this_thread() - derived_before,
+            1,
+            "two runs and every cell of both grids share the one attested derivation"
+        );
+
+        for (mask, (grid, rows)) in masks.iter().zip(evaluated.iter().zip(&replayed)) {
+            let run = test_execution_run(&instrument, mask, resolved.side(), &input)
+                .expect("the synthetic run seals");
+            let attested = resolved
+                .attest_training(series, &column, Horizon::DEFAULT)
+                .expect("the exact training slice attests");
+            assert_eq!(
+                Ok(grid),
+                resolved.evaluate_with_attested(&attested, run).as_ref(),
+                "the hoisted-facts door is the per-run door, field for field"
+            );
+            assert_eq!(rows.len(), grid.grid().cells.len());
+            let facts = crate::trade::SliceFacts::of(&input, &column);
+            for (cell, replayed_rows) in grid.grid().cells.iter().zip(rows) {
+                let one_off = crate::grid::materialize_cell(
+                    &input,
+                    &column,
+                    mask,
+                    Horizon::DEFAULT,
+                    resolved.side(),
+                    grid.grid(),
+                    cell,
+                );
+                assert_eq!(replayed_rows, &one_off, "the replay is the one-off door");
+                assert_eq!(
+                    crate::grid::materialize_cell_over(
+                        &input,
+                        &column,
+                        mask,
+                        Horizon::DEFAULT,
+                        resolved.side(),
+                        grid.grid(),
+                        cell,
+                        &facts,
+                    ),
+                    one_off
+                );
+                assert_eq!(
+                    replayed_rows.as_ref().map(Vec::len).ok(),
+                    Some(usize::try_from(cell.trades).expect("trade count fits usize")),
+                    "every cell reconciles to its own trade count"
+                );
+            }
+        }
+        assert!(
+            evaluated.first().is_some_and(|grid| grid
+                .grid()
+                .cells
+                .iter()
+                .any(|cell| cell.trades > 0)),
+            "the firing mask must exercise a non-empty replay"
+        );
+        assert!(
+            evaluated.get(1).is_some_and(|grid| grid
+                .grid()
+                .cells
+                .iter()
+                .all(|cell| cell.trades == 0)),
+            "the every-condition mask is the zero-trade edge"
+        );
+
+        // A cell the grid did not produce is refused, never re-chosen.
+        let grid = evaluated.first().expect("firing grid");
+        let cells = replay.cell_replay(grid).expect("own grid replays");
+        let mut forged = grid
+            .grid()
+            .cells
+            .iter()
+            .find(|cell| cell.trades > 0)
+            .copied()
+            .expect("a trading cell exists");
+        forged.trades += 1;
+        assert!(cells.materialize(&forged).is_err());
+
+        // A grid minted by another resolution, or over another horizon, is
+        // refused before any walk.
+        let mut changed = input.clone();
+        if let Some(bar) = changed.first_mut() {
+            bar.volume = bar.volume.saturating_add(1);
+        }
+        let other = policy()
+            .resolve(&instrument, &changed)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let foreign = other
+            .evaluate_training_grid(
+                &changed,
+                &test_column(&changed),
+                &firing,
+                Horizon::DEFAULT,
+                other.side(),
+            )
+            .expect("the other resolution prices its own slice");
+        assert_eq!(
+            replay.cell_replay(&foreign).err(),
+            Some(ExitGridErrorV1::EvaluationResolutionMismatch)
+        );
+        let shorter = Horizon::bars(5).expect("a five-bar horizon");
+        let other_horizon = resolved
+            .evaluate_training_grid(&input, &column, &firing, shorter, resolved.side())
+            .expect("the same resolution prices another horizon");
+        assert_eq!(
+            replay.cell_replay(&other_horizon).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        // Each arm of the series check refuses alone: a grid differing only in
+        // its column digest, and one differing only in its evaluation spec.
+        let mut other_column = grid.clone();
+        other_column.column_digest[0] ^= 1;
+        assert_eq!(
+            replay.cell_replay(&other_column).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        let mut thresholds = Thresholds::CLASSICAL;
+        thresholds.long_body = thresholds.long_body.saturating_add(1);
+        let changed_spec = test_column_with_thresholds(&input, thresholds)
+            .evaluation_spec_token()
+            .expect("a changed threshold still seals a spec");
+        assert_ne!(changed_spec, grid.evaluation_spec);
+        let mut other_spec = grid.clone();
+        other_spec.evaluation_spec = changed_spec;
+        assert_eq!(
+            replay.cell_replay(&other_spec).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        assert!(
+            replay.cell_replay(grid).is_ok(),
+            "the untouched grid still replays"
+        );
+        assert_eq!(replay.horizon, Horizon::DEFAULT);
     }
 
     /// The attested door is the single-shot door split in two, and the split
