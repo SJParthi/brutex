@@ -9934,8 +9934,12 @@ The text above is kept as it was written.
   page itself is O(page). The generation is metadata, not a content hash: it
   detects ordinary rewrites and replacements (device, inode, length, and
   nanosecond modification and change times on Unix), not an actor able to
-  forge filesystem metadata. On a non-Unix target the generation check
-  refuses every warm read, as `TradeReader::page` already does.
+  forge filesystem metadata. Windows has a real identity (volume serial,
+  file index, length, creation and last-write times) and pins as Unix does.
+  On a target with no file identity at all the cold read already refuses (its
+  own `require_generation_unchanged` check), so no generation is ever
+  pinned, and the warm comparison goes through that same function, which
+  refuses there too.
 * **Cold reads stay linear.** The first pin of a `Summary` built by
   `Capture::finish` is O(C); a cold `TradeReader::open` reads and checks
   every trade row of its file; retained history grows with every capture.

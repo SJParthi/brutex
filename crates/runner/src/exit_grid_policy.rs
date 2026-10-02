@@ -6481,6 +6481,30 @@ mod tests {
             replay.cell_replay(&other_horizon).err(),
             Some(ExitGridErrorV1::TrainingSeriesMismatch)
         );
+        // Each arm of the series check refuses alone: a grid differing only in
+        // its column digest, and one differing only in its evaluation spec.
+        let mut other_column = grid.clone();
+        other_column.column_digest[0] ^= 1;
+        assert_eq!(
+            replay.cell_replay(&other_column).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        let mut thresholds = Thresholds::CLASSICAL;
+        thresholds.long_body = thresholds.long_body.saturating_add(1);
+        let changed_spec = test_column_with_thresholds(&input, thresholds)
+            .evaluation_spec_token()
+            .expect("a changed threshold still seals a spec");
+        assert_ne!(changed_spec, grid.evaluation_spec);
+        let mut other_spec = grid.clone();
+        other_spec.evaluation_spec = changed_spec;
+        assert_eq!(
+            replay.cell_replay(&other_spec).err(),
+            Some(ExitGridErrorV1::TrainingSeriesMismatch)
+        );
+        assert!(
+            replay.cell_replay(grid).is_ok(),
+            "the untouched grid still replays"
+        );
         assert_eq!(replay.attested().horizon, Horizon::DEFAULT);
     }
 

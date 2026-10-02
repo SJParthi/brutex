@@ -867,9 +867,14 @@ fn a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change() {
     assert_eq!(CATALOG_VERIFICATIONS.with(std::cell::Cell::get), 1);
 
     // The catalog changes between pages: same bytes, new file. Refused warm.
+    // The old file is renamed aside and kept until the refusals are asserted,
+    // so its inode is still allocated and the replacement cannot reuse it: the
+    // generations differ by identity, not by a timestamp tick that a coarse
+    // clock could collapse.
     let catalog = capture.directory.join("catalog.bin");
+    let aside = capture.directory.join("catalog.bin.aside");
     let bytes = fs::read(&catalog).expect("catalog bytes");
-    fs::remove_file(&catalog).expect("remove catalog");
+    fs::rename(&catalog, &aside).expect("move catalog aside");
     fs::write(&catalog, &bytes).expect("rewrite identical catalog");
     for refusal in [
         candidates_page(&root, &summary, 0, 0, 2, DEFAULT_MAX_BYTES).map(|_| ()),
@@ -880,6 +885,7 @@ fn a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change() {
         let why = refusal.expect_err("a replaced catalog must refuse a pinned summary");
         assert!(why.contains("changed between pages"), "{why}");
     }
+    fs::remove_file(&aside).expect("remove the old catalog");
     // A fresh cold read of the identical bytes is still valid evidence.
     let fresh = read(&root, [42; 32], attempt.token(), DEFAULT_MAX_BYTES)
         .expect("read")

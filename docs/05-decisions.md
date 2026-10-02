@@ -43818,10 +43818,18 @@ its cells) and the grid's own work. Per cell: O(paths × holding), independent
 of the slice length. The per-mask walk is not O(1); `docs/06-limits.md` §147
 states it. All of these are read from the source; no bench times them.
 
-**What did not change.** The produced Candidate universe: the fixture's
-ordered row digest and Base Evidence digest were printed on the unfixed code
-and again after the change and are identical. No identity term, record byte
-or refusal was added or removed.
+**What did not change.** The produced rows: each replayed cell is compared
+with the one-off `materialize_cell` door and the hoisted grid with the per-run
+`evaluate_with_attested` door, field for field, in
+`an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts`,
+and two runs of the changed code produce one row and Base Evidence digest.
+No before-and-after digest of the unfixed code is recorded, so that equality
+is argued from those two door comparisons, not measured. No identity term or
+record byte was added or removed, and no refusal was added or removed, but
+the ORDER of refusals moved: both sides are now attested on the first closed
+member, before `expand_population_side`'s `max_rows` and reserve checks, so a
+bad input that used to fail with a per-side message can now fail first with
+the run-source or attestation refusal of either side.
 
 **Proven by** `runner::exit_grid_policy::tests::a_daily_reference_source_is_sealed_once_and_reproduces_every_run`,
 `runner::exit_grid_policy::tests::an_attested_replay_prices_and_replays_every_cell_over_one_set_of_slice_facts`,

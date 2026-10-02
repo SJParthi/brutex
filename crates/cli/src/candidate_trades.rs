@@ -814,7 +814,9 @@ fn pinned(root: &Path, summary: &Summary, max_bytes: u64) -> Result<PathBuf, Str
             Flock::try_lock_shared(crate::readonly_file::open(&path).map_err(io_error)?, &path)
                 .map_err(busy)?;
         let observed = crate::result_set::file_generation(&file, &path)?;
-        if observed != expected {
+        // Through the shared comparison, so a target with no file identity
+        // refuses here too rather than comparing two identity-free values.
+        if crate::result_set::require_generation_unchanged(expected, observed, &path).is_err() {
             return Err("candidate catalog changed between pages".to_owned());
         }
         file.release().map_err(|u| io_error(u.why))?;
