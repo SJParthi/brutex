@@ -6662,6 +6662,10 @@ jobs:
           #     plus `anchored` V4's and `choice_matches_visible_v2`'s), each over
           #     one fold's retained placements, each beside a `.max()` over the
           #     same slice, once per fold.
+          #   runner/validate.rs 4 -> 5 (D-1186) -- `first_live`, the first row
+          #     of the confined test column with any bit set, found once per fold
+          #     before the candidates walk from it: O(bars) once per fold, beside
+          #     the `SliceFacts::of` pass over the same bars on the line above.
           #   cli/lib.rs (counted in its 7) -- `final_selection` finds the best
           #     row that traded over every priced row, once per screen, after two
           #     sorts of the same rows.
@@ -6728,7 +6732,7 @@ jobs:
           crates/runner/src/grid.rs 2
           crates/runner/src/research_family.rs 1
           crates/runner/src/signal_candle_stop.rs 2
-          crates/runner/src/validate.rs 4
+          crates/runner/src/validate.rs 5
           crates/telemetry/src/record.rs 1
           crates/vocab/src/expression.rs 1
           '
@@ -6844,9 +6848,16 @@ jobs:
           # is `[a, b, c, d, e].contains(&0)` in population_statistics_v2.rs,
           # which is a five-element array literal checking that five declared
           # bounds are all nonzero.
+          #
+          # api/calendar_of.rs 1 -> 2 (D-0950). `proved.contains(&(year, month))`
+          # probes a `BTreeSet<(u16, u8)>` of the months the daily rung read:
+          # O(log M) per calendar month walked, once per derivation, never per
+          # bar. The older site is `owed.contains(&bars)` over the distinct
+          # session lengths the live feeds report for one day, at most one per
+          # `Vendor::ALL` entry.
           allow_member='
           crates/api/src/assets.rs 1
-          crates/api/src/calendar_of.rs 1
+          crates/api/src/calendar_of.rs 2
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
           crates/api/src/merge.rs 2
