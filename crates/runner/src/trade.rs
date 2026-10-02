@@ -307,10 +307,15 @@ impl Trades {
 /// # Cost
 ///
 /// One pass over the column. Per signal: one mask test, one same-day comparison,
-/// two `costs::fill::Bar` constructions and two `worst_case_fills`, each a fixed
-/// count of integer operations. The forced-close index comes from a table built
-/// once in [`forced_exits`], so no per-signal search walks the session.
-/// `CLAUDE.md` §3 rule 4.
+/// one [`SliceFacts::at_timestamp`] probe in `horizon_bar` (a `HashMap` lookup,
+/// so EXPECTED O(1), not worst-case), and in `round_trip` two
+/// `costs::fill::Bar` constructions and two [`costs::fill::fills_at`] calls —
+/// one at `Anchor::Open`, one at `Anchor::PrintedExtreme`. A signal whose exit
+/// cannot be priced pays at most one more `Bar` and two more `fills_at` in
+/// `entry_is_priceable`. Each is a fixed count of integer operations. The
+/// forced-close index comes from a table built once in [`forced_exits`], so no
+/// per-signal search walks the session. `CLAUDE.md` §3 rule 4. This paragraph
+/// named `worst_case_fills`, which nothing here calls — D-1180.
 ///
 /// **This entry point derives [`SliceFacts`] on the way in, so it is O(bars) and
 /// allocates the median-step sample per CALL.** That is the right cost for a
@@ -2773,6 +2778,48 @@ mod tests {
         )
         .expect("the changed printed row remains valid");
         assert_ne!(changed, baseline, "the required 15:09 OHLCV was ignored");
+    }
+
+    /// `walk`'s `# Cost` paragraph names the fill calls the walk actually
+    /// makes. It named `worst_case_fills` while `round_trip` called `fills_at`
+    /// twice and `horizon_bar` probed a hash map it did not mention — D-1180.
+    #[test]
+    fn the_walk_cost_paragraph_names_the_calls_the_walk_makes() {
+        let source = include_str!("trade.rs");
+        let doc = source
+            .split_once("/// Walk one combination's signals into")
+            .and_then(|(_, rest)| rest.split_once("pub fn walk("))
+            .map(|(doc, _)| doc)
+            .expect("walk keeps its doc comment");
+        let cost = doc
+            .split_once("/// # Cost")
+            .map(|(_, cost)| cost)
+            .expect("walk keeps a cost section");
+        assert!(!cost.contains("two `worst_case_fills`"), "stale call named");
+        assert!(cost.contains("fills_at"));
+        assert!(cost.contains("Anchor::Open"));
+        assert!(cost.contains("Anchor::PrintedExtreme"));
+        assert!(cost.contains("at_timestamp"));
+        assert!(cost.contains("EXPECTED O(1)"));
+        // The calls the paragraph names are the calls the code makes.
+        let round_trip = source
+            .split_once("fn round_trip(")
+            .and_then(|(_, rest)| rest.split_once("fn entry_is_priceable("))
+            .map(|(body, _)| body)
+            .expect("round_trip remains bounded by entry_is_priceable");
+        let code: String = round_trip
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+        assert_eq!(code.matches("FillBar::new(").count(), 2);
+        assert_eq!(code.matches("fills_at(").count(), 2);
+        let horizon = source
+            .split_once("fn horizon_bar(")
+            .and_then(|(_, rest)| rest.split_once("fn actual_square_off("))
+            .map(|(body, _)| body)
+            .expect("horizon_bar remains bounded by actual_square_off");
+        assert_eq!(horizon.matches(".at_timestamp(").count(), 1);
     }
 
     /// The shipping sweep path brackets fills only by prices that actually

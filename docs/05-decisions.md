@@ -44081,3 +44081,24 @@ defect is live and its effect is unchanged. A refused bar after a level exit
 still un-prices that variant and blocks to the time exit. The direction is
 conservative: it refuses trades, it never invents one. This lane did not edit
 `grid.rs`.
+
+### D-1180 — `walk`'s cost paragraph names the fill calls the walk makes — 2026-10-02
+
+**What was wrong (audit ET-strategies-trades-ranking-costs-8).** The `# Cost`
+section of `runner::trade::walk` said each signal costs "two `costs::fill::Bar`
+constructions and two `worst_case_fills`". Nothing in `crates/runner` calls
+`worst_case_fills`. `round_trip` builds two `FillBar`s and calls
+`costs::fill::fills_at` twice, once at `Anchor::Open` and once at
+`Anchor::PrintedExtreme`. A signal whose exit cannot be priced also calls
+`entry_is_priceable`, which costs one more `FillBar` and two more `fills_at`.
+The paragraph also left out the `SliceFacts::at_timestamp` probe in
+`horizon_bar`. That probe is a `HashMap` lookup, so it is expected O(1), not
+worst-case O(1). `CLAUDE.md` §3 rule 6 asks for that distinction to be stated.
+
+**Change.** Documentation only. The paragraph now names those calls and the
+hash probe's expected bound. No code path and no output changes.
+`the_walk_cost_paragraph_names_the_calls_the_walk_makes` reads the paragraph and
+fails if the stale call returns. It also counts the `FillBar::new` and
+`fills_at` calls in `round_trip` and the `.at_timestamp(` probe in
+`horizon_bar`, so the doc and the code cannot drift apart unnoticed. The test
+fails on the previous text.
