@@ -3357,12 +3357,19 @@ jobs:
           #   greeks/src/solver.rs println! 5 -> 7 (D-0921). Both new prints are
           #     inside `#[cfg(test)]` and report the measured bracket width and
           #     the bisected-solve census, the same kind as the five beside them.
+          #
+          #   api/src/server.rs println! 16, print! 1, eprintln! 9 -> 0 (D-1202,
+          #     probeapi-7). Every one of those 26 sites now goes through
+          #     `say!` (17: the 16 println! and the one print!) or `warn_line!`
+          #     (9: the eprintln!), which write with `writeln!` and never panic
+          #     on a closed stream. The sites did not go away, they changed
+          #     spelling, so they are declared in clause A2 below as the three
+          #     stream handles those two macros name (`stdout()` once,
+          #     `stderr()` twice), and the event rule for each is unchanged.
+          #     Folded with D-1450.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
           api/src/main.rs:eprintln!:1
-          api/src/server.rs:println!:16
-          api/src/server.rs:eprintln!:9
-          api/src/server.rs:print!:1
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
@@ -3418,14 +3425,16 @@ jobs:
 
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
-          # Its declared list is EMPTY and that is the measurement, not an
-          # oversight: nothing in this workspace names `stderr()` or `stdout()`
-          # today. An empty declaration against an empty measurement is the
-          # strongest state this clause can be in, and the day somebody adds the
-          # first one they will be told to write it down here with the same
-          # sentence clause A asks for — which kind is it, and where is the event
-          # that goes with it.
-          declared_handles=''
+          # Its declared list was EMPTY until D-1202: nothing in this workspace
+          # named `stderr()` or `stdout()`. Now exactly one file does, three
+          # times, and all three are inside the two server macros clause A's
+          # note above describes: `say!` names `stdout()` and `stderr()` (the
+          # banner line, and the stderr note when stdout is closed), and
+          # `warn_line!` names `stderr()`. Every call of either macro is one of
+          # the 26 server.rs prints clause A used to count, and the ones that
+          # are diagnostics on a production path still emit the event beside
+          # them. A new handle anywhere else is still refused. D-1450.
+          declared_handles='api/src/server.rs:handle:3'
           # Both sides normalised the same way, because an empty `printf` emits a
           # blank line and an empty file emits nothing, and comparing those two
           # would fail on the healthy case forever.
