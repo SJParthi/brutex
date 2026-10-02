@@ -46258,3 +46258,131 @@ path)`, `assert_eq!(one, one)`, `assert_eq!(one.key, one.key)`,
 `assert_eq!(genesis, genesis)`, `assert_eq!(read, read)`), which no derived
 `PartialEq` can fail. Each now compares against an independently built equal
 value and uses `assert_ne!` against a value differing in one field.
+### D-0740 — An Admission decision reads the validation's issued projection instead of re-reconciling the whole search — 2026-09-29
+
+**What was wrong (W3-runner1-0).** `AdmissionPolicyV1::evaluate_v2_projection`,
+`evaluate_v3_projection` and `evaluate_v3_exact_grid_projection` each built
+their walk-forward authority through `search_authority_projection()`, which
+runs the full private-seal reconciliation (`reconcile_anchored_admission_v2`,
+`reconcile_anchored_search_v3`, `reconcile_anchored_search_v4`) over every fold
+of the opaque validation. That work does not depend on the candidate, and the
+production caller (`cli::population_admission_v4`) makes one decision per
+candidate against one borrowed validation, so the same reconciliation ran once
+per candidate. `docs/06-limits.md` §167 had called that evaluation O(C).
+
+**The change.** The three issuing doors now keep the projection their one
+reconciliation derived in a private `issued` field, and the three
+walk-forward constructors read it through `issued_authority_projection()`,
+which copies fixed-size fields. The fields are private and written only by the
+issuing door, so the value cannot drift from what that reconciliation saw.
+`search_authority_projection()` is unchanged and still revalidates for any
+caller that asks for it. A value without an issued projection is refused
+with `SealMismatch`. No decision's bytes change: the projection read is the
+one the same reconciliation computed.
+
+**Proof.** `admission::tests::per_candidate_admission_never_re_reconciles_the_opaque_validation`
+counts reconciliations with a test-only per-thread probe: 21 decisions across
+V2, V3 and the exact grid add 0, and the revalidating door adds 1. With only
+the three call sites reverted it reports 21.
+`validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection`
+pins the refusal.
+
+### D-0741 — The training attestation carries the slice facts, so a per-run price does not rebuild them — 2026-09-29
+
+**What was wrong (W3-runner2-0).** `ResolvedExitGridV1::evaluate_with_attested`
+said "no bar is re-read and no byte is re-hashed here; what remains is the
+grid", but it called `grid::evaluate_resolved_policy_v1`, which ran
+`trade::SliceFacts::of(bars, column)` on every call: a walk over every
+execution bar, a `HashMap` and two prefix vectors of the slice's length, per
+run. The expression twin (`evaluate_expression_with_attested`, through
+`grid::evaluate_resolved_expression_policy_v1`) did the same, and
+`materialize_expression_coordinate` did it once per coordinate through
+`grid::materialize_expression_cell`. The facts depend only on the bars and
+column the token already borrows.
+
+**The change.** `AttestedTrainingV1` now holds the `SliceFacts` its
+attestation derived, and the three doors pass them down; the two resolved grid
+functions take the facts as a parameter, and
+`grid::materialize_expression_cell_over` is the materializer over given facts
+(the public `materialize_expression_cell` derives them and delegates). The
+token loses `Clone`, `Copy` and `Debug`, which no caller used; it stays `Sync`.
+No price changes: the facts are the same function of the same borrowed bars
+and column, and the attested and single-shot doors still return equal grids.
+
+**Proof.** `pricing_runs_over_one_attestation_derives_the_slice_facts_once`
+and `programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once`
+count derivations with a test-only per-thread probe in `SliceFacts::of`. On
+the unfixed doors they report 5 extra derivations for five runs and 33 for
+three programs and their 30 coordinates; with the fix, 0.
+
+**What it does not change.** The walk after the facts still visits every
+column row, and `evaluate_training_grid_attested` still runs
+`let attested = self.attest_training(series, column, horizon)?;` on every
+call, so a caller that prices each run through it still reads the whole slice
+per run.
+
+### D-0742 — The stationary bootstrap refuses a mean block above one million, where its ppm restart draw floors to zero — 2026-09-30
+
+**What was wrong (W3-runner1-2).** `bootstrap::stationary_indices` sets the
+continuation probability in parts per million:
+`1_000_000_u64.saturating_sub(1_000_000 / block as u64)`. For a block of
+1,000,001 or more the quotient is 0, the continuation is 1,000,000 ppm, and no
+draw ever restarts: every draw is one cyclic rotation of the series, whose
+mean equals the sample mean. Only a zero block was refused, so
+`reality_check`, `spa`, their receipts, `romano_wolf`, its receipts and
+`family_tests_v1` answered over rotations. On origin/main
+`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point` fails
+with `Reality Check answered over rotations: Some(0.001)` — p = 1/(999+1) for
+noise with a 3 paisa edge.
+
+**The change.** `bootstrap::MAX_BLOCK = 1_000_000`. Every entry point named
+above, and the family pass's `Stepdown`, refuses a block above it the way it
+already refused a zero block: `None`, `Err(FamilyTestsRefusalV1::…)`, or the
+legacy empty vector of `romano_wolf`. A block at or below the ceiling computes
+exactly what it computed before, so no answered verdict changes.
+
+**What it does not change.** The refusal is the arithmetic ceiling only. A
+block at or below one million is not compared with the series length: the
+test answers at a block of 1,000,000 over 200 periods. Recorded in
+`docs/06-limits.md`.
+
+**Proof.** `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`.
+
+### D-0743 — An Admission V2/V3 door refuses a probability whose floor ppm hides an exact value above its ceiling — 2026-09-30
+
+**What was wrong (GAP5-49).** `AdmissionEvidenceV2::new` and its V3 twin store
+each exact probability through `AdmissionExactProbabilityV2::ppm`, a floor,
+and the fixed policy gates PBO, family-wise Romano--Wolf, SPA, White and
+candidate Romano--Wolf with `check_max_u64` over that stored value
+(`value > ceiling`). A fraction just above a ceiling floors onto it and
+passes: on origin/main SPA `2_501 / 50_019` floors to 50,000 ppm, the
+fixture's 5% ceiling, `rejects_at_ppm(50_000)` is false, and the V2 verdict
+does not fail SPA.
+
+**The change.** `evaluate_v2_projection`, `evaluate_v3_projection` and
+`evaluate_v3_exact_grid_projection` refuse with
+`AdmissionV{2,3}ArithmeticRefusal::ProbabilityProjection(reason)` when a
+max-gated probability's floor ppm is within its ceiling while the exact
+fraction is not (`!rejects_at_ppm(ceiling)`), naming the first such gate in
+the order PBO, FWER, SPA, White, candidate Romano--Wolf. A decision record's
+verdict is re-derived by the V1 evaluation over the evidence's floor ppm
+slots (`values: evidence.values,` in `evaluate_v2` and `evaluate_v3`), and
+`AdmissionDecisionV3::from_canonical_parts` refuses a supplied verdict unequal
+to it (`let computed = policy.evaluate_v3(&evidence);`), so a correct failure
+cannot be written in these versions; refusing is the loud alternative to a record that passes a gate its
+exact value fails. Every value these doors decided correctly before is decided
+byte-identically: the refusal fires only where the old verdict was wrong. A
+ceiling projection in new record versions is the way to decide these values
+instead of refusing them, and is not done here.
+
+**What it does not change.** The cli-side V1 evidence builders
+(`boolean_admission_v1`, `boolean_admission_reader`,
+`index_stop_qualification_numeric`) also fill max-gated fields with
+`.ppm()`; they are outside the runner crate and outside this change.
+
+The evidence bytes themselves keep each exact fraction in their statistics
+section (`AdmissionExactProbabilityV2::new(reader.read_u64()?, reader.read_u64()?)`
+in `read_probability_v2` and `read_probability_v3`); it is the verdict, re-derived
+from the floor ppm slots, that cannot carry the correct failure.
+
+**Proof.** `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`.

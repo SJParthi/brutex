@@ -417,7 +417,7 @@ impl Stepdown {
         seed: u64,
         block: usize,
     ) -> Option<Self> {
-        if draws == 0 || block == 0 {
+        if draws == 0 || block == 0 || block > super::MAX_BLOCK {
             return None;
         }
         let denominator = draws.checked_add(1)?;

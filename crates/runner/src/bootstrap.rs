@@ -383,15 +383,25 @@ impl_exact_family_test_receipt_v1!(SpaReceiptV1);
 /// returns should pass their own.
 pub const DEFAULT_BLOCK: usize = 10;
 
+/// The largest average block length the stationary bootstrap can honour.
+///
+/// The continuation draw is in parts per million: a new block starts with
+/// probability `1_000_000 / block` ppm. Above one million that floors to
+/// zero, so no draw ever restarts and every draw is one rotation of the series
+/// (W3-runner1-2, D-0742). Every entry point refuses a longer block rather
+/// than resampling at a block length the caller did not ask for.
+pub const MAX_BLOCK: usize = 1_000_000;
+
 /// White's Reality Check.
 ///
 /// `returns[i]` is strategy `i`'s per-period returns. All must be the same
 /// length: they are aligned in time, and a bootstrap draw picks the same periods
 /// from every strategy so that the correlation between them is preserved.
 ///
-/// `None` when the set is empty, when the series disagree in length, or when a
-/// series is empty — refused rather than answered, because a p-value computed
-/// over misaligned strategies is a number about nothing.
+/// `None` when the set is empty, when the series disagree in length, when a
+/// series is empty, or when `block` exceeds [`MAX_BLOCK`] — refused rather than
+/// answered, because a p-value computed over misaligned strategies, or over
+/// draws that are all rotations of the sample, is a number about nothing.
 ///
 /// # Cost
 ///
@@ -408,6 +418,9 @@ pub fn reality_check(
     seed: u64,
     block: usize,
 ) -> Option<Verdict> {
+    if block > MAX_BLOCK {
+        return None;
+    }
     let periods = aligned(returns)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
@@ -503,6 +516,9 @@ pub fn reality_check(
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
 pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Option<Verdict> {
+    if block > MAX_BLOCK {
+        return None;
+    }
     let periods = aligned(returns)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
 
@@ -616,7 +632,8 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 /// Unlike [`reality_check`], this authority-producing API refuses zero draws,
 /// a zero block, fewer than two periods and an unrepresentable `draws + 1`
 /// denominator.  The legacy API keeps its conservative `p = 1` compatibility
-/// behavior for those cases.  The counted comparison remains White's existing
+/// behavior for those cases.  Both refuse a block above [`MAX_BLOCK`].  The
+/// counted comparison remains White's existing
 /// `bootstrap maximum >= observed statistic`; changing it to strict `>` would
 /// be a different procedure version, not a receipt-only change.
 ///
@@ -754,7 +771,7 @@ fn exact_family_test_inputs_v1(
     draws: usize,
     block: usize,
 ) -> Option<(usize, Vec<Performance>)> {
-    if draws == 0 || block == 0 || draws.checked_add(1).is_none() {
+    if draws == 0 || block == 0 || block > MAX_BLOCK || draws.checked_add(1).is_none() {
         return None;
     }
     let periods = aligned(returns)?;
@@ -1104,8 +1121,9 @@ impl RomanoWolfAdjustedReceiptV1 {
 /// what makes this different from testing each strategy at 5% and hoping.
 ///
 /// Returns the rejected strategies in the order they were rejected. This
-/// legacy vector shape renders both malformed input and a complete
-/// non-rejection as empty; callers that must distinguish them use
+/// legacy vector shape renders malformed input, a `block` above
+/// [`MAX_BLOCK`] and a complete non-rejection as empty; callers that must
+/// distinguish them use
 /// [`romano_wolf_receipt`].
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
@@ -1117,6 +1135,9 @@ pub fn romano_wolf(
     block: usize,
     alpha_ppm: u64,
 ) -> Vec<Rejected> {
+    if block > MAX_BLOCK {
+        return Vec::new();
+    }
     let Some(periods) = aligned(returns) else {
         return Vec::new();
     };
@@ -1126,9 +1147,9 @@ pub fn romano_wolf(
 /// Runs Romano--Wolf and preserves the complete procedure denominators.
 ///
 /// Unlike [`romano_wolf`], this distinguishes a valid family that rejected
-/// nothing from malformed input.  Zero draws, a zero block length and an alpha
-/// outside the ppm probability domain have no complete procedure receipt and
-/// return `None`.
+/// nothing from malformed input.  Zero draws, a zero block length or one above
+/// [`MAX_BLOCK`], and an alpha outside the ppm probability domain have no
+/// complete procedure receipt and return `None`.
 #[must_use]
 pub fn romano_wolf_receipt(
     returns: &[Vec<i64>],
@@ -1137,7 +1158,7 @@ pub fn romano_wolf_receipt(
     block: usize,
     alpha_ppm: u64,
 ) -> Option<RomanoWolfReceipt> {
-    if draws == 0 || block == 0 || alpha_ppm > 1_000_000 {
+    if draws == 0 || block == 0 || block > MAX_BLOCK || alpha_ppm > 1_000_000 {
         return None;
     }
     let periods = aligned(returns)?;
@@ -1175,7 +1196,8 @@ pub fn romano_wolf_receipt(
 /// assumption enters this result.
 ///
 /// `None` refuses an empty/misaligned family, fewer than two periods, zero
-/// draws, zero block length, an unrepresentable exact denominator, or any
+/// draws, a zero block length or one above [`MAX_BLOCK`], an unrepresentable
+/// exact denominator, or any
 /// zero-variance candidate.  The last case is structural: studentization has
 /// no denominator, and assigning the source paper's strict-exceedance floor to
 /// a point mass at zero would manufacture the strongest possible p-value from
@@ -1198,7 +1220,7 @@ pub fn romano_wolf_adjusted_p_values_v1(
     seed: u64,
     block: usize,
 ) -> Option<RomanoWolfAdjustedReceiptV1> {
-    if draws == 0 || block == 0 {
+    if draws == 0 || block == 0 || block > MAX_BLOCK {
         return None;
     }
     let denominator = draws.checked_add(1)?;
@@ -2722,5 +2744,96 @@ mod stepdown_partition_tests {
             rejected.len() <= set.len(),
             "the total rejected can never exceed the input"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod block_ceiling_tests {
+    use super::{
+        FamilyTestsRefusalV1, Rng, family_tests_v1, reality_check, romano_wolf,
+        romano_wolf_adjusted_p_values_v1, romano_wolf_receipt, spa, spa_receipt_v1,
+        stationary_indices, white_reality_check_receipt_v1,
+    };
+
+    /// Deterministic noise around zero, plus `edge` paisa per period.
+    fn edged(periods: usize, seed: u64, edge: i64) -> Vec<i64> {
+        let mut r = Rng::new(seed);
+        (0..periods)
+            .map(|_| i64::try_from(r.next_u64() % 200).unwrap_or(0) - 100 + edge)
+            .collect()
+    }
+
+    /// W3-runner1-2 (D-0742): the continuation draw is in parts per million,
+    /// so above one million periods the restart probability floors to zero
+    /// and every draw is one rotation of the series. Every entry point
+    /// refuses that block instead of resampling rotations; one million itself
+    /// is still accepted.
+    #[test]
+    fn a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point() {
+        let ceiling = 1_000_000_usize;
+        assert_eq!(
+            super::MAX_BLOCK,
+            ceiling,
+            "the ppm draw resolves one million"
+        );
+        let beyond = ceiling + 1;
+        let periods = 200_usize;
+
+        // Why it is refused: at `beyond` no draw ever restarts.
+        let mut rng = Rng::new(5);
+        for _ in 0..50 {
+            let index = stationary_indices(periods, beyond, &mut rng);
+            assert!(
+                index
+                    .windows(2)
+                    .all(|pair| pair.get(1) == pair.first().map(|at| (at + 1) % periods).as_ref()),
+                "above the ppm resolution every draw is one rotation"
+            );
+        }
+
+        // A small positive mean on noise, beside plain noise.
+        let set = vec![edged(periods, 11, 3), edged(periods, 12, 0)];
+        let rc = reality_check(&set, 999, 3, beyond);
+        assert!(
+            rc.is_none(),
+            "Reality Check answered over rotations: {:?}",
+            rc.map(|v| v.p_value)
+        );
+        let v = spa(&set, 999, 3, beyond);
+        assert!(
+            v.is_none(),
+            "SPA answered over rotations: {:?}",
+            v.map(|v| (v.p_value, v.clears()))
+        );
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, beyond).is_none());
+        assert!(spa_receipt_v1(&set, 999, 3, beyond).is_none());
+        assert!(romano_wolf_receipt(&set, 999, 3, beyond, 50_000).is_none());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, beyond).is_none());
+        assert_eq!(
+            family_tests_v1(&set, &[0], 999, 3, beyond).err(),
+            Some(FamilyTestsRefusalV1::RomanoWolf)
+        );
+        assert_eq!(
+            family_tests_v1(&set, &[], 999, 3, beyond).err(),
+            Some(FamilyTestsRefusalV1::White)
+        );
+
+        // A strong edge the stepdown names at the ceiling is not named beyond it.
+        let strong = vec![edged(periods, 21, 60), edged(periods, 22, 0)];
+        assert!(!romano_wolf(&strong, 999, 3, ceiling, 50_000).is_empty());
+        assert!(romano_wolf(&strong, 999, 3, beyond, 50_000).is_empty());
+
+        // One million is still a block the draw can restart at, and is accepted.
+        assert!(reality_check(&set, 999, 3, ceiling).is_some());
+        assert!(spa(&set, 999, 3, ceiling).is_some());
+        assert!(white_reality_check_receipt_v1(&set, 999, 3, ceiling).is_some());
+        assert!(spa_receipt_v1(&set, 999, 3, ceiling).is_some());
+        assert!(romano_wolf_receipt(&set, 999, 3, ceiling, 50_000).is_some());
+        assert!(romano_wolf_adjusted_p_values_v1(&set, 999, 3, ceiling).is_some());
+        assert!(family_tests_v1(&set, &[0], 999, 3, ceiling).is_ok());
     }
 }

@@ -10733,3 +10733,48 @@ the calls in `dhan.rs` are inside its `mod tests`.
   another thread changes the counter in between or the weak exchange fails
   spuriously. The number of attempts grows with that contention; it is not
   one `fetch_add`. Not timed.
+## Admission no longer re-reconciles the search per candidate — D-0740, 29 September 2026
+
+§167 said Runner evaluation of Admission V4 is O(C). Until D-0740 it was not:
+each decision re-ran the opaque validation's full reconciliation, whose work
+grows with the folds and each fold's candidate list, so C decisions paid that
+fold-wide cost C times. Each decision now reads the projection sealed at
+issuance, a copy of fixed-size fields, so the reconciliation runs once when
+the validation is issued and not per decision
+(`per_candidate_admission_never_re_reconciles_the_opaque_validation`). The
+rest of each decision (Statistics verification, the evidence join and the
+policy) is unchanged and was not re-measured here. Not timed.
+
+## Attested pricing no longer rebuilds the slice facts per run — D-0741, 29 September 2026
+
+`evaluate_with_attested`, the expression pricing door and coordinate
+materialization each derived `SliceFacts` (a pass over every execution bar,
+one `HashMap` and two prefix vectors of the slice's length) on every call. The
+attestation now derives them once and the doors read them
+(`pricing_runs_over_one_attestation_derives_the_slice_facts_once`,
+`programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once`).
+A priced run still walks every column row, so its cost grows with the signal
+rows of the slice and the grid, not with a constant. The single-shot
+`evaluate_training_grid_attested` still attests per call, so a caller that
+uses it per candidate still reads the whole slice per candidate. Not timed.
+
+## The stationary bootstrap's block ceiling is arithmetic, not statistical — D-0742, 30 September 2026
+
+The continuation draw is `1_000_000_u64.saturating_sub(1_000_000 / block as u64)`
+ppm, so a block above `bootstrap::MAX_BLOCK` (1,000,000) would never restart
+and is now refused by every entry point
+(`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`). A
+block at or below the ceiling is still accepted however it compares with the
+series length — the same test answers at a block of 1,000,000 over 200
+periods — and the integer division quantizes the restart probability, so a
+large accepted block is resampled at `1_000_000 / (1_000_000 / block)` rather
+than at `block`. Neither is refused or measured here.
+
+## Admission V2/V3 refuses, rather than decides, a floor-hidden probability — D-0743, 30 September 2026
+
+A max-gated probability whose floor ppm is within its ceiling while its exact
+fraction is above it is refused by the three projection doors
+(`a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`);
+a V2/V3 verdict, re-derived from the floor ppm slots, cannot carry the
+correct failure. The cli V1 builders
+that fill the same fields with `.ppm()` are not changed by D-0743.

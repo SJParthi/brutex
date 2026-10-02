@@ -5595,3 +5595,28 @@ the guard. The existing emits test pins the warning's message and level.
 | C4-PULL-10-01 | `pull::resolve::crawl` builds one `MasterIndex` before its category loop and calls no per-index `universe::resolve`, so the master is indexed once per pass. | `pull::resolve::tests::the_master_is_indexed_once_per_pass_not_once_per_index` | ✓ |
 | C4-PULL-10-02 | `MasterIndex::resolve` counts `extra` as the old master walk did: a symbol the master repeats is subtracted per row, a name the file repeats once, a blank never; and one index reused across resolutions answers each as a fresh join. | `pull::universe::tests::extra_counts_every_unnamed_row_once_through_repeats_and_blanks`, `pull::universe::tests::one_master_index_answers_each_index_as_a_fresh_join_would` | ✓ |
 | C4-PULL-10-03 | `Selection::cells` yields each instrument-month once, in first-seen, instrument-major order, however often a month is repeated; `gaps` lists a repeated missing cell once and counts a repeated held cell once. | `pull::work::tests::a_repeated_month_yields_each_cell_once_in_first_seen_order`, `pull::work::tests::a_repeated_cell_is_missing_once_and_held_once` | ✓ |
+### Admission reads the issued search projection — W3-runner1-0 (D-0740)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-01: an Admission V2, V3 or exact-grid decision reads the projection its opaque validation sealed at issuance and runs no fold-wide reconciliation; 21 decisions add 0 reconciliations and the revalidating `search_authority_projection` still adds 1, with decisions equal to the first. | `admission::tests::per_candidate_admission_never_re_reconciles_the_opaque_validation` | ✓ |
+| C4-RUNNER-02: an opaque validation with no issued projection is refused with `SealMismatch` by the O(1) door, for V2, V3 and V4. | `validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection` | ✓ |
+
+### Attested pricing reads the slice facts the attestation derived — W3-runner2-0 (D-0741)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-03: `attest_training` derives the slice facts once, and five `evaluate_with_attested` runs over that token derive them 0 more times while pricing the same grid as the single-shot door, which derives them once. | `exit_grid_policy::tests::pricing_runs_over_one_attestation_derives_the_slice_facts_once` | ✓ |
+| C4-RUNNER-04: three expression programs priced over one attestation, and every coordinate of each materialized from it, derive the slice facts 0 more times after the attestation's one derivation. | `exit_grid_policy::expression_execution::tests::programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once` | ✓ |
+
+### The stationary bootstrap refuses a block its ppm draw cannot restart at — W3-runner1-2 (D-0742)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-05: `bootstrap::MAX_BLOCK` is 1,000,000; at a block of 1,000,001 over 200 periods each of 50 `stationary_indices` draws is one rotation, and `reality_check`, `spa`, `white_reality_check_receipt_v1`, `spa_receipt_v1`, `romano_wolf_receipt`, `romano_wolf_adjusted_p_values_v1` and `family_tests_v1` refuse that block while `romano_wolf` returns no rejection where it names one at 1,000,000; every one of them still answers at 1,000,000. | `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point` | ✓ |
+
+### A floor ppm on a max ceiling never passes an exact probability above it — GAP5-49 (D-0743)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| C4-RUNNER-06: when the exact PBO, family-wise Romano--Wolf, SPA, White or candidate Romano--Wolf probability floors to a ppm within its policy ceiling while the exact fraction is above it, `evaluate_v2_projection`, `evaluate_v3_projection` and `evaluate_v3_exact_grid_projection` refuse with `ProbabilityProjection` naming that gate; values within every ceiling are decided, and an SPA floor above its ceiling is decided as a failed SPA gate. | `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it` | ✓ |
