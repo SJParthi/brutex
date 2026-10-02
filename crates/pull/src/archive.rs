@@ -746,7 +746,7 @@ fn descend(
         // census walk (`Malformed::Collect`) pushes a malformed member onto
         // `rejected`, never onto `out`, so a folder of malformed files was
         // read past the cap. An ingest walk's `rejected` stays empty, so its
-        // count is the one it always was. D-0725.
+        // count is the one it always was. D-0725, D-0953 (W1-pull1-2).
         let seen = out.len().saturating_add(rejected.len());
         if seen >= MAX_MEMBERS {
             return Err(ArchiveError::TooManyMembers {
@@ -859,7 +859,9 @@ pub fn total_rows(members: &[Member]) -> usize {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
-    use super::{ArchiveError, MAX_FINDING_BYTES, SORTS, finding, read_dir};
+    use super::{
+        ArchiveError, MAX_FINDING_BYTES, MAX_MEMBERS, SORTS, finding, read_dir, read_dir_reporting,
+    };
     use crate::csv::{Columns, CsvError};
     use std::fs;
     use std::path::PathBuf;
@@ -1257,6 +1259,41 @@ mod tests {
         assert!(
             matches!(walked.last(), Some(CsvError::TooManyRows { .. })),
             "the walk reaches the last variant declared: {walked:?}"
+        );
+    }
+
+    /// **A CENSUS STOPS AT THE MEMBER CAP WHETHER THE MEMBERS DECODE OR NOT.**
+    ///
+    /// W1-pull1-2. The cap read `out.len()`, which counts ACCEPTED members only,
+    /// so under `Malformed::Collect` a folder of members that all fail to decode
+    /// was read in full, every file opened and every rejection kept, with no
+    /// bound at all. The cap now counts every member the walk visits.
+    #[test]
+    fn a_census_of_malformed_members_is_refused_at_the_member_cap() {
+        let scratch = Scratch::new();
+        let root = scratch.root.join("feed");
+        fs::create_dir_all(&root).expect("a scratch feed");
+        for i in 0..=MAX_MEMBERS {
+            fs::write(root.join(format!("F{i}.csv")), "20221003,09:15:01\n")
+                .expect("two fields, not five");
+        }
+
+        let got = read_dir_reporting(&root, Columns::TrueDataIndex);
+        // Counts, not the vectors: fifty thousand rejections would bury the
+        // failure message this test exists to print.
+        let seen = got
+            .as_ref()
+            .map(|(kept, rejected)| (kept.len(), rejected.len()));
+        assert!(
+            matches!(
+                got,
+                Err(ArchiveError::TooManyMembers {
+                    members: MAX_MEMBERS,
+                    cap: MAX_MEMBERS,
+                })
+            ),
+            "the census must stop AT the bound, counting the members it \
+             rejected; (kept, rejected) = {seen:?}"
         );
     }
 }
