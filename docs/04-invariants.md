@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### A generated sweep that measured nothing exits non-zero — audit 2026-10-02 probeapi-6
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBEAPI-6 — **`cli sweep SESSIONS MIN_HITS` exits `FAILED` when its verdict reads `outcome NOTHING MEASURED`, and still prints the report.** Every session count from one to five, at 1 and at 10 hits, exits `FAILED` with the verdict and the BARS block rendered, and the page carries no refusal line; six sessions at 100 hits, which completes a ladder, exits `OK`. `nothing_measured` matches the verdict row only, not the phrase in prose or another `outcome` value. Before the fix `cli sweep 1 10` exited 0 while `cli audit 1 10` exited 1 | `cli::tests::a_sweep_that_measured_nothing_exits_non_zero`; `cli::tests::a_valid_sweep_and_a_valid_auto_both_render_and_exit_zero` | ✓ |

@@ -2057,7 +2057,15 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         {
             (Ok(s), Ok(m)) => {
                 let text = sweep(s, m);
-                let code = if carries_refusal(&text) { FAILED } else { OK };
+                // A sweep that walked no ladder measured nothing, and its own
+                // verdict says the answer is not trustworthy. Exiting 0 on it
+                // let `cli sweep 1 10 && <next>` proceed where `cli audit 1 10`
+                // stopped.
+                let code = if carries_refusal(&text) || nothing_measured(&text) {
+                    FAILED
+                } else {
+                    OK
+                };
                 out.push_str(&text);
                 code
             }
@@ -14026,6 +14034,22 @@ fn carries_refusal(text: &str) -> bool {
     refusal_reason(text).is_some()
 }
 
+/// Whether a rendered report's verdict says no ladder was walked.
+///
+/// `runner::report`'s verdict prints `outcome ... NOTHING MEASURED` for a
+/// sweep that never started: too few bars to warm, or every bar refused. That
+/// is not a refusal line, so [`carries_refusal`] does not see it, and it is not
+/// an answer either: the same verdict says the run is not trustworthy as a
+/// whole. Matched on the verdict row itself, so a word elsewhere on the page
+/// cannot trip it.
+fn nothing_measured(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("outcome")
+            .is_some_and(|rest| rest.trim_start().starts_with("NOTHING MEASURED"))
+    })
+}
+
 /// Every step refused, so there is no page and no verdict on the rules.
 fn refused_walk(out: &mut String, steps: usize, first_refusal: Option<&str>) {
     let _ = writeln!(
@@ -19764,6 +19788,7 @@ mod tests {
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
+    use super::{FAILED, carries_refusal, nothing_measured};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -20114,11 +20139,52 @@ mod tests {
         }
     }
 
+    /// A SWEEP THAT MEASURED NOTHING EXITS NON-ZERO. Audit probeapi-6.
+    ///
+    /// `cli sweep` over one to five generated sessions walks no ladder: its
+    /// verdict reads `NOTHING MEASURED` and `trustworthy as a whole answer
+    /// NO`, and it exited 0 while `cli audit` on the same input exited 1. Every
+    /// count from one to five now exits `FAILED` and still prints its report;
+    /// six sessions at 100 hits, which completes a ladder, exits `OK`. The
+    /// predicate reads the verdict row only: the phrase in prose, or an
+    /// `outcome` row with any other value, does not trip it.
+    #[test]
+    fn a_sweep_that_measured_nothing_exits_non_zero() {
+        for sessions in ["1", "2", "3", "4", "5"] {
+            for hits in ["1", "10"] {
+                let mut out = String::new();
+                assert_eq!(
+                    run(&argv(&["sweep", sessions, hits]), &mut out),
+                    FAILED,
+                    "sweep {sessions} {hits}:\n{out}"
+                );
+                assert!(nothing_measured(&out), "{out}");
+                assert!(out.contains("BARS"), "the report still renders:\n{out}");
+                assert!(!carries_refusal(&out), "it is not a refusal line:\n{out}");
+            }
+        }
+        let mut out = String::new();
+        assert_eq!(run(&argv(&["sweep", "6", "100"]), &mut out), OK, "{out}");
+        assert!(nothing_measured(
+            "  outcome          NOTHING MEASURED  no ladder"
+        ));
+        assert!(!nothing_measured(
+            "  outcome                  complete  extinct"
+        ));
+        assert!(!nothing_measured("NOTHING MEASURED appears in prose here"));
+        assert!(!nothing_measured("  outcomes        NOTHING MEASURED"));
+        assert!(!nothing_measured(""));
+    }
+
     #[test]
     fn a_valid_sweep_and_a_valid_auto_both_render_and_exit_zero() {
         let mut out = String::new();
-        assert_eq!(run(&argv(&["sweep", "1", "1"]), &mut out), OK);
+        assert_eq!(run(&argv(&["sweep", "6", "100"]), &mut out), OK);
         assert!(out.contains("BARS"), "the report body rendered:\n{out}");
+        assert!(
+            out.contains("the frontier went extinct"),
+            "six sessions at 100 hits complete a ladder:\n{out}"
+        );
 
         let mut out = String::new();
         assert_eq!(run(&argv(&["auto", "1"]), &mut out), OK);
