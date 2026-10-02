@@ -218,6 +218,14 @@ pub struct FoldResult {
     /// `None` exactly when `chosen` is `None`: a fold that picked no candidate
     /// decided no side, and saying "long" there would be a value nobody chose.
     pub chosen_side: Option<Direction>,
+    /// The exit-grid rung count this fold priced its training grid at.
+    ///
+    /// Recorded because it is now a per-fold fact: under
+    /// [`FoldRungs::PerTraining`] it is derived from this fold's own training
+    /// slice, so two folds may differ, and a count that silently depended on a
+    /// later test window would otherwise be invisible (GAP4-46, D-0963).
+    /// `None` from a door that prices an exact grid policy rather than a count.
+    pub exit_rungs: Option<usize>,
     /// The combination with the best in-sample worst-case total, if any.
     ///
     /// "Worst case" names the FILL MODEL, not a cost bound. That selection
@@ -1612,6 +1620,68 @@ pub fn fold_rungs() -> usize {
         .unwrap_or(DEFAULT_RUNGS)
 }
 
+/// Where each walk-forward fold gets its exit-grid rung count from.
+///
+/// # The look-ahead this closes (GAP4-46, D-0963)
+///
+/// The two-series doors took one `rungs: usize`, and `cli` resolved it with
+/// `grid_rungs(bars)` over the WHOLE span -- test windows included. That count
+/// is `max_stop_points / step`, both read off the bars, so a bar in the last
+/// fold's test window could move the exit grid every earlier fold trained on.
+/// `CLAUDE.md` §3 rule 7 allows bar N to read bars `0..N`, and a training
+/// grid sized by its own future does not.
+///
+/// So a derived count is now derived PER FOLD, from that fold's own training
+/// signal slice and nothing else. An explicit operator count stays
+/// [`FoldRungs::Fixed`]: it is a stated number, not a reading of any bar.
+#[derive(Clone, Copy)]
+pub enum FoldRungs<'a> {
+    /// One count for every fold. Zero keeps the legacy [`DEFAULT_RUNGS`]
+    /// fallback rather than pricing only the no-exit baseline.
+    Fixed(usize),
+    /// Derive each fold's count from `train` -- the fold's training signal
+    /// slice, the same bars its sweep is allowed to see. A zero answer means
+    /// the slice cannot support a derivation, and the walk refuses by name
+    /// instead of substituting a count nobody derived.
+    PerTraining(&'a (dyn Fn(&[Candle]) -> usize + Sync)),
+}
+
+impl core::fmt::Debug for FoldRungs<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Fixed(n) => f.debug_tuple("Fixed").field(n).finish(),
+            Self::PerTraining(_) => f.write_str("PerTraining"),
+        }
+    }
+}
+
+impl FoldRungs<'_> {
+    /// The count one fold prices, or why its training slice cannot say.
+    ///
+    /// `index` is the fold's zero-based position, named one-based in the
+    /// refusal so it matches the progress line an operator reads.
+    ///
+    /// # Errors
+    ///
+    /// [`FoldRungs::PerTraining`] returning zero for `train`.
+    pub fn for_training(&self, index: usize, train: &[Candle]) -> Result<usize, String> {
+        match *self {
+            Self::Fixed(0) => Ok(DEFAULT_RUNGS),
+            Self::Fixed(n) => Ok(n),
+            Self::PerTraining(derive) => match derive(train) {
+                0 => Err(format!(
+                    "walk-forward fold {} has a {}-bar training slice too short to derive an \
+                     exit-grid rung count from its own bars; refusing rather than borrowing a \
+                     count from bars the fold may not read",
+                    index.saturating_add(1),
+                    train.len()
+                )),
+                n => Ok(n),
+            },
+        }
+    }
+}
+
 /// The excursion side matching a fill direction.
 ///
 /// Two enums for the same fact, in two crates that may not depend on each
@@ -1926,7 +1996,7 @@ pub fn walk_forward_shaped_with_rungs(
         &mut builder,
         shape,
         trades_on_these_bars,
-        rungs,
+        FoldRungs::Fixed(rungs),
         None,
         None,
         // The one-series door has no operator behind it: `cli` validates
@@ -1948,6 +2018,11 @@ pub fn walk_forward_shaped_with_rungs(
 /// `on_fold` hears each finished fold once, on the calling thread, as a
 /// [`FoldProgress`]; that type says why this crate cannot report a fold itself.
 /// A caller with nothing to say passes `&|_| {}`.
+///
+/// `rungs` is a [`FoldRungs`]: an explicit count every fold shares, or a
+/// derivation each fold applies to its own training signal slice. A
+/// whole-span count derived from bars that include test windows is the
+/// look-ahead that type exists to refuse (D-0963).
 #[must_use]
 #[expect(
     clippy::too_many_arguments,
@@ -1964,7 +2039,7 @@ pub fn walk_forward_projected_with_rungs(
     sweeper: &crate::Sweeper,
     evaluator: &mut impl FnMut() -> Evaluator,
     shape: Shape,
-    rungs: usize,
+    rungs: FoldRungs<'_>,
     on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     let mut builder = |slice: &[Candle]| Ok(Column::build(slice, &mut evaluator()));
@@ -1994,6 +2069,11 @@ pub fn walk_forward_projected_with_rungs(
 /// `on_fold` hears each finished fold once, on the calling thread, as a
 /// [`FoldProgress`]; that type says why this crate cannot report a fold itself.
 /// A caller with nothing to say passes `&|_| {}`.
+///
+/// `rungs` is a [`FoldRungs`]: an explicit count every fold shares, or a
+/// derivation each fold applies to its own training signal slice. A
+/// whole-span count derived from bars that include test windows is the
+/// look-ahead that type exists to refuse (D-0963).
 #[must_use]
 #[expect(
     clippy::too_many_arguments,
@@ -2008,7 +2088,7 @@ pub fn walk_forward_projected_prepared_with_rungs(
     sweeper: &crate::Sweeper,
     builder: &mut impl FnMut(&[Candle]) -> Result<Column, String>,
     shape: Shape,
-    rungs: usize,
+    rungs: FoldRungs<'_>,
     on_fold: &(dyn Fn(FoldProgress) + Sync),
 ) -> Validated {
     walk_forward_core(
@@ -2075,7 +2155,7 @@ pub fn walk_forward_projected_prepared_anchored_admission_v2(
         builder,
         Shape::Anchored,
         TradesOnTheseBars::Yes,
-        resolved_rungs,
+        FoldRungs::Fixed(resolved_rungs),
         Some(execution),
         Some(AnchoredCapture::AdmissionV2(&mut capture)),
         &|_| {},
@@ -2128,7 +2208,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v3(
         builder,
         Shape::Anchored,
         TradesOnTheseBars::Yes,
-        rungs,
+        FoldRungs::Fixed(rungs),
         Some(execution),
         Some(AnchoredCapture::SearchV3(&mut capture)),
         &|_| {},
@@ -2785,6 +2865,8 @@ fn walk_forward_exact_grid_v4(
             chosen_exit_total: choice.map(|value| value.in_sample_pessimistic),
             out_of_sample_exit: choice.map(|value| value.out_of_sample_pessimistic),
             chosen_side: choice.map(|value| value.side),
+            // V4 prices an exact resolved grid policy per fold, not a count.
+            exit_rungs: None,
             chosen: choice.map(|value| value.mask),
             in_sample: plain_train,
             out_of_sample: plain_oos,
@@ -4270,7 +4352,7 @@ fn walk_forward_core(
     builder: &mut impl FnMut(&[Candle]) -> Result<Column, String>,
     shape: Shape,
     trades_on_these_bars: TradesOnTheseBars,
-    rungs: usize,
+    rungs: FoldRungs<'_>,
     execution: Option<ExecutionSeries<'_>>,
     mut admission_capture: Option<AnchoredCapture<'_>>,
     on_fold: &(dyn Fn(FoldProgress) + Sync),
@@ -4313,7 +4395,6 @@ fn walk_forward_core(
         }
     }
     let mut out = Validated::default();
-    let rungs = if rungs == 0 { DEFAULT_RUNGS } else { rungs };
     let mut training_execution_cursor = MonotonicExecutionPrefix::default();
     let mut oos_execution_cursor = MonotonicExecutionPrefix::default();
 
@@ -4363,6 +4444,18 @@ fn walk_forward_core(
         // A new threshold must retain the caller's memory, work and worker
         // limits. Reconstructing a default ladder would escape those bounds.
         let per_fold = fold_ladder(base, train.len(), bars.len());
+        // THIS FOLD'S RUNG COUNT, FROM `train` ALONE (GAP4-46, D-0963). It
+        // used to be one count resolved by the caller over the whole span,
+        // test windows included, so a later test window could resize this
+        // fold's training grid. Resolved before any column is built so a
+        // refusal costs nothing.
+        let fold_rungs = match rungs.for_training(index, train) {
+            Ok(n) => n,
+            Err(why) => {
+                out.refused = Some(why);
+                return out;
+            }
+        };
         let signal_train_column = match builder(train) {
             Ok(column) => column,
             Err(why) => {
@@ -4611,9 +4704,12 @@ fn walk_forward_core(
         // Hoisted beside `facts` because it too is a fact about `train` and
         // does not vary by candidate. One pass, shared by every thread.
         let forward = crate::outcome::forward(trade_train, train_column, horizon);
-        // THE RUNG COUNT WAS RESOLVED BY THE CALLER, ONCE. It is the same
-        // already-clamped value the caller records in run identity; no lane
-        // reads `std::env`, and no fold can reinterpret the memory bound.
+        // THE RUNG COUNT IS `fold_rungs`, RESOLVED ABOVE FROM THIS FOLD'S
+        // TRAINING SLICE (or the caller's explicit `Fixed` count). It is NOT
+        // the full-span value the caller records as identity term seventeen:
+        // that value read the test windows. Identity names the POLICY instead
+        // (term twenty-one), and the count each fold used is recorded on
+        // `FoldResult::exit_rungs`. No lane reads `std::env`.
         // THE SIDE TRAVELS WITH THE CANDIDATE, because the test window must be
         // priced on the side TRAINING chose and not on one derived again from
         // the bars being tested.
@@ -4634,7 +4730,7 @@ fn walk_forward_core(
                     &item.mask,
                     horizon,
                     side_of(own),
-                    crate::grid::Levels::derived(rungs),
+                    crate::grid::Levels::derived(fold_rungs),
                     &facts,
                 );
                 let cell = g.sharpest().or_else(|| g.best())?;
@@ -4939,6 +5035,7 @@ fn walk_forward_core(
             train_bars: train.len(),
             purged: fold.purged,
             test_bars: fold.test.len(),
+            exit_rungs: Some(fold_rungs),
             considered,
             priced,
             halted: swept.sweep.halted,
@@ -5008,9 +5105,10 @@ fn restricted(column: &Column, from: usize) -> Column {
 mod tests {
     use super::{
         AnchoredAdmissionValidationRefusalV2, AnchoredAdmissionValidationV2,
-        AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, MonotonicExecutionPrefix,
-        Shape, TradesOnTheseBars, Validated, is_one_minute_path, project_fold, project_oos_fold,
-        walk_forward, walk_forward_projected_prepared_anchored_admission_v2,
+        AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, FoldRungs,
+        MonotonicExecutionPrefix, Shape, TradesOnTheseBars, Validated, is_one_minute_path,
+        project_fold, project_oos_fold, walk_forward,
+        walk_forward_projected_prepared_anchored_admission_v2,
         walk_forward_projected_prepared_anchored_search_v3,
         walk_forward_projected_prepared_with_rungs, walk_forward_projected_with_rungs,
         walk_forward_shaped, walk_forward_shaped_with_rungs, walk_forward_with_rungs,
@@ -5096,6 +5194,7 @@ mod tests {
     use brutex_core::instrument::{Exchange, InstrumentKey};
     use costs::fill::Direction;
     use engine::Ladder;
+    use indicators::Candle;
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -5454,7 +5553,7 @@ mod tests {
             &sweeper(),
             &mut evaluator,
             Shape::Anchored,
-            DEFAULT_RUNGS,
+            FoldRungs::Fixed(DEFAULT_RUNGS),
             &|_| {},
         );
         assert!(refused.folds.is_empty());
@@ -5487,7 +5586,7 @@ mod tests {
                 Err("stored daily/minute replay evidence refused this fold".to_owned())
             },
             Shape::Anchored,
-            DEFAULT_RUNGS,
+            FoldRungs::Fixed(DEFAULT_RUNGS),
             &|_| {},
         );
         assert_eq!(called, 1, "the first refused fold stops the walk");
@@ -5495,6 +5594,138 @@ mod tests {
         assert_eq!(
             refused.refused.as_deref(),
             Some("stored daily/minute replay evidence refused this fold")
+        );
+    }
+
+    /// `FoldRungs::PerTraining` is called on each fold's TRAINING slice and on
+    /// nothing else, its answer is the count that fold records, and two spans
+    /// differing only in the last fold's test window give identical earlier
+    /// folds (GAP4-46, D-0963).
+    ///
+    /// The derivation reads the largest high in whatever it is handed, so it
+    /// would move if any fold were given a slice reaching into the changed
+    /// test window -- and the count is mapped into 2..=5 so every fold prices
+    /// a real ladder.
+    #[test]
+    fn a_per_training_rung_count_reads_only_its_own_training_slice() {
+        let derive = |train: &[Candle]| -> usize {
+            let top = train.iter().map(|bar| bar.high).max().unwrap_or(0);
+            usize::try_from(top.rem_euclid(4)).unwrap_or(0) + 2
+        };
+        let a = crate::synthetic::sessions(12);
+        // PAST THE LAST EARLIER TEST WINDOW, plus two horizons, in either
+        // shape: a trade an earlier fold opens on its final test bar resolves
+        // up to one horizon later. That is the outcome being priced, not an
+        // input to any choice, so the change starts where no earlier fold's
+        // trade can still be open -- and stays inside the last test window.
+        let quiet_until = [Shape::Anchored, Shape::Rolling]
+            .iter()
+            .filter_map(|shape| {
+                let windows = shape.folds(a.len(), h(15), 3);
+                windows
+                    .get(windows.len().checked_sub(2)?)
+                    .map(|fold| fold.test.end)
+            })
+            .max()
+            .expect("both shapes have an earlier fold")
+            .saturating_add(30);
+        let mut b = a.clone();
+        for bar in b.get_mut(quiet_until..).expect("in range") {
+            bar.high = bar.high.saturating_add(1_000_003);
+        }
+        let walk = |bars: &[Candle], shape: Shape| {
+            walk_forward_projected_with_rungs(
+                bars,
+                ExecutionSeries {
+                    bars,
+                    signal_length_micros: 60_000_000,
+                },
+                h(15),
+                3,
+                Direction::Long,
+                &sweeper(),
+                &mut evaluator,
+                shape,
+                FoldRungs::PerTraining(&derive),
+                &|_| {},
+            )
+        };
+        for shape in [Shape::Anchored, Shape::Rolling] {
+            let one = walk(&a, shape);
+            let other = walk(&b, shape);
+            assert_eq!(one.refused, None, "{shape:?}");
+            assert_eq!(one.folds.len(), 3, "{shape:?}: three splits, three folds");
+            assert_eq!(
+                one.folds.get(..2),
+                other.folds.get(..2),
+                "{shape:?}: a later test window cannot reach an earlier fold"
+            );
+            let trains = shape.folds(a.len(), h(15), 3);
+            for fold in &one.folds {
+                let train = trains
+                    .get(fold.index)
+                    .and_then(|window| a.get(window.train.0.clone()))
+                    .expect("in range");
+                assert_eq!(
+                    fold.exit_rungs,
+                    Some(derive(train)),
+                    "{shape:?} {}",
+                    fold.index
+                );
+            }
+        }
+        // And the whole span would have answered differently, so the equality
+        // above is not an accident of the derivation ignoring its input.
+        assert_ne!(derive(&a), derive(&b), "fixture precondition");
+    }
+
+    /// A derivation answering zero refuses the walk by name at the first
+    /// fold, before any column is built; `Fixed(0)` keeps the legacy default.
+    #[test]
+    fn a_training_slice_that_cannot_derive_a_rung_count_refuses_by_name() {
+        let bars = crate::synthetic::sessions(12);
+        let built = core::cell::Cell::new(0_u32);
+        let refused = walk_forward_projected_prepared_with_rungs(
+            &bars,
+            ExecutionSeries {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            h(15),
+            3,
+            Direction::Long,
+            &sweeper(),
+            &mut |slice: &[Candle]| {
+                built.set(built.get().saturating_add(1));
+                Ok(Column::build(slice, &mut evaluator()))
+            },
+            Shape::Anchored,
+            FoldRungs::PerTraining(&|_| 0),
+            &|_| {},
+        );
+        assert!(refused.folds.is_empty(), "no fold priced an underived grid");
+        assert_eq!(built.get(), 0, "refused before any column was built");
+        let why = refused.refused.expect("a named refusal");
+        assert!(why.contains("fold 1"), "{why}");
+        assert!(why.contains("too short to derive"), "{why}");
+        let one = bars.get(..1).expect("one bar");
+        assert_eq!(FoldRungs::Fixed(0).for_training(4, one), Ok(DEFAULT_RUNGS));
+        assert_eq!(
+            FoldRungs::Fixed(usize::MAX).for_training(4, one),
+            Ok(usize::MAX)
+        );
+        assert_eq!(
+            FoldRungs::PerTraining(&<[Candle]>::len).for_training(4, one),
+            Ok(1)
+        );
+        let named = FoldRungs::PerTraining(&<[Candle]>::len)
+            .for_training(4, &[])
+            .expect_err("an empty slice derives zero");
+        assert!(named.contains("fold 5 has a 0-bar"), "{named}");
+        assert_eq!(format!("{:?}", FoldRungs::Fixed(7)), "Fixed(7)");
+        assert_eq!(
+            format!("{:?}", FoldRungs::PerTraining(&|_| 1)),
+            "PerTraining"
         );
     }
 
@@ -5525,7 +5756,7 @@ mod tests {
             &sweeper(),
             &mut evaluator,
             Shape::Rolling,
-            DEFAULT_RUNGS,
+            FoldRungs::Fixed(DEFAULT_RUNGS),
             &|progress| seen.lock().expect("no fold panicked").push(progress),
         );
         let seen = seen.into_inner().expect("no fold panicked");
@@ -5567,7 +5798,7 @@ mod tests {
             &sweeper(),
             &mut |_| Err("refused before any fold could finish".to_owned()),
             Shape::Anchored,
-            DEFAULT_RUNGS,
+            FoldRungs::Fixed(DEFAULT_RUNGS),
             &|_| {
                 silent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             },

@@ -9907,3 +9907,34 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## A walk-forward fold derives its exit-grid rung count from its own training slice — D-0963, 2 October 2026
+
+- **The cost, named.** With no `BRUTEX_GRID_RUNGS`, each fold calls
+  `cli::fold_grid_rungs` once on its training signal slice: `range_percentile`
+  (one allocation and one selection over the slice), `reference_price`,
+  `grid_step_ppm` and `max_stop_points`, each O(training bars). That is
+  O(folds × bars) per walk-forward shape, at most twenty folds, once per fold
+  and before the fold's column is built. It is on no per-bar or per-candidate
+  path, so none of the five operations `CLAUDE.md` §3 rule 4 bounds is
+  touched. The run previously paid one O(bars) `grid_rungs` over the whole
+  span in `knobs_checked`, which no longer runs there.
+- **Folds may now price different grids, by design.** A fold whose training
+  history is quiet derives fewer rungs than a later, wilder one; each records
+  its count on `FoldResult::exit_rungs`. Before D-0963 every fold shared one
+  count read partly from test windows.
+- **What is not changed.** The in-sample screen still sizes its grid with
+  `grid_rungs` over the whole span: it is a whole-span search, not a fold, and
+  identity term three still records that count. Identity term seventeen still
+  records the same whole-span count for positional stability; term twenty-one
+  says whether folds used a fixed or a per-training count. The Admission V2
+  and Anchored Search V3 doors still take one caller-resolved count, sealed in
+  their policy facts; no production caller of either exists today, and V4
+  already re-resolves its grid per fold.
+- **A fold whose training slice has no ranged bar is refused**, naming the
+  fold and its bar count, rather than priced at the `MAX_STOP_POINTS` constant
+  `grid_rungs` falls back to. That is a refusal of a walk that previously
+  completed, on degenerate data only.
+- **Every recorded run identity is re-keyed.** `policy_of` gained a term, so a
+  rerun of an old span carries a new `RunId`. That is honest: the walk-forward
+  computation changed.

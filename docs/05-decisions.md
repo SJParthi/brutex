@@ -43764,3 +43764,47 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0963 — A walk-forward fold sizes its exit grid from its own training slice — 2026-10-02
+
+**The defect (GAP4-46).** `cli::knobs_checked` resolved `grid_rungs(bars)` over
+the whole span, test windows included, and `both_shapes` handed that one count
+to every anchored and rolling fold. `grid_rungs` is `max_stop_points / step`,
+both read off the bars, so a volatile final test window could lift the rung
+count every earlier fold trained its exit grid at. On a synthetic fixture a
+tail confined to the last test window moved it from 2 to 7. That is
+look-ahead in the training half of the fold (`CLAUDE.md` §3 rule 7), and
+runner's comment claimed the value was safe because it was the one recorded
+in identity.
+
+**The choice.** `runner::validate::FoldRungs::{Fixed(usize),
+PerTraining(&dyn Fn(&[Candle]) -> usize + Sync)}` replaces the `rungs: usize`
+of `walk_forward_core` and of the two two-series doors
+`walk_forward_projected_with_rungs` and
+`walk_forward_projected_prepared_with_rungs`. The core resolves each fold's
+count from that fold's training signal slice before building its column and
+records it on the new `FoldResult::exit_rungs`. `cli` passes `Fixed(n)` when
+`BRUTEX_GRID_RUNGS` names a count (an operator statement, not a reading of any
+bar, clamped exactly as `grid_rungs` clamps it), else
+`PerTraining(fold_grid_rungs)`. A derivation answering 0 refuses the walk by
+name; `fold_grid_rungs` answers 0 for a slice with no ranged bar, where
+`grid_rungs` would have priced the `MAX_STOP_POINTS` constant.
+
+**Identity.** Term seventeen keeps its meaning, the whole-span count, because
+positional identity is append-only and reinterpreting a position is the
+renumbering §3 rule 8 forbids. A twenty-first term names the policy: `1`
+fixed, `2` per-training. Every run identity re-keys, which is honest because
+the walk-forward computation changed.
+
+**Rejected.** (1) Keeping one count but deriving it from the first fold's
+training slice: later folds would then ignore history they may read, and the
+count would still be one number standing in for several. (2) Reinterpreting
+term seventeen as the policy: same length, silently different meaning, which
+is the collision §3 rule 3 exists to refuse. (3) Falling back to
+`DEFAULT_RUNGS` or the whole-span count when a training slice cannot derive
+one: a fallback that hides a failure (§4). (4) Changing the Admission V2 and
+Search V3 doors: their single resolved count is sealed in their policy facts,
+neither has a production caller, and V4 already re-resolves per fold. The
+legacy one-series doors keep `usize` and pass `Fixed`.
+
+Invariants AF-GAP4-46-a through AF-GAP4-46-d; `docs/06-limits.md` has the cost.

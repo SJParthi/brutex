@@ -5165,8 +5165,8 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // anywhere -- and this knob is settable over HTTP from a free-text box, so
     // a typo silently bought a different grid. `CLAUDE.md` §4: degrade loudly
     // and name the reason, or refuse. `audit_bars` prints what was refused.
-    if let Some(n) = crate::knobs::count_usize("BRUTEX_GRID_RUNGS") {
-        return n.min(rungs_within_cell_budget()).max(2);
+    if let Some(n) = grid_rungs_asked() {
+        return n;
     }
     let reference = reference_price(bars);
     // ONE BAR: this sizes a DISPLAY rung count, not a priced ladder, and it has
@@ -5181,6 +5181,74 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // and removing that clamp -- correct in itself, it was collapsing the stop
     // ladder -- left this division with no upper bound at all.
     from_the_data.min(rungs_within_cell_budget())
+}
+
+/// The operator's explicit `BRUTEX_GRID_RUNGS`, clamped exactly as
+/// [`grid_rungs`] clamps it, or `None` when the count is derived.
+///
+/// One reader for both the screen and the walk-forward policy, so the two
+/// cannot disagree about whether a count was asked for.
+fn grid_rungs_asked() -> Option<usize> {
+    crate::knobs::count_usize("BRUTEX_GRID_RUNGS").map(|n| n.min(rungs_within_cell_budget()).max(2))
+}
+
+/// Where each walk-forward fold's exit-grid rung count comes from.
+///
+/// # Why this is not the `usize` it replaced (GAP4-46, D-0963)
+///
+/// [`knobs_checked`] used to resolve `grid_rungs(bars)` over the WHOLE span
+/// and hand that one count to every fold. `grid_rungs` is
+/// `max_stop_points / step`, both read off the bars, so a fold's training grid
+/// was sized partly by its own test window and every later one: a quiet first
+/// year priced at a rung count a wild final month chose. `CLAUDE.md` §3 rule 7.
+///
+/// Now an explicit operator count is still one number for every fold -- it is
+/// a statement, not a reading of any bar -- and a derived count is derived per
+/// fold by runner, from that fold's training signal slice alone, through
+/// [`fold_grid_rungs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FoldRungPolicy {
+    /// `BRUTEX_GRID_RUNGS` named this count, already clamped.
+    Fixed(usize),
+    /// No count was named: each fold derives its own from its training bars.
+    PerTraining,
+}
+
+impl FoldRungPolicy {
+    /// Read the request-local knob store once.
+    fn resolved() -> Self {
+        grid_rungs_asked().map_or(Self::PerTraining, Self::Fixed)
+    }
+
+    /// The run-identity code: identity term twenty-one. Non-zero for both so
+    /// neither can be mistaken for an absent term.
+    const fn identity_code(self) -> u64 {
+        match self {
+            Self::Fixed(_) => 1,
+            Self::PerTraining => 2,
+        }
+    }
+
+    /// The runner-side form.
+    fn for_runner(self) -> runner::validate::FoldRungs<'static> {
+        match self {
+            Self::Fixed(n) => runner::validate::FoldRungs::Fixed(n),
+            Self::PerTraining => runner::validate::FoldRungs::PerTraining(&fold_grid_rungs),
+        }
+    }
+}
+
+/// One fold's derived rung count, from its training signal slice alone.
+///
+/// Zero -- which runner refuses by name -- when the slice holds no bar with a
+/// positive range. `grid_rungs` falls back to the `MAX_STOP_POINTS` constant
+/// there, which is a count no bar of this fold supports; a fold must not price
+/// a grid its own history cannot size.
+fn fold_grid_rungs(train: &[indicators::Candle]) -> usize {
+    if range_percentile(train, 9, 10).is_none() {
+        return 0;
+    }
+    grid_rungs(train)
 }
 
 /// The most rungs whose grid still fits the memory this machine can spare.
@@ -10133,6 +10201,7 @@ const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstr
 /// | the ranking [`runner::rank::Lens`] | which combination is TRADED |
 /// | `BRUTEX_GRID_RUNGS`, via [`grid_rungs`] | how wide the exit grid is |
 /// | `BRUTEX_SCREEN_CAP`, via [`screen_cap`] | how many combinations are priced at all |
+/// | whether `BRUTEX_GRID_RUNGS` is set, via [`FoldRungPolicy`] | whether each walk-forward fold derives its own rung count (term 21, D-0963) |
 ///
 /// Change any one and the recorded `Record` changes. Before this the `RunId` did
 /// not, so two runs with different answers collided — and the ledger, which
@@ -10154,7 +10223,7 @@ fn policy_of(
     validate: bool,
     horizon: Horizon,
     fold_rungs: usize,
-) -> [u64; 20] {
+) -> [u64; 21] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -10356,6 +10425,16 @@ fn policy_of(
         // term added in the middle silently renumbers every one after it.
         u64::from_ne_bytes(rules.min_fill_headroom_bp.to_ne_bytes()),
         u64::from_ne_bytes(rules.min_avg_rr_bp.to_ne_bytes()),
+        // THE TWENTY-FIRST: WHERE EACH FOLD'S RUNG COUNT CAME FROM (D-0963).
+        //
+        // Term seventeen stays what it is, the whole-span count, because
+        // positional identity is append-only and reinterpreting a position is
+        // the renumbering §3 rule 8 forbids. But it no longer describes what
+        // the walk-forward priced: with no `BRUTEX_GRID_RUNGS` every fold now
+        // derives its own count from its training slice, which is a different
+        // computation from the old full-span count on the same bars. `1` is an
+        // explicit operator count every fold shares; `2` is per-training.
+        FoldRungPolicy::resolved().identity_code(),
     ]
 }
 
@@ -18063,21 +18142,24 @@ fn note_validation_fold(
 ///
 /// # Cost
 ///
-/// Five knob reads and two passes over the bars in the `rung` case.
-/// `grid_rungs` is O(bars) through `reference_price` and `grid_step_ppm`, and
-/// `horizon_for` measures the smallest signal spacing. This crate already calls
-/// the former seven times a run, and both remain off every per-bar and
-/// per-candidate path, once per run. `CLAUDE.md` §3 rule 4 bounds five
+/// Five knob reads and one pass over the bars in the `rung` case:
+/// `horizon_for` measures the smallest signal spacing. The rung count is no
+/// longer derived here -- each fold derives its own from its training slice
+/// (D-0963, `docs/06-limits.md`) -- so only the knob is read. Both remain off
+/// every per-bar and per-candidate path, once per run. `CLAUDE.md` §3 rule 4 bounds five
 /// per-operation costs and this is none of them.
 fn knobs_checked(
     bars: &[indicators::Candle],
     on_execution_series: bool,
-) -> (Horizon, usize, Option<String>) {
+) -> (Horizon, FoldRungPolicy, Option<String>) {
     let _screen_cap = screen_cap();
     let _budget = screen_budget_ms();
-    // Retained, not merely checked: this exact resolved value reaches both
+    // Retained, not merely checked: this exact resolved POLICY reaches both
     // walk-forward shapes instead of runner re-reading a different knob door.
-    let rungs = grid_rungs(bars);
+    // It is no longer `grid_rungs(bars)`: that read the whole span, test
+    // windows included, and sized every fold's training grid with it
+    // (GAP4-46, D-0963). A derived count is now derived per fold.
+    let rungs = FoldRungPolicy::resolved();
     let _sizing_rate = sizing_rate_bp();
     let horizon = horizon_for(bars, on_execution_series);
     (horizon, rungs, crate::knobs::refused())
@@ -18236,7 +18318,7 @@ fn ranked_opening(
 /// Every fallible input needed before an audit can rank one candidate.
 struct PreparedAudit {
     horizon: Horizon,
-    rungs: usize,
+    rungs: FoldRungPolicy,
     refused_knobs: Option<String>,
     ladder: engine::Ladder,
     column: indicators::column::Column,
@@ -19298,10 +19380,12 @@ fn both_shapes(
     // one from the borrow.
     fresh: &Evaluator,
     replay: Option<StoredReplay<'_>>,
-    rungs: usize,
+    rungs: FoldRungPolicy,
     on_fold: &(dyn Fn(runner::validate::FoldProgress) + Sync),
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
+    // PER FOLD, FROM ITS OWN TRAINING SLICE, unless the operator named a count.
+    let rungs = rungs.for_runner();
     // A FALLBACK NOW, NOT THE PRICING SIDE, and that is the whole of the
     // look-ahead fix. `side_of_evidence(first)` reads the top row of a rank over
     // the WHOLE span -- test folds included -- so handing it to the fold fitted
@@ -19764,6 +19848,7 @@ mod tests {
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
+    use super::{FoldRungPolicy, fold_grid_rungs};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -22216,13 +22301,14 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            20,
-            "twenty choices are folded in. The eighteenth is \
+            21,
+            "twenty-one choices are folded in. The eighteenth is \
              `require_protective_exits`; the nineteenth and twentieth are \
              `min_fill_headroom_bp` and `min_avg_rr_bp`, both APPENDED after it \
              rather than placed beside the other rule terms, because positional \
              identity is append-only and inserting one there renumbers every \
-             term after it. \
+             term after it. The twenty-first is the walk-forward fold-rung \
+             policy (D-0963). \
              If this moved, `policy_of`'s doc \
              table and the append-never-insert rule both need reading before the \
              number is changed"
@@ -22326,7 +22412,8 @@ mod tests {
         crate::knobs::clear_all();
         crate::knobs::set("BRUTEX_GRID_RUNGS", "2");
         let bars = runner::synthetic::sessions(2);
-        let (horizon, rungs, refused) = knobs_checked(&bars, false);
+        let (horizon, fold_policy, refused) = knobs_checked(&bars, false);
+        let rungs = grid_rungs(&bars);
         let policy = policy_of(
             &bars,
             crate::Rules::elite(400, 25),
@@ -22339,11 +22426,270 @@ mod tests {
 
         assert_eq!(refused, None, "two rungs is a valid explicit grid");
         assert_eq!(rungs, 2, "the request-local value is retained");
+        assert_eq!(
+            fold_policy,
+            FoldRungPolicy::Fixed(2),
+            "the explicit count is the one every fold receives"
+        );
         assert_eq!(policy[2], 2, "the historical screen term stays third");
         assert_eq!(
             policy[16], 2,
             "the same value validation receives stays appended as term seventeen"
         );
+        assert_eq!(policy[20], 1, "term twenty-one names the fixed policy");
+    }
+
+    /// With no `BRUTEX_GRID_RUNGS`, every fold derives its own count, and the
+    /// identity says so in a NEW term rather than by reinterpreting term
+    /// seventeen (D-0963).
+    #[test]
+    fn a_derived_fold_rung_count_is_per_training_and_keys_its_own_identity_term() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let bars = runner::synthetic::sessions(2);
+        let (horizon, fold_policy, refused) = knobs_checked(&bars, false);
+        let rungs = grid_rungs(&bars);
+        let rules = crate::Rules::elite(400, 25);
+        let lens = runner::rank::Lens::Detectability;
+        let derived = policy_of(&bars, rules, lens, true, horizon, rungs);
+        crate::knobs::set("BRUTEX_GRID_RUNGS", &rungs.to_string());
+        let fixed = policy_of(&bars, rules, lens, true, horizon, rungs);
+        crate::knobs::clear_all();
+
+        assert_eq!(refused, None);
+        assert_eq!(fold_policy, FoldRungPolicy::PerTraining);
+        assert_eq!(derived.len(), 21, "one term appended, none inserted");
+        assert_eq!(derived[20], 2, "per-training is code two");
+        assert_eq!(fixed[20], 1, "an explicit count is code one");
+        assert_eq!(
+            derived.get(..20),
+            fixed.get(..20),
+            "every earlier term is unchanged at an equal count: only the new term moves"
+        );
+        assert_ne!(derived, fixed, "the two policies are two identities");
+    }
+
+    /// A fold whose training slice holds no ranged bar cannot size a grid from
+    /// its own history: zero, which runner refuses by name. A ranged slice
+    /// derives exactly what `grid_rungs` derives on it.
+    #[test]
+    fn a_training_slice_with_no_range_derives_no_fold_rung_count() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let bars = runner::synthetic::sessions(2);
+        let mut flat = bars.clone();
+        for bar in &mut flat {
+            bar.high = bar.open;
+            bar.low = bar.open;
+            bar.close = bar.open;
+        }
+        assert_eq!(fold_grid_rungs(&[]), 0, "empty");
+        assert_eq!(fold_grid_rungs(&flat), 0, "every range is zero");
+        assert_eq!(fold_grid_rungs(&bars), grid_rungs(&bars), "ranged");
+        assert!(fold_grid_rungs(&bars) >= 2, "a ladder offers two choices");
+        let refused = FoldRungPolicy::PerTraining
+            .for_runner()
+            .for_training(0, &flat)
+            .expect_err("a flat slice is refused");
+        assert!(refused.contains("fold 1"), "{refused}");
+        assert!(refused.contains("too short to derive"), "{refused}");
+        assert_eq!(
+            FoldRungPolicy::Fixed(3).for_runner().for_training(0, &flat),
+            Ok(3),
+            "an explicit count reads no bar"
+        );
+    }
+
+    /// Twelve synthetic sessions, and a twin whose bars past every earlier
+    /// test window (plus two horizons, in either shape) have their wicks
+    /// stretched forty points. With the horizon and split count both are
+    /// walked at.
+    fn a_span_and_its_wild_tail_twin() -> (
+        Vec<indicators::Candle>,
+        Vec<indicators::Candle>,
+        Horizon,
+        usize,
+    ) {
+        let a = runner::synthetic::sessions(12);
+        let horizon = super::horizon_for(&a, false);
+        let splits = super::walk_forward_splits(a.len());
+        // PAST THE LAST EARLIER TEST WINDOW, plus two horizons, in either
+        // shape: a trade an earlier fold opens on its final test bar resolves
+        // up to one horizon later, which is the outcome being priced and not
+        // an input to any choice. Everything that changes sits where no
+        // earlier fold may read it.
+        let hold = usize::try_from(horizon.as_bars()).expect("a horizon fits usize");
+        let quiet_until = [
+            runner::split::Shape::Anchored,
+            runner::split::Shape::Rolling,
+        ]
+        .iter()
+        .filter_map(|shape| {
+            let windows = shape.folds(a.len(), horizon, splits);
+            windows
+                .get(windows.len().checked_sub(2)?)
+                .map(|fold| fold.test.end)
+        })
+        .max()
+        .expect("both shapes have an earlier fold")
+        .saturating_add(hold.saturating_mul(2));
+        // The tail is WILDER: every changed bar keeps its open/close and has
+        // its wicks stretched forty points either side, which lifts the
+        // 90th-percentile range `max_stop_points` reads -- and with it the
+        // whole-span rung count.
+        let mut b = a.clone();
+        for bar in b.get_mut(quiet_until..).expect("the tail is in range") {
+            bar.high = bar.high.saturating_add(4_000);
+            bar.low = bar.low.saturating_sub(4_000);
+        }
+        (a, b, horizon, splits)
+    }
+
+    /// Two spans identical except the last fold's TEST window, walked through
+    /// the production `both_shapes` with the policy `knobs_checked` resolves.
+    ///
+    /// The rung count used to be `grid_rungs` over the WHOLE span, test
+    /// windows included, handed to every fold: here the wild tail lifts that
+    /// count, so every earlier fold priced a different exit grid because of
+    /// bars it may never read (`CLAUDE.md` §3 rule 7, GAP4-46, D-0963). The
+    /// first assertion below is the one that failed on that code.
+    ///
+    /// Now each fold records the count derived from its own training slice,
+    /// which the tail cannot reach, and every earlier fold is identical.
+    #[test]
+    fn an_earlier_fold_exit_grid_cannot_read_a_later_test_window() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let (a, b, horizon, splits) = a_span_and_its_wild_tail_twin();
+        let whole_span_b = grid_rungs(&b);
+        assert_ne!(
+            grid_rungs(&a),
+            whole_span_b,
+            "fixture precondition: the tail moves the whole-span rung count"
+        );
+        let (_, policy_a, refused_a) = knobs_checked(&a, false);
+        let (_, policy_b, refused_b) = knobs_checked(&b, false);
+        assert_eq!((refused_a, refused_b), (None, None), "no knob is set");
+        assert_eq!(
+            policy_a, policy_b,
+            "the grid parameter every fold receives cannot depend on a later test window"
+        );
+        assert_eq!(policy_a, FoldRungPolicy::PerTraining);
+
+        let ladder = engine::Ladder::with_min_hits(120)
+            .with_ceiling(20_000)
+            .with_support_lanes(1);
+        let first = runner::rank::Scored {
+            mask: vocab::ConditionMask::default(),
+            hits: 0,
+            edge: runner::outcome::Edge::default(),
+        };
+        let fresh = evaluator().expect("pinned widths are valid");
+        let walk = |bars: &[indicators::Candle], policy| {
+            super::both_shapes(
+                bars,
+                super::Execution {
+                    bars,
+                    signal_length_micros: 60_000_000,
+                },
+                horizon,
+                &first,
+                ladder,
+                &fresh,
+                None,
+                policy,
+                &|_| {},
+            )
+        };
+        let (anchored_a, rolling_a) = walk(&a, policy_a);
+        let (anchored_b, rolling_b) = walk(&b, policy_b);
+        for (shape, one, other) in [
+            (runner::split::Shape::Anchored, &anchored_a, &anchored_b),
+            (runner::split::Shape::Rolling, &rolling_a, &rolling_b),
+        ] {
+            assert_eq!(one.refused, None, "{shape:?}: the fixture walks");
+            assert_eq!(other.refused, None, "{shape:?}: the fixture walks");
+            assert_eq!(
+                one.folds.len(),
+                other.folds.len(),
+                "{shape:?}: same windows"
+            );
+            assert!(one.folds.len() >= 2, "{shape:?}: an earlier fold exists");
+            let earlier = one.folds.len() - 1;
+            assert_eq!(
+                one.folds.get(..earlier),
+                other.folds.get(..earlier),
+                "{shape:?}: every fold before the changed test window is identical"
+            );
+            let trains = shape.folds(b.len(), horizon, splits);
+            for fold in other.folds.iter().take(earlier) {
+                let train = trains
+                    .get(fold.index)
+                    .and_then(|window| b.get(window.train.0.clone()))
+                    .expect("the fold's training window is in range");
+                assert_eq!(
+                    fold.exit_rungs,
+                    Some(fold_grid_rungs(train)),
+                    "{shape:?} fold {}: the count is derived from its own training slice",
+                    fold.index
+                );
+                assert_ne!(
+                    fold.exit_rungs,
+                    Some(whole_span_b),
+                    "{shape:?} fold {}: not the whole-span count the tail lifted",
+                    fold.index
+                );
+            }
+        }
+    }
+
+    /// `BRUTEX_GRID_RUNGS` set: every fold of both shapes prices exactly the
+    /// named count, whatever its training slice would have derived.
+    #[test]
+    fn an_explicit_grid_rung_count_reaches_every_fold_unchanged() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_GRID_RUNGS", "3");
+        let bars = runner::synthetic::sessions(12);
+        let (horizon, rungs, refused) = knobs_checked(&bars, false);
+        let first = runner::rank::Scored {
+            mask: vocab::ConditionMask::default(),
+            hits: 0,
+            edge: runner::outcome::Edge::default(),
+        };
+        let fresh = evaluator().expect("pinned widths are valid");
+        let (anchored, rolling) = super::both_shapes(
+            &bars,
+            super::Execution {
+                bars: &bars,
+                signal_length_micros: 60_000_000,
+            },
+            horizon,
+            &first,
+            engine::Ladder::with_min_hits(120)
+                .with_ceiling(20_000)
+                .with_support_lanes(1),
+            &fresh,
+            None,
+            rungs,
+            &|_| {},
+        );
+        crate::knobs::clear_all();
+
+        assert_eq!(refused, None);
+        assert_eq!(rungs, FoldRungPolicy::Fixed(3));
+        assert_ne!(
+            fold_grid_rungs(&bars),
+            3,
+            "fixture precondition: the derived count would differ"
+        );
+        for validated in [&anchored, &rolling] {
+            assert_eq!(validated.refused, None);
+            assert!(!validated.folds.is_empty(), "the fixture walks");
+            for fold in &validated.folds {
+                assert_eq!(fold.exit_rungs, Some(3), "fold {}", fold.index);
+            }
+        }
     }
 
     /// The eight rules `Rules::operator()` made variable are each folded.
