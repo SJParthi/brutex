@@ -1883,9 +1883,12 @@ impl BarFile {
     ///
     /// **Read that bound precisely.** The *operation* is constant; the read
     /// syscall underneath it is not free and its latency is the device's, not
-    /// this crate's. Nothing here measures the device, and no bench in this
-    /// repository times a syscall — `crates/store/benches/ratio.rs` measures
-    /// the arithmetic and the checksum. The syscall cost is UNVERIFIED.
+    /// this crate's. This method IS timed, and with it its one `pread`:
+    /// C-28 and C-29 time it in `crates/store/benches/ratio.rs` (a sentence
+    /// here said no bench timed a syscall until D-0913 corrected it). What
+    /// they time is a WARM read — one fixed index, so its checksum block is
+    /// cached and its page resident after the first call. The cold block
+    /// verify a random index pays, and a cold device, are UNVERIFIED.
     ///
     /// # Errors
     ///
@@ -1920,9 +1923,14 @@ impl BarFile {
     /// window start is addressable in `log2(n_valid)` reads rather than found by
     /// walking. At 8,250 bars that is fourteen.
     ///
-    /// **UNVERIFIED as a measured bound.** No bench in this workspace
-    /// times this, so the shape above is read from the source rather
-    /// than measured. `CLAUDE.md` §3 rule 6.
+    /// **The probe count is proven; the time is not.** At most
+    /// `ceil(log2(n_valid + 1))` record reads — fourteen at the one-minute
+    /// month ceiling of 31 × 375 = 11,625 — asserted by
+    /// `store::file::first_at_or_after_never_probes_more_than_the_bisection_height`.
+    /// Each read may also pay one cold block verify (up to 4,088 bytes read,
+    /// a 4-byte sidecar read, a CRC-32C) when its block is not the one
+    /// cached. No bench times the lookup, so its wall-clock cost is
+    /// UNVERIFIED. `docs/06-limits.md`, D-0913; `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -2779,11 +2787,11 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::{
-        Action, Appended, Bar, BarFile, FormatError, Layout, Positional, StoreError,
+        Action, Appended, Bar, BarFile, FormatError, Layout, NO_BLOCK, Positional, StoreError,
         already_stored, bytes_past_the_counter, classify, first_at_or_after, initialise, len_u64,
         lock_fault, open_rw, read_fully, write_fully,
     };
-    use crate::format::OI_NULL;
+    use crate::format::{OI_NULL, RECORDS_PER_BLOCK};
     use std::fs::TryLockError;
     use std::io::{self, ErrorKind};
     use std::path::{Path, PathBuf};
@@ -3390,6 +3398,102 @@ mod tests {
         reads.set(0);
         assert_eq!(first_at_or_after(0, T0, read), Ok(0));
         assert_eq!(reads.get(), 0, "an empty month is not probed at all");
+    }
+
+    /// `ceil(log2(n + 1))`, the height of a bisection over `n` records: the
+    /// most probes `first_at_or_after` may spend. Written as a bit count so it
+    /// is exact for every `u64`, which `f64::log2` is not.
+    fn bisection_height(n: u64) -> u32 {
+        u64::BITS - n.leading_zeros()
+    }
+
+    /// Probes `first_at_or_after` spends on `n` records for `ts`, the answer,
+    /// and how many cold block verifies a handle with ONE cached block — the
+    /// shape `BarFile::verify_block_of` has — would pay on the way, starting
+    /// from [`NO_BLOCK`]. Records are `stamp == index`, so any `n` up to
+    /// `i64::MAX` is addressable without a table.
+    fn probe(n: u64, ts: i64) -> (u32, u64, u32) {
+        let probes = Cell::new(0u32);
+        let cold = Cell::new(0u32);
+        let cached = Cell::new(NO_BLOCK);
+        let read = |index: u64| -> Result<Bar, StoreError> {
+            assert!(index < n, "probe {index} is past the {n} committed records");
+            probes.set(probes.get() + 1);
+            let block = index / RECORDS_PER_BLOCK;
+            if cached.get() != block {
+                cold.set(cold.get() + 1);
+                cached.set(block);
+            }
+            Ok(Bar {
+                ts_micros: i64::try_from(index).expect("test n stays below i64::MAX"),
+                ..bar(0)
+            })
+        };
+        let at = first_at_or_after(n, ts, read).expect("an in-memory read never refuses");
+        (probes.get(), at, cold.get())
+    }
+
+    #[test]
+    fn first_at_or_after_never_probes_more_than_the_bisection_height() {
+        // W3-store1-0 / D-0913. `docs/06-limits.md` states the lookup as
+        // `ceil(log2(n_valid + 1))` record reads, each possibly paying one
+        // cold block verify; this is that sentence as a number. A scan, a
+        // probe that re-reads `mid`, or a loop that runs one step past an
+        // interval of one each breaks it.
+        //
+        // EXHAUSTIVE for small months: every insertion point, plus the
+        // timestamps before the first and after the last record, across the
+        // block edges at 73 and 146 records.
+        for n in 0u64..=150 {
+            let height = bisection_height(n);
+            let mut worst = 0u32;
+            for ts in -1..=i64::try_from(n).expect("small") + 1 {
+                let (probes, at, cold) = probe(n, ts);
+                let want = u64::try_from(ts.clamp(0, i64::try_from(n).expect("small")))
+                    .expect("clamped non-negative");
+                assert_eq!(at, want, "n={n} ts={ts}: wrong insertion point");
+                assert!(
+                    probes <= height,
+                    "n={n} ts={ts}: {probes} probes against a height of {height}"
+                );
+                assert!(cold <= probes, "n={n} ts={ts}: a verify with no read");
+                worst = worst.max(probes);
+            }
+            // TIGHT, not merely bounded: some timestamp costs the full height,
+            // so the stated bound is the cost and not a loose ceiling over it.
+            assert_eq!(worst, height, "n={n}: the worst case is the height");
+        }
+
+        // THE MONTH CEILING. A one-minute month is at most 31 sessions of 375
+        // bars; `docs/06-limits.md` names fourteen probes for it.
+        let month = 31 * 375;
+        assert_eq!(bisection_height(month), 14);
+        let mut worst_cold = 0u32;
+        for ts in [-1, 0, 1, 72, 73, 74, 5_812, 11_623, 11_624, 11_625, 11_626] {
+            let (probes, at, cold) = probe(month, ts);
+            assert_eq!(at, u64::try_from(ts.clamp(0, 11_625)).expect("clamped"));
+            assert!(
+                probes <= 14,
+                "ts={ts}: {probes} probes at the month ceiling"
+            );
+            worst_cold = worst_cold.max(cold);
+        }
+        assert!(
+            worst_cold <= 14,
+            "at most one cold block verify per probe, not {worst_cold}"
+        );
+
+        // LARGE COUNTERS, where `(low + high) / 2` would overflow and where a
+        // linear walk would never finish. Both ends and the middle.
+        for n in [1u64 << 31, (1u64 << 62) - 1, 1u64 << 62] {
+            let height = bisection_height(n);
+            let last = i64::try_from(n).expect("below i64::MAX");
+            for ts in [i64::MIN, 0, last / 2, last - 1, last, i64::MAX] {
+                let (probes, at, _) = probe(n, ts);
+                assert_eq!(at, u64::try_from(ts.clamp(0, last)).expect("clamped"));
+                assert!(probes <= height, "n={n} ts={ts}: {probes} > {height}");
+            }
+        }
     }
 
     #[test]

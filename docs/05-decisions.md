@@ -43718,3 +43718,38 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0913 — State the timestamp lookup's bisection cost in the limits register, and stop saying no bench times a syscall — 2026-10-02
+
+**What happened.** An audit (W3-store1-0, W3-store1-1) found
+`store::file::first_at_or_after` and `already_stored` documented only in
+source comments. The first is a bisection that `api` `/bars.json` calls twice
+per request. The second is that bisection plus a batch-long comparison, on
+`BarFile::append`'s duplicate path. `docs/06-limits.md` had no entry for
+either, and the `BarFile::first_at_or_after` doc called its own bound "read
+from the source rather than measured". A second finding
+(ET-bars-candles-store-12) found three copies of the sentence "no bench in
+this repository times a syscall": `BarFile::read_record`'s doc,
+`docs/06-limits.md` §40.2 and the C-01 note in `docs/04-invariants.md`. It is
+stale, because C-28 and C-29 time `read_record`, which is one `pread` per call.
+
+**The change.** No production code changed. The bisection already uses
+`ceil(log2(n_valid + 1))` reads, the fewest any comparison search over sorted
+records can use, so the requested probe-count reduction had nothing to remove.
+`store::file::first_at_or_after_never_probes_more_than_the_bisection_height`
+now asserts that bound, and that it is tight, exhaustively for 0 to 150
+records (crossing the block edges at 73 and 146). It also checks the
+one-minute month ceiling of 11,625 records (fourteen reads) and counters up to
+2^62. Its counting reader models the handle's one-slot block cache and asserts
+at most one cold verify per read. `docs/06-limits.md` gains a section with
+both bounds, the per-read cold-verify cost, both callers and what stays
+UNVERIFIED (wall-clock time, a cold block, a cold device). The three stale
+sentences now say that C-28 and C-29 time a warm `pread`.
+`crates/store/tests/bisect_cost.rs` fails the build if the section loses a
+bound or a caller, or if the stale sentence comes back in any of the three
+places. Invariant S-BISECT-01 names the probe test.
+
+**Not decided.** A multi-block cache or a per-month timestamp index would
+lower the cold-verify count. Each is a memory or format decision with its own
+cost, and neither is taken here. ET-bars-candles-store-9, a bench that times a
+cold block verify, remains open.

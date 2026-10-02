@@ -103,6 +103,7 @@ fixtures do not turn the scanners into complete TOML or Markdown parsers.
 | S-28 | **A non-finite derivative never reaches the disk.** `Overlay::is_sane` answers `true` because a spot and a volatility constrain nothing about one another and an all-zero row is a legal reading. A greeks row is different: a `NaN` delta is not a reading at all, and it looks exactly like a real one until it is multiplied by something. Refused at the write boundary, across all seven float fields | `store::geometry::a_non_finite_derivative_is_refused_at_the_write_boundary` | ✓ |
 | S-29 | **Three geometries are told apart by magic, stride AND version, pairwise.** `.bin` is 56 bytes at version 2, `.ovl` is 24 at version 9, `.grk` is 80 at version 8. A shared version makes resolution pick whichever row is first; a shared stride makes two geometries indistinguishable to a reader that resolved correctly. Asserted as a property over the whole of `Layout::KNOWN` rather than as a pair, so a fourth row is checked against all three. **All three are IN `KNOWN`** — excluding a sidecar was tried and moves the problem: `Header::decode_parts` resolves a version while decoding, before any caller names a table, so a sidecar outside the list is `UnknownVersion` at its own first byte. What separates them is `file::table_of`, chosen by file kind | `store::unit::the_constants_are_the_current_versions_layout` · `store::geometry::three_geometries_are_told_apart_by_magic_stride_and_version` | ✓ |
 | S-26 | **A month the renderer writes always parses back.** `YearMonth`'s `Display` is `{:04}-{:02}` and `catalog::parse_month` is its inverse, checked over a decade — 120 months, both halves — so a change to either fails the build rather than leaving a store that cannot be listed. Width is checked before value: `2026-8` is refused, because accepting it would let a hand-made directory pass as one the writer produced | `store::catalog::every_month_the_renderer_writes_parses_back` | ✓ |
+| S-BISECT-01 | **Locating a timestamp in a month costs at most `ceil(log2(n_valid + 1))` record reads, and at most one cold block verify per read.** `first_at_or_after` is a bisection and is not O(1); `already_stored` adds one read per batch record. Checked exhaustively for 0 to 150 records, every insertion point including the ones before the first and after the last record, across the block edges at 73 and 146. The bound is tight: the worst case reaches it for every count. At the one-minute month ceiling, 11,625 records, it is fourteen. Also checked at counters up to 2^62. The wall-clock cost is UNVERIFIED (`docs/06-limits.md`, D-0913) | `store::file::first_at_or_after_never_probes_more_than_the_bisection_height` | ✓ |
 
 ### Store proof follow-up — 27 September 2026
 
@@ -259,11 +260,13 @@ measurable today and named a bench that runs.
 **The reader has since shipped and this paragraph's last sentence has not.**
 `BarFile::read_record` is one multiply, one add and one 56-byte positional read,
 and S-02 walks it at every index of a 160-record file. C-01 still names the
-header read rather than the bar read, and deliberately: **no bench in this
-repository times a syscall.** `crates/store/benches/ratio.rs` measures the
-arithmetic and the checksum, which is what `crates/store/src/file.rs` says in as
-many words beside `read_record` — the operation is constant and the device
-latency underneath it is UNVERIFIED. A bar-read ratio row that timed a `pread`
+header read rather than the bar read, and deliberately: **at the time, no
+bench timed a syscall** (since C-28 and C-29 that is no longer true — both time
+`read_record`, one `pread` each, warm; corrected by D-0913).
+`crates/store/benches/ratio.rs` then measured the arithmetic and the checksum,
+and `crates/store/src/file.rs` still says beside `read_record` that the
+operation is constant and that a cold device and a cold block verify are
+UNVERIFIED. A bar-read ratio row that timed a `pread`
 would be measuring the operator's disk, so the row returns when there is a bench
 that separates the two, not merely when the reader exists.
 
