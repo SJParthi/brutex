@@ -43880,3 +43880,34 @@ without its own `src` or with a body, an `on*=` attribute in any tag,
 
 **Limits.** Markup assembled at run time from pieces that are not one literal
 or one `concat!` is not seen. Invariant CIG-10.
+
+### D-1107 — Manifests are read as TOML by every gate that pins a dependency set, and an absent manifest refuses — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-0, AC-gates-cx-0 and LATE-gates-and-ci
+#13 (gates 9 and 9b). Gates 9, 9b and 22 clause A refused the table spellings
+they could not parse and extracted `name =` from the flat `[dependencies]`
+table, on the claim that with the refusal held the extraction was complete. The
+refusal read headers with `^\[dependencies\.`, so `[ dependencies . store ]`,
+`["dependencies"]` and a root-level `dependencies.store = { .. }` matched
+neither the refusal nor the extraction, and each gate printed its success line
+over a declared dependency. Gate 22 clause A compared dependency NAMES, so
+`vocab = { package = "store", .. }` passed as `vocab`. Gates 9 and 9b printed
+"skip — crate not created yet" and passed when the manifest was missing. Gate
+21 clause A (an awk range) and gate 23 clause B's `has_telemetry` had the same
+parse. `crates/core/tests/graph.rs` had the same holes, and read any value
+containing the word `package` as a rename.
+
+**The choice.** Every one of these gates calls `source_scan deps` (D-1100),
+which parses the manifest as TOML and prints `kind:name:package` for every
+declaration in every linking table, `target.*`, `[patch]` and `[replace]`.
+Gates 9, 9b and 21 clause A refuse any line. Gate 22 clause A compares the
+sorted `kind:package` set with its pin. Gate 23 answers yes only for a plain
+`dependencies` declaration of the package `telemetry`. A manifest that is not
+tracked, or that the scanner cannot read, refuses. `graph.rs` splits headers
+and keys into TOML segments, strips comments outside quotes, and resolves a
+rename per dependency name from a `package` key.
+
+**Deferred.** `engine::tests::declared_dependencies` in `crates/engine/src/lib.rs`
+has the same line parser. That crate is owned by another worker in this
+change, so it is left as it is. Gate 22 clause A no longer relies on it.
+Invariant CIG-11.

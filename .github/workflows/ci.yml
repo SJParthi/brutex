@@ -1787,68 +1787,43 @@ jobs:
           # to say "core depends on nothing". A pass and a bypass spelled
           # identically is the worst shape a gate can have.
           #
-          # A shell cannot parse TOML and this gate is not going to pretend it
-          # can. It does what gate 22 clause A1 does instead: REFUSE every
-          # spelling the extractor cannot read, so that with the refusal held
-          # the extractor is a COMPLETE parse rather than a hopeful one. Here
-          # refusing is doubly right -- three of those four spellings declare a
-          # dependency and core may declare none of any kind. The authoritative
-          # parser is Rust: `declarations` in crates/core/tests/graph.rs handles
-          # all four and is tested against all four.
+          # THE MANIFEST IS NOW PARSED, NOT REFUSED-AROUND (D-1107). The
+          # repair above was a refusal list read with `^\[dependencies\.`, so
+          # `[ dependencies . store ]`, `["dependencies"]` and a root-level
+          # `dependencies.store = { path = "../store" }` -- all valid TOML, all
+          # declaring a dependency -- matched no refusal and no extraction, and
+          # the step printed its success line over them. `source_scan deps`
+          # reads the manifest as TOML (quoted and spaced keys, dotted keys at
+          # any level, inline tables, every linking table, `target.*`,
+          # `[patch]`, `[replace]`) and prints one line per declaration. Core
+          # may have none, so ANY line is the violation -- and a manifest the
+          # scanner cannot read is a refusal, never a pass.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           f=crates/core/Cargo.toml
-          [ -f "$f" ] || { echo "skip — crate not created yet"; exit 0; }
-          # Comments stripped first, and this manifest needs it: the empty
-          # `[dependencies]` table is introduced by a comment block that spells
-          # the rule out at length. Text in a comment is text -- the defect that
-          # took gate 17, gate 1d and gate 22 clause A1 red in turn. The limit is
-          # the one graph.rs states about itself: a `#` inside a quoted value
-          # truncates its line. No manifest here has one, and a dependency name
-          # cannot contain one.
-          code=$(sed 's/#.*//' "$f")
-          bad=0
-          for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
-                          '^\[build-dependencies' '^\[target\.'; do
-            if grep -qE "$spelling" <<< "$code"; then
-              printf 'REFUSED  %s uses a dependency table this gate refuses outright: %s\n' \
-                "$f" "$spelling"
-              bad=1
-            fi
-          done
-          # A dotted key inside the flat table declares a dependency the
-          # extractor below would read as a crate named `store.path` and then
-          # fail to match against anything.
-          if grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *=' <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"; then
-            printf 'REFUSED  %s declares a dependency with a dotted key\n' "$f"
-            bad=1
+          # ABSENT IS A REFUSAL. This step said "skip — crate not created yet"
+          # and passed when the manifest was missing, so deleting the manifest
+          # turned the architecture's most load-bearing arrow off in silence.
+          if [ -z "$(git ls-files -- "$f")" ]; then
+            echo "REFUSED  $f is not a tracked file. The crate this gate guards is gone."
+            exit 1
           fi
-          # With those held, this is every dependency the manifest declares.
-          # `|| true` is load-bearing: core declares NOTHING, so grep exits 1,
-          # and under `set -o pipefail` that killed the step before it printed a
-          # line -- an exit 1 with no output, indistinguishable from a real
-          # refusal. Gate 22 clause A2 was red for precisely that.
-          deps=$(printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-                 | { grep -oE '^[A-Za-z0-9_-]+ *=' || true; } \
-                 | sed 's/ *=//' | sort -u)
+          if ! deps=$("$scan" deps "$f"); then
+            echo "REFUSED  $f could not be read as TOML, so nothing it declares can be vouched for."
+            exit 1
+          fi
           if [ -n "$deps" ]; then
             printf 'crates/core MUST DEPEND ON NOTHING. Found:\n%s\n' "$deps"
-            bad=1
-          fi
-          if [ "$bad" -ne 0 ]; then
             echo "core is compiled to wasm32 through crates/web. See D-0009."
-            echo "THE DEV-DEPENDENCY REFUSAL IS NOT A TECHNICALITY. This step had"
-            echo "no dev-dependency clause at all, so a flat [dev-dependencies]"
-            echo "table in crates/core passed it in silence. A dev-dependency is"
-            echo "compiled into every test and every bench, so a crate that"
-            echo "declares one CAN REACH IT whatever the shipping graph says --"
-            echo "which is why graph.rs reads all three linking tables and why"
-            echo "all three are refused here."
+            echo "A DEV-DEPENDENCY IS NOT A TECHNICALITY: it is compiled into every"
+            echo "test and every bench, so a crate that declares one CAN REACH IT"
+            echo "whatever the shipping graph says."
             exit 1
           fi
           # WHAT THIS STILL CANNOT SEE, because a gate that oversells itself is
-          # worse than no gate: a dependency inherited from the workspace root by
-          # a member that names it, and any dependency reached through a
-          # `[patch]` or `[replace]` rename. Gate 13 layers 1 and 2 are what walk
-          # the root manifest and the lock; this step reads one file.
+          # worse than no gate: a `[patch]` or `[replace]` in the WORKSPACE root
+          # that redirects a crate core does not name is not core's declaration
+          # and is not read here. Gate 13 layers 1 and 2 walk the root manifest
+          # and the lock; this step reads one file, completely.
           echo "OK — core declares no dependency of any kind, in any spelling."
       - name: Gate 9b — greeks depends on nothing
         run: |
@@ -1896,42 +1871,32 @@ jobs:
           # least as strong: it is not forced on a consumer, but it IS forced on
           # anyone who runs this crate's tests, and this crate's tests are part
           # of what `tickvault` takes by git URL.
+          # THE MANIFEST IS NOW PARSED, NOT REFUSED-AROUND (D-1107). The
+          # refusal list this replaced read headers with `^\[dependencies\.`,
+          # so `[ dependencies . serde ]`, `["dependencies"]` and a root-level
+          # `dependencies.serde = "1"` -- all valid TOML, all declaring a
+          # dependency -- matched no refusal and no extraction, and the step
+          # printed the success line over them. `source_scan deps` reads the
+          # manifest as TOML (quoted and spaced keys, dotted keys at any level,
+          # inline tables, every linking table, `target.*`, `[patch]`,
+          # `[replace]`) and prints one line per declaration; greeks may have
+          # none, so ANY line is the violation. A manifest it cannot read is a
+          # refusal, never a pass.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           f=crates/greeks/Cargo.toml
-          [ -f "$f" ] || { echo "skip — crate not created yet"; exit 0; }
-          # Comments stripped first. This manifest's comment block discusses
-          # `[dependencies]` and `[dev-dependencies]` by name, at length, and
-          # explains why both are empty -- so an unstripped scan would refuse the
-          # crate over its own justification. Text in a comment is text. The
-          # limit is the one graph.rs states: a `#` inside a quoted value
-          # truncates its line, and no manifest here has one.
-          code=$(sed 's/#.*//' "$f")
-          bad=0
-          for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
-                          '^\[build-dependencies' '^\[target\.'; do
-            if grep -qE "$spelling" <<< "$code"; then
-              printf 'REFUSED  %s uses a dependency table this gate refuses outright: %s\n' \
-                "$f" "$spelling"
-              bad=1
-            fi
-          done
-          if grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *=' <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"; then
-            printf 'REFUSED  %s declares a dependency with a dotted key\n' "$f"
-            bad=1
+          # ABSENT IS A REFUSAL. This step said "skip — crate not created yet"
+          # and passed when the manifest was missing, so deleting the crate's
+          # manifest turned the guarantee off in silence.
+          if [ -z "$(git ls-files -- "$f")" ]; then
+            echo "REFUSED  $f is not a tracked file. The crate this gate guards is gone."
+            exit 1
           fi
-          # With those held this is a complete parse. `|| true` is load-bearing
-          # for the same reason it is in gate 22 clause A2: greeks declares
-          # nothing, grep exits 1, and `set -o pipefail` would kill the step with
-          # no output at all -- a silent exit 1 that reads exactly like a real
-          # refusal, and had the polarity been the other way it would have passed
-          # forever having checked nothing.
-          deps=$(printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-                 | { grep -oE '^[A-Za-z0-9_-]+ *=' || true; } \
-                 | sed 's/ *=//' | sort -u)
+          if ! deps=$("$scan" deps "$f"); then
+            echo "REFUSED  $f could not be read as TOML, so nothing it declares can be vouched for."
+            exit 1
+          fi
           if [ -n "$deps" ]; then
             printf 'crates/greeks MUST DEPEND ON NOTHING. Found:\n%s\n' "$deps"
-            bad=1
-          fi
-          if [ "$bad" -ne 0 ]; then
             echo "It is shared with another repository by git URL. See D-0046."
             exit 1
           fi
@@ -3371,13 +3336,22 @@ jobs:
           # Verified against the tree: `api`, `pull`, `store` and `lake` all
           # declare telemetry in the flat table and still answer yes; `core` and
           # `costs` answer no, as they should.
+          #
+          # NOW READ AS TOML (D-1107). The two greps above read one header
+          # spelling and one key spelling, so `[ dependencies . telemetry ]`
+          # and a root-level `dependencies.telemetry = ..` answered no (a loud
+          # false refusal), and `telemetry = { package = "store", .. }` answered
+          # YES while linking no logger at all (a silent false pass).
+          # `source_scan deps` prints `kind:name:package`; the answer is yes
+          # exactly when a plain `dependencies` declaration links the PACKAGE
+          # `telemetry`. A target-only dependency still answers no, the safe
+          # direction recorded above. An unreadable manifest answers no.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           has_telemetry() {
-            m="crates/$1/Cargo.toml"
-            [ -f "$m" ] || return 1
-            code=$(sed 's/#.*//' "$m")
-            if grep -qE '^\[dependencies\.telemetry\]' <<< "$code"; then return 0; fi
-            grep -qE '^telemetry[[:space:]]*[=.]' \
-              <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"
+            local m="crates/$1/Cargo.toml" listed
+            [ -n "$(git ls-files -- "$m")" ] || return 1
+            listed=$("$scan" deps "$m") || return 1
+            grep -qE '^[^:]*:[0-9]+:dependencies:[^:]*:telemetry$' <<< "$listed"
           }
           # Both files, because clause A2's handles are the same hazard as an
           # `eprintln!` and were not reaching this loop at all.
@@ -3604,8 +3578,21 @@ jobs:
           # read a bar, a manifest or a census however it is later edited. It is
           # std-only by construction, and the manifest is where that is
           # enforced rather than a comment nobody re-reads.
-          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f' crates/telemetry/Cargo.toml \
-                 | grep -vE '^[[:space:]]*(#|$)' || true)
+          #
+          # READ AS TOML, EVERY LINKING TABLE (D-1107). This was an awk range
+          # over the flat `[dependencies]` table, so `[dependencies.store]`,
+          # `[ dependencies . store ]`, a root-level `dependencies.store = ..`,
+          # a `[dev-dependencies]` and a `[target.*.dependencies]` table each
+          # declared a dependency it printed nothing for -- and a missing
+          # manifest printed nothing too, which read as "std only".
+          # `source_scan deps` parses the manifest and prints one line per
+          # declaration of any kind; an absent or unreadable manifest refuses.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          if [ -z "$(git ls-files -- crates/telemetry/Cargo.toml)" ] \
+             || ! deps=$("$scan" deps crates/telemetry/Cargo.toml); then
+            echo "  REFUSED  crates/telemetry/Cargo.toml is absent or could not be read as TOML"
+            deps='(unreadable)'
+          fi
           if [ -n "$deps" ]; then
             echo "  REFUSED  crates/telemetry declares dependencies:"
             printf '%s\n' "$deps" | sed 's/^/             /'
@@ -3845,62 +3832,44 @@ jobs:
           # The load-bearing clause, because it is transitive: a crate that cannot
           # NAME `store` cannot call into one whatever its source says.
           #
-          # A1 FIRST, and this is the repair. Cargo accepts four spellings of one
-          # dependency, and the extraction in A2 -- `name =` at line start inside
-          # the `[dependencies]` range -- can see exactly one of them:
-          #
-          #   store = { path = "../store" }        the only form A2 sees
-          #   store.path = "../store"              a dotted key, same meaning
-          #   [dependencies.store]                 a table header, same meaning
-          #   [dev-dependencies]                   links into every test and bench
-          #   [target.'cfg(unix)'.dependencies]    links on that target
-          #
-          # A shell cannot parse TOML and this gate is not going to pretend it can.
-          # So instead of teaching A2 four spellings, A1 refuses every spelling A2
-          # cannot read. These three manifests use none of them, so the constraint
-          # costs nothing -- and with A1 held, A2 is a COMPLETE parse rather than a
-          # hopeful one. The authoritative parser is Rust:
-          # `engine::tests::declared_dependencies`, which handles all four and is
-          # tested against all four.
+          # THE MANIFEST IS NOW PARSED (D-1107). This clause used to refuse
+          # the spellings a shell could not read and extract `name =` from the
+          # flat table, on the claim that with the refusal held the extraction
+          # was complete. It was not: the refusal read headers with
+          # `^\[dependencies\.`, so `[ dependencies . store ]`,
+          # `["dependencies"]` and a root-level
+          # `dependencies.store = { path = "../store" }` matched no refusal and
+          # no extraction, and `vocab = { package = "store", path = ".." }`
+          # was read as `vocab` -- the one name clause A allows -- while
+          # linking the store. `source_scan deps` reads the manifest as TOML
+          # (quoted and spaced keys, dotted keys at any level, inline tables,
+          # every linking table, `target.*`, `[patch]`, `[replace]`) and
+          # prints `kind:name:package` per declaration. The comparison is on
+          # KIND AND PACKAGE, so a rename is seen for what it links, and a
+          # dev-, build- or target-dependency is a different kind and is
+          # therefore refused. A manifest that is absent or unreadable is a
+          # refusal, never a pass.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           for c in $PINNED; do
             m="crates/$c/Cargo.toml"
-            # Comments stripped first. A comment mentioning `[dev-dependencies]` is
-            # not a `[dev-dependencies]` table, and three of these manifests
-            # discuss the graph at length in exactly that way. This is the defect
-            # that took `V-06` red and `hits_does_the_same_work_for_every_input`
-            # green-on-a-broken-function: text in a comment is text.
-            code=$(sed 's/#.*//' "$m")
-            for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
-                            '^\[build-dependencies' '^\[target\.'; do
-              if grep -qE "$spelling" <<< "$code"; then
-                echo "REFUSED  $m uses a dependency-table spelling this gate cannot parse: $spelling"
-                echo "         Use the flat [dependencies] table with `name = ...`."
-                echo "         See engine::tests::declared_dependencies for why."
-                fail=1
-              fi
-            done
-            # A dotted key inside the flat table -- `store.path = "../store"` --
-            # declares a dependency A2 would not see.
-            if grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *=' <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"; then
-              echo "REFUSED  $m declares a dependency with a dotted key"
+            if [ -z "$(git ls-files -- "$m")" ]; then
+              echo "REFUSED  $m is not a tracked file. A pinned crate cannot be pinned by its absence."
               fail=1
+              continue
             fi
-
-            # A2. With A1 held this is every dependency the manifest declares.
-            # `|| true` is load-bearing: `vocab` declares NOTHING, so grep exits 1,
-            # and under `set -euo pipefail` that killed this gate before it printed
-            # a line -- an exit 1 with no output, indistinguishable from a real
-            # refusal, and had the polarity gone the other way it would have passed
-            # forever having checked nothing.
-            deps=$(printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-                   | { grep -oE '^[A-Za-z0-9_-]+ *=' || true; } \
-                   | sed 's/ *=//' | sort -u | tr '\n' ' ')
+            if ! raw=$("$scan" deps "$m"); then
+              echo "REFUSED  $m could not be read as TOML, so its dependency set is unknown."
+              fail=1
+              continue
+            fi
+            deps=$(awk -F: 'NF { print $3 ":" $NF }' <<< "$raw" | sort -u | tr '\n' ' ')
             case "$c" in
               vocab)             want='' ;;
-              indicators|engine) want='vocab ' ;;
+              indicators|engine) want='dependencies:vocab ' ;;
             esac
             if [ "$deps" != "$want" ]; then
               echo "REFUSED  crates/$c declares [$deps] and must declare [$want]"
+              printf '%s\n' "$raw" | sed 's/^/           /'
               echo "         A new dependency here is how a bar reaches the sweep."
               fail=1
             fi
