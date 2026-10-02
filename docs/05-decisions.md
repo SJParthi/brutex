@@ -43718,3 +43718,38 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-1100 — Read the gates' inputs as tokens, and refuse three workflow shapes that switch a gate off — 2026-10-02
+
+**What was wrong.** An audit (lane 2, findings ET-rust-only-purity-0..10,
+UC-5..12, AC-gates-*) fed the shell gates valid source they passed: `r#Command`,
+`#[path]`, `pub(crate) mod`, `include!`, `*slot = "acmeorg";` dropped as a
+comment line, `#[cfg(test)] use std::{fs, io};` swallowing the next function,
+`[dependencies . indicators]`. Each gate read characters on a line. Separately,
+twenty-three `printf ... | grep -q` tests ran under `set -o pipefail`: grep exits
+at its first match, the producer takes SIGPIPE once its output is larger than a
+pipe buffer, and the `if` reads the match as a miss (AC-gates-law-5). Gate 1e's
+toolchain-word check over `cargo test` output was one of them. And Gate W5 ran
+an 86-line JavaScript program through `node -e` from `ci.yml`, a tracked file
+outside `web/` (ET-rust-only-purity-9).
+
+**The choice.** One dependency-free Rust file, `.github/source_scan.rs`, built by
+`rustc` in a new gate 0 the same way gate 10 builds `invariant_paths.rs` and
+gate 18 builds `mutation_gate.rs`. Gate 0 runs its unit tests first and exports
+the binary's path as `SOURCE_SCAN` for the rest of the `language-purity` job.
+Later decisions move each gate onto it. A shell regex per spelling was rejected:
+every audit pass found one more spelling, and the lexer answers the question
+the regex approximated.
+
+Gate 0 also reads every tracked workflow and refuses: a pipe into `grep -q` (each
+of the 23 is now `grep -q ... <<< "$x"`, which has no pipe), `continue-on-error`
+anywhere, and an interpreter given a program inline (`node -e`, `-c` to the py-family interpreters,
+`perl -e`, `ruby -e`, `php -r`, `deno eval`). Gate W5's program moved verbatim
+to `web/ci/css-comments.mjs`, an ES module, where D-0053 makes any language
+legal. It now also refuses an empty file list itself.
+
+**Limits.** The workflow reader reads `ci.yml`'s own layout (jobs at two
+spaces, steps at six), not YAML in general. The pipe check reads one logical
+shell line after `\` and leading-`|` continuations are joined. A grep fed by
+a process substitution or a file is not a pipe and is not refused.
+Invariants CIG-01 and CIG-02.

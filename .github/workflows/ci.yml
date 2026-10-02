@@ -25,6 +25,44 @@ jobs:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
+      - name: Gate 0 — the source scanner proves itself, then reads this workflow
+        run: |
+          set -euo pipefail
+          # D-1100. The gates below used to read Rust and TOML with line
+          # regexes, and valid source walked past them: `r#Command`, `#[path]`,
+          # `pub(crate) mod`, `include!`, `*slot = "..."` read as a comment, a
+          # brace on a `#[cfg(test)] use` line, `[dependencies . x]`. The
+          # scanner reads TOKENS. It is one dependency-free Rust file, built by
+          # rustc like gate 10's and gate 18's tools, and its own adversarial
+          # tests run before any gate is allowed to trust an answer from it.
+          # Every later step in this job reads its path from SOURCE_SCAN.
+          tool="${RUNNER_TEMP:-/tmp}/source-scan"
+          rustc --edition=2024 --test -D warnings .github/source_scan.rs -o "${tool}-tests"
+          "${tool}-tests"
+          rustc --edition=2024 -D warnings .github/source_scan.rs -o "$tool"
+          if [ -n "${GITHUB_ENV:-}" ]; then
+            printf 'SOURCE_SCAN=%s\n' "$tool" >> "$GITHUB_ENV"
+          fi
+          # Workflow hygiene, read from every tracked workflow:
+          #   * `continue-on-error` anywhere turns a red step into a green job,
+          #     and ci-ok accepts only `success` from a job.
+          #   * a pipe into `grep -q` under `pipefail`: grep exits at its first
+          #     match, the producer takes SIGPIPE once its output outruns one
+          #     pipe buffer, and `if` reads the match as a MISS (AC-gates-law-5).
+          #     Test with `grep -q ... <<< "$x"` instead.
+          #   * an interpreter handed a program inline (`node -e`, `perl -e`)
+          #     is a second language in a tracked file outside web/ (CLAUDE.md
+          #     section 2); such a program lives under web/ and is run by path.
+          wfs=$(git ls-files '.github/workflows/*.yml')
+          [ -n "$wfs" ] || { echo "GATE 0 READ NO WORKFLOW."; exit 1; }
+          # shellcheck disable=SC2086
+          if ! "$tool" workflow $wfs; then
+            echo
+            echo "GATE 0 FAILED: the workflow lines above are refused. See D-1100."
+            exit 1
+          fi
+          echo "OK — the scanner passed its own tests and the workflow is clean."
+
       - name: Gate 1 — extension allowlist
         run: |
           set -euo pipefail
@@ -80,7 +118,7 @@ jobs:
           bad=0
           while IFS= read -r f; do
             base="${f##*/}"
-            if printf '%s\n' "$base" | grep -Eq "^(${allowed_names})$"; then continue; fi
+            if grep -Eq "^(${allowed_names})$" <<< "$base"; then continue; fi
             case "$base" in
               *.*) ext="${base##*.}" ;;
               *)   ext="" ;;
@@ -95,7 +133,7 @@ jobs:
               .claude/*) list="$claude_allowed" ; where='.claude/' ;;
               *)         list="$allowed"        ; where='outside web/' ;;
             esac
-            if ! printf '%s\n' "$ext" | grep -Eq "^(${list})$"; then
+            if ! grep -Eq "^(${list})$" <<< "$ext"; then
               printf 'FORBIDDEN FILE  %s  (extension %s, %s)\n' \
                 "$f" "${ext:-<none>}" "$where"
               bad=1
@@ -184,7 +222,7 @@ jobs:
           fi
           # And the words, kept as a second signal: a crate could reach a toolchain
           # by an absolute path the stub directory does not shadow.
-          if printf '%s' "$out" | grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json'; then
+          if grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json' <<< "$out"; then
             echo "FORBIDDEN: the build read front-end package metadata."
             printf '%s\n' "$out" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
             exit 1
@@ -234,7 +272,7 @@ jobs:
             printf '%s\n' "$tout" | tail -40
             exit 1
           fi
-          if printf '%s' "$tout" | grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json'; then
+          if grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json' <<< "$tout"; then
             echo "FORBIDDEN: the test run read front-end package metadata."
             printf '%s\n' "$tout" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
             exit 1
@@ -1637,7 +1675,7 @@ jobs:
           bad=0
           for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
                           '^\[build-dependencies' '^\[target\.'; do
-            if printf '%s\n' "$code" | grep -qE "$spelling"; then
+            if grep -qE "$spelling" <<< "$code"; then
               printf 'REFUSED  %s uses a dependency table this gate refuses outright: %s\n' \
                 "$f" "$spelling"
               bad=1
@@ -1646,8 +1684,7 @@ jobs:
           # A dotted key inside the flat table declares a dependency the
           # extractor below would read as a crate named `store.path` and then
           # fail to match against anything.
-          if printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-             | grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *='; then
+          if grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *=' <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"; then
             printf 'REFUSED  %s declares a dependency with a dotted key\n' "$f"
             bad=1
           fi
@@ -1738,14 +1775,13 @@ jobs:
           bad=0
           for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
                           '^\[build-dependencies' '^\[target\.'; do
-            if printf '%s\n' "$code" | grep -qE "$spelling"; then
+            if grep -qE "$spelling" <<< "$code"; then
               printf 'REFUSED  %s uses a dependency table this gate refuses outright: %s\n' \
                 "$f" "$spelling"
               bad=1
             fi
           done
-          if printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-             | grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *='; then
+          if grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *=' <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"; then
             printf 'REFUSED  %s declares a dependency with a dotted key\n' "$f"
             bad=1
           fi
@@ -2036,7 +2072,7 @@ jobs:
               if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
                 printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
                 bad=1
-              elif ! printf '%s\n' "$hits" | grep -q "^${p}:"; then
+              elif ! grep -q "^${p}:" <<< "$hits"; then
                 printf '  ::warning title=Gate 13 allowlist is loose::'
                 printf '%s no longer matches layer %s — drop the entry\n' "$p" "$layer"
               fi
@@ -3194,9 +3230,9 @@ jobs:
             m="crates/$1/Cargo.toml"
             [ -f "$m" ] || return 1
             code=$(sed 's/#.*//' "$m")
-            if printf '%s\n' "$code" | grep -qE '^\[dependencies\.telemetry\]'; then return 0; fi
-            printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-              | grep -qE '^telemetry[[:space:]]*[=.]'
+            if grep -qE '^\[dependencies\.telemetry\]' <<< "$code"; then return 0; fi
+            grep -qE '^telemetry[[:space:]]*[=.]' \
+              <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"
           }
           # Both files, because clause A2's handles are the same hazard as an
           # `eprintln!` and were not reaching this loop at all.
@@ -3691,7 +3727,7 @@ jobs:
             code=$(sed 's/#.*//' "$m")
             for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
                             '^\[build-dependencies' '^\[target\.'; do
-              if printf '%s\n' "$code" | grep -qE "$spelling"; then
+              if grep -qE "$spelling" <<< "$code"; then
                 echo "REFUSED  $m uses a dependency-table spelling this gate cannot parse: $spelling"
                 echo "         Use the flat [dependencies] table with `name = ...`."
                 echo "         See engine::tests::declared_dependencies for why."
@@ -3700,8 +3736,7 @@ jobs:
             done
             # A dotted key inside the flat table -- `store.path = "../store"` --
             # declares a dependency A2 would not see.
-            if printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
-               | grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *='; then
+            if grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *=' <<< "$(sed -n '/^\[dependencies\]/,/^\[/p' <<< "$code")"; then
               echo "REFUSED  $m declares a dependency with a dotted key"
               fail=1
             fi
@@ -3998,7 +4033,7 @@ jobs:
             echo "  REFUSED  Cargo.toml has no [profile.release] table at all"
             bad=1
           fi
-          if printf '%s\n' "$rel" | grep -qE '^overflow-checks[[:space:]]*=[[:space:]]*true[[:space:]]*$'; then
+          if grep -qE '^overflow-checks[[:space:]]*=[[:space:]]*true[[:space:]]*$' <<< "$rel"; then
             echo "  present  [profile.release] overflow-checks = true"
           else
             echo "  REFUSED  [profile.release] no longer sets overflow-checks = true."
@@ -4007,7 +4042,7 @@ jobs:
             echo "           written believing the opposite."
             bad=1
           fi
-          if printf '%s\n' "$rel" | grep -qE '^panic[[:space:]]*=[[:space:]]*"abort"[[:space:]]*$'; then
+          if grep -qE '^panic[[:space:]]*=[[:space:]]*"abort"[[:space:]]*$' <<< "$rel"; then
             echo '  present  [profile.release] panic = "abort"'
           else
             echo '  REFUSED  [profile.release] no longer sets panic = "abort".'
@@ -4352,12 +4387,12 @@ jobs:
           # declaration to count.
           whole_file_test_module() {
             # The compiler excludes this entire file in every non-test build.
-            if head -1 "$1" | grep -qxF '#![cfg(test)]'; then return 0; fi
+            if [ "$(head -1 "$1")" = '#![cfg(test)]' ]; then return 0; fi
             stem="${1##*/}"; stem="${stem%.rs}"
             root="${1%/src/*}/src/lib.rs"
             [ -f "$root" ] \
-              && grep -A 1 '^#\[cfg(test)\]$' "$root" \
-                 | grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$"
+              && grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$" \
+                   <<< "$(grep -A 1 '^#\[cfg(test)\]$' "$root" || true)"
           }
 
           walked=0; kept=0; dropped=0; undelimited=0
@@ -5900,12 +5935,12 @@ jobs:
           # somewhere it can be read, so it lives here.
           whole_file_test_module() {
             # The compiler excludes this entire file in every non-test build.
-            if head -1 "$1" | grep -qxF '#![cfg(test)]'; then return 0; fi
+            if [ "$(head -1 "$1")" = '#![cfg(test)]' ]; then return 0; fi
             stem="${1##*/}"; stem="${stem%.rs}"
             root="${1%/src/*}/src/lib.rs"
             [ -f "$root" ] \
-              && grep -A 1 '^#\[cfg(test)\]$' "$root" \
-                 | grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$"
+              && grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$" \
+                   <<< "$(grep -A 1 '^#\[cfg(test)\]$' "$root" || true)"
           }
 
 
@@ -5991,7 +6026,7 @@ jobs:
               if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
                 printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
                 bad=1
-              elif ! printf '%s\n' "$hits" | grep -q "^${p}:"; then
+              elif ! grep -q "^${p}:" <<< "$hits"; then
                 printf '  ::warning title=Gate 11 allowlist is loose::'
                 printf '%s no longer matches rule %s — tighten it\n' "$p" "$rule"
               fi
@@ -6893,9 +6928,9 @@ jobs:
                     | sed -E "s/[Ff]lat +${notclaim}//g" \
                     | sed -E 's/[Ff]lat +(JSON|json) object//g' \
                     | sed -E 's/(exactly|books the trade|came out|row-major and|is charged|A) [Ff]lat//g')
-            printf '%s' "$scrub" | grep -qE "$trigger" || continue
+            grep -qE "$trigger" <<< "$scrub" || continue
             claimed=$((claimed + 1))
-            if printf '%s' "$text" | grep -q 'UNVERIFIED'; then
+            if grep -q 'UNVERIFIED' <<< "$text"; then
               by_unverified=$((by_unverified + 1))
               continue
             fi
@@ -7185,7 +7220,7 @@ jobs:
           while IFS="$tab" read -r f ln text; do
             [ -n "${text-}" ] || continue
             scrub=$(printf '%s' "$text" | sed -E "s/[Ff]lat +${notclaim}//g")
-            printf '%s' "$scrub" | grep -qE "$trigger" || continue
+            grep -qE "$trigger" <<< "$scrub" || continue
             printf '%s\t%s\t%s\n' "$(printf '%s' "$f" | cut -d/ -f2)" "$f" "$ln" \
               >> "$claims"
           done < "$blocks"
@@ -8135,93 +8170,11 @@ jobs:
           #
           # Plain single quotes are correct here and always were: this is the
           # shell, not a nested string.
-          node -e '
-            const fs = require("fs");
-            const files = process.argv.slice(1);
-            let bad = 0;
-            for (const f of files) {
-              const src = fs.readFileSync(f, "utf8");
-              // A `.css` file IS the stylesheet; a `.svelte` file carries one.
-              // `theme.css` is 2,052 lines and the first version of this gate
-              // globbed past it, along with `routes/+page.svelte`, whose path
-              // has no directory between `routes/` and the filename. A gate
-              // that names its inputs by hand misses the ones nobody thought
-              // of, so this walks the tree instead.
-              //
-              // THE SPLIT THIS REPLACES READ THE WRONG BLOCK ON A REAL FILE.
-              // `split("<style>")[1]` takes whatever follows the FIRST of that
-              // eight-character string, and on `routes/+page.svelte` the second
-              // occurrence is PROSE -- six lines into the style block a comment
-              // reads "A literal in a page <style> is a second theme the toggle
-              // cannot reach". So the split handed 387 characters to a scanner
-              // owed 35,472, and the fragment ends inside a comment, so the
-              // gate reported an unterminated comment that is not there.
-              //
-              // The opening tag is matched at COLUMN ZERO and the closing tag
-              // is required to start a line, which is where a Svelte component
-              // puts its one top-level style element and where prose about the
-              // tag never sits. Attributes are allowed: `<style lang="scss">`
-              // is the same element.
-              let css = null;
-              let base = 0;
-              if (f.endsWith(".css")) {
-                css = src;
-              } else {
-                const open = /^<style(?:[^>\n]*)?>/m.exec(src);
-                if (open) {
-                  base = open.index + open[0].length;
-                  const rest = src.slice(base);
-                  const shut = rest.indexOf("\n</style>");
-                  if (shut !== -1) css = rest.slice(0, shut);
-                }
-                // A FILE THAT CARRIES THE TAG AND NO READABLE BLOCK IS LOUD.
-                // Falling quietly through is how the version of this gate that
-                // was handed ZERO filenames printed its success line every run.
-                if (css === null && src.includes("<style")) {
-                  console.log(`${f}: carries a <style tag but no top-level <style> ... </style> block this gate can read`);
-                  bad++;
-                }
-              }
-              if (css === null) continue;
-              const opens = (css.match(/\/\*/g) || []).length;
-              const closes = (css.match(/\*\//g) || []).length;
-              // 1-based line number in the ORIGINAL file, so a finding can be
-              // opened rather than searched for.
-              const at = (k) => src.slice(0, base + k).split("\n").length;
-              let i = 0;
-              while (true) {
-                const a = css.indexOf("/*", i);
-                if (a === -1) break;
-                const b = css.indexOf("*/", a + 2);
-                const body = css.slice(a, b === -1 ? undefined : b).split("\n");
-                if (b === -1) {
-                  console.log(`${f}:${at(a)}: UNTERMINATED comment: ${body[0].slice(0, 70)}`);
-                  bad++;
-                  break;
-                }
-                // ANY line of the body, not just the first: the `*/` is deleted
-                // wherever the prose happened to end, which on a three-line
-                // comment is the third line.
-                const k = body.findIndex((l) => l.trimEnd().endsWith("{"));
-                if (k !== -1) {
-                  console.log(`${f}:${at(a) + k}: comment swallows the rule under it: ${body[k].trim().slice(0, 70)}`);
-                  bad++;
-                }
-                i = b + 2;
-              }
-              if (opens !== closes) {
-                console.log(`${f}: note, not a failure: ${opens} "/*" against ${closes} "*/" -- a nested opener has no meaning to CSS and is counted anyway`);
-              }
-            }
-            if (bad) {
-              console.log("");
-              console.log("A comment that runs past its rule leaves that styling INERT while the");
-              console.log("build stays green: svelte-check cannot see it and Gate W4 cannot count");
-              console.log("it, because to every tool involved the text is prose.");
-              process.exit(1);
-            }
-            console.log("no comment swallows a rule");
-          ' $(find web/src -name '*.svelte' -o -name '*.css' | sort)
+          # The program itself is web/ci/css-comments.mjs (D-1100): JavaScript
+          # written inline here was a second language in a tracked file outside
+          # web/, and gate 0 now refuses an interpreter handed a program inline.
+          # It refuses an empty file list itself.
+          node web/ci/css-comments.mjs $(find web/src -name '*.svelte' -o -name '*.css' | sort)
 
       - name: Gate W6 — the masters script spends no vendor request on load
         run: |

@@ -5354,3 +5354,16 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+## CI gates read tokens, not lines — D-1100 onward
+
+`.github/source_scan.rs` is the one reader these rows share: a dependency-free
+Rust lexer, module resolver, TOML key walker and workflow reader that gate 0
+builds with `rustc` and proves with `rustc --test` before any later gate in the
+`language-purity` job may call it. Each row names the unit cases that fed the
+old line regex the same input and watched it pass.
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| CIG-01 | The scanner separates code from comments and strings by lexing: a deref statement `*slot = "x";` is code, `//` or `/*` inside a string is text, block comments nest, `r#name` is `name`, a lifetime or char literal never opens a string, and an unterminated literal or comment is an error rather than a pass | `a_deref_statement_is_code_and_a_comment_is_not`, `comment_markers_inside_strings_are_text`, `nested_block_comments_close_at_the_right_depth`, `raw_identifiers_lose_their_prefix`, `lifetimes_and_chars_do_not_open_strings`, `an_unterminated_literal_is_an_error_not_a_pass`, `empty_input_is_empty` in `.github/source_scan.rs` | ✓ |
+| CIG-02 | No tracked workflow pipes into `grep -q` (a match read as a miss once the producer outruns a pipe buffer under `pipefail`), sets `continue-on-error`, or hands an interpreter a program inline; a program the web job runs lives under `web/` and is run by path | `workflow_hygiene_refusals` in `.github/source_scan.rs`, run by gate 0 over every tracked workflow | ✓ |
