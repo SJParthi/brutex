@@ -2042,6 +2042,9 @@ fn evaluate_timed(
             ..Grid::default()
         };
     }
+    if !money_envelope_fits(bars, &timed.occupancy, facts.acceptance()) {
+        return envelope_refused(timed);
+    }
 
     // PASS TWO: the ladders, from what this combination's own trades did. A
     // provisional walk with no levels supplies the excursion sample, so the
@@ -2270,6 +2273,9 @@ fn evaluate_timed_with_exact_ladders(
     mut cells: Vec<Cell>,
     families: ExitFamilies,
 ) -> Grid {
+    if !money_envelope_fits(bars, &timed.occupancy, facts.acceptance()) {
+        return envelope_refused(timed);
+    }
     // Every candidate path is measured once against all exact ladders. The
     // sequence comes from `occupancy`, not the level-less trade list: an early
     // level exit can free a later signal, so exclusivity must be replayed by
@@ -2336,6 +2342,75 @@ fn evaluate_timed_with_exact_ladders(
         targets,
         trails,
         refused_paths,
+    }
+}
+
+/// Can every money accumulator of every cell over these paths be summed in
+/// `i64` without saturating? (D-1147)
+///
+/// # Why a refusal and not a clamp
+///
+/// `Cell::pessimistic`, `optimistic`, `fill_cost`, `gross_win`, `gross_loss`
+/// and the drawdown's running equity are summed with `saturating_add`, and no
+/// field says a sum was clamped -- a saturated total printed as a real one is
+/// the hidden fallback `CLAUDE.md` §4 bans, and `trade.rs` already refuses a
+/// saturated FILL rather than clamping it. So the grid asks this first.
+///
+/// # The bound, and why it is sufficient
+///
+/// It is the money term `exit_grid_policy`'s `validate_arithmetic_envelope`
+/// already applies to the V1 grid, over the bars the paths actually touch:
+/// with `A` the largest absolute price on any path and `P` the number of
+/// paths, each trade's fill legs lie inside `[-A, A]`, so one trade moves a
+/// money sum by at most `2A`, a fill-cost term by at most `4A`, and a
+/// drawdown spans at most twice the summed magnitude. `4·A·P ≤ i64::MAX`
+/// therefore bounds every accumulator. It is conservative: a slice it refuses
+/// might have summed safely. On index data it is unreachable -- at
+/// ₹1,00,000 a unit it would take over 2.3 × 10¹¹ paths.
+///
+/// # Cost
+///
+/// O(Σ span) over the paths, the same walk `crossings_checked` already makes;
+/// no term in the bar count.
+///
+/// A bar the evaluator REFUSED (`accepted[i] == false`) is skipped: no fill
+/// and no excursion is ever read from it, and a refused bar's price is
+/// exactly the kind of poison that must not decide a healthy path's verdict.
+/// An empty `accepted` (no verdicts) skips nothing.
+fn money_envelope_fits(
+    bars: &[Candle],
+    paths: &[crate::trade::Occupancy],
+    accepted: &[bool],
+) -> bool {
+    let mut largest = 0_i128;
+    for path in paths {
+        for index in path.entry_bar..=path.exit_bar.max(path.entry_bar) {
+            let Some(bar) = bars.get(index) else {
+                break;
+            };
+            if accepted.get(index) == Some(&false) {
+                continue;
+            }
+            for price in [bar.open, bar.high, bar.low, bar.close] {
+                largest = largest.max(i128::from(price).abs());
+            }
+        }
+    }
+    let count = i128::try_from(paths.len()).unwrap_or(i128::MAX);
+    largest
+        .checked_mul(count)
+        .and_then(|value| value.checked_mul(4))
+        .is_some_and(|bound| bound <= i128::from(i64::MAX))
+}
+
+/// The grid a slice outside [`money_envelope_fits`] gets: no cell, every path
+/// counted in `refused_paths`, which is the channel this module already uses
+/// for "a measurement that could not be taken".
+fn envelope_refused(timed: &crate::trade::Trades) -> Grid {
+    Grid {
+        signals: timed.signals,
+        refused_paths: u64::try_from(timed.occupancy.len()).unwrap_or(u64::MAX),
+        ..Grid::default()
     }
 }
 
@@ -3545,6 +3620,18 @@ impl<'a> PreparedReplay<'a> {
                 ladders,
                 candidates: None,
                 refused_paths: 0,
+            };
+        }
+        if !money_envelope_fits(bars, &timed.occupancy, facts.acceptance()) {
+            // No candidate is priced, and every path is counted refused:
+            // `variant` then answers "no priceable trade, all refused", and
+            // `CellReplay::materialize` refuses a selected trading cell.
+            return Self {
+                bars,
+                side,
+                ladders,
+                candidates: Some(Vec::new()),
+                refused_paths: u64::try_from(timed.occupancy.len()).unwrap_or(u64::MAX),
             };
         }
         let (candidates, refused_paths) = replay_candidates(bars, side, ladders, facts, timed);
@@ -5581,6 +5668,160 @@ mod exit_family_tests {
             }
         }
         assert!(compared > 0, "the fixture must exercise at least one cell");
+    }
+
+    /// D-1147. The money envelope is exact at its boundary and refuses empty
+    /// spans, negative prices and overflowing products the right way round.
+    #[test]
+    fn the_money_envelope_is_exact_at_its_boundary() {
+        use crate::trade::Occupancy;
+        let path = |entry_bar, exit_bar| Occupancy {
+            signal_bar: entry_bar,
+            entry_bar,
+            exit_bar,
+            priceable: true,
+        };
+        let bar = |price: i64| indicators::Candle {
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            ..indicators::Candle::default()
+        };
+        let fits = |bars: &[indicators::Candle], paths: &[Occupancy]| {
+            super::money_envelope_fits(bars, paths, &[])
+        };
+        let limit = i64::MAX / 4; // 4·A·1 ≤ i64::MAX exactly at this A
+        assert!(fits(&[], &[]), "nothing to sum fits");
+        assert!(fits(&[bar(limit)], &[path(0, 0)]));
+        assert!(!fits(&[bar(limit + 1)], &[path(0, 0)]));
+        assert!(
+            !fits(&[bar(-limit - 1)], &[path(0, 0)]),
+            "magnitude, not sign"
+        );
+        assert!(!fits(&[bar(i64::MIN)], &[path(0, 0)]));
+        // Two paths halve the affordable price.
+        let half = limit / 2;
+        assert!(fits(&[bar(half), bar(half)], &[path(0, 0), path(1, 1)]));
+        assert!(!fits(&[bar(half + 1), bar(1)], &[path(0, 0), path(1, 1)]));
+        // A bar no path touches does not count; an out-of-range path reads
+        // nothing rather than panicking.
+        assert!(fits(&[bar(1), bar(i64::MAX)], &[path(0, 0)]));
+        assert!(fits(&[bar(1)], &[path(5, 9)]));
+        // A bar the evaluator refused is never priced, so its price does not
+        // count; an accepted or unjudged one does.
+        let poisoned = [bar(1), bar(i64::MAX), bar(1)];
+        let span = [path(0, 2)];
+        assert!(!fits(&poisoned, &span));
+        assert!(super::money_envelope_fits(
+            &poisoned,
+            &span,
+            &[true, false, true]
+        ));
+        assert!(!super::money_envelope_fits(
+            &poisoned,
+            &span,
+            &[true, true, true]
+        ));
+        assert!(!super::money_envelope_fits(&poisoned, &span, &[true]));
+    }
+
+    /// D-1147 (ET-strategies-trades-ranking-costs-1). Prices large enough that
+    /// a cell's totals could saturate are refused -- no cell, every path in
+    /// `refused_paths` -- rather than priced and clamped at `i64::MAX`, on the
+    /// grid, on the resolved-ladder replay and on cell materialisation.
+    #[test]
+    fn a_grid_that_could_saturate_is_refused_not_clamped() {
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        let mask = ConditionMask::default();
+        let bars = crate::synthetic::sessions(8);
+        let column = column(&bars);
+        let facts = SliceFacts::of(&bars, &column);
+        let side = Side::Long;
+        let timed = crate::trade::walk_over(
+            &bars,
+            &column,
+            &mask,
+            horizon,
+            super::direction_of(side),
+            &facts,
+        );
+        let paths = i64::try_from(timed.occupancy.len()).expect("paths fit");
+        assert!(paths > 0, "the fixture must trade");
+        // The SMALLEST price, so every path span's largest price is past the
+        // bound: `4 · A · P > i64::MAX` for any span this walk takes.
+        let smallest = bars
+            .iter()
+            .map(|b| b.low.min(b.open).min(b.close))
+            .min()
+            .expect("bars");
+        let scale = i64::MAX / 4 / paths / smallest + 1;
+        let scaled: Vec<indicators::Candle> = bars
+            .iter()
+            .map(|b| indicators::Candle {
+                open: b.open * scale,
+                high: b.high * scale,
+                low: b.low * scale,
+                close: b.close * scale,
+                ..*b
+            })
+            .collect();
+        let scaled_facts = SliceFacts::of(&scaled, &column);
+        let refused = super::evaluate_over(
+            &scaled,
+            &column,
+            &mask,
+            horizon,
+            side,
+            Levels::derived(3),
+            &scaled_facts,
+        );
+        assert!(refused.cells.is_empty(), "no clamped cell may be reported");
+        assert_eq!(refused.refused_paths, timed.occupancy.len() as u64);
+        assert_eq!(refused.signals, timed.signals);
+        // The same prices on the replay doors.
+        let grid = super::evaluate_over(
+            &bars,
+            &column,
+            &mask,
+            horizon,
+            side,
+            Levels::derived(3),
+            &facts,
+        );
+        let trading = grid
+            .cells
+            .iter()
+            .find(|cell| cell.trades > 0)
+            .expect("a trading cell");
+        let replay = super::CellReplay::prepare(
+            &scaled,
+            &column,
+            &mask,
+            horizon,
+            side,
+            &grid,
+            &scaled_facts,
+        );
+        assert!(replay.materialize(trading).is_err());
+        assert!(
+            super::with_levels(
+                &scaled,
+                &column,
+                &mask,
+                horizon,
+                side,
+                crate::excursion::Ladders {
+                    stops: &grid.stops,
+                    targets: &grid.targets,
+                    trails: &grid.trails,
+                },
+                super::Chosen::from_cell(trading),
+            )
+            .is_none()
+        );
+        // Unscaled, nothing is refused for the envelope.
+        assert!(!grid.cells.is_empty());
     }
 
     /// D-1146. A grid evaluated from the caller's own level-less walk equals

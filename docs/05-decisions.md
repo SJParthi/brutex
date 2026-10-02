@@ -43982,3 +43982,49 @@ a mask that hits nothing.
 `validate::tests::the_in_sample_pass_walks_each_candidate_once` (source shape)
 fails on the previous tree. All of `runner`'s walk-forward fixtures, including
 the pinned fold outcomes, are unchanged.
+
+### D-1147 — Refuse a grid whose money totals could saturate, instead of reporting them clamped at `i64::MAX` — 2026-10-02
+
+**Finding.** ET-strategies-trades-ranking-costs-1. Grid cell totals are summed
+with `saturating_add`: `trades`, `pessimistic` and `optimistic`, the same
+pattern at `gross_win`, `gross_loss` and `fill_cost`, and the running equity
+in `accrue_risk` (whose `dip` uses `saturating_sub`). Nothing on `Cell` or
+`Grid` records that a sum clamped, so an overflow would print as a real total,
+and the drawdown built on a clamped running equity reads 0. `trade.rs` refuses
+a saturated fill rather than clamping it, and the totals did not follow that
+rule. The V1 resolved policy is already protected by `exit_grid_policy`'s
+`validate_arithmetic_envelope`. The legacy grid and the fixed-ladder replay
+(`with_levels`, `per_trade`, `CellReplay`) had no check.
+
+**The change.** New `grid::money_envelope_fits(bars, paths)` applies V1's money
+term, `4·A·P ≤ i64::MAX`, where `A` is the largest absolute price on any path
+span and `P` the number of paths. Each trade moves a money sum by at most `2A`
+and a fill-cost term by at most `4A`, and a drawdown spans at most twice the
+summed magnitude, so the bound covers every accumulator. It is checked in
+`evaluate_timed` before the excursion pass, in
+`evaluate_timed_with_exact_ladders`, and in `PreparedReplay::of`. A slice
+outside the bound gets no cell, and every path is counted in `refused_paths`,
+the module's existing channel for a measurement that could not be taken. A
+bar the evaluator refused is skipped, because no fill or excursion is ever read
+from it. The first draft counted refused bars, and
+`arming_tests::chosen_materialization_never_contains_a_statefully_refused_path`
+caught it: a poisoned bar at 5 × 10¹⁸ paisa refused the whole grid. The
+replay then returns no cell, and `CellReplay::materialize` refuses a selected
+trading cell. The check reads only the path spans, the bars `crossings_checked`
+already walks, so it adds no term in the bar count. A `Cell` or `Grid` field
+naming the reason would be louder. It is not added because it changes every
+`Debug` fingerprint, every struct literal across `cli`, and the cell codecs.
+`docs/06-limits.md` records this.
+
+**Outputs.** No output changes on any data the engine has seen. The bound is
+conservative, but it refuses only above ₹2.3 × 10¹⁶ of summed price magnitude
+(about 2.3 × 10¹¹ paths at ₹1,00,000). Previously a grid over such prices would
+have printed clamped totals; now it reports itself refused.
+
+**Tests.** `grid::exit_family_tests::the_money_envelope_is_exact_at_its_boundary`
+covers the exact boundary, one over it, the negative magnitude, `i64::MIN`, two
+paths, untouched bars, an out-of-range path, and empty input.
+`grid::exit_family_tests::a_grid_that_could_saturate_is_refused_not_clamped`
+scales a real fixture past the bound and requires refusal from the grid, the
+cell replay and `with_levels`. With the check disabled it fails ("no clamped
+cell may be reported").

@@ -5399,3 +5399,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | `grid::evaluate_from_walk` over the caller's own `walk_over` equals `grid::evaluate_over` byte for byte, and `walk_forward_core`'s in-sample pricing body takes exactly one walk per candidate. | `runner::grid::exit_family_tests::a_grid_from_the_callers_walk_equals_evaluate_over` · `runner::validate::tests::the_in_sample_pass_walks_each_candidate_once` | ✓ |
+
+### Grid totals are refused, never clamped — ET-strategies-trades-ranking-costs-1 (D-1147)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A legacy grid, fixed-ladder replay or cell materialisation whose paths fail `4·A·P ≤ i64::MAX` reports no cell and counts every path refused. It never reports a total clamped by `saturating_add`. The envelope is exact at its boundary. | `runner::grid::exit_family_tests::a_grid_that_could_saturate_is_refused_not_clamped` · `runner::grid::exit_family_tests::the_money_envelope_is_exact_at_its_boundary` | ✓ |

@@ -9940,3 +9940,18 @@ not:
   empty-mask answer (a blanked row fires for the empty mask) and the slice
   facts derived from the column. The fix that changes no answer is a row-offset
   start in `trade::walk_over`, which is owned by another lane. Not measured.
+
+## A grid refused for its money envelope does not say why — D-1147, 2 October 2026
+
+- A legacy grid whose paths fail `4·A·P ≤ i64::MAX` reports no cell and counts
+  every path in `refused_paths`. That is the same signal a slice whose every
+  path crossed a refused bar gives. The two are told apart only by reading the
+  prices. A `Cell`/`Grid` field naming the reason would change every `Debug`
+  fingerprint, every struct literal in `cli`, and the cell codecs. It is left
+  to a change that owns those.
+- The bound is conservative. It assumes every fill leg lies inside the path's
+  price range, which is how the printed-OHLCV fill model prices, so a slice it
+  refuses could sometimes have summed safely. It is the same bound V1 applies
+  over the whole slice.
+- The check costs O(Σ path span), the spans `crossings_checked` already walks.
+  Not measured.
