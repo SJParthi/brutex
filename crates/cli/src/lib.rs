@@ -20745,6 +20745,10 @@ mod tests {
     /// answer must be distinguishable from an unmeasured one.
     #[test]
     fn an_impossible_threshold_still_renders_a_report_rather_than_nothing() {
+        // `sweep` reads the process-wide knobs, so it waits for any test that
+        // is setting one; otherwise a knob held for another test's duration
+        // (a ceiling, a threshold) decides this report.
+        let _guard = crate::knobs::serially();
         let text = sweep(1, u64::MAX);
         assert!(text.starts_with(PROVENANCE));
         assert!(text.contains("BARS"), "the census is still shown:\n{text}");
@@ -21883,10 +21887,24 @@ mod tests {
 
         // A value far above the floor, so the division is what decides the
         // answer rather than the floor clamping both sides to the same number.
-        let asked = floor.saturating_mul(sharing.max(1)).saturating_mul(64);
+        //
+        // CAPPED AT THE REFUSAL LIMIT. `ceiling_asked` refuses anything above
+        // 64x this machine's derived ceiling, and that figure scales with the
+        // machine while `floor * sharing * 64` scales with the share count other
+        // tests raise. On a smaller CI runner with a raised share the uncapped
+        // value crossed the limit, the knob was refused, and the `expect` below
+        // panicked BEFORE `clear_all`, leaking `BRUTEX_CEILING` into every
+        // knob-reading test that ran next.
+        let asked = floor
+            .saturating_mul(sharing.max(1))
+            .saturating_mul(64)
+            .min(crate::ceiling_limit());
         crate::knobs::set("BRUTEX_CEILING", &asked.to_string());
-        let got = crate::ceiling_from_env().expect("a positive integer parses");
+        // Cleared before the answer is unwrapped, so a refusal cannot leak the
+        // knob into the next test.
+        let got = crate::ceiling_from_env();
         crate::knobs::clear_all();
+        let got = got.expect("a positive integer parses");
 
         assert_eq!(
             got,
