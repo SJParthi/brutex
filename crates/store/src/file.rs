@@ -845,6 +845,20 @@ fn write_checksums_missing(
     )
 }
 
+fn write_short_read(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    offset: u64,
+    asked: usize,
+    read: usize,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} ended at offset {offset} with {asked} bytes owed after {read}",
+        path.display()
+    )
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -890,11 +904,7 @@ impl fmt::Display for StoreError {
                 offset,
                 asked,
                 read,
-            } => write!(
-                f,
-                "{} ended at offset {offset} with {asked} bytes owed after {read}",
-                path.display()
-            ),
+            } => write_short_read(f, path, *offset, *asked, *read),
             Self::RaggedTail { path, len, extra } => write!(
                 f,
                 "{} is {len} bytes, {extra} past the last whole record",

@@ -48538,6 +48538,59 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0953 — API request costs named per route; one index observation per instrument; a page orders only itself; `/store` fresh in every view; the serve lock names one holder — 2026-10-02
+
+**What happened.** An audit (cluster B6: W1-api5-0 to W1-api5-11, UC-20,
+R9-api-cx-2, GAP14-63) found eleven paths in `crates/api` whose cost grows
+with the store or the universe and which `docs/06-limits.md` did not name,
+two bugs, and one untested guard.
+
+**Changed.**
+
+* *W1-api5-0.* `land_spot` landed each body through `land_bodies_scheduled`,
+  which took the index observation itself, so every body after the first
+  missed the census cache (each body's append moves the manifest stamp), read
+  every vendor manifest whole, sorted the vendor's entries and re-derived the
+  index calendar. The observation is now taken once per instrument, before
+  the first body appends, and handed to every body through the new
+  `land_bodies_observed`. It is still a snapshot before any append, and the
+  observation stays diagnostic, never schedule authority. `land_one` keeps
+  its one call.
+* *W1-api5-4.* `bars::window` partitioned at `offset + limit` with an uncapped
+  `offset`, so a page near or past the end of a 1.9-million-bar window ordered
+  every row. `bars::page_of` partitions at `offset`, then at `limit`, and
+  orders only the page; an offset past the end compares nothing. The output is
+  unchanged: the comparator is total.
+* *UC-20.* `/store?show=gaps` drew its axis and cells from `Site::series` and
+  `Site::censuses`, the boot snapshot, and every `/store` view printed the boot
+  census notes beside fresh vendor cards. Both now come from the request's
+  `census_now`. The two notes that warned the counters were "this process's
+  startup read" had become false and are removed.
+* *R9-api-cx-2.* `take_serve_lock` stamped `serve.lock` without truncating,
+  so a shorter stamp left an earlier holder's tail and a refused instance
+  quoted two pids. The holder now cuts the file to its stamp after writing it,
+  and the refusal quotes the first line only.
+
+**Documented, not changed.** W1-api5-1 (`from_window` and `record_held` read
+the whole census per call), W1-api5-2 (a `census_now` miss, which is every
+request while a pull lands), W1-api5-3 (`/instruments.json`), W1-api5-5
+(`/calendar.json`), W1-api5-6 (a filtered `/store`), W1-api5-7
+(`/verify.json`), W1-api5-8 (`/bars.json` past the last bar), W1-api5-9
+(`/indexmap.json`) and W1-api5-11 (`spot_targets`, `resolved_master_rows`)
+are in `docs/06-limits.md`'s D-0953 section, which also corrects §34's
+"not reachable today". The route docs for `/calendar.json`, `/verify.json`
+and `/indexmap.json` now state those costs. `api::server::cost_limits_tests`
+holds each bullet to the source shape it describes.
+
+**GAP14-63.** `a_symbol_this_feed_holds_no_file_for_is_not_named_in_from`
+covers the `calendar.sessions() > 0` guard on the exchange branch of
+`/calendar.json`; it fails when the guard is removed.
+
+**Not decided.** Caching the decoded census across windows in `pull`
+(W1-api5-1) changes the durability path of the counter and is left to that
+crate. W1-api5-8's whole-month fallback stays because it is what reads a
+header naming zero-filled records correctly. Invariants APIC-01 to APIC-06.
+
 ### D-0952 — One audited route list, an owed terminal, and the journal's growth stated — 2026-10-02
 
 **The defects (audit findings GAP14-57, W1-api3-5, W1-api3-0).** (1)

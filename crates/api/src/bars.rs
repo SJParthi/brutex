@@ -1042,15 +1042,13 @@ pub fn window(
     // asks for a bounded page and never O(universe); an audit found this route
     // breaching it.
     //
-    // The partition in `ordered_page` is O(n) and leaves the first `keep`
-    // elements as the `keep` rows nearest the page's end of this order,
-    // unordered among themselves. Only those are then ordered. The cost goes
-    // from `O(n log n)` to `O(n) + O(keep log keep)`, where `keep` is the
-    // fewer of `offset + limit` and `n - offset` (D-0733).
+    // `page_of` partitions in O(n) and orders only the page's own rows, so the
+    // cost goes from `O(n log n)` to `O(n) + O(limit log limit)`. D-0733 first
+    // bounded it by the nearer end of the window; D-0953 bounds it by the page.
     //
     // THE OUTPUT IS UNCHANGED, and that is what a TOTAL comparator buys: with
     // the timestamp as tie-break no two rows ever compare equal, so the set of
-    // the `keep` rows is unique and ordering it is byte-identical to
+    // the page's rows is unique and ordering it is byte-identical to
     // ordering everything and slicing -- §3 rule 5. An unstable partition may
     // reorder only what it is free to reorder, and here there is nothing.
     // `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
@@ -1060,9 +1058,15 @@ pub fn window(
     // THE BARS ARE STILL ALL READ, and that is not what this changes. `total`,
     // `extremes_of` and the per-file change fold each need every row; the read
     // is O(bars) because of the question being asked. What is removed is the
-    // ordering of rows nobody will see. `ordered_page` says which rows those
-    // are, and why a deep offset is now counted from the far end (D-0733).
-    let bars = ordered_page(all, order, offset, limit);
+    // ordering of rows nobody will see.
+    //
+    // AND THE ROWS BEFORE THE PAGE ARE NOT ORDERED EITHER. `want` was
+    // `offset + limit`, and `offset` comes off the query string uncapped, so a
+    // page near the end of a 1.9-million-bar window ordered all of them again,
+    // and an offset past the end ordered every row to answer none. `page_of`
+    // partitions twice instead: once at `offset`, once at `limit` inside what
+    // is left, and orders only the page. W1-api5-4, D-0953.
+    let bars = page_of(all, offset, limit, order);
 
     Ok(Window {
         total,
@@ -1074,76 +1078,42 @@ pub fn window(
     })
 }
 
-/// Which end of a totally ordered list a page is cut from, and how many rows
-/// have to be ordered to cut it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PageSide {
-    /// The page is empty: the offset is at or past the end, or the limit is 0.
-    Empty,
-    /// Keep the `n` smallest rows under the order, order them, and slice.
-    Front(usize),
-    /// Keep the `n` LARGEST rows, order them under the reversed order, and
-    /// slice from the other end.
-    Back(usize),
-}
-
-/// Where rows `offset..offset + limit` of `n` rows are cut from.
+/// The rows `offset .. offset + limit` of `all` under `order`, in that order.
 ///
-/// From the front the rows to order are the first `offset + limit`; from the
-/// back they are the last `n - offset`. The smaller of the two is kept, the
-/// front on a tie, so no page orders more than half the rows plus its own
-/// limit: a deep offset used to order nearly all `n` (W1-api1-3, D-0733).
-fn page_side(n: usize, offset: usize, limit: usize) -> PageSide {
-    let start = offset.min(n);
-    let end = offset.saturating_add(limit).min(n);
-    if start == end {
-        PageSide::Empty
-    } else if end <= n - start {
-        PageSide::Front(end)
-    } else {
-        PageSide::Back(n - start)
-    }
-}
-
-/// Rows `offset..offset + limit` of `all` under `order`, which must be TOTAL.
+/// Equal to ordering all of `all` and slicing, when `order` is a total order
+/// (no two rows compare equal), which is what `window`'s comparator is: its
+/// timestamp tie-break is unique within a series.
 ///
-/// It partitions to the rows [`page_side`] keeps in O(n), orders only those,
-/// and slices. A total order makes the kept set unique, so the page is the
-/// same rows in the same order as sorting everything and slicing:
-/// `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`.
-/// From the back it keeps the largest rows under the reversed order, whose
-/// ordering is the page's end first, and reverses the slice it cuts.
-fn ordered_page<T>(
+/// # Cost
+///
+/// Two partitions and one ordering of the page: an `O(n)` partition at
+/// `offset` (skipped when it is zero), an `O(n - offset)` partition at `limit`
+/// inside what is left, then `O(limit log limit)` to order the page. An offset
+/// at or past the end answers empty with no comparison at all. The ordering of
+/// rows before or after the page, which an `offset + limit` partition paid
+/// near the end of a window, is gone. `std`'s `select_nth_unstable_by` is the
+/// partition, and the comparison count is measured, not argued, by
+/// `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
+/// W1-api5-4, D-0953.
+fn page_of<T>(
     mut all: Vec<T>,
-    order: impl Fn(&T, &T) -> core::cmp::Ordering,
     offset: usize,
     limit: usize,
+    mut order: impl FnMut(&T, &T) -> std::cmp::Ordering,
 ) -> Vec<T> {
-    let n = all.len();
-    let (keep, back) = match page_side(n, offset, limit) {
-        PageSide::Empty => return Vec::new(),
-        PageSide::Front(keep) => (keep, false),
-        PageSide::Back(keep) => (keep, true),
-    };
-    let cmp = |a: &T, b: &T| if back { order(b, a) } else { order(a, b) };
-    /* NO `keep < n` GUARD. `page_side` keeps at least one row and at most
-    `n`, so `keep - 1` is always a legal index; with `keep == n` the partition
-    and the truncation move nothing that the sort does not then order. The
-    guard made no difference to any page, and `cargo mutants` could not tell
-    `<` from `<=` in it (D-0733). */
-    all.select_nth_unstable_by(keep - 1, cmp);
-    all.truncate(keep);
-    all.sort_by(cmp);
-    let end = offset.saturating_add(limit).min(n);
-    if back {
-        // Row `i` of the kept rows is row `n - 1 - i` in the page's order, so
-        // the page is kept rows `n - end..` read backwards.
-        all.drain(..n - end);
-        all.reverse();
-    } else {
-        all.drain(..offset);
+    if limit == 0 || offset >= all.len() {
+        return Vec::new();
     }
-    all
+    if offset > 0 {
+        all.select_nth_unstable_by(offset, &mut order);
+    }
+    let mut page = all.split_off(offset);
+    if limit < page.len() {
+        page.select_nth_unstable_by(limit - 1, &mut order);
+        page.truncate(limit);
+    }
+    page.sort_by(&mut order);
+    page
 }
 
 struct OpenedWindow {
@@ -1415,15 +1385,15 @@ mod tests {
             .collect();
         let order = |a: &(i64, i64), b: &(i64, i64)| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));
 
-        // EVERY OFFSET, including each one past the end, so the front and the
-        // back cut (D-0733) are both compared against the unbounded page.
+        // EVERY OFFSET, including each one past the end, against the
+        // unbounded page (D-0733, and since D-0953 through `page_of`).
         for offset in 0..=62 {
             for limit in [0, 1, 2, 10, 29, 30, 31, 60, 61] {
                 let mut whole = rows.clone();
                 whole.sort_by(order);
                 let expected: Vec<(i64, i64)> =
                     whole.into_iter().skip(offset).take(limit).collect();
-                let got = ordered_page(rows.clone(), order, offset, limit);
+                let got = super::page_of(rows.clone(), offset, limit, order);
                 assert_eq!(
                     got, expected,
                     "offset={offset} limit={limit}: the bounded page must be the \
@@ -1431,43 +1401,17 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// **A DEEP OFFSET ORDERS THE ROWS BEHIND IT, NOT THE ROWS BEFORE IT.** Of
-    /// the `offset + limit` rows from the front and the `n - offset` rows from
-    /// the back, the fewer are kept, the front on a tie (W1-api1-3, D-0733).
-    #[test]
-    fn a_page_is_cut_from_whichever_end_orders_fewer_rows() {
-        assert_eq!(page_side(100, 0, 10), PageSide::Front(10));
-        assert_eq!(page_side(100, 40, 10), PageSide::Front(50));
-        // A tie, 60 rows either way, is cut from the front.
-        assert_eq!(page_side(100, 40, 20), PageSide::Front(60));
-        // One row past the tie: 53 from the front against 52 from the back.
-        assert_eq!(page_side(100, 48, 5), PageSide::Back(52));
-        assert_eq!(page_side(100, 50, 0), PageSide::Empty);
-        assert_eq!(
-            page_side(2_000_000, 1_999_000, 1_000),
-            PageSide::Back(1_000)
-        );
-        // Clipped at the end, and nothing past it.
-        assert_eq!(page_side(100, 95, 10), PageSide::Back(5));
-        assert_eq!(page_side(100, 100, 10), PageSide::Empty);
-        assert_eq!(page_side(100, 150, 10), PageSide::Empty);
-        assert_eq!(page_side(0, 0, 10), PageSide::Empty);
-        assert_eq!(page_side(100, usize::MAX, 10), PageSide::Empty);
-        assert_eq!(page_side(100, 0, usize::MAX), PageSide::Front(100));
-        // NO PAGE ORDERS MORE THAN HALF THE ROWS PLUS ITS LIMIT, at every row
-        // count up to 40 and every offset and limit up to 45.
-        for n in 0..=40 {
-            for offset in 0..=45 {
-                for limit in 0..=45 {
-                    let keep = match page_side(n, offset, limit) {
-                        PageSide::Empty => 0,
-                        PageSide::Front(keep) | PageSide::Back(keep) => keep,
-                    };
-                    assert!(2 * keep <= n + limit, "n={n} offset={offset} limit={limit}");
-                }
-            }
+        // AND THE EDGES NO OFFSET ABOVE REACHES: limits and offsets at
+        // `usize::MAX`, where `offset + limit` would overflow (W1-api5-4, D-0953).
+        for (offset, limit) in [(usize::MAX, usize::MAX), (1, usize::MAX), (59, usize::MAX)] {
+            let mut whole = rows.clone();
+            whole.sort_by(order);
+            let expected: Vec<(i64, i64)> = whole.into_iter().skip(offset).take(limit).collect();
+            assert_eq!(
+                super::page_of(rows.clone(), offset, limit, order),
+                expected,
+                "offset={offset} limit={limit}"
+            );
         }
     }
 
@@ -1497,8 +1441,8 @@ mod tests {
             "let (rows, mut bad) = slots(file, 0, held);",
             "match file.read_record(index)",
             "let extremes = want_extremes.then(|| extremes_of(&all));",
-            "all.select_nth_unstable_by(keep - 1, cmp);",
-            "all.sort_by(cmp);",
+            "page.select_nth_unstable_by(limit - 1, &mut order);",
+            "page.sort_by(&mut order);",
             "pub const MAX_WINDOW_MONTHS: usize = 240;",
             "pub const MAX_WINDOW_LIMIT: usize = 1_000;",
         ] {
@@ -1507,6 +1451,60 @@ mod tests {
                 "the limit quotes {quoted}"
             );
             assert!(code.contains(quoted), "bars.rs still says {quoted}");
+        }
+    }
+
+    /// **A page orders itself and nothing else, wherever its offset lands.**
+    /// W1-api5-4, D-0953.
+    ///
+    /// `window` partitioned at `offset + limit` and ordered everything before
+    /// that, so a page near the end of the window (or an offset past it, which
+    /// the query string does not cap) ordered every row. Counted here with a
+    /// comparator that counts: over 200,000 rows in three adversarial input
+    /// orders, the page at the very end costs a linear number of comparisons,
+    /// within a bound an `n log n` ordering of the whole window (some 3.5
+    /// million comparisons here) cannot meet, and an offset past the end costs
+    /// none.
+    #[test]
+    fn the_page_orders_only_itself_wherever_the_offset_lands() {
+        const N: usize = 200_000;
+        const N_I64: i64 = 200_000;
+        const LIMIT: usize = 1_000;
+        let inputs: [(&str, Vec<(i64, i64)>); 3] = [
+            ("ascending", (0..N_I64).map(|i| (i, i)).collect()),
+            ("descending", (0..N_I64).rev().map(|i| (i, i)).collect()),
+            (
+                "one primary value",
+                (0..N_I64).map(|i| (7, (i * 7919) % N_I64)).collect(),
+            ),
+        ];
+        for (name, rows) in inputs {
+            for offset in [0, N / 2, N - LIMIT, N - 1, N, N + 1, usize::MAX] {
+                let compared = std::cell::Cell::new(0_u64);
+                let order = |a: &(i64, i64), b: &(i64, i64)| {
+                    compared.set(compared.get() + 1);
+                    a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+                };
+                let got = super::page_of(rows.clone(), offset, LIMIT, order);
+                let mut whole = rows.clone();
+                whole.sort_unstable();
+                let expected: Vec<_> = whole.into_iter().skip(offset).take(LIMIT).collect();
+                assert_eq!(got, expected, "{name} offset={offset}");
+                // Two linear partitions and one ordering of the page.
+                let bound = 12 * N as u64 + 2 * (LIMIT as u64) * 10;
+                assert!(
+                    compared.get() <= bound,
+                    "{name} offset={offset}: {} comparisons against a linear bound of {bound}",
+                    compared.get()
+                );
+                if offset >= N {
+                    assert_eq!(
+                        compared.get(),
+                        0,
+                        "{name} offset={offset}: an empty page compares nothing"
+                    );
+                }
+            }
         }
     }
 

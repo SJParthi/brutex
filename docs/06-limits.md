@@ -10060,9 +10060,9 @@ ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
   request.
 * `let extremes = want_extremes.then(|| extremes_of(&all));`: one pass over
   them.
-* `ordered_page` then partitions once over them
-  (`all.select_nth_unstable_by(keep - 1, cmp);`) and orders the rows it kept
-  (`all.sort_by(cmp);`).
+* `page_of` then partitions over them at `offset` and again at `limit`
+  (`page.select_nth_unstable_by(limit - 1, &mut order);`) and orders only the
+  page (`page.sort_by(&mut order);`). D-0953 replaced D-0733's `ordered_page`.
 
 The range is capped at `MAX_WINDOW_MONTHS` (`pub const MAX_WINDOW_MONTHS: usize
 = 240;`) and the page at `MAX_WINDOW_LIMIT` (`pub const MAX_WINDOW_LIMIT: usize
@@ -10078,8 +10078,11 @@ row. `page_side` now keeps the fewer of the first `offset + limit` and the last
 reversed order and reverses it. No page orders more than half the rows plus
 its limit: asserted for every row count up to 40 and every offset and limit
 up to 45, and at 2,000,000 rows for one deep page.
-`a_page_is_cut_from_whichever_end_orders_fewer_rows` pins the
-choice, and
+**Superseded by D-0953 when both landed together (D-FOLD1):** `page_of` orders
+only the page itself, which is never more rows than the nearer-end cut kept, so
+`page_side` and `ordered_page` are gone and
+`the_page_orders_only_itself_wherever_the_offset_lands` counts the
+comparisons instead.
 `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
 compares every offset from 0 to past the end against sorting everything and
 slicing, over primary values each repeated three times.
@@ -11177,6 +11180,113 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## API request and pull costs that still grow with the store — D-0953, 2 October 2026
+
+An audit (cluster B6) found eleven paths in `crates/api` whose cost grows with
+the store or the universe and which this register did not name. Three were
+changed. The rest are written here, each with the function that pays it.
+`api::server::cost_limits_tests` reads every bullet below and checks that the
+code still has the shape the bullet describes, so a bullet goes stale only
+with a failing build. Notation: `E` is census entries across every vendor,
+`E_v` one vendor's, `U` the merged universe (about 2,780 keys), `n` bars in
+the range a request names. **No latency below is measured** (`CLAUDE.md` §3
+rule 6); every bound is read from the source.
+
+### Changed
+
+* **W1-api5-0 — `ingestion_observations`, once per instrument.** `land_spot`
+  landed one body at a time and took the index observation per body. Each
+  body's append rewrote the vendor manifest, so every body after the first
+  missed the census cache (`census::read_all` of every vendor manifest, then
+  `held_entries` over all of them: O(manifest bytes + E log E)), sorted the
+  vendor's entries again (O(E_v log E_v)), and missed the calendar cache
+  (`calendar_of::derive`, measured at 0.28 s for one instrument across 81
+  months in `calendar_of::cached`'s doc). It is now taken once per instrument,
+  before the first body appends. **What remains:** that one observation per
+  instrument still pays the miss whenever the previous instrument moved a
+  manifest, which in a multi-instrument pull is every instrument.
+  `api::server::tests::one_instrument_lands_every_body_on_one_index_observation`
+  counts zero manifest reads for five bodies against a warm census.
+* **W1-api5-4 — `bars::window`'s page.** The ordering is no longer paid for
+  rows outside the page: `page_of` partitions at `offset`, then at `limit`,
+  then orders the page, so it is O(n) comparisons plus O(limit log limit), and
+  an offset at or past the end compares nothing. Before, it partitioned at
+  `offset + limit` and ordered everything before that; the query string does
+  not cap `offset`. `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`
+  counts the comparisons. **What remains:** a request whose sort is not `ts`,
+  or that asks `extremes=1`, still reads every bar in its month range (one
+  `read_record` per bar), folds the change over them, and holds them all in
+  memory: O(n) reads and O(n) memory, and `n` reaches about 1.9 million at
+  `MAX_WINDOW_MONTHS` = 240 (the figure `bars.rs` states). The `ts` sort
+  without extremes is the bounded seek path and is unchanged.
+* **UC-20 (a freshness bug, not a cost).** `/store?show=gaps` built its axis
+  from `Site::series` and its cells from `Site::censuses`, both read at boot.
+  It now builds the axis with `census::held_series` over the request's fresh
+  census, so a `show=gaps` request pays O(keys log keys) for the axis, the cost
+  §32 records for startup, on top of `census_now`'s. The default held-only view
+  does not pay it.
+
+### Documented, not changed
+
+* **W1-api5-1 — `pull::ingest::from_window`, per body.** `land_bodies_observed`
+  calls `from_window` once per body, and each call reads the vendor's whole
+  census under its lock (`read_census`: one `fs::read`, then a decode and
+  checksum of every committed entry): O(manifest bytes + E_v) per body. The
+  rolling path pays the same through `pull::ingest::record_held`, which
+  `roll_one` calls once per vendor answer. The write half is incremental now
+  (positional appends, see the correction under §34); the read half is not.
+  Caching the decoded census across windows is a durability change in `pull`
+  and is not made here.
+* **W1-api5-2 — `census_now` on a miss.** A hit is five `stat` calls (six
+  when no manifest answered) and one lock. A miss reads every vendor manifest
+  whole (each up to `census::MAX_MANIFEST_BYTES`, 268,468,224 bytes) and
+  sorts and dedups every entry: O(manifest bytes + E log E). The D-0686
+  section says this is paid "once per manifest change". **While a pull is
+  landing, that is every request:** each body rewrites a manifest, so every
+  census-backed route a console polls during a backfill misses.
+* **W1-api5-3 — `instruments_json`.** Per request: a filter over every key of
+  the merged universe (O(U)), `census_now`, then `bars_by_symbol`, which
+  walks every entry of every vendor's census (O(E)) into a map pre-sized to
+  that count, then a sort of the tracked listing (O(T log T), T about 800).
+* **W1-api5-5 — `calendar_json`.** Per request, both branches:
+  `held_entries` over the asked feed's census (O(E_v log E_v)); the exchange
+  branch then does, per spot series, one `calendar_of::cached` probe, three
+  key `String`s and a deep clone of that series' calendar, and `agree` over
+  every day. The route doc said "one map probe per series on a hit", which
+  leaves out the collect and sort; corrected.
+* **W1-api5-6 — `store_html` with a filter.** With `kind=`, `symbol=`,
+  `from=` or `to=`, `census::filtered` walks every entry and copies the kept
+  ones: O(E) per request. Unfiltered it borrows and pays O(page).
+* **W1-api5-7 — `verify_json`.** `verify::vendor` walks `Manifest::newest`,
+  which builds a set over the whole append log (O(log length)), and opens one
+  bar file per held entry, reading its header and two records: O(E_v) file
+  opens per request. The route doc said "O(1) per entry ... nothing is read
+  whole"; corrected to name the log walk.
+* **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
+  month's last stored bar, the bisection returns `n_valid` and the fallback
+  reads the whole month to answer `[]`: O(n_valid) reads instead of
+  O(log n_valid). It is kept because the same landing is how a header naming
+  zero-filled records shows itself, and reading the month is what answers
+  that file correctly; a cheaper test that tells the two apart needs a
+  monotonicity proof the record cannot give.
+* **W1-api5-9 — `indexmap_json`.** Per request: `nse_indices.csv` is read and
+  parsed whole (`indexmap::Published::read`), and every key of the merged
+  universe is filtered to the index symbols: O(file bytes + U).
+* **W1-api5-11 — `spot_targets` and `resolved_master_rows`.** `spot_targets`
+  walks every key of the merged universe whatever the target, so `Swept`
+  walks about 2,780 keys to return two: O(U) per pull POST and per
+  `recovery_mapping`. `resolved_master_rows` walks the merged universe and
+  sorts what it keeps: O(U log U) per `POST /universe/resolve`.
+
+### Corrections to earlier sections
+
+* §34 says the broker path "is not reachable today". It is: the target guard
+  it describes was removed (D-0136), and the backfill it projects is what
+  `land_spot` runs. §34 also describes the install as a whole-image rename;
+  `install_census` now appends each entry positionally (`append_locked`), so
+  the write amplification §34 measures is gone. The per-window **read** above
+  (W1-api5-1) is what remains of §34's finding.
 
 ## The invocation journal grows by one file per audited request, and its terminal is owed — D-0952, 2 October 2026
 
