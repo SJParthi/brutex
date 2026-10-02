@@ -9907,3 +9907,24 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## The native-dependency gate reads the lock, not the target's `cfg` — D-0916, 2 October 2026
+
+- **Target `cfg` expressions and weak features are not evaluated.**
+  `Cargo.lock` records every target's dependencies and the optional
+  dependency behind a weak `dep?/feature`, so lock reachability over-reports
+  what a host build compiles. `crates/vocab/tests/workspace_is_rust.rs` closes
+  that gap with a hand-declared list of three exact `(parent, child)` edges
+  (`rustls-webpki -> ring`, `iana-time-zone -> iana-time-zone-haiku`,
+  `wasip2 -> wit-bindgen`), each with its reason and each checked to still be
+  in the lock. The list is a judgement, not a measurement: a new path to a
+  declared crate fails and has to be argued in, but an existing skipped edge
+  that a later feature change made real on the host (for example a release of
+  `rustls-webpki` turning `ring` on by default) would not be seen by this test.
+  The fingerprint pin catches that change as a moved `dependencies` list or
+  version, and `cargo deny check` (gate 3, `ring` and `cc` banned) remains the
+  check on the compiled graph.
+- **Names only, as before.** A native crate under a name `DECLARED` does not
+  list is caught by the fingerprint pin, not by the reachability walk.
+- **Cost.** One parse of the lock and one O(V + E) walk (about 195 packages),
+  with a skip-list probe of three rows per edge. Test-only; nothing ships.
