@@ -46834,3 +46834,90 @@ does not have. The costs, the source lines they are read from, the
 killed-process tail left by D-0926, and the unsynced rollback are recorded in
 `docs/06-limits.md` under "Global Replay V1 appends and V3 commits re-read
 their whole ledger". Nothing was timed.
+### D-0936 — A selection ledger that grew also re-reads what it had already indexed — 2026-09-29
+
+**What happened.** W2-cli14-5. `SelectionLedger::absorb_new`,
+`SelectionLedgerV2::absorb_new` (`crates/cli/src/selection.rs`) and
+`SelectionLedgerV3::absorb_new` (`crates/cli/src/selection_v3.rs`) refused a
+file that shrank (`if len < self.scanned`) and a same-length change
+(`if len == self.scanned { require_generation_unchanged(..) }`). When the file
+grew, they rechecked the 40-byte header, seeked to `self.scanned` and decoded
+only the new records. A second handle that rewrote a record this handle had
+already indexed, and also appended a valid one, was absorbed: the three tests
+below appended successfully on origin/main (`2c209309`).
+
+**The change.** When the length grew past the indexed length, each
+`absorb_new` now calls `require_indexed_records_unchanged` before decoding the
+new records. It re-reads every indexed record after the header, in file order,
+and requires it to equal `to_bytes()` of the receipt held in memory; a
+difference refuses with "rewrote already-indexed selection record" and nothing
+is appended. The tests are
+`selection::tests::rewrite_plus_append_of_an_indexed_selection_record_refuses_before_append`,
+`selection::tests::selection_v2_rewrite_plus_append_of_an_indexed_record_refuses_before_append`
+and
+`selection_v3::tests::rewrite_plus_append_of_an_indexed_record_refuses_before_append`;
+each also requires the file length to be unchanged by the refused append. An
+honest append by another handle is still absorbed, in file order:
+`selection::tests::file_order_survives_stale_absorb_and_reopen_and_read_only_stays_read_only`,
+`selection::tests::selection_v2_honest_growth_by_another_handle_is_absorbed_in_file_order`
+and `selection_v3::tests::honest_growth_by_another_handle_is_absorbed_in_file_order`.
+Each format passes its own header length to the shared helper.
+
+**What it costs, and why it is accepted.** The re-read is O(indexed records)
+and runs only on the growth branch. An append through the same handle leaves
+the file length equal to `self.scanned` (after its write the append advances
+`self.scanned` by `.checked_add(SELECTION_STRIDE)`, `SELECTION_V2_STRIDE` or
+`SELECTION_V3_STRIDE`, then runs
+`self.generation = validated_generation(&self.file, &self.path, self.scanned)?;`), so the
+next append takes the same-length branch and does not re-read. The cost is
+paid when another handle appended since this one last looked, which already
+costs a decode of every record that handle added. The constant-size
+generation cannot separate "grew" from "rewrote and grew", because an honest
+append changes the same metadata. This does not defend against an actor able
+to forge metadata or to restore identical bytes; it compares bytes only.
+Recorded in `docs/06-limits.md`.
+
+### D-0937 — Population V6 sizes its receipt index by its records, and two lookup costs are stated as they are — 2026-09-29
+
+**W2-cli13-2, changed.** `PopulationV6Ledger::scan` (`crates/cli/src/population_v6.rs`)
+ran `self.receipts.try_reserve(usize::try_from(self.bounds.authorities)..)` on
+every open and after every append, so it allocated and initialised an index
+sized by the configured authority ceiling rather than the data. It now
+reserves `receipt_index_capacity(self.record_count, self.bounds.authorities)`:
+`record_count / BLOCK_MANIFEST_RECORDS`, capped by the authority bound. A
+complete block is `candidate_count + BLOCK_MANIFEST_RECORDS` records (the
+scan's `checked_add(BLOCK_MANIFEST_RECORDS)`), so the reservation covers every
+complete block the file's records can hold, up to that bound.
+`population_v6::tests::scan_sizes_the_receipt_index_by_records_not_by_the_authority_bound`
+opens an empty ledger under an authority bound of `1 << 16` and requires a
+capacity of 0, then appends one block and reopens and requires a capacity
+below `1 << 16`; on origin/main the empty-ledger assertion failed with a
+capacity of 114688.
+`population_v6::tests::receipt_index_capacity_is_records_over_four_capped_by_authorities`
+pins the arithmetic. The scan itself still reads every record; only the
+reservation changed.
+
+**W2-cli13-3, stated, not changed.**
+`CommittedStoredPopulationV6::selected_stored_oos_witnesses` resolves each
+requested strategy with `.find(|row| row.population().candidate_semantic_id() == *strategy)`
+over the source rows, under `if strategies.len() > 25`. That is O(C) per
+strategy. The same call runs `let before = self.execution_v4_source()?;` and
+`let after = self.execution_v4_source()?;`, which re-authenticate the retained
+source and project every row, so an index would not change the call's class.
+The function had no cost statement; it now has one, and
+`population_v6::tests::replay_lookup_cost_doc_names_the_live_linear_find`
+holds that statement to the lines above. The lookup was not rewritten,
+because an index would not change the call's class and the defect's own
+verdict was that the scan was undocumented.
+
+**W2-cli14-0, corrected.** The module doc of `crates/cli/src/selection_v5.rs`
+said "Exact lookup after open is one expected/amortized-O(1) `HashMap` probe".
+`structural_receipt` runs `self.require_unchanged()` before
+`self.receipts.get(selection_id)`, and `require_unchanged` runs
+`self.rows.require_unchanged()?; self.completions.require_unchanged()?;`,
+each of which reaches `measured_generation`, whose `while remaining != 0` loop
+feeds every byte of the file to `hasher.update(chunk)`. The lookup is O(F);
+the probe inside it is average O(1). The doc now says so, and
+`selection_v5::tests::module_doc_states_lookup_is_o_f_because_it_rehashes_both_files`
+pins both the corrected sentence and the source lines it rests on. The
+rehash is the integrity check the ledger relies on and is kept.

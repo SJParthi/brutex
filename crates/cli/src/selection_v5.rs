@@ -20,9 +20,12 @@
 //! ranking, including its complete deterministic tie order.  The selection
 //! itself is O(C) over C combined dispositions and uses O(C) temporary
 //! uniqueness/projection state in this persistence core.  Opening/reopening is
-//! O(F) in explicitly bounded file bytes.  Exact lookup after open is one
-//! expected/amortized-O(1) `HashMap` probe; Rust's `HashMap` does not promise
-//! worst-case O(1).  Hashing, filesystem latency, selection, persistence,
+//! O(F) in explicitly bounded file bytes.  Exact lookup after open is O(F)
+//! too: `structural_receipt` runs `require_unchanged` first, which re-reads
+//! and BLAKE3-hashes every byte of both the rows file and the Completions
+//! file, and only then makes one expected/amortized-O(1) `HashMap` probe;
+//! Rust's `HashMap` does not promise worst-case O(1).  The probe is O(1); the
+//! lookup is not.  Hashing, filesystem latency, selection, persistence,
 //! recovery and a complete run are not O(1).
 //!
 //! **UNVERIFIED as a measured bound.** No bench in this workspace
@@ -4346,5 +4349,56 @@ mod tests {
             );
             assert_eq!(std::fs::read(path).expect("reread restored file"), original);
         }
+    }
+
+    /// W2-cli14-0: the module doc called exact lookup after open one
+    /// average-O(1) probe while `structural_receipt` rehashes both files
+    /// first. Pins the corrected claim to the live mechanism it describes.
+    #[test]
+    fn module_doc_states_lookup_is_o_f_because_it_rehashes_both_files() {
+        let source = include_str!("selection_v5.rs");
+        let doc = source
+            .lines()
+            .take_while(|line| line.starts_with("//!"))
+            .map(|line| line.trim_start_matches("//!").trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !doc.contains("Exact lookup after open is one"),
+            "module doc still claims an O(1) lookup: {doc}"
+        );
+        assert!(doc.contains("Exact lookup after open is O(F)"), "{doc}");
+        assert!(
+            doc.contains("The probe is O(1); the lookup is not."),
+            "{doc}"
+        );
+
+        let production = source
+            .split("\nmod tests {\n")
+            .next()
+            .expect("production source precedes the test module");
+        let lookup = production
+            .split("fn structural_receipt(\n")
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .expect("structural_receipt body");
+        assert!(lookup.contains(".require_unchanged()"), "{lookup}");
+        assert!(
+            lookup.contains("self.receipts.get(selection_id)"),
+            "{lookup}"
+        );
+        assert!(production.contains(
+            "self.rows.require_unchanged()?;\n        self.completions.require_unchanged()?;"
+        ));
+        let generation = production
+            .split("fn measured_generation(\n")
+            .nth(1)
+            .expect("measured_generation body");
+        assert!(generation.contains("let mut remaining = len;"));
+        assert!(generation.contains("while remaining != 0"));
+        assert!(generation.contains("hasher.update(chunk);"));
+        assert!(production.contains(
+            "let observed = measured_generation(&mut duplicate, &self.path, self.max_bytes, self.label)?;"
+        ));
     }
 }
