@@ -1897,17 +1897,20 @@ impl BarFile {
         // failure than silence, which is what this path had.
         //
         // `Debug`: this is the per-member write path, so a normal run at the
-        // `Info` floor pays one relaxed atomic load and writes nothing.
-        let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::debug("store.append", "committed")
-                .with(
-                    "file",
-                    telemetry::Value::Str(&self.bars_path.display().to_string()),
-                )
-                .with("bars", telemetry::Value::Uint(count))
-                .with("first_index", telemetry::Value::Uint(first_index))
-                .with("n_valid", telemetry::Value::Uint(self.header.n_valid))
-                .with("generation", telemetry::Value::Uint(self.header.generation)),
+        // `Info` floor pays one relaxed atomic load and writes nothing. It is
+        // `emit_if!` and not `emit` because only the macro makes that true:
+        // `emit` is a function, so its arguments, the path's formatted
+        // `to_string()` among them, are built before the level is read.
+        // Through `emit_if!` a filtered event evaluates no field at all.
+        let _dropped_when_filtered = telemetry::emit_if!(
+            telemetry::Level::Debug,
+            "store.append",
+            "committed",
+            "file" => telemetry::Value::Str(&self.bars_path.display().to_string()),
+            "bars" => telemetry::Value::Uint(count),
+            "first_index" => telemetry::Value::Uint(first_index),
+            "n_valid" => telemetry::Value::Uint(self.header.n_valid),
+            "generation" => telemetry::Value::Uint(self.header.generation),
         );
         Ok(Appended::Committed {
             first_index,
@@ -2831,6 +2834,52 @@ mod tests {
     use std::fs::TryLockError;
     use std::io::{self, ErrorKind};
     use std::path::{Path, PathBuf};
+
+    /// THE PER-MEMBER `store.append` LINE BUILDS NOTHING WHEN IT IS FILTERED.
+    ///
+    /// Its comment says a run at the `Info` floor "pays one relaxed atomic
+    /// load and writes nothing". Through the function `telemetry::emit` that
+    /// was false: a function's arguments are evaluated first, so every commit
+    /// formatted and allocated the month's path just to throw it away. Only
+    /// `telemetry::emit_if!` gates before evaluating, and
+    /// `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`
+    /// proves the macro's half. This holds the call site to it: the site is the
+    /// macro, the path is formatted inside the macro's arguments only, and no
+    /// production `Debug` event in this file is built eagerly.
+    #[test]
+    fn a_filtered_append_line_formats_no_path() {
+        let source = include_str!("file.rs");
+        let production = source
+            .split_once(concat!("\n#[cfg(test)]\n#[allow(", "\n"))
+            .expect("the test module follows the production code")
+            .0;
+        let (before, after) = production
+            .split_once(concat!("\"store.append", "\",\n"))
+            .expect("the append line names its target");
+        let opener = before
+            .rsplit_once("let _dropped_when_filtered = ")
+            .expect("the append line is bound")
+            .1;
+        assert_eq!(
+            opener.trim(),
+            concat!(
+                "telemetry::emit_if",
+                "!(\n            telemetry::Level::Debug,"
+            )
+            .trim(),
+            "the append line must gate before it builds: {opener}"
+        );
+        let call = after.split_once(");").expect("the call ends").0;
+        assert!(
+            call.contains(concat!("self.bars_path.display", "().to_string()")),
+            "the path is formatted only inside the gated arguments: {call}"
+        );
+        assert_eq!(
+            production.matches(concat!("Event::", "debug(")).count(),
+            0,
+            "no production Debug event in this file is built before its level is read"
+        );
+    }
 
     /// What the fake host should do on the next call.
     #[derive(Debug, Clone, Copy)]
