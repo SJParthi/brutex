@@ -43764,3 +43764,29 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0918 — Bound rupee text at 64 bytes and refuse longer text by name — 2026-10-02
+
+**The defect (audit finding o1store-2).** `Paisa::from_rupee_text_half_up`
+walks its input three times (two `bytes().all(..)` digit checks and the
+`skip(3).any(..)` tail check) and never refused a long input, so its cost was
+the caller's input length. Two `pull` callers (`http::one_price`,
+`rolling` rupee cells) hand it the `to_string()` of a decoded cell, and
+nothing upstream bounds that text.
+
+**The choice.** `brutex_core::price::MAX_PRICE_TEXT = 64` bytes, ASCII padding
+included, checked before any byte is read. Longer text is refused with a new
+`PriceError::TooLong`, never truncated. Sixty-four because the widest price
+that fits `i64` paisa is 21 bytes and the shortest round-tripping text of an
+`f64`, which is what `pull` renders a JSON number back to, is at most 24, so
+the bound refuses nothing any caller legitimately sends and leaves room for
+padding and trailing zeros.
+
+**Rejected.** (1) Reusing `NotDecimal`: a 65-byte string of digits is a
+decimal, and naming it as malformed would mislead the operator reading the
+refusal. `PriceError` is `#[non_exhaustive]`, so the new variant breaks no
+matcher. (2) Folding the three passes into one: still O(input) without a
+bound. (3) Bounding at each caller: three sites to keep in step for one rule
+the reader owns.
+
+Invariant AU-O1STORE-2; `docs/06-limits.md` records the bound.

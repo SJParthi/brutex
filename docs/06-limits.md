@@ -9907,3 +9907,14 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Rupee text is read at most 64 bytes at a time (D-0918)
+
+- **`Paisa::from_rupee_text_half_up` costs at most a few passes over
+  `MAX_PRICE_TEXT` (64) bytes.** Text longer than that, padding included, is
+  refused with `PriceError::TooLong` before a byte is read. Until D-0918 the
+  cost was the caller's input length, and two `pull` callers pass text nothing
+  upstream bounds. Proved by
+  `core::price::tests::text_longer_than_the_bound_is_refused_before_it_is_read`
+  (64 bytes read, 65 and a mebibyte refused); the cost is stated from the
+  shape of the code, not timed.
