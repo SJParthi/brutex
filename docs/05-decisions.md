@@ -43719,6 +43719,52 @@ coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
 
+### D-0910 — Verify the old tail block before a following append re-seals it — 2026-10-02
+
+**The defect (audit finding W3-store1-3).** `BarFile::append` takes the
+`Ok(next)` arm of `Header::advance` for a batch that strictly follows the
+commit, and that arm read no record: it wrote the batch, synced it, and called
+`seal_committed`, which starts at `layout.block_of(first_index)` (the old tail
+block when the old `n_valid` is not a whole number of blocks), reads that
+block's covered bytes back from disk and seals whatever it finds. A committed
+record that rotted between two appends, or a lost write, therefore became the
+sealed truth of the month, and every later read "verified" it. The overlap
+paths (`already_stored`, `suffix_that_follows`) were never exposed, because
+they read the tail block through `verify_block_of` first.
+
+**The choice.** Before anything is written, the forward path calls
+`BarFile::verify_old_tail_before_reseal(first_index)`. When the old tail block
+is partially covered it clears the handle's one-block cache and calls
+`verify_block_of` on that block, the same check every read makes, so an
+interrupted append is still admitted on the D-0688 proof and nothing else is.
+A mismatch returns the existing `StoreError::BlockChecksum` naming the file,
+the block, the stored entry and the committed extent's checksum, before the
+records, the sidecar or the header slot are touched; the error enum is
+unchanged. A full old tail block, or an empty stream, is not re-sealed by the
+append, so nothing is read. The cost is one block verification per append,
+bounded by the block, not by the file (`CLAUDE.md` §3 rule 4).
+
+**What this withdraws, stated.** D-0688 left one state refused "until a
+strictly following append re-seals the block": a second interrupted append that
+rewrote records past the commit before re-sealing. That heal was the same code
+path as the laundering, and the bytes cannot tell the two apart. That state
+now refuses every append as well as every read, and AF-42 and its test say so.
+No path in this repository repairs it (`store::repair` refuses a source whose
+checksums fail); `docs/06-limits.md` records it.
+
+**Rejected.** (1) Verifying after the records are written: the bytes past the
+commit that the D-0688 proof needs are overwritten by then, so an interrupted
+append it can prove would be refused. (2) Trusting the handle's cache when it
+already holds the block: the cache is about bytes when they were read, not
+now. (3) A new error variant: `BlockChecksum` already names everything the
+operator needs, and a new variant would change a public enum three crates
+match on. (4) Checking every block the file holds: O(file), and an earlier full
+block is never re-sealed by an append, so its damage stays where a reader
+refuses it.
+
+Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
+`docs/06-limits.md` has the cost and the widened false refusal.
+
 ### D-0994 — Replay a retained Candidate's Execution V3 dispositions once per exact row set, not once per reauthentication — 2026-10-02
 
 **What happened.** `cli::step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte`
