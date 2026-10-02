@@ -5652,7 +5652,7 @@ pub(crate) mod tests {
     fn a_coarse_fold_projects_exactly_and_cannot_read_its_test_execution_bar() {
         let execution = crate::synthetic::sessions(120);
         let period = crate::resample::Period::minutes(60).expect("sixty minutes is coarse");
-        let signal = crate::resample::resample(&execution, period);
+        let signal = crate::resample::resample(&execution, period).expect("market values resample");
         let fold = Shape::Anchored
             .folds(signal.len(), h(15), 2)
             .into_iter()

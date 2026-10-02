@@ -2951,9 +2951,10 @@ mod tests {
     ///
     /// # `forward` runs on the SIGNAL series, which is not always one minute
     ///
-    /// `crate::resample` buckets on the IST clock, so the sixty-minute rung of a
-    /// regular session is seven bars stamped 09:00 … 15:00. None is the exact
-    /// 15:09 one-minute record, so no coarse bar may be promoted into a forced
+    /// The fixture hand-builds seven hourly bars stamped 09:00 … 15:00 a day.
+    /// `crate::resample` now anchors at the open (D-1430) and emits 09:15 …
+    /// 15:15 instead, but the point holds on either grid: no coarse bar is the
+    /// exact 15:09 one-minute record, so none may be promoted into a forced
     /// fill. Exact coarse horizons observed before 15:10 remain usable only for
     /// this legacy same-series runner surface; stored operator paths reproject
     /// onto explicit one-minute OHLCV before reaching money.
@@ -3103,7 +3104,7 @@ mod tests {
         let minute = crate::synthetic::sessions(8);
         let column = Column::build(&minute, &mut evaluator());
         let five = crate::resample::Period::minutes(5).expect("five");
-        let coarse = crate::resample::resample(&minute, five);
+        let coarse = crate::resample::resample(&minute, five).expect("market values resample");
         assert!(
             coarse.len() < minute.len(),
             "the coarse slice must be shorter, or this proves nothing"

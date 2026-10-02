@@ -47664,3 +47664,73 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-1430 — `runner::resample` anchors intraday buckets at the 09:15 open, as `pull::fold` does — 2026-10-02
+
+**The defect (C3 "resample", audit finding probeengine-2).** `runner::resample`
+keyed every bucket on `(ts + IST offset).div_euclid(period)`, an IST-midnight
+grid, while its own doc said a 5-minute bar from 09:17..09:19 is stamped 09:15
+and `pull::fold` (the store's fold authority) anchors every intraday rung at the
+09:15 open. The two agree only when the period divides 555 minutes. For 2, 10,
+30 and 60 minutes the first bar of each session was stamped 09:14, 09:10, 09:00
+and 09:00 and held only part of a period; a period that does not divide a day
+(7, 75 minutes) moved to a different clock offset each day. Shown on
+`origin/main` by a probe: the 2-minute first bucket of 09:15..10:30 was stamped
+`1728013440000000` where 09:15 is `1728013500000000`.
+
+**The choice.** The rule is restated, not imported (`runner` may not depend on
+`pull` or `store`): an intraday period uses the anchor `IST offset − 555
+minutes`, a period of 1,440 minutes or more keeps IST midnight, exactly the
+`bucket.secs() >= 86_400` split `pull::fold` makes. The intraday grid restarts
+at every 09:15: a bar's bucket start is `t − ((t + A) mod day) mod period`, two
+`rem_euclid` and one checked subtraction per bar, O(1). For every period that
+divides a day (every rung the store files) that is edge for edge the
+continuous grid `pull::fold` walks, including a bucket that spans IST midnight.
+For one that does not (7, 75 minutes) it deliberately differs: a continuous grid
+drifts 1,440 mod period minutes a day, and the restart keeps every session's
+first bar at 09:15, the cut-short bucket being the overnight one ending at the
+next 09:15. `crates/cli/tests/resample_matches_fold.rs` holds
+`runner::resample` and `pull::fold` to byte-equal bars at 2, 3, 5, 10, 15, 30,
+60 and 1,440 minutes, because `cli` is the one crate that can name both.
+
+**Callers.** Every call site is a test (`identity.rs`, `validate.rs`,
+`outcome.rs`, `signal_candle_stop_tests.rs`). The signal-candle fixture relied
+on midnight edges: it signalled at 10:00, which is not an edge on the 2/10/30/60
+open grid, and listed last buckets of 15:28/15:20/15:00/15:00. It now signals
+at 10:15 (an edge for every rung) and its last buckets are the open grid's
+15:29/15:25/15:15/15:15. The outcome test's doc, which said the hourly rung is
+stamped 09:00 … 15:00, now says the fixture hand-builds those stamps.
+
+**Rejected.** (1) A dev-dependency on `pull` from `runner`: it adds an arrow
+`CLAUDE.md` §5 does not draw. (2) Keeping midnight and documenting it: the
+stamped-before-the-open bar is the leading stub `pull::fold` calls "a lie", and
+a resampled 60-minute run would not match the store's own 60-minute rung.
+
+Invariants RS-01, RS-02.
+
+### D-1431 — `runner::resample` refuses its `i64` edges instead of saturating — 2026-10-02
+
+**The defect.** `bucket_of` used `saturating_add`, `bucket_start` used
+`saturating_mul`/`saturating_sub`, and the volume sum used `saturating_add`. A
+saturated key or start stamped a bar outside the bucket it was folded into (a
+bar at `i64::MAX` was stamped `9223372017000000000`, 330 minutes away at a
+5-minute period), and two `i64::MAX` volumes summed to `i64::MAX` reported as a
+measured volume. Both are a fallback that hides a failure, which `CLAUDE.md` §4
+bans; the module's own test asserted the clamp as correct.
+
+**The choice.** `resample` returns `Result<Vec<Candle>, ResampleError>`.
+`GridOverflow { at, ts_micros }` is returned when the anchored key or the bucket
+start is not an `i64`; `VolumeOverflow { at, bucket_micros }` when a bucket's
+volume sum is not. The period multiply needed no guard: `u32::MAX` minutes is
+about 2.6 × 10^17 µs, and a `const` assertion proves it, so the dead
+`saturating_mul` is gone rather than made checked. Each bar still costs a fixed
+number of checked operations, O(1). No market value reaches either error.
+
+**Rejected.** (1) Panicking: §4's loud death. (2) Dropping the bar: a silent
+change of answer. (3) Clamping the period at construction: the period is never
+the overflowing term.
+
+`pull::fold` still saturates its own volume sum; that is its file and is not
+changed here.
+
+Invariant RS-03.
