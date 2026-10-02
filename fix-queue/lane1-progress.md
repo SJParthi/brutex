@@ -26,3 +26,7 @@ After any pause: read this file, `git ls-remote origin 'refs/heads/fix/cloud-*'`
 | lane1-b unit | Branch | State | PR |
 |---|---|---|---|
 | U21 | fix/cloud-W2-cli4-2 | pushed, in review | https://github.com/SJParthi/brutex/pull/26 |
+
+## Batch 3 (audit-20261002 new-findings.md, queued after lane1-b)
+
+Medium first: o1cli-1, probestore-3, probeapi-3 (cli half). Then: o1store-1, o1store-2, o1engine-22, o1engine-23, o1engine-24, o1engine-40, o1cli-2..6, probestore-4..7, probeapi-6. State: queued. Source: /mnt/project-files/audit-20261002/new-findings.md (copied to fix-queue/lane1-c-findings.md).
