@@ -135,6 +135,12 @@ impl Paisa {
         // came back one paisa high although neither is a tie. The
         // multiplication by 100 still rounds; that is the limit
         // `a_decimal_tie_is_usually_not_a_binary_tie` records.
+        //
+        // The remainder is exact: a double minus its floor is exact under
+        // 2^52, and at or above it every double is an integer and the
+        // remainder is zero. An overflowed product is infinite, its remainder
+        // is NaN, the comparison is false, and the range check below refuses
+        // it. (Found again as probestore-6.)
         let scaled = rupees * SCALE;
         let whole = scaled.floor();
         let floored = if scaled - whole >= 0.5 {
@@ -753,5 +759,49 @@ mod tests {
             }
         }
         assert_eq!(checked, 30_000_003, "every grid point and both neighbours");
+    }
+
+    /// HALF-UP ON THE SCALED VALUE, WITH NO SECOND ROUNDING. Audit probestore-6.
+    ///
+    /// The conversion added 0.5 and floored, and the addition rounds. Just
+    /// below a half-paisa, `0.004999999999999999` scales to
+    /// `0.49999999999999994`, which plus 0.5 rounds to 1.0: it gave 1 paisa
+    /// where the text path gives 0. From 2^52 an odd scaled integer plus 0.5 is
+    /// a tie that rounds to even, so `45035996273704.97` (exactly
+    /// `4503599627370497` paisa once scaled) gave `...498`, and its negative
+    /// gave `...496`. Each scaled value below is what the product actually is;
+    /// the tie at a half still rounds toward positive infinity.
+    #[test]
+    fn a_scaled_value_is_rounded_half_up_without_a_second_rounding() {
+        for (rupees, paisa) in [
+            (0.004_999_999_999_999_999, 0),
+            (-0.004_999_999_999_999_999, 0),
+            (45_035_996_273_704.97, 4_503_599_627_370_497),
+            (-45_035_996_273_704.97, -4_503_599_627_370_497),
+            (45_035_996_273_704.99, 4_503_599_627_370_499),
+            (90_071_992_547_409.9, 9_007_199_254_740_991),
+            // Ties, unchanged: a half rounds toward positive infinity.
+            (0.005, 1),
+            (-0.005, 0),
+            (45_035_996_273_704.95, 4_503_599_627_370_496),
+            (0.0, 0),
+            (-0.0, 0),
+            (23_109.55, 2_310_955),
+        ] {
+            assert_eq!(
+                Paisa::from_rupees_half_up(rupees).map(Paisa::raw),
+                Ok(paisa),
+                "{rupees:?}"
+            );
+        }
+        // A product that overflows to infinity is refused, not converted.
+        assert_eq!(
+            Paisa::from_rupees_half_up(f64::MAX),
+            Err(PriceError::OutOfRange)
+        );
+        assert_eq!(
+            Paisa::from_rupees_half_up(f64::MIN),
+            Err(PriceError::OutOfRange)
+        );
     }
 }

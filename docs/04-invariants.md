@@ -6019,3 +6019,9 @@ old line regex the same input and watched it pass.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | AU-PROBESTORE-5 — **`catalog::walk` counts a file whose path below `bars/` has any non-UTF-8 component in the `Census::non_utf8` bucket (D-0768; found again as probestore-5), before measuring depth, and never lists it.** A non-UTF-8 contract level (`FNO/NIFTY/<0xFF>CE/1min/2024-01.bin`), symbol, rung, file stem and vendor are each counted `non_utf8` and in no other bucket; the real `2024-02` NIFTY month beside them is the one row; `reconciles` includes the bucket; a rerun counts the same. Before the fix the components were dropped, the contract file measured at spot depth and was listed as the NIFTY index | `a_non_utf8_component_is_counted_and_never_shortens_the_path` in `crates/store/tests/catalog.rs` | ✓ |
+
+### Float rupees round half-up without a second rounding — audit 2026-10-02 probestore-6
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBESTORE-6 — **`Paisa::from_rupees_half_up` rounds the scaled product half-up by comparing its exact remainder with a half, never by adding 0.5 and flooring.** `0.004999999999999999` (scaled `0.49999999999999994`) and its negative give 0; `45035996273704.97` gives `4503599627370497` and its negative `-4503599627370497`; `45035996273704.99` and `90071992547409.9` give their exact odd scaled integers; ties still round toward positive infinity (`0.005` → 1, `-0.005` → 0, `45035996273704.95` → `...496`); `f64::MAX` and `f64::MIN` are refused `OutOfRange`. Before the fix the first gave 1 paisa and the odd integers from 2^52 came out one paisa off | `core::price::tests::a_scaled_value_is_rounded_half_up_without_a_second_rounding` | ✓ |
