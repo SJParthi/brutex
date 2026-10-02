@@ -128,7 +128,7 @@ use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
 
-use crate::outcome::{Horizon, SessionBounds, median_step_micros, median_step_micros_over};
+use crate::outcome::{Horizon, SessionBounds, prefix_median_steps_over};
 
 /// The authoritative execution cadence promised by this engine surface.
 ///
@@ -378,8 +378,9 @@ pub struct SliceFacts {
     /// [`forced_exits`] over the slice.
     exits: Vec<Option<SquareOff>>,
     /// The authoritative one-minute cadence for fill-sourced execution, or the
-    /// measured native rung cadence for a signal-sourced compatibility walk.
-    step_micros: i64,
+    /// measured native rung cadence for a signal-sourced compatibility walk —
+    /// measured PER BAR over bars `0..=i`, never over the whole slice (D-1410).
+    cadence: Cadence,
     /// The evaluator verdict plus exact whole-minute execution coordinates.
     /// A valid slice shares the column's bitmap through an [`Arc`] clone. An
     /// off-grid slice creates one stricter bitmap here, never per candidate.
@@ -413,6 +414,25 @@ pub(crate) fn slice_facts_derived_on_this_thread() -> u64 {
     DERIVATIONS.with(std::cell::Cell::get)
 }
 
+/// Where [`SliceFacts`] gets a bar's cadence from.
+pub(crate) enum Cadence {
+    /// The engine's authoritative cadence, the same at every bar.
+    Fixed(i64),
+    /// A native column's measured cadence, one entry per bar, each over bars
+    /// `0..=i` only ([`prefix_median_steps_over`]).
+    Prefix(Vec<i64>),
+}
+
+impl Cadence {
+    /// The cadence at bar `index`; `0` outside a prefix table.
+    fn at(&self, index: usize) -> i64 {
+        match self {
+            Self::Fixed(step) => *step,
+            Self::Prefix(steps) => steps.get(index).copied().unwrap_or(0),
+        }
+    }
+}
+
 impl SliceFacts {
     /// Derive every execution-slice fact from `bars` and its column, once.
     #[must_use]
@@ -438,10 +458,10 @@ impl SliceFacts {
                         .collect()
                 }
             });
-        let step_micros = match column.sourced() {
-            indicators::column::Sourced::Fill => EXECUTION_MINUTE_MICROS,
+        let cadence = match column.sourced() {
+            indicators::column::Sourced::Fill => Cadence::Fixed(EXECUTION_MINUTE_MICROS),
             indicators::column::Sourced::Signal => {
-                median_step_micros_over(bars, accepted.as_deref())
+                Cadence::Prefix(prefix_median_steps_over(bars, accepted.as_deref()))
             }
         };
         let mut at_timestamp = std::collections::HashMap::with_capacity(bars.len());
@@ -455,6 +475,7 @@ impl SliceFacts {
                 let is_accepted = verdict.get(index).copied().unwrap_or(false);
                 let refused = refused_prefix.last().copied().unwrap_or(0);
                 refused_prefix.push(refused.saturating_add(u64::from(!is_accepted)));
+                let step_micros = cadence.at(index);
                 let broken = prior_timestamp.is_some_and(|prior| {
                     step_micros <= 0 || bar.ts_micros.saturating_sub(prior) != step_micros
                 });
@@ -467,8 +488,8 @@ impl SliceFacts {
             }
         }
         Self {
-            exits: forced_exits_with_step(bars, step_micros, accepted.as_deref()),
-            step_micros,
+            exits: forced_exits_with_steps(bars, |index| cadence.at(index), accepted.as_deref()),
+            cadence,
             accepted,
             refused_prefix,
             broken_prefix,
@@ -483,10 +504,27 @@ impl SliceFacts {
         &self.exits
     }
 
-    /// The execution/native cadence selected by [`Self::of`], in microseconds.
+    /// The execution/native cadence selected by [`Self::of`] at the slice's
+    /// LAST bar, in microseconds — the whole-slice median for a native column.
+    ///
+    /// A diagnostic of the slice, not a trade's clock: no walk reads it, because
+    /// at an earlier bar it is a look-ahead. Trades read [`Self::step_at`].
     #[must_use]
-    pub const fn step_micros(&self) -> i64 {
-        self.step_micros
+    pub fn step_micros(&self) -> i64 {
+        match &self.cadence {
+            Cadence::Fixed(step) => *step,
+            Cadence::Prefix(steps) => steps.last().copied().unwrap_or(0),
+        }
+    }
+
+    /// The cadence known at bar `index`, measured over bars `0..=index` only.
+    ///
+    /// `0` for an index the slice does not hold, under which every caller
+    /// refuses rather than inventing a timeframe. One bounds-checked read.
+    /// `CLAUDE.md` §3 rule 7, D-1410.
+    #[must_use]
+    pub fn step_at(&self, index: usize) -> i64 {
+        self.cadence.at(index)
     }
 
     /// Did the evaluator accept this exact row, with a whole-minute execution
@@ -696,7 +734,6 @@ fn walk_core(
     facts: &SliceFacts,
 ) -> Trades {
     let h = horizon.as_bars() as usize;
-    let step_micros = facts.step_micros();
     let mut out = Trades::default();
     // The bar the open position exits on. Until the first entry there is none,
     // and a new fill is eligible only strictly after it.
@@ -792,6 +829,10 @@ fn walk_core(
         // point unless they supplied one-minute execution. A
         // fill-sourced column already came through `onto_execution`, whose
         // exact timestamp equality selected the immediate one-minute bar.
+        // THE CADENCE KNOWN AT THE FILL BAR, measured on bars `0..=entry`.
+        // A whole-slice median here let bars after the trade decide whether it
+        // was immediate (D-1410).
+        let step_micros = facts.step_at(entry);
         let immediate = match column.sourced() {
             indicators::column::Sourced::Signal => bars
                 .get(signal)
@@ -1358,19 +1399,20 @@ mod clock_contract_tests;
 /// not. Both modules read this table rather than keeping parallel spellings.
 #[must_use]
 pub fn forced_exits(bars: &[Candle]) -> Vec<Option<SquareOff>> {
-    forced_exits_with_step(bars, median_step_micros(bars), None)
+    let steps = prefix_median_steps_over(bars, None);
+    forced_exits_with_steps(bars, |index| steps.get(index).copied().unwrap_or(0), None)
 }
 
-/// [`forced_exits`] with the slice's median timeframe already measured.
+/// [`forced_exits`] with the slice's per-bar prefix cadence already measured.
 ///
 /// `SliceFacts` calls this form so its horizon clock and its square-off table
 /// cannot allocate or infer the same slice twice.
-fn forced_exits_with_step(
+fn forced_exits_with_steps(
     bars: &[Candle],
-    step_micros: i64,
+    step_at: impl Fn(usize) -> i64,
     accepted: Option<&[bool]>,
 ) -> Vec<Option<SquareOff>> {
-    let session = SessionBounds::with_step(bars, step_micros, accepted);
+    let session = SessionBounds::with_steps(bars, step_at, accepted);
     (0..bars.len())
         .map(|index| {
             session.last_fill_bar(index).map(|bar| SquareOff {
@@ -1679,7 +1721,7 @@ mod tests {
             .collect();
         let column = Column::build(&bars, &mut evaluator());
         assert_eq!(
-            super::median_step_micros(&bars),
+            crate::outcome::median_step_micros(&bars),
             120_000_000,
             "the adversarial slice must actually have a two-minute inferred cadence"
         );
@@ -2327,7 +2369,7 @@ mod tests {
         }
         assert_eq!(bars.len(), 105, "the fixture is the real day's bar count");
 
-        let step = super::median_step_micros(&bars);
+        let step = crate::outcome::median_step_micros(&bars);
         assert_eq!(
             step, 60_000_000,
             "one minute, taken as the MEDIAN so the \
@@ -2548,7 +2590,7 @@ mod tests {
         assert_eq!(facts.exits().len(), exits.len());
         assert_eq!(
             facts.step_micros(),
-            super::median_step_micros(&bars),
+            crate::outcome::median_step_micros(&bars),
             "the spacing a caller hoists is the spacing the walk would have \
              measured"
         );

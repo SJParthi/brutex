@@ -11034,3 +11034,16 @@ Not O(1) on a miss, and not bounded by the run. `pullrun::rows_now` is
   moves.
 
 UNMEASURED: no count or timing of rebuilds during a run was taken.
+## The prefix cadence is O(n log g) per slice — D-1410, 2 October 2026
+
+`runner::outcome::prefix_median_steps_over` replaces the whole-slice median
+selection, which was O(n) per slice, with a two-heap running median. Each bar
+costs at most one push and one rebalance, O(log g), where `g` is the number
+of qualifying gaps seen so far. The heaps and the per-bar output take O(n)
+memory: one `i64` per bar, held in `SliceFacts` alongside the two existing
+prefix-count vectors. The cost is paid once per `SliceFacts::of`,
+`SessionBounds::of` or `trade::forced_exits` call, so once per slice, never
+per candidate. Every lookup afterwards (`SliceFacts::step_at`) is one
+bounds-checked read. A constant-per-bar running median would need a bounded
+alphabet of step values, and the slice does not guarantee one. **UNVERIFIED as
+a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
