@@ -6559,6 +6559,20 @@ jobs:
           #     NSE file the test reads), once per file, never per record.
           #   runner/grid.rs 1 of 2 -- `Grid::baseline`, one grid's cells. No
           #     production caller in the workspace calls it; tests do.
+          #
+          #   THREE OLDER ROWS, COUNTED BEFORE D-1121 AND NEVER WRITTEN DOWN
+          #   api/store_wire.rs -- `censuses.iter().find(|c| c.vendor == feed)`,
+          #     the census search the api/server.rs entry above names: one row
+          #     per `Vendor::ALL` entry, once per wire request.
+          #   api/sweeprun.rs 1 -- the counted site is one of two, and both are
+          #     bounded: `EVERY_RUNG.iter().copied().find(..)` probes the eight
+          #     rungs once per asked rung, before a run starts; and
+          #     `observe_elsewhere`'s `lifecycle.records.iter().find(..)` walks
+          #     `status_tail(.., 256)`, a telemetry query capped at 256 records,
+          #     once per status request.
+          #   pull/cash_auction.rs 2 of 2 -- the five `REQUIRED` probes in
+          #     `Columns::parse`, the same header walk as the lifecycle probes
+          #     above: once per file, never per record.
           allow_scan='
           crates/api/src/audit_json.rs 1
           crates/api/src/autopilot.rs 2
