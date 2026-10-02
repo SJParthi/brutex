@@ -175,7 +175,8 @@ impl Cursor {
     /// of canonical order, or leaves more values than the instructions left in
     /// `length` can reduce to one. Every check is O(1) except the sibling
     /// comparison, which reads the two subtrees being joined and so is bounded
-    /// by `length`.
+    /// by `length`. Proved by
+    /// `vocab::expression_search::the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did`.
     fn place(&self, at: usize) -> Option<(u16, u16)> {
         let remaining = usize::from(self.length).checked_sub(at.checked_add(1)?)?;
         let (below_start, below_depth) = match at.checked_sub(1) {
