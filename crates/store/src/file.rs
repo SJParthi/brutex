@@ -174,6 +174,39 @@ const MAX_ROW_LEN: usize = {
 
 /// The three widths, pinned so a format change is seen here.
 const _: () = assert!(MAX_ROW_LEN == 80);
+
+/// The longest checksum block any geometry a `BarFile` can open declares, so
+/// one stack buffer holds the covered range of any block it verifies.
+///
+/// **Why a stack buffer at all — D-0914.** `verify_block_of` runs on every
+/// COLD read, the one that lands in a block other than the last one verified,
+/// which is every random access and every bisection probe. It allocated
+/// `vec![0u8; span]` for the covered bytes on each of them, and the tail block
+/// allocated a second for the records past the commit. A heap allocation per
+/// read is a per-operation cost the allocator decides, not the format; a
+/// fixed array of the longest block is a cost the format decides.
+///
+/// **Derived from the three tables, never typed as a number**, for the reason
+/// [`MAX_ROW_LEN`] is: bars 56 × 73 = 4,088, overlay 24 × 170 = 4,080, greeks
+/// 80 × 51 = 4,080. A geometry with a longer block that reached
+/// `verify_block_of` would be refused there by name, as
+/// [`FormatError::BlockLengthMismatch`], rather than read short.
+const MAX_BLOCK_LEN: usize = {
+    let bars = Layout::V2.block_len();
+    let overlay = Layout::OVERLAY.block_len();
+    let greeks = Layout::GREEKS.block_len();
+    let widest = if bars > overlay { bars } else { overlay };
+    let widest = if widest > greeks { widest } else { greeks };
+    // `as` in const context, where `try_from` is unavailable; the assertion
+    // below pins the value, so a truncation could not pass silently.
+    #[allow(clippy::cast_possible_truncation)]
+    let len = widest as usize;
+    len
+};
+
+/// Pinned to the bar geometry's block, so a format change is seen here.
+const _: () = assert!(MAX_BLOCK_LEN as u64 == crate::format::BLOCK_LEN);
+const _: () = assert!(MAX_BLOCK_LEN == 4_088);
 use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
@@ -2098,12 +2131,17 @@ impl BarFile {
             self.layout.covered_byte_range(block, self.header.n_valid),
             &self.bars_path,
         )?;
-        let span = usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
-            path: self.bars_path.clone(),
-            source: FormatError::OffsetOverflow,
-        })?;
-        let mut bytes = vec![0u8; span];
-        read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+        // ON THE STACK, NOT THE HEAP — D-0914. The covered range is never
+        // longer than the block, and the block is never longer than
+        // `MAX_BLOCK_LEN`; a range that was would be refused by name here.
+        let mut covered = [0u8; MAX_BLOCK_LEN];
+        let bytes = slice_of(
+            &mut covered,
+            end.saturating_sub(start),
+            block,
+            &self.bars_path,
+        )?;
+        read_fully(&self.bars, &self.bars_path, start, bytes)?;
 
         // FOUR BYTES AT `block * 4`, AND THE `.crc` IS THE PATH A FAILURE HERE
         // NAMES. A short sidecar is a short read of the SIDECAR, not of the
@@ -2118,7 +2156,8 @@ impl BarFile {
         // other block and for a healthy file. `block::verify_through` uses them
         // only to PROVE that a mismatching tail entry was sealed over the
         // committed bytes plus some of these — see `Self::past_the_commit`.
-        let past = self.past_the_commit(block, end)?;
+        let mut beyond = [0u8; MAX_BLOCK_LEN];
+        let past = self.past_the_commit(block, end, &mut beyond)?;
 
         // `block::verify_through` AND NOT A COMPARISON WRITTEN HERE. It is the
         // body of `block::verify`, the function `crates/store/tests/fault.rs`
@@ -2127,7 +2166,7 @@ impl BarFile {
         // admitted, visible in `/logs` as well as in the return value. A second
         // comparison in this module would be a second answer to one question.
         let checked =
-            crate::block::verify_through(&self.header, self.layout, block, &bytes, &past, stored);
+            crate::block::verify_through(&self.header, self.layout, block, bytes, past, stored);
         if let Err(FormatError::BlockChecksum { computed, .. }) = checked {
             return Err(StoreError::BlockChecksum {
                 path: self.bars_path.clone(),
@@ -2163,27 +2202,37 @@ impl BarFile {
     ///
     /// # Errors
     ///
-    /// Anything the host refuses measuring or reading the bar file.
-    fn past_the_commit(&self, block: u64, end: u64) -> Result<Vec<u8>, StoreError> {
+    /// Anything the host refuses measuring or reading the bar file, and
+    /// [`FormatError::BlockLengthMismatch`] for records past the commit that
+    /// would not fit in `room`, which the geometry rules out (see
+    /// [`MAX_BLOCK_LEN`]).
+    ///
+    /// # Into the caller's buffer — D-0914
+    ///
+    /// The records are read into `room`, a stack array the caller owns, and
+    /// the answer borrows from it. Until D-0914 this returned a fresh `Vec`,
+    /// a heap allocation on every cold read of a tail block holding records
+    /// past the commit.
+    fn past_the_commit<'r>(
+        &self,
+        block: u64,
+        end: u64,
+        room: &'r mut [u8; MAX_BLOCK_LEN],
+    ) -> Result<&'r [u8], StoreError> {
         let n_valid = self.header.n_valid;
         if block.saturating_add(1) != self.layout.blocks_for(n_valid) {
-            return Ok(Vec::new());
+            return Ok(&[]);
         }
         let len = fault(self.bars.metadata(), &self.bars_path, Action::Measure)?.len();
         let nominal_end = block
             .saturating_add(1)
             .saturating_mul(self.layout.records_per_block());
         let held = self.layout.capacity_for(len).min(nominal_end);
-        let span = usize::try_from(
-            held.saturating_sub(n_valid)
-                .saturating_mul(self.layout.record_stride()),
-        )
-        .map_err(|_| StoreError::Format {
-            path: self.bars_path.clone(),
-            source: FormatError::OffsetOverflow,
-        })?;
-        let mut past = vec![0u8; span];
-        read_fully(&self.bars, &self.bars_path, end, &mut past)?;
+        let span = held
+            .saturating_sub(n_valid)
+            .saturating_mul(self.layout.record_stride());
+        let past = slice_of(room, span, block, &self.bars_path)?;
+        read_fully(&self.bars, &self.bars_path, end, past)?;
         Ok(past)
     }
 
@@ -2670,6 +2719,34 @@ fn write_fully<P: Positional>(
     Ok(())
 }
 
+/// The first `len` bytes of a block-sized stack buffer, or a refusal naming
+/// the block when `len` will not fit — D-0914.
+///
+/// The one door both of `verify_block_of`'s reads take into their stack
+/// buffers, so neither can fall back to reading short or to the heap. A
+/// `len` past [`MAX_BLOCK_LEN`] is [`FormatError::BlockLengthMismatch`]
+/// carrying the room there was as `len` and the bytes asked for as `need`.
+/// No geometry a `BarFile` opens produces one; the refusal is what happens if
+/// a future geometry did, instead of a panic or a silent truncation.
+fn slice_of<'b>(
+    buffer: &'b mut [u8; MAX_BLOCK_LEN],
+    len: u64,
+    block: u64,
+    path: &Path,
+) -> Result<&'b mut [u8], StoreError> {
+    usize::try_from(len)
+        .ok()
+        .and_then(|len| buffer.get_mut(..len))
+        .ok_or_else(|| StoreError::Format {
+            path: path.to_path_buf(),
+            source: FormatError::BlockLengthMismatch {
+                block,
+                len: MAX_BLOCK_LEN,
+                need: len,
+            },
+        })
+}
+
 /// Reads every byte, resuming a short read at the offset it stopped at.
 ///
 /// A read that returns zero is end of file: the caller asked for bytes the
@@ -2840,6 +2917,32 @@ mod tests {
 
     fn path() -> &'static Path {
         Path::new("/tmp/brutex-store-fake.bin")
+    }
+
+    /// `slice_of` hands out exactly the asked-for prefix of the stack buffer
+    /// at every length from nothing to the whole block, and refuses one byte
+    /// more — and `u64::MAX` — by name, naming the block. D-0914.
+    #[test]
+    fn the_block_buffer_serves_up_to_its_length_and_refuses_one_byte_more() {
+        let mut buffer = [0u8; super::MAX_BLOCK_LEN];
+        for len in [0u64, 1, 56, 4_087, 4_088] {
+            let got = super::slice_of(&mut buffer, len, 3, path()).map(|s| len_u64(s.len()));
+            assert_eq!(got, Ok(len), "a prefix of {len} bytes");
+        }
+        for (len, block) in [(4_089u64, 7u64), (u64::MAX, u64::MAX)] {
+            assert_eq!(
+                super::slice_of(&mut buffer, len, block, path()),
+                Err(StoreError::Format {
+                    path: path().to_path_buf(),
+                    source: FormatError::BlockLengthMismatch {
+                        block,
+                        len: 4_088,
+                        need: len,
+                    },
+                }),
+                "{len} bytes do not fit a 4,088-byte block buffer"
+            );
+        }
     }
 
     #[test]
@@ -4635,8 +4738,9 @@ mod tests {
             let end = v2.offset_of(n_valid).expect("an offset");
 
             let reader = reopen_readonly(&path).expect("the month opens");
+            let mut room_buffer = [0u8; crate::file::MAX_BLOCK_LEN];
             let past = reader
-                .past_the_commit(tail, end)
+                .past_the_commit(tail, end, &mut room_buffer)
                 .expect("the tail's past reads");
             assert_eq!(
                 len_u64(past.len()),
@@ -4644,14 +4748,14 @@ mod tests {
                 "{tag}: the tail block's room and not the dead batch"
             );
             assert_eq!(
-                past,
+                *past,
                 bytes[offset(n_valid)..offset(n_valid + room)],
                 "{tag}: exactly the records that follow the commit"
             );
             if tail > 0 {
                 assert_eq!(
-                    reader.past_the_commit(tail - 1, end),
-                    Ok(Vec::new()),
+                    reader.past_the_commit(tail - 1, end, &mut [0u8; crate::file::MAX_BLOCK_LEN]),
+                    Ok(&[] as &[u8]),
                     "{tag}: a block that is not the tail has nothing past the commit"
                 );
             }
@@ -4677,9 +4781,10 @@ mod tests {
             assert_eq!(
                 settled.past_the_commit(
                     v2.block_of(last - 1),
-                    v2.offset_of(last).expect("an offset")
+                    v2.offset_of(last).expect("an offset"),
+                    &mut [0u8; crate::file::MAX_BLOCK_LEN],
                 ),
-                Ok(Vec::new()),
+                Ok(&[] as &[u8]),
                 "{tag}: a file that ends at its commit has nothing past it"
             );
             drop(settled);

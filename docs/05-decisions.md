@@ -43718,3 +43718,50 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0914 — Measure the cold bar lookup, give it its own 10,000-floor budget, and read its block into the stack — 2026-10-02
+
+**What was wrong.** Two audit findings, one defect. C-28 and C-29
+(`crates/store/benches/ratio.rs`) re-read one fixed index, so after the first
+call `verify_block_of` returned on its one-block memory and only the warm path
+was timed. The cold path — every read that lands in a block other than the last
+one verified, which is every random access and every bisection probe — was
+never measured, and allocated `vec![0u8; span]` per call in `verify_block_of`,
+plus a second in `past_the_commit` for a tail block holding records past the
+commit.
+
+**The change.**
+
+1. **Two bench rows.** C-BC-01, `cold_record_read_is_flat_in_the_file`, reads
+   fourteen indices in fourteen distinct blocks in turn, block 0 to the tail,
+   at 1×, 10× and 100× the record count, under the 3.0× ceiling. C-BC-02,
+   `cold_record_read_stays_within_its_budget`, holds the same cold read to a
+   floor budget.
+2. **Its own budget, 10,000 floors.** Measured 2,066.247 floors before the
+   change and 2,394.687 / 2,096.921 / 2,443.033 after, on a shared `x86_64`
+   host. C-29's 800 does not hold for the cold read, and the row printed OVER
+   BUDGET at 800 before this budget was set. Folding the cold read into C-29
+   by raising 800 would have loosened the warm read's bound by 12× to cover a
+   different operation; a second named budget keeps both honest. 10,000 is the
+   worst observed with roughly 4× left over, the rule C-29 used.
+3. **A stack buffer.** `MAX_BLOCK_LEN`, derived from the bar, overlay and
+   greeks geometries and pinned to 4,088, sizes one array for the covered range
+   and one for the records past the commit. `past_the_commit` reads into the
+   caller's array and returns a borrow of it. `slice_of` is the one door into
+   both arrays and refuses a length past `MAX_BLOCK_LEN` as
+   `FormatError::BlockLengthMismatch` naming the block; no geometry a
+   `BarFile` opens produces one. The caching in `read_row` and
+   `verify_block_of` is untouched.
+4. **Gate 14's store row** names C-BC-01 and C-BC-02.
+
+**Considered and refused.** A counting global allocator to prove the absence
+of allocation by measurement: it needs `unsafe impl GlobalAlloc`, and
+`unsafe_code` is denied workspace-wide. C-BC-03 is a source-shape test instead,
+named as one, beside edge tests that drive the buffer through the public door.
+
+**Not shown.** Removing the allocation did not visibly lower the cold cost on
+this host; the CRC dominates it. No dedicated-hardware or `aarch64`
+measurement was taken. `docs/06-limits.md` records both. Four store tests
+(`durability.rs` ×3, `write.rs` ×1) fail in this container because it runs as
+root and permission bits do not refuse root; they fail identically on
+`origin/main` and are not touched here.
