@@ -10887,7 +10887,12 @@ struct AttemptRung<'a> {
 }
 
 /// Runs one descent step inside the same lifecycle the live table folds.
-fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> String {
+fn screen_step(
+    question: AttemptRung<'_>,
+    support: u64,
+    policy: Policy,
+    cache: &mut ScreenCache,
+) -> String {
     let (from, to) = question.span;
     let min_hits = min_hits_for(
         usize::try_from(question.bars).unwrap_or(usize::MAX),
@@ -10905,6 +10910,8 @@ fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> Strin
         named_support: true,
     };
     note_rung_sweeping(progress);
+    // ONE LOAD FOR THE WHOLE DESCENT: `cache` carries the span, contexts and
+    // column from the first step to the rest. D-0997.
     let page = screen_range_for_attempt(
         question.vendor_word,
         question.underlying,
@@ -10913,6 +10920,7 @@ fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> Strin
         support,
         policy,
         question.attempt,
+        cache,
     );
     let refused = page.strip_prefix("refused: ").map_or_else(
         || not_recorded_reason(&page),
@@ -10926,7 +10934,13 @@ fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> Strin
     page
 }
 
-fn validated_at(question: AttemptRung<'_>, support: u64, policy: Policy, searched: &str) -> String {
+fn validated_at(
+    question: AttemptRung<'_>,
+    support: u64,
+    policy: Policy,
+    searched: &str,
+    cache: &mut ScreenCache,
+) -> String {
     let validated = screen_step(
         question,
         support,
@@ -10934,6 +10948,7 @@ fn validated_at(question: AttemptRung<'_>, support: u64, policy: Policy, searche
             validate: true,
             ..policy
         },
+        cache,
     );
     if validated.contains(YOUR_RULES_MET) {
         validated
@@ -13893,6 +13908,9 @@ fn elite_descend_with_attempt(
     // THE FIRST REFUSAL, KEPT, because a walk where every step refused has no
     // page to show and `exhausted_walk` would otherwise report the market.
     let mut first_refusal: Option<String> = None;
+    // LOADED ONCE, ON THE FIRST STEP, AND HELD FOR EVERY LATER ONE: nothing a
+    // step loads depends on its support. D-0997, o1cli-1.
+    let mut cache = ScreenCache::default();
     for (step, support) in ladder.iter().enumerate() {
         // PROGRESS TO STDERR as each step lands, for the reason `descend`
         // records: a walk that buffers its whole output prints nothing for
@@ -13902,7 +13920,7 @@ fn elite_descend_with_attempt(
             step.saturating_add(1),
             ladder.len()
         );
-        let page = screen_step(question, *support, policy);
+        let page = screen_step(question, *support, policy, &mut cache);
 
         // ADMITTED ROWS ARE READ BACK OFF THE RENDERED PAGE, which is the
         // pattern `results_arm` already takes and states the reason for: a
@@ -13925,7 +13943,7 @@ fn elite_descend_with_attempt(
             );
             // THE SURVIVOR IS VALIDATED, and only the survivor — see
             // `validated_at` for why the search half cannot afford this stack.
-            out.push_str(&validated_at(question, *support, policy, &page));
+            out.push_str(&validated_at(question, *support, policy, &page, &mut cache));
             return out;
         }
         // ONE PREDICATE FOR BOTH DECISIONS, which is the defect this replaces.
@@ -15206,13 +15224,19 @@ pub fn screen_range(
         support_ppm,
         policy,
         None,
+        &mut ScreenCache::default(),
     ) {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
     }
 }
 
-/// [`screen_range`] under one exact browser attempt.
+/// [`screen_range`] under one exact browser attempt, reusing `cache`'s
+/// support-independent inputs when it holds this question (D-0997).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven screen inputs plus the descent's shared input cache (D-0997); the cache is state the caller owns across steps, not part of the question"
+)]
 fn screen_range_for_attempt(
     vendor_word: &str,
     underlying: &str,
@@ -15221,6 +15245,7 @@ fn screen_range_for_attempt(
     support_ppm: u64,
     policy: Policy,
     attempt: Option<u64>,
+    cache: &mut ScreenCache,
 ) -> String {
     match screen_range_inner(
         vendor_word,
@@ -15230,6 +15255,7 @@ fn screen_range_for_attempt(
         support_ppm,
         policy,
         attempt,
+        cache,
     ) {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
@@ -15266,6 +15292,10 @@ pub struct Policy {
 }
 
 /// [`screen_range`]'s work, with its refusals unrendered.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven screen inputs plus the descent's shared input cache (D-0997); the cache is state the caller owns across steps, not part of the question"
+)]
 fn screen_range_inner(
     vendor_word: &str,
     underlying: &str,
@@ -15274,6 +15304,7 @@ fn screen_range_inner(
     support_ppm: u64,
     policy: Policy,
     attempt: Option<u64>,
+    cache: &mut ScreenCache,
 ) -> Result<String, stored::Refusal> {
     swept_rung(rung)?;
     let commit = commit_stamp().ok_or_else(|| {
@@ -15285,17 +15316,26 @@ fn screen_range_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    screen_range_kernel(StoredScreenRequest {
-        root,
-        vendor,
-        underlying,
-        rung,
-        span,
-        support_ppm,
-        policy,
-        attempt,
-        commit,
-    })
+    screen_range_kernel_cached(
+        StoredScreenRequest {
+            root,
+            vendor,
+            underlying,
+            rung,
+            span,
+            support_ppm,
+            policy,
+            attempt,
+            commit,
+        },
+        cache,
+    )
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: how many times this thread loaded a screen's stored inputs. D-0997.
+    static SCREEN_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 struct StoredScreenRequest<'a> {
@@ -15311,38 +15351,80 @@ struct StoredScreenRequest<'a> {
 }
 
 /// Own the admitted screen inputs after the public boundary verifies the build.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the ordered source, execution, context, identity and publication preconditions form one screen transaction; every refusal retains its original reason"
-)]
+///
+/// Test-only since D-0997: every production caller now goes through
+/// [`screen_range_kernel_cached`] with the cache it owns.
+#[cfg(test)]
 fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, stored::Refusal> {
-    let StoredScreenRequest {
-        root,
-        vendor,
-        underlying,
-        rung,
-        span: (from, to),
-        support_ppm,
-        policy,
-        attempt,
-        commit,
-    } = request;
-    let Policy {
-        rules,
-        lens,
-        validate,
-    } = policy;
-    // REFUSED BEFORE THE SPAN IS READ, as every recorded kernel does. Each step
-    // of an `elite` descent arrives here. D-0685.
-    recorded_budget_refusal()?;
-    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    screen_range_kernel_cached(request, &mut ScreenCache::default())
+}
+
+/// Which stored question a [`ScreenCache`] holds the inputs for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScreenKey {
+    root: std::path::PathBuf,
+    vendor: Vendor,
+    underlying: String,
+    rung: String,
+    span: ((u16, u8), (u16, u8)),
+}
+
+/// Everything a stored screen loads that does not depend on the support.
+///
+/// # Why this is held across the steps of a descent
+///
+/// An `elite` descent screens one span at up to ten supports. Each step used to
+/// re-enter [`screen_range_kernel`], which read the signal span, the one-minute
+/// execution span, the daily and exact-minute contexts, and rebuilt the
+/// anchored column: all of it O(bars) and none of it a function of the support.
+/// The support only sets `min_hits`, and everything that reads `min_hits` --
+/// the ladder, the identity, the sweep and the ranking -- still runs per step.
+/// o1cli-1, D-0997.
+struct ScreenInputs {
+    span: stored::Span,
+    signal_length: i64,
+    execution_bars: Option<stored::Span>,
+    holed_days: Vec<i64>,
+    withheld: u64,
+    daily: stored::DailyContext,
+    exact_minute: stored::ExactMinuteContext,
+    availability: Availability,
+    cost: audit::CostScope,
+    /// `None` when the anchored build refused. The audit then rebuilds it and
+    /// refuses with the same reason at the same point it always did, so a
+    /// refusal is never moved earlier by the cache.
+    column: Option<Column>,
+}
+
+/// The inputs of the last stored question screened, or its refusal.
+///
+/// Keyed, so a cache handed a different question loads afresh rather than
+/// answering it from another span. A refusal is held too: every step of a
+/// descent over a span that cannot load refuses with the same reason, as each
+/// step's own load did before. D-0997.
+#[derive(Default)]
+struct ScreenCache {
+    loaded: Option<(ScreenKey, Result<ScreenInputs, stored::Refusal>)>,
+}
+
+/// Load the support-independent half of a stored screen, in its original order.
+fn load_screen_inputs(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    (from, to): ((u16, u8), (u16, u8)),
+) -> Result<ScreenInputs, stored::Refusal> {
+    #[cfg(test)]
+    SCREEN_SPAN_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
+    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
 
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         Some(stored::load_span(
-            &root,
+            root,
             vendor,
             underlying,
             EXECUTION_RUNG,
@@ -15404,14 +15486,95 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
     if span.bars.is_empty() {
         return Err("every signal session has a minute gap; no screenable bars remain".to_owned());
     }
-    // Support is a fraction of the admitted sample, which excludes holed days.
-    let min_hits = min_hits_for(span.bars.len(), support_ppm);
-    let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
-        stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
+        stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
     let cost = stored::audit_cost_scope(&span.key)?;
+    let column = stored_anchored_column(
+        &span.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    )
+    .ok();
+    Ok(ScreenInputs {
+        span,
+        signal_length,
+        execution_bars,
+        holed_days,
+        withheld,
+        daily,
+        exact_minute,
+        availability,
+        cost,
+        column,
+    })
+}
 
+/// [`screen_range_kernel`], reusing `cache`'s inputs when it holds this question.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the ordered identity and publication preconditions form one screen transaction; every refusal retains its original reason"
+)]
+fn screen_range_kernel_cached(
+    request: StoredScreenRequest<'_>,
+    cache: &mut ScreenCache,
+) -> Result<String, stored::Refusal> {
+    let StoredScreenRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        span: (from, to),
+        support_ppm,
+        policy,
+        attempt,
+        commit,
+    } = request;
+    let Policy {
+        rules,
+        lens,
+        validate,
+    } = policy;
+    // REFUSED BEFORE THE SPAN IS READ, as every recorded kernel does. Each step
+    // of an `elite` descent arrives here, and is still refused here on every
+    // step even when the span is already held. D-0685.
+    recorded_budget_refusal()?;
+    let key = ScreenKey {
+        root: root.clone(),
+        vendor,
+        underlying: underlying.to_owned(),
+        rung: rung.to_owned(),
+        span: (from, to),
+    };
+    let loaded = match &mut cache.loaded {
+        Some((held, loaded)) if *held == key => loaded,
+        slot => {
+            let loaded = load_screen_inputs(&root, vendor, underlying, rung, (from, to));
+            &mut slot.insert((key, loaded)).1
+        }
+    };
+    let ScreenInputs {
+        span,
+        signal_length,
+        execution_bars,
+        holed_days,
+        withheld,
+        daily,
+        exact_minute,
+        availability,
+        cost,
+        column,
+    } = loaded.as_ref().map_err(Clone::clone)?;
+    let (signal_length, withheld, availability) = (*signal_length, *withheld, *availability);
+    let execution = execution_bars.as_ref().map(|exec| Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
+    // Support is a fraction of the admitted sample, which excludes holed days.
+    let min_hits = min_hits_for(span.bars.len(), support_ppm);
     let ladder = ladder_for(min_hits)?;
     let horizon = horizon_for(&span.bars, rung != EXECUTION_RUNG);
     let rungs = grid_rungs(&span.bars);
@@ -15428,11 +15591,11 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
         params: Params::of(ladder).with_policy(&policy_of(
             &span.bars, rules, lens, validate, horizon, rungs,
         )),
-        data_digest: stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?,
+        data_digest: stored_executed_digest(&span.bars, exact_minute, daily, execution_slice)?,
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header = span_banner(&span, underlying, from, to, commit);
+    let mut header = span_banner(span, underlying, from, to, commit);
     if withheld > 0 {
         let dates = holed_days
             .iter()
@@ -15450,18 +15613,18 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
             span.bars.len(),
         );
     }
-    header.push_str(&daily_reference_note(&daily, &exact_minute));
+    header.push_str(&daily_reference_note(daily, exact_minute));
     Ok(audit_bars(
         &evaluator_stored(availability),
-        span.bars,
+        span.bars.clone(),
         &header,
         min_hits,
         Some(&id),
         AuditOptions {
-            prepared_column: None,
+            prepared_column: column.clone(),
             replay: Some(StoredReplay {
-                daily: &daily,
-                exact_minute: &exact_minute,
+                daily,
+                exact_minute,
                 signal_length_micros: signal_length,
                 availability,
             }),
@@ -15483,7 +15646,7 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
             // The environment's ceiling -- see `AuditOptions::ceiling`.
             ceiling: None,
             validate,
-            cost,
+            cost: *cost,
         },
     ))
 }

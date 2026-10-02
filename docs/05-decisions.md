@@ -43764,3 +43764,53 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0997 — A support descent loads its stored inputs once, not once per step — 2026-10-02
+
+**What was wrong (o1cli-1).** `cli elite` walks one span down a ladder of up
+to ten supports. Each step called `screen_step`, which re-entered the stored
+screen kernel from the top: it read the signal span and the one-minute
+execution span from the store, loaded the daily and exact-minute contexts, and
+then `audit_bars` rebuilt the anchored condition column, because the kernel
+passed `prepared_column: None`. None of that depends on the support, which only
+sets `min_hits`. So a ten-step descent paid ten store reads and ten column
+folds for one answer, and `docs/06-limits.md` §91 named only the frontier and
+the trade walk as the per-step cost. Measured before the fix with a test-only
+load counter: two screens of one span, two loads.
+
+**The change.** The kernel is split. `load_screen_inputs` does the
+support-independent half in its original order — span, execution span, the
+malformed-execution check, minute-gap withholding, both contexts, VWAP
+availability, cost scope — and also builds the anchored column. A
+`ScreenCache` holds that result, keyed by root, feed, underlying, rung and
+span. `screen_range_kernel_cached` checks the screen budget, takes the held
+inputs when the key matches (or loads and holds them when it does not), and
+then runs the support-dependent half unchanged: `min_hits`, the ladder, the
+run identity, the banner and `audit_bars`, now given
+`prepared_column: Some(column)`. The descent creates one cache and passes it to
+every step and to the validated re-run of the survivor. Every other caller
+(`screen`, `screen_range_for_attempt` outside a descent, the tests' kernel)
+passes a fresh cache, so it behaves exactly as before.
+
+**Byte-identical by construction, and checked.** The column passed in is the
+one `audit_bars_work` would have built: the same `stored_anchored_column` call
+on the same withheld bars and contexts. If that build refuses, the cache holds
+`None` and `audit_bars_work` rebuilds and refuses with the same text at the
+same point, after the attempt has begun, as it always did. A load that refuses
+is held and returned to every step, as each step's own load used to refuse. The
+budget refusal is still checked on every step before anything else.
+
+**Honest limits.** A step still copies the signal bars and the column (O(bars)
+memory copies) because `audit_bars` takes both by value; changing that would
+touch every audit caller and was not needed to remove the reloads. If the store
+changes during a descent, later steps now see the span as the first step read
+it rather than re-reading it; one descent therefore answers about one snapshot.
+The saving was counted, not timed: no wall-clock figure is claimed. The
+`screen_range_for_attempt` signature gained the cache argument, and its one
+test caller passes a fresh one.
+
+**Proof.** `cli::audited_stored::tests::a_descent_loads_its_stored_inputs_once`
+(three supports over one cache: one load; pages equal three uncached screens
+of an identical store; a different rung loads afresh), recorded as
+`docs/04-invariants.md` C-O1CLI1-01. `docs/06-limits.md` §91 now says what a
+step no longer pays.

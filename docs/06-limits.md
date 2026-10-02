@@ -5785,6 +5785,18 @@ rungs are worse: 1-minute signals over the same span are ~630,000 bars against
 ~10,000 at 60-minute, so the column build alone is roughly 60x. That is stated
 here rather than discovered by a reader watching a terminal.
 
+**What each step no longer pays — D-0997.** Until o1cli-1 every step also
+re-read the signal span, the 1-minute execution span and the daily and
+exact-minute contexts from the store, and rebuilt the anchored condition column,
+though none of it depends on the support. The descent now loads them once, on
+its first step, and holds them for every later step and for the validated
+re-run of the survivor (`ScreenCache`). What a step still pays besides the
+frontier and the trade walk above is one copy of the signal bars and one copy
+of the column, each O(bars) and a memory copy rather than a store read and a
+re-fold. The saving was counted (one load instead of one per step, in
+`a_descent_loads_its_stored_inputs_once`) and not timed; no new wall-clock
+figure is claimed here.
+
 ## 92. Gate 13 does not guard the three JavaScript binding crates, and cannot from where it stands — D-0298
 
 `wasm-bindgen`, `js-sys` and `web-sys` are **in `Cargo.lock`** and are **not on
