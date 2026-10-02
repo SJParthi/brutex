@@ -155,7 +155,7 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    counts into disjoint slices of one `counts` vector, and one serial loop then
    pushes each survivor in candidate order — so no push on that path allocates.
    (This paragraph described lane-local `kept` vectors folded with one `extend`
-   per chunk; that design was replaced and the paragraph was not. D-0926.) k=1
+   per chunk; that design was replaced and the paragraph was not. D-1440.) k=1
    reserves the offered width; the join's `exhausted` check reserves for every
    pending batch candidate before admitting one. Where a reservation is not
    already held, `Vec`'s guarantee is amortised O(1), not worst-case O(1).
@@ -322,7 +322,7 @@ relaxed `fetch_add`, with an event only on every `stride`-th candidate. Its
 events are emitted at structural boundaries — per run, per instrument-month, and
 that `stride` — which is the granularity gate 17's own comment prescribes as the
 affordable one. This said `cli` held no loop over bars or candidates until
-D-0957 corrected it. D-0226.
+D-1448 corrected it. D-0226.
 
 `cli` once deliberately had no `store` arrow, on the reasoning that the
 operator's standing rule forbade both a vendor pull and the bars already on

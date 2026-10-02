@@ -280,7 +280,7 @@ relaxed `fetch_add`, with an event only on every `stride`-th candidate. Its
 events are emitted at structural boundaries — per run, per instrument-month, and
 that `stride` — which is the granularity gate 17's own comment prescribes as the
 affordable one. This said `cli` held no loop over bars or candidates until
-D-0957 corrected it. D-0226.
+D-1448 corrected it. D-0226.
 
 `cli` once deliberately had no `store` arrow, on the reasoning that the
 operator's standing rule forbade both a vendor pull and the bars already on
