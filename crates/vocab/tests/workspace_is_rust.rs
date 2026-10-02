@@ -61,7 +61,9 @@ const DECLARED: &[Declared] = &[
     Declared {
         name: "ring",
         ships: "17 .c, 28 .h, 73 .S, 17 .asm, plus build.rs",
-        why: "NO LONGER REACHED, AND THIS ROW USED TO SAY THE OPPOSITE. It read \
+        why: "IF THIS PRINTS, RING IS REACHABLE FROM A WORKSPACE MEMBER THROUGH AN \
+              EDGE LOCK_ONLY_EDGES DOES NOT SKIP. History: as of 2026-08-26 it \
+              was not reached, and this row once said the opposite. It read \
               `THE OPEN §2 BREACH. Measured: nm on the release binary returns 72 \
               ring_core symbols, so this is linked, not dormant` — which was true \
               when written and stopped being true the moment `reqwest` moved to \
@@ -546,6 +548,15 @@ fn no_declared_native_dependency_is_compiled_any_more() {
             e.why
         );
     }
+    // A lock-format change that renamed `dependencies = [` would leave the walk
+    // with no edges, and a walk over no edges reaches nothing and passes. The
+    // lock records 474 edge lines as of D-0916; 300 leaves room to shrink.
+    let edges: usize = pkgs.iter().map(|p| p.deps.len()).sum();
+    assert!(
+        edges > 300,
+        "parsed only {edges} dependency edges — the lockfile format changed and \
+         the reachability walk stopped testing"
+    );
     let reached = declared_native_reached(&lock);
     assert!(reached.is_ok(), "{:?}", reached.as_ref().err());
     let compiled = reached.unwrap_or_default();

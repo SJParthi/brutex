@@ -9921,9 +9921,13 @@ The text above is kept as it was written.
   declared crate fails and has to be argued in, but an existing skipped edge
   that a later feature change made real on the host (for example a release of
   `rustls-webpki` turning `ring` on by default) would not be seen by this test.
-  The fingerprint pin catches that change as a moved `dependencies` list or
-  version, and `cargo deny check` (gate 3, `ring` and `cc` banned) remains the
-  check on the compiled graph.
+  The fingerprint pin catches that change only when it moves a `dependencies`
+  list. The fingerprint hashes names and dependency strings, never versions,
+  so a version bump that leaves every `dependencies` list unchanged (the
+  `rustls-webpki` example: only its version and checksum lines move, its list
+  still reads `"ring"`) is invisible to both the walk and the fingerprint.
+  `cargo deny check` (gate 3, `ring` and `cc` banned) is the only check on
+  that case.
 - **Names only, as before.** A native crate under a name `DECLARED` does not
   list is caught by the fingerprint pin, not by the reachability walk.
 - **Cost.** One parse of the lock and one O(V + E) walk (about 195 packages),
