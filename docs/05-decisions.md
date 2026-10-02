@@ -44128,3 +44128,25 @@ counts two matches in `audit.rs`, one ordering.
 checks every `keep` from 0 to n+1 against the full table, ties included, with
 `best()` and `sharpest()` on different rows. It fails without the head sort,
 and it fails with the two marked rows swapped.
+
+### D-0931 — An execution view is located in its minute context by address — 2026-10-02
+
+**Finding:** o1runner-3 (audit 2026-10-02). `require_exact_execution_subslice`
+found the evaluated slice's start by a bar-by-bar `position` scan of the minute
+context, then compared every bar of the window.
+
+**Decision:** production callers pass the evaluated slice as a view into the
+context it was cut from. Its start is now the address offset divided by the
+element size, and acceptance is one fat-pointer `ptr::eq` against that window:
+O(1), with no bar read. An equal slice held in separate memory still takes the
+old search and compare, so acceptance and refusal are unchanged. The per-call
+count also fell to once per catalogue under D-1143. The per-rule OOS path is
+o1runner-2's.
+
+**Output change:** none.
+
+**Proof:** `runner::exit_grid_policy::subslice_tests::a_view_into_the_context_is_located_without_a_search`
+checks that five views (whole, first, last, interior, one bar) are accepted with
+zero searches; that a copy is accepted and a forged copy refused, with two
+searches; and that over-long and empty slices still refuse. It fails when the
+fast path is disabled.

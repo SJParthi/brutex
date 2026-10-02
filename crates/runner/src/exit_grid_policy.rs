@@ -491,6 +491,17 @@ impl ExecutionRunV1 {
     }
 }
 
+/// Is `evaluated_execution_1m` an exact contiguous run of
+/// `reference_minute_context`?
+///
+/// # Cost (o1runner-3, D-0931)
+///
+/// Every production caller passes the evaluated slice as a VIEW into the
+/// context it was cut from, so its position is pointer arithmetic: the address
+/// offset over the element size, then one fat-pointer comparison of that
+/// window. O(1), no bar read. Only an equal slice held in separate memory
+/// takes the linear search and element-wise compare, and it accepts and
+/// refuses exactly what the fast path would have accepted or refused.
 fn require_exact_execution_subslice(
     reference_minute_context: &[Candle],
     evaluated_execution_1m: &[Candle],
@@ -498,6 +509,22 @@ fn require_exact_execution_subslice(
     let Some(first) = evaluated_execution_1m.first() else {
         return Err(ExitGridErrorV1::EmptyExecutionSeries);
     };
+    let offset = evaluated_execution_1m
+        .as_ptr()
+        .addr()
+        .checked_sub(reference_minute_context.as_ptr().addr());
+    let size = core::mem::size_of::<Candle>();
+    if let Some(offset) = offset
+        && offset % size == 0
+        && let Some(window) = (offset / size)
+            .checked_add(evaluated_execution_1m.len())
+            .and_then(|end| reference_minute_context.get(offset / size..end))
+        && core::ptr::eq(window, evaluated_execution_1m)
+    {
+        return Ok(());
+    }
+    #[cfg(test)]
+    SUBSLICE_SCANS.with(|n| n.set(n.get() + 1));
     let Some(start) = reference_minute_context.iter().position(|bar| bar == first) else {
         return Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext);
     };
@@ -508,6 +535,87 @@ fn require_exact_execution_subslice(
         return Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext);
     }
     Ok(())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Linear subslice searches taken on this thread (D-0931).
+    static SUBSLICE_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod subslice_tests {
+    use super::{ExitGridErrorV1, SUBSLICE_SCANS, require_exact_execution_subslice};
+    use indicators::Candle;
+
+    fn bars(n: i64) -> Vec<Candle> {
+        (0..n)
+            .map(|m| {
+                Candle::new(
+                    m * 60_000_000,
+                    100 + m,
+                    110 + m,
+                    90 + m,
+                    105 + m,
+                    1,
+                    indicators::OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    fn scans() -> u64 {
+        SUBSLICE_SCANS.with(std::cell::Cell::get)
+    }
+
+    /// o1runner-3 / D-0931: a view into the context is located by address, with
+    /// no search; a copy is still judged exactly as before.
+    #[test]
+    fn a_view_into_the_context_is_located_without_a_search() {
+        let context = bars(400);
+        let before = scans();
+        for (from, to) in [(0, 400), (0, 1), (399, 400), (17, 250), (100, 101)] {
+            assert_eq!(
+                require_exact_execution_subslice(
+                    &context,
+                    context.get(from..to).unwrap_or_default()
+                ),
+                Ok(()),
+                "{from}..{to}"
+            );
+        }
+        assert_eq!(scans() - before, 0, "every view must take the O(1) path");
+
+        // A copy in other memory: accepted iff it equals a contiguous run.
+        let copy: Vec<Candle> = context.get(17..250).unwrap_or_default().to_vec();
+        assert_eq!(require_exact_execution_subslice(&context, &copy), Ok(()));
+        let mut forged = copy.clone();
+        if let Some(last) = forged.last_mut() {
+            last.close += 1;
+        }
+        assert_eq!(
+            require_exact_execution_subslice(&context, &forged),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+        assert_eq!(scans() - before, 2, "only the two copies searched");
+
+        // A view of a DIFFERENT buffer with equal bars is a copy, not a view.
+        let other = bars(400);
+        assert_eq!(
+            require_exact_execution_subslice(&context, other.get(5..9).unwrap_or_default()),
+            Ok(())
+        );
+        // Past the end, and empty, refuse as before.
+        let longer = bars(401);
+        assert_eq!(
+            require_exact_execution_subslice(&context, &longer),
+            Err(ExitGridErrorV1::EvaluatedExecutionOutsideReferenceContext)
+        );
+        assert_eq!(
+            require_exact_execution_subslice(&context, &[]),
+            Err(ExitGridErrorV1::EmptyExecutionSeries)
+        );
+    }
 }
 
 /// OOS execution input with an explicit first test bar.

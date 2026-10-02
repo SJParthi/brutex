@@ -5431,3 +5431,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | For every `keep`, the exit-grid table prints exactly the full table's leading `keep` rows in its order. Below the cut it prints only the selectors' rows, in full-table order. Only the shown rows are sorted. | `runner::audit::tests::a_cut_grid_table_shows_exactly_the_full_tables_leading_rows` | ✓ |
+
+### Execution subslice location — o1runner-3 (D-0931)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| An evaluated execution slice that is a view into its minute context is accepted with no linear search. An equal copy elsewhere is still accepted and a changed one refused, by the old search. | `runner::exit_grid_policy::subslice_tests::a_view_into_the_context_is_located_without_a_search` | ✓ |
