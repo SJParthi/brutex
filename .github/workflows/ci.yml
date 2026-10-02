@@ -5225,6 +5225,16 @@ jobs:
           #     whose running maxima, selection scratch and per-rank bars are
           #     the same studentized statistics; lane 4's own tree measured 51
           #     against its allowance of 48. No price is among them.
+          #   cli/institutional_evidence.rs 7 -> 8 -- GAP5-54 (D-0930) replaced
+          #     `probability_ppm`, two lines that took `ceil(p * PPM)` in `f64`,
+          #     with `bootstrap_fraction`, three lines that recover the exact
+          #     integer `k/(draws+1)` behind the runner's p-value: `value *
+          #     denominator as f64` rounded to the `u64` numerator, the bit-exact
+          #     check that `numerator / denominator` reproduces the p-value, and
+          #     the refusal message naming the `f64` it cannot represent above
+          #     2^53. The float is again the input discarded for an integer, the
+          #     direction of travel `runner/report.rs` is allowed for, and the ppm
+          #     and the decision are now integer arithmetic on that fraction.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -5251,7 +5261,7 @@ jobs:
           crates/telemetry/src/encode.rs 1
           crates/telemetry/src/record.rs 1
           crates/cli/src/live.rs 1
-          crates/cli/src/institutional_evidence.rs 7
+          crates/cli/src/institutional_evidence.rs 8
           crates/cli/src/institutional_statistics.rs 19
           crates/cli/src/population_statistics_v2.rs 18
           crates/cli/src/population_statistics_v3.rs 11
@@ -5447,6 +5457,14 @@ jobs:
           # (`HashMap::with_capacity(candidates)`, and the proved-day set at
           # `required.len()`), so the file has no unsized map left and its row
           # was only loose. D-1189 deletes it; a new unsized map there is red.
+          #
+          # `api/recovery_journal.rs` 1, D-1380 -- SHAPE 1. `append_new`'s `fresh`, the
+          # set that refuses a seed batch naming one recovery key twice, is bound
+          # `HashSet::new()` and its very next statement is
+          # `fresh.try_reserve(records.len())`, the batch length counted before
+          # the walk; no insert precedes it. The `images` Vec just above it
+          # is reserved the same way. `with_capacity` would abort on allocation
+          # failure where this path returns the `io::Error` the journal reports.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
@@ -5508,6 +5526,7 @@ jobs:
           crates/pull/src/cash_session_cache.rs 2
           crates/cli/src/selection_v6.rs 1
           crates/cli/src/index_stop_store.rs 1
+          crates/api/src/recovery_journal.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5955,11 +5974,37 @@ jobs:
           #     again (D-0606): `sort_unstable_by` on `total_cmp`, ties broken by
           #     position, over the same slice of strategies and in the same
           #     decreasing order as the first `runner/bootstrap.rs` entry.
+          #   runner/bootstrap.rs 2 -> 4 -- D-0973 rewrote the legacy stepdown
+          #     `romano_wolf_aligned` as one backward walk. `quantile` and its
+          #     sort went; three came in, each over strategies or draws and never
+          #     over bars or the universe. (1) `order.sort_unstable_by` is the
+          #     same descending-statistic order, ties by caller position, as the
+          #     adjusted receipt's `stepdown_order` -- D-0973 makes the legacy
+          #     vector decide on that receipt's order, so it must build it.
+          #     (2) `select_nth_unstable_by(position, f64::total_cmp)` is a
+          #     SELECTION of each suffix's bar from the B draw maxima: O(B) per
+          #     strategy, the "linear runtime for all inputs" fallback its doc
+          #     comment quotes. (3) `this_round.sort_unstable_by_key` orders one
+          #     round's rejected strategies by caller position; rounds partition
+          #     the strategies, so all rounds together sort S once. The stated
+          #     cost is O(S·B·N + S·B + S log S), in the function's own doc.
+          #   runner/outcome.rs 1 -> 4 -- D-1410. The production cadence is now
+          #     `prefix_median_steps_over`, a two-heap running median so bar `i`
+          #     reads only bars `0..=i`: `use std::collections::BinaryHeap` and
+          #     the `lower`/`upper` heaps are the three `BinaryHeap` lines. It
+          #     runs once per `SliceFacts::of`, `SessionBounds::of` or
+          #     `trade::forced_exits` -- once per slice, never per candidate --
+          #     and docs/06-limits.md "The prefix cadence is O(n log g) per slice"
+          #     states it. The fourth is the former entry's
+          #     `select_nth_unstable` in `median_step_micros`, now a
+          #     `#[cfg(test)] fn` kept as the oracle the prefix cadence must end
+          #     on. This scanner drops `#[cfg(test)] mod` blocks, not a
+          #     `#[cfg(test)]` fn, so it still counts a line no build runs.
           allow_sort='
           crates/runner/src/audit.rs 2
-          crates/runner/src/bootstrap.rs 2
+          crates/runner/src/bootstrap.rs 4
           crates/runner/src/bootstrap_family_pass.rs 1
-          crates/runner/src/outcome.rs 1
+          crates/runner/src/outcome.rs 4
           crates/runner/src/pbo.rs 2
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
@@ -6575,8 +6620,10 @@ jobs:
           #     fixed `RESEARCH_FAMILY_BYTES_V1` record.
           #   telemetry/record.rs -- `Record::field`, at most `MAX_FIELDS`
           #     (twelve), enforced by `Record::decode`.
-          #   vocab/expression.rs -- `table::TABLE` by name, a `const` table,
-          #     once per name token while an expression is parsed; never per bar.
+          #   vocab/expression.rs -- REMOVED (o1engine-24): a name token now
+          #     resolves through `vocab::table::index_of`, a compile-time hash
+          #     index, so the row-order scan of `table::TABLE` is gone and the
+          #     row was loose. A new search there is red.
           #   api/booleanjson.rs 2, cli/boolean_qualification_reader.rs --
           #     `grids()`, whose return type is `&[GridContext; 2]`.
           #   cli/boolean_campaign_codec.rs 2 -- `state.rows`, which `validate`
@@ -6615,6 +6662,11 @@ jobs:
           #     plus `anchored` V4's and `choice_matches_visible_v2`'s), each over
           #     one fold's retained placements, each beside a `.max()` over the
           #     same slice, once per fold.
+          #   runner/validate.rs 4 -> 5 (D-1186) -- `first_live`, the first OOS
+          #     row with any bit set, found by one `position` over the confined
+          #     column ONCE per validation and then shared by every candidate,
+          #     whose walks each used to start at row 0. It replaces
+          #     candidates x training rows of dead steps with one linear pass.
           #   cli/lib.rs (counted in its 7) -- `final_selection` finds the best
           #     row that traded over every priced row, once per screen, after two
           #     sorts of the same rows.
@@ -6681,9 +6733,8 @@ jobs:
           crates/runner/src/grid.rs 2
           crates/runner/src/research_family.rs 1
           crates/runner/src/signal_candle_stop.rs 2
-          crates/runner/src/validate.rs 4
+          crates/runner/src/validate.rs 5
           crates/telemetry/src/record.rs 1
-          crates/vocab/src/expression.rs 1
           '
 
           # ---- rule 7: the ambiguous membership test -----------------------
@@ -6735,6 +6786,11 @@ jobs:
           #     calendar. Two spot instruments and a handful of feeds. It does
           #     not grow with bars, days, instruments or months, which is the
           #     bound rule 6's entries are held to and the one that matters.
+          #     The second (D-0950) is `proved.contains` in `withhold_unproved`,
+          #     a HASH-FREE but ordered probe: `proved` is a `BTreeSet` of the
+          #     `(year, month)` pairs whose daily rung was read whole, at most one
+          #     per month in the span, so each probe is O(log months) and it runs
+          #     once per civil month, never per bar or per day.
           #   cli/src/lib.rs 2 -> 3 -- the third is the HASH PROBE case this
           #     rule's preamble names. `closed_by_evidence` collects the closed
           #     set into a `HashSet` and then filters the ranked top through
@@ -6799,7 +6855,7 @@ jobs:
           # bounds are all nonzero.
           allow_member='
           crates/api/src/assets.rs 1
-          crates/api/src/calendar_of.rs 1
+          crates/api/src/calendar_of.rs 2
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
           crates/api/src/merge.rs 2
