@@ -308,6 +308,17 @@ fn parse_month(stem: &str) -> Result<YearMonth, PathError> {
     if year.len() != 4 || month.len() != 2 {
         return Err(PathError::MonthOutOfRange { month: 0 });
     }
+    // DIGITS ONLY, before `parse`. `u8::from_str` and `u16::from_str` accept a
+    // leading `+`, so `2024-+1` passed the width check, parsed as January 2024
+    // and was listed as a month whose canonical file, `2024-01.bin`, is a
+    // different file. Opening the listed month then read that other file.
+    if !year
+        .bytes()
+        .chain(month.bytes())
+        .all(|b| b.is_ascii_digit())
+    {
+        return Err(PathError::MonthOutOfRange { month: 0 });
+    }
     let year: u16 = year
         .parse()
         .map_err(|_| PathError::YearOutOfRange { year: 0 })?;

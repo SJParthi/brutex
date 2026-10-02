@@ -5359,3 +5359,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### A signed month name is not a held month — audit 2026-10-02 probestore-4
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBESTORE-4 — **`catalog::walk` lists a month only when its file stem is four ASCII digits, `-`, two ASCII digits, and that month exists.** `2024-+1`, `+024-01`, `2024- 1`, ` 024-01`, `2024-1 `, `2024--1`, `-024-01`, `2024-+0` and `+++++-01` are each counted `malformed_month` and preserved on disk, beside a real `2024-02` that is still the one held month; the census reconciles and a rerun counts the same. Before the fix `2024-+1` was listed as January 2024, whose canonical file is a different file, because `str::parse` accepts a leading `+` | `a_signed_or_padded_month_name_is_not_listed_as_the_canonical_month` in `crates/store/tests/catalog.rs` | ✓ |
