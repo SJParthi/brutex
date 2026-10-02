@@ -169,6 +169,7 @@ Branch execution is not a mutation result or a complete coverage measurement.
 | V-04 | Time-of-day and VWAP bits are cleared on a daily timeframe | `indicators::unit::daily_mask_clears` | — |
 | V-05 | The fast evaluator agrees with a naive reference on random input | `indicators::proptest::differential_vs_naive` | — |
 | V-06 | Bits are computed exactly once per slice, never re-derived per candidate — proved **structurally** rather than by counting calls: `Ladder::walk` takes `&[ConditionMask]`, already computed, and `crates/engine` does not depend on `crates/indicators` at all, so no expression in the sweep can compute a condition bit. A counting spy would prove the current code does not recompute; this proves it CANNOT | `engine::tests::the_sweep_cannot_compute_a_condition_bit` | ✓ |
+| V-06b | **V-06's pin reads the manifest as TOML and names the PACKAGE each dependency links.** A rename (`package = ..` inline, in a header table or as a dotted key), a spaced or quoted header segment, an underscore table spelling, a root-level dotted key, an escaped key and a `workspace = true` declaration renamed in the root manifest are each reported as the package they link; a continuation line of a multi-line array or a header inside a multi-line string is not a dependency; text the reader cannot parse refuses rather than returning a partial list. Each positive shape returned something else from the previous line scan, measured. D-1120 | `engine::tests::the_manifest_reader_sees_every_spelling_the_line_scan_missed`; `engine::tests::the_manifest_reader_decodes_strings_and_refuses_what_it_cannot_read`; `engine::tests::the_sweep_cannot_compute_a_condition_bit` | ✓ |
 
 ## Sweep
 
@@ -5538,6 +5539,7 @@ old line regex the same input and watched it pass.
 | CIG-17 | Gate 25 reads every tracked `Cargo.toml` as TOML: the root manifest must hold `profile.release.overflow-checks = true` and `profile.release.panic = "abort"` as parsed leaves, any leaf under `profile` ending in `overflow-checks` whose value is not `true` is refused whatever its quoting, indentation, dotting or package override, and no tracked workflow may set a `CARGO_PROFILE_*_OVERFLOW_CHECKS` variable or an `overflow-checks` codegen flag | `profile_keys_are_seen_whatever_their_spelling` in `.github/source_scan.rs` | ✓ |
 | CIG-18 | Gate 10's proof table is built from `fn` keyword tokens, so a `fn name` in a comment or string proves nothing; a token whose first segment is not a crate must name a function declared in a tracked file mounted as that module (through `#[path]` included, read by `source_scan modules`) or whose path names it, and an unresolvable mounting refuses | `only_a_declared_fn_is_a_function`, `a_file_is_named_by_the_module_it_is_mounted_as` in `.github/source_scan.rs`; `a_module_first_token_must_name_a_function_its_module_declares`, `a_module_mounted_by_path_resolves_through_the_module_table` in `.github/invariant_paths.rs` | ✓ |
 | CIG-19 | Gate 11 rule 6 reads method chains: a corpus record whose code begins with `.` is folded onto the record above it in the same file before the rule's `.iter().find(` / `.position(` / `.rposition(` pattern runs, so a chain `cargo fmt` breaks across lines is one record and is counted; the fold self-tests on a fixture (three chains, one across a file boundary, expected three hits) before the corpus is read, and the 41 chained sites first seen by the fold are pinned per file in `allow_scan_unread`, a list that may only shrink | the chain-fold fixture inside gate 11, run before the corpus | ✓ |
+| CIG-19b | Every rule-6 site gate 11 counts is allowed by an `allow_scan` row whose bound is written beside it: `allow_scan_unread` is empty, and the 41 chained sites D-1115 pinned unread are classified as compile-time tables or fixed fields, feed-count or stated runtime caps, or data-sized searches at a named boundary. D-1121 | gate 11 rule 6 (`check 6` over the chain-folded corpus, with `allow_scan_unread` empty), run locally on 2026-10-02 with no REFUSED or STALE line | ✓ |
 | CIG-20 | Gates 12 and 14 carry one claim reader -- block extraction, trigger, non-claim nouns and scrub -- between `>>> CLAIM READER` and `<<< CLAIM READER` markers, and gate 14 refuses unless there are exactly two copies with the same bytes; gate 12's `allow_claim` entries are `FILE ITEM`, the item being the name below the doc block, so an allowance excuses one block and every allowed block is printed with its location | `core::claim_reader::gates_12_and_14_carry_one_claim_reader`, `core::claim_reader::the_reader_check_sees_a_divergent_copy`, `core::claim_reader::every_claim_allowance_names_one_item` | ✓ |
 | CIG-21 | Gate 14 layer 3 counts calls of a helper whose name ends in `ratio` in `source_scan code` output (comments blank, declarations excluded) against a pin equal to each bench's count at D-1117; layer 4 counts an id as printed only when it is the first word of a decoded string literal in the bench, the rule `printed_ids` in `crates/core/tests/cost_invariants.rs` applies | the gate's own layers, exercised on a vocab bench with one call commented out and one label renamed (both refused) | ✓ |
 | CIG-22 | Opening `/masters` asks for `/masters/status.json` and nothing else: `web/masters.js`, run in `node:vm` against a stub document with every load event, timer and promise played, makes no other `fetch`; pressing `#go` asks for `/masters/refresh` and pressing `#verify` for `/indexmap.json?feed=`; twelve load-time spellings of a call to `refresh` or `verify` (indented, no semicolon, `void`, an async IIFE, `setTimeout`, `requestAnimationFrame`, `load` and `DOMContentLoaded` listeners on window and document, `onload` assignments, a promise continuation) are each caught; gate W6 refuses if the test is not tracked, and gate W2 runs it | `opening the page asks only for the socket-free status`, `every way to call refresh or verify on load is caught` in `web/tests/masters-load.test.js` | ✓ |
@@ -5754,7 +5756,7 @@ old line regex the same input and watched it pass.
 | Invariant | Statement | Test that proves it | Status |
 |---|---|---|---|
 | C4-COSTS-01 | `costs::expiry::next_weekly_expiry` answers the first day on or after the day asked whose own weekly regime names its own weekday, so a regime change between the day asked and the old weekday is read at the expiry and not at the day asked. NIFTY asked 2025-08-29 to 2025-09-01 answers 2025-09-02, and BANKNIFTY asked 2023-09-01 to 2023-09-04 answers 2023-09-06. Over the verified window on both underlyings every answer is an expiry by its own regime and the answers never go backwards; a boundary landing on the old weekday is crossed, a withdrawal met on the way answers `None`, and a refusal met on the way is returned. (D-0770) | `costs::expiry::tests::a_weekly_regime_change_is_read_at_the_expiry_and_not_at_the_day_asked`, `costs::expiry::tests::every_weekly_answer_is_an_expiry_by_its_own_regime_and_the_answers_never_go_backwards`, `costs::expiry::tests::a_boundary_on_the_old_regimes_expiry_day_is_crossed_and_one_past_it_is_not`, `costs::expiry::tests::a_boundary_into_a_refusal_before_the_expiry_is_refused_rather_than_projected` | ✓ |
-| C4-COSTS-02 | `costs::fill::fills_at` with `Anchor::PrintedExtreme` sells at the bar low when that low is one tick or more, and at one tick when it is below one tick or below zero, on both directions; the buy stays the printed high, the realized slippage stays zero, and the worst-case sell is never above it. A long whose exit low is `-i64::MAX` is charged as a one-tick sale and `trip::charge_stack` does not overflow. (D-0771) | `costs::fill::tests::the_printed_extreme_sell_is_floored_at_one_tick_as_the_worst_case_is`, `costs::trip::tests::a_printed_extreme_sell_below_zero_prices_at_the_floor_and_does_not_overflow` | ✓ |
+| C4-COSTS-02 | `costs::fill::fills_at` with `Anchor::PrintedExtreme` sells at the bar low when that low is one tick or more, and REFUSES it with `BelowTick { quantity: "sell printed-extreme fill" }` when it is below one tick or below zero, on both directions; at or above a tick the buy stays the printed high and the realized slippage stays zero, and the worst-case sell on a refused low is at or below its one-tick floor. A long whose exit low is `-i64::MAX` is refused by name on the printed reading, and the worst case on the same bars prices without overflowing `trip::charge_stack` or is refused as an overflow. (D-0771, refusal by D-1192 on the merged tree; D-1198) | `costs::fill::tests::the_printed_extreme_sell_refuses_a_sub_tick_low_and_keeps_a_printed_one`, `costs::trip::tests::a_printed_extreme_sell_below_zero_is_refused_and_does_not_overflow` | ✓ |
 | C4-COSTS-03 | `costs::fill::Bar::new` refuses an open below the low or above the high as `CostError::OpenOutsideBar` carrying the open, the high and the low in their own fields, and prints that the open is outside the range; a low above the high is still `CostError::InvertedBar`. (D-0772) | `costs::fill::tests::an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar`, `costs::error::tests::every_cost_error_renders_its_own_reason` | ✓ |
 ### Index-future cost scope — C4 costs batch 02 (D-0944)
 
@@ -6038,3 +6040,127 @@ old line regex the same input and watched it pass.
 |---|---|---|
 | AU-PROBESTORE-7a — **`LakeFile::read_row_group` refuses an `open_interest` that stores `i64::MIN` with `LakeError::OpenInterestIsNullSentinel` (W3-lake1-4, D-0775; found again as probestore-7) naming the row, at the first, a middle and the last row.** `i64::MIN + 1`, zero, `-1` and `i64::MAX` read as themselves and a real null reads as `None`. Before the fix the stored sentinel read back as "none reported", a null the file never held | `a_stored_open_interest_sentinel_is_refused_by_row` in `crates/lake/tests/refusals.rs` | ✓ |
 | AU-PROBESTORE-7b — **What the lake reader does not judge decodes as written, and its crate header and `read_row_group` doc say so.** A row with timestamp `i64::MIN`, a `low` above the `high`, an `open` outside the range, a negative close, volume and open interest reads back exactly as stored; the header's "Everything is refused by name" now limits itself to malformations of the file | `values_the_reader_does_not_judge_decode_as_written` in `crates/lake/tests/refusals.rs` | ✓ |
+
+### Legacy grid ratio flag is inert — W3-runner3-6 (D-1140)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| On the legacy `grid::evaluate` path, `Levels::ratios` does not change the grid: the result with `ratios: true` equals the result with `ratios: false`, and every (stop, target) pair with no trail is a priced cell. Exact ratio admission is never applied to a quantile target rung. | `runner::grid::exit_family_tests::ratio_flag_keeps_every_stop_and_target_cell` | ✓ |
+
+### Slice facts are per slice and cell replay is per grid — W3-runner3-1, W3-runner3-2, W3-runner5-2 (D-1141)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| One `grid::CellReplay` prepared per (mask, side, grid) materialises every cell to the same rows, or the same refusal, as a fresh `grid::materialize_cell`. This holds on empty input, one session, eight sessions, both sides and a mask that hits nothing. Reusing the replay is idempotent, and a cell the grid never held is refused. | `runner::grid::exit_family_tests::cell_replay_materializes_every_cell_exactly_as_materialize_cell` | ✓ |
+| The per-candidate resolved-policy doors (`evaluate_resolved_policy_v1`, `evaluate_resolved_expression_policy_v1`) and `CellReplay::materialize` build no `SliceFacts`, and `materialize` walks nothing. The facts come from the attested slice token. | `runner::grid::exit_family_tests::per_candidate_doors_take_their_slice_facts_rather_than_build_them` | ✓ |
+
+### A persisted run identity does not drift — AC-whp-law-3 (D-1142)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| The `RunId` encoding is a stored format: one fixed `Run` hashes to a pinned 64-hex identity, and `runner::identity`'s source does not claim that `RunId`s are unpersisted. | `runner::identity::tests::a_persisted_run_identity_does_not_drift` | ✓ |
+
+### A run is sealed against its slices' digests, hashed once — W3-runner3-3, W3-runner5-1 (D-1143)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `ExecutionRunV1::with_digests` over `ExecutionDigestsV1` returns exactly what `ExecutionRunV1::new` / `new_with_daily_reference` returns, or exactly the same refusal, for every input those constructors accept or refuse. Reusing one digest set is idempotent. | `runner::exit_grid_policy::tests::sealing_against_hoisted_digests_equals_hashing_per_run` | ✓ |
+| No per-candidate loop in the V4 walk-forward (training population or OOS replay) or in `cli`'s Boolean catalogue hashes the fold's or source's slices to seal a run. | `runner::validate::tests::the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop` · `runner::validate::tests::the_oos_replay_loop_hashes_its_slices_once_per_fold` · `cli::candidate_universe::boolean_candidate_v1::tests::produce_side_hashes_no_slice` | ✓ |
+
+### Walk-forward counts and `held_up` are tested against independent answers — W3-runner5-5, AC-whp-tb-1 (D-1144)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `FoldResult::priced` is counted from the pricing loop's returned vector, not from its input, so `priced == considered` fails when any cap truncates the loop. | `runner::validate::tests::priced_is_counted_from_what_the_pricing_loop_returned` · `runner::validate::tests::every_candidate_the_sweep_produced_is_priced_and_none_is_skipped` | ✓ |
+| `Validated::held_up` counts a chosen fold by its chosen exit's out-of-sample total when one exists (strictly positive), and by the level-less walk only when none does. Unchosen folds never count. | `runner::validate::tests::held_up_counts_the_chosen_exit_and_not_the_level_less_walk` | ✓ |
+
+### One slice-fact build per OOS fold — o1runner-4 (D-1145)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `walk_forward_core`'s OOS pass builds `SliceFacts` for `(trade_test, confined)` once, and the chosen candidate's level-less walk reuses them through `walk_over`. | `runner::validate::tests::the_chosen_oos_walk_reuses_the_folds_test_facts` | ✓ |
+
+### One level-less walk per in-sample candidate — W3-runner5-4 (D-1146)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `grid::evaluate_from_walk` over the caller's own `walk_over` equals `grid::evaluate_over` byte for byte, and `walk_forward_core`'s in-sample pricing body takes exactly one walk per candidate. | `runner::grid::exit_family_tests::a_grid_from_the_callers_walk_equals_evaluate_over` · `runner::validate::tests::the_in_sample_pass_walks_each_candidate_once` | ✓ |
+
+### Grid totals are refused, never clamped — ET-strategies-trades-ranking-costs-1 (D-1147)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A legacy grid, fixed-ladder replay or cell materialisation whose paths fail `4·A·P ≤ i64::MAX` reports no cell and counts every path refused. It never reports a total clamped by `saturating_add`. The envelope is exact at its boundary. | `runner::grid::exit_family_tests::a_grid_that_could_saturate_is_refused_not_clamped` · `runner::grid::exit_family_tests::the_money_envelope_is_exact_at_its_boundary` | ✓ |
+
+### Printed-extreme sell floor — probeengine-1 (D-1192)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `fills_at(.., Anchor::PrintedExtreme)` refuses a sell anchor (the long's exit low, the short's entry low) below one tick — including 0, negatives and `i64::MIN` — with `BelowTick { quantity: "sell printed-extreme fill" }`; the non-fill bar's low never refuses; exactly one tick prices unchanged. | `costs::fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name` | ✓ |
+| No anchor, direction or quantity lets a degenerate low produce a `Fills` with a sub-tick leg, and `charge_stack` over any such `Fills` answers `Ok` or a named `Err` without panicking. | `costs::trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill` | ✓ |
+
+### Boolean catalogue attestation — o1runner-1 (D-1193)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A Boolean candidate request attests its training slice once per resolution side (2 per request), not once per program × side; a three-program catalogue attests exactly twice. | `cli::candidate_universe::boolean_candidate_v1::tests::a_catalogue_attests_its_training_slice_once_per_side` | ✓ |
+
+### Resampler grid — probeengine-2 (D-1194)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| For every intraday period that divides the day, every session's first resampled bar is stamped 09:15 IST and holds a whole period, on consecutive days; the hourly bucket holding 09:15 begins at 09:15. | `runner::resample::tests::every_session_opens_with_a_bar_stamped_at_the_open` · `runner::resample::tests::the_hourly_grid_starts_at_the_open_and_not_on_the_ist_hour` | ✓ |
+| A period that does not divide the day does not drift between sessions: D-1194 refused such a period at `Period::minutes`; the merged tree keeps D-1430's grid instead, which restarts at every 09:15, so a 7-minute bucket opens at 09:15 on each of 14 consecutive days (D-1198). | `runner::resample::tests::a_period_that_does_not_divide_a_day_does_not_drift_between_days` | ✓ |
+
+### Exit-grid table cut — o1runner-11 (D-1195)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| For every `keep`, the exit-grid table prints exactly the full table's leading `keep` rows in its order. Below the cut it prints only the selectors' rows, in full-table order. Only the shown rows are sorted. | `runner::audit::tests::a_cut_grid_table_shows_exactly_the_full_tables_leading_rows` | ✓ |
+
+### Execution subslice location — o1runner-3 (D-1196)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| An evaluated execution slice that is a view into its minute context is accepted with no linear search. An equal copy elsewhere is still accepted and a changed one refused, by the old search. | `runner::exit_grid_policy::subslice_tests::a_view_into_the_context_is_located_without_a_search` | ✓ |
+
+### Romano–Wolf null table — o1runner-7 (D-1197)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| The Romano–Wolf stepdown evaluates each strategy's resampled mean exactly once per draw, across all rounds, counted at `mean_at`. Its rejections are identical on every rerun and equal its receipt's rejected set on every seed tested; on the merged tree the property is held by D-0973's one-walk stepdown, whose exact rule replaced the per-round quantile this row first compared against (D-1198). | `runner::bootstrap::stepdown_partition_tests::the_stepdown_computes_each_null_statistic_once_and_answers_unchanged` | ✓ |
+
+### Runner outcome, excursion and trade follow-ups (D-1170 onward)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| Every excursion `forward` measures is the exact highest high and lowest low over `[i + 1, exit]`, read from two monotonic deques whose ends only advance. A backwards or jumping query is answered by refilling, never from a stale maximum. Each exit is after its entry and never before an earlier entry's exit. No power-of-two table is built (D-1170). | `runner::outcome::window_tests::the_sliding_window_agrees_with_a_full_scan_on_every_query`, `runner::outcome::window_tests::every_forward_excursion_is_the_scan_over_its_own_window`, `runner::outcome::window_tests::forward_builds_no_power_of_two_table` | ✓ |
+| `edge` weights a pair of hits only while the older window still reaches past the newer entry, so no pair crosses a session. Its `t` equals the Newey-West estimator written out pair by pair: Bartlett `1 - d/H`, same IST day, `d < H`. A sample that one shared window holds whole reports `t = 0`, and the mean is still carried (D-1171). | `runner::outcome::overlap_tests::no_overlap_pair_crosses_a_session`, `runner::outcome::overlap_tests::a_horizon_past_every_session_is_measured_per_session`, `runner::outcome::overlap_tests::one_window_holding_the_whole_sample_is_no_evidence` | ✓ |
+| `Ladder::from_excursions` returns exactly the rungs the sorted reading returns, for any sample and any count. It does not sort. A count past 65 gives the same ladder as 65, and the result depends only on the multiset handed in (D-1172). | `runner::excursion::ladder_selection_tests::the_selected_ladder_is_the_sorted_ladder_rung_for_rung`, `runner::excursion::ladder_selection_tests::an_absurd_rung_count_is_the_sixty_five_rung_ladder`, `runner::excursion::ladder_selection_tests::the_ladder_is_independent_of_the_order_it_is_handed`, `runner::excursion::ladder_selection_tests::from_excursions_does_not_sort_the_sample` | ✓ |
+| `edge` holds every move, extremum and sum as a paisa integer (`i64` extrema, `u64` loss magnitude, exact `i128` sums) and converts each to `f64` once, at assembly. No excursion is dropped for its size, and each `Edge` money field's bits equal the exact integer converted once. The fields are exact up to 2^53 paisa (D-1173). | `runner::outcome::money_tests::a_move_past_two_to_the_fifty_three_is_held_exactly`, `runner::outcome::money_tests::every_sum_is_the_exact_sum_converted_once` | ✓ |
+| `edge` folds each measured hit's overlap pairs in O(1) amortised from four exact `i128` running sums over the queue, and visits no queued hit. The running form equals the pair-by-pair Bartlett sums. Moves at either end of `i64` neither overflow nor cancel (D-1174). | `runner::outcome::overlap_window_tests::the_running_sums_reproduce_every_pair`, `runner::outcome::overlap_window_tests::moves_at_the_ends_of_i64_neither_overflow_nor_cancel`, `runner::outcome::overlap_window_tests::empty_single_and_reopened_windows`, `runner::outcome::overlap_window_tests::edge_visits_no_queued_hit` | ✓ |
+| `edge`'s final step reports `t = 0.0` exactly, never `NaN` or an infinity, for a long-run sum that is negative, zero, `NaN` or infinite. For a positive sum it reports `mean / sqrt(sum / (n-1) / n)` with the mean's sign (D-1175). | `runner::outcome::tests::a_long_run_sum_that_cannot_give_a_t_reports_none` | ✓ |
+| An outcome dropped because a minute its path needed has no record, with no refused record on that path, is `was_refused` and `was_missing`. One dropped for a refused record is `was_refused` only, even when a hole is also on the path. `Edge::refused` keeps the persisted total, and `Edge::missing` is the missing-minute part. The tail and out-of-range indices are neither (D-1176). | `runner::outcome::missing_minute_tests::a_missing_minute_is_named_missing_and_never_a_refused_record`, `runner::outcome::missing_minute_tests::a_refused_record_is_never_named_missing`, `runner::outcome::missing_minute_tests::the_tail_and_an_index_past_the_slice_are_neither` | ✓ |
+| `SessionBounds::with_step` reserves its per-day 15:09 map at the count of 15:09 records, an exact upper bound, and its proved-day set at the map's length. Neither grows from empty, and each lone 15:09 record still proves its day while a duplicated one proves nothing (D-1177). | `runner::outcome::presize_tests::the_forced_close_map_is_pre_sized_from_its_exact_bound`, `runner::outcome::presize_tests::a_slice_of_only_forced_close_rows_proves_each_lone_day` | ✓ |
+| `worst_reward_risk_bp`, `path_ratio_bp` and `largest_gain_paisa` read the side a combination is traded (`mean_paisa < 0` is short). A sample and its negation score the same, an always-down short is unbounded rather than the floor, and `ByAsymmetry` breaks ties on the traded side's largest move (D-1178). | `runner::rank::tests::a_short_is_scored_on_the_moves_that_go_its_way`, `runner::rank::tests::the_asymmetry_tie_break_reads_the_traded_side` | ✓ |
+| `Crossings::first_refused` is the offset of the first refused bar on a path, `None` when there is none or when the entry is non-positive. It is an offset from the walk's start, not a slice index, and every crossing before it was read off accepted bars only (D-1179). The grid reads it since D-1183 (see the D-1183 section below). | `runner::excursion::tests::a_hole_after_a_level_exit_is_located_not_merely_counted`, `runner::excursion::tests::rejected_membership_blocks_every_interior_crossing_and_peak` | ✓ |
+| `runner::trade::walk`'s `# Cost` paragraph names the per-signal calls the walk makes: two `FillBar::new` and two `fills_at` (`Anchor::Open`, `Anchor::PrintedExtreme`) in `round_trip`, and one expected-O(1) `SliceFacts::at_timestamp` hash probe in `horizon_bar`. It does not name `worst_case_fills`, which the walk never calls (D-1180). | `runner::trade::tests::the_walk_cost_paragraph_names_the_calls_the_walk_makes` | ✓ |
+| A `Sourced::Signal` walk's step at bar `i` is measured over bars `0..=i` only, so appending later sessions with a different cadence changes no trade that completed inside the earlier ones. D-1182 pinned the opposite as a known violation and asked for this test to be inverted; D-1410 removed the look-ahead and the test is inverted (D-1198). `Sourced::Fill` is unaffected. | `runner::trade::tests::a_signal_sourced_cadence_is_not_read_from_bars_after_the_signal` | ✓ |
+
+### Runner lane-2b follow-ups (D-1183 onward)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A grid variant is un-priced by a refused bar only when `Crossings::first_refused` is at or before that variant's pessimistic exit offset. A hole after a stop, target or trail has fired leaves the trade priced and the block at its own exit. A hole on the exit bar, or before it, still refuses and blocks to the time exit. `block_only` paths are unchanged (D-1183). | `runner::grid::tests::a_hole_after_a_level_exit_leaves_that_exit_priced` | ✓ |
+| Every per-candidate replay loop prices over one `SliceFacts` per slice: the V4 OOS loop builds one per fold and calls `replay_selected_over`, `replay_universe_v1` takes facts, a later expression result materialises every ordinal over the facts built with its grid, and `cli`'s candidate capture and consistency pass use `materialize_cell_over`, `materialize_expression_cell_over` and `per_trade_over`. The hoisted doors equal the per-call doors (D-1184). | `runner::grid::exit_family_tests::the_per_candidate_replays_reuse_one_slice_facts_per_slice`, `runner::grid::exit_family_tests::the_hoisted_replay_doors_equal_the_per_call_doors`, `cli::candidate_trades::tests::materialisation_reuses_one_slice_facts_per_capture` | ✓ |
+| `outcome::forward_over` over `SliceFacts::of(bars, column)` equals `outcome::forward(bars, column, h)`, field for field. Facts that do not cover `bars` leave every outcome absent and refused. A walk-forward training fold builds its slice facts once and its forward returns read them (D-1185). | `runner::outcome::tests::forward_over_hoisted_facts_is_forward`, `runner::validate::tests::the_training_fold_builds_its_slice_facts_once` | ✓ |
+| `trade::walk_over_from(.., first_row)` equals `walk_over` for every mask with a bit set when every row before `first_row` has zero bits. A start past the column walks nothing. The walk-forward OOS pass finds the first row with a set bit once per fold, starts every non-empty mask there, and keeps row 0 for the empty mask (D-1186). | `runner::trade::tests::a_walk_from_the_first_live_row_equals_the_full_walk`, `runner::validate::tests::the_oos_pass_walks_from_the_first_live_row` | ✓ |
+| A `LaterExpressionSliceV1` built once prices every program and side exactly as `evaluate_expression_oos` does: the same digest, grid, summary and rows, and the same refusal in the same order. A `LaterFoldMapV1` built once binds exactly as `bind` indexes, refuses at the same cap byte, and is refused for other bars, another column or another partition. `cli`'s Boolean later loop builds both once, before it iterates (D-1188). | `runner::exit_grid_policy::expression_execution::later_period::tests::one_later_slice_prices_every_program_as_the_per_call_path_does`, `runner::exit_grid_policy::expression_execution::later_period::validation::tests::one_fold_map_binds_every_program_exactly_as_bind_does`, `cli::candidate_universe::boolean_candidate_v1::oos::tests::the_later_loop_attests_its_slice_and_fold_index_once` | ✓ |
+
+
+### Runner lane-2 D follow-ups (D-1190 onward)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| One stored rung's screen builds `SliceFacts` once, in `trade_and_screen`. `screen_cascade`, every tier's `screen` and `measure_top` take the caller's facts and build none. The final exact rebuild uses `evaluate_over`, `materialize_cell_over` and `walk_over` (D-1190). | `cli::tests::one_rung_screen_builds_its_slice_facts_once` | ✓ |
+| `SliceFacts::first_refused_within(from, to)` is the first refused record on `from..=to` and `first_missing_within(from, to)` the first bar on `from + 1..=to` after a missing minute, each as a scan finds it, in one read. Both are `None` exactly when `path_accepts(from, to)` holds on an in-range path. Every `Occupancy` the walk pushes carries both over `entry_bar..=exit_bar`, and a priceable path has neither (D-1191). | `runner::trade::tests::slice_facts_locate_the_first_refused_record_and_missing_minute`, `runner::trade::tests::every_occupancy_record_says_where_its_holes_are` | ✓ |

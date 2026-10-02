@@ -5174,6 +5174,11 @@ jobs:
           #     Newey--West and payoff arithmetic the existing entry describes.
           #     The forward RETURN is paisa `i64` throughout and only the mean,
           #     the t-statistic and the ratios derived from them are floating.
+          #   runner/outcome.rs 29 -> 26 -- TIGHTENED, not raised: the entry
+          #     read 29 while this rule's own count measured 26 on 2026-10-02
+          #     (D-1189), so three float sites had left the module and the
+          #     allowance kept room for three new ones nobody had read. The
+          #     reason above is unchanged; only the slack is gone.
           #   runner/validate.rs 1 -- `direction_from_training_edge(mean_paisa:
           #     f64)`, and the parameter name is why it earns a sentence rather
           #     than a line. It is not a price: its only production caller passes
@@ -5211,6 +5216,15 @@ jobs:
           #     no-arbitrage volatility bracket the fixed-step bisection starts
           #     from. A volatility is a statistic with no paisa representation,
           #     the same reason the other 13 in this file are allowed.
+          #   runner/bootstrap.rs 48 -> 49 (D-1197). The new line is the
+          #     Romano--Wolf null table, `Vec<Vec<f64>>` of studentized resampled
+          #     means, built once instead of per round. A t-statistic has no paisa
+          #     representation, the reason the other 48 are allowed.
+          #   runner/bootstrap.rs 49 -> 51 (D-0973, D-1198). The merge with
+          #     lane 4 replaced that null table with D-0973's one-walk stepdown,
+          #     whose running maxima, selection scratch and per-rank bars are
+          #     the same studentized statistics; lane 4's own tree measured 51
+          #     against its allowance of 48. No price is among them.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -5225,9 +5239,9 @@ jobs:
           crates/runner/src/grid.rs 4
           crates/runner/src/significance.rs 21
           crates/runner/src/admission.rs 4
-          crates/runner/src/bootstrap.rs 48
+          crates/runner/src/bootstrap.rs 51
           crates/runner/src/bootstrap_family_pass.rs 17
-          crates/runner/src/outcome.rs 29
+          crates/runner/src/outcome.rs 26
           crates/runner/src/report.rs 3
           crates/runner/src/validate.rs 1
           crates/store/src/format.rs 14
@@ -5394,8 +5408,7 @@ jobs:
           # size is the number of DISTINCT keys and counting those needs the map.
           # `api/ladder.rs::earliest` is keyed by `(exchange, segment, symbol)` over
           # a month list; `api/server.rs::spot_months_by_identity` drops the
-          # timeframe from `(Series, YearMonth)`; `runner/outcome.rs` keys by IST
-          # session DAY over bars; `cli/population.rs::index_blocks`,
+          # timeframe from `(Series, YearMonth)`; `cli/population.rs::index_blocks`,
           # `population_admission_v4`, `population_finalization_v4` and
           # `population_statistics_v3` key by BLOCK over records, and a block's
           # length is a field inside it, so the block count is not `len / stride`.
@@ -5427,6 +5440,13 @@ jobs:
           # module headers say the opposite, at length, and gate 12 holds them to
           # it. It says only that no map here grows from an unreserved zero on a
           # path where the count was available, which is what law 2 asks.
+          #
+          # REMOVED, NOT LOOSENED: `runner/outcome.rs` was a SHAPE 3 row, its
+          # forced-close map keyed by IST session day. D-1177 counts the
+          # whole-minute 15:09 records first and reserves exactly that bound
+          # (`HashMap::with_capacity(candidates)`, and the proved-day set at
+          # `required.len()`), so the file has no unsized map left and its row
+          # was only loose. D-1189 deletes it; a new unsized map there is red.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
@@ -5472,7 +5492,6 @@ jobs:
           crates/cli/src/trades.rs 1
           crates/pull/src/nse.rs 1
           crates/runner/src/lib.rs 1
-          crates/runner/src/outcome.rs 1
           crates/runner/src/rank.rs 1
           crates/cli/src/pool.rs 1
           crates/pull/src/cash_auction.rs 3
@@ -5680,13 +5699,19 @@ jobs:
           # `read_reach`/`reach_of` and stopped being true of `read_census` at D-0141. The
           # bound is archive.rs's cap, not that sentence. Section 65 also records that NO
           # timing has been taken against a real purchased archive; none is claimed here.
-          # `crates/runner/src/excursion.rs` ONE sort, and a quantile IS an order
-          # statistic -- the same argument the significance.rs entry above makes
-          # about Benjamini-Hochberg. `Ladder::from_excursions` places its rungs at
-          # quantiles of the excursions the instrument actually produced, so that a
-          # stop level is "the level a fifth of moves reached" rather than a number
-          # somebody typed. Removing the sort does not make it cheaper; it makes it
-          # a different and wrong procedure.
+          # `crates/runner/src/excursion.rs` ONE SELECTION SITE, NOT A SORT, and a
+          # quantile IS an order statistic -- the same argument the significance.rs
+          # entry above makes about Benjamini-Hochberg. `Ladder::from_excursions`
+          # places its rungs at quantiles of the excursions the instrument actually
+          # produced, so that a stop level is "the level a fifth of moves reached"
+          # rather than a number somebody typed. This entry used to say "ONE sort";
+          # D-1172 replaced the full `sort_unstable` with `select_nth_unstable`
+          # called from the deepest rung position down, each inside the prefix the
+          # previous selection left, so the work is expected O(n) per ladder
+          # rather than Theta(n log n), and the slice is left PERMUTED, not sorted.
+          # It is still one occurrence because rule 4's pattern matches the
+          # selection's spelling. Removing the selection does not make it cheaper;
+          # it makes it a different and wrong procedure. (D-1189 corrects this text.)
           # WHAT BOUNDS IT: one entry per TRADE on the training bars, and
           # `crate::trade` takes non-overlapping positions with a minimum hold of one
           # bar, so the slice is at most the bar count and is usually far smaller --
@@ -5694,8 +5719,9 @@ jobs:
           # candidate count and NOT the frequent-itemset count, so it does not grow
           # with the sweep. Called once per fold at a `crate::validate` boundary,
           # never per bar and never on a request path.
-          # `sort_unstable` on `i64` and not a comparator: these are integer basis
-          # points, so there is no NaN and no partial order to get wrong.
+          # `select_nth_unstable` on `i64` (`Ppm`) and not a comparator: these are
+          # integer parts-per-million, so there is no NaN and no partial order to
+          # get wrong.
           # `crates/runner/src/pbo.rs` ONE sort, and a median IS an order statistic
           # -- the third time this rule meets that argument, after Benjamini-Hochberg
           # and the excursion quantiles. `probability_of_overfitting` sorts the
@@ -5719,6 +5745,10 @@ jobs:
           # count. It is neither the candidate count nor the frequent-itemset count,
           # so it does not grow with the sweep. Called once per rendered report at
           # the coarsest boundary this crate has, and the render touches no bar.
+          # TWO matches since D-1195 (o1runner-11), and still one ordering: a
+          # `select_nth_unstable_by_key` picks the `keep` rows the table shows and
+          # `sort_by_key` orders only those, O(n + keep log keep) instead of a
+          # full sort of every cell. Same rows, same order, by test.
           # `crates/api/src/census.rs` — THE SECOND OF ITS TWO SORTS IS PER REQUEST,
           # AND THIS ENTRY SAID THE OPPOSITE. The startup group above used to name
           # `held_series` AND `held_entries` together under a heading that reads
@@ -5926,7 +5956,7 @@ jobs:
           #     position, over the same slice of strategies and in the same
           #     decreasing order as the first `runner/bootstrap.rs` entry.
           allow_sort='
-          crates/runner/src/audit.rs 1
+          crates/runner/src/audit.rs 2
           crates/runner/src/bootstrap.rs 2
           crates/runner/src/bootstrap_family_pass.rs 1
           crates/runner/src/outcome.rs 1
@@ -6516,26 +6546,144 @@ jobs:
           #     over that slice, so deleting the `position` would not change the
           #     cost -- it would only lose the check that the chosen ordinal IS the
           #     argmax, which is the whole point of the comparison.
+          # THE 41 CHAINED SITES D-1115 PINNED UNREAD, EACH NOW OPENED (D-1121).
+          # Rule 6 began reading method chains at D-1115, which pinned what it
+          # newly saw in `allow_scan_unread` without reading it. Every one was
+          # read for this entry and its bound is below; the per-file totals in
+          # `allow_scan` are the old rows plus the pinned ones, unchanged in sum.
+          # None is a per-candidate scan over data that an O(1) structure would
+          # remove at a cost worth paying, so none was rewritten.
+          #
+          #   COMPILE-TIME TABLES AND FIXED-WIDTH FIELDS
+          #   api/indexstoprankingjson.rs, cli/index_stop_qualification_numeric
+          #     .rs, cli/index_stop_store.rs -- `EVERY_RUNG`, `[&str; 8]`.
+          #   cli/boolean_rung_scope.rs, cli/index_stop_search.rs --
+          #     `ledger_all::LEDGER_RUNGS`, `[&str; 8]`.
+          #   api/pullrun.rs -- `ladder_rank`'s local `PULL_ORDER`, `[&str; 5]`.
+          #   cli/index_stop_vix_codec.rs -- `Vendor::ALL`, `[Vendor; 5]`.
+          #   cli/stored.rs -- `CHARTER_NON_REGULAR_IST_DAYS`, `[i64; 9]`. This
+          #     one runs once per stored bar in `excludes`; nine comparisons
+          #     is the bound, and it does not grow with the bars.
+          #   pull/rolling.rs 3 -- `RollingSpec::expiry_flags`, `expiry_codes`
+          #     and `sides`, each a `&'static` descriptor slice (2, 3 and 2).
+          #   pull/vendor.rs 5 -- `window_caps`, `granularity_tokens`,
+          #     `listings`, `groups` and `segment_tokens`, each a `&'static`
+          #     descriptor slice a few rows long.
+          #   runner/grid.rs 1 of 2 -- `Choices::iter`, five `Option<Ended>`
+          #     flattened, once per priced bar: five is the bound.
+          #   runner/research_family.rs -- the NUL in a 24-byte name field of a
+          #     fixed `RESEARCH_FAMILY_BYTES_V1` record.
+          #   telemetry/record.rs -- `Record::field`, at most `MAX_FIELDS`
+          #     (twelve), enforced by `Record::decode`.
+          #   vocab/expression.rs -- `table::TABLE` by name, a `const` table,
+          #     once per name token while an expression is parsed; never per bar.
+          #   api/booleanjson.rs 2, cli/boolean_qualification_reader.rs --
+          #     `grids()`, whose return type is `&[GridContext; 2]`.
+          #   cli/boolean_campaign_codec.rs 2 -- `state.rows`, which `validate`
+          #     refuses unless it holds exactly eight rows, one per rung; both
+          #     searches run after `validate`.
+          #
+          #   BOUNDED BY THE FEED COUNT, the same bound as the census rows above
+          #   api/autopilot.rs 1 of 2, api/server.rs 1 of 9 -- census rows, one
+          #     per `Vendor::ALL` entry.
+          #   pull/config.rs 2 of 3 -- `CredentialConfig::vendors`; `parse`
+          #     refuses a vendor named twice, so it holds at most `Vendor::ALL`.
+          #   cli/strict_range_knobs.rs -- request knob overrides. The slice type
+          #     does not bound it; its two production callers do: `api::sweeprun
+          #     ::knobs_in` emits at most one per row of its `KNOBS` table, and
+          #     `ledger_v6` passes `&[]`.
+          #   cli/global_replay_v4.rs -- one entry minute's offered attempts,
+          #     which `schedule_group` refuses above `MAX_INTENTS_PER_MINUTE`
+          #     (200) before this search runs. Up to 200 x 200 per full minute,
+          #     the ceiling docs/06-limits.md section 132 already states.
+          #   api/expressionsearchjson.rs -- the snapshot session cache, which
+          #     `render` holds at eight by evicting the oldest.
+          #
+          #   DATA-SIZED, AT A PREPARATION OR VALIDATION BOUNDARY
+          #   cli/candidate_universe.rs, cli/pre_admission_data.rs,
+          #     runner/signal_candle_stop.rs 1 of 2 -- locate the execution
+          #     slice's first bar in the complete minute context. O(M) in that
+          #     context, once per attestation, beside an O(M) ordering or hash
+          #     pass over the same slice; the cost docs/06-limits.md sections
+          #     134 and 142 record. A binary search would be cheaper and rule 1
+          #     bans it.
+          #   runner/signal_candle_stop.rs 1 of 2 -- the first daily period at
+          #     or after `first_day`, O(days) once per evaluation. The `filter`
+          #     on the next statement walks the same periods and the evaluation
+          #     then walks every signal bar, so the search adds no order.
+          #   runner/validate.rs 4 -- the argmax re-checks (the two rows above
+          #     plus `anchored` V4's and `choice_matches_visible_v2`'s), each over
+          #     one fold's retained placements, each beside a `.max()` over the
+          #     same slice, once per fold.
+          #   cli/lib.rs (counted in its 7) -- `final_selection` finds the best
+          #     row that traded over every priced row, once per screen, after two
+          #     sorts of the same rows.
+          #   cli/population_v6.rs -- each requested strategy (refused above 25)
+          #     is found among the retained population rows: at most 25 walks of
+          #     O(P), once per replay request, after `execution_v4_source` has
+          #     rebuilt all P rows.
+          #   pull/cash_auction.rs 1 of 2 -- `Columns::parse` finds five required
+          #     and three lifecycle names in one CSV header (120 columns in the
+          #     NSE file the test reads), once per file, never per record.
+          #   runner/grid.rs 1 of 2 -- `Grid::baseline`, one grid's cells. No
+          #     production caller in the workspace calls it; tests do.
+          #
+          #   THREE OLDER ROWS, COUNTED BEFORE D-1121 AND NEVER WRITTEN DOWN
+          #   api/store_wire.rs -- `censuses.iter().find(|c| c.vendor == feed)`,
+          #     the census search the api/server.rs entry above names: one row
+          #     per `Vendor::ALL` entry, once per wire request.
+          #   api/sweeprun.rs 1 -- the counted site is one of two, and both are
+          #     bounded: `EVERY_RUNG.iter().copied().find(..)` probes the eight
+          #     rungs once per asked rung, before a run starts; and
+          #     `observe_elsewhere`'s `lifecycle.records.iter().find(..)` walks
+          #     `status_tail(.., 256)`, a telemetry query capped at 256 records,
+          #     once per status request.
+          #   pull/cash_auction.rs 2 of 2 -- the five `REQUIRED` probes in
+          #     `Columns::parse`, the same header walk as the lifecycle probes
+          #     above: once per file, never per record.
           allow_scan='
           crates/api/src/audit_json.rs 1
-          crates/api/src/autopilot.rs 1
+          crates/api/src/autopilot.rs 2
           crates/api/src/backtest.rs 1
-          crates/api/src/server.rs 8
+          crates/api/src/booleanjson.rs 2
+          crates/api/src/expressionsearchjson.rs 1
+          crates/api/src/indexstoprankingjson.rs 1
+          crates/api/src/pullrun.rs 1
+          crates/api/src/server.rs 9
+          crates/api/src/store_wire.rs 1
+          crates/api/src/sweeprun.rs 1
+          crates/cli/src/boolean_campaign_codec.rs 2
+          crates/cli/src/boolean_qualification_reader.rs 1
+          crates/cli/src/boolean_rung_scope.rs 1
+          crates/cli/src/candidate_universe.rs 1
+          crates/cli/src/global_replay_v4.rs 1
+          crates/cli/src/index_stop_qualification_numeric.rs 1
+          crates/cli/src/index_stop_search.rs 1
+          crates/cli/src/index_stop_store.rs 1
+          crates/cli/src/index_stop_vix_codec.rs 1
           crates/cli/src/lib.rs 7
           crates/cli/src/population_admission_v2.rs 1
           crates/cli/src/population_finalization_v2.rs 1
+          crates/cli/src/population_v6.rs 1
+          crates/cli/src/pre_admission_data.rs 1
           crates/cli/src/results.rs 1
-          crates/pull/src/config.rs 1
+          crates/cli/src/stored.rs 1
+          crates/cli/src/strict_range_knobs.rs 1
+          crates/pull/src/cash_auction.rs 2
+          crates/pull/src/config.rs 3
           crates/pull/src/fno.rs 1
           crates/pull/src/manifest.rs 1
           crates/pull/src/resolve.rs 1
+          crates/pull/src/rolling.rs 3
           crates/pull/src/ssm.rs 1
-          crates/pull/src/vendor.rs 3
+          crates/pull/src/vendor.rs 8
           crates/runner/src/exit_grid_policy.rs 1
-          crates/runner/src/validate.rs 2
-          crates/pull/src/cash_auction.rs 1
-          crates/api/src/store_wire.rs 1
-          crates/api/src/sweeprun.rs 1
+          crates/runner/src/grid.rs 2
+          crates/runner/src/research_family.rs 1
+          crates/runner/src/signal_candle_stop.rs 2
+          crates/runner/src/validate.rs 4
+          crates/telemetry/src/record.rs 1
+          crates/vocab/src/expression.rs 1
           '
 
           # ---- rule 7: the ambiguous membership test -----------------------
@@ -6755,48 +6903,13 @@ jobs:
                 "$allow_panic" \
                 'CLAUDE.md section 4 — degrade loudly or refuse, never die'
 
-          # MEASURED, NOT YET CLASSIFIED (D-1115). These are the chained
-          # searches rule 6 could not see until it read chains rather than
-          # lines: 41 sites in 29 files, counted by the fold below at the
-          # commit that added it. Unlike `allow_scan` above, nobody has yet
-          # opened each one and written its bound here. A spot check of five
-          # found five fixed tables or one record's own fields (telemetry's
-          # `Record::field`, vocab's `TABLE` name lookup, rolling's expiry
-          # flags, vendor's window caps, the grid's baseline cell), but five
-          # is not 41. They are pinned so that a NEW chained search is refused
-          # from this commit on. Moving an entry up into `allow_scan` with its
-          # bound written beside it is the follow-up that `docs/06-limits.md`
-          # records; this list may only shrink.
+          # EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6
+          # first saw here, unread; each was opened and moved into `allow_scan`
+          # with its bound (see the block above it). The list stays, empty, so
+          # a future change to rule 6 that surfaces sites it cannot classify at
+          # once has a place that says so rather than a silent raise of
+          # `allow_scan`. It may only shrink, and it is at zero.
           allow_scan_unread='
-          crates/api/src/autopilot.rs 1
-          crates/api/src/booleanjson.rs 2
-          crates/api/src/expressionsearchjson.rs 1
-          crates/api/src/indexstoprankingjson.rs 1
-          crates/api/src/pullrun.rs 1
-          crates/api/src/server.rs 1
-          crates/cli/src/boolean_campaign_codec.rs 2
-          crates/cli/src/boolean_qualification_reader.rs 1
-          crates/cli/src/boolean_rung_scope.rs 1
-          crates/cli/src/candidate_universe.rs 1
-          crates/cli/src/global_replay_v4.rs 1
-          crates/cli/src/index_stop_qualification_numeric.rs 1
-          crates/cli/src/index_stop_search.rs 1
-          crates/cli/src/index_stop_store.rs 1
-          crates/cli/src/index_stop_vix_codec.rs 1
-          crates/cli/src/population_v6.rs 1
-          crates/cli/src/pre_admission_data.rs 1
-          crates/cli/src/stored.rs 1
-          crates/cli/src/strict_range_knobs.rs 1
-          crates/pull/src/cash_auction.rs 1
-          crates/pull/src/config.rs 2
-          crates/pull/src/rolling.rs 3
-          crates/pull/src/vendor.rs 5
-          crates/runner/src/grid.rs 2
-          crates/runner/src/research_family.rs 1
-          crates/runner/src/signal_candle_stop.rs 2
-          crates/runner/src/validate.rs 2
-          crates/telemetry/src/record.rs 1
-          crates/vocab/src/expression.rs 1
           '
           # One entry per file for `check`, which reads the first match only.
           allow_scan_all=$(printf '%s\n%s\n' "$allow_scan" "$allow_scan_unread" \

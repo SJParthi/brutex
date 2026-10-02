@@ -2488,6 +2488,11 @@ const WORST_K3: usize = LIVE_POSITIONS * (LIVE_POSITIONS - 1) * (LIVE_POSITIONS 
 #[cfg(test)]
 const WORST_K4: usize = WORST_K3 * (LIVE_POSITIONS - 3) / 4;
 
+/// The manifest reader behind V-06b. Declared here, past the shipping region, because
+/// several tests below read this file only up to its first `#[cfg(test)]`.
+#[cfg(test)]
+mod manifest;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3559,92 +3564,21 @@ mod tests {
     ///
     /// Checked against the manifest rather than asserted in prose, so adding the
     /// arrow fails this test rather than passing review.
-    /// Every crate this manifest declares a dependency on, however it is spelled.
+    /// Every package this manifest links, however it is spelled.
     ///
-    /// # Why this is a parser and not a substring scan
-    ///
-    /// It WAS a substring scan over the raw text between `[dependencies]` and the
-    /// next `\n[`, and that scan was wrong in both directions at once.
-    ///
-    /// False positive: comments are inside the table. A commit adding the sentence
-    /// "`crates/indicators` had always written it the other way" to a comment in
-    /// that table turned this test red while the dependency list had not moved.
-    /// That is the same defect `vocab::mask::hits_does_the_same_work_for_every_input`
-    /// was fixed for one commit earlier -- text in a comment is text.
-    ///
-    /// False negative, and far worse: cargo accepts four spellings of one
-    /// dependency and the scan could see exactly one.
-    ///
-    /// ```text
-    /// [dependencies]
-    /// store = { path = "../store" }        the only form the scan saw
-    /// store.path = "../store"              a dotted key, same meaning
-    ///
-    /// [dependencies.store]                 a table header, same meaning
-    /// path = "../store"
-    ///
-    /// [dev-dependencies]                   links into every test and bench
-    /// [target.'cfg(unix)'.dependencies]    links on that target
-    /// ```
-    ///
-    /// An audit confirmed by running it that one `[dependencies.store]` stanza
-    /// defeats this test, gate 22 clause A, gate 9, gate 9b, gate 21 clause A and
-    /// the four graph tests in `crates/core/tests/graph.rs` -- nine dependency
-    /// guarantees sharing one parser shape, and one bypass for all of them.
-    ///
-    /// The one limit, stated: a `#` inside a quoted value would be read as a
-    /// comment. No manifest in this workspace has one, and a dependency name
-    /// cannot contain one.
-    fn declared_dependencies(manifest: &str) -> Vec<String> {
-        /// Are this table's KEYS dependency names?
-        fn keys_are_dependencies(table: &str) -> bool {
-            matches!(
-                table.rsplit('.').next().unwrap_or(""),
-                "dependencies" | "dev-dependencies" | "build-dependencies"
-            )
-        }
-        /// Does this table's HEADER name a dependency, as `[dependencies.store]` does?
-        fn named_by_header(table: &str) -> Option<&str> {
-            let mut segments = table.rsplit('.');
-            let leaf = segments.next()?;
-            let parent = segments.next()?;
-            matches!(
-                parent,
-                "dependencies" | "dev-dependencies" | "build-dependencies"
-            )
-            .then_some(leaf)
-        }
-
-        let mut found: Vec<String> = Vec::new();
-        let mut table = String::new();
-        for raw in manifest.lines() {
-            let line = raw.split_once('#').map_or(raw, |(code, _)| code).trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(inner) = line.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-                table = inner
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .trim()
-                    .to_owned();
-                if let Some(name) = named_by_header(&table) {
-                    found.push(name.to_owned());
-                }
-                continue;
-            }
-            if !keys_are_dependencies(&table) {
-                continue;
-            }
-            let key = line.split('=').next().unwrap_or("").trim();
-            let name = key.split('.').next().unwrap_or("").trim();
-            if !name.is_empty() {
-                found.push(name.to_owned());
-            }
-        }
-        found.sort();
-        found.dedup();
-        found
+    /// This was a line scanner twice over. The first version was a substring scan
+    /// between `[dependencies]` and the next `\n[`; it read comments as code and
+    /// saw one of cargo's four spellings of a dependency, and one
+    /// `[dependencies.store]` stanza defeated nine dependency guarantees at once.
+    /// The second split lines at `#` and `=` and still reported the KEY, so
+    /// `vocab = { package = "store", .. }` passed this test as `vocab`, and
+    /// `[ dependencies . store ]`, `[dev_dependencies]` and a root-level
+    /// `dependencies.store = { .. }` were not seen at all. D-1107 closed those
+    /// holes in the CI gates and deferred this one; [`crate::manifest`] closes it
+    /// here by reading the manifest as TOML (D-1120). A manifest it cannot read is
+    /// a failure of this test, never an empty list.
+    fn declared_dependencies(manifest: &str) -> Result<Vec<String>, String> {
+        crate::manifest::linked_packages(manifest, include_str!("../../../Cargo.toml"))
     }
 
     #[test]
@@ -3654,53 +3588,54 @@ mod tests {
         // dependency nobody thought to forbid fails it too.
         assert_eq!(
             declared_dependencies(include_str!("../Cargo.toml")),
-            ["vocab"],
-            "`crates/engine` must declare `vocab` and nothing else. V-06's whole \
+            Ok(names(&["vocab"])),
+            "`crates/engine` must link `vocab` and nothing else. V-06's whole \
              argument is that the sweep cannot recompute a condition bit because it \
              cannot reach the code that computes one -- `crates/indicators` is the \
              only crate that turns a bar into a bit. A new arrow here needs a \
              decisions entry AND a different proof of V-06."
         );
 
-        // The parser is checked against the four spellings it exists for, because a
-        // parser nothing tests is the previous version of this test.
-        assert_eq!(
-            declared_dependencies("[dependencies]\nstore = { path = \"../store\" }"),
-            ["store"],
-            "the inline-table spelling"
-        );
-        assert_eq!(
-            declared_dependencies("[dependencies]\nstore.path = \"../store\""),
-            ["store"],
-            "the dotted-key spelling"
-        );
-        assert_eq!(
-            declared_dependencies("[dependencies.store]\npath = \"../store\""),
-            ["store"],
-            "the table-header spelling — the bypass that defeated nine guarantees"
-        );
-        assert_eq!(
-            declared_dependencies("[target.'cfg(unix)'.dev-dependencies]\nstore = \"1\""),
-            ["store"],
-            "a dev-dependency behind a target predicate still links into every test"
-        );
+        // The reader is checked against the four spellings the first repair existed
+        // for, because a parser nothing tests is the previous version of this test.
+        // The spellings the SECOND line scan missed are in
+        // `the_manifest_reader_sees_every_spelling_the_line_scan_missed`.
+        for (manifest, why) in [
+            (
+                "[dependencies]\nstore = { path = \"../store\" }",
+                "the inline-table spelling",
+            ),
+            (
+                "[dependencies]\nstore.path = \"../store\"",
+                "the dotted-key spelling",
+            ),
+            (
+                "[dependencies.store]\npath = \"../store\"",
+                "the table-header spelling — the bypass that defeated nine guarantees",
+            ),
+            (
+                "[target.'cfg(unix)'.dev-dependencies]\nstore = \"1\"",
+                "a dev-dependency behind a target predicate still links into every test",
+            ),
+        ] {
+            assert_eq!(
+                declared_dependencies(manifest),
+                Ok(names(&["store"])),
+                "{why}"
+            );
+        }
         assert_eq!(
             declared_dependencies("[dependencies]\n# store = { path = \"../store\" }"),
-            [] as [&str; 0],
+            Ok(names(&[])),
             "a commented-out dependency is not a dependency"
         );
-        // A KEY WITH NO NAME IS NOT A DEPENDENCY EITHER, and this is the only guard
-        // between a malformed line and a phantom entry. The scanner takes everything
-        // left of the first `=` as the name, so a line that opens with one -- junk, a
-        // half-finished edit, a continuation nobody closed -- yields the empty
-        // string. Without the `!name.is_empty()` filter that empty string joins
-        // `found`, and the exact-equality assertion at the top of this test then
-        // reads `["", "vocab"]`: a dependency with no name, failing a check whose
-        // whole value is that it says what IS there.
-        assert_eq!(
-            declared_dependencies("[dependencies]\n= \"1\"\nvocab = \"0.1.0\""),
-            ["vocab"],
-            "a nameless key must be dropped, not admitted as a dependency called \"\""
+        // A KEY WITH NO NAME IS REFUSED, not dropped and not admitted. The line scan
+        // took everything left of the first `=` as the name and filtered out the
+        // empty string; the reader refuses the line, because a manifest it cannot
+        // read is a manifest whose dependency set it cannot state.
+        assert!(
+            declared_dependencies("[dependencies]\n= \"1\"\nvocab = \"0.1.0\"").is_err(),
+            "a nameless key must refuse the manifest, not pass or vanish"
         );
 
         // And the entry point takes bits, not bars. A signature change to accept
@@ -3712,6 +3647,175 @@ mod tests {
              sweep that accepted bars could compute a bit per candidate, which is \
              exactly what V-06 forbids."
         );
+    }
+
+    /// Owned names, so a `Result<Vec<String>, _>` can be compared in one line.
+    fn names(of: &[&str]) -> Vec<String> {
+        of.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    /// **The manifest is read as TOML, and the package is what is reported (D-1120).**
+    ///
+    /// Every positive case below is a manifest shape that linked a crate and that
+    /// the line scanner `declared_dependencies` used to be reported as something
+    /// else: the comment on each says what it returned. The first one is the shape
+    /// that mattered most -- it passed `the_sweep_cannot_compute_a_condition_bit`'s
+    /// exact pin of `["vocab"]` while linking `store`.
+    #[test]
+    fn the_manifest_reader_sees_every_spelling_the_line_scan_missed() {
+        let root = include_str!("../../../Cargo.toml");
+        for (manifest, linked, why) in [
+            (
+                "[dependencies]\nvocab = { package = \"store\", path = \"../store\", version = \"0.1.0\" }",
+                &["store"][..],
+                "a renamed package links the package, not the key (line scan: [\"vocab\"])",
+            ),
+            (
+                "[dependencies.vocab]\npath = \"../store\"\npackage = \"store\"",
+                &["store"],
+                "a rename inside a header table (line scan: [\"vocab\"])",
+            ),
+            (
+                "[dependencies]\nvocab.package = \"store\"\nvocab.path = \"../store\"",
+                &["store"],
+                "a rename as a dotted key (line scan: [\"vocab\"])",
+            ),
+            (
+                "[ dependencies . store ]\npath = \"../store\"",
+                &["store"],
+                "spaces around the dot of a header (line scan: [])",
+            ),
+            (
+                "[\"dependencies\"]\nstore = \"1\"",
+                &["store"],
+                "a quoted header segment (line scan: [])",
+            ),
+            (
+                "[dev_dependencies]\nstore = \"1\"\n[build_dependencies]\nlake = \"1\"",
+                &["lake", "store"],
+                "cargo's underscore spellings (line scan: [])",
+            ),
+            (
+                "dependencies.store = { path = \"../store\" }\n[package]\nname = \"x\"",
+                &["store"],
+                "a dotted key at the root, before any header (line scan: [])",
+            ),
+            (
+                "[dependencies]\n\"\\u0073tore\" = \"1\"",
+                &["store"],
+                "an escaped key is its decoded name (line scan: a name with a backslash)",
+            ),
+            (
+                "[dependencies]\nvocab = { path = \"../vocab\", features = [\n  \"x\",\n  \"y\" ] }",
+                &["vocab"],
+                "an array across lines is a value, not keys (line scan: phantom names)",
+            ),
+            (
+                "[package]\ndescription = '''\n[dependencies]\nphantom = 1\n'''\n[dependencies]\nvocab = \"1\"",
+                &["vocab"],
+                "a header inside a multi-line string is text (line scan: a phantom)",
+            ),
+            (
+                "[dependencies]\nvocab = { path = \"../vocab#\" } # store = \"1\"",
+                &["vocab"],
+                "a `#` inside a quoted value is text and after it a comment",
+            ),
+            (
+                "[[bench]]\nname = \"ratio\"\n[workspace.dependencies]\nstore = \"1\"\n[lints]\nworkspace = true",
+                &[],
+                "an array-of-tables element, a workspace table and lints link nothing",
+            ),
+        ] {
+            assert_eq!(
+                crate::manifest::linked_packages(manifest, root),
+                Ok(names(linked)),
+                "{why}"
+            );
+        }
+
+        // `NAME.workspace = true` resolves through the ROOT manifest, which is where
+        // its rename lives. The line scan could not see that file at all.
+        let renaming_root = "[workspace.dependencies]\nvocab = { package = \"store\", path = \"crates/store\" }\nlake.path = \"crates/lake\"";
+        assert_eq!(
+            crate::manifest::linked_packages(
+                "[dependencies]\nvocab.workspace = true\nlake = { workspace = true }\ncore = { workspace = false }",
+                renaming_root,
+            ),
+            Ok(names(&["core", "lake", "store"])),
+            "an inherited dependency links the package its workspace entry names"
+        );
+        assert_eq!(
+            crate::manifest::linked_packages(include_str!("../Cargo.toml"), root),
+            Ok(names(&["vocab"])),
+            "the real root manifest parses, and leaves this crate's set alone"
+        );
+    }
+
+    /// The reader decodes TOML strings and refuses text it cannot parse (D-1120).
+    #[test]
+    fn the_manifest_reader_decodes_strings_and_refuses_what_it_cannot_read() {
+        let root = include_str!("../../../Cargo.toml");
+        // The string grammar, decoded rather than skipped: every escape, both
+        // multi-line forms, a line-ending backslash, quotes just inside a closer,
+        // CRLF line ends, an empty inline table and a trailing comma.
+        assert_eq!(
+            crate::manifest::linked_packages(
+                "[dependencies]\r\n\
+                 a = { package = \"\\b\\t\\n\\f\\r\\\"\\\\\\U00000041\" }\r\n\
+                 b = { package = \"\"\"\n x\\\n   y\"\"\"\"\" }\n\
+                 c = { package = '''z''' }\n\
+                 d = {}\n\
+                 e = { version = \"1\", }\n\
+                 f = { features = [] }\n\
+                 g = { package = \"\" }\n",
+                root,
+            ),
+            Ok(names(&[
+                "",
+                "\u{8}\t\n\u{c}\r\"\\A",
+                " xy\"\"",
+                "d",
+                "e",
+                "f",
+                "z",
+            ])),
+            "the decoded package names"
+        );
+
+        // Text the reader cannot parse refuses, naming why. Never a partial list.
+        for (manifest, reason) in [
+            ("a = \"x", "unterminated string"),
+            ("a = \"x\ny\"", "newline inside a one-line string"),
+            ("a = \"x\\", "unterminated escape"),
+            ("a = \"\\u12\"", "malformed unicode escape"),
+            ("a = \"\\uD800\"", "escape is not a character"),
+            ("a = \"\\q\"", "unknown escape"),
+            ("= 1", "expected a key"),
+            ("a = { b }", "expected `=` in an inline table"),
+            (
+                "a = { b = \"1\" c = \"2\" }",
+                "expected `,` or `}` in an inline table",
+            ),
+            ("a = [\"1\" \"2\"]", "expected `,` or `]` in an array"),
+            ("a = ,", "malformed value"),
+            ("a = b = c", "malformed value"),
+            ("a =", "expected a value"),
+            ("[a", "malformed table header"),
+            ("[[a]", "malformed table header"),
+            ("a b", "expected `=` after a key"),
+            ("a = \"x\" y", "trailing text after a value"),
+        ] {
+            let got = crate::manifest::linked_packages(manifest, root);
+            assert!(
+                got.as_ref().is_err_and(|e| e.contains(reason)),
+                "{manifest:?} must refuse with {reason:?}, got {got:?}"
+            );
+            // A root the reader cannot parse refuses too.
+            assert!(
+                crate::manifest::linked_packages("", manifest).is_err(),
+                "an unreadable root manifest must refuse: {manifest:?}"
+            );
+        }
     }
 
     #[test]

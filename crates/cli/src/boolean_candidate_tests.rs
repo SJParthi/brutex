@@ -544,8 +544,55 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
     Ok(())
 }
 
+/// D-1143, source shape: `produce_side` runs once per program and side and
+/// must seal its run against the catalogue's hoisted digests rather than hash
+/// the signal, minute and daily bars again. The answers are byte-identical, so
+/// only the source tells the two apart.
+#[test]
+fn produce_side_hashes_no_slice() {
+    let source = include_str!("boolean_candidate_v1.rs");
+    let at = source.find("fn produce_side<");
+    assert!(at.is_some(), "produce_side must exist");
+    let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+    let body = rest
+        .get(..rest.find("\n}\n").unwrap_or(rest.len()))
+        .unwrap_or_default();
+    assert!(body.contains("ExpressionExecutionRunV1::with_digests(&run, program, digests)"));
+    for hashing in [
+        "data_digest_with_daily_reference(",
+        "new_with_daily_reference(",
+        "ExecutionDigestsV1::of",
+    ] {
+        assert!(
+            !body.contains(hashing),
+            "produce_side must not call {hashing}"
+        );
+    }
+}
+
+/// o1runner-1 / D-1193: a catalogue attests its training slice once per
+/// resolution, not once per program x side. Three programs over two sides
+/// re-attested six times before the fix; they must attest exactly twice.
+#[test]
+fn a_catalogue_attests_its_training_slice_once_per_side() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    assert_eq!(programs.len(), 3);
+    let before = ATTESTATIONS.with(std::cell::Cell::get);
+    let first = fixture.produce("NIFTY", &programs)?;
+    let after = ATTESTATIONS.with(std::cell::Cell::get);
+    assert_eq!(first.programs(), programs);
+    assert_eq!(
+        after - before,
+        2,
+        "one attestation per side, not per program"
+    );
+    Ok(())
+}
+
 std::thread_local! {
-    /// Source digests [`super::SourceDigest`] has hashed on this thread.
+    /// Source digests [`super::SourceDigest`] or [`super::slice_digests`] has
+    /// hashed on this thread.
     pub(super) static DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// TRAINING attestations [`super::PricedSide`] has made on this thread.
     pub(super) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -572,12 +619,10 @@ pub(super) fn passes() -> (u64, u64) {
 /// slice once, however many programs the catalog holds, where cli used to do
 /// both afresh for every program × side. W2-cli2-3.
 ///
-/// **This counts cli's passes, not the family's.** The runner still hashes
-/// the same three streams for every program × side: `produce_side` mints each
-/// run through `ExpressionExecutionRunV1::new_with_daily_reference`, whose
-/// runner constructor begins `let expected_data_digest =
-/// crate::identity::data_digest_with_daily_reference(`. That pass is
-/// W3-runner2-3's, and D-0711 records it as not closed here.
+/// On the merged tree the digest is [`super::slice_digests`] (D-1143), and
+/// `produce_side` seals each run with `ExpressionExecutionRunV1::with_digests`,
+/// so the runner pass W3-runner2-3 that D-0711 recorded as open is closed on
+/// this TRAINING path too; `produce_side_hashes_no_slice` pins that shape.
 #[test]
 fn cli_digests_a_familys_source_once_and_attests_each_side_once() -> Result<(), String> {
     let fixture = Fixture::new()?;

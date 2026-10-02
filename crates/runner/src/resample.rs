@@ -433,6 +433,43 @@ mod tests {
         assert_eq!(five().label(), "5min");
     }
 
+    /// D-1194: the first bar of EVERY session starts at 09:15 and covers whole
+    /// periods from the open, for every intraday period that divides the day,
+    /// on two consecutive days. Under the IST-midnight anchor a 60-minute first
+    /// bar was stamped 09:00. (D-1194 also refused a period that does not
+    /// divide the day; the merged tree keeps D-1430's per-session restart
+    /// instead, under which such a period opens at 09:15 every day too.)
+    #[test]
+    fn every_session_opens_with_a_bar_stamped_at_the_open() {
+        let open = |day: i64| (day * 1_440 + 555) * MINUTE_MICROS - IST_OFFSET_MICROS;
+        for minutes in [
+            2_u32, 3, 4, 5, 6, 8, 10, 15, 20, 30, 45, 60, 90, 120, 180, 360, 720,
+        ] {
+            let p = period(minutes);
+            for day in [19_723_i64, 19_724] {
+                let session: Vec<Candle> = (0..375)
+                    .map(|m| Candle {
+                        ts_micros: open(day) + m * MINUTE_MICROS,
+                        ..bar(0, 10, 10, 10, 10, 1)
+                    })
+                    .collect();
+                let out = run(&session, p);
+                assert_eq!(
+                    out.first().map(|c| c.ts_micros),
+                    Some(open(day)),
+                    "{minutes}-minute first bar on day {day}"
+                );
+                let per = i64::from(minutes);
+                assert_eq!(
+                    out.first().map(|c| c.volume),
+                    Some(per.min(375)),
+                    "{minutes}-minute first bar holds a whole period"
+                );
+                assert_eq!(out.len(), 375_usize.div_ceil(minutes as usize));
+            }
+        }
+    }
+
     #[test]
     fn ohlc_takes_first_last_max_min_and_volume_sums() {
         // Five minutes, deliberately not monotone, so first/last cannot be

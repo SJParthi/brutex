@@ -714,6 +714,7 @@ impl Trades {
     /// Absorbs blocks another writer has appended since this handle last looked.
     ///
     /// O(rows appended by others), which is zero on the one-writer path.
+    /// Proved by `cli::trades::a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows`.
     /// Bring a HELD handle up to date, in O(rows appended since it was opened).
     ///
     /// # The scan this exists to stop repeating

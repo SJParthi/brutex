@@ -6586,7 +6586,10 @@ For B execution bars, the checked evaluator replay costs O(B) time and retains
 O(B) acceptance bits. `SliceFacts` then builds an O(B) refusal-prefix table, an
 O(B) accepted-timestamp index and O(B) session facts. The acceptance bitmap is
 shared by reference across candidate and grid walks; cloning it does not copy B
-verdicts. These are per-slice costs, not per-candidate costs.
+verdicts. These are per-slice costs, not per-candidate costs, **only where
+the caller hoists `SliceFacts`.** Several entry points do not: see D-1181
+and the D-1170-onward section at the end of this file. Where a caller does
+not hoist, the O(B) build is paid per candidate.
 
 One membership read and one inclusive path-refusal query are worst-case O(1):
 the latter is two prefix reads and a subtraction. Exact-deadline lookup through
@@ -11321,25 +11324,39 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   (64 bytes read, 65 and a mebibyte refused); the cost is stated from the
   shape of the code, not timed.
 
-## Forty-one chained searches rule 6 now sees and nobody has classified — D-1115, 2 October 2026
+## ~~Forty-one chained searches rule 6 now sees and nobody has classified~~ — D-1115, CLOSED by D-1121, 2 October 2026
 
-CI gate 11 rule 6 reads method chains as of D-1115. It found 41
-`.iter().find(` / `.position(` / `.rposition(` sites in 29 files that the
-line-based grep had never shown. They are pinned per file in
-`allow_scan_unread`, so a new one is refused. **None has been opened and
-classified.** The list sits beside `allow_scan`, whose entries each carry a
-written bound.
+CI gate 11 rule 6 reads method chains as of D-1115, and the 41 sites it first
+saw were pinned in `allow_scan_unread` unread. D-1121 opened each one, wrote
+its bound beside `allow_scan` in `.github/workflows/ci.yml`, and emptied
+`allow_scan_unread`. 25 are compile-time tables or fixed-width fields, and 7
+are bounded by the feed count or another stated cap.
 
-A spot check of five found a fixed table or one record's own fields each time:
-- `telemetry::record::Record::field`
-- vocab's `TABLE` lookup by name
-- `pull::rolling`'s expiry flags
-- `pull::vendor`'s window caps
-- the grid's baseline cell
+**Nine are not constant, and are stated here as what they are,** with three
+already-counted sites read beside them (two of the four `validate` re-checks
+and `final_selection`, whose chains sat inside older `allow_scan` counts):
 
-Five of 41 is not a measurement of the rest. Until each entry is moved into
-`allow_scan` with its bound, none of these sites is shown to be bounded by a
-compile-time table rather than by the data.
+- `cli::candidate_universe`, `cli::pre_admission_data` and
+  `runner::signal_candle_stop` locate an execution slice's first bar in the
+  complete minute context: O(M), once per attestation, beside an O(M) pass
+  over the same slice (sections 134 and 142).
+- `runner::signal_candle_stop` finds an evaluation's first daily period:
+  O(days) per evaluation, beside an O(days) filter over the same periods and
+  the evaluation's walk of every signal bar.
+- `runner::validate` re-checks an argmax four times: O(retained placements)
+  once per fold, beside a `.max()` over the same slice.
+- `cli::final_selection` finds the best traded row: O(priced rows) once per
+  screen, after two sorts of the same rows.
+- `cli::population_v6` finds each requested strategy among the population rows:
+  at most 25 walks of O(P) per replay request.
+- `pull::cash_auction` finds eight column names in one CSV header: O(columns)
+  once per file.
+- `runner::grid::Grid::baseline` walks one grid's cells. Nothing in production
+  calls it.
+
+The `cli::strict_range_knobs` override search is bounded by its two callers
+(at most the `KNOBS` table, or none), not by its parameter type; a new caller
+would have to keep that bound. None of these timings is measured.
 
 ## The window-range percentile's per-bar bound is read off the source — D-1116, 2 October 2026
 
@@ -12070,3 +12087,191 @@ C-E-10, C-E-11, C-E-12) ran in a shared four-core container with other builds
 in flight; their recorded ratios are what that run printed and are not a
 quiet-machine measurement.
 
+
+## Slice facts per slice, cell replay per grid, and what is still linear — D-1141, 2 October 2026
+
+§113 above says the `SliceFacts` builds "are per-slice costs, not
+per-candidate costs". Until D-1141 that was false on three live paths: the
+resolved-policy grid doors and the per-cell `materialize_cell` all built them
+per call. The text of §113 is kept as written. What now holds, and what does
+not:
+
+- **Attested training grids.** `attest_training` builds the facts once. Each
+  `evaluate_with_attested` and `evaluate_expression_with_attested` call pays
+  the walk, O(B + signals), plus O(C·(span + L)) crossings and O(cells·C)
+  folds. It pays no fact build. The walk is O(B) per candidate because
+  `trade::walk_over` visits every column row. That is `trade.rs`'s bound and
+  is not changed here.
+- **Candidate-universe cell replay.** Per member-side: one fact build O(B),
+  one walk and one crossing table. Then O(C) per cell. The member-side O(B)
+  remains for two reasons. `cli` still calls `evaluate_training_grid_attested`
+  per member-side, which re-attests (BLAKE3 over the training bytes and the
+  column). And the facts are rebuilt beside it, because the attested token is
+  not handed back to the caller. Hoisting attestation to the population is
+  the next step, and it is not taken here.
+- **Expression coordinate replay** (`materialize_expression_coordinate`, per
+  ordinal) no longer rebuilds the facts. It still re-walks the program and
+  re-measures crossings per ordinal: O(B + signals + C·(span + L)) per cell.
+  An expression analogue of `CellReplay` would make that O(C). Its empty-walk
+  rule differs from the mask path's (it compares an empty fold to the
+  selected cell), so it is not folded into `CellReplay`.
+- **`expression_oos`** builds the facts once per anchored call. It is not an
+  attested path.
+- Not measured. No bench times any of these; the bounds are read from the
+  source (`CLAUDE.md` §3 rule 6).
+
+## Run sealing is O(1) per run; OOS replay is still O(prefix) per pending candidate — D-1143, 2 October 2026
+
+- **Sealing.** `ExecutionDigestsV1` is O(S + E) BLAKE3 once per slice set, and
+  `ExecutionRunV1::with_digests` is O(1) per run: a few term compares, one
+  identity hash over fixed-size terms, and two short feed/commit hashes. The
+  V4 training population, the V4 OOS loop and `cli`'s Boolean catalogue use
+  it. `cli::candidate_universe` still seals per member-side with
+  `new_with_daily_reference`, which is O(S + E) per member-side. It also
+  re-attests per member-side (D-1141's limits), so the order there is
+  unchanged.
+- **V4 OOS replay (W3-runner5-0, open).** Each pending candidate's
+  `replay_selected` still costs O(E_prefix) attestation work: BLAKE3 over
+  `trade_test` twice, one over the column, bar/acceptance/source/envelope
+  validation, and a `SliceFacts` build. Its walk is O(prefix rows), not
+  O(test rows). The loop is serial, and pending is up to 2 × closed masks.
+  Closing the attestation term needs an attested-OOS token. That token would
+  change which refusal is reported when an input has more than one fault, and
+  that needs its own decision. Closing the walk term needs `trade::walk_over`
+  to start at a row offset (see the W3-runner5-3 entry below).
+- **`walk_forward_core` OOS pass (W3-runner5-3, open).** Every scored candidate
+  is re-priced with `with_levels_over` on a column that runs from bar 0 to
+  `fold.test.end`, with rows before `fold.test.start` blanked by `restricted`.
+  The walk visits every row, so it costs O(prefix rows) per candidate where
+  O(test rows) is needed. Cutting the column instead would renumber nothing,
+  because sources are explicit. It would still change two things: the
+  empty-mask answer (a blanked row fires for the empty mask) and the slice
+  facts derived from the column. The fix that changes no answer is a row-offset
+  start in `trade::walk_over`, which is owned by another lane. Not measured.
+
+## A grid refused for its money envelope does not say why — D-1147, 2 October 2026
+
+- A legacy grid whose paths fail `4·A·P ≤ i64::MAX` reports no cell and counts
+  every path in `refused_paths`. That is the same signal a slice whose every
+  path crossed a refused bar gives. The two are told apart only by reading the
+  prices. A `Cell`/`Grid` field naming the reason would change every `Debug`
+  fingerprint, every struct literal in `cli`, and the cell codecs. It is left
+  to a change that owns those.
+- The bound is conservative. It assumes every fill leg lies inside the path's
+  price range, which is how the printed-OHLCV fill model prices, so a slice it
+  refuses could sometimes have summed safely. It is the same bound V1 applies
+  over the whole slice.
+- The check costs O(Σ path span), the spans `crossings_checked` already walks.
+  Not measured.
+
+## Runner outcome, excursion and trade bounds — D-1170 onward, 2 October 2026
+
+* **`forward`'s excursions: O(bars) per call (D-1170).** The window
+  `[i + 1, exit]` is answered by two monotonic deques whose ends only advance,
+  so each bar is pushed and popped at most once. Memory is bounded by the
+  widest window, not `n·log n`. A query that moved backwards would cost
+  Θ(window) for that query. `forward` issues none, and the test that walks
+  every exit checks that. Not timed. No bench row covers `forward`.
+* **A derived exit ladder: expected O(n) per candidate, O(1) per trade
+  (D-1172).** `Ladder::from_excursions` selects at most 65 halving positions
+  with `select_nth_unstable` and never sorts. Each caller still copies the
+  sample once per axis (`to_vec()`), which is O(n) per candidate. That copy is
+  linear in the candidate's own trades, not in the bars. Expected rather than
+  worst-case: `select_nth_unstable`'s documented bound is expected linear.
+  Not timed.
+* **`edge`'s overlap correction: O(1) amortised per hit, at any horizon
+  (D-1171, D-1174).** The queue holds at most one hit per bar of one session's
+  window. Each hit is pushed and popped once, and its pairs are read from four
+  exact running sums, so no queued hit is visited. A candidate costs O(rows of
+  the column), whatever `H` the operator sets. The working set is
+  `min(H, bars in one session)` entries. Not timed. No bench row covers `edge`
+  or the ranking pass.
+* **`SliceFacts` is O(B) per CANDIDATE on several grid entry points, not per
+  slice (D-1181).** §113 called these per-slice costs. That holds only where
+  the caller builds `SliceFacts` once and passes it to `trade::walk_over`.
+  `runner::grid` builds a fresh one with `SliceFacts::of(bars, column)` inside
+  `evaluate`, `evaluate_with`, `evaluate_families`,
+  `evaluate_resolved_policy_v1`, `evaluate_resolved_expression_policy_v1`,
+  `materialize_expression_cell` and `replay_universe_v1`. Each of those is
+  called once per candidate, from `expression_execution`, `expression_oos`,
+  `exit_grid_policy`, `validate` and `cli::candidate_trades`. So the
+  acceptance copy, the two prefix tables, the timestamp map and the square-off
+  table are rebuilt for every candidate, at O(B) time and memory. `trade::walk`
+  documents the same cost for itself. The fix is to take `&SliceFacts` from
+  the caller, which is a `grid.rs` change and was not made by this lane. Not
+  timed.
+* **A signal-sourced walk reads its cadence from bars after the signal
+  (D-1182).** For `Sourced::Signal`, `SliceFacts::of` sets `step_micros` to the
+  median same-session gap over the WHOLE slice. That step decides whether a
+  signal's next bar is "immediate" and where its horizon deadline falls. Bars
+  later in the slice can therefore refuse or admit an earlier trade.
+  `a_signal_sourced_cadence_is_read_from_bars_after_the_signal` reproduces it:
+  six dense sessions trade on their own, and the same signals are all refused
+  once fourteen thinned sessions are appended. `Sourced::Fill` uses the fixed
+  execution minute and is unaffected. The code comments in `walk_core` say
+  shipping one-minute paths are reprojected to `Fill`. This lane did not
+  re-check every caller. The fix needs a cadence supplied by the caller (or
+  read from the rung's declared timeframe), which changes the `grid` and `cli`
+  call sites. It is deferred, and the direction of the error is not one-sided.
+  **Closed on the merged tree by D-1410** (D-1198): the cadence at bar `i` is
+  measured over bars `0..=i` only, and the test is inverted as
+  `a_signal_sourced_cadence_is_not_read_from_bars_after_the_signal`.
+
+## Runner lane-2b follow-ups — D-1183 onward, 2 October 2026
+
+- **A hole after a level exit still blocks the path in the walk (D-1183).** The
+  grid now prices a variant whose exit precedes `first_refused`. But
+  `trade::walk_core` marks a whole path block-only when `path_accepts(entry,
+  time_exit)` fails, so shipping grids never see such a candidate as priceable.
+  A refused bar or missing minute after a stop therefore still removes that
+  trade from every cell and blocks to the time exit. The direction is
+  conservative (a trade is refused, none is invented). Fixing it needs
+  `Occupancy` to carry the first refused offset and the first missing-minute
+  offset, which changes the walk's output.
+- **`SliceFacts` per candidate: what is left after D-1184.** The per-candidate
+  loops now build facts once per slice (see D-1184 for the list), so the D-1181
+  bullet above describes the public one-shot doors only: `evaluate`,
+  `evaluate_with`, `evaluate_families`, `materialize_cell`,
+  `materialize_expression_cell`, `per_trade` and `with_levels` still build
+  facts per call at O(B). The public `replay_selected`,
+  `replay_selected_universe` and `replay_global_witness` also build them per
+  call. `cli`'s global-replay callers use those per candidate and were not
+  moved. Not timed.
+- **V4 OOS replay: the walk is already O(OOS rows) (correction to D-1143).**
+  The D-1143 bullet says each pending candidate's walk is O(prefix rows).
+  `project_oos_fold` drops every pre-OOS row from the projected column, so the
+  walk visits OOS rows only. What was O(E_prefix) per candidate was the
+  `SliceFacts` build over `trade_test`, which D-1184 hoists to once per fold.
+  The attestation term (BLAKE3 over `trade_test` and the column, bar and
+  source validation) is still per candidate.
+- **`walk_forward_core` OOS pass: O(test rows) per candidate, plus one scan per
+  fold (D-1186).** This closes the W3-runner5-3 bullet under D-1143. Each fold
+  scans its test column once to find the first row with a set bit, which is
+  O(prefix rows) per fold, not per candidate. Each candidate's walk then visits
+  rows from there. The empty mask still walks from row 0. `SliceFacts` for the
+  fold is still built over `trade_test` from bar 0, which is O(E_prefix) once
+  per fold. Not timed.
+- **Boolean later-period run: O(B + R) once per series, then per program and
+  side only what depends on them (D-1188).** The later slice's validation,
+  hashes, price extremes, `SliceFacts` and fold index are built once. Each
+  program and side still costs its own truth summary over the column (O(R)),
+  its exact grid walk, its seal over the grid's cells and an O(rungs) envelope
+  check. The fold map holds O(B + folds) memory for the whole run instead of
+  per bind. Not timed.
+
+- **One stored rung's screen: one `SliceFacts` build (D-1190).** This narrows
+  the `SliceFacts` bullet above. `trade_and_screen` builds the facts once and
+  every tier's `screen`, `measure_top` and the final rebuild share them. The
+  one-shot doors still build facts per call, but no production loop calls
+  them. `replay_global_witness` still builds facts once per witness, because
+  `StoredPostTrainingOosCohortV1` rebuilds the whole OOS source (signal fold
+  and execution column) per disposition. That rebuild is O(signal bars +
+  execution bars) per selected candidate. It is left because hoisting it would
+  change the durable fold records each witness writes. Not timed.
+- **Hole locations are recorded, not used (D-1191).** This narrows the D-1183
+  bullet above. Each `Occupancy` now carries its path's first refused record
+  and first missing minute, read in O(1) from two per-slice tables. Those
+  tables cost one more O(B) pass and `2 × (B + 1)` `usize`s per `SliceFacts`.
+  `Occupancy` doubles to 64 bytes per held path. The grid still blocks a
+  whole path for a hole after a level exit. Reading the locations there changes
+  shipping cells, so it waits for its own decision. Not timed.
