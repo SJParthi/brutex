@@ -1559,12 +1559,8 @@ impl CandidateSearchColumnBuilderV1<'_> {
         }
         let final_close_minute = prefix
             .last()
-            .map(|bar| {
-                bar.ts_micros
-                    .saturating_add(signal_length_micros)
-                    .saturating_sub(60_000_000)
-            })
-            .ok_or_else(|| "candidate Search V4 requested an empty signal prefix".to_owned())?;
+            .ok_or_else(|| "candidate Search V4 requested an empty signal prefix".to_owned())
+            .and_then(|bar| session_close_minute_v1(bar.ts_micros, signal_length_micros))?;
         while self
             .reference_minute_context
             .get(cursor.minute_end)
@@ -3958,6 +3954,78 @@ fn require_exact_execution_subspan(
         );
     }
     Ok(())
+}
+
+/// The exact minute at which the signal bar opened at `bar_ts_micros` closes.
+///
+/// The store folds every intraday rung on a grid anchored at the 09:15 open,
+/// so a rung that does not divide the 375-minute session (2, 10, 30 and 60
+/// min) ends the day with a SHORT bar: the 60-minute bar stamped 15:15 holds
+/// only 15:15-15:29. Its close is therefore the last minute of the bucket that
+/// the measured session actually traded, not `ts + rung - 1min` (16:14), which
+/// no minute context can hold. D-0961.
+///
+/// The session comes from [`pull::calendar::kind_of`], the same authority the
+/// stored calendar receipt and bucket geometry use, never from a literal. The
+/// close is the latest minute of the bucket inside any measured window; that
+/// also covers a disaster-recovery Saturday whose bucket meets a window end.
+/// A day the calendar does not report open with measured windows, or a bucket
+/// that meets no window, is refused naming why.
+///
+/// O(1): one bounded calendar lookup plus a walk over at most
+/// [`pull::calendar::MAX_WINDOWS`] windows.
+fn session_close_minute_v1(
+    bar_ts_micros: i64,
+    signal_length_micros: i64,
+) -> Result<i64, CandidateUniverseRefusal> {
+    const MINUTE_MICROS: i64 = 60_000_000;
+    const DAY_MICROS: i64 = 86_400_000_000;
+    if signal_length_micros < MINUTE_MICROS || signal_length_micros % MINUTE_MICROS != 0 {
+        return Err(format!(
+            "candidate Search V4 signal length {signal_length_micros} micros is not a whole number of minutes"
+        ));
+    }
+    let day = indicators::ist_day(bar_ts_micros);
+    let day_start = day
+        .checked_mul(DAY_MICROS)
+        .and_then(|micros| micros.checked_sub(indicators::IST_OFFSET_MICROS))
+        .ok_or_else(|| format!("candidate Search V4 IST day {day} overflowed microseconds"))?;
+    let offset = bar_ts_micros
+        .checked_sub(day_start)
+        .filter(|offset| offset % MINUTE_MICROS == 0)
+        .ok_or_else(|| {
+            format!("candidate Search V4 signal bar {bar_ts_micros} is not on a whole IST minute")
+        })?;
+    let open_minute = offset / MINUTE_MICROS;
+    let bucket_last_minute = open_minute
+        .checked_add(signal_length_micros / MINUTE_MICROS - 1)
+        .ok_or_else(|| "candidate Search V4 signal bucket overflowed".to_owned())?;
+    let session = match pull::calendar::kind_of(day) {
+        pull::calendar::DayKind::Open(session) => session,
+        other => {
+            return Err(format!(
+                "candidate Search V4 signal bar {bar_ts_micros} is on IST day {day}, which has no measured session window ({other:?})"
+            ));
+        }
+    };
+    let close_minute = session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .filter(|window| {
+            i64::from(window.from) <= bucket_last_minute && i64::from(window.to) >= open_minute
+        })
+        .map(|window| i64::from(window.to).min(bucket_last_minute))
+        .max()
+        .ok_or_else(|| {
+            format!(
+                "candidate Search V4 signal bar {bar_ts_micros} opens a bucket that meets no measured session window on IST day {day}"
+            )
+        })?;
+    close_minute
+        .checked_mul(MINUTE_MICROS)
+        .and_then(|micros| day_start.checked_add(micros))
+        .ok_or_else(|| "candidate Search V4 closing minute overflowed".to_owned())
 }
 
 fn signal_length_micros(rung_seconds: u32) -> Result<i64, CandidateUniverseRefusal> {
@@ -8161,6 +8229,273 @@ mod tests {
                 original
             );
         }
+    }
+
+    /// Folds exact minutes into open-anchored rung bars the way the store's
+    /// `pull::fold` does: buckets start at 09:15 IST, so a rung that does not
+    /// divide 375 leaves a SHORT final bar (60min: 15:15 holds 15:15-15:29).
+    fn open_anchored_rung_bars(minutes: &[Candle], rung_minutes: i64) -> Vec<Candle> {
+        let mut bars: Vec<Candle> = Vec::new();
+        let mut key = None;
+        for minute in minutes {
+            let day = indicators::ist_day(minute.ts_micros);
+            let day_start = day
+                .saturating_mul(DAY_MICROS)
+                .saturating_sub(indicators::IST_OFFSET_MICROS);
+            let of_day = minute.ts_micros.saturating_sub(day_start) / MINUTE_MICROS;
+            let bucket = (of_day - 555).div_euclid(rung_minutes);
+            if key == Some((day, bucket)) {
+                let last = bars.last_mut().expect("an open bucket has a bar");
+                last.high = last.high.max(minute.high);
+                last.low = last.low.min(minute.low);
+                last.close = minute.close;
+                last.volume = last.volume.saturating_add(minute.volume);
+            } else {
+                key = Some((day, bucket));
+                bars.push(Candle {
+                    ts_micros: day_start
+                        .saturating_add((555 + bucket * rung_minutes) * MINUTE_MICROS),
+                    ..*minute
+                });
+            }
+        }
+        bars
+    }
+
+    fn search_builder_over<'a>(
+        signal: &'a [Candle],
+        daily_references: &'a [DailyReference],
+        context: &'a [Candle],
+        rung_seconds: u32,
+    ) -> CandidateSearchColumnBuilderV1<'a> {
+        CandidateSearchColumnBuilderV1 {
+            full_signal: signal,
+            daily_references,
+            reference_minute_context: context,
+            rung_seconds,
+            evaluation: CandidateEvaluationInputsV1 {
+                widths: Widths::pinned().expect("fixture uses measured widths"),
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            },
+            cursors: [CandidateCausalPrefixCursorV1::default(); 2],
+        }
+    }
+
+    fn two_open_days_in_january_2025() -> (i64, i64) {
+        let start = i64::from(
+            Day::new(2025, 1, 1)
+                .expect("fixture day is valid")
+                .days_from_epoch(),
+        );
+        let mut open = (start..start + 20).filter(|day| matches!(kind_of(*day), DayKind::Open(_)));
+        let prior = open.next().expect("January 2025 has an open day");
+        let day = open.next().expect("January 2025 has a second open day");
+        assert_eq!(
+            kind_of(day),
+            DayKind::Open(pull::calendar::Session::full()),
+            "the fixture day is a standard 09:15-15:29 session"
+        );
+        (prior, day)
+    }
+
+    /// D-0961. A Search V4 prefix ending on the store's short final bar of a
+    /// session (rungs 2, 10, 30 and 60 min) demands its close at the session's
+    /// last minute, 15:29, not at `ts + rung - 1min`, which lies after the close.
+    #[test]
+    fn search_v4_prefix_ending_on_the_short_final_bar_closes_at_the_session_last_minute() {
+        let (prior, day) = two_open_days_in_january_2025();
+        let (_, _, references) = daily_reference_fixture(prior, day);
+        let context = minute_bars(day, day);
+        let session_last = context.last().expect("the day has minutes").ts_micros;
+        let day_start = day
+            .saturating_mul(DAY_MICROS)
+            .saturating_sub(indicators::IST_OFFSET_MICROS);
+        assert_eq!(
+            session_last,
+            day_start + i64::from(pull::calendar::LAST_MINUTE) * MINUTE_MICROS
+        );
+        // (rung minutes, bars in the day, stamp of the final bar as IST minute)
+        for (rung, bars, final_stamp) in [
+            (60_i64, 7_usize, 15 * 60 + 15),
+            (30, 13, 15 * 60 + 15),
+            (10, 38, 15 * 60 + 25),
+            (2, 188, 15 * 60 + 29),
+            (15, 25, 15 * 60 + 15),
+            (5, 75, 15 * 60 + 25),
+            (1, 375, 15 * 60 + 29),
+        ] {
+            let signal = open_anchored_rung_bars(&context, rung);
+            assert_eq!(signal.len(), bars, "rung {rung} bar count");
+            assert_eq!(
+                signal.last().expect("bars").ts_micros,
+                day_start + final_stamp * MINUTE_MICROS,
+                "rung {rung} final stamp"
+            );
+            let rung_seconds = u32::try_from(rung * 60).expect("rung fits");
+            let mut builder = search_builder_over(&signal, &references, &context, rung_seconds);
+            let column = builder
+                .build(&signal)
+                .unwrap_or_else(|why| panic!("rung {rung} prefix refused: {why}"));
+            assert_eq!(column.len(), signal.len(), "rung {rung} column width");
+            assert_eq!(
+                builder.cursors[0].minute_end,
+                context.len(),
+                "rung {rung} binds the minute context through 15:29 and no further"
+            );
+            assert_eq!(builder.cursors[0].last_signal_len, signal.len());
+
+            // The bar before the final one is a full bucket: its close is exact
+            // and unclamped, so the cursor stops a whole final bucket short.
+            let mut earlier = search_builder_over(&signal, &references, &context, rung_seconds);
+            let prefix = &signal[..signal.len() - 1];
+            earlier
+                .build(prefix)
+                .unwrap_or_else(|why| panic!("rung {rung} earlier prefix refused: {why}"));
+            let final_open = signal.last().expect("bars").ts_micros;
+            let bound = context
+                .iter()
+                .position(|bar| bar.ts_micros >= final_open)
+                .expect("final bucket has minutes");
+            assert_eq!(
+                earlier.cursors[0].minute_end, bound,
+                "rung {rung} earlier bound"
+            );
+        }
+    }
+
+    /// A short final bar whose 15:29 minute is absent is still refused: the
+    /// clamp moves the demanded close to the session's end, it never relaxes it.
+    #[test]
+    fn search_v4_short_final_bar_without_its_1529_minute_is_still_refused() {
+        let (prior, day) = two_open_days_in_january_2025();
+        let (_, _, references) = daily_reference_fixture(prior, day);
+        let full = minute_bars(day, day);
+        let signal = open_anchored_rung_bars(&full, 60);
+        let truncated = &full[..full.len() - 1];
+        let mut builder = search_builder_over(&signal, &references, truncated, 3_600);
+        let why = builder
+            .build(&signal)
+            .expect_err("a missing 15:29 minute must refuse");
+        let expected = full.last().expect("minutes").ts_micros;
+        assert_eq!(
+            why,
+            format!(
+                "candidate Search V4 lacks exact closing minute {expected} for its signal prefix"
+            )
+        );
+        assert_eq!(
+            builder.cursors[0].last_signal_len, 0,
+            "a refusal commits nothing"
+        );
+    }
+
+    fn ist_minute_micros(day: i64, minute: i64) -> i64 {
+        day * DAY_MICROS - indicators::IST_OFFSET_MICROS + minute * MINUTE_MICROS
+    }
+
+    /// D-0961: the close is the latest minute of the open-anchored bucket that
+    /// the measured session traded, on standard, irregular and Muhurat days.
+    #[test]
+    fn session_close_minute_clamps_to_every_measured_window_end() {
+        let (_, standard) = two_open_days_in_january_2025();
+        let cases = [
+            // (day, bucket open minute, rung minutes, expected close minute)
+            (standard, 915, 60, 929),
+            (standard, 855, 60, 914),
+            (standard, 915, 30, 929),
+            (standard, 925, 10, 929),
+            (standard, 915, 10, 924),
+            (standard, 928, 2, 929),
+            (standard, 915, 15, 929),
+            (standard, 925, 5, 929),
+            (standard, 929, 1, 929),
+            (standard, 555, 1, 555),
+            // 2024-03-02 disaster-recovery Saturday: 09:15-09:59 and 11:30-12:29.
+            (19_784, 555, 60, 599),
+            (19_784, 675, 60, 734),
+            (19_784, 735, 60, 749),
+            // 2021-02-24 outage: 09:15-11:39 and 15:45-16:59.
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 675, 60, 699),
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 915, 60, 974),
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 975, 60, 1_019),
+            // 2025-10-21 Muhurat, 13:45-14:44 on the 09:15-anchored grid.
+            (20_382, 795, 60, 854),
+            (20_382, 855, 60, 884),
+        ];
+        for (day, open, rung, close) in cases {
+            assert_eq!(
+                session_close_minute_v1(ist_minute_micros(day, open), rung * MINUTE_MICROS),
+                Ok(ist_minute_micros(day, close)),
+                "day {day} bucket {open} rung {rung}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_close_minute_refuses_without_a_measured_window() {
+        let (_, standard) = two_open_days_in_january_2025();
+        let sunday = i64::from(
+            Day::new(2025, 1, 5)
+                .expect("fixture day is valid")
+                .days_from_epoch(),
+        );
+        assert_eq!(kind_of(sunday), DayKind::Closed);
+        for (day, kind) in [
+            (sunday, "Closed"),
+            (18_580, "OpenLengthUnmeasured"),
+            (pull::calendar::LAST_DAY + 1, "Unmeasured"),
+        ] {
+            let ts = ist_minute_micros(day, 915);
+            assert_eq!(
+                session_close_minute_v1(ts, 60 * MINUTE_MICROS),
+                Err(format!(
+                    "candidate Search V4 signal bar {ts} is on IST day {day}, which has no measured session window ({kind})"
+                ))
+            );
+        }
+        // A bucket wholly between the two windows of a two-window day.
+        let gap = ist_minute_micros(19_784, 615);
+        assert_eq!(
+            session_close_minute_v1(gap, 60 * MINUTE_MICROS),
+            Err(format!(
+                "candidate Search V4 signal bar {gap} opens a bucket that meets no measured session window on IST day 19784"
+            ))
+        );
+        // Before the open and after the close of a standard day.
+        for minute in [554, 930] {
+            assert!(
+                session_close_minute_v1(ist_minute_micros(standard, minute), MINUTE_MICROS)
+                    .expect_err("outside the session")
+                    .contains("meets no measured session window")
+            );
+        }
+        // Malformed lengths and a timestamp off the minute grid.
+        let ts = ist_minute_micros(standard, 915);
+        for length in [0, MINUTE_MICROS - 1, MINUTE_MICROS + 1, -MINUTE_MICROS] {
+            assert_eq!(
+                session_close_minute_v1(ts, length),
+                Err(format!(
+                    "candidate Search V4 signal length {length} micros is not a whole number of minutes"
+                ))
+            );
+        }
+        assert_eq!(
+            session_close_minute_v1(ts + 1, MINUTE_MICROS),
+            Err(format!(
+                "candidate Search V4 signal bar {} is not on a whole IST minute",
+                ts + 1
+            ))
+        );
+        // Extremes: neither end of i64 panics or wraps into a session.
+        for extreme in [i64::MIN, i64::MAX] {
+            assert!(session_close_minute_v1(extreme, MINUTE_MICROS).is_err());
+        }
+        assert_eq!(
+            session_close_minute_v1(ts, i64::MAX - i64::MAX % MINUTE_MICROS),
+            Ok(ist_minute_micros(standard, 929)),
+            "the widest whole-minute length still closes at 15:29"
+        );
     }
 
     #[test]
