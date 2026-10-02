@@ -984,6 +984,12 @@ pub struct BarFile {
     /// FRESH verdict against the disk as it then stands, not a repeat of the
     /// old one: a block damaged while the handle was elsewhere is refused on
     /// return.
+    /// For the TAIL block the cost is not only the CRC: each re-verification
+    /// pays [`Self::past_the_commit`]'s `fstat` and reads again, and for a tail
+    /// an interrupted append sealed past the commit it writes one more
+    /// `store.block` WARN — once per alternation, not once per handle.
+    /// `store::tail_proof` counts those lines; `docs/06-limits.md` (D-0688
+    /// section) states the cost. D-0957.
     ///
     /// The cache is what a handle verified, not what the disk holds now: a
     /// warm read serves the bytes that matched the sidecar when they were read,

@@ -1087,7 +1087,7 @@ pub const TABLE: [BitDef; 370] = [
     // crossing bars: exactly one on a bar that crosses, none on a bar that does
     // not, which is what makes them safe to AND with anything else.
     //
-    // Per SESSION, reset in the rollover beside `previous_mask` -- an overnight
+    // Per SESSION, reset in the rollover beside `last_side` -- an overnight
     // change of side is a gap and not a test of the level.
     plain(314, "first_cross_ema20"),
     plain(315, "second_cross_ema20"),
@@ -1258,7 +1258,7 @@ pub struct LevelCrossing {
 /// # Reset at the session boundary, like the crossing itself
 ///
 /// The count is per SESSION. `indicators::Evaluator` clears it in the rollover
-/// beside `previous_mask`, for the same reason: an overnight change of side is a
+/// beside `last_side`, for the same reason: an overnight change of side is a
 /// gap, not a test of the level, and this engine is intraday-only by
 /// `CLAUDE.md` §1.
 pub const CROSSINGS: [LevelCrossing; 17] = [

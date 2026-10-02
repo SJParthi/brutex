@@ -5884,8 +5884,10 @@ mod tests {
     ///
     /// # Why the second half is asserted on `side_of` and not on the folds
     ///
-    /// The row also asks that "a direction accepted and then ignored fails it",
-    /// and the obvious reading — compare the two walks' folds — cannot express
+    /// The row used to ask that "a direction accepted and then ignored fails
+    /// it". Since D-0387 the walk ignores the caller's direction by design
+    /// (WF-01), so the row was corrected by D-0957 to what this asserts. The
+    /// obvious reading — compare the two walks' folds — could never express
     /// it. Measured: on `sessions(12)` the long and short walks return fold for
     /// fold IDENTICAL results, with 12,531 candidates considered and priced in
     /// fold 1 and an exit chosen in both.

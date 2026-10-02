@@ -44637,6 +44637,137 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0957 — Fourteen stale or false written claims corrected against the code, and a test that reads them back — 2026-10-02
+
+**What happened.** A lane-3 audit named fourteen sentences in the documents,
+`CLAUDE.md`, `AGENTS.md` and a few source comments that the code contradicts:
+GAP5-50, UC-6, AC-whp-o1-1, AC-gates-o1-4, AC-whp-tb-3, AC-whp-tb-6,
+AC-whp-tb-7, ET-o1-proof-coverage-7, -8 and -9, UC-17,
+ET-strategies-trades-ranking-costs-9, R9-csr-o1-0 and
+ET-vocabulary-conditions-bits-3. Each was checked against the code at
+bc531316 before anything was edited; all fourteen held. No code path changes
+here. The corrections are to text, plus one test that was cited and missing.
+
+**What was false, and what is true now.**
+
+- **CSCV enumeration (GAP5-50).** Charter §4e said the paper's "equal-block
+  complementary enumeration" is carried. It is not. Bailey et al.'s
+  Algorithm 2.3 forms all `C(S,S/2)` training sets, so every complementary
+  pair is scored in both orientations; D-0476's layout keeps segment 0 on the
+  test side and scores `C(S-1,S/2)` = `C(S,S/2)/2` splits
+  (`cli::population_statistics_v2::canonical_split_count`). The swapped
+  orientation, whose in-sample winner can differ, is never scored; at `S = 2`
+  that is one split against the paper's two, so the estimate can only be 0
+  or 1. **The operator's choice between (a) a new CSCV policy version that
+  enumerates all `C(S,S/2)` and (b) keeping the half enumeration is not made
+  here.** This entry takes (b) only in the sense of making the documents
+  true: the charter row now names the deviation. D-0476 itself states
+  `C(S-1,S/2)` correctly and claims no paper authority for it, so it is not
+  amended. Choosing (a) needs its own entry and a new policy digest, since the
+  current one names `train-bit-zero-absent`.
+- **Non-Rust files (UC-6).** D-0211 and `docs/06-limits.md` §42 said the one
+  non-Rust file in the graph is `libc`'s `etc/libc-util.py`. On this host,
+  over the 140 registry packages `cargo tree --workspace -e normal,build,dev`
+  names, sixteen scripts ship in six crates (`libc`, `parquet`,
+  `parquet-format-safe`, `tracing`, `untrusted`, `zerocopy`). None is `.c`,
+  `.h`, `.S`, `.asm` or `.js`, and no build script runs any of them. §42 now
+  says so. D-0211 keeps its text, since this ledger is append-only; this
+  sentence is its correction.
+- **Ranked streaming (AC-whp-o1-1).** `docs/06-limits.md` §5 said the ranked
+  path no longer returns survivor vectors and that only ranked entry points
+  take the streamed result. `sweep-stored` and `sweep-audited-stored` run
+  `stored_month_kernel`, which calls `cli::and_checkpoint::run`. That walks
+  with the retaining checkpoint sink, and `runner::rank_checkpointed_sweep`
+  then ranks the whole retained `Sweep`. `docs/20-sweep-resume.md` said
+  encoding uses fixed scratch space. Its only production caller collects the
+  payload into a growing `BoundedBytes` `Vec` of up to 64 MiB − 96. Both
+  documents now say so. The retention itself is unchanged: this entry
+  records it and does not remove it.
+- **Gate 17's premise (AC-gates-o1-4).** `CLAUDE.md` §5, `AGENTS.md` and
+  `cli`'s structural-event doc said `cli` holds no loop over bars or
+  candidates. It holds both. `window_range_percentile` walks bars, and
+  `screen` walks every candidate in `by_evidence.par_iter()`, ticking a
+  relaxed counter per candidate and emitting once per `stride`. The
+  `CLAUDE.md` edit is the minimum that makes the sentence true. Gate 17's
+  list and its rule are unchanged.
+- **Crossing rows (AC-whp-tb-3).** CX-01..CX-03 described a `previous_mask`
+  field that has never existed. The state is `last_side` and
+  `crossings_seen`, reset at the rollover. The rows cited tests that never
+  drive an `Evaluator` and named an early return that is a `continue`. They
+  now cite the last-definite-side oracle in
+  `indicators/tests/crossing_known_readiness.rs`, which spans eight sessions.
+  CX-04 cited no test, and `table::CROSSINGS`' doc named
+  `the_crossing_map_names_only_live_two_sided_levels`, which nobody had
+  written. It is written now, in `crates/vocab/tests/table.rs`. CX-04 also
+  gave a false reason for the VWAP pair's absence: `cli` binds
+  `Availability::Present` for every cash equity. The two `previous_mask`
+  comments in `vocab::table` now name `last_side`.
+- **Checksums at birth (AC-whp-tb-6).** S-06 and S-06b, and the matching
+  comments in `store::block` and `store::emits`, said no writer sets
+  `FLAG_CHECKSUMS`. `store::file::initialise` passes it. S-06 is now ✓ on
+  `store::file::tests::a_flipped_byte_in_a_committed_block_is_refused_and_names_the_block`.
+  S-06b now describes the month an earlier build wrote flag-clear: it is read
+  unverified and gains no sidecar.
+- **R-03 (AC-whp-tb-7).** R-03 said the short walk differs from the long one,
+  which contradicts WF-01 (D-0387: the fold picks the side). The row now
+  claims what its test asserts: the short arm runs, and `side_of` maps the
+  two directions apart.
+- **Layer 8's ceiling (ET-o1-proof-coverage-7, UC-17).**
+  `docs/07-o1-architecture.md` said 1.4×. The engine harness asserts
+  `CEILING_PERMILLE = 3_000`.
+- **Stale limits (ET-o1-proof-coverage-8).** §5 tabulated `C(238, k)` and
+  counted memory for the deleted `seen` set. The table is now `C(328, k)`
+  from `LIVE`. At 473,490,550 rows, k=4 is 3.53× `DEFAULT_CEILING`. §7c said
+  there is no bar reader, that every row but C-08 is a ratio, and that
+  `/instruments` has no index. `docs/04-invariants.md` and §40.2 said no
+  bench times a syscall, yet `C-28` and `C-29` time `read_record`. Each is
+  corrected in place with a pointer here.
+- **C-03/C-04/C-E-10/C-E-11 (ET-o1-proof-coverage-9).** These were
+  "measurement pending". `cargo bench -p engine` at bc531316, 2026-10-02, on
+  a 4-core host shared with other builds (load average about 23):
+  C-E-10 1.000× and 1.028×, C-E-11 1.011× and 1.560×, against the 3.0×
+  ceiling. The bench times its own `HashSet<u32>` and `Vec<Itemset>`, not
+  the engine's call sites. The rows say so and are ◐, not ✓.
+- **Tail re-verification cost (R9-csr-o1-0).** The D-0688 limits section said
+  the tail's `fstat` is paid on the first verification per handle, and that
+  bit rot warns twice. A handle remembers one block, so every touch of the
+  tail after another block pays the `fstat`, both reads and one more
+  `store.block` WARN. `store::tail_proof` already counted that WARN. The
+  limits text and the `verified` field's doc now say it.
+- **§72 (ET-strategies-trades-ranking-costs-9).** §72 said the peaks are
+  walked for every profitable candidate in every cell. They are walked once
+  per trade, in pass two of `evaluate_timed`, and the per-cell reads are
+  indexed (EB-06).
+- **C-V-03/C-V-06 (ET-vocabulary-conditions-bits-3).** These rows named 234
+  live bits and position 279. The bench uses `LIVE` (328) and
+  `NEXT_FREE − 1` (369). C-V-06's "a scan does not" now says "an early-exit
+  scan does not", since a full scan is flat too. The bench's own comments
+  are corrected the same way. The dated 2026-08-11 figures keep their 234
+  and are labelled as such.
+
+**The check, so these cannot drift back.**
+`crates/vocab/tests/stale_claims.rs` reads the documents and compares them
+with the code:
+- §5's live count and every `C(n, k)` row against `LIVE`;
+- Layer 8's ceiling against the engine bench's constant;
+- C-V-03/C-V-06 against `LIVE` and `NEXT_FREE`;
+- the charter's CSCV row against `canonical_split_count`'s binomial;
+- §5's stored-door paragraph against `stored_month_kernel`;
+- the absence of `previous_mask` from every source and document but this
+  append-only ledger;
+- every test path that the eleven corrected rows cite, which must exist as a
+  `fn` in the named crate;
+- the sentences as they were written, which must not return.
+
+Every test in that file fails on bc531316 and passes after this change.
+It lives in `vocab` because two checks need `LIVE` and `NEXT_FREE` directly.
+`vocab`'s `[dependencies]` and `[dev-dependencies]` stay empty.
+
+**What is not claimed.** The UC-6 inventory is one host's registry on one
+date and is not checked mechanically. The engine bench ratios are one run
+on a loaded shared machine. No figure in this entry is a measurement on
+dedicated hardware.
+
 ### D-0945 — Remove the two crossing tests that called no production code; the real guard is `crossing_known_readiness.rs` — 2026-10-02
 
 **What was wrong (cloud audit AC-whp-tb-4).** `evaluator.rs` carried

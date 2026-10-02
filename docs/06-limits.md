@@ -72,26 +72,36 @@ a real sweep completes with its hardware recorded.
 
 **This section was rewritten because every number in it was wrong.** It tabulated
 `C(74, k)` — the predecessor repository's 74-condition vocabulary — at "32 bytes
-each", which was that repository's mask width. The vocabulary here has **238 live
-positions** and an `Itemset` is **56 bytes**: a 48-byte `ConditionMask` plus a
+each", which was that repository's mask width. The vocabulary here has **328 live
+positions** (`vocab::table::LIVE`, pinned by `table.rs`'s own popcount assertion;
+this said 238 until D-0957) and an `Itemset` is **56 bytes**: a 48-byte `ConditionMask` plus a
 `u64` hit count, asserted at compile time in `crates/engine` so this arithmetic
 cannot drift again. A mask widening now fails the build rather than quietly
 falsifying the table below.
 
-At 238 live conditions, holding one level exactly:
+At 328 live conditions, holding one level exactly:
 
-| k | C(238, k) | `Vec<Itemset>` | `HashSet<ConditionMask>` |
-|---:|---:|---:|---:|
-| 2 | 28,203 | 1.51 MiB | 1.29 MiB |
-| 3 | 2,218,636 | 118.49 MiB | 101.56 MiB |
-| 4 | 130,344,865 | 6.80 GiB | 5.83 GiB |
-| 5 | 6,100,139,682 | 318.15 GiB | 272.70 GiB |
-| 6 | 236,888,757,651 | 12.07 TiB | 10.34 TiB |
-| 7 | 7,851,170,253,576 | 399.87 TiB | 342.75 TiB |
-| 8 | 226,702,541,072,007 | 11,546.35 TiB | 9,896.87 TiB |
+| k | C(328, k) | `Vec<Itemset>` |
+|---:|---:|---:|
+| 2 | 53,628 | 2.86 MiB |
+| 3 | 5,827,576 | 311.23 MiB |
+| 4 | 473,490,550 | 24.69 GiB |
+| 5 | 30,682,187,640 | 1.56 TiB |
+| 6 | 1,651,724,434,620 | 84.13 TiB |
+| 7 | 75,979,323,992,520 | 3,869.76 TiB |
+| 8 | 3,048,670,375,199,865 | 155,273.98 TiB |
 
-The `HashSet` column is the raw key bytes and understates the real cost: hashbrown
-keeps a load factor near 7/8 and adds one control byte per slot.
+The table used to carry a `HashSet<ConditionMask>` column for the candidate
+`seen` set. That set is gone (`crates/engine/src/lib.rs`, "THE DEDUP SET IS
+GONE": the prefix join is injective), so the column described memory nothing
+allocates.
+
+**k=4 is the first whole-vocabulary level past the shipped candidate ceiling.**
+Its 473,490,550 rows are 3.53× `DEFAULT_CEILING = 2^27`, so a whole-vocabulary k=4
+level trips the ceiling's halt before it can be held; `out` alone would be 24.69 GiB before allocator
+overhead, the previous frontier, batches or ranking. At k=5 the join itself
+dominates everything: `|F|²/2` pair-unions over a whole k=4 frontier is
+1.12 × 10¹⁷ six-word ORs, independent of the bars.
 
 **k=4 is the first whole-vocabulary level at the shipped candidate ceiling.**
 Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` alone is
@@ -147,8 +157,18 @@ was already-retired survivors kept in `Sweep::levels`. Ranking 15–17 million
 retained survivors per rung happened afterwards, and the process died before a
 complete result existed.
 
-The ranked path no longer returns those survivor vectors. Both retained and
-streamed entry points execute the same `Ladder::walk_into`; the streamed sink
+**On the streamed ranked path** (`runner::Sweeper::run_prepared_ranked_by_reporting`,
+which `cli`'s audit doors reach through `audit_bars_work`) survivor vectors are
+no longer returned. **The two stored sweep doors are not on it.** `sweep-stored`
+and `sweep-audited-stored` both run `stored_month_kernel`, which calls
+`cli::and_checkpoint::run`: that walks with the RETAINING checkpoint sink
+(`Ladder::walk_checkpointed`, every level kept in `Sweep::levels`) and
+`runner::rank_checkpointed_sweep` ranks the complete retained `Sweep` after the
+walk ends. On those two doors retention is O(total frequent combinations), as
+it was before streaming, and everything below about the streamed result is
+about the other path. D-0957.
+
+Both retained and streamed entry points execute the same `Ladder::walk_into`; the streamed sink
 reduces every retired frontier to one fixed-size `Tally`. Its engine result is
 therefore **O(depth)**, plus the vocabulary-bounded exclusion list. Ranking
 keeps at most `keep` rows in the one global cut. Parallel scoring uses bounded
@@ -175,7 +195,8 @@ every survivor walk exactly the same levels to exactly the same extinction or
 halt. The cap decides only what the caller retains; the join, support test,
 subset prune and both budgets never read it. `Sweep` remains available to a
 plain caller that explicitly wants every survivor and accepts that retention
-cost; only ranked entry points take the streamed result.
+cost. Not every ranked entry point takes the streamed result: the two stored
+sweep doors take a retained, checkpointed `Sweep` (above).
 
 Whether the whole-vocabulary worst case is REACHABLE is **UNMEASURED**. It
 depends on how fast the frequent frontier collapses on real bars at a real
@@ -266,18 +287,25 @@ said which crates those were.
 
 Four things it still does not prove.
 
-**Absolute speed.** Every row but C-08 is a *ratio*. A change that made every
-operation uniformly ten times slower would pass all of them. C-08 is the one
+**Absolute speed.** When this was written every row but C-08 was a *ratio*,
+and a change that made every operation uniformly ten times slower would have
+passed all of them. **That is no longer the whole picture (D-0957):** floor-budget
+rows now exist beside the ratios — `C-29`, `C-09b`, `C-G-05`, `C-K-13`, `C-L-04`
+and `C-T-04` each divide one operation by a floor timed in the same run, which is
+the row a uniform slowdown cannot pass. A crate with only ratio rows still has
+this gap. C-08 is the one
 absolute-ish assertion and it is deliberately relative too — the retired kernel
 is measured in the same process, on the same machine, under the same load,
 because a nanosecond threshold would have to be guessed for hardware this
 repository has never run on.
 
 **Bar read cost.** C-01 used to claim it and name `store::bench::read_ratio`,
-which did not exist; there is no bar reader in `crates/store` at all. Any
-statement about the cost of verifying one randomly addressed bar is a
-projection about code not yet written. The per-block cost is measured; the
-per-bar ratio is not.
+which did not exist, and this paragraph said there was no bar reader at all.
+**Both are stale (D-0957):** `BarFile::read_record` exists, and `C-28` times it
+at index 0 and the last index across 1×, 10× and 100× files while `C-29` budgets
+it against its address arithmetic. Those benches call the real reader, so each
+measurement includes one `pread`. What is still not separated is the device's
+share of that time from the reader's.
 
 **Anything on `aarch64` in CI.** Every CI job runs `ubuntu-24.04`, `x86_64`.
 The numbers in D-0032 and D-0033 were taken on an Apple M4 Pro. The kernels
@@ -290,7 +318,9 @@ checks it on whichever host runs — but the *timings* on `x86_64` are
 just as loudly as one measuring the right thing. These measure what two
 specific defects did; they are not a general proof of constancy.
 
-**The instruments page.** C-11 covers `/` and nothing else. `/instruments`
+**The instruments page.** *Superseded by §24 (D-0042), kept as written below
+for the record (D-0957):* the orderings and filters now come from one build at
+load time, and only search stays linear. C-11 covers `/` and nothing else. `/instruments`
 filters, sorts and pages the merged map per request, which is O(matched · log
 matched) and **cannot** be made constant: a substring search over n rows is
 Ω(n) without a prepared index, and there is no index. What was fixed there is
@@ -2896,6 +2926,12 @@ calls on an already-open handle. Against the groww census's own numbers that is
 
 **The syscall latency is not measured and is not claimed.**
 `store::file::BarFile::read_record` states the same limit for the same reason:
+the operation is constant and the read underneath it is the device's. *(This
+said "no bench in this repository times a syscall". That is false: `C-28` and
+`C-29` time `read_record`, one `pread` each, and `C-T-01` times `emit`, which
+writes the log file. None of them separates the device's latency from the
+code's — D-0957.)* §14 carries what *is* measured.
+
 the operation is constant and the read underneath it is the device's. C-28 and
 C-29 do time `read_record`, `pread` included, but only warm — one fixed index,
 its page resident and its checksum block cached — so they bound neither a cold
@@ -3109,9 +3145,20 @@ checkable.
   `cc`. **Now none does.** The other native-looking packages were declarations
   only and still are — `core-foundation-sys` (macOS), `windows-sys` (Windows),
   and `js-sys`/`web-sys`, which resolve solely because `deny.toml` lists
-  `wasm32-unknown-unknown` as a graph target and are in no native build. The one
-  non-Rust file left anywhere in the graph is `libc`'s `etc/libc-util.py`, a
-  repository maintenance script no build executes.
+  `wasm32-unknown-unknown` as a graph target and are in no native build. This
+  said the one non-Rust file left in the graph was `libc`'s `etc/libc-util.py`.
+  **That was false (D-0957).** Measured over the 140 registry packages
+  `cargo tree --workspace -e normal,build,dev` names on `x86_64-unknown-linux-gnu`:
+  no package ships a `.c`, `.h`, `.S`, `.asm` or `.js` file, but sixteen scripts
+  ship in six crates — `libc` (1 `.py`), `parquet` (2 `.py`),
+  `parquet-format-safe` (1 `.sh`, plus `parquet.thrift`), `tracing` (1 `.sh`),
+  `untrusted` (2 `.sh`, plus the extensionless `mk/runner`) and `zerocopy`
+  (8 `.sh`, 1 `.bat`). None is referenced by a build script: `parquet` and
+  `tracing` declare `build = false`, `parquet-format-safe` and `untrusted` have
+  no `build.rs`, and the `build.rs` of `libc` and `zerocopy` run `rustc --version` (`libc` through
+  `RUSTC_WRAPPER` when set, and on FreeBSD or Emscripten a version query too)
+  — no script. Nothing checks
+  this mechanically; it is a reading of one host's registry on 2026-10-02.
 * D-0074 ruled that this was permitted and **declared**, on the reading that §2's
   four prohibitions are about what *this repository* contains and runs and that a
   third-party crate's own build script is neither. **That reading is no longer
@@ -4521,14 +4568,16 @@ of `crates/runner` that the suite does not catch; two are now killed
 once, and swapping `winner_mae` with `winner_mfe`, which inverts the sniper
 ratio. Gate 18 is the gate that should refuse them.
 
-**`grid::peak` is a loop the cost model omits.** `peak_adverse` and
-`peak_favourable` are each `for i in from..=to` and are called for every
-profitable candidate in every cell, so the real bar-visit count carries a
-`2 × variants × winners × span` term. The exit DECISION is genuinely three
-integer compares; the MAE/MFE measured beside it is not. The reduction is
-available and not taken: `excursion::crossings` already accumulates running
-`mae`/`mfe` and discards them, and because both are running MAXIMA the value at
-offset d IS `peak(entry, entry + d)`.
+**`grid::peak` is a loop, and this paragraph overstated where it runs.** It
+said `peak_adverse` and `peak_favourable` are called for every profitable
+candidate in every cell, carrying a `2 × variants × winners × span` term.
+**Stale, in the pessimistic direction (D-0957).** Their only non-test call
+sites are in pass two of `grid::evaluate_timed`, inside `for t in
+&timed.trades`: two walks of `entry_bar..=exit_bar` per trade of the candidate,
+once, not once per cell. The per-cell figures are indexed — `Crossings` records
+the running extreme price per offset and each read is two loads and a division
+(`docs/04-invariants.md` EB-06). The bar-visit term that remains is
+`2 × trades × span` per candidate evaluated.
 
 ---
 
@@ -8983,9 +9032,16 @@ it was written.
 
 ## A tail block sealed past the commit is admitted on proof, at a stated cost — D-0688
 
-- **The tail block's first verification per handle adds one `fstat`.** It is
-  how the reader learns whether the file holds whole records past the commit.
-  Other blocks pay nothing new. Not timed: no bench row covers this path.
+- **Every verification of the tail block adds one `fstat`, not only the first
+  per handle (D-0957 corrects "first").** It is how the reader learns whether
+  the file holds whole records past the commit. A handle remembers ONE verified
+  block, so each touch of the tail after a touch of another block verifies it
+  again: one `fstat`, two heap buffers, a `pread` of the covered bytes (at most
+  4,088), a 4-byte `pread` of the sidecar entry, a `pread` of up to 72 records
+  past the commit, the CRC and, for an
+  interrupted append, one `store.block` WARN. `store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`
+  counts that WARN per touch. Other blocks pay nothing new. Not timed: no bench
+  row covers this path.
 - **When records lie past the commit, the reader also reads them and extends
   the CRC over them.** Together with the committed covered bytes that is at
   most one 4,088-byte block, so the CRC work per verification is still bounded
@@ -9014,8 +9070,9 @@ it was written.
   and is read as the previous commit.** Both fail that slot's own checksum.
   Before D-0688 the previous commit's tail block, sealed over the newer
   records, was refused, so the damage surfaced as a refusal. Now the reader
-  serves the previous commit's bars. It warns twice, `store.header` for the
-  fallback and `store.block` for the interrupted append, and the run records
+  serves the previous commit's bars. It warns `store.header` for the fallback
+  and `store.block` for the interrupted append — the latter once per
+  re-verification of the tail, so alternating reads repeat it (D-0957), and the run records
   under that smaller sample's own identity. In the `cli` fixture that is 525
   of 600 bars (AF-12). Nothing marks the report itself: the fallback is visible
   in `/logs` and in the bar count, not as a line in the screen or the audit.

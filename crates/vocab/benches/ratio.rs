@@ -21,7 +21,7 @@
 //! * a miss in **word 0** against a miss in **word 5**, because an early-exit
 //!   loop would return sooner on the first and that is precisely the
 //!   implementation `hits` refuses to be;
-//! * a **1-bit** candidate against a **234-bit** one, because the cost must not
+//! * a **1-bit** candidate against one requiring every live bit (`LIVE`), because the cost must not
 //!   depend on how much the candidate requires — that is what lets the Apriori
 //!   ladder walk to any depth without the per-test cost growing with `k`.
 //!
@@ -182,14 +182,15 @@ fn all_live_bits() -> ConditionMask {
 ///
 /// The rows above measure the MASK. They say nothing about the TABLE, and the
 /// two are different operations on different data — one is six words of
-/// register arithmetic, the other is a bounds-checked index into 280 rows of
-/// static memory.
+/// register arithmetic, the other is a bounds-checked index into `TABLE`'s
+/// rows (370 today) of static memory.
 ///
 /// # Why the index has to vary, and why a miss is included
 ///
-/// A direct index costs the same everywhere; **a scan does not**. Looking up
-/// position 0, position 279 and a position past the end is what separates them:
-/// a linear search would be flat at 0 and linear at 279, and would walk the
+/// A direct index costs the same everywhere; **an early-exit scan does not**.
+/// Looking up position 0, the last allocated position (`NEXT_FREE - 1`) and a
+/// position past the end is what separates them: an early-exit linear search
+/// would be cheap at 0 and dear at the last position, and would walk the
 /// whole table before answering the miss. That is the only shape this row can
 /// usefully refuse, so it is the shape it measures.
 fn a_condition_lookup_costs_the_same_wherever_it_lands() -> bool {
@@ -291,7 +292,7 @@ fn a_miss_costs_the_same_in_every_word() -> bool {
 /// C-V-03 — HOW MUCH the candidate requires does not change the cost.
 ///
 /// The claim §6 rests on. The Apriori ladder walks upward from k=1 with no
-/// depth parameter, and that is only affordable if evaluating a k=234
+/// depth parameter, and that is only affordable if evaluating a k=|LIVE|
 /// combination costs what a k=1 one costs. A per-bit cost would make the
 /// ladder's total work quadratic in depth and the absent parameter would be a
 /// performance bug rather than a design decision.
