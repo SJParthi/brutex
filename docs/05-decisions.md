@@ -43718,3 +43718,47 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0961 — Close a Search V4 signal prefix at the last minute its session traded, not at `ts + rung − 1min` — 2026-10-02
+
+**What was wrong (W2-cli3-7).** `CandidateSearchColumnBuilderV1::build` in
+`crates/cli/src/candidate_universe.rs` demanded the exact closing minute of a
+prefix's final signal bar as `ts + rung − 60 s`, with no session clamp. The
+store folds every intraday rung on a grid anchored at the 09:15 open, so a
+rung that does not divide the 375-minute session (2, 10, 30 and 60 min, all in
+`LEDGER_RUNGS`) ends each day with a SHORT bar: the 60-minute bar stamped 15:15
+holds only 15:15-15:29. For that bar the builder demanded 16:14, the minute
+context ends at 15:29, and every Search V4 prefix ending on a session's final
+bar at those rungs was refused "lacks exact closing minute". Rungs 1, 3, 5 and
+15 min divide 375 and were unaffected.
+
+**The change.** The close is now `session_close_minute_v1`: the latest minute
+of the open-anchored bucket that lies inside a measured window of the day, as
+`pull::calendar::kind_of` reports it. That is the same authority the stored
+calendar receipt and bucket geometry use, so no session literal enters `cli`.
+A full bucket still closes at `ts + rung − 1min`. A short final bar closes at
+the window end (15:29 on a standard day). A two-window day (the 2024-03-02
+disaster-recovery Saturday, the 2021-02-24 outage) and the Muhurat session
+close at the end of the window the bucket meets. The exact-close refusal is
+unchanged: a short final bar whose 15:29 minute is absent is still refused,
+naming 15:29. A day with no measured window (`Closed`, `OpenLengthUnmeasured`,
+`Unmeasured`), a bucket that meets no window, a length that is not a whole
+number of minutes, and a stamp off the IST minute grid are each refused with
+their own reason. Nothing falls back to the old formula.
+
+**Cost.** One `kind_of` lookup plus a walk over at most
+`pull::calendar::MAX_WINDOWS` (2) windows per `build` call: O(1).
+
+**Honest limit.** `kind_of` is venue-blind. An NSE cash-equity key on a day
+whose dated closing-auction schedule ends continuous trading earlier than the
+calendar window is not modelled here; the same gap is GAP12-6 in
+`stored.rs`, and a shared per-venue session helper is that item's work. Until
+then such a prefix is refused at the exact-close check, loudly, as before.
+
+**Tests.** `search_v4_prefix_ending_on_the_short_final_bar_closes_at_the_session_last_minute`
+failed before the change (rung 60: "lacks exact closing minute
+1735814640000000", which is 16:14 IST) and passes after, for rungs 60, 30, 10,
+2, 15, 5 and 1. `search_v4_short_final_bar_without_its_1529_minute_is_still_refused`,
+`session_close_minute_clamps_to_every_measured_window_end` and
+`session_close_minute_refuses_without_a_measured_window` pin the remaining
+cases, including both ends of `i64`. Invariant CU-SV4-CLOSE-D0961.

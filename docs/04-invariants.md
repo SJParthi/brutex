@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Search V4 short final bar closes at the session's last minute — W2-cli3-7 (D-0961)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| CU-SV4-CLOSE-D0961 | A Search V4 signal prefix whose final bar is the store's short last bucket of a session (rungs 2, 10, 30, 60 min) demands its exact close at the last minute the measured `pull::calendar` window holds (15:29 on a standard day), binds the minute context through that minute and no further, and still refuses when that minute is absent. Full buckets close at `ts + rung − 1min` unchanged; days with no measured window, buckets meeting no window, malformed lengths and off-grid stamps are refused by name. | `cli::candidate_universe::tests::search_v4_prefix_ending_on_the_short_final_bar_closes_at_the_session_last_minute`, `cli::candidate_universe::tests::search_v4_short_final_bar_without_its_1529_minute_is_still_refused`, `cli::candidate_universe::tests::session_close_minute_clamps_to_every_measured_window_end`, `cli::candidate_universe::tests::session_close_minute_refuses_without_a_measured_window` | ✓ |
