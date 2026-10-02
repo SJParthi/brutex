@@ -11178,6 +11178,41 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## The autopilot's stall list is bounded by the calendar, not constant — D-0949, 2 October 2026
+
+**What changed.** Until D-0949 the list grew by one entry per failed
+reconsideration for the life of the process (W1-api1-2, W1-api1-8), so
+`reconsider`, `stall_note`, `survey`'s clone and `Status::json` had no bound at
+all. A stall is now keyed by (month, rung) and a repeat updates its entry, so
+each feed's list holds at most one entry per month per rung.
+
+**The bound, stated.** For one feed, `stalls.len() ≤ 2 × months_owed(floor,
+yesterday)`: two rungs (`RUNGS`), and `months_owed` is the inclusive month count
+from the feed's floor to yesterday. Groww's floor is 2020-01-01, so on
+2026-10-02 that is `2 × 81 = 162` entries; a rolling floor stays at or below
+it. The walks cost:
+
+| operation | cost | how often |
+|---|---|---|
+| `FeedState::enter` | O(1), four fields swapped | once per feed per pass |
+| `SeriesCache::get` | O(1): one read lock, one compare; O(U log U) rebuild once per rung per masters parse | once per pass |
+| `FeedState::record_stall` / `unstall` | O(S_f), one feed's list | once per stall, once per completed month |
+| `reconsider`, `stall_note` | O(Σ S_f), every feed's list | once per idle pass (every `IDLE_POLL_SECS`) |
+| `Status::json` | O(Σ S_f) plus the bytes of each reason, under the status mutex | once per `GET /autopilot.json` or control request |
+
+**Why not O(1).** `Status::json` must render every stall, so it cannot cost less
+than the list's length; `reconsider` picks the oldest due stall across feeds,
+which needs an ordered structure to do in less than a scan, and it runs at most
+once a minute. The bound is in months of calendar, not in failures or in time
+the process has been up. Not timed; the counts are what
+`the_stall_list_is_one_entry_per_month_however_many_passes_fail` and
+`the_rung_work_lists_are_built_once_per_masters_parse` measure.
+
+**Per-stall attempts.** At most `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = 9
+vendor-bound attempts per (month, rung) per process, which is twice the 9 that
+§70 and the doc comments state per month, because the day rung and the minute
+rung each owe the month their own file.
+
 ## The anchored daily cursor under refused signal bars — D-0942, 2 October 2026
 
 * **Before.** Each refused signal bar on the stored-daily anchored path walked

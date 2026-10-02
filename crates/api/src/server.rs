@@ -5302,10 +5302,12 @@ impl Site {
             .parsed
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = held.generation.wrapping_add(1);
         *held = Parsed {
             read,
             at: parsed_at,
             targets,
+            generation,
         };
         Ok(summary)
     }
@@ -5368,6 +5370,7 @@ impl Site {
                 // stamp would answer a different one.
                 at: std::time::SystemTime::now(),
                 targets,
+                generation: 0,
             }),
             censuses,
             series,
@@ -5537,6 +5540,14 @@ pub struct Parsed {
     pub at: std::time::SystemTime,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
+    /// Zero at load, and moved by every [`Site::reparse`] that swaps a universe
+    /// in. A refused reparse leaves it alone, as it leaves the universe.
+    ///
+    /// A counter rather than [`Self::at`], because two parses can carry the
+    /// same timestamp on a coarse or stepped clock and a counter cannot.
+    /// `autopilot::SeriesCache` compares it to know whether its work lists are
+    /// still the universe's (W1-api1-1, D-0949).
+    pub generation: u64,
 }
 
 /// How many instruments each spot target names.

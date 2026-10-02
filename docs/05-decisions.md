@@ -48538,6 +48538,87 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0949 — Give each autopilot rung its own frontier, key stalls by month and rung, and cache the rung work lists per masters parse — 2026-10-02
+
+**The defects (audit findings W1-api1-2, W1-api1-8, W1-api1-7, W1-api1-1, all in
+`crates/api/src/autopilot.rs`).**
+
+* *W1-api1-8 (bug) and W1-api1-2 (cost).* `FeedState::observe` pushed a fresh
+  `Stall { retried: 0, .. }` every time a month burned `MAX_MONTH_ATTEMPTS`.
+  `reconsider` puts a stalled month back on the ladder, so a reconsidered month
+  that failed again added a second entry with a full allowance. Nothing ever
+  removed an entry: not a completion, not a revive. Retries per stalled month
+  were therefore unbounded (one every `STALL_RECHECK_SECS` while idle), the
+  stated bound of `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = 9 attempts per
+  month was not enforced, and the list grew by one entry per failure for the life
+  of the process. `reconsider`, `stall_note`, the survey's clone and
+  `Status::json` (under the status mutex, on every `GET /autopilot.json`) each
+  walk that list, so their cost grew without bound too. A test comment said the
+  stall "leaves only when the month actually completes"; no code did that.
+* *W1-api1-7 (bug).* `fly` alternates the day and minute rungs over one feed
+  table, and `FeedState` had one frontier. A day pass that completed month F
+  moved it to F+1, and the next minute pass scanned upward from F+1, so minute
+  months below the day frontier were never examined for the life of the process,
+  and every restart repeated it. The per-month counters (`attempts`, `dry`,
+  `backoff`) crossed between rungs the same way.
+* *W1-api1-1 (cost).* `fly` called `tracked_series` on every pass: a filter of
+  the whole merged master universe, `sort_unstable` and `dedup`, O(U log U) for
+  U rows (2,787 real, 50,000 in the bench fixture), back to back while working
+  and every `IDLE_POLL_SECS` while idle. Its doc comment said it was computed
+  once at start.
+
+**The choice.**
+
+1. *One place per rung.* `FeedState` gains `rung` (which rung its live
+   `frontier`, `attempts`, `dry` and `backoff` belong to) and `parked: Place`
+   (the other rung's four fields). `RUNGS = [Day1, Minute1]` names the two
+   rungs `fly` alternates. `FeedState::enter(rung)` swaps the four fields in
+   O(1), and is a no-op for the live rung; `round` calls it for every feed
+   before anything else, so every caller of `round` gets the right place.
+   Halts, the credential re-read allowance, `months_done` and `last_reason`
+   stay per feed: a dead credential or a full disk is not a rung's fault.
+2. *A stall is keyed by (month, rung).* `Stall` gains `rung`.
+   `FeedState::record_stall` updates an existing entry for the same key: its
+   `attempts` add up (saturating at `u8::MAX`), its reason is replaced, and its
+   `retried` and `at_unix` are kept, so a reconsidered month that fails again
+   does not renew its allowance. `observe`'s `complete` arm calls
+   `FeedState::unstall`, which removes the entry for the live rung's frontier
+   month. `reconsider` moves the stall's own rung: the live frontier when the
+   stall's rung is live, otherwise `parked`. The 9-attempt bound is now
+   measured by a test, not only stated. `/autopilot.json` names each stall's
+   `timeframe`.
+3. *The work lists are cached per masters parse.* `server::Parsed` gains
+   `generation`, zero at load and moved by every `Site::reparse` that swaps a
+   universe in (a refused reparse leaves both alone). `SeriesCache` holds one
+   list per rung timeframe with the generation it was built at; a pass costs
+   one read lock and one integer compare, and a rebuild happens once per rung
+   per parse. `fly` reads both its opening instrument count and every pass's
+   list through it.
+
+**What is O(1) and what is not.** `enter` and the cache lookup are O(1) per
+pass. The stall list is bounded but its walks are not O(1): `record_stall` and
+`unstall` scan one feed's list, and `reconsider`, `stall_note` and
+`Status::json` scan every feed's. Each list now has at most one entry per
+(month, rung), so it is bounded by twice the months between the feed's floor and
+yesterday. `Status::json` must render every entry, so its cost cannot be below
+the list's length. `docs/06-limits.md` states the bound.
+
+**Rejected.** (1) Two feed tables, one per rung: halts, store probes and the
+status page would split in two, and a dead credential would be met twice.
+(2) A map keyed by (month, rung) for O(1) dedup: it would not make
+`Status::json` or `stall_note` O(1), and the bounded scan runs once per
+`MAX_MONTH_ATTEMPTS` failed ticks. (3) Removing a stall when the month is passed
+by the dry-round rule: a dry month stored nothing, and the stall is the only
+record that it was ever asked for. (4) Keying the cache on `Parsed::at`: two
+parses on a coarse or stepped clock can carry one timestamp, and a counter
+cannot.
+
+**Not changed.** `docs/06-limits.md` §70 still describes the minute rung as
+pinned; D-0153's order and §70's text predate the alternation and are left for
+their own correction.
+
+Invariants AU-W1A-a through AU-W1A-d; `docs/06-limits.md` has the bound.
+
 ### D-0948 — Enforce §8's re-read-and-halt on the pull paths that ship, and decide a credential halt only from that comparison — 2026-10-02
 
 **What was wrong.** These are findings GAP2-36, GAP2-37 and GAP2-38.
