@@ -5390,6 +5390,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Daily reference records are prices — ET-indicators-1 / UC-3 (D-0941)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A daily record with any nonpositive price cannot become an anchored reference, eligible or excluded: `DailyReference::new` refuses it as `Corrupt::PriceNotPositive`, exactly as `Evaluator::step` refuses the same record, earlier structural refusals keep their names, a one-paisa record is still admitted and anchors the next day, and the stored caller refuses the whole daily context by name rather than dropping the record | `indicators::anchored::tests::a_nonpositive_daily_record_is_refused_exactly_as_the_evaluator_refuses_it`; `indicators::anchored::tests::the_smallest_positive_daily_record_is_still_an_eligible_anchor`; `cli::stored::tests::a_nonpositive_stored_daily_record_refuses_the_daily_context_by_name` | ✓ |
+
 ### Reads are served from the bytes that were checksummed — ET-bars-candles-store-0 (D-0912)
 
 | ID | Invariant | Test that proves it | Status |

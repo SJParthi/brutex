@@ -98,12 +98,21 @@ impl DailyReference {
     ///
     /// # Errors
     ///
-    /// [`DailyReferenceRefusal::Corrupt`] for malformed OHLCV, or
+    /// [`DailyReferenceRefusal::Corrupt`] for malformed OHLCV, including a
+    /// record with a nonpositive price ([`Corrupt::PriceNotPositive`]), or
     /// [`DailyReferenceRefusal::Unusable`] when an eligible bar cannot produce
     /// all previous-day levels.  An excluded record need not produce levels,
     /// because no family is allowed to consume it.
     pub fn new(bar: Candle, eligibility: DailyEligibility) -> Result<Self, DailyReferenceRefusal> {
-        bar.check().map_err(DailyReferenceRefusal::Corrupt)?;
+        // `check_evaluable`, not `check` (D-0941). `check` admits an all-zero
+        // record by contract, and an ELIGIBLE all-zero daily bar used to install
+        // a 0/0/0 pivot, CPR and Fibonacci ladder, Prev5 and PreviousSession that
+        // fired on every bar of the next day, while `Evaluator::stepped` refuses
+        // the very same record as `PriceNotPositive`. An excluded record is held
+        // to the same rule: it is offered and counted as evidence, and a record
+        // that is not a price is not evidence of a session.
+        bar.check_evaluable()
+            .map_err(DailyReferenceRefusal::Corrupt)?;
         let range = bar
             .range()
             .ok_or(DailyReferenceRefusal::Corrupt(Corrupt::RangeOverflows))?;
@@ -1109,13 +1118,108 @@ mod tests {
             DailyReference::new(impossible_span, DailyEligibility::Eligible),
             Err(DailyReferenceRefusal::Corrupt(Corrupt::RangeOverflows))
         );
-        let level_overflow = Candle::new(ts(20_000, 0), 0, i64::MAX / 2, 0, 0, 1, OI_NULL);
+        let level_overflow = Candle::new(ts(20_000, 0), 1, i64::MAX / 2, 1, 1, 1, OI_NULL);
         assert_eq!(
             DailyReference::new(level_overflow, DailyEligibility::Eligible),
             Err(DailyReferenceRefusal::Unusable(Unusable::LevelOverflows))
         );
     }
 
+    /// D-0941 (ET-indicators-1, UC-3). `DailyReference::new` validated with
+    /// `check`, which admits an all-zero record by contract, so an ELIGIBLE
+    /// 0/0/0 daily bar installed a zero pivot/CPR/Fibonacci ladder, `Prev5` and
+    /// `PreviousSession` and fired pivot-family bits on every bar of the next day,
+    /// while `Evaluator::stepped` refuses the same record as `PriceNotPositive`.
+    /// Both doors now give the same answer for every nonpositive shape, under
+    /// both eligibilities, and the smallest positive record is still admitted.
+    #[test]
+    fn a_nonpositive_daily_record_is_refused_exactly_as_the_evaluator_refuses_it() {
+        let day = 20_000;
+        let at = ts(day, 0);
+        let nonpositive = [
+            ("all zero", Candle::new(at, 0, 0, 0, 0, 0, OI_NULL)),
+            (
+                "low zero, high positive",
+                Candle::new(at, 5, 10, 0, 5, 1, OI_NULL),
+            ),
+            ("negative low", Candle::new(at, 5, 10, -5, 5, 1, OI_NULL)),
+            (
+                "all negative, ordered",
+                Candle::new(at, -10, -5, -20, -10, 1, OI_NULL),
+            ),
+            (
+                "low at i64::MIN + 1",
+                Candle::new(at, 0, 0, i64::MIN + 1, 0, 1, OI_NULL),
+            ),
+            (
+                "open and close at low zero",
+                Candle::new(at, 0, 7, 0, 0, 1, OI_NULL),
+            ),
+        ];
+        for (name, bar) in nonpositive {
+            for eligibility in [DailyEligibility::Eligible, DailyEligibility::Excluded] {
+                assert_eq!(
+                    DailyReference::new(bar, eligibility),
+                    Err(DailyReferenceRefusal::Corrupt(Corrupt::PriceNotPositive)),
+                    "{name} ({eligibility:?}) must not become reference evidence"
+                );
+            }
+            // The ordinary evaluator refuses the same record for the same
+            // reason, so the anchored door and the signal door agree.
+            let mut ordinary = Evaluator::new(
+                Widths::pinned().expect("pinned widths are valid"),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+            );
+            assert_eq!(
+                ordinary.step(&bar),
+                Err(Corrupt::PriceNotPositive),
+                "{name}: the evaluator's own refusal"
+            );
+        }
+        // Precedence is unchanged: an earlier structural refusal keeps its name
+        // rather than being renamed to the sign refusal.
+        let straddling = Candle::new(at, 0, i64::MAX, i64::MIN, 0, 1, OI_NULL);
+        assert_eq!(
+            DailyReference::new(straddling, DailyEligibility::Eligible),
+            Err(DailyReferenceRefusal::Corrupt(Corrupt::RangeOverflows))
+        );
+        let negative_volume_and_price = Candle::new(at, 0, 0, 0, 0, -1, OI_NULL);
+        assert_eq!(
+            DailyReference::new(negative_volume_and_price, DailyEligibility::Eligible),
+            Err(DailyReferenceRefusal::Corrupt(Corrupt::NegativeVolume))
+        );
+    }
+
+    /// The boundary on the admitted side: one paisa is a price. A one-paisa
+    /// eligible record is admitted, anchors the next day, and the anchor it
+    /// installs is that record and no other.
+    #[test]
+    fn the_smallest_positive_daily_record_is_still_an_eligible_anchor() {
+        let one = Candle::new(ts(20_000, 0), 1, 1, 1, 1, 0, OI_NULL);
+        let references = [DailyReference::new(one, DailyEligibility::Eligible)
+            .expect("a one-paisa record is a price")];
+        assert_eq!(
+            DailyReference::new(one, DailyEligibility::Excluded).map(|r| r.eligibility()),
+            Ok(DailyEligibility::Excluded)
+        );
+        let mut evaluator = evaluator(&references);
+        evaluator
+            .step(&signal_bar(20_001, OPEN_IST_MINUTE, 2_500_000))
+            .expect("signal is valid");
+        assert!(evaluator.has_yesterday());
+        let snapshot = evaluator.current_reference().expect("installed");
+        assert_eq!(
+            (
+                snapshot.ist_day,
+                snapshot.low,
+                snapshot.high,
+                snapshot.range
+            ),
+            (20_000, 1, 1, 0)
+        );
+        assert_eq!(evaluator.reference_census().installed, 1);
+    }
     #[test]
     fn full_ohlcv_and_range_are_available_for_audit() {
         let references = [eligible(20_000, 2_500_000)];

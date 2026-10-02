@@ -4730,6 +4730,34 @@ mod tests {
         assert!(why.contains("cannot be called a holiday"), "{why}");
     }
 
+    /// D-0941. A stored all-zero (or any `low <= 0`) 1day record used to pass
+    /// `DailyReference::new` and become the next day's eligible anchor. It now
+    /// refuses the whole daily context by name, rather than being dropped
+    /// silently or substituted with an older anchor.
+    #[test]
+    fn a_nonpositive_stored_daily_record_refuses_the_daily_context_by_name() {
+        let signal = [
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000),
+            candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100),
+        ];
+        for (low, high) in [(0, 0), (0, 100), (-100, 100)] {
+            let mut bad = candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 0);
+            bad.open = low;
+            bad.close = low;
+            bad.low = low;
+            bad.high = high;
+            let daily = daily_span(vec![
+                candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+                bad,
+            ]);
+            let why = daily_context_from_span(daily, &signal)
+                .expect_err("a nonpositive daily record is not reference evidence");
+            assert!(why.contains("not usable reference evidence"), "{why}");
+            assert!(why.contains("PriceNotPositive"), "{why}");
+            assert!(why.contains(&bad.ts_micros.to_string()), "{why}");
+        }
+    }
+
     fn minute_on_ist_day(day: i64, minute: i64, close: i64) -> Candle {
         let mut bar = candle_on_ist_day(day, close);
         bar.ts_micros = bar
