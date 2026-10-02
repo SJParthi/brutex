@@ -468,6 +468,8 @@ pub fn derive(
 /// in [`Report::withheld`].
 ///
 /// Cost: one step per civil month in the span and one slot per day withheld.
+/// `proved` is walked in lockstep with the months, both ascending, so each
+/// proved month is passed exactly once and no month pays a membership probe.
 fn withhold_unproved(
     calendar: &mut Calendar,
     proved: &std::collections::BTreeSet<(u16, u8)>,
@@ -484,9 +486,12 @@ fn withhold_unproved(
     else {
         return;
     };
+    let mut ahead = proved.iter().peekable();
     while i64::from(month.days_from_epoch()) <= last {
         let end = month.end_of_month();
-        if !proved.contains(&(month.year(), month.month())) {
+        let key = (month.year(), month.month());
+        while ahead.next_if(|held| **held < key).is_some() {}
+        if ahead.next_if_eq(&&key).is_none() {
             let changed = calendar.withhold_closed(
                 i64::from(month.days_from_epoch()),
                 i64::from(end.days_from_epoch()),
