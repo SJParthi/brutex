@@ -44637,6 +44637,47 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0945 — Remove the two crossing tests that called no production code; the real guard is `crossing_known_readiness.rs` — 2026-10-02
+
+**What was wrong (cloud audit AC-whp-tb-4).** `evaluator.rs` carried
+`mod band_crossing_tests`, whose only import was the `Side` enum. Its two tests,
+`an_unknown_side_does_not_erase_the_side_before_it` and
+`the_first_definite_side_of_a_session_is_recorded_and_not_reported`, each
+rebuilt the crossing rule in a local loop ("the rule, applied exactly as
+`crossings_of` applies it") and asserted on that loop's count. Neither called
+`crossings_of` or any public path to it. The first test's doc said it "fails
+the moment the code goes back to reading the previous bar", and the earlier
+entry in this ledger that introduced the last-definite-side rule says the same
+test "asserts both halves". Neither statement was true of the code: a change to
+`crossings_of` could not reach either test.
+
+**Measured, not argued.** Two mutations of `crossings_of` were applied by hand
+and each was run against both the in-file module and
+`crates/indicators/tests/crossing_known_readiness.rs`, which drives the public
+`Evaluator::step_known`:
+
+| Mutation | `band_crossing_tests` (2) | `crossing_known_readiness.rs` (3) |
+|---|---|---|
+| An `Unknown` bar clears the remembered side (the previous-bar rule) | 2 passed | 2 FAILED, 1 passed |
+| The first definite side of a session is reported as a crossing | 2 passed | 3 FAILED |
+
+The failures were `a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it`
+(truth bit, line 201 / 200) and
+`every_crossing_and_ordinal_matches_a_last_definite_side_oracle_including_known_non_events`
+(`known bit296 day1 minute2` under the first mutation, `bit313 day0 minute1`
+under the second), plus
+`available_crossing_negation_survives_column_handoff_and_refusal_is_transactional`
+under the second. Both mutations were reverted.
+
+**The change.** Test-only plus one doc paragraph. The module is deleted rather
+than rewritten: the integration tests already reach the production function
+and already fail under both mutations, so a rewritten in-file pair would have
+duplicated them. `crossings_of`'s doc now names the tests that do guard it,
+the path they reach it by, and why the old module is gone. No production line
+changed, so no test fails before and passes after; the evidence for this entry
+is the mutation table above. Not added to `docs/11-findings.md`, which records
+the 2026-08-11 sweep and its digest; the cloud audit's id is cited here.
+
 ### D-0941 — A daily reference record must be a price: `DailyReference::new` validates with `check_evaluable`, not `check` — 2026-10-02
 
 **What was found.** ET-indicators-1, and UC-3 is the same defect.
