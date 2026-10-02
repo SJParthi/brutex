@@ -1583,7 +1583,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // Nothing measured this. `crates/runner/benches/ratio.rs` has no row
     // covering `edge` or the ranking pass, and `rank::rank`'s own doc says so.
     // The change is argued from the shape, not from a timing. §3 rule 6.
-    let mut recent: std::collections::VecDeque<(usize, f64)> =
+    let mut recent: std::collections::VecDeque<(usize, f64, usize)> =
         std::collections::VecDeque::with_capacity(
             horizon_bars.min(forward.bars_len.saturating_add(1)),
         );
@@ -1711,14 +1711,23 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // oldest and the moment it falls out of range every entry behind it is
         // in range. Dropping from the front is therefore complete, not a
         // heuristic.
-        while let Some(&(older, _)) = recent.front() {
-            if source.saturating_sub(older) >= horizon_bars {
+        //
+        // TWO WAYS OUT OF RANGE, AND THE SECOND IS THE SESSION -- D-1171. A
+        // pair at a bar gap of `H` or more shares no bar. Neither does a pair
+        // whose OLDER window had already EXITED by this entry: `forward` ends
+        // every window at the earlier of the horizon and that day's forced
+        // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
+        // apart and share nothing at any horizon. The gap alone paired them at
+        // `H >= 23` with a weight above zero. Exits only advance with the entry
+        // (see `WindowExtremes`), so this half drains from the front too.
+        while let Some(&(older, _, older_exit)) = recent.front() {
+            if source.saturating_sub(older) >= horizon_bars || older_exit <= source {
                 recent.pop_front();
             } else {
                 break;
             }
         }
-        for &(older, x_older) in &recent {
+        for &(older, x_older, _) in &recent {
             let gap = source.saturating_sub(older);
             // `gap` is in `1..horizon_bars` by the drain above, so the weight is
             // in `(0, 1)` and never the `d = 0` self-pair, which is `m2`'s job.
@@ -1731,7 +1740,10 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
             cross_b += w * (x_older + x);
             cross_c += w;
         }
-        recent.push_back((source, x));
+        // `exit_at` is `Some` wherever `at` was, which is the only way here; the
+        // `source` fallback would share no bar with the next hit and drain at
+        // once, so it could not pair anything that does not overlap.
+        recent.push_back((source, x, forward.exit_at(source).unwrap_or(source)));
     }
 
     // ONE ASSEMBLY POINT FOR BOTH EXITS. The early return and the final one
@@ -1825,6 +1837,29 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     // defect into the correction term. This keeps the protection Welford was
     // for.
     if m2 <= 0.0 {
+        return assemble(0.0);
+    }
+    // ONE WINDOW HOLDING THE WHOLE SAMPLE IS NO EVIDENCE EITHER -- D-1171.
+    //
+    // The queue is drained only when a pair stops sharing bars, so if it still
+    // holds every observation, every pair overlapped: the Bartlett bandwidth
+    // covers the whole sample. Newey-West needs a bandwidth well inside the
+    // sample. At this extreme every weight tends to one, and the corrected sum
+    // tends to `(Σ (x - m))²`, which is ZERO by the definition of the mean. What
+    // survives is rounding. Measured on the empty mask over
+    // `synthetic::sessions(6)`, whose one swept day is one shared window at
+    // `H = u32::MAX`: 353 hits scored `t` = 14,175.6 without this check.
+    // Before the session drain the whole slice was one window, and the audit
+    // measured `t` = 24,673.4 and 116,747.9 at 8 and 32 sessions and 0 at
+    // 128, where the residue came out negative. `rank::walk` sorts such a
+    // figure above every real finding.
+    //
+    // `Horizon::bars` refuses only zero and `BRUTEX_HORIZON_BARS` parses any
+    // `u32`, so this is reachable from the operator's own knob. The session
+    // drain above confines a pair to one day, so a sample spread over two or
+    // more days always leaves the queue. Only a sample inside one shared
+    // window reaches this line.
+    if u64::try_from(recent.len()).is_ok_and(|held| held == n) {
         return assemble(0.0);
     }
     #[allow(
@@ -3661,5 +3696,141 @@ mod window_tests {
             "the doubling build is back"
         );
         assert!(live.contains("WindowExtremes::new()"), "forward must slide");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod overlap_tests {
+    use super::{Horizon, edge, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, ist_day};
+    use vocab::ConditionMask;
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// Every measured hit of the empty mask: `(source, move, IST day)`.
+    fn hits(bars: &[Candle], column: &Column, f: &super::Forward) -> Vec<(usize, f64, i64)> {
+        column
+            .sources()
+            .iter()
+            .filter_map(|&s| {
+                let x = f.at(s)?;
+                let day = ist_day(bars.get(s)?.ts_micros);
+                #[allow(clippy::cast_precision_loss, reason = "a test fixture's paisa move")]
+                Some((s, x as f64, day))
+            })
+            .collect()
+    }
+
+    /// The Newey-West `t` written out pair by pair, from its definition rather
+    /// than from `edge`'s accumulators: Bartlett weight `1 - d/H` on the bar gap
+    /// `d`, for pairs on the SAME IST day closer than `H`, and nothing else.
+    fn reference_t(hits: &[(usize, f64, i64)], horizon: u32) -> f64 {
+        #[allow(clippy::cast_precision_loss, reason = "a test fixture's count")]
+        let n = hits.len() as f64;
+        let mean = hits.iter().map(|h| h.1).sum::<f64>() / n;
+        let mut sum = hits.iter().map(|h| (h.1 - mean).powi(2)).sum::<f64>();
+        for (i, a) in hits.iter().enumerate() {
+            for b in hits.iter().skip(i + 1) {
+                let gap = b.0 - a.0;
+                if a.2 == b.2 && gap < horizon as usize {
+                    #[allow(clippy::cast_precision_loss, reason = "a bar gap")]
+                    let w = 1.0 - gap as f64 / f64::from(horizon);
+                    sum += 2.0 * w * (a.1 - mean) * (b.1 - mean);
+                }
+            }
+        }
+        mean / (sum / (n - 1.0) / n).sqrt()
+    }
+
+    /// W3-runner3-7: a hit at the end of one session and the first hit of the
+    /// next are paired by bar gap alone, although `forward` ends both windows at
+    /// their own day's forced close and they share no bar.
+    #[test]
+    fn no_overlap_pair_crosses_a_session() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        for horizon in [23_u32, 60, 400] {
+            let f = forward(&bars, &column, Horizon::bars(horizon).expect("positive"));
+            let measured = hits(&bars, &column, &f);
+            // THE FIXTURE MUST CONTAIN THE CASE: two consecutive hits on
+            // different days closer than the horizon.
+            let crossing = measured
+                .windows(2)
+                .filter(|w| matches!(w, [a, b] if a.2 != b.2 && b.0 - a.0 < horizon as usize))
+                .count();
+            assert!(crossing > 0, "H={horizon}: no cross-day pair to refuse");
+            let got = edge(&column, &f, &ConditionMask::default()).t;
+            let want = reference_t(&measured, horizon);
+            assert!(
+                (got - want).abs() <= 1e-9 * want.abs().max(1.0),
+                "H={horizon}: t={got}, the session-bounded definition gives {want}"
+            );
+        }
+    }
+
+    /// W3-runner3-5: a horizon past the whole sample. Across days the pairing is
+    /// now bounded by the session, so the estimate is a real one -- the same
+    /// definition as above, at weights near one.
+    #[test]
+    fn a_horizon_past_every_session_is_measured_per_session() {
+        for sessions in [8_i64, 12] {
+            let bars = crate::synthetic::sessions(sessions);
+            let column = Column::build(&bars, &mut evaluator());
+            let f = forward(&bars, &column, Horizon::bars(u32::MAX).expect("positive"));
+            let e = edge(&column, &f, &ConditionMask::default());
+            let want = reference_t(&hits(&bars, &column, &f), u32::MAX);
+            assert!(
+                e.t.is_finite() && (e.t - want).abs() <= 1e-6 * want.abs().max(1.0),
+                "{sessions} sessions at H=u32::MAX: t={}, per-session definition {want}",
+                e.t
+            );
+        }
+    }
+
+    /// And when ONE window holds the whole sample there is no second window to
+    /// estimate a long-run variance from. Six sessions leave one swept day, so
+    /// at `H = u32::MAX` every hit shares bars with every other.
+    #[test]
+    fn one_window_holding_the_whole_sample_is_no_evidence() {
+        let bars = crate::synthetic::sessions(6);
+        let column = Column::build(&bars, &mut evaluator());
+        let f = forward(&bars, &column, Horizon::bars(u32::MAX).expect("positive"));
+        let measured = hits(&bars, &column, &f);
+        assert!(measured.len() >= 2, "the fixture must measure a sample");
+        assert!(
+            measured
+                .windows(2)
+                .all(|w| matches!(w, [a, b] if a.2 == b.2)),
+            "the fixture must be one day"
+        );
+        let e = edge(&column, &f, &ConditionMask::default());
+        assert!(e.n >= 2);
+        assert!(
+            e.t == 0.0,
+            "{} hits in one shared window scored t={}",
+            e.n,
+            e.t
+        );
+        assert!(e.mean_paisa != 0.0, "the mean is still carried");
+
+        // THE SAME DAY AT A ONE-BAR HORIZON IS AN ORDINARY SAMPLE: no pair
+        // overlaps, so the refusal must not fire.
+        let one = forward(&bars, &column, Horizon::bars(1).expect("positive"));
+        let e1 = edge(&column, &one, &ConditionMask::default());
+        assert!(e1.n >= 2 && e1.t.is_finite() && e1.t != 0.0, "t={}", e1.t);
     }
 }

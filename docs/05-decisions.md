@@ -43751,3 +43751,50 @@ which the test uses to check every excursion against a direct scan of
 `forward_builds_no_power_of_two_table` pin it. The last one fails on the
 previous tree. **Not measured:** no bench row times `forward`. The O(bars) bound
 is argued from the code (§3 rule 6).
+
+### D-1171 — `edge` pairs two hits only while their windows share a bar, and refuses a sample that one window holds — 2026-10-02
+
+**What was wrong (audits W3-runner3-7 and W3-runner3-5).** `edge`'s Newey-West
+correction drained its queue on the bar-index gap alone:
+`source - older >= H`. `forward` ends every window at the earlier of the
+horizon and that day's forced close, so a 15:08 hit and the next session's 09:15
+hit share no bar. They are about 22 bars apart on a full session, so at
+`H >= 23` the gap paired them anyway, at weight `1 - 22/H`.
+
+The second defect follows from the first. `Horizon::bars` refuses only zero, and
+`BRUTEX_HORIZON_BARS` parses any `u32`. At a horizon past the span of the hits,
+every pair was weighted near one. The corrected sum of squares then tends to
+`(Σ (x - m))²`, which is zero by the definition of the mean, and only rounding
+was left. The audit measured `t` = 24,673.4 and 116,747.9 on the empty mask at
+8 and 32 sessions with `H = u32::MAX`, and 0 at 128 sessions, where the residue
+was negative. `rank::walk` sorts on `|t|`, so the first two would rank above
+every real finding.
+
+**The change.** `Forward` carries each outcome's exit bar (D-1170). `edge` now
+also drains a pair once the older window has exited by the newer entry
+(`older_exit <= source`). Exits only advance with the entry, so the drain stays
+front-only. A same-day pair closer than `H` always still overlaps, so it is
+weighted exactly as before. A pair across a session boundary is never weighted.
+The weight matrix is therefore block-diagonal, one Bartlett triangle per day. It
+stays positive semi-definite, and at a large `H` the estimate becomes the
+per-session (cluster) sum of squares rather than zero.
+
+When the queue still holds every observation at the end of the walk, every pair
+overlapped, and one window holds the whole sample. Newey-West has no second
+window to estimate from, so `t` is reported as `0.0`, which is the same "no
+evidence" answer the `m2 <= 0` guard gives. The mean, sums and counts are still
+carried.
+
+**Outputs that change.** `t` changes for any mask with a hit pair that crosses
+a session closer than `H`. At the default `H = 15` there is none on a full
+session, so only horizons at or above about 23 bars move. `t` becomes `0.0` for
+a sample with at least two observations whose windows all mutually overlap. The
+mean, the counts and every sum are unchanged.
+
+**Tests that fail on the previous tree:** `no_overlap_pair_crosses_a_session`
+(`t` = 77.967 against the per-session definition's 77.951 at `H = 23`),
+`a_horizon_past_every_session_is_measured_per_session` (24,673.4 against
+1,195.8 at 8 sessions) and
+`one_window_holding_the_whole_sample_is_no_evidence` (14,175.6 on 353 hits of
+one day). They compare `edge` against the estimator written out pair by pair
+from its definition, not against `edge`'s own accumulators.
