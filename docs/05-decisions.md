@@ -43764,3 +43764,56 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0964 — Price `cli pool` pass 2 on the one-minute execution series the screen trades — 2026-10-02
+
+**The defect (audit findings GAP13-15, W2-cli9-4, R9-cli-o1-1).** Pass 2's
+`price_all` built the anchored column on the signal rung and then handed the
+coarse signal bars, that column, and a horizon from `horizon_for(.., true)` to
+`grid::evaluate_over`. `horizon_for` counts EXECUTION minutes when the rung is
+coarse, so on 60min a fifteen-minute hold was walked as fifteen sixty-minute
+bars, and the stop ladder, grid width and rule floors were measured on the
+signal series too. `range-rung`, whose frontier rows the union is built from,
+prices every candidate on the one-minute series `project_onto_execution`
+returns. The two never priced the same trade, so a pooled cell was not the
+cell the doc comment and SC-08 said it was. The test that claimed to pin the
+equivalence, `the_pool_prepares_a_span_exactly_as_the_screen_does`, searched
+`lib.rs` from `fn screen_range_inner(` with no end bound and found its last
+two steps inside `audit_bars_work`; it compared the order of names, not the
+series priced on. The cost statement in `pool.rs` and `docs/06-limits.md`
+§171 gave each evaluation as O(cells × T) and left out the Θ(B) bar walk in
+`walk_core`.
+
+**The choice.** `price_all` keeps its loaders and withheld-day filter and now
+calls the screen's own `project_onto_execution` (native exact-next-minute
+alignment on 1min, the explicit one-minute series otherwise), refuses a span
+with no bar left after withholding as the screen does, measures
+`Rules::derived` on `floors_measured_on(..)` (the execution series), sizes the
+stop ladder, grid rungs and step on the execution bars, builds one
+`SliceFacts` over them for every candidate, and evaluates each candidate over
+the execution bars and the projected column. A coarse rung with no one-minute
+month refuses by name through `load_span` or the projection; nothing falls
+back to coarse fills. The source-order test is replaced by three behavioural
+tests on the generated store that compare each cell with the cell the
+screen's pieces price, on 5min, on 1min, with a holed session withheld, with
+an empty union, and with refusals. Recorded failing on the unfixed function:
+both comparison tests failed (5min: 112 vs 280 trades for the first
+candidate).
+
+**Cost, restated.** Pass 2 is Θ(I × U × (B_exec + cells × T)) plus Θ(B_exec)
+per instrument for loading, projection and `SliceFacts`; U grows with
+I × frontier rows per instrument, so pass 2 is quadratic in I. Pricing on the
+minute series raises B from the signal bar count to the minute count (sixty
+times on 60min); that is the price of pricing what the screen priced.
+
+**Rejected.** (1) Refusing coarse rungs in pass 2: the projection already
+exists and is the screen's, so refusal would discard a verb that can be
+correct. (2) Comparing against the stamped pass-1 frontier rows: those cells
+are chosen by the screen's tier cascade, not the single derived rule set
+`price_all` selects with, so equality there is not the claim; the tests compare
+against the screen's pricing pieces instead, which run in an unstamped build.
+(3) Keeping the source-order test beside the new ones: it passed while the
+defect stood.
+
+Invariants SC-08 (updated) and SC-08-GAP13; `docs/06-limits.md` §171 has the
+cost.

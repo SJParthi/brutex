@@ -15,6 +15,35 @@ pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R
     run(&fixture.root)
 }
 
+/// The warmed store with one interior one-minute row of 2025-05-07 left
+/// out, so that session's signal bars are withheld. The 5min rung keeps
+/// every bar, exactly as a pulled coarse rung does over a vendor's minute hole.
+pub(crate) fn with_warmed_store_missing_one_minute<R>(
+    run: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    let fixture = Fixture::for_symbol("NIFTY");
+    for day in 5..=13 {
+        let rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        let minutes: Vec<Bar> = rows
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| day != 7 || *at != 100)
+            .map(|(_, row)| *row)
+            .collect();
+        fixture.write(5, Timeframe::MINUTE_1, &minutes);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    run(&fixture.root)
+}
+
 struct Fixture {
     root: PathBuf,
     /// The swept instrument every file and request names. NIFTY unless a

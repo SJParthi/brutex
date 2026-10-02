@@ -8329,8 +8329,16 @@ change inside the pricing loop and is not made. Every report labels the
 column as a bound.
 
 Cost: pass 1 is I screens in parallel, each what `range-rung` costs on that
-instrument; pass 2 is I × U grid evaluations, each O(cells × T) for that
-instrument and candidate; the fold is one pass over I × U cells. The union is
+instrument; pass 2 is I × U grid evaluations over each instrument's
+one-minute execution series of B_exec bars. Each `grid::evaluate_over` walks
+every execution bar once (`walk_core`, Θ(B_exec)) before pricing its cells over
+the mask's T trades, so pass 2 is Θ(I × U × (B_exec + cells × T)), plus one
+load, projection and `SliceFacts` build per instrument, Θ(B_exec), paid once
+outside the candidate loop (D-0964). This section used to say O(cells × T) per
+evaluation and left out the Θ(B_exec) walk, which dominates when a mask fires
+seldom. U is the union of every instrument's frontier rows, so it grows with
+I × the rows each keeps and pass 2 is quadratic in I. The fold is one pass over
+I × U cells. The union is
 one expected-O(1) `HashSet` insert per frontier row, not worst-case O(1).
 None of this is a rule-4 primitive, and none of it is constant in I or U.
 

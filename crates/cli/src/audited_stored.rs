@@ -243,4 +243,4 @@ fn error(why: impl std::fmt::Display) -> String {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::with_warmed_store;
+pub(crate) use tests::{with_warmed_store, with_warmed_store_missing_one_minute};

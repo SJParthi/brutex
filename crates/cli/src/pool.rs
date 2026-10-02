@@ -78,8 +78,13 @@
 //! # Cost
 //!
 //! Pass 1 is `instruments` screens in parallel, each what `range-rung` costs.
-//! Pass 2 is `instruments × |union|` grid evaluations, each the cost of one
-//! exit grid over that instrument's trades for that mask. Neither is a rule-4
+//! Pass 2 is `instruments × |union|` grid evaluations over each instrument's
+//! one-minute execution series of `B` bars. Each `grid::evaluate_over` walks
+//! every execution bar once (`walk_core`, Θ(B)) and then prices its cells over
+//! the mask's trades, so pass 2 is Θ(I × U × (B + cells × T)), plus one load,
+//! projection and `SliceFacts` build per instrument, Θ(B), hoisted out of the
+//! candidate loop. U, the union, grows with I × the frontier rows each
+//! instrument keeps, so pass 2 is quadratic in I, not linear. Neither is a rule-4
 //! operation: those bound the per-bar and per-candidate primitives INSIDE the
 //! screen, which are unchanged. The union itself is one `HashSet` insert per
 //! frontier row — O(1) expected — and the pooled fold is one pass over
@@ -762,8 +767,12 @@ fn union_of(
 /// The span is prepared exactly as the screen prepares one — the same loaders,
 /// the same execution-series check, the same withheld days, the same anchored
 /// column, the same VWAP verdict — so a cell here is the cell `range-rung`
-/// would show for that mask on that instrument. `the_pool_prepares_a_span_exactly_as_the_screen_does`
-/// pins the sequence.
+/// would show for that mask on that instrument. The grid then runs where the
+/// screen's does: on the one-minute execution series `project_onto_execution`
+/// returns, with the horizon in minutes and the rules measured on that series.
+/// A coarse rung with no execution series is refused there by name.
+/// `pass_two_prices_on_the_one_minute_series_the_screen_trades` compares every
+/// cell with the screen's on a coarse rung and on 1min (D-0964).
 fn price_all(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -787,9 +796,11 @@ fn price_all(
             to,
         )?)
     };
-    let execution_slice = execution_bars
-        .as_ref()
-        .map_or(span.bars.as_slice(), |exec| exec.bars.as_slice());
+    let execution = execution_bars.as_ref().map(|exec| crate::Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
+    let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     crate::validate_one_minute_execution(execution_slice).map_err(|why| {
         format!(
             "the {} execution span is malformed: {why}. Nothing was priced.",
@@ -800,6 +811,12 @@ fn price_all(
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
+    }
+    if span.bars.is_empty() {
+        return Err(
+            "every signal session has a minute gap; no priceable bars remain. Nothing was priced."
+                .to_owned(),
+        );
     }
     let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
@@ -812,10 +829,25 @@ fn price_all(
         signal_length,
         availability,
     )?;
-    let bars = span.bars.as_slice();
-    let horizon = crate::horizon_for(bars, rung != crate::EXECUTION_RUNG);
+    // THE HORIZON COUNTS EXECUTION MINUTES, and the grid walks the minutes it
+    // counts. Pass 2 used to hand the coarse signal bars and this same
+    // minute-count horizon to `evaluate_over`, so on 60min a fifteen-minute
+    // hold became fifteen hours and no cell matched the one `range-rung`
+    // recorded. The screen's own projection is used, not a copy of it: the
+    // signal column moves onto the one-minute series exactly as
+    // `audit_bars_work` moves it, and a coarse rung with no execution series
+    // refuses there by name rather than pricing coarse. D-0964.
+    let horizon = crate::horizon_for(&span.bars, execution.is_some());
+    let (trade_bars, trade_column, _note) = crate::project_onto_execution(
+        &span.bars,
+        &column,
+        execution,
+        rung == crate::EXECUTION_RUNG,
+        horizon,
+    )?;
+    let bars = trade_bars.as_slice();
     let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
-    let rules = crate::Rules::derived(bars, horizon);
+    let rules = crate::Rules::derived(crate::floors_measured_on(&span.bars, execution), horizon);
     let stop_rungs = crate::stop_ladder_ppm(bars, hold);
     let levels = grid::Levels {
         rungs: crate::grid_rungs(bars),
@@ -824,7 +856,9 @@ fn price_all(
         ratios: true,
         stops_ppm: &stop_rungs,
     };
-    let facts = runner::trade::SliceFacts::of(bars, &column);
+    // ONE SET OF SLICE FACTS FOR EVERY CANDIDATE, over the execution series
+    // the grid walks: Θ(B_exec) once, not once per candidate.
+    let facts = runner::trade::SliceFacts::of(bars, &trade_column);
     Ok(union
         .iter()
         .map(|candidate| {
@@ -833,7 +867,7 @@ fn price_all(
                 Direction::Long => runner::excursion::Side::Long,
                 Direction::Short => runner::excursion::Side::Short,
             };
-            let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
+            let g = grid::evaluate_over(bars, &trade_column, &mask, horizon, side, levels, &facts);
             crate::shown_cell(&g, rules)
                 .map(|(cell, _admitted)| cell)
                 .filter(|cell| cell.trades > 0)
@@ -2445,44 +2479,223 @@ mod tests {
         }
     }
 
-    /// **The pool prepares a span exactly as the screen does.**
-    ///
-    /// The sequence of loaders and checks in `price_all` is the sequence in
-    /// `screen_range_inner`, in the same order, so a cell the pool prices is
-    /// the cell `range-rung` would show. Pinned by name because the two are
-    /// separate functions and a loader added to one and not the other would
-    /// price a different column without any test noticing.
-    #[test]
-    fn the_pool_prepares_a_span_exactly_as_the_screen_does() {
-        const SEQUENCE: [&str; 10] = [
-            "stored::load_span(",
-            "stored::rung_length_micros(",
-            "validate_one_minute_execution(",
-            "minute_gaps::days_with_interior_gaps(",
-            "minute_gaps::withhold(",
-            "stored::load_daily_context(",
-            "stored::load_exact_minute_context(",
-            "stored::vwap_availability(",
-            "stored_anchored_column(",
-            "horizon_for(",
-        ];
-        let pool = include_str!("pool.rs");
-        let lib = include_str!("lib.rs");
-        let screen_at = lib
-            .find("fn screen_range_inner(")
-            .expect("the screen exists");
-        let price_at = pool.find("fn price_all(").expect("the pool prices");
-        let mut last_pool = price_at;
-        let mut last_screen = screen_at;
-        for step in SEQUENCE {
-            let in_pool = pool[last_pool..].find(step).map(|i| i + last_pool);
-            let in_screen = lib[last_screen..].find(step).map(|i| i + last_screen);
-            assert!(
-                in_pool.is_some() && in_screen.is_some(),
-                "`{step}` must appear in both, after the previous step: pool={in_pool:?} screen={in_screen:?}"
-            );
-            last_pool = in_pool.expect("asserted above");
-            last_screen = in_screen.expect("asserted above");
+    /// The cells `range-rung`'s screen prices for `union` on NIFTY over May
+    /// 2025, built from the screen's own pieces in the screen's order: the
+    /// signal column, `project_onto_execution`, and one exit grid over the
+    /// execution series it returns, judged by the execution-measured rules.
+    fn screen_cells(
+        root: &std::path::Path,
+        rung: &'static str,
+        union: &[Candidate],
+    ) -> Result<Vec<super::Priced>, String> {
+        let vendor = crate::parse_vendor("zerodha")?;
+        let month = (2025, 5);
+        let mut span = crate::stored::load_span(root, vendor, "NIFTY", rung, month, month)?;
+        let signal_length = crate::stored::rung_length_micros(rung)?;
+        let minutes =
+            crate::stored::load_span(root, vendor, "NIFTY", crate::EXECUTION_RUNG, month, month)?;
+        let coarse = rung != crate::EXECUTION_RUNG;
+        let execution = coarse.then_some(crate::Execution {
+            bars: &minutes.bars,
+            signal_length_micros: signal_length,
+        });
+        let gap_days = crate::minute_gaps::days_with_interior_gaps(&minutes.bars);
+        span.bars = crate::minute_gaps::withhold(&span.bars, &gap_days).0;
+        let daily =
+            crate::stored::load_daily_context(root, vendor, "NIFTY", (month, month), &span.bars)?;
+        let exact = crate::stored::load_exact_minute_context(
+            root,
+            vendor,
+            "NIFTY",
+            (month, month),
+            &span.bars,
+        )?;
+        let column = crate::stored_anchored_column(
+            &span.bars,
+            &daily,
+            &exact,
+            signal_length,
+            crate::stored::vwap_availability(&span.key),
+        )?;
+        let horizon = crate::horizon_for(&span.bars, coarse);
+        let (bars, projected, _) =
+            crate::project_onto_execution(&span.bars, &column, execution, !coarse, horizon)?;
+        let hold = horizon.as_bars() as usize;
+        let rules = crate::Rules::derived(&minutes.bars, horizon);
+        let stops = crate::stop_ladder_ppm(&bars, hold);
+        let levels = grid::Levels {
+            rungs: crate::grid_rungs(&bars),
+            step_ppm: Some(crate::grid_step_ppm(&bars, hold)),
+            forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+            ratios: true,
+            stops_ppm: &stops,
+        };
+        let facts = runner::trade::SliceFacts::of(&bars, &projected);
+        Ok(union
+            .iter()
+            .map(|candidate| {
+                let side = match candidate.direction {
+                    Direction::Long => runner::excursion::Side::Long,
+                    Direction::Short => runner::excursion::Side::Short,
+                };
+                let mask = vocab::ConditionMask::from_words(candidate.words);
+                let g =
+                    grid::evaluate_over(&bars, &projected, &mask, horizon, side, levels, &facts);
+                crate::shown_cell(&g, rules)
+                    .map(|(cell, _)| cell)
+                    .filter(|cell| cell.trades > 0)
+            })
+            .collect())
+    }
+
+    /// Every single condition that held on a signal bar of `rung`, on both
+    /// sides: the candidates a frontier would name, without needing a
+    /// stamped pass 1 to write one.
+    fn fired_singles(root: &std::path::Path, rung: &'static str) -> Vec<Candidate> {
+        let vendor = crate::parse_vendor("zerodha").expect("feed");
+        let month = (2025, 5);
+        let span =
+            crate::stored::load_span(root, vendor, "NIFTY", rung, month, month).expect("span");
+        let daily =
+            crate::stored::load_daily_context(root, vendor, "NIFTY", (month, month), &span.bars)
+                .expect("daily");
+        let exact = crate::stored::load_exact_minute_context(
+            root,
+            vendor,
+            "NIFTY",
+            (month, month),
+            &span.bars,
+        )
+        .expect("exact");
+        let column = crate::stored_anchored_column(
+            &span.bars,
+            &daily,
+            &exact,
+            crate::stored::rung_length_micros(rung).expect("rung"),
+            crate::stored::vwap_availability(&span.key),
+        )
+        .expect("column");
+        let mut seen = vocab::ConditionMask::from_words([0; 6]);
+        for row in column.bits() {
+            seen = seen.union(row);
         }
+        let mut out = Vec::new();
+        for bit in (0..384_u32).filter(|bit| seen.get(*bit)).take(12) {
+            let words = vocab::ConditionMask::from_words([0; 6])
+                .with_bit(bit)
+                .words();
+            for direction in [Direction::Long, Direction::Short] {
+                out.push(Candidate { words, direction });
+            }
+        }
+        out
+    }
+
+    /// **Pass 2 prices on the one-minute series the screen trades.** GAP13-15.
+    ///
+    /// `price_all` evaluated the exit grid over the coarse SIGNAL bars with a
+    /// horizon counted in execution minutes, so on 5min a fifteen-minute hold
+    /// was seventy-five minutes and every cell differed from the one
+    /// `range-rung` recorded. Each candidate's cell must now be the cell the
+    /// screen's own projection prices, on the coarse rung and on 1min itself,
+    /// and at least one must fire, so an empty answer cannot pass.
+    #[test]
+    fn pass_two_prices_on_the_one_minute_series_the_screen_trades() {
+        crate::audited_stored::with_warmed_store(|root| {
+            let vendor = crate::parse_vendor("zerodha").expect("feed");
+            for rung in ["5min", crate::EXECUTION_RUNG] {
+                let union = fired_singles(root, rung);
+                assert!(union.len() >= 2, "premise: conditions fired on {rung}");
+                let priced =
+                    super::price_all(root, vendor, "NIFTY", rung, (2025, 5), (2025, 5), &union)
+                        .expect("priced");
+                let screened = screen_cells(root, rung, &union).expect("screened");
+                assert_eq!(priced.len(), union.len(), "{rung}: one cell per candidate");
+                assert_eq!(priced, screened, "{rung}: the cell the screen prices");
+                assert!(
+                    priced.iter().flatten().any(|cell| cell.trades > 0),
+                    "{rung}: at least one candidate traded: {priced:?}"
+                );
+            }
+            // NO CANDIDATE, NO CELL, and still Ok: the union decides the length.
+            assert_eq!(
+                super::price_all(root, vendor, "NIFTY", "5min", (2025, 5), (2025, 5), &[]),
+                Ok(Vec::new())
+            );
+        });
+    }
+
+    /// **A day with a one-minute hole is withheld from pass 2 as the screen
+    /// withholds it**, and the cells are still the screen's.
+    #[test]
+    fn pass_two_withholds_the_sessions_the_screen_withholds() {
+        crate::audited_stored::with_warmed_store_missing_one_minute(|root| {
+            let vendor = crate::parse_vendor("zerodha").expect("feed");
+            let minutes = crate::stored::load_span(
+                root,
+                vendor,
+                "NIFTY",
+                crate::EXECUTION_RUNG,
+                (2025, 5),
+                (2025, 5),
+            )
+            .expect("minutes");
+            assert_eq!(
+                crate::minute_gaps::days_with_interior_gaps(&minutes.bars).len(),
+                1,
+                "premise: one holed session"
+            );
+            let union = fired_singles(root, "5min");
+            let priced =
+                super::price_all(root, vendor, "NIFTY", "5min", (2025, 5), (2025, 5), &union)
+                    .expect("priced");
+            assert_eq!(
+                priced,
+                screen_cells(root, "5min", &union).expect("screened")
+            );
+            assert!(
+                priced.iter().flatten().any(|cell| cell.trades > 0),
+                "{priced:?}"
+            );
+        });
+    }
+
+    /// **A coarse rung with no one-minute series is refused by name in pass
+    /// 2, never priced on its own coarse bars**, and an instrument with no
+    /// bars at all is refused rather than pooled as zeros.
+    #[test]
+    fn pass_two_refuses_a_coarse_rung_without_its_minutes_and_an_absent_instrument() {
+        crate::audited_stored::with_warmed_store(|root| {
+            let vendor = crate::parse_vendor("zerodha").expect("feed");
+            let union = fired_singles(root, "5min");
+            let absent = super::price_all(
+                root,
+                vendor,
+                "BANKNIFTY",
+                "5min",
+                (2025, 5),
+                (2025, 5),
+                &union,
+            );
+            assert!(absent.is_err(), "{absent:?}");
+            let key = crate::stored::swept_index("NIFTY").expect("key");
+            let minute = store::path::StorePath::for_key(
+                brutex_core::vendor::Vendor::Zerodha,
+                &key,
+                store::path::Timeframe::MINUTE_1,
+                store::path::YearMonth::new(2025, 5).expect("month"),
+                store::path::FileKind::Bars,
+            )
+            .expect("path")
+            .to_path_buf(root);
+            std::fs::remove_file(&minute).expect("premise: the minute month existed");
+            let refused =
+                super::price_all(root, vendor, "NIFTY", "5min", (2025, 5), (2025, 5), &union);
+            let why = refused.expect_err("no coarse fallback");
+            assert!(
+                why.contains("1min"),
+                "names the missing execution rung: {why}"
+            );
+        });
     }
 }
