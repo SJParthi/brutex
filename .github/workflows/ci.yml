@@ -4832,6 +4832,11 @@ jobs:
           #     is allowed for, computed once for all three tests instead of once
           #     each. Only integer exceedance counts cross threads, so no float is
           #     ever summed in an order that depends on the thread count.
+          #   greeks/solver.rs 13 -> 14 (D-0921). The new line is
+          #     `Checked::bracket(&self, price: f64, kind) -> (f64, f64)`, the
+          #     no-arbitrage volatility bracket the fixed-step bisection starts
+          #     from. A volatility is a statistic with no paisa representation,
+          #     the same reason the other 13 in this file are allowed.
           allow_float='
           crates/api/src/ingest.rs 1
           crates/api/src/server.rs 4
@@ -4839,7 +4844,7 @@ jobs:
           crates/greeks/src/bsm.rs 36
           crates/greeks/src/normal.rs 21
           crates/greeks/src/error.rs 17
-          crates/greeks/src/solver.rs 13
+          crates/greeks/src/solver.rs 14
           crates/greeks/src/moneyness.rs 6
           crates/pull/src/pricing.rs 22
           crates/pull/src/tenor.rs 5
