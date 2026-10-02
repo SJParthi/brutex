@@ -5405,3 +5405,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | A legacy grid, fixed-ladder replay or cell materialisation whose paths fail `4·A·P ≤ i64::MAX` reports no cell and counts every path refused. It never reports a total clamped by `saturating_add`. The envelope is exact at its boundary. | `runner::grid::exit_family_tests::a_grid_that_could_saturate_is_refused_not_clamped` · `runner::grid::exit_family_tests::the_money_envelope_is_exact_at_its_boundary` | ✓ |
+### Printed-extreme sell floor — probeengine-1 (D-0927)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| `fills_at(.., Anchor::PrintedExtreme)` refuses a sell anchor (the long's exit low, the short's entry low) below one tick — including 0, negatives and `i64::MIN` — with `BelowTick { quantity: "sell printed-extreme fill" }`; the non-fill bar's low never refuses; exactly one tick prices unchanged. | `costs::fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name` | ✓ |
+| No anchor, direction or quantity lets a degenerate low produce a `Fills` with a sub-tick leg, and `charge_stack` over any such `Fills` answers `Ok` or a named `Err` without panicking. | `costs::trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill` | ✓ |

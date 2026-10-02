@@ -916,8 +916,11 @@ fn position(fills: Fills, quantity: i64) -> Result<Position, CostError> {
     let sell_notional = leg_notional(fills.sell(), quantity, "the sell notional")?;
 
     // Both notionals are in `[0, i64::MAX]`: a `Fills` has no public
-    // constructor, so its buy leg is at least two ticks and its sell leg at
-    // least one, the quantity is strictly positive, and the multiplications
+    // constructor, so its buy leg is at least one tick (two on the worst case)
+    // and its sell leg at least one on every anchor -- the printed-extreme
+    // anchor only since D-0927, before which a negative low reached here and
+    // `i64::MIN` overflowed this subtraction -- the quantity is strictly
+    // positive, and the multiplications
     // above already refused anything that left `i64`. The difference of two
     // values in `[0, i64::MAX]` is in `[-i64::MAX, i64::MAX]`, so this
     // subtraction cannot overflow and there is no branch pretending it can.
@@ -2234,6 +2237,46 @@ mod tests {
             BpsX100::new(exchange),
             BpsX100::new(ipft_rate),
         )
+    }
+
+    /// D-0927. Every anchor, every constructible degenerate low, both
+    /// directions, a range of quantities: `charge_stack` answers `Ok` or a
+    /// named `Err` and never panics. Before D-0927 a printed-extreme sell at
+    /// `i64::MIN` panicked in `position` with "attempt to subtract with
+    /// overflow", and a low of -100 priced a sell fill at -₹1.00.
+    #[test]
+    fn no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill() {
+        use crate::fill::{Anchor, fills_at};
+        let tame = minted(15_000, 3_503, 50);
+        let lows = [i64::MIN, i64::MIN + 1, -100, -1, 0, 1, 4, 5, 9_000];
+        let mut checked = 0_u32;
+        for low in lows {
+            let odd = Bar::new(
+                Paisa::from_raw(10_000),
+                Paisa::from_raw(10_000),
+                Paisa::from_raw(low),
+            )
+            .expect("Bar::new admits any low");
+            let normal = Bar::flat(Paisa::from_raw(10_000)).expect("legal");
+            for anchor in [Anchor::Open, Anchor::AdverseExtreme, Anchor::PrintedExtreme] {
+                for direction in [Direction::Long, Direction::Short] {
+                    for (entry, exit) in [(normal, odd), (odd, normal), (odd, odd)] {
+                        let Ok(fills) = fills_at(entry, exit, direction, anchor) else {
+                            continue;
+                        };
+                        assert!(fills.sell() >= TICK_HELPER, "a sell below a tick priced");
+                        assert!(fills.buy() >= TICK_HELPER, "a buy below a tick priced");
+                        for quantity in [1, 65, i64::MAX] {
+                            // Ok or a named refusal; reaching the next line is
+                            // the assertion that nothing panicked.
+                            let _ = charge_stack(fills, quantity, &tame);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]

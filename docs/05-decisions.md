@@ -44028,3 +44028,33 @@ paths, untouched bars, an out-of-range path, and empty input.
 scales a real fixture past the bound and requires refusal from the grid, the
 cell replay and `with_levels`. With the check disabled it fails ("no clamped
 cell may be reported").
+### D-0927 — Refuse a sub-tick printed-extreme sell fill instead of pricing it — 2026-10-02
+
+**Finding.** probeengine-1 (audit 2026-10-02). `costs::fill::fills_at` with
+`Anchor::PrintedExtreme` fills the sell leg AT the printed low with nothing
+added, and `Bar::new` deliberately admits any low so the worst case can absorb
+it with its sell floor. The printed-extreme arm had no floor and no check, and
+its comment claimed "a low it accepted is a price that traded", which was false.
+Reproduced on the base tree: a low of −100 priced `sell_fill: Paisa(-10000)`
+and a gross of −20,100 paisa; a low of `i64::MIN` panicked at
+`trip.rs:938` ("attempt to subtract with overflow") in `trip::position`, whose
+comment rested on a sell leg of at least one tick that this anchor did not
+provide.
+
+**The change.** The printed-extreme arm refuses a sell anchor below one `TICK`
+with `CostError::BelowTick { quantity: "sell printed-extreme fill", .. }`, the
+same refusal the open arm makes and for the same reason: flooring it upward
+would flatter the seller. `Fills`' sell leg is now at least one tick on every
+constructor, so `position`'s unchecked subtraction is sound as its comment
+states; no checked branch was added there because no input could take it.
+
+**What output changes.** Only inputs with a printed sell low below ₹0.05: those
+now refuse instead of returning a negative or sub-tick fill. Every bar with a
+low of at least one tick prices byte-for-byte as before. No production path
+offers such a bar today (the finding says so and the stored bars are tick-grid
+prices); `runner::trade`'s `fills_at(.., PrintedExtreme).is_ok()` probe now
+reports such a bar as unfillable rather than fillable.
+
+Proved by `costs::fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name`
+and `costs::trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill`;
+both fail with the refusal removed.
