@@ -5437,6 +5437,12 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+### Condition names resolve through a compile-time index — audit 2026-10-02 o1engine-24
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-O1ENGINE-24 — **`vocab::table::index_of`, which `Expression::parse` uses for every name token, gives each row's name exactly the position a row-order scan finds first, and `None` for every token no row carries, within a pinned probe bound.** All 370 names resolve to their own index; the empty token, a prefix, a suffix, an upper-cased name, a padded name, `"0"`, an unknown name, and tokens one byte and 4 KiB past the longest name are refused. Every name is held once in the 2,048-slot table; the worst hit is at most 4 probes and the worst miss over every slot at most 7. Before this, every token scanned all 370 rows | `vocab::table::tests::every_name_is_found_by_its_index_and_no_other_token_is` | ✓ |
+
 ### Expression search checks each choice incrementally — audit 2026-10-02 o1engine-23
 
 | Invariant | Test that proves it | Status |

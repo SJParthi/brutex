@@ -606,12 +606,7 @@ impl Parser<'_> {
         let bit = token
             .parse::<u16>()
             .ok()
-            .or_else(|| {
-                table::TABLE
-                    .iter()
-                    .find(|row| row.name == token)
-                    .map(|row| row.index)
-            })
+            .or_else(|| table::index_of(token))
             .ok_or(Refusal::UnavailableBit)?;
         let definition = table::definition(bit).ok_or(Refusal::UnavailableBit)?;
         if definition.status != table::BitStatus::Live {

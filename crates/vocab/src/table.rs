@@ -1579,6 +1579,149 @@ pub fn definition(index: u16) -> Option<&'static BitDef> {
     TABLE.get(usize::from(index))
 }
 
+/// Slots in [`NAME_INDEX`]: a power of two, so a hash folds with a mask, and
+/// at least twice the row count, so an empty slot always ends a probe.
+///
+/// 2,048 and not 1,024, measured: at 1,024 (36% full) the names' shared
+/// prefixes clustered to a worst hit of 11 probes and a worst miss of 13; at
+/// 2,048 they are 4 and 7. Half-full is a termination bound, not a cost one.
+const NAME_SLOTS: usize = 2048;
+const _: () = assert!(NAME_SLOTS.is_power_of_two() && COUNT * 2 <= NAME_SLOTS);
+
+/// The longest name in [`TABLE`]. A longer token cannot equal any of them, so
+/// [`index_of`] answers it without hashing.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every index is bounded by its loop condition, and this is \
+              evaluated at compile time, where an out-of-range index is a \
+              build error rather than a runtime panic"
+)]
+const MAX_NAME_BYTES: usize = {
+    let mut longest = 0;
+    let mut row = 0;
+    while row < COUNT {
+        let len = TABLE[row].name.len();
+        if len > longest {
+            longest = len;
+        }
+        row += 1;
+    }
+    longest
+};
+
+/// FNV-1a: four lines, no dependency, and `const`, so [`NAME_INDEX`] is built
+/// by the compiler. A collision costs one extra probe, never a wrong answer,
+/// because the probe compares the whole name.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every index is bounded by its loop condition, and this is \
+              evaluated at compile time, where an out-of-range index is a \
+              build error rather than a runtime panic"
+)]
+const fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// The slot a hash folds to.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "masked to at most NAME_SLOTS - 1 before the cast"
+)]
+const fn home(hash: u64) -> usize {
+    (hash & (NAME_SLOTS as u64 - 1)) as usize
+}
+
+/// Byte equality usable in a `const` context.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every index is bounded by its loop condition, and this is \
+              evaluated at compile time, where an out-of-range index is a \
+              build error rather than a runtime panic"
+)]
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Every row's name, open-addressed by FNV-1a with linear probing; each
+/// occupied slot holds `row + 1`, and `0` is empty. Built at compile time.
+/// A name held by two rows keeps the lower row, which is what a scan of
+/// [`TABLE`] in row order finds first.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every index is bounded by its loop condition, and this is \
+              evaluated at compile time, where an out-of-range index is a \
+              build error rather than a runtime panic"
+)]
+static NAME_INDEX: [u16; NAME_SLOTS] = {
+    let mut slots = [0_u16; NAME_SLOTS];
+    let mut row = 0;
+    while row < COUNT {
+        let name = TABLE[row].name.as_bytes();
+        let mut at = home(fnv1a(name));
+        loop {
+            let held = slots[at] as usize;
+            if held == 0 {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "COUNT is far below u16::MAX"
+                )]
+                {
+                    slots[at] = (row + 1) as u16;
+                }
+                break;
+            }
+            if same(TABLE[held - 1].name.as_bytes(), name) {
+                break;
+            }
+            at = (at + 1) & (NAME_SLOTS - 1);
+        }
+        row += 1;
+    }
+    slots
+};
+
+/// The position whose name is `name`, tombstone or not.
+///
+/// One hash over at most the longest name's bytes and a probe over a
+/// compile-time table, measured at no more than 4 slots for a name and 7 for
+/// any other token by
+/// `table::tests::every_name_is_found_by_its_index_and_no_other_token_is`,
+/// instead of a scan of all 370 rows per token. A token longer than any name
+/// is refused before it is hashed. Liveness is the caller's check.
+#[must_use]
+pub fn index_of(name: &str) -> Option<u16> {
+    if name.len() > MAX_NAME_BYTES {
+        return None;
+    }
+    let mut at = home(fnv1a(name.as_bytes()));
+    for _ in 0..NAME_SLOTS {
+        let row = usize::from(*NAME_INDEX.get(at)?).checked_sub(1)?;
+        let def = TABLE.get(row)?;
+        if def.name == name {
+            return Some(def.index);
+        }
+        at = (at + 1) & (NAME_SLOTS - 1);
+    }
+    None
+}
+
 /// The name at `index`, tombstone or not. A retired name is history and is
 /// still reported, because a stored mask from before the retirement still
 /// carries the position.
@@ -1730,6 +1873,81 @@ pub fn set_near(
 )]
 mod tests {
     use super::*;
+
+    /// Probes `index_of` takes for `name`: slots read until it answers.
+    #[expect(clippy::indexing_slicing, reason = "slots are masked into range")]
+    fn probes(name: &str) -> usize {
+        let mut at = home(fnv1a(name.as_bytes()));
+        let mut read = 1;
+        while let Some(row) = usize::from(NAME_INDEX[at]).checked_sub(1) {
+            if TABLE[row].name == name {
+                return read;
+            }
+            at = (at + 1) & (NAME_SLOTS - 1);
+            read += 1;
+        }
+        read
+    }
+
+    /// NAME LOOKUP IS ONE HASH AND A SHORT PROBE, AND IT ANSWERS WHAT THE ROW
+    /// SCAN ANSWERED. Audit o1engine-24.
+    ///
+    /// `Expression::parse` turned each name into its position by scanning all
+    /// 370 rows. `index_of` must give, for every row's name, exactly the
+    /// position a scan in row order finds first, and `None` for every token no
+    /// row carries: the empty token, a prefix, a suffix, a case change, a
+    /// padded name, a decimal, and tokens one byte and 4 KiB past the longest
+    /// name. Measured probe lengths are pinned: the worst hit and the worst
+    /// miss over every slot a token can hash to.
+    #[test]
+    fn every_name_is_found_by_its_index_and_no_other_token_is() {
+        let mut worst_hit = 0;
+        for row in &TABLE {
+            let scanned = TABLE.iter().find(|r| r.name == row.name).map(|r| r.index);
+            assert_eq!(index_of(row.name), scanned, "{}", row.name);
+            assert_eq!(index_of(row.name), Some(row.index), "{}", row.name);
+            worst_hit = worst_hit.max(probes(row.name));
+        }
+        let first = TABLE[0].name;
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        let huge = "a".repeat(4096);
+        for miss in [
+            "",
+            &first[..first.len() - 1],
+            &format!("{first}x"),
+            &first.to_uppercase(),
+            &format!(" {first}"),
+            "0",
+            "not_a_condition",
+            long.as_str(),
+            huge.as_str(),
+        ] {
+            assert_eq!(index_of(miss), None, "{miss:?}");
+        }
+        assert!(TABLE.iter().any(|r| r.name.len() == MAX_NAME_BYTES));
+        assert!(TABLE.iter().all(|r| r.name.len() <= MAX_NAME_BYTES));
+        let worst_miss = (0..NAME_SLOTS)
+            .map(|start| {
+                let mut at = start;
+                let mut read = 1;
+                while NAME_INDEX.get(at).is_some_and(|&slot| slot != 0) {
+                    at = (at + 1) & (NAME_SLOTS - 1);
+                    read += 1;
+                }
+                read
+            })
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            NAME_INDEX.iter().filter(|&&slot| slot != 0).count(),
+            COUNT,
+            "every row's name is held once"
+        );
+        assert!(
+            worst_hit <= 4 && worst_miss <= 7,
+            "{worst_hit} {worst_miss}"
+        );
+    }
 
     /// A tolerance for the tests, pinned locally. It is deliberately NOT
     /// The pinned constants: neither is the sentinel, and
