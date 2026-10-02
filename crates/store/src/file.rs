@@ -1714,6 +1714,37 @@ impl BarFile {
         fault(crc.sync_all(), &self.bars_path, Action::Sync)
     }
 
+    /// Verifies the old tail block's committed prefix against its existing
+    /// sidecar entry, when the next append will re-seal that block.
+    ///
+    /// Only a block that is PARTIALLY covered at `n_valid` is re-sealed by an
+    /// append starting at `n_valid`: a full block, or an empty stream, leaves
+    /// every existing entry alone, so there is nothing to protect and nothing
+    /// is read. The handle's one-block cache is cleared first, because a block
+    /// it verified before may have changed on disk since, and the cache is not
+    /// evidence about the bytes about to be sealed. D-0910.
+    ///
+    /// # Cost
+    ///
+    /// One block verification: at most one block of bytes, one 4-byte sidecar
+    /// read and one `fstat` (`verify_block_of`'s tail-block cost), independent
+    /// of the file's length.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::BlockChecksum`] when the committed prefix does not match
+    /// the entry and no interrupted-append extent proves it, or the host's own
+    /// refusal from a read.
+    fn verify_old_tail_before_reseal(&self, n_valid: u64) -> Result<(), StoreError> {
+        // A file born without the flag is answered by `verify_block_of`
+        // itself (`crc_path` is `None`), so it is not asked twice here.
+        if self.layout.block_of(n_valid) >= self.layout.blocks_for(n_valid) {
+            return Ok(());
+        }
+        self.verified.store(NO_BLOCK, Ordering::Relaxed);
+        self.verify_block_of(n_valid.saturating_sub(1))
+    }
+
     /// The committed header, as the file's own bytes describe it.
     #[must_use]
     pub const fn header(&self) -> Header {
@@ -1916,6 +1947,19 @@ impl BarFile {
         let commit = refused(next.commit(), &self.bars_path)?;
         let first_index = self.header.n_valid;
         let at = refused(self.layout.offset_of(first_index), &self.bars_path)?;
+
+        // THE OLD TAIL BLOCK IS PROVED BEFORE ANYTHING IS WRITTEN. D-0910.
+        //
+        // This forward path reads no record, and `seal_committed` below
+        // re-seals the old tail block over whatever bytes are on disk. A
+        // committed record that rotted since the last commit would become the
+        // sealed truth of the month, and every later read would "verify" it.
+        // So the previously committed prefix of that block is checked against
+        // its existing entry first, by `verify_block_of` itself, which admits
+        // an interrupted append only on the D-0688 proof. A mismatch refuses
+        // with `BlockChecksum` before the records, the sidecar or the header
+        // slot are touched.
+        self.verify_old_tail_before_reseal(first_index)?;
 
         let mut image = Vec::with_capacity(batch.len().saturating_mul(R::LEN));
         for row in batch {
@@ -4556,18 +4600,20 @@ mod tests {
     }
 
     /// A second crash that rewrote a record past the commit, and died before
-    /// sealing, leaves an entry no extent matches — and a re-offer that
-    /// OVERLAPS cannot repair it, because it reads the tail block first.
+    /// sealing, leaves an entry no extent matches — and NO append can re-seal
+    /// it, overlapping or following.
     ///
-    /// This is the false refusal `docs/06-limits.md` states under D-0688, held
-    /// to its words: the read is refused, the overlapping re-offer is refused
-    /// with the same checksum refusal, and a batch that strictly FOLLOWS the
-    /// commit writes without reading, re-seals the block over what is now on
-    /// disk, and the month reads again. The following batch is longer than
-    /// the one the first crash lost, so the entry it leaves is a new number
-    /// and the fresh reads prove the re-seal rather than a coincidence.
+    /// This is the false refusal `docs/06-limits.md` states under D-0688, as
+    /// D-0910 narrowed it: the read is refused, the overlapping re-offer is
+    /// refused with the same checksum refusal because it reads the tail block
+    /// first, and a batch that strictly FOLLOWS the commit is refused with the
+    /// same refusal too, because it verifies the old tail block before it
+    /// would re-seal it. Until D-0910 the following batch re-sealed the block
+    /// over whatever was on disk, which healed this state and laundered a
+    /// rotted committed record by exactly the same path — the two cannot be
+    /// told apart from the bytes. Both files are left exactly as found.
     #[test]
-    fn a_second_crash_that_rewrote_the_past_refuses_an_overlapping_re_offer_until_one_follows() {
+    fn a_second_crash_that_rewrote_the_past_refuses_every_append_and_leaves_both_files() {
         let _sink_is_mine = crate::emits::hold_the_sink();
 
         let path = crash_between_seal_and_commit("pastsecondcrash", 5, 3);
@@ -4591,30 +4637,23 @@ mod tests {
         assert_eq!(reader.read_record(4), Err(refusal.clone()));
         drop(reader);
 
+        let before = both_files(&path);
         let mut writer = reopen(&path).expect("the writer opens");
         let overlapping: Vec<Bar> = (0..8).map(bar).collect();
         assert_eq!(
             writer.append(&overlapping),
-            Err(refusal),
+            Err(refusal.clone()),
             "an overlapping re-offer reads the tail block before it could re-seal it"
         );
         let following: Vec<Bar> = (5..10).map(bar).collect();
         assert_eq!(
             writer.append(&following),
-            Ok(Appended::Committed {
-                first_index: 5,
-                n_valid: 10
-            }),
-            "a batch that strictly follows the commit reads nothing and re-seals"
+            Err(refusal),
+            "a batch that strictly follows the commit verifies the old tail first"
         );
+        assert_eq!(writer.records(), 5, "nothing was committed");
         drop(writer);
-        assert_eq!(sealed_sum(&path, 0), live_sum(&path, 0, 10));
-        let fresh = reopen_readonly(&path).expect("the month opens");
-        for index in 0..10 {
-            let at = u64::try_from(index).expect("small");
-            assert_eq!(fresh.read_record(at), Ok(bar(index)), "record {index}");
-        }
-        drop(fresh);
+        assert_eq!(both_files(&path), before, "and nothing was written");
         scrub_month(&path);
     }
 
@@ -4890,6 +4929,315 @@ mod tests {
             drop(settled);
             scrub_month(&path);
         }
+    }
+
+    // =======================================================================
+    // A following append never re-seals a tail block it cannot prove — D-0910
+    //
+    // The forward path (`advance` -> `Ok`) reads no record, so before D-0910
+    // `seal_committed` re-sealed the old tail block over whatever was on disk:
+    // a committed record that rotted between two appends became the sealed,
+    // "verified" truth of the month for good. Each test below damages a
+    // committed byte or the tail entry and then offers a batch that strictly
+    // follows the commit.
+    // =======================================================================
+
+    /// Flips one bit of committed record `index`'s `high` on disk, through a
+    /// fresh write of the whole file, so a handle that is still open sees it.
+    fn rot_record(path: &Path, index: u64) {
+        let mut bytes = std::fs::read(path).expect("the month reads");
+        let at = usize::try_from(Layout::V2.offset_of(index).expect("an offset"))
+            .expect("an offset that fits");
+        bytes[at + 18] ^= 0b1000_0000;
+        std::fs::write(path, &bytes).expect("the month writes");
+    }
+
+    /// The bar file and the sidecar, byte for byte.
+    fn both_files(path: &Path) -> (Vec<u8>, Vec<u8>) {
+        (
+            std::fs::read(path).expect("the month reads"),
+            std::fs::read(sidecar_of(path)).expect("the sidecar reads"),
+        )
+    }
+
+    /// A rotted committed record in a partially filled tail block refuses a
+    /// strictly following append, by name, and writes nothing — and a rerun of
+    /// the same append refuses identically.
+    ///
+    /// The first, a middle and the last committed record of the tail block are
+    /// each damaged in turn, so a check that verified only part of the old
+    /// covered prefix would let one of them through.
+    #[test]
+    fn a_rotted_tail_record_refuses_a_following_append_and_leaves_both_files() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        for (tag, damaged) in [("w3first", 0u64), ("w3middle", 1), ("w3last", 2)] {
+            let (path, mut file) = month(tag);
+            assert_eq!(
+                file.append(&[bar(0), bar(1), bar(2)]),
+                Ok(Appended::Committed {
+                    first_index: 0,
+                    n_valid: 3,
+                })
+            );
+            drop(file);
+            let stored = sealed_sum(&path, 0);
+            rot_record(&path, damaged);
+            let computed = live_sum(&path, 0, 3);
+            assert_ne!(computed, stored, "{tag}: the premise, the bytes changed");
+            let before = both_files(&path);
+
+            let mut writer = reopen(&path).expect("the writer opens");
+            let refusal = Err(StoreError::BlockChecksum {
+                path: path.clone(),
+                block: 0,
+                stored,
+                computed,
+            });
+            assert_eq!(
+                writer.append(&[bar(3), bar(4)]),
+                refusal,
+                "{tag}: the following append refuses naming the old tail block"
+            );
+            assert_eq!(writer.records(), 3, "{tag}: and commits nothing");
+            assert_eq!(
+                both_files(&path),
+                before,
+                "{tag}: no record, no checksum and no header slot was written"
+            );
+            assert_eq!(
+                writer.append(&[bar(3), bar(4)]),
+                refusal,
+                "{tag}: a rerun refuses identically"
+            );
+            assert_eq!(both_files(&path), before, "{tag}: and still writes nothing");
+            drop(writer);
+
+            let reader = reopen_readonly(&path).expect("the month opens");
+            assert!(
+                matches!(
+                    reader.read_record(damaged),
+                    Err(StoreError::BlockChecksum { block: 0, .. })
+                ),
+                "{tag}: the damage is still visible to a reader"
+            );
+            drop(reader);
+            scrub_month(&path);
+        }
+    }
+
+    /// A handle that already verified the tail block does not get to skip the
+    /// check: the bytes can rot under an open handle between a read and the
+    /// next append.
+    #[test]
+    fn a_following_append_reverifies_a_tail_block_this_handle_cached() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("w3cached");
+        assert_eq!(
+            file.append(&[bar(0), bar(1), bar(2)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        assert_eq!(file.read_record(2), Ok(bar(2)), "block 0 is cached here");
+        let stored = sealed_sum(&path, 0);
+        rot_record(&path, 1);
+        let computed = live_sum(&path, 0, 3);
+        let before = both_files(&path);
+        assert_eq!(
+            file.append(&[bar(3)]),
+            Err(StoreError::BlockChecksum {
+                path: path.clone(),
+                block: 0,
+                stored,
+                computed,
+            }),
+            "the cache is not evidence about bytes that may have changed since"
+        );
+        assert_eq!(both_files(&path), before, "and nothing was written");
+        drop(file);
+        scrub_month(&path);
+    }
+
+    /// A damaged tail ENTRY, with every committed record intact, is refused
+    /// the same way: re-sealing would overwrite the evidence of the damage.
+    #[test]
+    fn a_damaged_tail_entry_refuses_a_following_append_and_is_not_overwritten() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("w3entry");
+        assert_eq!(
+            file.append(&[bar(0), bar(1), bar(2)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        drop(file);
+        let computed = live_sum(&path, 0, 3);
+        let stored = computed ^ 1;
+        std::fs::write(sidecar_of(&path), stored.to_le_bytes()).expect("the sidecar writes");
+        let before = both_files(&path);
+
+        let mut writer = reopen(&path).expect("the writer opens");
+        assert_eq!(
+            writer.append(&[bar(3)]),
+            Err(StoreError::BlockChecksum {
+                path: path.clone(),
+                block: 0,
+                stored,
+                computed,
+            })
+        );
+        assert_eq!(
+            both_files(&path),
+            before,
+            "the damaged entry is left as found"
+        );
+        drop(writer);
+        scrub_month(&path);
+    }
+
+    /// The boundaries: a tail block that is FULL is never re-sealed, so a
+    /// following append neither verifies it nor launders it; a tail block
+    /// holding one record is verified over that one record; and a block before
+    /// the tail is never touched.
+    ///
+    /// 73 records fill block 0 exactly, so the next append starts block 1 and
+    /// must succeed without reading block 0 — the damage stays where a reader
+    /// finds it. 74 records leave one in block 1, and damaging that one record
+    /// refuses the append.
+    #[test]
+    fn only_a_partially_covered_old_tail_block_is_verified_before_a_following_append() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        let per_block = Layout::V2.records_per_block();
+        assert_eq!(per_block, 73, "the premise of the counts below");
+        let last = i64::try_from(per_block).expect("small");
+
+        // n_valid exactly at the block boundary, its last record rotted.
+        let (path, mut file) = month("w3boundary");
+        let full: Vec<Bar> = (0..last).map(bar).collect();
+        assert!(matches!(file.append(&full), Ok(Appended::Committed { .. })));
+        drop(file);
+        let sealed_block_0 = sealed_sum(&path, 0);
+        rot_record(&path, per_block - 1);
+        let mut writer = reopen(&path).expect("the writer opens");
+        assert_eq!(
+            writer.append(&[bar(last), bar(last + 1)]),
+            Ok(Appended::Committed {
+                first_index: per_block,
+                n_valid: per_block + 2,
+            }),
+            "a new block is sealed fresh; the full block before it is not read"
+        );
+        drop(writer);
+        assert_eq!(
+            sealed_sum(&path, 0),
+            sealed_block_0,
+            "the full block's entry was not re-sealed over the damage"
+        );
+        assert_eq!(sealed_sum(&path, 1), live_sum(&path, 1, per_block + 2));
+        let reader = reopen_readonly(&path).expect("the month opens");
+        assert!(
+            matches!(
+                reader.read_record(per_block - 1),
+                Err(StoreError::BlockChecksum { block: 0, .. })
+            ),
+            "and a reader still refuses it"
+        );
+        assert_eq!(reader.read_record(per_block + 1), Ok(bar(last + 1)));
+        drop(reader);
+        scrub_month(&path);
+
+        // One record in the tail block, and it is the one rotted.
+        let (path, mut file) = month("w3onerecord");
+        let held: Vec<Bar> = (0..=last).map(bar).collect();
+        assert!(matches!(file.append(&held), Ok(Appended::Committed { .. })));
+        drop(file);
+        let stored = sealed_sum(&path, 1);
+        rot_record(&path, per_block);
+        let computed = live_sum(&path, 1, per_block + 1);
+        let before = both_files(&path);
+        let mut writer = reopen(&path).expect("the writer opens");
+        assert_eq!(
+            writer.append(&[bar(last + 1)]),
+            Err(StoreError::BlockChecksum {
+                path: path.clone(),
+                block: 1,
+                stored,
+                computed,
+            })
+        );
+        assert_eq!(both_files(&path), before);
+        drop(writer);
+        scrub_month(&path);
+
+        // Damage in block 0 while the tail is block 1: the append verifies
+        // block 1 only, succeeds, and leaves block 0's entry as it was.
+        let (path, mut file) = month("w3earlier");
+        assert!(matches!(file.append(&held), Ok(Appended::Committed { .. })));
+        drop(file);
+        let sealed_block_0 = sealed_sum(&path, 0);
+        rot_record(&path, 0);
+        let mut writer = reopen(&path).expect("the writer opens");
+        assert_eq!(
+            writer.append(&[bar(last + 1)]),
+            Ok(Appended::Committed {
+                first_index: per_block + 1,
+                n_valid: per_block + 2,
+            })
+        );
+        drop(writer);
+        assert_eq!(sealed_sum(&path, 0), sealed_block_0);
+        assert_eq!(sealed_sum(&path, 1), live_sum(&path, 1, per_block + 2));
+        scrub_month(&path);
+    }
+
+    /// An interrupted append the proof admits is still healed by a following
+    /// batch: the check refuses what it cannot prove, not every tail sealed
+    /// past its commit. A rerun is a no-op and the next append re-seals.
+    #[test]
+    fn a_proved_tail_still_takes_a_following_append_and_a_rerun_is_already_present() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = crash_between_seal_and_commit("w3proved", 5, 3);
+        assert_ne!(
+            sealed_sum(&path, 0),
+            live_sum(&path, 0, 5),
+            "the premise: the entry covers more than the commit"
+        );
+        let mut writer = reopen(&path).expect("the writer opens");
+        let following: Vec<Bar> = (5..10).map(bar).collect();
+        assert_eq!(
+            writer.append(&following),
+            Ok(Appended::Committed {
+                first_index: 5,
+                n_valid: 10
+            })
+        );
+        let after = both_files(&path);
+        assert_eq!(
+            writer.append(&following),
+            Ok(Appended::AlreadyPresent {
+                first_index: 5,
+                n_valid: 10
+            }),
+            "a rerun is a no-op"
+        );
+        assert_eq!(both_files(&path), after, "and writes nothing");
+        assert_eq!(
+            writer.append(&[bar(10)]),
+            Ok(Appended::Committed {
+                first_index: 10,
+                n_valid: 11
+            }),
+            "and the next clean following append verifies and re-seals"
+        );
+        drop(writer);
+        assert_eq!(sealed_sum(&path, 0), live_sum(&path, 0, 11));
+        scrub_month(&path);
     }
 }
 
