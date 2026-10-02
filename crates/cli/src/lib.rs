@@ -40,6 +40,18 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+// The no-follow opens below take their flag from `store::open_flags`, which
+// states it only for the architectures whose UAPI values were verified. There
+// is no Linux-wide default: bit 17 is O_NOFOLLOW on x86_64 and O_LARGEFILE on
+// aarch64, so a guessed value can silently follow symlinks (D-0980).
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+compile_error!(
+    "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
+);
+
 #[cfg(test)]
 mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.

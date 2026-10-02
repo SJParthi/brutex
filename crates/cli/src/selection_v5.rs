@@ -96,10 +96,8 @@ const COMPLETION_FILE: &str = "global-selection-completions-v5.bin";
 const LOCK_FILE: &str = "global-selection-v5.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(MAX_TOP == REQUESTED_TOP);
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == SELECTION_V5_ROW_BYTES);

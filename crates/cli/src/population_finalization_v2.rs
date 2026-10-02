@@ -115,10 +115,8 @@ const LEDGER_FILE: &str = "population-finalization-v2.bin";
 const LOCK_FILE: &str = "population-finalization-v2.lock";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + SEAL_BYTES == POPULATION_FINALIZATION_V2_RECORD_BYTES);
 

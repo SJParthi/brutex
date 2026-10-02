@@ -108,10 +108,8 @@ const EVIDENCE_BASE_VALUES_BYTES: usize = 340;
 const EVIDENCE_STATISTICS_OFFSET: usize = RUNNER_HEADER_BYTES + EVIDENCE_BASE_VALUES_BYTES;
 const EVIDENCE_WALK_OFFSET: usize = 800;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () =
     assert!(DECISION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_ADMISSION_V3_DECISION_BYTES);

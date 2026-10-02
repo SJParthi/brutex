@@ -44637,6 +44637,55 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0980 — State `O_NOFOLLOW` per architecture in one module, `store::open_flags`, and refuse the x86_64 literal everywhere else — 2026-10-02
+
+**What was wrong.** Finding W2-cli4-2. Twenty-four open sites, twenty-three
+in `crates/cli` and one in `crates/store/src/checksum_audit.rs`, passed
+`0x20000` as `O_NOFOLLOW` for every Linux target. That value comes from the
+kernel UAPI `asm-generic/fcntl.h` and is right on x86_64. arm64 overrides it
+in `arch/arm64/include/uapi/asm/fcntl.h`: there `O_NOFOLLOW` is `0100000`
+(`0x8000`) and bit 17 is `O_LARGEFILE`. So on aarch64 Linux every one of
+these "no-follow" opens followed a final symlink, the execution lease and
+the evidence readers among them. `readonly_file.rs` and `checksum_audit.rs`
+already gated themselves to x86_64 and aarch64 and still wrote the x86_64
+bit for both, and the comment in `readonly_file.rs` cited the generic header
+as though arm64 used it. Sixteen modules each kept their own copy of the
+constant. `O_NONBLOCK` (`0x800`) is the same on both architectures and was
+not wrong.
+
+**The change.** `store::open_flags` now holds `O_NOFOLLOW` and `O_NONBLOCK`,
+with values for x86_64 Linux/Android, aarch64 Linux/Android and macOS, each
+next to the header it comes from. No other target gets a constant. Every site
+reads those constants. `checksum_audit::open_regular` and
+`readonly_file::open` keep their `Unsupported` refusal on other targets.
+`cli` adds a `compile_error!` for Linux or Android on any other architecture,
+because its other sites have no refusal path. It goes in `cli` and not in
+`store` so that `store` still builds, and refuses, on such a host. glibc and
+musl share the values because they come from the kernel, not from the C
+library.
+
+**Why `store` and not `core` or `libc`.** `libc` would be the workspace's
+first external dependency for three integers, and that would need a
+`cargo deny` argument. `core` is shared with other projects and holds "the
+nouns" (`docs/10-shared-core.md`), not host flags. `store` is
+brutex-specific, already owns OS-level file handling (`flock`), and both of
+its users can reach it: `cli` depends on `store`, and `store` owns the
+remaining site.
+
+**Proof.** `crates/store/tests/open_flags.rs`. It pins the value on each
+target, opens a real symlink with the flag and gets `ELOOP` where a plain
+open reads the target, and walks every `.rs` file under `crates/` refusing
+any hex literal equal to `1 << 17` outside the module. Before the fix that
+walk named all 24 sites. Rows S-NOFOLLOW-01 to S-NOFOLLOW-03 in
+`docs/04-invariants.md`.
+
+**Honest limits.** CI runs on x86_64 Linux. The aarch64 and macOS value
+tests compile only on those hosts, and no aarch64 run has been measured
+here. The aarch64 value is taken from the kernel header above, and libc
+0.2.189 agrees (`linux/gnu/b64/aarch64/mod.rs`: `O_NOFOLLOW = 0x8000`). The
+source walk catches the literal, but it cannot catch a site that builds the
+bit some other way, such as `1 << 17`.
+
 ### D-0912 — Serve a sealed month's records from the verified block's own bytes, not a fresh read the check never saw — 2026-10-02
 
 **What was wrong (ET-bars-candles-store-0).** `BarFile::read_row` read the

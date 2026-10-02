@@ -88,10 +88,8 @@ const COMPLETION_FILE: &str = "population-completions-v5.bin";
 const LOCK_FILE: &str = "population-v5.lock";
 const LOCK_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(ROW_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_V5_ROW_BYTES);
 const _: () = assert!(COMPLETION_PAYLOAD_BYTES + SEAL_BYTES == POPULATION_V5_COMPLETION_BYTES);
