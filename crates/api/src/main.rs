@@ -30,10 +30,51 @@
 /// already-resolved future is what a test has.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await;
-    note_exit(code, args.len());
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let count = raw.len();
+    let code = match text_args(raw) {
+        Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
+        Err(refusal) => {
+            eprintln!("{refusal}");
+            api::server::MISUSED
+        }
+    };
+    note_exit(code, count);
     std::process::ExitCode::from(code)
+}
+
+/// The arguments as text, or the sentence refusing the first one that is not.
+///
+/// # Why `args_os` and not `args` (probeapi-3, D-1200)
+///
+/// `std::env::args()` PANICS on an argument that is not valid Unicode: the
+/// audit ran `api $'\xff'` and got `called Result::unwrap() on an Err value`
+/// and exit 101, a code this binary does not document, and [`note_exit`] never
+/// ran. Every command this binary knows is ASCII, so a non-text argument is a
+/// word it does not understand — [`api::server::MISUSED`], exit 2, the same as
+/// any other unknown word, with the reason on stderr and the exit noted.
+///
+/// The refusal names the POSITION, not the bytes: the bytes are whatever the
+/// caller typed, and the lossy rendering is shown only so the operator can
+/// find it. One pass, one conversion per argument.
+///
+/// # Errors
+///
+/// The refusal sentence, ready for stderr.
+fn text_args(raw: Vec<std::ffi::OsString>) -> Result<Vec<String>, String> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(at, arg)| {
+            arg.into_string().map_err(|bad| {
+                format!(
+                    "REFUSED: argument {} is not valid UTF-8 ({:?}); every command \
+                     this binary knows is plain text; usage: api [serve [ADDR] | report]",
+                    at.saturating_add(1),
+                    bad.to_string_lossy()
+                )
+            })
+        })
+        .collect()
 }
 
 /// The last thing this process does: say which code the shell is about to
@@ -158,7 +199,7 @@ fn exit_note(code: u8) -> (telemetry::Level, &'static str, &'static str) {
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{exit_note, note_exit};
+    use super::{exit_note, note_exit, text_args};
 
     /// Every code this build can return says something of its own, and zero is
     /// the only one that is not an error.
@@ -236,5 +277,45 @@ mod tests {
             line.fields
         );
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// probeapi-3, D-1200: a non-UTF-8 argument is refused by position with a
+    /// sentence, never unwrapped; text arguments pass through unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_text_argument_is_refused_by_position_and_text_passes_through() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+        assert_eq!(text_args(Vec::new()), Ok(Vec::new()));
+        assert_eq!(
+            text_args(vec![OsString::from("serve"), OsString::from("127.0.0.1:0")]),
+            Ok(vec!["serve".to_owned(), "127.0.0.1:0".to_owned()])
+        );
+        for (raw, at) in [
+            (vec![OsString::from_vec(vec![0xff])], 1),
+            (
+                vec![
+                    OsString::from("serve"),
+                    OsString::from_vec(vec![b'1', 0xc0, 0x80]),
+                ],
+                2,
+            ),
+            // A lone surrogate half, as WTF-8 would carry it.
+            (
+                vec![
+                    OsString::from_vec(vec![0xed, 0xa0, 0x80]),
+                    OsString::from("x"),
+                ],
+                1,
+            ),
+        ] {
+            let why = text_args(raw).unwrap_err();
+            assert!(why.starts_with("REFUSED: argument "), "{why}");
+            assert!(
+                why.contains(&format!("argument {at} is not valid UTF-8")),
+                "{why}"
+            );
+            assert!(why.contains("usage: api"), "{why}");
+        }
     }
 }
