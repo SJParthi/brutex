@@ -43718,3 +43718,50 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0941 — A daily reference record must be a price: `DailyReference::new` validates with `check_evaluable`, not `check` — 2026-10-02
+
+**What was found.** ET-indicators-1, and UC-3 is the same defect.
+`indicators::anchored::DailyReference::new` validated its bar with
+`Candle::check`. That function admits an all-zero record by contract (its own
+doc and `a_defaulted_candle_is_all_zero_and_its_open_interest_is_a_real_zero`
+pin that), and `DailyLevels::from_daily_bar(0, 0, 0)` has no sign check. So an
+ELIGIBLE daily bar with `low <= 0` became the next day's anchor: it installed a
+0/0/0 pivot, CPR and both previous-day Fibonacci ladders, pushed Prev5 and set
+PreviousSession, and the pivot-family bits fired on every bar of the next day
+(the audit's attack counted 13). `Evaluator::stepped` refuses the very same
+record as `Corrupt::PriceNotPositive`, so the signal door and the anchored door
+disagreed about what a price is. The live caller is
+`cli::stored::daily_context_from_span`, which wraps every stored `1day` bar.
+
+**The change.** `DailyReference::new` calls `bar.check_evaluable()`, which is
+`check` plus `low <= 0 -> PriceNotPositive` run LAST, so every structural
+refusal keeps its old name (`RangeOverflows` for a straddling span,
+`NegativeVolume` for a negative volume) and only a record that passed all of
+`check` can newly refuse. It applies to excluded records too: an excluded row is
+still offered and counted as evidence of a session, and a record that is not a
+price is not evidence of one. The fixture in
+`malformed_or_unusable_daily_ohlcv_is_named_at_construction` that reached
+`LevelOverflows` through `low = 0` now reaches it with `low = 1`.
+
+**How a caller sees it.** Every caller already propagates the error: `cli`'s
+`daily_context_from_span` turns it into a refusal of the whole daily context
+naming the record's timestamp and `Corrupt(PriceNotPositive)`; the replay codec
+and the candidate-universe fixture `map_err` or `expect` it. Nothing drops the
+record or reuses an older anchor in its place (§4).
+
+**Proved by.**
+`indicators::anchored::tests::a_nonpositive_daily_record_is_refused_exactly_as_the_evaluator_refuses_it`
+(all-zero, `low = 0` with `high > 0`, negative low, all-negative ordered,
+`low = i64::MIN + 1`; both eligibilities; the evaluator's own refusal of each;
+precedence of `RangeOverflows` and `NegativeVolume`) fails on the pre-fix code
+with `left: Ok(DailyReference { … Eligible(DailyLevels { pdh: 0, pdl: 0, pivot:
+0, … }) })`. `the_smallest_positive_daily_record_is_still_an_eligible_anchor`
+pins the admitted side at one paisa, and
+`cli::stored::tests::a_nonpositive_stored_daily_record_refuses_the_daily_context_by_name`
+pins the caller's loud refusal.
+
+**What it does not claim.** The audit reported a store scan with zero
+all-zero daily records; that was not re-measured here. The defect was latent
+on the stored data that scan covered, and is closed for any record that
+reaches the anchored path.
