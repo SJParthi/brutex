@@ -2379,15 +2379,9 @@ impl HttpSource {
             .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
-        // A THROTTLE IS RECORDED AS SOON AS IT IS SEEN. A SUCCESS IS NOT: it is
-        // credited below, once the body has been accepted. D-0726.
-        if status.as_u16() == 429
-            && let Some(lock) = self.governor.as_ref()
-        {
-            lock.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record_throttled();
-        }
+        // ONLY THE THROTTLE IS RECORDED HERE. The success half waits for the
+        // body, exactly as `window_async` does: see `weigh_refused_body`.
+        self.record_throttle_status(status.as_u16());
         if !status.is_success() {
             // THE VENDOR'S OWN STATUS, for the reason `Discovery::get` gives
             // one line away: a 401 and a 429 mean different things to an
@@ -2412,19 +2406,59 @@ impl HttpSource {
         // undeclared one is abandoned at the cap. Both refusals carry the
         // vendor's status. D-0723.
         let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;
-        // ONLY NOW IS THE ANSWER CREDITED. This credit ran on any 2xx status
-        // before the body was read, so a body the socket cut short, one past
-        // the cap and one that is not UTF-8 each counted toward the next step
-        // up although this build refused them. A 2xx whose body carries a
-        // refusal is still credited here: nothing on this path reads the body
-        // for one, which is ledger row W1-pull2-11 and stays open. D-0726.
-        if let Some(lock) = self.governor.as_ref() {
-            lock.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record_success();
-        }
+        // THE ANSWER IS CREDITED ONLY ONCE ITS BODY IS ACCEPTED. This credit ran
+        // on any 2xx status before the body was read, so a body the socket cut
+        // short, one past the cap and one that is not UTF-8 each counted toward
+        // the next step up although this build refused them (D-0726). The credit
+        // now lives in `weigh_refused_body`, after the body is weighed for a
+        // refusal, so a 2xx carrying one is not credited either (D-0950).
         self.keep_first(crate::capture::Method::Post, url, &body);
+        // A REFUSAL UNDER A 200 IS A REFUSAL (W1-pull2-11, D-0950).
+        self.weigh_refused_body(&body, status.as_u16())?;
         Ok(body)
+    }
+
+    /// The throttle half of the governor feedback, the only half that can be
+    /// decided from the status alone.
+    ///
+    /// 429 is the only status read as rate. The success half is recorded only
+    /// once the body has been weighed, by [`Self::weigh_body`].
+    fn record_throttle_status(&self, status: u16) {
+        if status == 429
+            && let Some(lock) = self.governor.as_ref()
+        {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+        }
+    }
+
+    /// [`Self::weigh_body`] for the two paths that answer a
+    /// [`crate::chain::Refusal`]: `post_json` and `Discovery::get`.
+    ///
+    /// These two used to call `record_success` on any 2xx and hand the body
+    /// back as `Ok`, so a Dhan `DH-901` under a 200 raised the allowance and
+    /// reached the caller as a body to decode. `window_async` had already been
+    /// corrected; these had not (W1-pull2-11, D-0950).
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::chain::Refusal`] carrying the status sent and the body, with
+    /// `credential_dead` set exactly when the body names a dead session.
+    fn weigh_refused_body(&self, text: &str, status: u16) -> Result<(), crate::chain::Refusal> {
+        use crate::chain::Refusal;
+        match self.weigh_body(text) {
+            None => Ok(()),
+            Some(named) => {
+                let detail = refused_in_body(status, text);
+                Err(if named == crate::refusal::Disposition::SessionDead {
+                    Refusal::credential(Some(status), detail)
+                } else {
+                    Refusal::answered(status, detail)
+                })
+            }
+        }
     }
 
     /// Record this answer if the capture budget has room.
@@ -2511,16 +2545,8 @@ impl crate::chain::Discovery for HttpSource {
             .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
-        if let Some(lock) = self.governor.as_ref() {
-            let mut g = lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status.as_u16() == 429 {
-                g.record_throttled();
-            } else if status.is_success() {
-                g.record_success();
-            }
-        }
+        // ONLY THE THROTTLE HERE; the success half waits for the body.
+        self.record_throttle_status(status.as_u16());
         if !status.is_success() {
             // THE VENDOR'S OWN STATUS, NOT A PARAPHRASE. A 401 here and a 429
             // here mean different things to an operator -- one is a credential
@@ -2545,6 +2571,8 @@ impl crate::chain::Discovery for HttpSource {
         // expiries and contracts answers are parsed by field names taken from
         // its documentation and never from an observed response.
         self.keep_first(crate::capture::Method::Get, url, &body);
+        // A REFUSAL UNDER A 200 IS A REFUSAL (W1-pull2-11, D-0950).
+        self.weigh_refused_body(&body, status.as_u16())?;
         Ok(body)
     }
 }
@@ -2908,6 +2936,35 @@ impl HttpSource {
         text: &str,
         status: u16,
     ) -> Result<(), FetchError> {
+        match self.weigh_body_parsed(parsed) {
+            None => Ok(()),
+            Some(named) => Err(FetchError::VendorRefused {
+                status,
+                detail: refused_in_body(status, text),
+                named: Some(named),
+            }),
+        }
+    }
+
+    /// [`Self::weigh_body_parsed`] over a body it parses itself, for the two
+    /// paths that hand the caller text rather than a decoded window:
+    /// `post_json` and `Discovery::get`. A body that is not JSON names no
+    /// refusal, exactly as on the window path.
+    fn weigh_body(&self, text: &str) -> Option<crate::refusal::Disposition> {
+        self.weigh_body_parsed(parse_answer(text).ok().as_ref())
+    }
+
+    /// The disposition a 2xx body names, if any, with the governor feedback
+    /// that follows from it: a body-named throttle is recorded as a throttle,
+    /// any other named refusal moves nothing, and only a body naming no
+    /// refusal is recorded as a success.
+    ///
+    /// The one place that decision is made, for `window_async`, `post_json`
+    /// and `Discovery::get` alike (W1-pull2-11, D-0950).
+    fn weigh_body_parsed(
+        &self,
+        parsed: Option<&serde_json::Value>,
+    ) -> Option<crate::refusal::Disposition> {
         if let Some(contract) = self.spec.error_names
             && let Some(named) =
                 parsed.and_then(|value| crate::refusal::disposition_of_value(value, contract))
@@ -2924,18 +2981,7 @@ impl HttpSource {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 g.record_throttled();
             }
-            return Err(FetchError::VendorRefused {
-                status,
-                // CUT, LIKE EVERY OTHER REFUSAL THAT REACHES AN ERROR. This
-                // body is bounded only by `MAX_RESPONSE_BYTES`, and `trim` is the
-                // rule the non-2xx door already obeys. UC-22.
-                detail: format!(
-                    "the vendor answered {status} and put a refusal in the \
-                     body: {}",
-                    trim(text)
-                ),
-                named: Some(named),
-            });
+            return Some(named);
         }
         // ONLY NOW IS IT A SUCCESS. The status was 2xx and the body carries no
         // refusal this vendor's contract can name, so the additive increase is
@@ -2946,8 +2992,19 @@ impl HttpSource {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             g.record_success();
         }
-        Ok(())
+        None
     }
+}
+
+/// The sentence for a refusal the vendor put in a 2xx body: the status it sent
+/// and the body itself, unparaphrased but CUT, like every other refusal that
+/// reaches an error: this body is bounded only by `MAX_RESPONSE_BYTES`, and
+/// `trim` is the rule the non-2xx door already obeys. UC-22.
+fn refused_in_body(status: u16, text: &str) -> String {
+    format!(
+        "the vendor answered {status} and put a refusal in the body: {}",
+        trim(text)
+    )
 }
 
 /// One array per bar, read by POSITION: `[ts, open, high, low, close, volume]`
@@ -3147,7 +3204,9 @@ fn one_stamp(
             let text = v.as_str().ok_or_else(|| FetchError::TransportFailed {
                 detail: format!("bar {at} stamps {v}, and this feed spells its timestamps as text"),
             })?;
-            let local = local_seconds(text).ok_or_else(|| FetchError::TransportFailed {
+            // THE FIRST 19 BYTES ONLY: the zone after them is `stated_offset`'s.
+            let head = text.get(..19).unwrap_or(text);
+            let local = local_seconds(head).ok_or_else(|| FetchError::TransportFailed {
                 detail: format!(
                     "bar {at} stamps {text:?}, which is not YYYY-MM-DD followed by HH:MM:SS"
                 ),
@@ -3277,9 +3336,27 @@ fn path_safe<'a>(value: &'a str, placeholder: &'static str) -> Result<&'a str, F
 /// local. The separator is a `T` on Groww's live endpoint and a space on its
 /// deprecated one — and its documentation says space for both — so this accepts
 /// either rather than believing the annotation.
+///
+/// # The whole shape, and nothing after it (UC-23, D-0951)
+///
+/// Exactly 19 bytes: digits at every numeric position, `-` at 4 and 7, `T` or
+/// a space at 10, `:` at 13 and 16. This read six numbers at fixed offsets and
+/// checked nothing between or after them, so `2026-08-04T09:15:00Z` on an
+/// `IsoDateTimeText` feed was read as 09:15 local and then shifted by IST, and
+/// `i64::from_str` took a sign, so `-1` passed as an hour. A stamp carrying a
+/// zone is `IsoDateTimeOffset`'s, which hands this its first 19 bytes.
 fn local_seconds(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
-    if bytes.len() < 19 {
+    if bytes.len() != 19 {
+        return None;
+    }
+    let shaped = bytes.iter().enumerate().all(|(at, &b)| match at {
+        4 | 7 => b == b'-',
+        10 => b == b'T' || b == b' ',
+        13 | 16 => b == b':',
+        _ => b.is_ascii_digit(),
+    });
+    if !shaped {
         return None;
     }
     let num = |from: usize, to: usize| -> Option<i64> { text.get(from..to)?.parse().ok() };
@@ -4577,6 +4654,233 @@ mod tests {
             Some(ceiling),
             "a dead token is not a pace, so the allowance is untouched"
         );
+    }
+
+    /// **A REFUSAL UNDER A 200 ON THE ROLLING POST AND ON A DISCOVERY GET IS A
+    /// REFUSAL, AND IT IS NOT COUNTED AS A SUCCESS.** W1-pull2-11, D-0950.
+    ///
+    /// `window_async` weighs a 2xx body before it tells the governor the call
+    /// succeeded. `post_json` and `Discovery::get` did not: both called
+    /// `record_success` on any 2xx and returned the body as `Ok`. So a Dhan
+    /// `DH-901` under a 200 raised the allowance and reached the caller as a
+    /// body.
+    ///
+    /// The governor is primed one clean answer short of a step up
+    /// (`SUCCESSES_PER_STEP - 1` recorded after a throttle), so one more
+    /// `record_success` moves `permitted` and none leaves it where it was.
+    /// Each row is driven over a real loopback socket.
+    #[test]
+    fn a_refusal_under_a_200_on_the_post_and_discovery_paths_is_never_a_success() {
+        use core::cmp::Ordering;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let dead = r#"{"errorType":"Invalid_Authentication","errorCode":"DH-901","errorMessage":"Client ID or access token is invalid"}"#;
+        let throttled = r#"{"errorCode":"DH-904","errorMessage":"Too many requests"}"#;
+        let wrong = r#"{"errorCode":"DH-905","errorMessage":"Missing required fields"}"#;
+        let clean = r#"{"data":{"open":[1]}}"#;
+        // (body, refused?, credential dead?, how the allowance must move)
+        let rows: [(&str, bool, bool, Ordering); 4] = [
+            (dead, true, true, Ordering::Equal),
+            (throttled, true, false, Ordering::Less),
+            (wrong, true, false, Ordering::Equal),
+            (clean, false, false, Ordering::Greater),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (body, refused, credential_dead, moves) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                {
+                    let mut g = source
+                        .governor
+                        .as_ref()
+                        .expect("Dhan is budgeted")
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.record_throttled();
+                    for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                        g.record_success();
+                    }
+                }
+                let before = allowance(&source).expect("a per-second span");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post {
+                    "HttpSource::post_json"
+                } else {
+                    "Discovery::get"
+                };
+                if refused {
+                    let refusal = got.expect_err(&format!("{path}: {body} is a refusal"));
+                    assert_eq!(refusal.status, Some(200), "{path}: the status sent");
+                    assert_eq!(
+                        refusal.credential_dead, credential_dead,
+                        "{path}: {body} names whether the token is dead"
+                    );
+                    assert!(refusal.detail.contains(body), "{path}: {}", refusal.detail);
+                } else {
+                    assert_eq!(got.expect("a clean body is a success"), body, "{path}");
+                }
+                let after = allowance(&source).expect("a per-second span");
+                assert_eq!(
+                    after.cmp(&before),
+                    moves,
+                    "{path}: {body} moved the allowance {before} -> {after}"
+                );
+            }
+        }
+    }
+
+    /// **A 429 ON THE ROLLING POST AND ON A DISCOVERY GET STILL NARROWS THE
+    /// ALLOWANCE, AND NO OTHER REFUSING STATUS MOVES IT.** W1-pull2-11, D-0950.
+    ///
+    /// The correction moved the success half of the governor feedback behind
+    /// the body and left the throttle half on the status, in
+    /// `record_throttle_status`. This pins that half: with the governor primed
+    /// as in the 2xx test, a 429 must narrow the per-second allowance on both
+    /// paths, and a 503 and a 401 must leave it where it was.
+    #[test]
+    fn a_429_on_the_post_and_discovery_paths_narrows_the_allowance() {
+        use core::cmp::Ordering;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let rows: [(u16, &str, Ordering); 3] = [
+            (429, "Too Many Requests", Ordering::Less),
+            (503, "Service Unavailable", Ordering::Equal),
+            (401, "Unauthorized", Ordering::Equal),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (status, reason, moves) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                {
+                    let mut g = source
+                        .governor
+                        .as_ref()
+                        .expect("Dhan is budgeted")
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.record_throttled();
+                    for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                        g.record_success();
+                    }
+                }
+                let before = allowance(&source).expect("a per-second span");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post {
+                    "HttpSource::post_json"
+                } else {
+                    "Discovery::get"
+                };
+                let refusal = got.expect_err(&format!("{path}: a {status} is a refusal"));
+                assert_eq!(refusal.status, Some(status), "{path}: the status sent");
+                let after = allowance(&source).expect("a per-second span");
+                assert_eq!(
+                    after.cmp(&before),
+                    moves,
+                    "{path}: a {status} moved the allowance {before} -> {after}"
+                );
+            }
+        }
+    }
+
+    /// **A TEXT STAMP IS READ ONLY WHEN EVERY SEPARATOR AND DIGIT IS WHERE IT
+    /// BELONGS, AND NOTHING FOLLOWS IT.** UC-23, D-0951.
+    ///
+    /// `local_seconds` read six numbers at fixed offsets and checked nothing
+    /// between them, and nothing after byte 19. So `2026-08-04T09:15:00Z` on an
+    /// `IsoDateTimeText` feed was read as 09:15 local and then shifted by IST,
+    /// a 5h30m error that stores cleanly. `i64::from_str` also takes a sign,
+    /// so `-1` passed as an hour.
+    #[test]
+    fn a_text_stamp_is_refused_unless_its_whole_shape_is_right() {
+        use crate::vendor::TimestampEncoding as T;
+        let good = local_seconds("2026-08-04T09:15:00").expect("the live Groww shape");
+        assert_eq!(
+            local_seconds("2026-08-04 09:15:00"),
+            Some(good),
+            "a space is the documented separator and reads the same"
+        );
+        let bad = [
+            "2026x08-04 09:15:00",
+            "2026-08x04 09:15:00",
+            "2026-08-04x09:15:00",
+            "2026-08-04 09x15:00",
+            "2026-08-04 09:15x00",
+            "2026X08Y04Z09A15B00",
+            "2026-+8-04 09:15:00",
+            "2026-08-04 -1:15:00",
+            "2026-08-04 09:-5:00",
+            "+026-08-04 09:15:00",
+            "2026-08-04T09:15:00Z",
+            "2026-08-04T09:15:00+0530",
+            "2026-08-04 09:15:00 ",
+            "2026-08-04 24:00:00",
+            "2026-08-04 09:60:00",
+            "2026-08-04 09:15:60",
+        ];
+        for text in bad {
+            assert_eq!(local_seconds(text), None, "{text:?} must be refused");
+            let cell = serde_json::Value::String(text.to_owned());
+            for encoding in [T::IsoDateTimeText, T::IstDateTimeText] {
+                assert!(
+                    one_stamp(&cell, encoding, 0).is_err(),
+                    "{text:?} under {encoding:?}"
+                );
+            }
+        }
+        // THE OFFSET ARM STILL READS ITS 19-BYTE PREFIX, and still refuses one
+        // whose separators are wrong.
+        let zoned = serde_json::Value::String("2026-08-04T09:15:00+0530".to_owned());
+        assert_eq!(
+            one_stamp(&zoned, T::IsoDateTimeOffset, 0).expect("a zoned stamp"),
+            good - 19_800
+        );
+        let zoned_bad = serde_json::Value::String("2026x08-04T09:15:00+0530".to_owned());
+        assert!(one_stamp(&zoned_bad, T::IsoDateTimeOffset, 0).is_err());
     }
 
     #[test]
