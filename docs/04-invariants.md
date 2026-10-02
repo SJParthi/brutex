@@ -5711,3 +5711,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | An option row's strike must snap to a positive paisa count; `0`, `-0`, `0.004` and any negative strike are `Malformed`, not a routine `LiveContract` skip. | `core::vendor::tests::a_strike_at_or_below_zero_is_malformed_not_a_live_contract` | ✓ |
+
+### Expression grammar checkpoint decode and vocab crate doc (D-1341, D-1342)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| One prefix check of a checkpoint's whole selected prefix accepts exactly what a check at every index accepts, so `Cursor::decode` is bounded by `CURSOR_BYTES`, not `at²`. D-1341 | `expression_search::invariant_tests::one_check_of_the_whole_prefix_equals_a_check_at_every_index` | ✓ |
+| The vocab crate doc names every public module and the table's size, and quotes the nine-term run identity exactly as `CLAUDE.md` §3 rule 3 does. D-1342 | `tests::the_crate_doc_names_every_module_the_table_size_and_the_identity` in `crates/vocab/src/lib.rs` | ✓ |

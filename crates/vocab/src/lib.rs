@@ -1,18 +1,21 @@
 //! The condition vocabulary: the bit table, the 384-bit mask, and nothing else.
 //!
-//! This crate depends on nothing. `CLAUDE.md` §5 permits it one arrow, to
-//! `core`, and it does not take it -- a position is a `u16` and a name is a
-//! `&'static str`, so there is no price, no symbol and no calendar in the
-//! surface. A crate with no arrow cannot be in a cycle.
+//! This crate depends on nothing, and gate 22 clause A keeps it that way: a
+//! position is a `u16` and a name is a `&'static str`, so there is no price, no
+//! symbol and no calendar in the surface. A crate with no arrow cannot be in a
+//! cycle.
 //!
 //! # What is here
 //!
 //! | Module | Owns |
 //! |---|---|
 //! | [`mask`] | [`ConditionMask`], the six-word condition mask and the hit test |
-//! | [`table`] | the 370 positions, their names, and the three tombstones |
+//! | [`table`] | the 370 positions, their names, the three tombstones and the 39 void rows |
 //! | [`tolerance`] | the `near_*` band half-width, which is UNPINNED |
-//! | [`error`] | every refusal the two above can produce |
+//! | [`error`] | every refusal the table and tolerance can produce |
+//! | [`expression`] | versioned AND/OR/NOT programs over live positions, with unknown kept distinct |
+//! | [`expression_search`] | the resumable, checkpointed enumeration of that grammar |
+//! | [`implication`] | which positions restate or exclude another, exactly |
 //!
 //! # The three rules this crate exists to keep
 //!
@@ -62,7 +65,7 @@ pub use tolerance::Tolerance;
 ///
 /// `CLAUDE.md` §3 rule 3 identifies a run by
 /// `blake3(mask ‖ direction ‖ instrument ‖ timeframe ‖ params ‖ data_digest ‖
-/// vocab_version ‖ commit)`. This constant is the `vocab_version` term, so a
+/// vocab_version ‖ commit ‖ feed)`. This constant is the `vocab_version` term, so a
 /// bump changes the identity of **every** run ever recorded: the same sweep
 /// over the same bars produces a different key, nothing that was stored can be
 /// found by the identity a rerun computes, and the two sets of results cannot
@@ -122,6 +125,62 @@ mod tests {
             ConditionMask::BITS as usize - table::COUNT,
             14,
             "free positions before the next family forces a widen, and a bump"
+        );
+    }
+
+    /// The crate doc is checked against the crate rather than trusted. It had
+    /// drifted three ways at once: its module table omitted three of the seven
+    /// public modules, it gave the table 365 positions when it holds 370, and
+    /// the run identity it quoted had eight terms when `CLAUDE.md` §3 rule 3
+    /// has nine, `feed` (D-0225). D-1342.
+    #[test]
+    fn the_crate_doc_names_every_module_the_table_size_and_the_identity() {
+        let source = include_str!("lib.rs");
+        let header: String = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("//!"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let modules: Vec<&str> = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("pub mod "))
+            .map(|rest| rest.trim_end_matches(';'))
+            .collect();
+        assert_eq!(modules.len(), 7, "{modules:?}");
+        for module in modules {
+            assert!(
+                header.contains(&format!("| [`{module}`] |")),
+                "the module table must name `{module}`"
+            );
+        }
+        assert!(
+            header.contains(&format!("the {} positions", table::COUNT)),
+            "the module table must state the table's size"
+        );
+        assert!(
+            !header.contains("one arrow, to"),
+            "gate 22 pins vocab to no arrow"
+        );
+
+        let flatten = |text: &str, prefix: &str| -> String {
+            let start = text.find("`blake3(").unwrap_or(text.len());
+            let tail = text.get(start..).unwrap_or_default();
+            let end = tail.find(")`").map_or(0, |end| end + 2);
+            tail.get(..end)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| line.trim().trim_start_matches(prefix).trim())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let law = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CLAUDE.md"))
+            .unwrap_or_default();
+        let ours = flatten(source, "///");
+        assert!(ours.contains("feed"), "{ours}");
+        assert_eq!(
+            ours,
+            flatten(&law, ""),
+            "the identity quoted here is CLAUDE.md §3 rule 3's"
         );
     }
 

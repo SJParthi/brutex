@@ -47379,3 +47379,51 @@ The lane-4 commit also pinned `NotRepresentable`'s `source()`; that half is
 already held by `not_representable_exposes_its_core_error_as_the_source`
 (GAP14-64) and was not taken. The same lane's D-1331 (signed expiry) duplicates
 W3-lake1-3, already on this branch, and was not taken either.
+
+### D-1341 — Validate a cursor checkpoint's selected prefix once, not once per index — 2026-10-02
+
+**What happened.** `Cursor::decode` rebuilt the selected prefix and called
+`valid_prefix` on `code[..=index]` for every `index < at`. Each call re-walked
+the prefix from the start and cleared its 1,151-slot stack, so one decode was
+Θ(at²) instruction steps plus `at` clears of 9.2 KB. Measured in release on
+this machine, 200 decodes each: 4.7 µs at `at = 1`, 19.0 µs at `at = 100`,
+836.7 µs at `at = 1150`. Checkpoint readers decode every stored step.
+
+**The change.** One `valid_prefix` call on the whole selected prefix when
+`at > 0`. It is equivalent, not a weaker check: the walk refuses an operator
+the stack cannot feed at the index where it occurs, so every intermediate
+stack is still checked; and the slack `remaining − (depth − 1)` falls by 2, 1
+or 0 per instruction and never rises, so a final prefix that can still reduce
+implies every shorter prefix could. After the change the same measurement gave
+2.5 µs, 4.0 µs and 5.1 µs. Decode is now bounded by the fixed `CURSOR_BYTES`
+rather than by `at²`. Wall-clock figures are from a shared machine and are
+not a bench gate (§3 rule 6). `valid_prefix` itself is untouched; its
+per-step cost in `advance` is the limit D-0983 states.
+
+**Proof.** `one_check_of_the_whole_prefix_equals_a_check_at_every_index`
+compares the two answers exhaustively over five opcodes, every prefix up to six
+instructions and every length up to eight (63,465 cases, both outcomes
+present). The existing decode refusal and every-node resume tests pass
+unchanged.
+
+### D-1342 — The vocab crate doc is checked against the crate and the law — 2026-10-02
+
+**What happened.** `crates/vocab/src/lib.rs` had drifted in four places. Its
+module table named four of the seven public modules and omitted `expression`,
+`expression_search` and `implication`. It said (until ET-vocabulary-conditions-bits-2 corrected the number) that
+the table holds 365 positions; it holds 370. It said `CLAUDE.md` §5 permits vocab one arrow, to `core`; §5
+and gate 22 give it none. And the run identity quoted on `VOCAB_VERSION` had
+eight terms, without `feed`, which D-0225 made the ninth.
+
+**The change.** The doc is corrected, and
+`tests::the_crate_doc_names_every_module_the_table_size_and_the_identity`
+holds it: every `pub mod` must appear in the module table, the table size must
+be `table::COUNT`, the stale arrow sentence must be gone, and the quoted
+identity must equal `CLAUDE.md` §3 rule 3's, read from the file. It failed
+before the correction (`the module table must name `expression``) and passes
+after. No code, bit, or `VOCAB_VERSION` changes.
+
+D-1340, the third part of the same lane-4 commit, duplicates D-0750 and D-0982
+(cursor equality is its encoding), already on this branch, and was not taken.
+The module table keeps the `the 370 positions, their names` shape that
+`the_present_tense_position_counts_in_this_crates_prose_match_the_table` reads.

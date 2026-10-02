@@ -318,12 +318,21 @@ impl Cursor {
                 .ok_or(Refusal::Cursor)?;
             let instruction = cursor.instruction(rank).ok_or(Refusal::Cursor)?;
             *cursor.code.get_mut(index).ok_or(Refusal::Cursor)? = instruction;
-            if !valid_prefix(
-                cursor.code.get(..=index).ok_or(Refusal::Cursor)?,
+        }
+        // ONE check of the whole selected prefix, not one per index. The walk
+        // refuses an operator the stack cannot feed at the index it occurs, so
+        // every intermediate stack is checked by this one pass; and the slack
+        // `remaining - (depth - 1)` never rises from one instruction to the
+        // next (it falls by 2, 1 or 0), so a final prefix that can still
+        // reduce implies every shorter one could. Checking each prefix
+        // separately was Θ(at²) plus `at` clears of the walk's stack. D-1341.
+        if at > 0
+            && !valid_prefix(
+                cursor.code.get(..usize::from(at)).ok_or(Refusal::Cursor)?,
                 usize::from(length),
-            ) {
-                return Err(Refusal::Cursor);
-            }
+            )
+        {
+            return Err(Refusal::Cursor);
         }
         Ok(cursor)
     }
@@ -538,6 +547,45 @@ mod invariant_tests {
         );
         assert!(decoded == cursor, "equal bytes compare equal");
         assert!(cursor != start, "different progress compares unequal");
+    }
+
+    /// `decode` checks the selected prefix once instead of at every index.
+    /// That is sound only if the final check implies every intermediate one.
+    /// Exhaustive over five opcodes, every prefix up to six instructions and
+    /// every program length up to eight: the two answers never differ.
+    #[test]
+    fn one_check_of_the_whole_prefix_equals_a_check_at_every_index() {
+        let ops = [
+            Instruction::Bit(0),
+            Instruction::Bit(63),
+            Instruction::Not,
+            Instruction::And,
+            Instruction::Or,
+        ];
+        let (mut compared, mut accepted, mut refused) = (0_u32, 0_u32, 0_u32);
+        for size in 1..=6_usize {
+            for mut n in 0..5_usize.pow(u32::try_from(size).expect("small")) {
+                let mut code = [Instruction::Pad; 6];
+                for slot in code.iter_mut().take(size) {
+                    *slot = ops[n % 5];
+                    n /= 5;
+                }
+                let code = &code[..size];
+                for length in size..=8 {
+                    let every = (0..size).all(|i| valid_prefix(&code[..=i], length));
+                    let once = valid_prefix(code, length);
+                    assert_eq!(every, once, "{code:?} length {length}");
+                    compared += 1;
+                    if once {
+                        accepted += 1;
+                    } else {
+                        refused += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 63_465, "sum of 5^s * (9 - s) for s in 1..=6");
+        assert!(accepted > 1_000 && refused > 1_000, "{accepted} {refused}");
     }
 
     #[test]
