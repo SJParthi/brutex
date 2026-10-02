@@ -564,7 +564,14 @@ jobs:
           c_work=$(mktemp -d)
           git ls-files -z > "$c_work/tracked"
           [ -s "$c_work/tracked" ] || { echo "GATE 1C READ NO TRACKED FILE."; exit 1; }
-          hits=$(xargs -0 -r grep -nE "/[A-Za-z0-9][A-Za-z0-9_.-]*/(${envs})/" < "$c_work/tracked" \
+          # The org segment may begin with `_` or `-`, because
+          # `pull::config::check_segment` accepts either there, and the
+          # environment word is matched case-blind, because a segment may hold
+          # upper case. The pattern required `[A-Za-z0-9]` first and a
+          # lower-case environment, so an org written `_acmeorg` before a real
+          # environment word, or an environment word in capitals, passed
+          # (AC-gates-law-8, D-1109).
+          hits=$(xargs -0 -r grep -niE "/[A-Za-z0-9_-][A-Za-z0-9_.-]*/(${envs})/" < "$c_work/tracked" \
                  || true)
           if [ -n "$hits" ]; then
             printf 'LITERAL CREDENTIAL PATH IN A TRACKED FILE:\n%s\n' "$hits"
@@ -1571,6 +1578,19 @@ jobs:
           # field.
           pull_asserted_number='2025-07 2025-08 401 42'
 
+          # D-1109 surfaced these when the gate began reading DECODED literals.
+          # `orgtwo`, `vendorx` and `fieldx` are config-fixture segments written
+          # inside a larger fixture literal as `\"orgtwo\"`, which the line regex
+          # could not see (a backslash sat before each quote); `note`, `exact` and
+          # `__type` are JSON and CSV keys inside fixture bodies, `__type` being
+          # the AWS JSON error field. None names a real account, environment or
+          # vendor.
+          inner_literal='orgtwo vendorx fieldx note exact __type'
+          # Negative numbers, now that a segment may begin with `-` (D-1109):
+          # parse and overflow fixtures, `i64::MIN` among them. No digit string
+          # is a path segment this repository configures.
+          signed_number='-1 -125 -2450 -19801 -1e300 -9223372036854775808'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1581,66 +1601,77 @@ jobs:
           ${rolling_word} ${rolling_scaffold} ${pull_fixture}
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
-          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}"
+          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
+          ${inner_literal} ${signed_number}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
-          # unsound in the direction that fails a green build:
+          # unsound in the direction that fails a green build: `grep -q` exits
+          # the instant it MATCHES, `printf` takes EPIPE, `pipefail` promotes
+          # it, `!` inverts it, and a declared word is reported as undeclared.
+          # Writing the list to a file removes the pipe.
+          work=$(mktemp -d)
+          printf '%s\n' $allowed > "$work/allowed"
+
+          # THE EXTRACTION READS TOKENS, NOT LINES (D-1109). It used to drop
+          # every line whose first non-blank character was `//` or `*`, on the
+          # claim that "a Rust STRING LITERAL cannot sit on a line that begins
+          # with `//`, so this cannot hide one". The `*` half was never argued:
+          # `*slot = "acmeorg";` is an ordinary statement and was never read.
+          # It matched `"word"` in raw text, so a segment inside a fixture
+          # literal as `\"orgtwo\"` was invisible, and it required the first
+          # character to be `[a-z0-9]` while `pull::config::check_segment`
+          # accepts `-` and `_` there, so `"_acmeorg"` was invisible too.
           #
-          #   `grep -q` exits the instant it MATCHES, which closes the pipe;
-          #   `printf` then takes EPIPE and the pipeline's status is failure;
-          #   `pipefail` promotes that; `!` inverts it; and the gate reports a
-          #   word that IS declared as undeclared.
+          # Now `source_scan strings` lexes each tracked `.rs` under crates/pull
+          # and prints every string literal's DECODED value -- comments are not
+          # literals and are not read, a `*`-led statement is code, escapes and
+          # raw strings are resolved, and each `concat!` is also reported as the
+          # one literal the compiler sees. A value that is segment-shaped in
+          # whole is extracted, and so is every `"word"` quoted inside a value.
+          # The one non-Rust file, the manifest, is read as text as before.
           #
-          # It fires on a MATCH, never on a miss, so it cannot hide a real
-          # undeclared literal -- but it invents one at random. Whether printf
-          # has flushed before grep exits depends on the pipe buffer and the
-          # scheduler, which is why this passed on a developer machine and
-          # failed on a runner with the message `printf: write error: Broken
-          # pipe` printed one line above `UNDECLARED SEGMENT-SHAPED LITERAL IN
-          # crates/pull: authorization` -- a word declared in group 13 since
-          # the group was written.
+          # THE LISTING IS A FILE, SO A FAILING GIT FAILS THE STEP. It was read
+          # through process substitution, which swallowed git's status, and a
+          # loop that read nothing printed the success line (AC-gates-law-10).
           #
-          # Writing the list to a file removes the pipe rather than papering
-          # over its status, and does the word-splitting once instead of once
-          # per literal scanned. It is the same class of defect gate 10's own
-          # comment already records for `xargs -r grep -q`, which "RETURNS 123
-          # WHEN ANY BATCH MISSES ... a red build for a reason that is not".
-          printf '%s\n' $allowed > /tmp/gate1d-allowed.txt
+          # WHAT IT STILL CANNOT SEE: a segment containing an upper-case
+          # letter. `check_segment` accepts one, and 356 distinct upper-case
+          # segment-shaped values are in this crate today; declaring them is a
+          # separate piece of work. Gate 1c's path-shape scan, which is
+          # case-blind on the segments, is what covers a mixed-case path.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z -- crates/pull > "$work/list.z"
+          tr '\0' '\n' < "$work/list.z" > "$work/list"
+          grep -c . "$work/list" > /dev/null \
+            || { echo "GATE 1D READ NO FILE under crates/pull."; exit 1; }
+          : > "$work/words"
+          : > "$work/rs.z"
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *.rs) printf '%s\0' "$f" >> "$work/rs.z" ;;
+              *) { grep -ohE '"[a-z0-9_-][a-z0-9_-]{0,31}"' -- "$f" || true; } \
+                   | tr -d '"' >> "$work/words" ;;
+            esac
+          done < "$work/list.z"
+          xargs -0 -r "$scan" strings < "$work/rs.z" | cut -d: -f3- > "$work/values"
+          [ -s "$work/values" ] \
+            || { echo "GATE 1D READ NO STRING LITERAL under crates/pull."; exit 1; }
+          { grep -E '^[a-z0-9_-][a-z0-9_-]{0,31}$' "$work/values" || true; } >> "$work/words"
+          { grep -ohE '\\"[a-z0-9_-][a-z0-9_-]{0,31}\\"' "$work/values" || true; } \
+            | sed 's/\\"//g' >> "$work/words"
+          { grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$work/words" || true; } \
+            | sort -u > "$work/found"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
-            if ! grep -qxF -- "$word" /tmp/gate1d-allowed.txt; then
+            if ! grep -qxF -- "$word" "$work/allowed"; then
               printf 'UNDECLARED SEGMENT-SHAPED LITERAL IN crates/pull: %s\n' "$word"
-              { git ls-files 'crates/pull' | xargs grep -nF -- "\"$word\"" || true; } \
-                | head -3
+              { xargs -0 -r "$scan" strings < "$work/rs.z" \
+                  | grep -F -- "$word" || true; } | head -3
               bad=1
             fi
-          # COMMENTS STRIPPED FIRST, and this gate was RED for the same reason
-          # gate 17 was this morning: text in a comment is text.
-          #
-          # The extractor pulls every double-quoted lower-case token, and prose
-          # uses double quotes too. `crates/pull/src/vendor.rs:1707` reads
-          #
-          #     /// the decision to tier 2. It is deliberately not `>=`: "outranks" has to
-          #
-          # -- an English quotation inside a doc comment -- and the gate failed
-          # the build on it. `outranks` is a METHOD NAME being discussed in
-          # prose; it is not a literal the crate ever emits, let alone a path
-          # segment.
-          #
-          # Same filter gate 17 and gate 23 use: drop lines whose first non-blank
-          # token is `//` or `*`. Conservative in the safe direction -- a Rust
-          # STRING LITERAL cannot sit on a line that begins with `//`, so this
-          # cannot hide one. A trailing comment on a line that also carries code
-          # is still scanned, which is a false positive and therefore loud.
-          done < <(git ls-files 'crates/pull' \
-                   | while IFS= read -r f; do
-                       { grep -vE '^[[:space:]]*(//|\*)' "$f" || true; }
-                     done \
-                   | grep -ohE '"[a-z0-9][a-z0-9_-]{0,31}"' \
-                   | tr -d '"' \
-                   | { grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || true; } \
-                   | sort -u)
+          done < "$work/found"
+          echo "read $(grep -c . "$work/list") tracked file(s), $(grep -c . "$work/found") distinct segment-shaped literal(s)"
           if [ "$bad" -ne 0 ]; then
             echo
             echo "Either the literal is invented — add it above — or it is a real"
@@ -2943,62 +2974,67 @@ jobs:
           # so this widening is a hole closed and not a red build deferred.
           #
           # NO UNTRUSTED INPUT: `git ls-files` and the static list below.
+          #
+          # THE GATE NOW READS PATHS, NOT LINES (D-1109). It used to drop every
+          # line whose first non-blank character was `//` or `*` and grep the
+          # rest for four words, on the claim that "no Rust CALL can sit on a
+          # line that begins with `//`, so this cannot hide one". The `*` half
+          # was never argued: `*slot = 1; println!(..)` is one ordinary line and
+          # was never read. `use std::eprintln as note;` then `note!(..)`
+          # compiles and matched nothing, `dbg!` was not looked for, `::log::`
+          # was read only by accident of spelling, a file name holding a space
+          # was split in two and never opened, and an absent crate printed
+          # "absent" and passed.
+          #
+          # `source_scan paths` lexes each file -- comments are not code, a
+          # `*`-led statement is -- and prints every path it uses in canonical
+          # form: `use` aliases expanded (so `note!` is `std::eprintln`), `r#`
+          # dropped, a leading `::` read as the crate root. The rule refuses a
+          # path into `telemetry`, `log` or `tracing`, and the print macros
+          # `print`, `println`, `eprint`, `eprintln` and `dbg` and the
+          # `io::stdout`/`io::stderr` handles, bare or through `std`, `core` or
+          # `alloc`. The files are the tracked sources under each crate's `src/`
+          # PLUS the module closure of its `src/lib.rs`, so a module mounted
+          # with `#[path]` from outside `src/` is read too. Every listing is a
+          # NUL-separated file, so no path is word-split.
+          #
+          # MEASURED BEFORE THE SWITCH: zero hits over the four crates.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           swept='vocab engine indicators runner'
           bad=0
           scanned=0
+          g17=$(mktemp -d)
+          git ls-files -z > "$g17/tracked.z"
+          [ -s "$g17/tracked.z" ] || { echo "GATE 17 READ NO TRACKED FILE."; exit 1; }
+          # A macro invocation is printed with a trailing `!`, so a local named
+          # `print` or a variable named `stderr` is not a hit.
+          rule='^.+:[0-9]+:((telemetry|log|tracing)(::.+|!)|((std|core|alloc)::)?(e?print(ln)?|dbg)!|((std|core|alloc)::)?io::(stdout|stderr))$'
           for c in $swept; do
-            files=$( { git ls-files "crates/$c/src/*.rs" || true; } )
-            if [ -z "$files" ]; then
-              printf '  absent   crates/%s — not a tracked member yet\n' "$c"
+            if [ -z "$(git ls-files -- "crates/$c/src/lib.rs")" ]; then
+              printf '  REFUSED  crates/%s/src/lib.rs is not tracked. A swept crate\n' "$c"
+              printf '           cannot be covered by its absence.\n'
+              bad=1
               continue
             fi
-            for f in $files; do
-              scanned=$((scanned + 1))
-              # COMMENTS STRIPPED FIRST, and this gate was RED for exactly the
-              # reason gate 19's manifest scan already documents: text in a
-              # comment is text. `crates/indicators/src/column.rs:57` reads
-              #
-              #   //! CI gate 17 forbids `telemetry::` in this crate outright
-              #
-              # -- a doc comment DESCRIBING THIS GATE -- and the gate failed the
-              # build on it. The crate does not depend on telemetry at all;
-              # `telemetry` appears nowhere in its Cargo.toml.
-              #
-              # The filter is the one gate 23 already uses: drop lines whose
-              # first non-blank token is `//` or `*`. It is conservative in the
-              # safe direction -- no Rust CALL can sit on a line that begins
-              # with `//`, so this cannot hide one.
-              #
-              # WHAT IT STILL CATCHES WRONGLY, stated rather than discovered,
-              # and both were REPRODUCED against a probe file rather than
-              # reasoned about:
-              #
-              #   1. a trailing comment on a line that also carries code --
-              #      `let n = 0; // no telemetry:: here` -- is scanned whole;
-              #   2. the OPENING line of a block comment, `/* ... println! ... */`,
-              #      does not start with `//` or `*` and is scanned whole.
-              #      Continuation lines beginning ` * ` are skipped.
-              #
-              # Both are false POSITIVES: they fail loudly and visibly, which is
-              # the direction this repository errs in, and neither can hide a
-              # real call. No file under the three swept crates trips either
-              # today -- 18 scanned, zero hits.
-              #
-              # A sound fix needs a Rust parser, not a regex, for the same
-              # reason brace-counting source is unsound: a `//` can sit inside a
-              # string literal.
-              # AWK RATHER THAN `grep -v | grep -n`, so the reported number is
-              # the line's number IN THE FILE. Stripping first and numbering
-              # after renumbers every line below the first comment, and a gate
-              # that points at the wrong line is worse than one that points at
-              # none.
-              hits=$( { awk '!/^[[:space:]]*(\/\/|\*)/ { print FNR": "$0 }' "$f" \
-                        | grep -E 'telemetry::|log::|println!|eprintln!' || true; } )
-              if [ -n "$hits" ]; then
-                printf 'LOGGING INSIDE THE SWEEP: %s\n%s\n' "$f" "$hits"
-                bad=1
-              fi
-            done
+            git ls-files -z -- "crates/$c/src/*.rs" > "$g17/$c.z"
+            if ! "$scan" closure "$g17/tracked.z" "crates/$c/src/lib.rs" > "$g17/$c.closure"; then
+              printf '  REFUSED  crates/%s: the module closure did not resolve:\n' "$c"
+              grep '^UNRESOLVED' "$g17/$c.closure" | sed 's/^/           /'
+              bad=1
+            fi
+            grep -v '^UNRESOLVED' "$g17/$c.closure" | tr '\n' '\0' >> "$g17/$c.z"
+            tr '\0' '\n' < "$g17/$c.z" | sort -u | grep . | tr '\n' '\0' > "$g17/$c.files.z"
+            n=$(tr -cd '\0' < "$g17/$c.files.z" | wc -c | tr -d ' ')
+            scanned=$((scanned + n))
+            if ! xargs -0 -r "$scan" paths < "$g17/$c.files.z" > "$g17/$c.paths"; then
+              printf '  REFUSED  crates/%s: a source file could not be lexed\n' "$c"
+              bad=1
+            fi
+            hits=$( { grep -E "$rule" "$g17/$c.paths" || true; } )
+            if [ -n "$hits" ]; then
+              printf 'LOGGING INSIDE THE SWEEP: crates/%s\n%s\n' "$c" "$hits"
+              bad=1
+            fi
           done
           if [ "$bad" -ne 0 ]; then
             echo
@@ -3042,57 +3078,56 @@ jobs:
           # string-literal handling, and has no region to get wrong. The cost is
           # that a `println!` added to a TEST also has to be declared, which is a
           # line of bookkeeping rather than a failure mode.
+          #
+          # THE COUNT IS OF TOKENS, NOT LINES (D-1109). It dropped every line
+          # whose first non-blank character was `//` or `*` and grepped the rest
+          # for `m!`, so `*slot = 1; eprintln!(..)` was never counted, a
+          # `println!` written inside a string literal was (telemetry's
+          # `record.rs` was declared for one that prints nothing), and
+          # `use std::eprintln as note;` then `note!(..)` printed to stderr and
+          # counted as nothing at all. The file list was word-split, so a path
+          # holding a space was never opened.
+          #
+          # `source_scan paths` prints every path each file uses, canonical --
+          # `use` aliases expanded, `r#` dropped, a leading `::` read as the
+          # crate root -- with a trailing `!` on a macro invocation. A print is
+          # an invocation of `println`, `eprintln`, `print`, `eprint` or `dbg`,
+          # bare or through `std`, `core` or `alloc`; the count is of
+          # invocations, so two on one line are two.
+          #
+          # A HANDLE IS A PRINT TOO. `writeln!(std::io::stderr(), "...")`
+          # reaches the same terminal as `eprintln!` and is none of the five
+          # names. The handle, not the macro, is what is counted: `write!` and
+          # `writeln!` appear hundreds of times into a `Formatter` or a
+          # `String`, and what names the PROCESS's own stream is
+          # `io::stderr` / `io::stdout`. Now matched as a canonical path, so an
+          # aliased import is the same handle; `.stdout(Stdio::null())` is a
+          # method and is not a path, and a variable named `stderr` is not
+          # `io::stderr`. The `use` that imports a handle is counted with its
+          # calls. A handle obtained through a trait object or `libc::write` is
+          # still not seen; gate 22 clause B refuses `libc::` in the swept
+          # crates. MEASURED: zero handles across the workspace today.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          g23=$(mktemp -d)
+          git ls-files -z -- 'crates/*/src/*.rs' > "$g23/files.z"
+          [ -s "$g23/files.z" ] || { echo "GATE 23 READ NO FILE under crates/*/src."; exit 1; }
+          if ! xargs -0 -r "$scan" paths < "$g23/files.z" > "$g23/paths"; then
+            echo "  REFUSED  a source file under crates/*/src could not be lexed"
+            fail=1
+          fi
           : > /tmp/prints.txt
           : > /tmp/handles.txt
-          for f in $(git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' | sort -u); do
-            grep -vE '^[[:space:]]*(//|\*)' "$f" > /tmp/code.txt || true
-            # `(^|[^A-Za-z_])` and not `\b`: BSD and GNU disagree about `\b`, and
-            # without the guard `println!` also matches INSIDE `eprintln!`.
-            # Measured: it counted 17 sites as 20.
-            for m in println eprintln print eprint dbg; do
-              c=$(grep -cE "(^|[^A-Za-z_])${m}!" /tmp/code.txt || true)
-              if [ "$c" -gt 0 ]; then
-                printf '%s:%s!:%s\n' "$(echo "$f" | sed 's|crates/||')" "$m" "$c" >> /tmp/prints.txt
-              fi
-            done
-            # A HANDLE IS A PRINT TOO, AND FIVE MACRO NAMES ARE NOT THE SURFACE.
-            #
-            # `writeln!(std::io::stderr(), "...")` reaches the same terminal as
-            # `eprintln!`, is none of the five names above, and therefore appeared
-            # in neither clause: not in the declaration that is supposed to be the
-            # COMPLETE inventory of what this workspace prints, and not in clause
-            # B below, which keys off the word `eprint`. Both clauses could be
-            # walked past by choosing a different spelling, which makes the
-            # declaration a list of the ways somebody happened to write it rather
-            # than a statement about the code.
-            #
-            # THE PATTERN IS THE HANDLE, NOT THE MACRO, and that choice is the
-            # whole design. `write!` and `writeln!` appear over five hundred times
-            # here and nearly every one writes into a `Formatter` or a `String` in
-            # a `Display` impl -- counting those would produce a declaration
-            # nobody could read, which is a declaration nobody does read. What is
-            # rare, and what actually names the PROCESS's own stream, is
-            # `stderr()` / `stdout()`, and there is one spelling of each.
-            #
-            # WHAT IT DELIBERATELY DOES NOT MATCH:
-            #   * `.stdout(std::process::Stdio::null())` in api/src/server.rs --
-            #     the parentheses are not empty, so this is a `Command` builder
-            #     and not a stream. Reproduced against that line.
-            #   * the words "stdout"/"stderr" inside an HTML string in
-            #     api/src/logs.rs and inside a message in telemetry/src/sink.rs.
-            #     Neither carries `()`.
-            #   * `let e = io::stderr(); writeln!(e, ...)` is caught at the BIND,
-            #     not at the write, which is the same site and enough.
-            #   * a handle obtained some other way -- through a trait object, or
-            #     `libc::write(2, ...)`. A text scan cannot see either, and gate
-            #     22 clause B is what refuses `libc::` in the swept crates.
-            #
-            # MEASURED: zero across the workspace today, so this starts empty.
-            c=$(grep -cE '(^|[^A-Za-z0-9_])std(err|out)\(\)' /tmp/code.txt || true)
-            if [ "$c" -gt 0 ]; then
-              printf '%s:handle:%s\n' "$(echo "$f" | sed 's|crates/||')" "$c" >> /tmp/handles.txt
-            fi
-          done
+          awk '
+            { p = $0; sub(/^[^:]*:[0-9]+:/, "", p); f = $0; sub(/:[0-9]+:.*$/, "", f); sub(/^crates\//, "", f) }
+            p ~ /^((std|core|alloc)::)?(println|eprintln|print|eprint|dbg)!$/ {
+              m = p; sub(/^.*::/, "", m); n[f ":" m]++ }
+            p ~ /^((std|core|alloc)::)?io::(stdout|stderr)$/ { h[f ":handle"]++ }
+            END {
+              for (k in n) print k ":" n[k] > "/tmp/prints.txt"
+              for (k in h) print k ":" h[k] > "/tmp/handles.txt"
+            }
+          ' "$g23/paths"
+
 
           # CLAUSE A — the print surface is exactly this, and every line says
           # which kind it is.
@@ -3154,7 +3189,10 @@ jobs:
           #   telemetry/src/sink.rs  eprintln! 1
           #       The sink's own last-resort notice. It is the thing that failed,
           #       so it is the one place stderr is the only channel left.
-          #   telemetry/src/record.rs eprintln! 1
+          #   telemetry/src/record.rs eprintln! 1 -- REMOVED (D-1109). The one
+          #       "eprintln!" in that file is inside a test's assertion message,
+          #       a string literal; it prints nothing. The line count read it as a
+          #       print because it read text, not tokens.
           #   api/src/constituents.rs println! 2
           #       Two lines printed by TESTS for a human reading `--nocapture`,
           #       both past that file's `#[cfg(test)]` at :889 — a cost-benchmark
@@ -3264,7 +3302,6 @@ jobs:
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:5
           pull/src/http.rs:eprintln!:6
-          telemetry/src/record.rs:eprintln!:1
           telemetry/src/sink.rs:eprintln!:1'
           # Test-only measurements; production audit/recovery notices also emit.
           #
@@ -3392,9 +3429,11 @@ jobs:
           }
           # Both files, because clause A2's handles are the same hazard as an
           # `eprintln!` and were not reaching this loop at all.
-          for f in $( { cat /tmp/prints.txt /tmp/handles.txt \
-                        | grep -E 'eprint|:handle:' || true; } | cut -d: -f1 | sort -u); do
-            crate=$(echo "$f" | cut -d/ -f1)
+          # Read line by line, so a path holding a space is one path (D-1109).
+          { cat /tmp/prints.txt /tmp/handles.txt \
+              | grep -E ':(eprint!|eprintln!|handle):[0-9]+$' || true; } \
+            | cut -d/ -f1 | sort -u > /tmp/stderr-crates.txt
+          while IFS= read -r crate; do
             [ "$crate" = "telemetry" ] && continue   # it IS the logger
             if has_telemetry "$crate"; then
               echo "  ok       $crate writes to stderr and can also emit"
@@ -3407,7 +3446,7 @@ jobs:
               echo "           into tests and into no release build."
               fail=1
             fi
-          done
+          done < /tmp/stderr-crates.txt
 
           # CLAUSE C — a temporary path names the process that made it.
           #
@@ -4099,23 +4138,28 @@ jobs:
           scanned=0
           work=$(mktemp -d)
           : > "$work/hits"
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
+          # COMMENTS ARE BLANKED BY THE LEXER, NOT BY A LINE FILTER (D-1109).
+          # This used to drop every line whose first non-blank character was
+          # `//` or `*`, and `*slot = Some(MmapOptions::new().len(4096)
+          # .map_anon()?);` is an ordinary statement that began with `*` and was
+          # never read -- and `map_anon` is a SAFE function in memmap2, so
+          # `forbid(unsafe_code)` does not stop it. `source_scan code` prints
+          # each file with only its comments blanked and `r#` removed, line for
+          # line, so a `*`-led statement is read like any other and the line
+          # number shown is the line in the file. The listing is a NUL-separated
+          # file, so a git that fails fails the step and no path is split.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z -- 'crates/**/*.rs' > "$work/files.z"
+          while IFS= read -r -d '' f; do
             scanned=$((scanned + 1))
-            # Whole-line comments dropped first, the filter gates 17, 22 and 23
-            # already use: a comment discussing this rule is not a violation of
-            # it, and this very repository writes those at length.
-            #
-            # AWK-STYLE LINE NUMBERS WOULD BE WRONG HERE and are not claimed:
-            # `grep -n` after the strip numbers the STRIPPED stream, so the
-            # number shown is not the number in the file. The file name is what
-            # is load-bearing and the hit text is quoted in full, which is enough
-            # to find it -- gate 17 records the same trade-off and solves it with
-            # awk because it reports many; this one expects to report none ever.
-            { grep -vE '^[[:space:]]*(//|\*)' "$f" \
-              | { grep -E "$BANNED_MAP" || true; } \
-              | sed "s|^|${f}: |" >> "$work/hits"; } || true
-          done < <(git ls-files 'crates/**/*.rs')
+            if ! "$scan" code "$f" > "$work/code"; then
+              echo "  REFUSED  $f could not be lexed"
+              echo "$f: (unlexable)" >> "$work/hits"
+              continue
+            fi
+            { grep -nE "$BANNED_MAP" "$work/code" || true; } \
+              | sed "s|^|${f}:|" >> "$work/hits"
+          done < "$work/files.z"
 
           echo "scanned ${scanned} tracked source file(s) under crates/"
           if [ "$scanned" -eq 0 ]; then

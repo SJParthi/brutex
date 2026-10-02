@@ -43943,3 +43943,39 @@ by name, as gate 13's DELIBERATELY ABSENT list records (D-0298, D-0486).
 13 and the vocab test hold those. `deny.toml` matches exact names, not
 families. `cargo deny` is not installed in this environment, so the edited
 `deny.toml` was not checked by `cargo deny check` locally. Invariant CIG-12.
+
+### D-1109 — Gates 1c, 1d, 17, 23 and 24 read tokens, and no listing is word-split — 2026-10-02
+
+**What was wrong.** Findings AC-gates-law-1, AC-gates-cx-4, AC-gates-law-8,
+AC-gates-law-10 (gate 1d), LATE-gates-and-ci #5 and #13 (gate 17). Gates 1d,
+17, 23 and 24 dropped every line whose first non-blank character was `//` or
+`*`. A `*slot = "acmeorg";` statement, a `*s = 1; eprintln!(..)` statement and
+a `*s = Some(MmapOptions::new().map_anon()?)` statement were therefore never
+read. `map_anon` is safe, so `forbid(unsafe_code)` does not stop it. Gates 17
+and 23 matched macro names as text. `use std::eprintln as note;` followed by
+`note!(..)` printed to stderr and counted as nothing. Gate 17 did not look for
+`dbg!`. Gate 23 counted a `println!` written inside a string literal as a
+print. Gates 17 and 23 word-split their file lists. Gate 17 printed "absent"
+and passed when a swept crate was missing. Gate 1d required a segment to begin
+with `[a-z0-9]` and gate 1c required the org to begin with `[A-Za-z0-9]`, but
+`pull::config::check_segment` also accepts `_` and `-` there. Gate 1d read its
+listing through process substitution, so a failing git produced a pass.
+
+**The choice.** `source_scan` gains `strings`, which prints every string
+literal's decoded value. `paths` now reads a leading `::` as the crate root
+and marks each macro invocation with a trailing `!`. Gate 1d extracts every
+literal that is segment-shaped in whole, plus every `"word"` quoted inside a
+literal. Its new words are declared with a reason: three config-fixture
+segments hidden behind `\"`, three JSON and CSV keys, and six negative numbers.
+Gates 17 and 23 match canonical paths. Gate 17 reads each swept crate's tracked
+`src/` plus the module closure of its `src/lib.rs`, and it refuses an absent
+crate. Gate 23's declaration drops `telemetry/src/record.rs`, whose one
+"print" is an assertion message. Gate 24 greps the comment-blanked view, with
+line numbers that are true. Gate 1c accepts `_` and `-` before the org and
+matches the environment word case-blind. Every one of these gates reads a
+NUL-separated listing file.
+
+**Limits.** Gate 1d still does not extract a segment containing an upper-case
+letter. There are 356 such distinct values in `crates/pull` today, and gate 1c
+covers a mixed-case joined path. Gate 23 counts the `use` that imports a
+stream handle together with its calls. Invariant CIG-13.

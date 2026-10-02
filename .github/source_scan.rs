@@ -722,6 +722,38 @@ fn browser_scan(path: &str, src: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Every string literal in a file, test code included, by line and DECODED value:
+/// escapes resolved, raw and byte strings read as what they hold, and each
+/// `concat!` reported once more as the one literal the compiler sees. A literal in
+/// a comment is not a literal and is not reported; a line that begins with `*`
+/// is code like any other.
+fn string_literals(src: &str) -> Result<Vec<(usize, String)>, String> {
+    let tokens = lex(src)?.tokens;
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if let Tok::Str(s) = &t.tok {
+            out.push((t.line, s.clone()));
+        }
+        if is_ident(Some(t), "concat")
+            && is_punct(tokens.get(i + 1), '!')
+            && tokens
+                .get(i + 2)
+                .is_some_and(|g| matches!(g.tok, Tok::Punct('(' | '[' | '{')))
+        {
+            let end = skip_group(&tokens, i + 2);
+            let joined: String = tokens[i + 2..end]
+                .iter()
+                .filter_map(|g| match &g.tok {
+                    Tok::Str(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+            out.push((t.line, joined));
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------- module closure --
 
 fn normalise(p: &Path) -> PathBuf {
@@ -1131,9 +1163,21 @@ fn canonical_paths(src: &str, prod: bool) -> Result<Vec<(usize, String)>, String
             }
             continue;
         }
-        let starts = matches!(t[i].tok, Tok::Ident(_))
+        // A `::` before the ident continues a path only when something a path
+        // can follow precedes it -- an ident or a closing `>`. A leading `::`, as
+        // in `::log::info!`, starts a path at the crate root.
+        // A keyword before the `::` (`return ::log::x()`) does not continue it.
+        const NOT_A_PATH_HEAD: [&str; 22] = [
+            "return", "in", "break", "else", "match", "if", "while", "move", "mut", "ref", "let",
+            "as", "for", "box", "dyn", "impl", "where", "unsafe", "const", "static", "pub", "loop",
+        ];
+        let continues = i > 2
+            && is_path_sep(&t, i - 2)
+            && (ident(&t[i - 3]).is_some_and(|h| !NOT_A_PATH_HEAD.contains(&h))
+                || is_punct(t.get(i - 3), '>'));
+        let starts = ident(&t[i]).is_some_and(|h| !NOT_A_PATH_HEAD.contains(&h))
             && !(i > 0 && is_punct(t.get(i - 1), '.'))
-            && !(i > 1 && is_path_sep(&t, i - 2));
+            && !continues;
         if !starts {
             i += 1;
             continue;
@@ -1177,7 +1221,10 @@ fn canonical_paths(src: &str, prod: bool) -> Result<Vec<(usize, String)>, String
             expanded.extend(segs.into_iter().skip(1));
             segs = expanded;
         }
-        out.push((line, segs.join("::")));
+        // A macro invocation is marked, so `print!` is never confused with a
+        // local `print` or a variable called `stderr`.
+        let bang = is_punct(t.get(j), '!') && !is_punct(t.get(j + 1), '=');
+        out.push((line, segs.join("::") + if bang { "!" } else { "" }));
         i = j.max(i + 1);
     }
     out.sort();
@@ -1847,7 +1894,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|paths|paths-prod|closure|orphans|toml|deps|step-runs|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|strings|paths|paths-prod|closure|orphans|toml|deps|step-runs|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -1880,6 +1927,13 @@ fn run(args: &[String]) -> Result<bool, String> {
                     println!("{line}");
                 }
                 clean &= found.is_empty();
+            }
+        }
+        "strings" => {
+            for f in rest {
+                for (line, s) in string_literals(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
+                    println!("{f}:{line}:{}", s.escape_default());
+                }
             }
         }
         "paths" | "paths-prod" => {
@@ -2325,6 +2379,27 @@ mod tests {
     }
 
     #[test]
+    fn a_root_path_and_an_aliased_macro_are_paths() {
+        let p = paths(
+            "use std::eprintln as note; fn g() -> u8 { ::log::info!(\"z\"); note!(\"y\"); return ::std::io::stderr(); }",
+        );
+        for want in [
+            "log::info!",
+            "std::eprintln!",
+            "std::eprintln",
+            "std::io::stderr",
+        ] {
+            assert!(p.contains(&want.to_owned()), "{want} missing from {p:?}");
+        }
+        let p = paths("fn g() { a::b::<u8>::c(); x::y(); }");
+        assert!(!p.contains(&"c".to_owned()), "{p:?}");
+        assert!(!p.contains(&"y".to_owned()), "{p:?}");
+        let p = paths("fn g(print: u8, stderr: u8) -> bool { print != stderr }");
+        assert!(p.contains(&"print".to_owned()), "{p:?}");
+        assert!(!p.iter().any(|s| s.ends_with('!')), "{p:?}");
+    }
+
+    #[test]
     fn method_calls_are_not_paths() {
         let p = paths("fn g(x: X) { x.fs::<u8>(); x.write(); }");
         assert!(!p.iter().any(|s| s.contains("write")), "{p:?}");
@@ -2362,6 +2437,20 @@ mod tests {
                 "missed: {src} -> {d:?}"
             );
         }
+    }
+
+    #[test]
+    fn every_literal_is_read_and_no_comment_is() {
+        let src = "fn f(slot: &mut &str) {\n    *slot = \"acmeorg\";\n    // let a = \"commented\";\n    /* \"blocked\" */ let b = r#\"raw\"q\"#;\n    let c = concat!(\"acme\", \"org2\");\n    let d = b\"bytes\";\n    let e = \"\\x61cme\";\n}\n";
+        let got = string_literals(src).unwrap();
+        let values: Vec<&str> = got.iter().map(|(_, s)| s.as_str()).collect();
+        assert_eq!(
+            values,
+            [
+                "acmeorg", "raw\"q", "acmeorg2", "acme", "org2", "bytes", "acme"
+            ]
+        );
+        assert_eq!(got[0].0, 2, "the deref line is line 2");
     }
 
     #[test]
