@@ -223,7 +223,7 @@ fn truncated_trailing_foreign_and_malformed_payloads_are_refused() {
         (64, 0),
         (64, 27),
         (72, 0),
-        (72, 28), // the final empty outer row refuses exact budget exhaustion
+        (72, 27), // pairs past the budget with no named halt (exact budget completes, D-0922)
         (96, u64::MAX),
         (104, 0),
         (104, u64::MAX),
@@ -258,7 +258,6 @@ fn resumed_identity_column_offers_and_every_configuration_term_must_match() {
         ladder.with_ceiling(ladder.ceiling() - 1),
         Ladder::with_min_hits(2).with_support_lanes(1),
         ladder.with_pair_budget(ladder.pair_budget() - 1),
-        ladder.with_support_lanes(usize::MAX),
     ] {
         assert!(matches!(
             other.resume_checkpointed(&column, &POSITIONS, IDENTITY, decode(&bytes), &mut |_| Ok(
@@ -324,7 +323,7 @@ fn real_resource_halts_keep_exact_cumulative_budgets_and_never_advance() {
             2,
         ),
         (
-            Ladder::with_min_hits(1).with_ceiling(2).with_pair_budget(1),
+            Ladder::with_min_hits(1).with_ceiling(2).with_pair_budget(3),
             Breach::Candidates,
             2,
         ),
@@ -337,15 +336,16 @@ fn real_resource_halts_keep_exact_cumulative_budgets_and_never_advance() {
             halt.k, depth,
             "first joined level and accumulated later budget"
         );
-        if ladder.pair_budget() == 1 {
-            assert!(
-                halt.pairs > 1,
-                "the shared outer-row check admits a whole row"
+        if reason == Breach::Pairs {
+            assert_eq!(
+                halt.pairs,
+                ladder.pair_budget(),
+                "the join checks its budget before every pair, so a pairs halt \
+                 stops at the budget and never past it (D-0922)"
             );
-            if reason == Breach::Candidates {
-                assert_eq!(halt.pairs, 3);
-                assert_eq!(halt.candidates, 2);
-            }
+        }
+        if ladder.ceiling() == 2 {
+            assert_eq!((halt.pairs, halt.candidates), (3, 2));
         }
         for level in &expected.levels {
             check_interruption(&column, &POSITIONS, ladder, &expected, level.k);
@@ -939,4 +939,71 @@ fn serialized_resource_tags_preserve_terminal_refusal_and_reject_contradictions(
         ),
         Err(Error::Invalid("singleton accounting"))
     ));
+}
+
+/// The lane count schedules support counting and decides nothing, so a
+/// checkpoint written with one lane must resume with any other and reach the
+/// answer an uninterrupted walk reaches. It used to be refused as a
+/// configuration mismatch, which made every interrupted `sweep-stored` run
+/// unresumable on a host with a different core count. D-0923.
+#[test]
+fn a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer() {
+    let (ladder, column, bytes) = fixture_at_second_level();
+    let expected = ladder
+        .walk_checkpointed(&column, &POSITIONS, IDENTITY, &mut |_| Ok(()))
+        .expect("uninterrupted walk");
+    for lanes in [1, 2, 3, usize::MAX] {
+        let resumed = ladder
+            .with_support_lanes(lanes)
+            .resume_checkpointed(&column, &POSITIONS, IDENTITY, decode(&bytes), &mut |_| {
+                Ok(())
+            })
+            .expect("a lane count alone never refuses a resume");
+        assert_eq!(resumed, expected, "lanes {lanes} changed the answer");
+    }
+}
+
+/// A walk whose pair need equals its budget exactly completes, and the
+/// checkpoint it leaves -- no named halt, `pairs == pair_budget` -- must read
+/// back and resume. Before D-0922 the join halted such a walk on the final
+/// empty row, and the reader refused `pairs >= pair_budget` without a halt.
+#[test]
+fn a_walk_that_needs_exactly_its_pair_budget_completes_and_its_checkpoint_reads_back() {
+    let column = Column::try_from_rows(&masks(3, false)).expect("column");
+    let unbounded = Ladder::with_min_hits(1).with_support_lanes(1);
+    let mut need = 0;
+    let expected = unbounded
+        .walk_checkpointed(&column, &POSITIONS, IDENTITY, &mut |view| {
+            need = view.pairs();
+            Ok(())
+        })
+        .expect("unbounded walk");
+    assert!(expected.completed() && need > 1, "fixture must walk pairs");
+
+    let exact = unbounded.with_pair_budget(need);
+    let mut last = Vec::new();
+    let swept = exact
+        .walk_checkpointed(&column, &POSITIONS, IDENTITY, &mut |view| {
+            last = encode(view);
+            Ok(())
+        })
+        .expect("a budget equal to the need is enough");
+    assert!(swept.completed(), "exact budget halted: {:?}", swept.halted);
+    assert_eq!(swept.levels, expected.levels);
+    let checkpoint = decode(&last);
+    assert_eq!((checkpoint.pairs(), checkpoint.halted()), (need, None));
+    assert_eq!(
+        exact
+            .resume_checkpointed(&column, &POSITIONS, IDENTITY, checkpoint, &mut |_| Ok(()))
+            .expect("terminal replay"),
+        swept
+    );
+
+    // One pair fewer is a real refusal, recorded at the budget and not past it.
+    let short = unbounded
+        .with_pair_budget(need - 1)
+        .walk_checkpointed(&column, &POSITIONS, IDENTITY, &mut |_| Ok(()))
+        .expect("halts are results");
+    let halt = short.halted.expect("one pair short must halt");
+    assert_eq!((halt.breach, halt.pairs), (Breach::Pairs, need - 1));
 }

@@ -94,9 +94,11 @@ The `HashSet` column is the raw key bytes and understates the real cost: hashbro
 keeps a load factor near 7/8 and adds one control byte per slot.
 
 **k=4 is the first whole-vocabulary level at the shipped candidate ceiling.**
-Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` and the raw
-`seen` keys alone are 12.63 GiB before allocator overhead, the previous
-frontier, batches or ranking. At k=5 the join itself dominates everything:
+Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` alone is
+6.80 GiB before allocator overhead, the previous frontier's membership set and
+keyed copy, batches or ranking. (This sentence priced a `seen` duplicate set at
+another 5.83 GiB; the prefix join is injective and that set was deleted, so it
+no longer exists to price. D-0926.) At k=5 the join itself dominates everything:
 `|F|²/2` pair-unions is 8.49 × 10¹⁵ six-word ORs, months of work independent
 of the bars.
 
@@ -120,7 +122,9 @@ be the other.
 | `Breach::Memory` | the allocator | an honest refusal, discovered at runtime | overcommit |
 
 `Ladder::exhausted` asks both as one question. The allocator half is
-`HashSet::try_reserve`, which returns rather than aborts, so the walk halts
+`Vec::try_reserve` on the level's result vector, sized for every pending batch
+candidate (it was `HashSet::try_reserve` on the deleted `seen` set until
+D-0926 corrected this sentence), which returns rather than aborts, so the walk halts
 naming memory instead of dying. It takes what a 4 GB machine has and what a
 48 GB machine has and works out which at runtime.
 
@@ -1948,21 +1952,37 @@ ceiling that is **arithmetic**:
 ```text
 MAX_ITERATIONS = BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS
                  + FINAL_EVALUATION
-               = 2 + 8 + 64 + 1
-               = 75
+               = 2 + 8 + 75 + 1
+               = 86
 ```
 
-The bisection performs exactly 64 halvings of `[1e-6, 5]` with no early exit,
-no tolerance test and no stagnation detection. `(5 − 1e-6)/2^64 ≈ 2.7e-19` is
-narrower than one unit in the last place of any volatility in the band, so a
-fixed count is sufficient rather than merely safe — and its cost does not
-depend on any input value, because it does not read the input to decide when
-to stop.
+The bisection performs exactly 75 halvings of `[1e-6, 5]` with no early exit,
+no tolerance test and no stagnation detection. `(5 − 1e-6)/2^75 ≈ 1.32e-22` is
+narrower than `ulp(1e-6) = 2^-72 ≈ 2.12e-22`, the finest unit in the last place
+in the band, so a fixed count is sufficient rather than merely safe — and its
+cost does not depend on any input value, because it does not read the input to
+decide when to stop. 75 is the least count that does it; 74 leaves `2.65e-22`.
 
-**This said 72 until D-0046, and 72 was wrong by three.** The two evaluations
+**It was 64 halvings until D-0921, and this paragraph's claim was false.**
+`(5 − 1e-6)/2^64 ≈ 2.71e-19` is wider than one ulp of any volatility below
+`2^-9`, by up to about 1,280× at the floor. Measured at 64: a bisected solve at
+a true volatility of `1e-5` stopped with its two ends 160 ulps apart. The
+arithmetic is `greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band`,
+with the ulp computed from the bits. The end-to-end check,
+`greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility`,
+runs every bisected solve on the shared grid and on true volatilities down to
+`1.5e-6`. **What stays unproved:** the code halves with rounded midpoints, so
+"the `f64` ends finish equal or adjacent" is measured on those inputs, not
+proved for every input. The answer's distance to the *true* volatility is set
+by the quote's own rounding, not by the bracket. On that set it is up to
+`2.3e-6` relative. The cost was eleven more evaluations on every solve that
+reaches the bisection.
+
+**This said 72 until D-0046, and 72 was wrong by three** (at 64 halvings, when
+the true ceiling was 75). The two evaluations
 that establish the bracket and the one at the answer were never counted, while
 the constant's own documentation called itself "the largest total number of
-model evaluations one solve can cost". A refused solve costs 75 as well. The
+model evaluations one solve can cost". A refused solve costs the ceiling as well. The
 test named for the bound read the `iterations` field, which was
 `spent + BISECTION_STEPS` by construction and therefore could not observe the
 gap; `greeks::solver::the_reported_cost_is_every_model_evaluation` now counts
@@ -1971,10 +1991,10 @@ at `Checked::greeks`, the one function every evaluation passes through.
 **Measured on an 819-point grid of moneyness × maturity × volatility — by the
 calibration harness, whose rescuer was Brent and whose bisection exited early.
 This is NOT a measurement of the shipped solver.** It is why the shipped shape
-was chosen. The shipped solver uses a fixed 64-halving bisection and is
-measured at a worst total of **75**, which is also its arithmetic ceiling. The
+was chosen. The shipped solver uses a fixed 75-halving bisection and is
+measured at a worst total of **86**, which is also its arithmetic ceiling. The
 table below counts *search* evaluations only, which is what that harness
-counted; add three for the bracket and the answer to compare it with 75.
+counted; add three for the bracket and the answer to compare it with 86.
 
 | Newton cap | by Newton | rescued | worst total | median |
 |---|---|---|---|---|
@@ -2470,9 +2490,14 @@ The first pass missed **eleven**, and every one of them was a real hole:
 2. `solver.rs` — `price(middle) < price` against `<=` inside the bisection. The
    two differ only when the model price at a midpoint equals the target
    exactly, and at that point **both** choices keep the root inside the
-   bracket. The final answers can differ by at most the final bracket width,
-   `2.7e-19`, which is below one unit in the last place of any volatility the
-   function returns.
+   bracket. The final answers can differ by at most the final bracket width.
+   This said `2.7e-19` and called it below one ulp of any volatility the
+   function returns. At 64 halvings that was false for volatilities below
+   `2^-9`. At 75 halvings (D-0921) the exact-arithmetic width is `1.32e-22`,
+   below `ulp(1e-6)`, and the end-to-end check finds the `f64` ends adjacent
+   on every bisected solve it runs. The mutation counts in this section were
+   taken before D-0921 moved the bisection into `Checked::bracket`; they have
+   not been re-run.
 
 `CLAUDE.md` §9 asks for no surviving mutant on a touched module. Two survive,
 both on a comparison whose boundary is unreachable, and neither corresponds to
@@ -9907,3 +9932,50 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Engine join costs that are not O(1) — D-0922 to D-0926, 2 October 2026
+
+Three per-level and per-candidate costs of the prefix join were stated
+nowhere, or stated wrongly. Each is named here with its bound.
+
+**The pair budget is exact (D-0922).** It is checked before every pair, so a
+`Breach::Pairs` halt records exactly `pair_budget` pairs, and a walk that needs
+exactly its budget completes. It was checked once per outer row: a halt could
+report up to one block width minus one pair past the budget, and a level whose
+need equalled the budget halted on the final, empty row. The budget bounds
+pairs walked, not wall time; the cost of one pair still depends on depth, below.
+
+**The subset prune is Theta(k) per candidate, not O(1) (D-0924).** For a
+candidate the prefix join builds, the prune probes the previous frontier's
+`MaskSet` once per set bit below the two parents: `k - 2` expected-O(1) probes
+for a survivor, each hashing seven words and comparing 48 bytes. `k` is bounded
+by the 384-bit mask, so the cost is bounded and grows with depth. The two
+parents' own probes, which could only answer "yes", are skipped. `C-E-12`
+measures the per-probe cost flat from k=4 to k=320; it does not and cannot make
+the per-candidate cost constant. So a level's join work is
+`pairs x (O(1) + Theta(k))`, and `DEFAULT_PAIR_BUDGET`, which counts pairs,
+bounds a deep level's time less tightly than a shallow one's.
+
+**Indexing each level sorts it: O(|F| log |F|) per level (D-0924).**
+`JoinIndex::try_new` builds `(without_highest(mask), mask)` for each of the
+previous level's `|F_{k-1}|` survivors, sorts by twelve-word keys and dedups;
+`sort_canonically` then sorts the `|F_k|` survivors by their seven-word key.
+Both are comparison sorts, so each level costs `O(|F| log |F|)` comparisons
+beyond the join, and the cost grows with the frontier. It replaced an
+`|F|^2 / 2` pairwise scan, and it is per level, never per pair or per bar.
+
+**The top-results keeper admits in O(log cap), not O(1).** `keep::Best::offer`
+refuses in one root comparison and admits with a binary-heap sift of at most
+`floor(log2(cap))` levels. It has no production caller today; the bound is
+stated so one does not inherit an unstated cost (audit finding o1engine-20).
+
+**Duplicate rejection at k>=2 is absent, not measured (D-0926).** The prefix
+join is injective, so `duplicates` is written as a literal zero at k>=2 and no
+operation counts it. Its tests witness injectivity through `generated` and
+distinct survivors, not by reading that literal back.
+
+**Not measured for this change:** the new and corrected gate 8 rows (C-E-08,
+C-E-10, C-E-11, C-E-12) ran in a shared four-core container with other builds
+in flight; their recorded ratios are what that run printed and are not a
+quiet-machine measurement.
+

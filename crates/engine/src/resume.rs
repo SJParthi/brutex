@@ -153,6 +153,16 @@ impl Checkpoint {
     /// # Errors
     /// Refuses identity, row-count, offered-sequence or exact policy mismatch.
     /// The caller remains responsible for the complete column-byte identity.
+    ///
+    /// # Support lanes are deliberately NOT compared
+    ///
+    /// The lane count is a scheduling sentinel (`Ladder::support_lanes`), never
+    /// a depth or answer parameter, and the run identity leaves it out:
+    /// `a_support_lane_bound_changes_only_scheduling` proves the answer is the
+    /// same at every lane count. Comparing it refused an interrupted
+    /// `sweep-stored` resume on any machine or container with a different core
+    /// count, because `cli` derives lanes from `available_parallelism`. The
+    /// resumed walk schedules with the CALLER's lanes. D-0923.
     pub fn validate_for(
         &self,
         ladder: Ladder,
@@ -166,7 +176,6 @@ impl Checkpoint {
             || self.ladder.min_hits != ladder.min_hits
             || self.ladder.ceiling != ladder.ceiling
             || self.ladder.pair_budget != ladder.pair_budget
-            || self.ladder.support_lanes != ladder.support_lanes
         {
             return Err(Error::Invalid(
                 "run identity, column, offers or configuration mismatch",
@@ -242,7 +251,7 @@ impl Checkpoint {
         if admitted != crate::len_u64(self.progress.admitted)
             || self.progress.admitted > self.ladder.ceiling
             || admitted > self.progress.pairs
-            || (self.progress.halted.is_none() && self.progress.pairs >= self.ladder.pair_budget)
+            || (self.progress.halted.is_none() && self.progress.pairs > self.ladder.pair_budget)
         {
             return Err(Error::Invalid("cumulative candidate or pair accounting"));
         }
@@ -470,8 +479,9 @@ impl Ladder {
     /// The existing boundary is reported again, allowing idempotent durable
     /// acknowledgement. Earlier levels are retained but never recomputed.
     /// Extinct and resource-halted checkpoints return their original outcome;
-    /// a partial frontier never seeds another level. All configuration is exact,
-    /// including the requested support-lane policy.
+    /// a partial frontier never seeds another level. Every answer-bearing term
+    /// of the configuration is exact; the support-lane count is scheduling only
+    /// and is taken from the caller (see [`Checkpoint::validate_for`]).
     ///
     /// # Errors
     /// Refuses a foreign identity, column length, offered sequence or config,

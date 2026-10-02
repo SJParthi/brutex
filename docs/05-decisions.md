@@ -44636,3 +44636,207 @@ refuses it.
 
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
+
+### D-0920 — Refuse an overflowing discount factor in `Contract::check`, on the way in, so the solver cannot report an infinite intrinsic value — 2026-10-02
+
+**What happened.** Audit finding W1-greeks1-0. `Contract::check` took
+`carry_discount = e^-qT`, `forward = S·e^-qT` and `discounted_strike = K·e^-rT`
+unguarded. `MAX_RATE * MAX_YEARS` is 1000 against `ln(f64::MAX)` = 709.78, so
+`rate = -7.1` or `carry = -7.1` at `years_to_expiry = 100`, every value inside
+every accepted bound, makes a factor infinite. `MAX_RATE`'s documentation said
+the overflow was contained "on the way OUT", by `Contract::greeks` checking its
+own result. That held for `price` and `greeks` and not for the solver:
+`implied_volatility` reads `no_arbitrage_bounds` before it evaluates the model.
+Measured before the fix: at `S = K = 100, T = 100, r = -7.1` a put quoted at 10
+returned `PriceBelowIntrinsic { price: 10.0, intrinsic: inf }` rather than
+`NotRepresentable`. A named refusal that carries an infinity reads like a real
+arbitrage violation.
+
+**The product overflows on its own too.** With the factor finite the leg can
+still be infinite: `e^700` is 1.01e304 and `MAX_UNDERLYING` (1e12) times it is
+past `f64::MAX`. So `spot = 1e12, carry = -7.0, T = 100` overflows `forward`
+with `carry_discount` finite, and `strike = 1e12, rate = -7.0` does the same to
+`discounted_strike`. Both are reachable and both are tested.
+
+**Decision.** `Contract::check` returns `GreeksError::NotRepresentable` when
+`carry_discount`, `forward` or `discounted_strike` is not finite. Every public
+path goes through `check` first, so `price`, `greeks` and `implied_volatility`
+(call and put) refuse in the same way. `Contract::greeks` keeps its output
+check for overflows that no input check sees. The input bounds are unchanged:
+`MAX_RATE` still only keeps an input plausible, and its documentation now says
+the containment is on the way in. The test
+`a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out` is
+replaced by
+`greeks::bsm::a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in`.
+It asserts `check`, `price`, `greeks` and `implied_volatility` for both kinds on
+all four overflowing witnesses (rate, carry, `S·e^-qT`, `K·e^-rT`). It also
+asserts that at `-7.0` the rate alone and the carry alone still price, and that
+rate and carry together at `-7.0` still solve a call and a put back to 0.2 to
+1e-9 relative. It failed before the change on the assertion above. Invariant
+G-38.
+
+**Not changed, stated so it is not assumed.** The other direction, a factor that
+underflows to zero (`carry = +10, T = 100` gives `e^-1000 = 0`), stays finite
+and is not refused here. This finding did not cover it and no measurement of
+its effect on the solver was taken.
+
+### D-0921 — Raise the bisection from 64 to 75 halvings, so its final bracket is narrower than one ulp anywhere in the band — 2026-10-02
+
+**What happened.** Audit finding W1-greeks1-1. `Checked::bisect` performs
+`BISECTION_STEPS` fixed halvings of `[MIN_VOLATILITY, MAX_VOLATILITY] =
+[1e-6, 5]`. The solver's module documentation, `docs/06-limits.md` §29 and
+D-0046's entry above said the final bracket, `(5 − 1e-6)/2^64 ≈ 2.7e-19`, is
+narrower than one unit in the last place of any volatility in that band. That
+is false below `2^-9`. `ulp(1e-6)` is `2^-72 ≈ 2.12e-22`, so at the floor the
+bracket was about 1,280 ulps wide. Measured at 64 halvings: a bisected solve of
+a contract whose true volatility is `1e-5` (`S = 100`, `T = 1/365`, `K` two
+`σ√T` below spot, a put) stopped with its two ends 160 ulps apart.
+
+**Decision.** `BISECTION_STEPS` goes from 64 to **75**, the least count with
+`(5 − 1e-6)/2^75 ≈ 1.32e-22 < 2.12e-22`. 74 leaves `2.65e-22`. The claim is now
+true and is not just reworded. The bisection stays fixed-count, with no early
+exit and no tolerance test. `MAX_ITERATIONS` follows arithmetically:
+`2 + 8 + 75 + 1 = 86`, up from 75. Every solve that reaches the bisection costs
+eleven more model evaluations, and a solve that finishes in Newton costs the
+same as before. The halving loop moved into `Checked::bracket`, which returns
+the `(low, high)` pair, so a test can see the bracket and not only its
+midpoint. Behaviour is otherwise unchanged.
+
+**Proved and measured.**
+`greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band`
+computes `ulp(MIN_VOLATILITY)` from `f64::to_bits`/`from_bits`, not from a
+typed constant, and asserts the exact-arithmetic width after `BISECTION_STEPS`
+halvings is below it and the width after one fewer is not.
+`greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility`
+runs every bisected solve on the shared grid and on true volatilities of
+`1.5e-6`, `1e-5` and `1e-4` near the money. It asserts that the two `f64` ends
+are equal or adjacent, that the quote lies between their model prices, and
+that the answer is one of them. Measured: 370 bisected solves, 22 of them
+below `2^-9`. Both tests fail at 64. Invariant G-39. The grid round trip is
+unchanged at 64 and at 75: 1,032 solved, 312 refused, worst relative volatility
+`2.33e-6`.
+
+**Stated so it is not over-read.** "The `f64` ends finish adjacent" is
+arithmetic for exact halving. For the rounded midpoints the code computes, it
+is measured on the inputs above and not proved for every input. It is also a
+statement about the bracket around the crossing of the *computed* price, not
+about distance to the true volatility. The quote's own rounding moves that
+crossing by far more than one ulp of a volatility: up to `2.3e-6` relative on
+the same set, which G-08 bounds.
+
+**What was re-measured and what was not.** The unit tests re-measure the worst
+total, now 86 (`the_reported_cost_is_every_model_evaluation`,
+`the_iteration_count_never_exceeds_the_arithmetic_bound`). `cargo bench -p
+greeks` was re-run in a Linux x86_64 container (Intel Xeon 2.80 GHz, 4 vCPU),
+not on the operator's machine: C-G-03 reported 7 and 79 of 86 evaluations and
+1.166× per evaluation, all ratios within the ceiling. The operator-machine
+figures in `docs/04-invariants.md` (7 and 68 of 75, 1.195×) are now labelled as
+taken at 64 halvings. The calibration table in the solver header and in §29 was
+measured on a separate harness, not on this code, and is unaffected. The
+`cargo mutants` counts in §29 were not re-run. Entries above this one that say
+64, 75 or `2.7e-19` (D-0046 and its follow-ups) are left as written, because
+the ledger is append-only and this entry supersedes them. The solver header,
+`MAX_ITERATIONS`' documentation, the bench header, `docs/04-invariants.md`
+G-09, G-31 and C-G-03, and `docs/06-limits.md` §29 are corrected.
+
+### D-0922 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
+
+**What was wrong.** `Ladder::try_next_level_observing` checked
+`pairs_walked + pairs >= pair_budget` once at the start of each outer row of a
+prefix block. Two defects followed (audit findings W3-engine1-3 and
+ET-masks-evaluation-sweep-5). The inner loop walked its whole row before the
+next check, so a halt could report up to `block.len() - 1` pairs past the
+budget: with every bit frequent at k=2 the block is the whole frontier. And the
+check also ran on a block's last row, which has no pair to walk, so a level
+whose need equalled the budget was reported as `Breach::Pairs` with a partial
+frontier although every pair had been walked. Bars `{0,1,2},{0,1,2},{}` need
+four pairs; a budget of four halted.
+
+**The change.** The check moved inside the inner loop, before the pair is
+counted. A pairs halt now records exactly `pair_budget`, and a walk that needs
+exactly its budget completes. One integer compare per pair. The checkpoint
+reader accepts an unhalted `pairs == pair_budget` (it refused `>=`), and still
+accepts a named pairs halt with `pairs > pair_budget`, so checkpoints written
+before this change still read. A run whose pair budget binds now reports a
+different `Halt::pairs` and, where the old overshoot crossed a level, a
+different partial frontier; `commit` is in the run identity, so the two are
+distinct runs. No production caller sets a pair budget below the default, which
+the candidate ceiling reaches first (`DEFAULT_PAIR_BUDGET`'s doc).
+Tests: `engine::tests::the_pair_budget_is_exact_at_both_edges`,
+`a_walk_that_needs_exactly_its_pair_budget_completes_and_its_checkpoint_reads_back`.
+
+### D-0923 — A checkpoint resumes under any support-lane count — 2026-10-02
+
+**What was wrong.** `Checkpoint::validate_for` refused a resume whose
+`support_lanes` differed from the checkpoint's (finding
+ET-masks-evaluation-sweep-2). The lane count is a scheduling sentinel, outside
+the run identity, and `a_support_lane_bound_changes_only_scheduling` proves it
+changes no answer. `cli` derives lanes from `available_parallelism` divided by
+the rungs sharing the machine, so an interrupted `sweep-stored` AND checkpoint
+was refused on any host or container with a different core count.
+
+**The change.** The comparison is removed; the resumed walk schedules with the
+caller's lanes. Every answer-bearing term (identity, rows, offered sequence,
+`min_hits`, ceiling, pair budget) is still compared exactly. The checkpoint
+format is unchanged and still records the lane count in force when it was
+written. Test:
+`a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer`
+(1, 2, 3 and `usize::MAX` lanes, each equal to the uninterrupted walk).
+
+### D-0924 — Time the production join and k=1 primitives, skip the parents' subset probes, and name the join's Theta(k) and sort costs — 2026-10-02
+
+**What was wrong.** Gate 8's engine rows timed stand-ins (findings
+ET-masks-evaluation-sweep-8, ET-o1-proof-coverage-0 and -2, W3-engine1-0 and
+-1). C-E-08 timed `a.union(b).popcount()` over a bench-local vector, a popcount
+production no longer performs, while the subset prune and meaning prune that
+production does run per pair were never timed. C-E-10 and C-E-11 built their
+own `HashSet` and `Vec`, so an O(n) regression in the production dedup or
+append would have shipped with gate 8 green. The subset prune is Theta(k) per
+candidate while its doc called it "O(1)" and "a 384-probe loop", and the doc was
+attached to `BATCH_PER_LANE`. The per-level sorts in `JoinIndex::try_new` and
+`sort_canonically` cost O(|F| log |F|) and were stated only in a code comment.
+
+**The change.** A public `engine::primitives` module carries the production
+operations: `offer` (the k=1 insert `first_level` calls), `append` (the push
+`drain` calls) and `JoinProbe`, which indexes a frontier with the production
+`JoinIndex` and walks every pair through `join_screen`, the one function the
+level join now calls for the union and both prunes. C-E-08 times `JoinProbe`
+from a 105-wide to a 990-wide frontier; new row C-E-12 times one subset probe
+from k=4 to k=320; C-E-10 and C-E-11 call `offer` and `append`. The subset prune
+now skips the two parents, which came from the frontier the set was built from
+and could only answer yes: `k - 2` probes for a survivor, none at k=2.
+`skipping_the_parents_never_changes_the_subset_prune` checks it against the
+full k-probe walk, and the exhaustive-join oracle test now carries its own full
+check. `docs/06-limits.md` names the Theta(k) prune and the O(|F| log |F|)
+per-level sorts. The walk's exit count falls from 17 to 16 because both prunes
+leave by one skip.
+
+### D-0925 — `engine::support` adds a hit without branching on it — 2026-10-02
+
+**What was wrong.** Its doc said "no branch on the answer" and its body was
+`if b.hits(mask) { n + 1 } else { n }` (finding ET-masks-evaluation-sweep-6).
+The function is a test and bench reference; the live path is
+`Column::support`, which C-E-02b already pins.
+
+**The change.** The body adds `u64::from(b.hits(mask))`. Same answers; the
+existing support tests and C-E-06's agreement check cover it.
+
+### D-0926 — Say that `duplicates` is a structural zero at k>=2, replace the assertions that read it back, and correct the drain and append descriptions — 2026-10-02
+
+**What was wrong.** Every k>=2 level is built by `joined_frontier`, which
+writes `duplicates: 0` as a literal (finding AC-whp-tb-5). Three engine test
+assertions and one oracle test asserted `duplicates == 0` as "the witness" that
+the prefix join emits each k-set once; none could fail. `DEFAULT_PAIR_BUDGET`'s
+doc and the join comment called it a "measured zero". Separately (finding
+ET-masks-evaluation-sweep-3), `CLAUDE.md` §3 rule 4 described lane-local `kept`
+vectors folded with one `extend` per chunk, `drain`'s doc described `parts`
+vectors and a `seen` set, `docs/06-limits.md` §5 priced the deleted `seen` set
+and named `HashSet::try_reserve`, and `cli/src/batch.rs` called
+`DEFAULT_CEILING` `1 << 26` where it is `1 << 27`.
+
+**The change.** The dead assertions are removed or replaced by distinctness of
+the level's survivors, which can fail; `generated == 1` remains the witness
+where it already was. The prose now says the zero is proved by the join's shape
+and written, not counted. `CLAUDE.md`, `drain`'s doc, §5 and `batch.rs` describe
+what the code does: one reserved `out`, disjoint count slices, one serial
+in-order push per survivor, `Vec::try_reserve`, and `1 << 27`.

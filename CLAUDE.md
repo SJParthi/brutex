@@ -149,16 +149,17 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    former candidate `seen` set was removed: there is no dedup operation on that
    path to call O(1).
 
-   *Result append* is `Vec::push` **at k=1 and `Vec::extend` at k≥2, and the
-   difference is the live path rather than a detail.** `engine::drain` hands each
-   support lane its own pre-sized `kept`, pushes into that, and then folds the
-   lanes into `out` with one `extend` per chunk — so the per-candidate `push`
-   happens into a lane-local vector and the result vector is appended in batches.
-   Same amortised class, different operation from the one this rule named for as
-   long as it has existed. k=1 reserves the offered width and later levels
-   reserve a capped previous-frontier heuristic. Appends within that reservation
-   allocate nothing; an expanding level can outgrow it, so the unconditional
-   bound is amortised O(1), not worst-case O(1) for every append.
+   *Result append* is one `Vec::push` per surviving candidate, through
+   `engine::primitives::append`, at every k. At k≥2 `engine::drain` reserves room
+   in `out` for the whole batch before any worker runs, the support lanes write
+   counts into disjoint slices of one `counts` vector, and one serial loop then
+   pushes each survivor in candidate order — so no push on that path allocates.
+   (This paragraph described lane-local `kept` vectors folded with one `extend`
+   per chunk; that design was replaced and the paragraph was not. D-0926.) k=1
+   reserves the offered width; the join's `exhausted` check reserves for every
+   pending batch candidate before admitting one. Where a reservation is not
+   already held, `Vec`'s guarantee is amortised O(1), not worst-case O(1).
+   `C-E-11` times `engine::primitives::append` itself.
 
    These qualifications do not widen the rule: they identify where its named
    primitive exists, where injectivity removes the need for one, and where
