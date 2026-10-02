@@ -61,7 +61,7 @@ impl Permit {
     /// sooner. D-0952.
     fn owed() -> Self {
         ACTIVE.fetch_add(1, Ordering::AcqRel);
-        Self
+        Self(&ACTIVE)
     }
 }
 
