@@ -209,6 +209,7 @@ fn overlay(signal: &[Candle], exact: &[Candle], rung: i64, column: &mut Column) 
         rung * MINUTE,
         widths(),
         Calendar::all_regular(),
+        |_| Some(15 * 60 + 29),
         column,
     )
     .expect("exact aligned minute evidence");
@@ -237,6 +238,7 @@ fn all_eight_rungs_use_exact_window_minutes_including_sixty_and_straddling_two_a
             rung * MINUTE,
             widths(),
             Calendar::all_regular(),
+            |_| Some(15 * 60 + 29),
             &mut gap_only,
         )
         .expect("compatible GapFib-only bridge");
@@ -398,6 +400,7 @@ fn combined_bridge_rejects_late_missing_mismatched_corrupt_and_unaligned_minutes
                 2 * MINUTE,
                 widths(),
                 Calendar::all_regular(),
+                |_| Some(15 * 60 + 29),
                 &mut offered
             ),
             Err(expected)

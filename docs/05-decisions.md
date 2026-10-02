@@ -43719,6 +43719,4779 @@ coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
 
+### D-1320 — Count one overlong run in `tail` as one malformed line — 2026-10-02
+
+**What was wrong.** `Tail::malformed` is documented as "lines that would not
+decode". `walk_back` refuses a carry past `MAX_LINE_BYTES` and counted a
+malformed line each time the carry refilled past the cap, then decoded the
+run's head (the bytes after the newline that starts it) as if it were a line
+and counted it again. Measured on origin: a 196,625-byte run between two good
+lines gave `malformed: 3`.
+
+**The change.** A local `overlong` flag. The first refusal counts once and
+sets it, later refusals of the same run do not count, and the run's head is
+stepped over without being decoded. A torn tail that is also overlong stays
+one count. Pinned by T-28,
+`tail::tests::an_overlong_run_is_one_malformed_line_however_many_blocks_it_spans`.
+The cost is one `bool` per file walk.
+
+### D-1321 — `Tail::files_read` counts a file when its first block is read — 2026-10-02
+
+**What was wrong.** `walked` counted a file before `walk_back` checked the
+scan budget, so a budget spent exactly on the newest file still counted the
+rolled file behind it, which got no read at all. Measured on origin:
+`files_read: 2` with `bytes_read` equal to the newest file's length.
+
+**The change.** The count moves into `walk_back`, on the first successful
+block, which also leaves a file whose first read fails uncounted. Pinned by
+T-29, `tail::tests::a_file_the_spent_budget_never_reached_is_not_counted_as_read`.
+
+### D-1322 — Cut the last block to the scan budget so `max_scan_bytes` is exact — 2026-10-02
+
+**What was wrong (cost).** The crate root says a query "reads at most
+`Query::max_scan_bytes`". The walk checked the budget and then read a whole
+`READ_BLOCK`, so it overshot by up to 8,191 bytes. Measured on origin:
+`scanning_at_most(1)` read 8,192 bytes. `api::logs::SCAN_BYTES` and
+`api::sweeprun` size their reads with this budget.
+
+**The change.** Each read is `min(READ_BLOCK, bytes left in file, budget
+left)`, and a budget of zero stops before any read. The bound is now exact,
+and per-query cost stays O(budget), unchanged in class. Pinned by T-30,
+`tail::tests::the_scan_budget_is_never_exceeded_by_a_single_byte`.
+
+### D-1323 — Correct the stated width of the widest event line — 2026-10-02
+
+**What was false.** `tail::MAX_LINE_BYTES` said the event ceilings bound a
+line at "roughly 2.2 KiB of content" and "about 14 KiB" escaped.
+`event::MAX_STR_VALUE_BYTES` said the worst line is "≈ 6.5 KB, an order of
+magnitude inside" 64 KiB. The first was the arithmetic from before string
+values were raised from 128 to 512 bytes, and the second left out the sixfold
+`\u00XX` escaping.
+
+**The truth, pinned.** The content is 48 + 256 + 12 × (32 + 512) = 6,832
+bytes. Escaped, the widest line is just over 41 KB, which is inside 64 KiB by
+about a third. Both comments now say so.
+`tail::tests::the_widest_line_the_writer_can_produce_fits_the_reader_and_round_trips`
+(T-31) builds that line, asserts it is over 6 × 6,832 bytes and under
+`MAX_LINE_BYTES`, and round-trips it through `Sink` and `tail`. This is a
+documentation fix. The bound held before and holds now.
+
+### D-1324 — The telemetry set is bounded at 64 MiB while rotation works, not "forever" — 2026-10-02
+
+**What was false.** The crate root said the whole crate "occupies at most
+64 MiB, forever", and `DEFAULT_KEEP_FILES` said "a 64 MiB ceiling on this
+crate's entire footprint, forever". After the first failed roll,
+`rotation_broken` stops rotation for the life of the sink (its own documented design,
+held by `a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event`),
+and the current file then grows without a bound. A single line wider than a
+`MIN_FILE_BYTES` bound also passes the bound
+(`a_first_event_larger_than_the_whole_bound_does_not_roll_an_empty_file`).
+
+**The change.** Documentation only. Both sentences now state the bound as
+holding while rotation works and name the degradation and where it is
+reported (`Health::rotation_failures`, `current_bytes`, `is_loud`).
+
+### D-1325 — A reopened sink resumes its `ms` floor from the last line on disk — 2026-10-02
+
+**What was wrong.** `Inner::last_at` clamps `ms` so that `ms` order is file
+order. `tail` ends a `since` walk at the first record older than the floor,
+and relies on that order. `Sink::around` started the floor at zero, so a
+process restarted with its clock behind the last line on disk (NTP stepping a
+rebooted host back, or a restored VM) wrote an older line after a newer one.
+Measured on origin with a line stamped a day ahead: `since(ahead − 1 h)`
+returned `[]`, although the line on disk matched.
+
+**The change.** `resume_seq` becomes `resume_point` and returns the `seq` and
+the `ms` of the same last decodable record. `Sink::open` passes both to
+`around`. `with_target` still starts at zero, because it has no file to read.
+The cost is unchanged: one 64 KiB read at open. The known trade-off is that a
+line stamped in the future pins later stamps to it, across restarts as well
+as within a process. That is the clamp's existing in-process behaviour, now
+applied consistently. Pinned by T-32,
+`sink::tests::a_restart_behind_the_last_stamp_keeps_ms_in_file_order`.
+
+### D-1326 — Resume the sequence from the newest NON-EMPTY file in the set — 2026-10-02
+
+**What was wrong.** The resume read only the current file. After a roll has
+renamed the current file to `.1`, the set holds an empty current file if the
+append that follows fails or the process dies, and the same happens if the
+current file is removed. The numbering then restarted at zero on top of `.1`.
+`reserve_run_id` resumes from that number, so a restarted process re-issued
+run ids that events in `.1` still carry, which breaks the guarantee its
+`reserved_run` comment states. Measured on origin: `next_seq` 1 where 6 was
+due.
+
+**The change.** `resume_point` takes the first non-empty file, newest first,
+and reads one 64 KiB block at its end. If that file is non-empty but nothing
+in it decodes, the numbering still restarts at zero, as documented. An older
+file is not consulted then, because its number could be lower than lines the
+corrupt file still holds. The cost at open is at most `keep_files` `stat`s and
+one read. `tail::tests::a_restarted_sequence_is_not_mistaken_for_a_repeat`
+built its restart with an absent current file, which is exactly this case, so
+its fixture now uses a current file holding one damaged line, and it
+additionally asserts that line is counted. Pinned by T-33,
+`sink::tests::an_empty_current_file_resumes_from_the_rolled_one_beneath_it`.
+
+### D-1327 — Gate 20 declares `sink.rs` 20 after `resume_seq`'s `return 0` was removed — 2026-10-02
+
+D-1326 rewrote the resume as `resume_point` and `last_record`, and the
+declared uncovered production line in `sink.rs` (`resume_seq`'s guarded
+`return 0`, `docs/06-limits.md` §54, row 1309) no longer exists. Gate 20
+compares an exact count in both directions, so the declaration moves from 21
+to 20 in the same commit. A crate-scoped `cargo llvm-cov -p telemetry` on
+this root container counted `sink.rs` 53 → 51 and `tail.rs` 3 → 3, and the
+only lines that left were the two `return 0` arms. The 30 lines over CI's
+figure belong to four permission tests that fail as root, which is the
+audit-root item and is outside this change. **Not yet shown:** the CI
+workspace profile reproducing 20.
+
+### D-1353 — `Header::decode` refuses a non-zero reserved tail — 2026-10-02
+
+**What was wrong.** `docs/02-store-format.md` §2 gives slot bytes `60..64` as
+*reserved, zero* and says a future field takes reserved space *"in a new
+version, never by reinterpreting version 2"*. `decode` never read them. The
+slot checksum covers them, so a slot carrying a value there was written that
+way, and it decoded as a healthy version-2 header: the in-place
+reinterpretation `CLAUDE.md` §3 rule 8 forbids, accepted silently.
+
+**The change.** After the checksum and stride checks, a non-zero reserved
+tail is `FormatError::ReservedNotZero(u32)`. Ordering keeps a flipped bit a
+`SlotChecksum`. Every writer in this build leaves the tail zero
+(`a_slot_round_trips_every_field_at_its_documented_offset` pins it), so no
+file this repository wrote is newly refused. `docs/02-store-format.md` §2's
+row now says the refusal. Proof:
+`store::unit::a_slot_whose_reserved_tail_is_not_zero_is_refused`, all four
+bytes, through `decode` and `read_region` (failed before: a probe asserting
+`decode(..).is_err()` got `Ok(Header { format_version: 2, .. })`). O(1): one
+four-byte read per slot decode.
+
+### D-1354 — Undefined flag bits are refused on read and on commit — 2026-10-02
+
+**What was wrong.** `flags` defines bit 0 (`FLAG_CHECKSUMS`) and nothing
+else. `decode` accepted any value, so a file declaring a property this build
+has never heard of was read as if it declared none, and `Header::commit`
+wrote any value it was handed — a slot whose meaning no reader could know.
+
+**The change.** `FormatError::UnknownFlags(u32)` from `decode` (after the
+checksum) and from `commit`, so no slot this build writes can reach the read
+refusal. Production writes `FLAG_CHECKSUMS` (and older files `0`); both still
+round-trip. Proof:
+`store::unit::a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write`,
+bits 1..31 (failed before: flags `3` decoded `Ok`, and a commit with flags
+`2` succeeded). O(1).
+
+### D-1370 — `split_window`'s documentation says a capped chunk may cross a month — 2026-10-02
+
+**What was false.** The rustdoc of `pull::session::split_window` opened with
+seven lines about `DropCensus`'s private tests (a doc block that had drifted
+off the test module and onto the function), then said every chunk is *"inside
+one calendar month"*; its `None` paragraph said the month boundary *"binds at
+every rung"*; and its loop comment, headed *"AND NEVER ACROSS A MONTH
+BOUNDARY"*, said each chunk ends at the earlier of the cap, the last day and
+the month end, because `fetch::land` refuses a cross-month batch. The code has
+done none of that for a capped rung since the month clamp was removed:
+`ingest::months_in` splits a landed batch into one file per month, and RG-04
+and MR-38 in `docs/04-invariants.md` already state the current rule. With
+`Some(cap)` the chunk ends at the earlier of the cap and the window's last day;
+only `None` is bounded by the month.
+
+**The change.** Documentation only; no behaviour changed. The `DropCensus`
+paragraph moved back onto `session::tests`. The function doc, the `None`
+paragraph and the loop comment now state the rule the code follows, and a
+doctest on `split_window` pins it: a 2026-07-15..=2026-08-20 window at
+`Some(30)` has a first chunk ending 2026-08-13 (it crosses into August), and
+at `None` one ending 2026-07-31. The stale first paragraph of the
+`a_chunk_fills_the_cap_and_the_chunks_tile_the_window` doc, which still said
+every chunk lands in one month, was removed. **No fail-before test exists for
+this one:** the behaviour was already right and only the prose was wrong, so
+the doctest passes on the old code too. It stops the prose drifting again.
+
+### D-1371 — Parameter Store reads are signed only for `ap-south-1` — 2026-10-02
+
+**What was wrong.** `CLAUDE.md` §8 reads credentials from Parameter Store in
+`ap-south-1`. `pull::config` refuses any other region in the local file, but
+`pull::ssm::get_parameter` and `Signable::authorization` are `pub` and took the
+region as a free string, so any caller holding an AWS identity could sign and
+send a credential read to another region's store. The shipped caller
+(`api::server`, through `config.region()`) respected the rule. The function
+every read goes through did not enforce it.
+
+**The change.** `Signable::authorization` refuses any `region` other than
+`pull::config::REGION`, byte for byte, with an `SsmError` of kind
+`Unreachable` that names §8 and the one region. `get_parameter` signs before
+it builds a client, so a foreign region is refused before any socket exists.
+Two doc references to a `SecretError::Unavailable` variant that does not
+exist now name `SecretError::Unreachable`, which is what the code returns.
+Test: `pull::ssm::tests::a_signature_for_any_region_but_the_one_section_8_names_is_refused`
+fails on the old code (`"us-east-1" is not ap-south-1 and must not be signed
+for`) and passes after. It touches no network. Cost: one string comparison of
+at most ten bytes per read, O(1).
+
+### D-1372 — An empty AWS key is treated as missing, in the environment and the credentials file — 2026-10-02
+
+**What was wrong.** `AwsIdentity::from_env` took an exported-but-empty
+`AWS_ACCESS_KEY_ID` (the usual way a shell or CI step "clears" one) as a key
+id of zero characters. `from_credentials_file` took `aws_access_key_id =`
+with no value as a complete profile. Either way the identity signed a request
+AWS refuses with a fault that names neither source. Because `discover` stops
+at the first identity it builds, an empty export also shadowed a complete
+`~/.aws/credentials`. An empty `AWS_SESSION_TOKEN` or `aws_session_token` was
+signed and sent as a security token with no value.
+
+**The change.** One helper, `non_blank`, treats an absent, empty or
+all-whitespace value as `None` for both sources. `from_env` now goes through
+`from_lookup`, which takes the lookup as an argument so the rule can be tested
+without `std::env::set_var` (the crate forbids `unsafe`). Test:
+`pull::ssm::tests::an_empty_key_is_refused_as_missing_and_never_signs` fails
+on the old code (`empty-id: a blank half of the pair is no pair`) and passes
+after. The broker credential is untouched: this is the AWS identity that
+authorises the read, and §8's rules for the value read back are unchanged.
+
+### D-1373 — In a TOTP secret, `=` padding is accepted only at the end — 2026-10-02
+
+**What was wrong.** `pull::totp::base32_decode` skipped `=` wherever it
+appeared. `GEZD=GNBV` therefore decoded to the same key as `GEZDGNBV`, and
+`=GEZDGNBV` did too. A secret with a mis-keyed `=` produced a code that looked
+valid but came from a different key, and the vendor rejected it with nothing
+in this repository saying why. This is the failure that
+`a_bad_character_is_refused_and_not_skipped` exists to prevent. The function's
+own doc also said there is *"no padding to handle"* while the code handled it.
+
+**The change.** RFC 4648 §6 padding is a tail. Once a `=` has been read, only
+more `=` or a display separator may follow. A base32 data character after it
+is refused as `TotpError::NotBase32 { byte: b'=' }`. A trailing run of
+padding is still skipped, so every secret that decoded before and was well
+formed still decodes to the same key. Test:
+`pull::totp::tests::padding_inside_the_secret_is_refused_and_only_a_tail_is_skipped`
+fails on the old code (`"GEZD=GNBV" has data after padding`, left
+`Ok([49, 50, 51, 52, 53])`) and passes after. Cost: one boolean per character
+inside the loop, which is already bounded by `MAX_SECRET_LEN`.
+
+### D-1374 — `STEP_SECONDS` no longer claims the charter records a broker's TOTP step — 2026-10-02
+
+**What was false.** The doc of `pull::totp::STEP_SECONDS` said 30 s is *"what
+every broker documented in `docs/00-charter.md` uses"*. The charter records no
+TOTP step length for any broker. Its only TOTP fact is Groww's *"TOTP-derived
+daily token, reset 06:00 IST"*. The sentence was a vendor claim with no
+source, which `CLAUDE.md` §3 rule 1 forbids.
+
+**The change.** Documentation only. The constant stays at 30, cited to RFC
+6238 §4's default, and any given broker's step is marked **UNVERIFIED**. The
+RFC 6238 Appendix B vectors that `the_rfc_6238_sha1_vectors_reproduce_exactly`
+checks are unchanged and still pass. No code path in `totp.rs` exchanges a
+code for a token. It computes the code and nothing else, so §8's ban on
+minting holds in this file.
+### D-0730 — A window page counts an unreadable record as a used position, reads its lookback apart, and never measures a change across a gap — 2026-09-29
+
+**What was wrong (W1-api1-10).** `api::bars::seek_page` read the one-record
+lookback as the first record of the page's block and then dropped the first
+folded row by position. `bars::page` returns only the records that read, so
+when the lookback was unreadable the dropped row was the page's own first
+row, and nothing named it. Reproduced on origin/main (2c209309): a 200-record
+month with block 1 (records 73 to 145) damaged, asked for offset 146 limit 5,
+returned closes `[1147, 1148, 1149, 1150]` with one fault naming record 145.
+Separately, the loop stopped on rows returned rather than positions used, so a
+page that met damage filled the gap from the next month: offset 70 limit 10
+over a January whose records 73 to 99 are unreadable returned
+`[1070, 1071, 1072, 2000, …, 2006]`, and the next offset page returned
+February's first rows again. The reading path (sort other than `ts`, or
+`extremes=1`) had the third form of the same fault: its change fold ran over
+the records that read, so the row after a damaged block was measured against
+the last row before it.
+
+**The change.** `bars::slots` reads a page keeping every position, `None`
+where a record would not read; `bars::page` is that with the `None`s dropped,
+so its callers are unchanged. `seek_page` counts `end - start` positions per
+file, reads the lookback on its own with one `read_record`, and keeps the
+lookback's failure out of `faults`, because it is not a row of that page and
+the page that covers it names it. The change fold takes what stands behind the
+first slot and says `previous_unreadable`, in both change columns, for a row
+whose predecessor would not read. The cost is unchanged: one extra
+`read_record` for the lookback, as before.
+
+**The new wire code.** `previous_unreadable` is a new `chg_why` and
+`oichg_why` value on `/bars/window.json`. The grid in `web/` has no sentence
+for it yet and shows its generic "unknown" text; that is a front-end follow-up
+for the web group, not done here because this batch is backend only.
+
+**Proof.** `an_unreadable_lookback_record_does_not_eat_the_first_row_of_the_page`
+and `paging_across_a_damaged_block_returns_every_readable_row_exactly_once`
+fail on origin/main with the outputs quoted above and pass with the change;
+`a_sorted_page_names_the_row_after_a_damaged_block_rather_than_measuring_across_it`
+and `the_fold_names_an_unreadable_predecessor_in_both_change_columns` pin the
+fold.
+
+### D-0731 — Test the qualification row's coordinate cross-check on its own, since no api test can render a saved qualification — 2026-09-29
+
+**What was missing (GAP14-58).** `/boolean-qualification.json`'s projection
+refuses a qualification row whose original identity, family or coordinate
+differs from the saved statistics row beside it. The ledger's mutation run
+recorded `replace != with == in project` at
+`crates/api/src/booleanqualification_projection.rs:27:25` as MISSED: no api
+test renders a real qualification page, and the saved-qualification fixture
+lives in `cli`'s own `#[cfg(test)]` modules, which the `api` crate cannot
+reach.
+
+**The change.** The three comparisons move unchanged into
+`same_coordinate`, which `project` calls with `?`, so the refusal text and the
+order of checks are the same. It takes the three coordinates and one
+`cli::boolean_evidence::StatisticsRow`, both of which a test can build.
+`a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_match`
+accepts the equal case and requires the refusal for each coordinate differing
+alone. A full-page render test through a saved qualification is still absent;
+it needs `cli`'s fixture exposed to `api`, which this batch does not do.
+Until then the call itself is pinned in the source:
+`project_cross_checks_each_row_before_rendering_it` finds
+`same_coordinate(row.original, row.family, row.coordinate, original)?;` inside
+`project`'s row loop ahead of `admission_projection::row(`, and fails on
+origin/main, where that call does not exist. It reads source text and does not
+run `project`. So `cargo mutants --in-diff` over this batch still reports two
+MISSED mutants, `replace + with -` and `replace + with *` at
+`crates/api/src/booleanqualification_projection.rs:26:34`, the unchanged line
+`let index = asked.offset + n;` beside the changed call: no api test runs
+`project`, and only a rendered page would see a wrong index.
+
+### D-0732 — `/audit.json` counts the asked feed's months from its own manifest, once per census snapshot — 2026-09-29
+
+**What was wrong (W1-api1-0).** `store_block` rolled the asked feed up by month
+by walking `census_now`'s merged entry list, every held entry of every vendor,
+and probing the asked feed's manifest for each, on every request. The cost of
+one feed's audit answer grew with every other feed's store, on a route the
+console polls, and `docs/06-limits.md` did not say so.
+
+**The change.** `feed_rollup` takes one `VendorCensus` and walks that
+manifest's `held_keys()`, so no other feed is reachable from it.
+`RollupCache`, a field on `Site`, keeps its answer per feed for the census
+`Arc` `census_now` returned, compared by pointer through a `Weak` as
+`store_wire::Cache` does, and a new snapshot replaces every feed's rollup. The
+lock is released while a miss counts. The answer's bytes are unchanged:
+`the_store_block_rolls_up_the_asked_feed_by_month_and_counts_no_other_feed`
+pins the months and totals of two feeds held side by side.
+`the_rollup_is_counted_once_per_feed_per_census_snapshot` and
+`the_audit_body_reuses_the_rollup_until_the_manifest_changes` pin the count.
+`the_store_block_walks_one_census_and_not_every_feeds_entries` reads
+`store_block`'s source and fails on origin/main, where it contains
+`entries.iter()`. `docs/06-limits.md` gains a section for what is still paid,
+and `the_audit_rollup_cost_is_stated_in_the_limits_and_quotes_this_source`
+fails if that section is removed or the walk it quotes leaves `feed_rollup`.
+
+### D-0733 — A sorted window page is cut from whichever end orders fewer rows, and its full read is stated — 2026-09-29
+
+**What was wrong (W1-api1-3).** `GET /bars/window.json` sorted by a price
+column, or asked for extremes, reads every record in the asked months, keeps
+every readable one resident, and partitions them. That was stated only in
+comments in `bars.rs`, not in `docs/06-limits.md`. And the partition kept the
+first `offset + limit` rows, so a deep offset ordered nearly every row.
+
+**The change.** `ordered_page` replaces the inline partition. `page_side`
+keeps the fewer of the first `offset + limit` and the last `n - offset` rows,
+the front on a tie; a back page is ordered under the reversed comparator and
+its slice reversed. It still uses one partition and one sort, the two
+constructs gate 11 already counts in this file. The page is unchanged:
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+now calls `ordered_page` at every offset from 0 to past the end, against
+sorting everything and slicing. `a_page_is_cut_from_whichever_end_orders_fewer_rows`
+pins the side, the tie and the bound that no page orders more than half the
+rows plus its limit, the bound for every row count up to 40 and every offset
+and limit up to 45. The reads and resident rows are not changed and are now
+stated in `docs/06-limits.md`, quoting the lines that pay them;
+`the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source` fails
+if that section is removed or a line it quotes leaves `bars.rs`.
+
+**No `keep < n` guard around the partition.** `ordered_page` partitions and
+truncates even when `page_side` keeps every row, because that is legal
+(`keep` is at least 1 and at most `n`, so `keep - 1` is an index) and changes
+no page. With the guard, `replace < with <=` in it was a mutant no test could
+kill, because both spellings return the same page;
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+covers `limit` 60 and 61 over 60 rows at offset 0, where `keep` equals `n`.
+### D-0904 — Two api cost statements corrected: unpinned ranking checkpoint discovery, and the merge reservation's probe bound — 2026-09-29
+
+**Unpinned ranking requests.** `/index-stop-ranking.json`'s `render` calls
+`Reader::latest_checkpoint` in its unpinned arm before it compares the cached
+reader, so every unpinned request, warm or cold, opens a
+`search_checkpoint::Snapshot`, which walks the search's checkpoint directory
+(`fs::read_dir(directory)`) with one `fs::symlink_metadata` of `complete` per
+reservation, and then reads one payload. Nothing stated this cost; the cli doc
+calls it "bounded cold work". It is recorded in `docs/06-limits.md` and at the
+call site rather than removed: the newest acknowledged checkpoint is not known
+until the directory is read, and a pinned request already skips the walk.
+`an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
+reads the call order and the walk off their sources and requires the limits
+section.
+`an_unpinned_request_discovers_its_checkpoint_and_a_pinned_one_does_not` runs
+both arms in a child process on a root holding no saved search: the unpinned
+render is refused with `latest_checkpoint`'s own words, and the pinned one by
+`Reader::open` under the comparison's context.
+
+**The merge reservation.** The comment above `by_key` in
+`crates/api/src/merge.rs` said pre-sizing made a probe "O(1) in the WORST case
+and not merely on average", contradicting the doc on `merge` ("Probes have
+expected O(1) cost") and `CLAUDE.md` §3 rule 4. Reserving capacity prevents
+growth and rehash, not collision chains. The comment now says expected O(1).
+No code changed. `no_comment_claims_a_worst_case_constant_probe` refuses both
+worst-case phrasings in the file's production half.
+
+### D-0905 — Refuse a signed date piece, and pin the store root in the saved-VIX reader cache key — 2026-09-29
+
+**Signed date pieces.** `api::ingest::parse_day` checked widths 4/2/2 and then
+called `u16`/`u8` `from_str`, which accept a leading `+`, so `2024-+8-+6` was
+accepted as 2024-08-06 although the function's doc says it is strict on
+shape. It now refuses any byte other than an ASCII digit or `-` before parsing,
+as `DateNotIso`. `a_date_field_is_refused_by_name_whichever_way_it_is_wrong`
+adds `+024-01-08`, `2024-+8-+6` and `2024-08-+6`.
+
+**Saved-VIX cache key.** `indexstopvixjson::render` keeps one reader keyed on
+root, identity, pin and bounds, and replacing `cached.root == root` with `!=`
+survived the api suite. `a_cached_saved_vix_reader_for_one_root_never_answers_for_another`
+admits a page from root A, copies A's tree to root B and damages only B's
+companion, and requires B to refuse on its own bytes, then to admit once
+restored. The two saved-VIX tests that call `render` now hold one mutex, since
+`render` answers "busy" to a concurrent caller. The same root term in
+`indexstopcandlesjson::render`'s cache key is NOT covered by this entry: its
+mirror needs a saved original-source archive, which this batch builds no
+fixture for, and it stays open.
+### D-0906 — Refuse a `/pull/run` leg whose vendor is no feed this build has — 2026-09-29
+
+**What happened.** W1-api3-3. `pullrun::legs_from` copied a leg's vendor
+unchecked (`vendor: vendor.to_owned(),`), and `pullrun::by_feed` finds a leg's
+group with `groups.iter_mut().find(|(vendor, _)| *vendor == leg.vendor)`. The
+module doc said that scan is "bounded by the number of feeds this build has
+(four), not by the number of legs", and `by_feed`'s doc said "four, not four
+thousand". Neither held: the group count, and so the scan and the number of
+chains `conduct` spawns, grew with the distinct vendor strings a form carried.
+The feed count was also not four: `pull::vendor::FEED_COUNT` is 5.
+
+**The change.** `legs_from` refuses the whole run with `Refusal::Malformed`,
+naming the leg, when its vendor is not the exact `wire()` spelling of one of
+`pull::vendor::Feed::ALL`. That is the same refusal an unknown route already
+gets. The two docs name `pull::vendor::FEED_COUNT` in place of "four", and
+`by_feed`'s doc says the bound holds for legs `legs_from` admitted.
+
+**Proof.** `pullrun::tests::a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds`
+offers `FEED_COUNT + 1` invented vendors and requires the refusal quoting the
+first; requires `Dhan` beside `dhan` to refuse; and requires two legs on each
+feed in `Feed::ALL` to be admitted and grouped into exactly `FEED_COUNT` groups
+of two. With the check reverted the first assertion fails.
+
+### D-0907 — Record, not fix, the per-press journal replays of `/pull/recovery` — 2026-09-29
+
+**What happened.** W1-api4-0, W1-api4-1, W1-api4-2. `docs/06-limits.md` said
+only "recovery replay reads journal records". Every open of a recovery journal
+replays the whole file: `recovery_journal::replay` runs
+`for ordinal in 0..count`, and both `snapshot` and `Journal::open_at` call it.
+Nothing compacts a journal. So one press costs work proportional to history,
+not to the plan pressed, and one start replays each journal more than once.
+`preflight_plan` also snapshots `attempts.bin` only to prove it decodes; the
+result is not bound.
+
+**Why not fixed here.** The replay whose result is not bound is still a
+check: `start` runs `preflight_submission(&preflight_site, &asked)?` before
+`claim(&site, Some((id, true)))`, and
+`recovery::tests::preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing`
+requires that preflight to refuse with "shared recovery attempt history is
+unavailable; budgets cannot be reset" once `attempts.bin` is gone. Removing a
+replay means carrying one validated index from the blocking preflight into
+`seeded`, or compacting journals. That is a design change, not a follow-up,
+so the cost is stated and counted instead.
+
+**Stated and counted.** `docs/06-limits.md` "Per-press recovery journal
+replays (D-0907)" states the cost. A test-only thread-local in
+`recovery_journal` (`REPLAYS`) records each completed replay's file name and
+record count, and
+`recovery::tests::one_start_replays_each_journal_three_times_and_every_record_each_time`
+runs `preflight_submission` then `seeded`, as `start` does, on a plan with
+history and requires exactly three replays each of the plan journal,
+`attempts.bin` and `active.bin`, each reading every record, and nine in all.
+`drive`'s further open of `attempts.bin` runs after `seeded` and is not
+counted by that test. `reconcile_pending` (W1-api4-2) is stated from its
+source lines and is not counted by any test.
+### D-0710 — Make the commit-stamp tests decode a delta the proof reads, and pin the verifier's bounds — 2026-09-27
+
+GAP14-55. The tests of `crates/cli/build_provenance.rs` never decoded a delta.
+`plan_delta` deltified the first two blobs, and `verify` reads no blob object:
+`worktree_matches` hashes the working file instead. So no test reached
+`apply_delta` on the proof's path, the `REF_DELTA` arm never ran, and the
+loose-object hash check, the symlink content check and the linked-worktree
+watch could each be flipped with the whole suite green.
+
+**Reproduced first, on `origin/main` (96194c11).** `cargo mutants` does not
+discover this file (D-0691), so the evidence comes from a scratch crate outside
+any checkout that holds `origin/main`'s `build_provenance.rs` and
+`commit_stamp.rs` verbatim as library modules, run with `CARGO_TARGET_DIR`
+unset so each mutant builds in its own copy (its log reads `Dirty bpprobe`,
+then `Compiling bpprobe`). The full run printed `357 mutants tested in 8m: 131
+missed, 207 caught, 17 unviable, 2 timeouts`. The missed list includes every
+mutant the ledger names: `395:58` (`||` to `&&` in `read_bytes`), `479:54` (`+`
+to `-` and to `*` in the `REF_DELTA` depth), `571:5` (`apply_delta` replaced by
+`None`, `Some(vec![])`, `Some(vec![0])` and `Some(vec![1])`), `771:65` (`==` to
+`!=` for a symlink) and `69:24` (`==` to `!=` choosing the watched
+`packed-refs`).
+
+**The change is test-only.** Every hunk is inside `mod tests`. The fixture now
+stores HEAD's root tree, the first object below the commit that `verify`
+decodes, as an `OFS_DELTA` or a `REF_DELTA` against a base tree of 300
+pseudo-random bytes followed by the tree. The delta is one literal byte and a
+copy from offset 301 (0x12D, two offset bytes), and the fixture asserts the
+`OFS_DELTA` distance needs more than one seven-bit group. A copy one byte early
+must refuse. Further tests pin: every copy argument byte, a skipped byte, a copy
+with no offset byte and the implicit 0x10000 size; every way a delta can
+misdescribe its result; delta chains of exactly `MAX_DELTA_DEPTH` and one more
+on both delta paths; trees 128 levels below the root and one more; tree entry
+names and modes; loose objects whose body or declared size is false; pack
+entries whose header misstates a size; pack and pack-index versions and magic;
+every entry through the 64-bit offset table; an object found in a second pack
+past misses in the first; every object kind loose and packed; index versions,
+extensions, name lengths (including the saturated 0xFFF) and names; HEAD
+through packed refs and a traversing HEAD ref; a tracked symlink; an executable
+bit; a `.gitignore` comment; the watched directories; and a linked worktree
+watching the shared `packed-refs`.
+
+**After.** The same scratch crate holding this change's file printed `357
+mutants tested in 12m: 8 missed, 323 caught, 17 unviable, 9 timeouts`, and
+every mutant the ledger names above is in its caught list. Five of the 8
+survivors change nothing this platform can observe:
+
+- `247:9` and `318:13`, `||` to `&&` between "empty" and "starts with `/`" for
+  a ref or an index name. The next clause refuses any empty segment, which both
+  cases have.
+- `271:34`, `||` to `&&` skipping `#` and `^` lines in `packed-refs`. Neither
+  kind of line has the `<40 hex> <ref>` shape the lookup requires.
+- `787:5`, the `cfg(not(unix))` `executable`, which this platform does not
+  compile.
+- `1077:44`, `|` to `^` joining two hexadecimal nibbles, whose bits do not
+  overlap.
+
+The other three are survivors, not equivalents: `511:20` (`<` to `==` and to
+`<=`) and `511:40` (`+` to `-`), the pack index's minimum length
+`PACK_INDEX_HEADER + 40` (`if bytes.len() < PACK_INDEX_HEADER + 40`). A file
+they judge differently from the original is at most that long, so for it to
+list HEAD's tree its last 20 bytes, which must be the SHA-1 of every byte
+before them (`if Sha1::digest(bytes.get(..body_len)?).as_slice() !=
+bytes.get(body_len..)?`), overlap its own entry table. A fixture could build
+one only by searching for a digest whose bytes agree with that table.
+
+**Review round, 28 September: the three are caught.** That search was run once,
+offline, and its results are fixed in the test
+`a_pack_index_of_exactly_its_least_length_is_read_and_a_byte_shorter_is_not`.
+`pack_offset` reads no fanout word but the last, so the first carries a nonce:
+4,929 makes the SHA-1 of a 1,052-byte body name offset 2,298, and 235,050 makes
+that of a 1,051-byte body begin with the listed id's last byte and name offset
+34,834. The test asserts both properties, puts the object at that offset, and
+requires an index of exactly `PACK_INDEX_HEADER + 40` bytes to be read and one
+a byte shorter not to be. Each of the three mutants, applied alone in the
+scratch crate, fails it. The whole run over this file then printed `357 mutants
+tested in 13m: 5 missed, 326 caught, 17 unviable, 9 timeouts`: the five missed
+are the five listed above as unobservable, and the timeouts are the nine below.
+
+The nine timeouts are six mutants of `pack_offset`'s binary search (`527:15`,
+`528:26`, `528:34`, `528:41`, `532:54` twice) and three of `apply_delta`'s
+cursor (`580:16`, `587:20`, `601:24`, each `+=` to `-=`). A timeout is not
+counted as caught here. Gate 18 still cannot see this file, as D-0691 records,
+so a later change to it has mutation evidence only if its author collects it
+this way.
+
+### D-0711 — Hash a Boolean family's source once in cli and attest each side once, not per program — 2026-09-27
+
+W2-cli2-3. For every program × side of a Boolean catalog family, `produce_side`
+in `crates/cli/src/boolean_candidate_v1.rs` ran two passes that read no
+program: `runner::identity::data_digest_with_daily_reference` over the signal,
+exact-minute and daily streams, and `attest_training` over the side's TRAINING
+slice. `execution_run` in `boolean_oos_v1.rs` ran the same digest for every
+program × side of the later comparison. The runner documents the attestation
+as the once-per-slice half: a caller "pricing many candidates over one slice
+reads the slice once and not once per candidate" (`attest_training`,
+`crates/runner/src/exit_grid_policy.rs`).
+
+**Reproduced first, on `origin/main` (96194c11).** With a thread-local counter
+added at each of those three call sites and nothing else changed, the test
+fixture's three-program family made 6 digests and 6 attestations in TRAINING
+(`left: (6, 6)`), and its later comparison 6 digests (`left: (6, 0)`).
+
+**The change.** `SourceDigest` hashes the three streams the first time a
+program asks and returns the stored digest after; `PricedSide` attests its side
+the first time a program prices it and returns the stored attestation after.
+Both live for one family's `compute`, and the later comparison holds its own
+`SourceDigest`. In cli the same family now makes 1 digest and 2 attestations,
+and its later comparison 1 digest. These are cli's passes only; the runner's,
+below, are unchanged, so the family still hashes its three streams once per
+program × side as well as once in cli. With only the reuse removed (each call
+hashing or attesting again, the counters kept) the two tests fail again with
+`(6, 6)` and `(6, 0)`.
+
+**First use, not ahead of the loop.** A refusal of either pass still meets the
+first program's first side where it did on `origin/main`: the digest before
+that side's attempt begins, the attestation inside it. Hoisting the attestation
+ahead of the program loop would refuse before any per-program attempt exists,
+changing the evidence a refused family leaves. D-0716 adds the test that holds the
+attestation half (C4-CLI-13).
+
+**Same bytes.** The fixture family's identity and completion digest, and its
+later comparison's, printed from `origin/main` and from this change, are equal:
+training `0ba9c5e1…83de` completing `6b002064…a77b`, later comparison
+`6ae73684…7537` completing `7f455d4c…1b77`, from two fixture roots each.
+
+**Not closed here.** Each program × side still mints its run through
+`ExpressionExecutionRunV1::new_with_daily_reference`, whose runner constructor
+hashes the three streams again (`let expected_data_digest =
+crate::identity::data_digest_with_daily_reference(`), checks the execution
+subslice (`require_exact_execution_subslice(reference_minute_context,
+evaluated_execution_1m)?;`) and hashes the execution bars
+(`execution_digest: crate::identity::data_digest(exact_execution),`), and the
+later comparison's `evaluate_expression_oos` hashes the later bars per program
+(`let execution = crate::identity::data_digest(bars);`). Those are runner
+passes, ledgered as W3-runner2-3, W3-runner2-5 and W3-runner2-4 for the runner
+group, and recorded in `docs/06-limits.md`. W2-cli2-3 is therefore not
+closed: its ledger item counts these runner passes with the cli ones (`the
+cost is about 5-6 extra O(N) hashing/validation passes per program x side`),
+and only the two cli passes are removed here.
+
+### D-0712 — Save each AND checkpoint boundary's own level, never the whole history again — 2026-09-27
+
+AC-whp-o1-0. `cli::and_checkpoint`, which `stored_month_kernel` calls for
+`sweep-stored` and `sweep-audited-stored`, re-encoded every retained level into
+one in-memory buffer at every level boundary (`let payload = encode(view,
+&rows)?;`, then `journal.publish(&payload, MAX_BYTES)?`) under a 64 MiB
+admission (`const MAX_BYTES: u64 = 64 * 1024 * 1024;`).
+
+**Reproduced first, on `origin/main` (96194c11).** Twenty-one live conditions
+true together on two of three bars. Attempt 1 acknowledged depths 1 to 10 (21,
+210, 1,330, 5,985, 20,349, 54,264, 116,280, 203,490, 293,930 and 352,716
+survivors), built depth 11 and refused with `checkpoint sink refused:
+checkpoint I/O refused: AND checkpoint exceeds 64 MiB byte admission`. Attempt
+2 under the same identity acknowledged depth 10 again, rebuilt depth 11 and
+refused with the same words. The test
+`a_production_history_past_64_mib_completes_and_replays_without_recomputing`,
+run there with only a namespace constant added, failed with that error.
+
+**The change: version 2, `and-checkpoint-v2`.** At the boundary for depth `k`
+the level's engine bytes, from the new `CheckpointView::write_current_to`, are
+published as chunk entries of at most 32 MiB of level bytes (`CHUNK_BYTES`),
+each headed by `BRTXAC02`, the depth, its index within the level and the
+sequence of the boundary before it. Then one boundary record, `BRTXAB02`: the
+depth rows, this boundary's engine prefix from the new
+`CheckpointView::write_prefix_to` (header, offers, exclusions), and each level's
+chunks by sequence, length and seal. Resuming reads the newest boundary record,
+or, when the newest entry is a chunk an interrupted boundary never
+acknowledged, the boundary that chunk names, and streams the prefix and every
+chunk through `Checkpoint::read_from`, each chunk checked against its recorded
+seal, length, depth and index. The final boundary and every chunk it names are
+reopened before a rankable run returns, as the whole version-1 payload was.
+`write_to` is now `write_prefix_to` followed by every level as
+`write_current_to` writes it, and an engine test holds a boundary's prefix
+followed by every level saved so far equal to `write_to` byte for byte.
+
+**After.** The same production-size test completes: 2,097,151 survivors, a
+history over 64 MiB, and a replay of the completed identity makes one callback
+and publishes nothing. With `and_checkpoint.rs` alone put back to `origin/main`
+and that test run against it, it fails again with the version-1 refusal.
+
+**Not changed.** The walk, the depth rows, the ranking and the run's nine
+identity terms. The version-1 namespace is still accepted by `Journal::open`,
+and nothing writes it. A version-1 journal is not resumed by this build: the
+stored run identity carries the build's commit (`let id = identity(&Run {` …
+`commit,` in `stored_month_kernel`), so a journal an earlier build wrote was
+never under this build's identity. The retained history is still held in
+memory, as `docs/20-sweep-resume.md` states. What a boundary still writes, and
+what resuming reads, is recorded in `docs/06-limits.md`.
+
+### D-0713 — Record that a resumed Boolean campaign rung prices its pinned families again — 2026-09-27
+
+W2-cli2-8. Recorded, not fixed.
+
+**Reproduced first, on `origin/main` (96194c11).** A one-rung (1min) campaign
+is refused after its Families stage was published, by a regular file where the
+statistics namespace must be created: the row is saved `Refused` with the
+family's completion pin and no statistics link. With the file removed the same
+campaign resumes and completes the rung under the same pin, and the family's
+latest candidate attempt is 9 where the attempt that produced the pin was 1:
+the pinned family was priced again. `execute_rung` hands the rung to
+`prepared.input.run(rung, &prepared.programs, out, |stage| {` with no pins,
+and `produce_identified` always reaches `let produced = compute(&request,
+&source, identity, commit);`. The recorded pins are only compared (`"campaign
+retry candidate completion differs"`).
+
+**Why it is not fixed here.** Skipping a pinned family needs the family back
+as the `CommittedBooleanFamilyV1` that statistics consumes by value
+(`statistics::produce(root, families, plan.procedure, plan.bounds)?`). That
+value carries runner capabilities the saved body does not hold: each selected
+row's `SelectedExpressionExitV1`, each program × side's
+`ExpressionTrainingAnchorV1` and both sides' resolutions. The body reader
+rebuilds rows with `selected: None,`. Reopening a pinned family without pricing
+it therefore needs a runner-side way to re-mint those capabilities from sealed
+bytes, which is a design change to the runner's capability model rather than a
+cli repair.
+
+**The limit, stated.** A resume skips only a rung already completed
+(`.is_some_and(|row| row.status == Status::Completed)`); any other row goes
+back through `execute_rung`, whose run maps every family of the scope
+(`self.scope.families()` then `.par_iter()`). So a rung saved `Refused`, as
+tested, or left `Running` by an interrupted process, prices all its families
+again, pinned or not, and the recorded pin must equal the new one or the retry
+refuses. It is recorded in `docs/06-limits.md` and pinned by
+`a_resumed_refused_rung_prices_its_pinned_family_again`, which a fix must
+change.
+
+### D-0714 — Release each AND checkpoint chunk before a replay reads the next — 2026-09-28
+
+Review finding on D-0712. The `Replay` comment in `cli::and_checkpoint` said "at
+most one chunk is held beside the checkpoint being rebuilt", and no test backed
+it. `Replay::load` read the next chunk (`let saved =
+self.journal.read(piece.sequence, self.limits.entry)?;`) while `self.chunk`
+still owned the previous one, which was dropped only at `self.chunk =
+saved.payload;`. So two chunk payloads, each up to `CHUNK_BYTES` of level bytes
+and a header, were live at once.
+
+**Reproduced first, at 1648a0f8.** `a_replay_releases_each_chunk_before_reading_the_next`
+reads level 1's chunk, then points the replay at an entry the journal never
+published: the read fails, and the test requires level 1's chunk to be released
+already. Against 1648a0f8's `and_checkpoint.rs` it failed at that assertion
+("level 1's chunk was released before entry 999 was read").
+
+**The change.** `load` sets `self.chunk = Vec::new();` before the read, and the
+test passes. Only that line separates the two runs' `load`.
+
+**Not changed.** A replay still streams every chunk once, and the checkpoint it
+rebuilds is still held whole in memory (`docs/20-sweep-resume.md`).
+
+### D-0715 — Reserve each AND checkpoint level's chunk buffer once, whole — 2026-09-28
+
+Review finding on D-0712, a cleanup: no memory figure was claimed. `Chunks::write`
+reserved `CHUNK_HEADER` when a chunk began and `now.len()` for each write, at
+most eight bytes a call from the engine's word writer, and took the buffer with
+`std::mem::take` before every publish. So each chunk's buffer grew by repeated
+reallocation from its header, and the next chunk began again from nothing.
+
+**Reproduced first, at 1648a0f8.** `a_levels_chunks_share_one_buffer_reserved_whole`
+writes a 2,400-byte level eight bytes at a time under 1,024-byte chunks.
+Against 1648a0f8's `and_checkpoint.rs` it failed at its first check, that after
+the first write the buffer holds a chunk header and a whole chunk.
+
+**The change.** When a chunk begins with a buffer below `full` capacity, `full`
+being the header and a whole chunk, the buffer is reserved
+`try_reserve_exact(full)`, and after each publish the same buffer is cleared and
+put back. The reservation is therefore made once per level and no later byte
+grows or moves the buffer: the test counts exactly one reservation, where it is
+made, across three chunks published as 1,024, 1,024 and 352 bytes, and holds the
+buffer's pointer and capacity over all 300 writes (D-0716: the pointer alone
+cannot tell reuse from a chunk freed and allocated again at the same address). The per-write
+`try_reserve` is gone, since no write passes a full chunk.
+
+**The cost, stated.** A level smaller than a chunk still reserves a whole one:
+`CHUNK_HEADER + CHUNK_BYTES` bytes at production sizes, however few bytes the
+level writes. Not timed, and what the allocator commits for it is not measured.
+
+### D-0716 — Pin the AND checkpoint's depth-row check, its one reservation and its named-chunk refusal, and the attestation's place — 2026-10-01
+
+Round-4 review findings on D-0711, D-0712 and D-0715.
+
+**The depth-row check had lost its test.** Version 2 deleted
+`wrapper_counters_lengths_and_bounded_writer_refuse_without_truncation`, the one
+test that changed a recovered record's depth-row counters and required
+`validate_rows` to refuse, and its replacement altered only the reconciliation
+byte, which `DepthRow::from_words` refuses before `validate_rows` runs. The
+round-4 review found every AND checkpoint test passing with `validate_rows`
+returning `Ok(())` at once.
+`recovered_depth_rows_must_agree_with_the_replayed_search` changes one counter
+at a time in the depth-2 record's bytes (depth 1's admissions and pair
+iterations; depth 2's generated candidates, admissions, pair iterations below
+its admissions and pair iterations of `u64::MAX`), and a row history shorter than
+the replayed levels; each refuses in `validate_rows`' own words (C4-CLI-12).
+With `validate_rows` returning `Ok(())` at once it fails.
+
+**One reservation per level, counted where it is made.** D-0715's test held the
+buffer's pointer and capacity, and a chunk freed and allocated again at the same
+size came back at the same address, so it also passed with the buffer dropped
+after each publish. `Chunks::write` now reserves only when the buffer's capacity
+is below a whole chunk, and a test-only thread-local counter at that call
+(`RESERVATIONS`) lets the test require exactly one reservation for a three-chunk
+level (C4-CLI-11). With the buffer dropped after each publish the count is
+three and the test fails.
+
+**The attestation's place is held by a test.** D-0711 and the `PricedSide` doc
+comment said a refused TRAINING attestation stays inside the first program's
+attempt, and the round-4 review found every Boolean test passing with the
+attestation hoisted ahead of the program loop. A test-only hook (`ATTEST_FAULT`) makes the first
+attestation refuse and records the newest evidence attempt as it does:
+`a_refused_attestation_is_recorded_inside_the_first_sides_attempt` requires
+that attempt to be an `Expression` attempt still running, then `Refused`, with
+the family's `BooleanCandidates` attempt `Refused` after it and one attestation
+tried (C4-CLI-13). Hoisted, the newest attempt when the attestation runs is the
+family's, and the test fails.
+
+**A named chunk that cannot be read says which.** A chunk the newest boundary
+names that had vanished, or lost its completion marker, refused a resume with
+the operating system's words alone. `read_named` now carries the chunk's
+sequence, its one-based depth and its index beside the journal's reason, for the
+replay and for the final re-read alike (C4-CLI-14).
+
+**Documented, not changed.** `recover` reads the newest entry and at most one
+more, but only after `Journal::open` has listed the identity's whole entry
+directory; version 2 writes at least two entries a boundary, and orphans stay.
+`docs/06-limits.md` states that scan. `docs/22-expression-search.md` named
+`and-checkpoint-v1` as the AND namespace; it now names `and-checkpoint-v2`.
+
+**Kept open, not fixed here.** W2-cli2-8 (D-0713): a resumed `Refused` or
+`Running` campaign rung prices its pinned families again, because
+`statistics::produce` takes `CommittedBooleanFamilyV1` by value and the saved-body
+reader rebuilds rows with `selected: None`; skipping them needs a runner
+constructor that re-mints a family's capabilities from its sealed bytes. The
+runner's per program × side digests (W3-runner2-3, W3-runner2-4, W3-runner2-5)
+stay with the runner group, as D-0711 records.
+### D-1400 — Record that three resumable Boolean paths re-verify all completed work on every step — 2026-09-29
+
+**Renumbered.** Written as D-0910 on the Mac branch `fix/c4-cli-02`; main took D-0910 for the store tail-block check (#22) first, so this entry moved to lane 4's overflow number when the branches were integrated. The text below is unchanged.
+
+**What was found.** Three C4 audit rows (W2-cli2-2, W2-cli2-1, W2-cli2-0)
+name one shape in three commands: a loop whose single step repeats a check
+over everything earlier steps finished, and no limit said so.
+
+- `boolean-grammar-campaign-stored` advances one batch per invocation, and
+  `restore` calls its `complete` callback once for every nonempty completed
+  batch in the chain; the callback `execute_with` passes prepares that batch's
+  campaign again and verifies its saved campaign. Invocation n re-verifies
+  every nonempty batch completed before it (at most n − 1); an empty batch
+  never reaches `complete`.
+  `cli::boolean_grammar_campaign::tests::every_invocation_reverifies_every_completed_batch_in_order`
+  requires one, two and three calls, in chain order, after one, two and three
+  completed batches.
+- `boolean-search-stored` opens the whole history and calls `verify_batch` for
+  every completed batch whenever it resumes a saved search, before any work,
+  and again
+  before and after it publishes each completion.
+  `verify_batch` ends by rereading every retained record.
+- The later-period OOS producer loops over every training anchor, two per
+  program, and each group ends with `training.require_current()?;`, which loops
+  over every retained row and re-verifies the saved training body.
+
+**The choice.** The repeated checks are the tamper detection each path relies
+on before it skips or builds on finished work, so they are recorded, not
+removed. `docs/06-limits.md` states each one, and quotes the source lines that
+pay for it; `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`
+fails if a quote leaves the section or the source. The comment on `restore`,
+which named only a per-invocation bound, now also names the growth. No code
+path changed, so no run identity moves.
+
+### D-0911 — Bound the generated search child by its log, not by the clock — 2026-09-29
+
+**What was found (ET-rust-only-purity-11).** `run_fixture_child` in
+`crates/cli/src/boolean_search_integration_tests.rs` killed its child and
+failed once `started.elapsed()` passed six minutes (fifteen under
+`LLVM_PROFILE_FILE`). The time measures how loaded the machine is, not
+anything the test checks, so under load Gate 1e's test clause and the `Tests`
+step could fail with nothing §2-related changed. The comment this change
+removes recorded one such overrun, on the instrumented run: "Instrumented
+complete-calendar replay exceeded the ordinary deadline on the Linux CI
+runner."
+
+**The change.** The deadline is removed. The child is still killed, and the
+test still fails, when its log passes 8MiB, and the parent still requires the
+child's success and its `1 passed` line.
+`cli::boolean_search_command::integration_tests::the_generated_search_child_is_bounded_by_its_log_and_not_by_the_clock`
+reads the function's source, pins its whole wait loop and everything after
+it, and requires that the body
+names no `Instant`, `SystemTime`, `elapsed`, `now(`, `duration_since`,
+`from_mins`, `from_secs`, `timeout`, `deadline`, `thread::spawn`, `const ` or
+`static `. Test-only; no production path and no run identity changes.
+
+**What it costs, named rather than hidden.** A child that never exits is no
+longer failed by the test; it holds the test until something outside it stops
+the run. `docs/06-limits.md` states the consequences under this number, each
+checked against the file it names by
+`c4_cli_02_limits::the_d0911_costs_are_the_ones_in_ci_and_the_source`:
+
+- The `language-purity`, `build` and `coverage` jobs, which run this test,
+  declare no `timeout-minutes`, so a hang there runs until the platform's own
+  default job limit. That figure is not recorded in `docs/00-charter.md`:
+  UNVERIFIED.
+- Gate 1e captures the whole test run into one variable
+  (`tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"`) and
+  prints from it only after `cargo test` returns, so when that job is killed
+  its log names no test.
+- In every job the child's own output goes only to its log file
+  (`.stdout(file.try_clone().map_err(display)?)`, `.stderr(file)`), which the
+  parent reads only once the child has exited or passed 8MiB, so a killed hang
+  shows none of it.
+- The mutation job runs with `--minimum-test-timeout 900 --timeout-multiplier 2`
+  and `.github/mutation_gate.rs` refuses a timeout
+  (`if status != "0" || !missed.is_empty() || !timeout.is_empty() {`). A mutant
+  whose only effect is to hang the generated child used to fail the test at
+  the six-minute deadline and count as caught whenever that deadline came
+  before the mutant's test timeout; it is now recorded as a timeout, and the
+  mutation job fails.
+- The same class of clock bound stays in other tests and is not changed here:
+  `if started.elapsed() > std::time::Duration::from_secs(2) {` in
+  `crates/cli/src/checksum_receipts_tests.rs` and
+  `crates/store/src/checksum_audit_tests.rs`, and
+  `if start.elapsed() > std::time::Duration::from_secs(45)` in
+  `crates/api/src/booleanlaunch_tests.rs` and
+  `crates/api/src/indexstoplaunch_tests.rs`.
+### D-0912 — `fold-audit` re-derives with derive's own authority, and counts what derive withheld apart — 2026-09-29
+
+**The defect (GAP12-4).** `pull::ingest::derive` writes a coarse rung with
+`crate::fold::complete_minutes_with_calendar(minutes, bucket, venue,
+cash_schedule, calendar)`, which writes a bucket only when every scheduled
+minute exists and withholds an exceptional session outright ("exceptional
+session {session:?} withheld"). `fold_audit::compare` built its reference with
+the plain `pull::fold::fold`, which writes every bucket that holds any minute.
+So a month derive wrote correctly, holding a disaster-recovery Saturday, was
+reported as a store defect. On `origin/main` (2c209309), a copy of the test
+below adapted to that `compare` signature, over 2024-03-01, the DR Saturday
+2024-03-02 in its two windows and 2024-03-04, stored as
+`complete_minutes_for_venue` writes it, failed with 7 of 7 rungs disagreeing;
+`2min` first differed at record 188: stored `ts_micros` 1709523900000000
+against folded 1709351100000000, a Saturday bucket derive withheld. That the
+two authorities differ on all seven rungs of this month is what
+`a_legacy_plain_fold_of_a_withheld_session_disagrees` asserts.
+
+**The change.** `compare` takes the venue and builds its reference with
+`pull::fold::complete_minutes_for_venue`, which is
+`complete_minutes_with_calendar` with no cash schedule and the default runtime
+calendar. The runtime calendar changes no bar: `Runtime::kind_of` is
+`kind_of(day)`, the static answer. `audit_month` takes the venue from the key's
+own segment with `Venue::for_segment`, as derive does, and refuses a key with
+none before it reads a file. Derive's diagnostics are carried on the verdict as
+`withheld` and the first `MAX_REPORTED` of them as `withheld_named`; they are
+neither agreement nor disagreement, and `agrees` does not read them. The
+command prints a `WITHHELD by derive policy` line per rung-month that has any,
+and its banner and remedy name the derive authority.
+
+**What it proves.** `fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday`
+requires every rung of that month to agree and counts 54, 35, 21, 12, 7, 5 and
+3 withheld diagnostics for 2, 3, 5, 10, 15, 30 and 60 minutes, each naming an
+exceptional session. `a_legacy_plain_fold_of_a_withheld_session_disagrees`
+requires a file written by the plain fold over the same minutes to disagree,
+holding more bars than the reference. `fold_command_reports_withheld_buckets_apart_from_disagreements`
+runs the command over a month with one incomplete trailing bucket per rung:
+seven rung-months agree, the command passes, and seven withheld lines are
+printed.
+
+**What it does not see.** Derive passes a dated cash-session schedule for a
+cash equity and the audit has none. On a cash day that needs dated eligibility
+the reference writes nothing, so a stored bar there is a disagreement, never a
+silent agreement:
+`a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`.
+`docs/06-limits.md` records it. Records are still paired by position, not by
+timestamp.
+
+### D-0913 — A read-only frontier handle refreshes by the rule it opened with — 2026-09-29
+
+**The defect (W2-cli5-0).** `Frontier::refresh` called `absorb_new_rows`, whose
+first line is `self.refuse_integrity_failure_for_write()?`. A read-only handle
+opened over a file holding a bad seal, a sealed row with an invalid schema or a
+non-contiguous duplicate opens with `write_refusal` set, by design, so every
+refresh of it was refused. `api::detail::Cached::with_verified` answers a
+refused refresh with `*held = None; return Err(why);`, and the next request
+opens fresh at O(rows). A refusal and a whole-file walk alternated, while
+`refresh`'s doc said every refresh after the first open is O(delta). On
+`origin/main` the test below fails at its first `refresh`.
+
+**The change.** A read-only handle (`require_parent`) refreshes with
+`absorb_read_only`, which reads only the rows past `scanned` and indexes each
+with `index_row`, the per-row rule `index_of` now also calls at open. A writer
+handle keeps the strict `absorb_new_rows`, which still refuses. The shrunken
+and ragged-length refusals are one function, `absorbable_len`, for both.
+
+The read-only refresh holds the shared lock while it measures and reads, as
+`Frontier::read` and `results::Results::refresh` do; `append_all` writes under
+the exclusive lock. Recording damage instead of refusing is what makes the
+lock necessary: without it a refresh could read a row a writer has only
+partly laid down, index it as a bad seal, and keep that in a cached handle
+that no longer drops itself on a refusal.
+
+**What it proves.** `a_read_only_handle_over_damaged_history_refreshes_by_the_delta`
+opens read-only over a bad seal, refreshes, appends two rows of one run, a
+second bad seal, a sealed invalid row, a repeat of the first run and a new
+run, refreshes twice, and requires every run's block to equal a fresh
+read-only open's, the invalid row still diagnosed at read time, and then
+requires a writer handle's refresh over the same file to refuse. The existing
+stale-writer and reopened-writer tests keep the writer's append refusals.
+`a_read_only_refresh_waits_for_an_append_in_progress` has a peer hold the
+exclusive lock over a whole row of zeros for two seconds before writing the
+real row, and requires the refresh not to have finished while the lock is held,
+then to index the real row and record no damage.
+### D-0916 — Roll a failed Admission append back, and let the V4 writers finish a header a crash left torn — 2026-09-29
+
+**What was wrong.** Three ways a single interrupted write made a Population
+ledger refuse every later open, read-only included, for good:
+
+- **W2-cli10-3.** Admission V3 and V4 `append_raw` were
+  `file.seek(SeekFrom::End(0)).and_then(|_| file.write_all(raw))` with no
+  rollback. A write error partway through a record left a ragged tail, and the
+  next open refused the whole file. Reproduced on `origin/main` (2c209309) by
+  appending half a record to a committed ledger: Admission V3 answered
+  `Admission V3 decision file has ragged length 9216, not a multiple of 2048`
+  and Admission V4 `Admission V4 data file is ragged`.
+- **W2-cli10-4, W2-cli11-5.** Admission V4 and Finalization V4 write their
+  64-byte header only when `open_child` reports the file as newly created. A
+  crash after the create and before the header reached disk left an empty or
+  short file, which is not newly created on the next open, so `verify_header`
+  refused it forever. Reproduced on `origin/main` with an empty data file: the
+  writer answered `cannot read Admission V4 header: failed to fill whole
+  buffer` and `cannot read Finalization V4 header: failed to fill whole
+  buffer`.
+
+**The change.**
+
+- `append_raw` in both Admission modules now goes through
+  `append_with_rollback`, which records the end offset, and when the write
+  returns an error truncates the file back to it with `set_len` and refuses
+  naming the write error (`truncated back to {end} bytes`), or both errors when
+  the truncation fails too.
+- The Admission V4 and Finalization V4 writer, under its exclusive lock, treats
+  a data file shorter than the header whose every byte equals the constant
+  header's byte at that offset (`holds_torn_header`) as not yet initialised,
+  and writes the whole header from offset 0. A reader never repairs: it still
+  refuses and the file is left byte-identical. Short content that is not an
+  exact header prefix still refuses and is left byte-identical. A whole
+  64-byte header is not rewritten.
+
+**What this does not do.** Rollback runs only when `write_all` returns an
+error inside the process; a process killed partway through a record still
+leaves a ragged tail that every open refuses, and nothing here injects a
+physical ENOSPC, EIO or power loss. See `docs/06-limits.md`.
+
+Tests: `a_partial_append_error_truncates_back_and_committed_authority_stays_readable`
+(Admission V3 and V4), `empty_or_torn_header_prefix_is_reinitialized_by_the_writer_only`
+and `a_whole_header_is_not_rewritten_by_the_writer` (Admission V4 and
+Finalization V4).
+
+### D-0917 — Complete an exact partial Finalization V3 row prefix on the exact retry — 2026-09-29
+
+**What was wrong (W2-cli11-4).** `append_locked` appends a block's rows one at
+a time and syncs them once, after the loop, so a crash can leave any whole-row
+prefix of the block on disk with no Completion. `scan` admits such a prefix as
+the trailing block, but `complete_trailing` accepted only a trailing block
+whose rows equalled the whole retry
+(`trailing.rows != prepared.rows` refused). The exact rerun was therefore
+refused for good and the ledger took no further commit. Reproduced on
+`origin/main` (2c209309) with a one-row prefix: `Finalization V3 trailing
+block 1635a011… is not exact retry 1635a011…`, the same identity on both
+sides.
+
+**The change.** `complete_trailing` accepts a trailing block with the retry's
+Finalization identity whose rows are a prefix of the retry's rows
+(`prepared.rows.starts_with(&trailing.rows)`). It checks the append bound for
+the missing rows and one Completion, appends the missing rows at their
+physical positions after the kept prefix, syncs them, and then writes the
+Completion as before. For every prefix length of the fixture the completed
+row and Completion files are byte-identical to an uncrashed write, and a
+second rerun reuses. A retry with a different identity still refuses with
+`not exact retry` and leaves the row file byte-identical.
+
+**What this does not do.** A torn partial row (a row file that is not a whole
+number of rows) is still refused as ragged by `checked_record_count`, and
+Finalization V3 `append_raw` has no rollback; see `docs/06-limits.md`.
+
+Test: `every_exact_partial_row_prefix_without_completion_recovers_on_exact_retry`.
+### D-0918 — Let a Population V6 writer initialise a zero-length data file, and state what a Selection V6 read replays — 2026-09-29
+
+**GAP11-2.** `PopulationV6Ledger::open` wrote the header only when `open_child`
+reported that this call created `population-v6.bin`. A writer stopped between
+the create and the header write left a 0-byte file, and every later writer and
+reader refused it with "cannot read Population V6 header: failed to fill whole
+buffer". The choice: under the exclusive writer lock, a data file whose length
+is zero is uninitialised whoever created it, and the writer writes and syncs
+the header and syncs the root, the same steps as a fresh create. The
+observation authority already initialises its own file on length alone
+(`population_observations_v1.rs`:
+`if writable && file.metadata().map_err(|why| why.to_string())?.len() == 0 {`).
+A reader still never initialises, and a non-empty file still goes through
+`verify_header`: the test shows a one-byte file refused and left unchanged. Pinned by
+`cli::population_v6::tests::a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`.
+The same window in Admission V4 and Finalization V4 (W2-cli10-4, W2-cli11-5)
+is not changed by this entry.
+
+A zero-length file is also what committed history truncated to nothing looks
+like, and no byte left in it tells the two causes apart, so this choice
+reinitialises a truncated ledger as well. It does so loudly: a writer that
+initialises a zero-length file it did not create first emits a `Warn` event,
+target `cli.population_v6`, message "Population V6 zero-length data file
+reinitialised", naming the path and both causes. Pinned by
+`cli::population_v6::tests::a_writer_names_an_empty_data_file_it_did_not_create_before_initialising_it`.
+Whether a downstream authority detects the lost history is UNVERIFIED, and a
+header write that fails after 1 to 63 bytes still wedges; both are stated in
+`docs/06-limits.md`.
+
+**W2-cli15-0.** A Selection V6 winner read re-derives its source through
+Execution V4 and Population V6, and each layer re-reads before and after so
+that a source changing mid-read is refused. That re-reading is kept, because
+removing it would drop the mid-read change check; what was missing was any
+statement of its cost. `docs/06-limits.md` now states it call by call, and
+`cli::selection_v6::source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts each call site in the source and requires the section to quote it,
+including the full reads each layer repeats besides the Population replays
+(the Execution V4 disposition read, the Selection V6 committed-block scan and
+the Population V6 projection). No timing is claimed.
+
+### D-0919 — A `Trades` refresh records a damaged row and keeps indexing; only writers refuse — 2026-09-29
+
+**W2-cli16-0 and W2-cli16-6.** `Trades::refresh` was `absorb_new_rows`, which
+first refused on any recorded integrity failure. A read handle opened over one
+bad-seal, schema-invalid or non-contiguous row records that failure and opens,
+so the cached `/trades.json` handle refused its next refresh, was dropped, was
+reopened by a full walk on the following request, and refused again on the
+one after. The choice: `refresh` indexes each new row through `index_row`, the
+per-row step `index_of` now also calls, so a refreshed handle holds the same
+blocks and the same first failure as a cold open, and it reads only rows at
+or past `scanned`. It never refuses on a recorded failure. `append_all` and
+`confirm_durable` still call `absorb_new_rows`, which does, so no row is
+appended and nothing is promoted past damage. Pinned by
+`cli::trades::tests::a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows`
+and, through `/trades.json`, by
+`api::trades::tests::a_damaged_row_of_another_run_does_not_refuse_a_healthy_run_on_later_requests`.
+
+Removing the refusal on recorded damage removed the only thing that made the
+cached handle let go of a file replaced under its path, which is how a reviewed
+repair is installed: the held descriptor went on indexing the unlinked file and
+refused every run the repair added. So `refresh` now compares the held file's
+device and inode with what the path names and refuses by name on a mismatch or
+a missing path; the cache drops the handle and the next request opens the
+replacement. And because a row once indexed is never read again, `refresh`
+takes the shared lock `append_all`'s exclusive lock excludes, so it never
+indexes a row still being written. Pinned by
+`cli::trades::tests::a_refresh_refuses_a_file_replaced_or_removed_under_its_path`,
+`cli::trades::tests::a_refresh_waits_for_a_writer_holding_the_exclusive_lock` and
+`api::trades::tests::a_repair_renamed_into_place_is_served_after_one_named_refusal`.
+### D-0922 — Read back the `OperatorRule` selector the Boolean grid encoder writes — 2026-09-30
+
+**What was wrong (W2-cli2-10).** `crates/cli/src/boolean_candidate_grid.rs`
+encodes an exit policy's selector with `ExitGridSelectorV1::OperatorRule => 3,`
+(appended by D-0594), but `decode_policy` matched only `0`, `1` and `2` and
+answered `"Boolean selector unknown"` for anything else. A saved Boolean grid
+context whose policy selected `OperatorRule` was therefore refused by the same
+crate that wrote it.
+
+**The change.** `decode_policy` gains `3 => ExitGridSelectorV1::OperatorRule`.
+No encoder byte changes, so no saved record changes and no identity moves: a
+record that was refused before now reads back, and every other record reads
+back exactly as before. A word past `3` is still refused by name.
+
+**Proof.** `every_saved_selector_decodes_to_the_policy_that_was_saved` saves a
+policy with each of the four selectors, decodes it, requires the decoded policy
+to equal the saved one, and requires it to re-encode byte for byte; it fails
+on `OperatorRule` without the new arm. `an_unknown_selector_word_is_refused`
+rewrites the selector word to `4` and requires the named refusal.
+
+D-0594 named `execution_capability` as "the only one with a DECODE side";
+`boolean_candidate_grid::decode_policy` is a second, and it is the one that
+was not moved. D-0594 is left as written.
+
+### D-0923 — Join an audited span's months once, and record two per-call rescans as limits — 2026-09-30
+
+**W2-cli1-1, fixed.** `audited_range::Builder::append` reserved exactly each
+month's bars on the growing span (`span.bars.try_reserve_exact(loaded.bars.len())`)
+and then extended it, so an append could relocate every bar already held, and
+M appends could copy Theta(M^2 x bars-per-month) bars. The builder now keeps
+the first month's bars as the span and holds every later non-empty month apart;
+`finish` sums the held months, makes one exact reservation, and copies each
+held bar once. The month-boundary check reads the newest held month's last bar,
+falling back to the span's, so it stays one look rather than a walk.
+`appending_a_month_never_relocates_the_bars_already_held` appends 256 months of
+7 bars, requires the first month's buffer pointer and capacity to be unchanged
+after every append, requires the finished span's capacity to equal its length,
+and requires every bar in order; on the previous code it failed at month 1
+with the capacity grown from 7 to 14.
+`a_month_stepping_back_onto_an_appended_month_is_refused` requires the
+backward-step refusal against a held month and an empty month to add no bar.
+What each month decodes and what the finished span holds are unchanged, so no
+run identity moves.
+
+**W2-cli1-0, recorded, not fixed.** `AnchoredSearchLineageV4Ledger::append_completion`
+ends with `self.scan()`, and `scan` re-reads and re-validates every completed
+pair (`for sequence in 0..completion_records`). Removing that rescan would not
+change the class of a persist: `persist_anchored_search_lineage_v4` calls
+`AnchoredSearchLineageV4Ledger::open_write(root, bounds)` and later
+`AnchoredSearchLineageV4Ledger::open_read(root, bounds)`, and `open` hashes the
+lock, member and Completion files through `file_generation` and then calls
+`ledger.scan()`. The module rustdoc already states this path is
+"O(file bytes + pair records), not O(1)". The consequence, that N persists to
+one root cost Theta(N^2) in the records already written, is recorded in
+`docs/06-limits.md`.
+
+**W2-cli2-7, recorded, not fixed.** In `boolean_search_command::execute_observed`,
+a new batch calls `request.prepare(batch.programs(), false, ...)` and
+`request.prepare(batch.programs(), true, ...)` for its declaration, and the
+work phase calls the same pair again before comparing the plan
+(`"search batch pre-work qualification plan changed"`). Each call reaches
+`boolean_campaign::prepare`, which builds `prepared::Prepared::new` over the
+sources before `prepare_resolved(request, input, commit)` takes that
+preparation by value. Reusing one preparation across the calls would change
+that ownership, so the cost is recorded in `docs/06-limits.md` rather than
+changed here.
+### D-0930 — Family-test ppm and the White decision come from the exact bootstrap fraction (GAP5-54, W2-cli7-6) — 2026-09-29
+
+**What was wrong.** Two projections of one exact bootstrap fraction
+`k/(draws+1)` disagreed with the exact decision at the same alpha.
+
+- `FamilyTestEvidenceV1::from_runner` and the durable path decided White
+  with `Verdict::clears` (`p < 0.05`, `runner::bootstrap`) while the stored
+  ppm beside it is compared against `<=` maxima. `p = 250/5000` stored
+  `50_000`, which passes a `<= 50_000` maximum, beside `DidNotReject`. Its
+  `ceil(p * 1e6)` also overshot exact boundaries in `f64`: `79/5000`
+  projected to `15_801`.
+- `InstitutionalStatisticsAuthorityV1::fwer_p_value_ppm` and
+  `romano_wolf_p_value_ppm` returned the row's stored `exact_ppm`, a floor.
+  `50_001/1_000_001` read `50_000` and passed a `<= 50_000` maximum that
+  `romano_wolf_rejects_at_ppm(50_000)` refuses.
+
+**The change.** `institutional_evidence` recovers `k` from the runner's
+p-value and `draws`, refuses a value that is not exactly `k/(draws+1)` (or is
+zero, or has a denominator above `2^53`), and derives both the ppm
+(`ceil(k * PPM / d)`) and the White decision (`k * PPM <= d * alpha`, the
+inclusive rule `romano_wolf_rejects_at_ppm` already uses) from the integers.
+The statistics authority's two getters now return `ceil` over the retained
+exact counts. The V1 row still stores and validates the floor: its bytes are
+a format version and are not mutated in place (`CLAUDE.md` §3 rule 8). Only
+the admission-facing projection moved, and only when the fraction is not a
+whole number of ppm.
+
+**Proof.** `family_ppm_and_white_decision_come_from_one_exact_fraction`,
+`invalid_probabilities_are_refused_instead_of_clamped` and
+`ppm_projections_never_pass_a_maximum_the_exact_count_fails`; see
+`docs/04-invariants.md` C4-CLI-12-01 and C4-CLI-12-02.
+
+### D-0931 — A set knob does not read the environment; a live-run name is lowercase hex only (W2-cli7-4, W2-cli9-6) — 2026-09-29
+
+**Knobs.** `cli::knobs`' cost table called `var` O(1) in both rows, "one
+hash probe" when set and "one hash probe, then one `getenv`" when unset.
+`var` evaluated `std::env::var_os(name)` as an argument, so the set path read
+the environment too, and an environment lookup's cost depends on the process
+environment, which this workspace neither bounds nor measures. `resolve` now
+takes the environment as a closure that runs only when nothing is set, and the
+table no longer claims O(1) for the unset row or for `count`, which reads
+through `var`. `docs/06-limits.md` records the retraction.
+
+**Live-run names.** `live::identity_from_name` said it admits lowercase hex
+only, and checked `is_ascii_hexdigit`, which admits `A` to `F`. A foreign
+`AA..AA.bin` therefore parsed to the identity `aa..aa.bin` names. The check is
+now `0-9` and `a-f`, the only digits `Live::path`'s `{byte:02x}` writes.
+
+**Proof.** `a_set_knob_never_reads_the_environment`,
+`the_cost_table_does_not_call_an_environment_read_constant` and
+`an_upper_case_hex_name_is_not_an_identity`; see `docs/04-invariants.md`
+C4-CLI-12-03 and C4-CLI-12-04.
+### D-0934 — State four whole-file ledger costs where they are paid, and leave the rescans in place — 2026-09-30
+
+**What was found.** The C4 audit (W2-cli11-1, W2-cli11-0, W2-cli12-3,
+W2-cli12-4) found four crate-private ledger calls in `crates/cli` whose
+per-call cost was larger than their docs said, or unstated:
+
+- `PopulationFinalizationV3Authority::row_projection` runs the generation
+  check before and after its one fixed-offset read, and each check hashes the
+  lock, row and Completion files whole, twice each. Its rustdoc stated no
+  cost.
+- `PopulationFinalizationV4Ledger::append_locked` ends by hashing the data
+  file and calling `scan`, which walks every block of the ledger and ends with
+  another whole-file generation check. `docs/06-limits.md` §168 called append
+  O(D).
+- `CommittedStoredPopulationV5::authenticated_row` calls
+  `PreparedPopulationV5::from_authority` twice to compare one row. Its rustdoc
+  stated no cost.
+- `commit_population_v5` opens a writer, appends and reopens, and the open,
+  the post-Completion `finish_written` and the reopen each scan the whole
+  ledger. The module doc called persistence O(C).
+
+**The choice.** Each rescan re-authenticates the ledger after a write or
+around a read. Removing or narrowing one would change what the call proves, so
+the costs are stated, not reduced: each call's rustdoc now carries a `# Cost`
+paragraph, the Population V5 module doc no longer calls persistence O(C), and
+`docs/06-limits.md` gains the section "Four ledger calls that rehash or rescan
+whole files per call". §168 is not edited; the new section supersedes its
+append sentence and quotes it. The Finalization V4 and Population V5 bounds
+are stated as expected, not worst case, because the block validation each
+rescan repeats builds its duplicate checks with `bounded_set` hash sets.
+
+**What holds it.** `crates/cli/tests/ledger_scan_costs.rs` reads the three
+sources and the limits at compile time. For each call it first counts the
+calls that make the cost (two generation checks, three file hashes per check,
+two hashes per file; hash then rescan after the Completion sync; two
+preparations; three scans on a written commit and none in `reuse_existing`),
+then requires the stated sentences in the rustdoc and in the limits section;
+the commit test also refuses the module doc's former O(C) persistence
+sentence. On the base 2c209309 each of the four tests passed its counts and
+failed at its first documentation check: the three rustdoc sentences, and the module
+doc's O(C) sentence. All four pass with this change. No cost was timed.
+Each of the four rustdocs names `crates/cli/tests/ledger_scan_costs.rs`, and
+each test requires that sentence, so CI Gate 12, which refuses a doc block that
+says O(1) without naming a test, finds the test file named in each of them,
+including the two new `# Cost` paragraphs that say "not O(1)":
+`row_projection`'s and `CommittedStoredPopulationV5::authenticated_row`'s.
+
+**Review round 1.** Reviewers broke the call chains the tests did not pin and
+the four tests stayed green: `file_generation` rewritten to hash once,
+`row_projection` and `PopulationV5Authority::authenticated_row` rerouted
+through the whole-block reads, and `reuse_existing` given a
+`finish_written` call. The tests now also require that `file_generation`
+delegates to the twice-hashing body, that both row reads go through the
+fixed-offset lookups, that `reuse_existing` neither scans nor finishes, that
+only `append_locked` and `complete_trailing` call `finish_written`, that
+`open_read` and `open_write` go through `open`, that `append` takes the
+exclusive lock before `append_locked`, and that `append_locked` opens with a
+generation check and runs one before an exact reuse returns. Three texts were
+corrected. The Population V5 module doc called "codec and hashing work" O(C)
+while each commit decodes and seal-checks all R rows; it now scopes O(C) to
+the C new rows. `commit_population_v5` said the ledger is "read whole three
+times"; three counts scans, and every generation check also hashes the files
+whole, so it now counts scans and says so. It also called one commit O(R)
+while `PreparedPopulationV5::from_authority` runs twice, each run a whole
+upstream join; it now states O(R) plus two whole upstream joins, as a part of
+the paragraph's older "O(C + bounded source/file bytes)" rather than a
+second bound. The Finalization V4 rustdoc and limits now state that the
+opening and pre-reuse generation checks make a reused append O(F) as well.
+### D-0785 — Promote a Zerodha `INDICES` row to an index only when its type is `EQ` — 2026-09-29
+
+**What was wrong.** `decode_master_row` turned every Zerodha row whose
+`segment` is `INDICES` into an index by overwriting its type with `IDX`,
+without reading the type it replaced. `segment_of` stores `INDICES` and
+`type_of` maps `FUT`, `CE` and `PE` to themselves, so an `INDICES` row typed
+`FUT` was kept as the spot index its symbol names: on `origin/main` the row
+`256265, NIFTY 50, FUT, INDICES` decoded to
+`Keep(... underlying: NIFTY, kind: Index ...)`.
+
+**The change.** The promotion now requires the type word `EQ`, which is the
+type the index rows it was written for carry (`tests/zerodha_index.rs` builds
+them that way, and its module comment records that the vendor's index rows
+arrive as `EQ`). Any other type under `INDICES` is
+`InstrumentError::Malformed`, as every other unread shape in `segment_of` and
+`type_of` already is. No Groww or Dhan row is affected, because
+`index_segment_word` is `None` for both. Proven by
+`core::vendor::tests::an_indices_row_typed_as_a_derivative_is_refused_not_promoted_to_an_index`
+(C4-CORE-01).
+
+### D-0786 — Decide the paisa half-up snap on the scaled value's fraction — 2026-09-29
+
+**What was wrong.** `Paisa::from_rupees_half_up` computed
+`(rupees * 100 + 0.5).floor()`. The addition rounds before the floor runs, so
+two inputs that are not ties came back one paisa high on `origin/main`:
+`from_rupees_half_up(0.004999999999999999)` returned `1` although the scaled
+value is `0.49999999999999994`, and `from_rupees_half_up(45035996273704.97)`
+returned `4503599627370498` although the scaled value is exactly
+`4503599627370497.0`. Both break the function's own doc comment, which rounds
+up only "a value exactly halfway between two paisa".
+
+**The change.** The scaled value is floored, and one paisa is added only when
+the scaled value minus its floor is at least `0.5`. Half-up on both signs is
+unchanged: `0.125` gives `13` and `-0.125` gives `-12`. The multiplication by
+100 still rounds, which is the limit `a_decimal_tie_is_usually_not_a_binary_tie`
+already records.
+
+**What it does not move.** Every two-decimal price from ₹0.00 to
+₹1,00,000.00, parsed from its decimal text, snaps to its own paisa, and so does the double one step above and one step below each of
+them: 30,000,003 inputs, counted by the test. The same test passes with the
+biased-sum rule put back, so on that grid no paisa this function writes
+changes. Prices above ₹1,00,000.00 and doubles further from the grid were not
+measured. Proven by
+`core::price::tests::the_half_up_decision_reads_the_scaled_value_not_a_biased_sum`
+and
+`core::price::tests::every_two_decimal_price_and_its_neighbours_snaps_to_its_own_paisa`
+(C4-CORE-02).
+
+### D-0787 — Trim only ASCII whitespace from a master row's vendor id, series and suffix class — 2026-09-29
+
+**What was wrong.** `VendorId::new`, `board_of` and `unsuffixed_key` in
+`crates/core/src/vendor.rs` each called `str::trim`, which strips Unicode
+whitespace as well as ASCII. On `origin/main`, `VendorId::new("\u{a0}1333\u{3000}")`
+returned the id `1333`, so a row whose id column held U+00A0 and U+3000 around
+the digits was filed under an id the column did not hold; and `board_of("EQ\u{a0}")`
+returned `MainBoard`, so a Groww cash row with that listing class was kept as a
+main-board equity.
+
+**The change.** All three call `str::trim_ascii`. The padding the trim was for
+(Dhan's `"   ES   "`, `dhans_class_column_is_trimmed_before_it_is_read`) is
+ASCII and is still removed. A vendor id that still starts or ends with
+whitespace after the ASCII trim is refused (`None`), so the row is declined as
+`Skip::NoVendorId` rather than kept; whitespace inside an id is data and kept.
+A series with non-ASCII whitespace is a code no table holds, `Unrecognised`,
+declined as `Skip::UnrecognisedListingClass`; a suffix class with it strips
+nothing.
+
+"ASCII whitespace" here means what `u8::is_ascii_whitespace` names: space,
+tab, line feed, form feed and carriage return. The vertical tab U+000B is
+ASCII but outside that set, so `str::trim` used to strip it and
+`str::trim_ascii` does not: `VendorId::new("\u{b}1333")` is now `None` and
+`board_of("\u{b}EQ")` is `Unrecognised`, a loud decline where the old trim
+kept the row. Proven by
+`core::vendor::tests::whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class`
+(C4-CORE-03).
+### D-0770 — Read the weekly expiry regime at the expiry, not only at the day asked — 2026-09-29
+
+**Defect (W3-costs1-0).** `costs::expiry::next_weekly_on` read the weekly
+regime once, at the day asked, and projected that regime's weekday forward.
+When a later row started between the day asked and that weekday, the answer
+was a day the table's own regime says is not an expiry. Reproduced on
+`origin/main` 2c209309: NIFTY asked 2025-08-29 answered 2025-09-04, a
+Thursday, while the NIFTY Tuesday row starts 2025-09-02; BANKNIFTY asked
+2023-09-03 answered 2023-09-07, while the Wednesday row starts 2023-09-04 and
+cites "the first Wednesday weekly expired 2023-09-06". Asked one day later the
+answers went back to 2025-09-02 and 2023-09-06, so the function was not
+monotone.
+
+**The change.** Each pass reads the regime at `from` and computes its weekday's
+offset. If a later row starts after `from` and on or before that day, `from`
+moves to that row's start and the regime is read again; otherwise the pass
+answers. A withdrawal met on the way answers `None` and an unverified row met on
+the way is refused, never projected across. `from` only moves to a strictly
+later row start, so the passes are bounded by the fixed `later` array
+(`dated::MAX_LATER_ROWS`), not by any input. The module documentation and the
+public example now state this.
+
+**What it changes.** `next_weekly_expiry` has no caller on the sweep path: its
+caller is `pull::rolling::expiry_of`, which dates options contracts (options
+data is deferred) and which `api`'s F&O walk asks, through
+`cadence_has_contracts_on`, only whether a date exists. No run identity term is computed
+from it. The two source-answer rows in `the_next_weekly_lands_on_the_source_answers` that
+pinned the defect (NIFTY 2025-09-01 to 2025-09-04, BANKNIFTY 2023-09-03 to
+2023-09-07) now pin 2025-09-02 and 2023-09-06. The cost note on
+`api::server::cadence_has_contracts_on`, which said "One dated-table lookup per
+call", now names the bound stated in `costs::expiry`'s module documentation.
+Invariant C4-COSTS-01.
+
+### D-0771 — Floor the printed-extreme sell at one tick, as the worst case already is — 2026-09-29
+
+**Defects (W3-costs1-1, ET-strategies-trades-ranking-costs-4).**
+`costs::fill::fills_at` with `Anchor::PrintedExtreme` sold at the bar low with
+no floor, under a comment saying "a low it accepted is a price that traded".
+`Bar::new` deliberately admits "A **low** below one tick, or below zero", so the
+sell could be ₹0.00 or negative: the free sale the module header's sell floor
+calls "an impossible one". Reproduced with the fix reverted (the `fill.rs`
+arm is byte-identical to `origin/main` 2c209309 in that state):
+`the_printed_extreme_sell_is_floored_at_one_tick_as_the_worst_case_is` fails
+with `left: Paisa(4) right: Paisa(5)` for a long whose exit low is 4 paisa, and
+`a_printed_extreme_sell_below_zero_prices_at_the_floor_and_does_not_overflow`
+panics "attempt to subtract with overflow" at the `trip::position` subtraction
+whose comment says it "cannot overflow", because a negative sell notional is
+outside the `[0, i64::MAX]` range that comment assumes.
+
+**The change.** The printed-extreme sell is `sell.max(TICK)`: a low of one tick
+or more is the print, unchanged; a low below one tick sells at one tick. That is
+the floor `worst_case_fills` already applies to the same anchor, and it keeps
+the printed reading's sell at or above the worst case's on every bar the test
+table offers. The buy leg is unchanged: `Bar::new` refuses a sub-tick high. A
+refusal was the alternative and was not taken: `runner::trade` calls this arm
+with `.ok()?`, so a refusal there would drop the trade without a word, which is
+the hidden fallback `CLAUDE.md` §4 bans, while the floor is the module's stated
+law for a degenerate low.
+
+**What it changes.** On the runner path `indicators::evaluator` refuses first
+(`if bar.low <= 0 { return Err(Corrupt::PriceNotPositive); }`), so a zero or
+negative low never reaches this arm there; a positive low below one tick (1 to 4
+paisa) can, and its worst-reading sell moves from that low up to 5 paisa.
+Whether any stored bar has such a low is UNMEASURED. No run identity term is a
+fill-model version; the `commit` term separates runs before and after this
+change. Invariant C4-COSTS-02.
+
+### D-0772 — Refuse an open outside its bar under its own name — 2026-09-29
+
+**Defect (W3-costs1-2).** `costs::fill::Bar::new` refused an open outside
+`low..=high` as `CostError::InvertedBar { high, low: open }`, whose message is
+"a bar's low {low} is above its high {high}". For `Bar::new(98_00, 101_00,
+99_00)` that printed "a bar's low 9800 is above its high 10100", which is false:
+the low is 9900 and the open is below it. Reproduced with the fix reverted:
+`an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar` fails
+with `left: "a bar's low 9800 is above its high 10100; ..."`.
+
+**The change.** A new `CostError::OpenOutsideBar { open, high, low }` (the enum
+is `#[non_exhaustive]`) carries each value in its own field and prints "a bar's
+open {open} is outside its own range {low}..={high}; it is refused rather than
+filled at". A bar whose low is above its high is still `InvertedBar`, whatever
+its open. Which bars are refused is unchanged; only the error that names the
+refusal moves. `runner::trade` discards this error with `.ok()?`, so no run
+output changes. Invariant C4-COSTS-03.
+### D-0944 — Justify the index-future cost-free arm by the operator rule it rests on, not by untradeability — 2026-09-29
+
+**What was wrong.** `costs::scope::is_cost_free` answered `true` for
+`Segment::IndexFuture` in one arm shared with `Segment::IndexSpot`, under the
+comment *"Not tradeable. An index level is a number, not an instrument"*. That
+is true of a spot index and false of a future, which is an exchange-traded
+contract. Finding `ET-strategies-trades-ranking-costs-5`.
+
+**What changed.** The future has its own arm, and the comment over it says the
+zero is the operator rule `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001` (index spot and
+index futures are signal-only), not a market fact, and that this crate holds no
+futures charge stack to price one with: the `crates/costs/src/trip.rs` header
+lists "**The futures charge stack.** See `docs/06-limits.md` §27." under its
+heading "What is deliberately not here", and §27 has the heading "The futures
+charge stack is NOT ported". The answer is unchanged: `is_cost_free` still returns
+`true` for a future, so what a run computes does not move and no identity term
+changes.
+
+**The test.** `costs::scope::tests::the_index_future_arm_cites_the_operator_rule_not_untradeability`
+reads `scope.rs`, requires the future's arm not to name `IndexSpot`, requires
+the comment block over it to contain `DEC-COST-SCOPE-INDEX-SIGNAL-ONLY-001` and
+not `Not tradeable`, and requires `is_cost_free(Segment::IndexFuture)`. It fails
+on `origin/main` (2c209309) with *"the future shares the spot's arm"*.
+### D-0790 — Say the store reads by `pread`, refuses a header ahead of its data, and is timed by C-28 and C-29 — 2026-09-29
+
+**What was wrong.** Sentences in `docs/02-store-format.md`, in
+`docs/06-limits.md` and in `crates/store` comments described a store this build
+is not:
+
+- §4 said the file is mapped read-only and a read is pointer arithmetic over
+  resident pages. `crates/store/src/lib.rs` carries `#![forbid(unsafe_code)]`,
+  `crates/store/Cargo.toml` does not name `memmap2`, and the read is
+  `FileExt::read_at`, one `pread`. The module doc of
+  `crates/store/src/header.rs` carried the same claim as its heading, "It is
+  still a read-only mapping plus `pwrite`".
+- §5 said a header that outran its data "falls back to the previous
+  generation rather than refusing the whole file". `BarFile::validated`, which
+  every open door calls, refuses with `FormatError::CounterExceedsFile` when a
+  surviving slot claims more records than the chosen header.
+  `BarFile::validated`'s own comment said the same wrong thing, citing a test
+  that was renamed when its assertion was inverted.
+- §6 cited C-07 as enforcing per-read verification. C-07 times `block::seal`
+  over a block in memory; the read path verifies through `verify_block_of`.
+- `BarFile::read_record`'s doc and `docs/06-limits.md` §40 said no bench times
+  a syscall. C-28 and C-29 in `crates/store/benches/ratio.rs` time
+  `read_record`, whose read is a `pread`.
+
+**The change.** Each sentence now states what the code does, and
+`crates/store/tests/docs.rs` reads each one beside the source line it names, so
+the next drift fails the build. No code path changes. The paragraph under C-01
+in `docs/04-invariants.md` also says no bench times a syscall; it is an entry
+already on `main` and is left as written, and this entry supersedes that
+sentence. Row C4-DOCS-WEB-07 records the supersession, and
+`store::docs::the_c01_syscall_sentence_is_superseded_where_it_stands` fails if
+that sentence stands while this entry or that row stops saying so.
+
+### D-0791 — Open `docs/03-vocabulary.md` with the table as it is, mark the tombstones where they stand, and check prose bit names — 2026-09-29
+
+**What was wrong.** The opening said 74 conditions, a `u128` mask and 54 free
+positions; §2 said the evaluator produces one `u128`; §6 kept the same numbers
+with its supersession note only in §8. The §5 rows for retired positions 6, 19
+and 25 looked exactly like live rows. The D-0109 note named "31 `bar_up`", a
+condition that does not exist: position 31 is `bar_bearish`.
+
+**The change.** The opening and §2 name `ConditionMask` and the counts `COUNT`
+and `ConditionMask::BITS` give; §6 says at its head that §8 supersedes it; the
+two §5 sub-tables holding a tombstone carry a status column, and each retired
+row names the live position it duplicates; the stray name is removed. Three
+tests in `crates/vocab/tests/table.rs` read these against `TABLE`, and a fourth
+proves the prose scanner they rely on takes a numbered name and nothing else.
+
+### D-0792 — Say in `header.rs` that the file refuses what `Header::read_region` walks back from — 2026-09-30
+
+**What was wrong.** The module doc of `crates/store/src/header.rs` said that
+for a slot whose records never reached the disk, `Header::read_region` "falls
+back to the previous generation for that case too, instead of condemning the
+file". That is true of `read_region` and not of the file: `BarFile::validated`
+refuses with `FormatError::CounterExceedsFile` when a slot that still decodes
+claims more records than the chosen header (`if claimed > header.n_valid` in
+`crates/store/src/file.rs`). D-0790 corrected the same claim in
+`docs/02-store-format.md` §5 and left this sentence standing.
+
+**The change.** The sentence now says the fallback is `read_region`'s answer
+and names the file-level refusal and
+`store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`.
+`store::docs::the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data`
+reads the module doc beside the refusal in `file.rs`; row C4-DOCS-WEB-09. No
+code path changes.
+### D-0946 — The report page states a stock run gross of every charge, and zero levies only for a spot index — 2026-09-30
+
+**What was wrong (AC-docslaw-law-0).** `CLAUDE.md` §1 lets equities be
+ranked cost-excluded only as labelled research, "every such report stating
+it is gross of every charge". The operator's report page
+(`web/src/routes/backtest/+page.svelte`) printed three statements
+hard-coded, whatever the run's instrument: `Commission load` `0.00%` with
+"statutory charges are zero for spot indices · spread is not modeled" in the
+breakdown pane, "Statutory charges are zero for this spot-index sweep" over
+the trade list, and "spot indices only" in the coverage line. The page
+accepts a non-index pick (`indexWorkflow` is false once a picked symbol is
+not NIFTY or BANKNIFTY), and `/backtest.json` gives a stock's run an
+`equity_note` (`crates/api/src/backtest.rs`,
+`a_stock_run_carries_the_equity_note_and_an_index_run_is_unchanged`). So a
+RELIANCE run reached the operator labelled as carrying no commission.
+
+**The change.** `web/src/lib/charge-scope.js` decides the words.
+`chargeScope(run)` prints `0.00%` and the zero-levy sentences only when the
+run's `underlying` is one of `NIFTY`, `BANKNIFTY`, `NSE-NIFTY`,
+`NSE-BANKNIFTY` and the server sent no non-blank `equity_note`. Every other
+run, including one with no known instrument, prints `Not subtracted` and a
+sentence saying the figures are gross of every charge. When the server sent
+a note, the page shows it verbatim under both statements, and the note wins
+over an index name; the note is trimmed of leading and trailing blanks and
+otherwise unchanged. `coverScope(pickedSymbols)` keeps "spot indices only"
+only when every picked instrument is an index, names one non-index pick as
+gross of every charge, and counts several. It reads the whole picked set, not
+the first pick, because the picker accepts several instruments: NIFTY and
+RELIANCE picked together is labelled by RELIANCE. Both breakdown wordings
+keep "spread is not modeled" visible and both trade-list sentences keep
+"spread remains unmodeled". The page renders the note in two places, the
+breakdown pane and over the trade list. The Margin pane's "one-unit spot-index
+totals" became "one-unit totals".
+
+**Proof.** `web/tests/charge-scope.test.js` fails 7 of 7 against origin/main
+(bc531316, whose `web/` is byte-identical to 2c209309's), passes 7 of 7 with
+the change, and fails its two page-source tests with only the page change
+reverted. `web/tests/backtest-ui.test.js`'s commission test asserted the old
+hard-coded `0.00%`, now asserts the page reads `openCharges`, and fails on
+origin/main and with only the page change reverted. The batch changes no Rust file, so `cargo mutants
+--in-diff` has nothing to mutate. Hand mutations of `charge-scope.js` were
+each caught by these tests except one: dropping `isSweptIndex`'s `typeof`
+guard, which is equivalent, since `SWEPT_INDICES` holds only strings and
+`includes` of a non-string over it is false.
+
+**What this corrects.** D-0694's correction and the AF-19 correction in
+`docs/06-limits.md` each said "No page under `web/` renders `equity_note`".
+From this entry on, the report page renders it for the open run. Those
+entries are not edited.
+### D-0760 — The hit-set fingerprint has no production caller, and says so — 2026-09-29
+
+**What was wrong.** D-0454 says `support_fingerprinted` "repacks the same row
+result into stable 64-bar hit words so support identity remains
+byte-reproducible", and `docs/06-limits.md` priced "one support or fingerprint
+pass" beside the live support count. Both read as if a run used the
+fingerprint. None does: `Column::support_fingerprinted`, and the `HitSet` it
+returns, are reached only from engine tests and from the C-E-07 row in
+`crates/engine/benches/ratio.rs`. The live sweep calls `Column::support`.
+
+**The change.** No code path moves. The method's doc now opens a paragraph with
+"No production path calls this", the limits paragraph says no production
+source calls the fingerprint pass, and
+`engine/tests/production_callers.rs::the_fingerprinted_path_has_no_production_caller_and_says_so`
+reads every `.rs` file under `crates/engine/src` up to its first
+`#[cfg(test)]` line and every other crate's `src` whole, with line comments
+stripped, and requires no whole-token mention outside the definition and that
+sentence in the doc.
+`engine/tests/production_callers.rs::nothing_after_an_engine_files_first_test_gate_ships`
+holds the cut sound. The scan lives under `crates/engine/tests` because CI Gate
+22 clause B refuses `read_dir` and `std::fs` anywhere in `crates/engine/src`,
+test-only code included, and the engine's `src` keeps no filesystem call.
+The guard fails the day a caller appears, so the
+doc cannot go stale silently.
+
+**Why it was not deleted or wired in.** C-E-07 names the bench row that calls
+it, and invariant rows are append-only. Wiring it into the sweep would dedupe
+candidates by hit set, which changes what a run ranks and counts; that is a
+change to what a run computes and needs its own decision and identity move,
+not a follow-up fix. D-0454 stays as written; this entry corrects it.
+
+### D-0761 — The empty mask folds like every other candidate; no identity is reserved — 2026-09-29
+
+**What was wrong.** `support_fingerprinted` returned `HitSet::EVERY_BAR`, the
+pair `(0, 0)`, for the empty mask, and its doc called that pair "unreachable
+as a fold output". Two defects followed. First (W3-engine1-5), the identity was
+not a function of the bar set: on a column with bars, the empty mask and a bit
+every bar carries select the same bars and got different identities, and on an
+empty column the empty mask got `(0, 0)` while every other candidate got the
+unfolded seed pair, though all select nothing. Second (ET-masks-evaluation-sweep-4),
+the unreachability argument was false for each half: the high fold is zero
+when its one word equals `seed_hi.rotate_left(23)` and the low fold is zero
+when its word equals `seed_lo`, and a 64-bar column spells either word.
+
+**The change.** The early return and the `EVERY_BAR` constant are gone. The
+empty mask hits every row, since `(bits & 0) == 0`, and takes the ordinary
+fold, so it folds the same words as a bit every bar carries. With no reserved
+pair there is no value a real fold could collide with. The test-only vertical
+reference now starts each word with its real bars set and padding clear, so it
+folds the empty mask the same way.
+`engine::column::tests::the_empty_mask_folds_like_a_bit_every_bar_carries` and
+`engine::column::tests::either_half_of_a_fold_can_be_zero_so_no_pair_is_reserved`
+pin both. `the_empty_and_the_impossible_never_collide` and
+`selecting_no_bars_is_its_own_identity` now compare "every bar" with "no bar"
+on the same column instead of with the removed constant, and the engine's
+early-exit count for `column.rs` drops from two to one.
+
+**Why no run identity moves.** D-0760: no production path calls
+`support_fingerprinted`, so no run's ranking, count, trades or report changes.
+Only the value a test or the C-E-07 bench sees for the empty mask changes, and
+C-E-07 does not time the empty mask.
+
+### D-0762 — `keep::Best` has no production caller, and says so — 2026-09-29
+
+**What was wrong.** The crate doc called `keep::Best` "the bounded retention a
+caller feeds from the level boundary", and the type's doc said nothing about
+who calls it. Every use outside `keep.rs` sits in the engine's test module;
+`runner::rank` keeps its own heap. A reader could take the type for part of the
+live path.
+
+**The change.** No code path moves. The type's doc now says "No production path
+calls this" and names `runner::rank` as keeping its own heap; the crate doc
+says a caller could feed it and no production caller does.
+`engine/tests/production_callers.rs::best_has_no_production_caller_and_says_so`
+uses the D-0760 scan to require the token `Best` nowhere in any shipping engine
+region or any other crate's `src` but the type's own `pub struct Best` and
+`impl Best` lines, and that sentence in the doc.
+
+**Why it was not deleted or gated to tests.** `keep::Streamed`, `Tally` and the
+module's tests share the file, and the retention's cost and allocation
+findings (W3-engine1-2, W3-engine1-4) are open in a later batch against this
+type. Removing it would erase what those batches fix; the guard makes the
+first production caller visible instead.
+### D-0780 — A SuperTrend flip whose new stop will not fit `i64` leaves the stop absent — 2026-09-29
+
+**What was wrong (ET-indicators-4).** `SuperTrend::fold` computes the flip
+arm's new stop in `i128`. It then set the trend unconditionally and wrote the
+stop only `if let Ok(next) = i64::try_from(stop)`. A flip whose band left `i64`
+therefore recorded the new trend and kept the previous leg's stop, a level on
+the wrong side of price. Positions 64/65 read `stop()` whenever it is `Some`,
+and the next candle compared its close with that stale level. That is a
+fallback that hides a failure, which `CLAUDE.md` §4 bans. The same function's
+seed arm already used the other policy, `self.stop = i64::try_from(stop).ok()`.
+
+**The change.** The flip and ratchet arms now use the seed's policy: an
+unrepresentable stop is `None`. The next candle reseeds, as it does after an
+unrepresentable seed. The existing test that required the stale stop was
+rewritten as
+`trend::the_stop_on_both_sides::a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale`,
+which requires `stop()` to be `None` after the flip and on the candle after
+it. It fails with the old two-line write restored (`left: Some(2500000)`).
+
+**Identity.** `vocab::VOCAB_VERSION` is not moved. The ledger row records that
+reaching this arm "needs prices near i64::MAX, so real data cannot reach it";
+the test reaches it only through a multiplier of 10^21. It is a second route to
+the stale-latch class of `F-87AB98`, whose own route (the cross-bar true range)
+this entry does not change.
+
+### D-0781 — `Column::reproject` refuses a map that steps back or leaves its series — 2026-09-29
+
+**What was wrong (ET-indicators-3).** The collision guard in
+`Column::reproject_with` compares each target only with the last kept one. Its
+own comment says that is exact because "the alignment is monotonically
+non-decreasing", but `reproject` and `reproject_checked` are public and their
+docs did not state that precondition, nor that a target must be below
+`onto_len`. A map that stepped back filed a second row on an earlier fill bar
+with `collided` left at zero, which is the duplicated observation the guard
+exists to prevent, and a target at or past `onto_len` was accepted.
+
+**The change.** The precondition is checked rather than assumed: a target at or
+past `onto_len`, or below the last kept target, refuses the whole projection
+(`None`), the same answer the door already gives a map of the wrong length.
+Both checks compare against values already in hand, so the pass stays one walk
+over the rows. The two public docs now state the refusal.
+`column::reproject_tests::a_map_that_steps_back_or_past_its_series_refuses`
+requires `None` for a swapped pair, for a step back across a dropped row, and
+for a last target equal to `onto_len` on both doors, and requires that a
+repeated target across a dropped row still projects with `collided() == 1`.
+The existing fixture of `two_signals_resolving_to_one_fill_bar_produce_one_row`
+started at bar 20 and then mapped rows 1 to 4 onto bars 7 and 9, a step back;
+it now maps them onto bars 22 and 24 so the map is non-decreasing, and its
+assertions are otherwise unchanged.
+
+**Identity.** Not moved. Every non-test `reproject_checked` call in `runner`
+and `cli` (`validate.rs`, `signal_candle_stop.rs`, `cli/src/lib.rs`,
+`candidate_universe.rs`) passes a map built by `runner::align::onto_execution`,
+whose source reads "THE CURSOR ONLY MOVES FORWARD" and which pushes
+`Some(cursor)` only after `execution.get(cursor)` returned a bar. Such a map is
+non-decreasing and inside the execution series, so the new refusal does not
+fire on it; `validate.rs` only replaces some of its targets with `None`, which
+keeps it so.
+
+### D-0782 — The ordinary and anchored columns differ by the first warm bar, recorded not fixed — 2026-09-29
+
+**What was reported (ET-indicators-6).** Given the same one-minute bars and
+daily references aggregated from the same sessions, `Column::build` and
+`AnchoredColumn::build` admit different first rows. The ordinary
+`step_with_warmth` in `column.rs` reads `warmed_up()` before `step_known`, and
+the rollover that installs the fifth completed session runs inside the step,
+so the first bar of the first warm session is not admitted. The anchored
+`step_with_warmth` in `anchored.rs` calls `advance_before(signal_day)` and only
+then reads `warmed_up()`, so it admits that bar.
+
+**Reproduced on `origin/main` (2c209309).**
+`column::tests::the_anchored_column_admits_the_first_warm_bar_the_ordinary_one_drops`
+passes there unchanged: the anchored column's `first_swept()` is one less than
+the ordinary one's, its length is one more, the ordinary first row is the
+second bar of a session (`first % BARS_PER_SESSION == 1`), and the anchored
+`sources`, `bits` and `known` from index 1 on equal the ordinary ones.
+
+**Why it is not changed.** The ordinary path's pre-step read is a priced
+choice, not an accident: this module's doc states that reading before "is
+correct for *every* shape", that "the cost of reading it before is one lost
+warm bar per run", and that "paying it knowingly is different from paying it by
+accident". Moving either path's read point changes which rows every run of that
+path sweeps, which is a change to what runs compute and is outside a low
+severity follow-up. The test above pins the present difference so that any
+later change to either read point fails it and must be decided in its own
+entry.
+
+**Identity.** Not moved; no code changes.
+### D-0775 — Refuse the three lake-reader aliases a present value, a long chunk and a signed expiry used to hide — 2026-09-29
+
+**What happened.** Three places in `crates/lake` accepted an input and quietly
+read it as something else. Each was reproduced by a test that failed on the
+code origin/main 2c209309 carries and passes with the fix:
+
+- **W3-lake1-3, a signed expiry.** `contract::parse_expiry` checked only the
+  seven-byte width and then called `u8::from_str` and `u16::from_str`, which
+  accept a leading `+`. `NSE-NIFTY-+1Apr20-10000-CE` parsed to the same
+  `ContractName` as `NSE-NIFTY-01Apr20-10000-CE`, and `01Apr+0` to the same as
+  `01Apr00`: two directory names, one key. The expiry's day and year must now
+  be ASCII digits, the guard `parse_strike` already applies, and a signed one
+  is `ContractError::BadExpiryShape`.
+  `contract::tests::a_signed_day_or_year_is_refused_rather_than_aliased_onto_another_contract`.
+- **W3-lake1-4, a present open interest equal to the sentinel.**
+  `read_row_group` mapped every `open_interest` value through
+  `unwrap_or(OPEN_INTEREST_NULL)`, so a value stored PRESENT and equal to
+  `i64::MIN` read back through `Bar::open_interest` as `None` — the reverted
+  run printed `a present i64::MIN read back as [Some(0), None]`. `CLAUDE.md`
+  §7 makes `i64::MIN` the null sentinel, so a present one cannot be told from
+  an absence; it is now refused by name as
+  `LakeError::OpenInterestIsNullSentinel`, naming the row.
+  `reader::tests::a_present_open_interest_equal_to_the_null_sentinel_is_refused`.
+- **W3-lake1-2, a row count that understates the chunk.** Every column read
+  asked for exactly the row group's declared `num_rows` records, so an 8-row
+  file whose footer said 4 decoded as 4 bars (the reverted run printed
+  `an 8-row chunk was read as 4 rows`) while `LakeFile::num_rows` still said 8.
+  Only the overstated direction was refused (`ShortColumnChunk`, L-02). Each
+  column read now asks for one more record after the declared count, and a
+  chunk that has one is `LakeError::LongColumnChunk`, naming the column and the
+  declared count. The test lies twice: once in `num_rows` alone, and once with
+  every chunk's `num_values` edited to agree. Its fixture writes each chunk as
+  ONE page, so that second lie is still the probe's refusal; on a chunk of
+  several pages it was not, and D-0776 records that gap and its close.
+  `reader::tests::a_row_count_that_understates_the_chunk_is_refused_rather_than_truncated_to`.
+
+**GAP14-64, a test gap in the same crate.** Deleting the `NotRepresentable` arm
+of `LakeError::source` survived the lake suite.
+`error::tests::not_representable_exposes_its_core_error_as_the_source` builds
+the variant from a real core `PriceError`, requires `source()` to return it,
+and requires every other listed variant to have none.
+
+**Why refuse rather than tolerate.** `CLAUDE.md` §4 bans a fallback that hides
+a failure, and each of these was one: an alias that makes two names one key, a
+present value reported as absent, and rows dropped under a count that still
+claims them. None changes what a correct file reads as — the sound halves of
+each test decode unchanged — and no workspace crate depends on `lake`, so no
+run identity moves.
+
+**Cost.** The long-chunk probe is one extra `read_records(1, ..)` call per
+column chunk, with two one-element buffers; it is not a per-row operation.
+
+### D-0776 — Count the chunk bytes a declared value count leaves unread, and refuse them — 2026-09-30
+
+**What happened.** D-0775's `LongColumnChunk` probe asks a column for one
+record past the row group's declared `num_rows`. Its test wrote each chunk as a
+single page, and there the probe is enough. On a chunk of several pages it is
+not: `LakePageReader::get_next_page` stops walking once the data pages it has
+returned reach the chunk's declared `num_values`, so a footer that cuts
+`num_rows` AND every chunk's `num_values` to the same page boundary hands the
+column reader exactly the declared rows, the probe finds nothing, and the pages
+after the boundary were dropped without a word — the defect W3-lake1-2 names,
+through a door D-0775 left open. The reverted run of
+`reader::tests::both_counts_understated_on_a_page_boundary_are_refused_rather_than_truncated_to`
+is the evidence: with two four-row pages a column, it printed
+`an 8-row chunk was read as 4 rows`.
+
+**The fix.** The page walk still stops at `num_values` — that stop is what makes
+a `num_values` short of `num_rows` a `ShortColumnChunk` (L-02), and removing it
+would turn that refusal into a silent read. Instead the walk records how many
+chunk bytes it left unread when the declared count stopped it
+(`LakePageReader::stranded`), and a column that otherwise decoded whole with any
+left over is `LakeError::UnreadChunkBytes`, naming the column and the byte
+count. The check runs after `Columns::expand`, so a short chunk, which also
+strands bytes, is still named as short: the L-02 tests are unchanged.
+
+**Pages that cannot hold a row are stepped over before counting.** A first
+draft of this fix counted every byte left unread, and it refused a sound file:
+in a row group of NO rows written by `parquet`'s own writer, the `timestamp`
+chunk holds one dictionary page and nothing else, and a walk whose declared
+count is zero never reads it. Run against that
+draft, `reader::tests::a_sound_row_group_of_no_rows_decodes_to_an_empty_batch`
+failed with `UnreadChunkBytes { column: "timestamp", bytes: 14 }`. The count
+now starts at the first leftover page that is not a dictionary page or a data
+page declaring no values (`page::rowless_extent`); a page holding values, a
+page of any other type, a header that will not parse and a body that runs
+past the chunk all start it. Only headers are parsed there; no body is
+decompressed. `page::tests::a_rowless_page_is_measured_and_anything_else_is_not`
+and `page::tests::a_stopped_walk_counts_from_the_first_page_that_could_hold_a_row`
+pin it.
+
+**Why a leftover row-bearing page is damage.** `parquet-format-safe` 0.2.4
+(`parquet_format.rs`) documents `ColumnMetaData.total_compressed_size` as the
+"total byte size of all compressed, and potentially encrypted, pages in this
+column chunk (including the headers)", and `Columns::pages` slices the chunk to
+exactly that length, so every byte of a conforming chunk belongs to one of its
+pages, and a page holding values past the declared count is values that count
+does not cover. Whether
+every real lake file conforms is **UNMEASURED**: `~/.brutex/lake` is not on the
+machine this was written on, and every test in `tests/real_lake.rs` is
+`#[ignore]`d with the reason "needs ~/.brutex/lake, which cannot be tracked". See `docs/06-limits.md`.
+
+**Cost.** When a walk stops: one header parse per rowless page it steps over,
+then one atomic store; one atomic load per column chunk. Nothing per row. No run identity moves: no workspace crate depends on
+`lake`.
+
+### D-0777 — Refuse a row group read under a file-level row count its row groups do not sum to — 2026-10-01
+
+**What happened.** An independent review of D-0776 (round 3) found W3-lake1-2
+still open for one footer: the row group's `num_rows`, every chunk's
+`num_values` AND every chunk's `total_compressed_size`, all cut at a page
+boundary. `Columns::pages` slices a chunk to its declared length, so the cut
+page is outside the slice, the stranded-byte count has nothing to count, and
+the one-more-record probe finds nothing. The reviewer's probe printed
+`RV7 TRIPLE LIE: file.num_rows()=8 batch.len()=4`. Before this fix,
+`reader::tests::row_value_and_byte_counts_understated_together_are_refused_on_the_file_count`
+failed with `an 8-row file was read as 4 rows`; with only the new check
+disabled it fails the same way again.
+
+**The fix.** `LakeFile::from_bytes` sums every row group's declared `num_rows`
+once, as an `i128`, and `LakeFile::read_row_group` refuses a group read under a
+file-level `num_rows` that differs from that sum as
+`LakeError::RowCountsDisagree`, naming both counts. `parquet.thrift`
+(`parquet-format-safe-0.2.4`) gives `FileMetaData` field 3 `num_rows` as
+"Number of rows in this file" and `RowGroup` field 3 `num_rows` as "Number of
+rows in this row group". The check runs after the columns decode, so a lie a
+column can see is still named by that column: the D-0775 and D-0776 tests are
+unchanged. It is a refusal at read, not at open, so a file whose counts
+disagree still opens and still reports its footer's `num_rows`.
+
+**What it does not close.** Any footer whose row-group counts sum to the
+file-level `num_rows` passes the check, whatever made them sum. A footer that
+also cuts the file-level `num_rows` to the same prefix decodes as that prefix,
+and the test pins it. D-0778 names two more ways to the same sum, another
+group raised to make up the cut and a row-group entry listed twice, and
+`docs/06-limits.md` records all three. Checking that the chunks' byte ranges
+tile the file with no gap was the reviewer's optional second check and is not
+implemented here.
+
+**Cost.** One `i128` sum over the row groups at open, which already reads the
+whole file; one comparison per `read_row_group`. No run identity moves: no
+workspace crate depends on `lake`.
+
+**The step over rowless pages is bounded (same review, round 3).** D-0776's
+loop that steps over leftover rowless pages advanced by whatever
+`rowless_extent` answered and had no other exit, so a step that did not advance
+would spin. `cargo mutants` reported `rowless_extent -> Some(0)` and
+`pos += len -> pos *= len` as TIMEOUT rather than caught. A lake test binary
+built with `rowless_extent` forced to `Some(0)` on the code before this change
+ran `reader::tests::a_sound_row_group_of_no_rows_decodes_to_an_empty_batch`
+until a 60-second alarm killed it (exit 142). The step is now
+`page::step_over_rowless`, a loop of at most as many steps as it has bytes;
+with the same forced `Some(0)` that test and two page tests fail at once
+instead. `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
+pins the bound.
+
+### D-0778 — Record every footer that sums to its file count, and stop a rowless step past the end being taken as consumed — 2026-10-01
+
+**What happened.** Round 4 of independent review of D-0777 upheld one
+should-fix and three nits on W3-lake1-2.
+
+1. *The recorded limit was narrower than what is open.* D-0777 and
+   `docs/06-limits.md` named one way past `RowCountsDisagree`, cutting the
+   file-level `num_rows` too. The reviewer's probe found a second: of two
+   eight-row groups, group 0 cut to its first page in every count and group 1's
+   `num_rows` raised to 12, the file-level 16 untouched. It printed
+   `RV7 COMPENSATING: file.num_rows()=16 group0=Ok(4) group1=Err(ShortColumnChunk { column: "timestamp", row: 8, expected: 12, arrived: 8 })`.
+2. *The same gap by a copied entry.* A second probe appended a copy of a cut
+   group's footer entry, and listed a sound group twice under a file-level 16.
+   It printed `read_all=Ok([0, 1, 2, 3, 0, 1, 2, 3])` and every row twice.
+3. *A disagreeing file count is seen only at read.* `LakeFile::num_rows`
+   returned the footer's claim unqualified, with nothing saying so.
+4. *`page::step_over_rowless` failed open on a step past the end.*
+   `rest.get(len..).unwrap_or_default()` took a length past the bytes as
+   everything consumed, so those bytes were never counted as unread.
+
+**The choices.**
+
+- For 1 and 2, the limit is recorded, not closed. What would close them is a
+  check that chunk byte ranges tile the file with no gap and no overlap, and
+  whether the Polars writer that wrote the lake lays chunks out that way is
+  UNMEASURED: `~/.brutex/lake` is not on this machine and `tests/real_lake.rs`
+  is `#[ignore]`d. A check built on an unmeasured layout could refuse real
+  files with nothing here to show it. `docs/06-limits.md`'s D-0777 section is
+  rewritten to say any footer whose row-group counts sum to the file count
+  passes, and names the three ways tested;
+  `reader::tests::a_cut_group_padded_by_another_reads_short_alone_and_the_padded_one_is_refused`
+  and
+  `reader::tests::row_group_counts_that_sum_to_the_file_count_pass_however_they_were_made_to`
+  pin them, so closing one is seen.
+- For 3, the refusal stays at read. `LakeFile::num_rows`'s doc now says it is
+  the footer's claim, not checked at open, and
+  `reader::tests::a_file_count_that_disagrees_opens_and_refuses_every_group_read`
+  pins it for file-level counts of 9, 11, 0, -1, `i64::MAX` and `i64::MIN`
+  against groups summing to 10. With the comparison disabled that test fails at
+  `group 0 under 9`.
+- For 4, a length past the end now ends the walk with what is left, to be
+  counted as unread. The case added to
+  `page::tests::the_step_over_rowless_pages_ends_even_if_a_step_does_not_advance`
+  failed before the change with `a step past the end leaves every byte`,
+  `left: []`, and passes after. `rowless_extent` answers `Some(len)` only when
+  `len <= rest.len()`, so no lake file reached this; it is the helper's own
+  contract that changed.
+
+**Cost.** Unchanged: the step already called `rest.get(len..)`, and only what
+follows a `None` from it changes. No run identity moves: no workspace crate depends on
+`lake`, and no stored byte changes.
+### D-0720 — A folder walk holds every decoded row of the folder, and `archive.rs` now says so — 2026-09-26
+
+`crates/pull/src/archive.rs` said twice that a folder walk holds one file at a
+time. The module doc said "Peak memory is one file, not one archive", and
+`read_dir`'s `# Cost` said "peak memory is one file's rows, not the
+directory's". Both were false. `descend` runs
+`out.push(Member { path, instrument, rows, });` onto the one vector the whole
+walk shares, and `read_dir` returns that vector. `docs/12-ingest-audit.md` had
+already recorded the contradiction as open. Ledger row W1-pull1-1.
+
+**Decision: correct the claim and keep the accumulation.** The ingest path
+relies on it. `ingest::from_dir` is `let members = archive::read_dir(dir,
+columns)?;` followed by `from_members`, so a member that will not decode
+refuses the folder before anything is written, wherever the member sorts.
+Handing members on one at a time would write the members that sort ahead of a
+malformed one, or would need a second decoding pass over every file. Neither
+trade was asked for, so neither is made here. The census walk,
+`read_dir_reporting` behind `GET /folder.json`, writes nothing and holds the
+same rows only because it shares the walk. Its doc now says so.
+
+**Proof.** `every_decoded_member_is_held_until_the_walk_returns` walks seven
+members, six of one row and one of three, and finds all 9 rows in the vector
+`read_dir` returns and in the one `read_dir_reporting` returns.
+`a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written`
+puts a complete 375-minute member first and a three-field member last.
+`from_dir` refuses, naming the last one, and the store root stays empty. With
+the malformed member removed, the same folder stores 375 bars.
+`the_walk_does_not_claim_one_file_of_peak_memory` fails while either false
+sentence is in `archive.rs`. It failed on origin/main, passes with the
+correction, and fails again with only the correction reverted. C4-PULL-01.
+`docs/06-limits.md` records the bound.
+
+### D-0721 — Hold a CSV row's fields in a fixed array, and say what a row really costs — 2026-09-26
+
+`crates/pull/src/csv.rs` said, under `# Cost`, "No allocation per row" and that
+the row vector "is reserved from a caller-supplied bound". Neither was true.
+`decode_rows` ran `let fields: Vec<&str> = line.split(',').collect();` for every
+row, one heap allocation sized to every comma in the line, made before the
+field count was checked. It began from `let mut rows: Vec<RawRow> =
+Vec::new();`, and `pub fn decode(body: &str, columns: Columns)` takes no bound,
+so no caller supplies one. Ledger row W1-pull1-3.
+
+**Decision: make the per-row claim true, and correct the other two.**
+
+- A row's fields are borrowed into a `[&str; MAX_FIELDS]` array by `fields_of`.
+  `MAX_FIELDS` is 10, the widest layout's count, and
+  `every_layout_fits_the_fixed_field_array` pins every layout it walks
+  inside it. It walks the layouts through `after`, a match on `Columns` with
+  no wildcard arm, so a layout added to the enum does not compile until the
+  test names it. Its first version listed the four by hand, and review
+  found that a fifth layout of 11 fields would have passed it while
+  `fields_of` refused every row as `FieldCount` with `got` equal to `want`.
+  With such a layout appended, the old test passed and the new one did not
+  compile until `after` named it. Named as `TrueDataFno`'s successor, it
+  failed at "Wide has 11 fields and the array holds 10". **Named with an arm
+  of its own returning `None`, while `TrueDataFno`'s arm still returned
+  `None`, it was never walked and the test passed**, as the test's own doc
+  says. That gap is open: a match can make a new layout be named, not be
+  walked. Such a layout's rows would be refused as `FieldCount`, not dropped,
+  because `fields_of` refuses a `want` wider than the array. Every field is still counted, so `CsvError::FieldCount` reports the line's
+  true width as before, but only the first ten are kept, and nothing is
+  allocated for the rest. A `want` wider than the array is refused rather
+  than read short.
+- The row vector is not reserved. The doc now says an append is amortised
+  O(1), not worst-case O(1). Reserving from the body's line count was not
+  chosen: blank and skipped lines would reserve rows that never arrive.
+- A row costs time linear in its line's bytes, and no line-length cap
+  exists. `archive` reads a member whole with `fs::read`, with no byte cap.
+  `docs/06-limits.md` records both. No real line or member length has been
+  measured here, so neither cap is set.
+
+**Proof.** The allocator's calls are counted, in
+`crates/pull/tests/allocation.rs` (D-0724).
+`twice_the_rows_cost_no_allocation_per_row` decodes 4,096 rows and then 8,192
+and allows the second at most four more allocating calls.
+`a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`
+requires the refusal `FieldCount { line: 1, got: 1_000_001, want: 5 }` and
+fewer bytes allocated on the way to it than the line's 1,000,000. On
+origin/main they failed at "4,096 more rows made 8193 more allocating calls
+(8203 for 4,096 rows, 16396 for 8,192): a row allocates" and "refusing a
+1000000-byte line allocated 33554666 bytes: its fields were held". They pass
+here and fail again, with the same two messages, with only the fixed array
+reverted, and under each of the two review breaks that put a per-row collect
+back: a `Vec` collected inside `fields_of`, and a turbofish collect in
+`decode_rows`.
+
+That proof replaced `decode_rows_collects_nothing_per_row`, which read
+`decode_rows`'s own text for `.collect(`. Both review breaks left it and every
+other CSV test green. Its stated reason for not counting, that a counting
+allocator needs `unsafe` and every crate root forbids it, was wrong: an
+integration test is its own crate, and Gate 16 reads only `src/lib.rs` and
+`src/main.rs`.
+
+`a_lines_fields_land_in_a_fixed_array_and_are_counted_whole` holds `fields_of`:
+exact counts accepted, short and long lines refused with their true count, a
+line of 1,000,000 commas counted as 1,000,001 fields, and a width past the
+array refused. The existing field-count tests still pass unchanged. C4-PULL-02.
+
+### D-0722 — Read a contract's underlying from both ends, so `BAJAJ-AUTO` and `NAM-INDIA` are discoverable — 2026-09-26
+
+`fno::read_contract` split a discovered contract name on every `-` and took
+the second piece as the underlying: `let mut parts = name.split('-');` then
+`let underlying = parts.next()?;`. `core::universe::FNO_UNDERLYINGS` holds two
+underlyings with a hyphen, `BAJAJ-AUTO` and `NAM-INDIA`. A name such as
+`NSE-BAJAJ-AUTO-27Mar25-FUT` read as the underlying `BAJAJ` with `AUTO` where
+the expiry belongs, `expiry_token_agrees` refused `AUTO`, and the name went to
+`Chain::unreadable`. So no expired contract of either underlying could be
+discovered, and neither's month could report itself whole. Ledger row
+W1-pull1-5.
+
+**Decision: the grammar is fixed at both ends, so the underlying is what lies
+between.** The exchange is the first piece. A name ends `-FUT`, or a strike
+and a side. The expiry token is the piece before that tail. The underlying is
+everything between the exchange and the expiry token, hyphens included.
+Every name the reader's existing refusal test refuses is still refused, and
+the same malformed tails are refused for hyphenated names. One thing is
+looser, and the next paragraph names it.
+
+**What stands behind the looser middle.** A name with an extra piece in its
+middle, `NSE-BAJAJ-AUTO-X-25Jan24-FUT`, now reads as the underlying
+`BAJAJ-AUTO-X` rather than failing the expiry check. `chain::month` compares
+every read underlying with the ask and refuses a mismatch by name, so that name
+is still not filed.
+
+**UNVERIFIED.** No Groww contract name for either underlying has been
+observed. That the vendor writes `NSE-BAJAJ-AUTO-…` rather than dropping the
+hyphen is not established. This entry holds only that a name spelled with the
+hyphen reads as the underlying it names. A name spelled without it would read
+as `BAJAJAUTO` and be refused by the ask check, as before.
+
+**Proof.** `every_fno_underlying_reads_back_whole_hyphen_and_all` reads a
+weekly future, a monthly future and an option for every underlying in
+`FNO_UNDERLYINGS` and gets each underlying back whole. It also asserts that
+the hyphenated ones are exactly `BAJAJ-AUTO` and `NAM-INDIA`. It failed on
+origin/main at `NSE-BAJAJ-AUTO-27Mar25-FUT must read`, and fails again with
+only the reader reverted.
+`a_hyphenated_underlyings_contracts_are_filed_and_an_off_key_one_is_refused`
+drives `chain::month` for `BAJAJ-AUTO`: both of its contracts are filed, and
+`NSE-BAJAJ-AUTO-X-25Jan24-FUT` is refused naming `BAJAJ-AUTO-X`, as is
+`NSE-BAJAJAUTO-25Jan24-FUT` naming `BAJAJAUTO`. On origin/main it filed
+nothing, and it fails again with only the reader reverted.
+`a_hyphenated_name_with_a_malformed_tail_is_still_refused` holds malformed
+hyphenated names refused as their plain twins are. C4-PULL-03.
+
+### D-0723 — Bound the rolling answer's body read at `MAX_RESPONSE_BYTES`, and keep its bytes exact — 2026-09-27
+
+`HttpSource::post_json`, the rolling (Dhan expired-options) POST, read its
+success body with `let body = answer.text().await…`. That holds the whole
+answer before anything can look at its size, and nothing looked afterwards.
+The bars path (`window_async`) checks the declared length against
+`MAX_RESPONSE_BYTES` and reads under that cap, and discovery
+(`Discovery::get`) reads through `strict_discovery_body` under
+`masters::MAX_BODY_BYTES`. The rolling path had no cap at all, and its
+`# Cost` said "One request, one permit. O(1)." Ledger row W1-pull2-2.
+
+**Decision.** `post_json` reads through `strict_discovery_body` with
+`MAX_RESPONSE_BYTES` (`pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
+1024;`), the cap the bars window uses, because a rolling answer is a window
+of bars. An answer declaring more is refused before its body is read. One
+that declares nothing is abandoned once the bytes held would pass the cap:
+`if held.len().saturating_add(chunk.len()) > cap` refuses before the chunk
+that would cross it is kept. Both
+refusals carry the vendor's status, so `api::server::step` reads them through
+`Some(_) => Step::Answered` and does not re-ask. The bars window files the
+same overrun as a transport failure instead; the rolling path takes
+discovery's classification because it shares discovery's reader and its
+`chain::Refusal` type.
+
+**One behaviour change beyond the cap, and it is deliberate.** `text()`
+decoded lossily: an invalid byte became U+FFFD and the body was returned as
+if the vendor had sent that character. The shared reader keeps the bytes
+exact or refuses them as "body is not UTF-8", which is the loud refusal
+`CLAUDE.md` §4 asks for in place of a silent repair.
+
+**Proof.**
+`a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap` offers
+64 MiB more than the cap, in 64 KiB frames, with no `Content-Length`, and the
+server counts every body byte its socket accepts. It asserts that the client
+hangs up before the flood ends, with fewer than 32 MiB past the cap sent, and
+then that the answer is refused under status 200 naming the cap. The refusal
+alone did not hold where the read stopped. A review break that read the whole
+body and checked its size after the loop refused in the same words and left
+every `http::` test green. It now fails at "the client hangs up before the
+flood ends: 134217728 of 134217728 bytes went out". So does origin/main's
+`text()`, and so does this tree with only the bounded read reverted.
+`a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading`
+sends a `Content-Length` one past the cap. On origin/main that came back as a
+transport refusal with no status (`left: None`, `right: Some(200)`). Now it
+is refused under 200 before the body is read.
+`a_rolling_answer_that_is_not_utf8_is_refused_not_repaired` returned
+`"{\u{fffd}}"` on origin/main and is now refused naming UTF-8.
+`a_rolling_answer_under_the_cap_is_returned_exactly` holds the success path
+byte for byte. The three refusal tests failed on origin/main, pass here, and
+fail again with only the read reverted. C4-PULL-04. `docs/06-limits.md`
+records the bound.
+
+### D-0724 — Count the allocator from one integration test crate, the workspace's first unsafe exception — 2026-09-27
+
+D-0721 made `crates/pull/src/csv.rs`'s "No allocation per row" true and proved
+it with `decode_rows_collects_nothing_per_row`, which read `decode_rows`'s own
+text for `.collect(`. Review put a per-row allocation back twice. One was
+`let all: Vec<&str> = line.split(',').collect();` inside `fields_of`, whose
+text no test read. The other was
+`let _per_row = line.split(',').collect::<Vec<&str>>();` in `decode_rows`,
+which the needle did not match. Under each, every test in `csv::tests` passed,
+`decode_rows_collects_nothing_per_row` among them. A text search finds the
+spellings it knows, and the claim is about an allocation.
+
+The test's reason for not counting allocations was that a counting allocator
+"needs `unsafe` and every crate root forbids it". Only the first half holds.
+Implementing `GlobalAlloc` is `unsafe`. But Gate 16 reads
+`f="crates/${c}/src/${base}.rs"` for `base` in `lib main`, and an integration
+test under `crates/<c>/tests/` is compiled as a crate of its own. The workspace
+lint is `unsafe_code = "deny"`, a level an allow overrides. Gate 5 counts
+`allow(unsafe_code)` over tracked `.rs` files and fails
+`if [ "$n" -gt 3 ]; then`, and before this entry
+`git ls-files '*.rs' | xargs grep -oh 'allow(unsafe_code)'` found none.
+
+**Decision: count allocations directly, in `crates/pull/tests/allocation.rs`,
+with the exception at that crate's root and nowhere else.**
+
+- The file sets `#![allow(unsafe_code)]` on one line, so Gate 5 counts it: one
+  exception of the three it permits.
+- `Counting` implements `GlobalAlloc` by forwarding every method to `System`
+  with the arguments it was given. Before forwarding, `alloc`, `alloc_zeroed`
+  and `realloc` add one call and the bytes asked for to two thread-local
+  `Cell<usize>` counts with `const` initialisers, so tests on other threads of
+  that binary cannot move them.
+- `crates/pull/src/lib.rs` still carries `#![forbid(unsafe_code)]`, as every
+  crate root Gate 16 reads does. The unsafe code is in a test crate that links
+  the library, and no library or binary target contains it.
+- `decode_rows_collects_nothing_per_row` is removed. The two allocation tests
+  hold what it was written to hold, and both review breaks fail them.
+
+**Not chosen.** A counting-allocator crate would put a package in `Cargo.lock`,
+which this batch keeps byte-identical, and it would hold the same `unsafe`
+inside a dependency. A wider text search stays a list of spellings.
+
+**What it cannot see.** It counts only the calling thread's allocations.
+It counts calls and bytes asked for, not bytes live at any moment.
+
+**Proof.** `twice_the_rows_cost_no_allocation_per_row` and
+`a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`, in
+`crates/pull/tests/allocation.rs`. On origin/main, with only the fixed array
+reverted, and under each review break, they fail at "4,096 more rows made 8193
+more allocating calls (8203 for 4,096 rows, 16396 for 8,192): a row allocates"
+and "refusing a 1000000-byte line allocated 33554666 bytes: its fields were
+held". Here both pass. C4-PULL-02.
+
+### D-0725 — A census counts the members it rejects against `MAX_MEMBERS`, and keeps a bounded part of each refusal — 2026-09-28
+
+Review of D-0720 found its replacement cost sentences stating a bound the
+census walk does not have. `read_dir_reporting`'s `# Cost` said "[`read_dir`]'s,
+memory included", the D-0720 limits entry said "The only ceilings are counts.
+`MAX_MEMBERS` members …", and the module doc kept "[`MAX_MEMBERS`] caps the
+walk". `descend` checked `if out.len() >= MAX_MEMBERS {`, and a census
+(`Malformed::Collect`) pushes a malformed member with
+`rejected.push(Rejected { why: why.to_string(), path });` and `continue;`,
+never onto `out`. So a census read every malformed member of a folder, past
+the cap, and kept a finding for each. `CsvError`'s `Display` quotes the bad
+field whole (`"line {line}: date {got:?} is not {format:?}"`), so a finding's
+length was bounded only by its file. The review's probe found a census past
+the cap returning `Ok` with no `TooManyMembers`, and a finding holding a
+million-byte date field whole; the proof below repeats both on origin/main.
+
+**Decision: bound both, rather than describe them as unbounded.**
+
+- `descend` compares `out.len().saturating_add(rejected.len())` with
+  `MAX_MEMBERS` and reports that sum as `TooManyMembers::members`. A census
+  now visits at most `MAX_MEMBERS` members, decoded and rejected together.
+  An ingest walk (`Malformed::Refuse`) never pushes onto `rejected`, so its
+  bound and its refusal are unchanged.
+- A finding keeps at most `MAX_FINDING_BYTES`
+  (`pub const MAX_FINDING_BYTES: usize = 1024;`) of the decoder's sentence.
+  A longer one keeps its first bytes up to that bound, cut back to a
+  character boundary with `floor_char_boundary`, followed by
+  ` [trimmed: N of M bytes not kept]`, so a trimmed finding says it was
+  trimmed. The copy is allocated to its own length. A sentence that fits is
+  kept whole.
+- The bound is chosen, not measured. No real refusal's length has been
+  measured here. Every refusal the sizing test walks, rendered around an
+  empty field, is shorter than it, so an ordinary field fits. The walk goes
+  through a match on `CsvError` and on `DateFormat` with no wildcard arm, so
+  a variant added later must be named there; as with D-0721's layout walk,
+  one appended with an arm of its own returning `None`, while the last
+  variant's arm still returns `None`, is named but not walked.
+
+**Not chosen.** Stating the census as unbounded and leaving it so. The route
+behind it, `GET /folder.json`, reads a folder an operator points at, and
+`MAX_MEMBERS` already said "The most members one walk will visit".
+
+**What stays unbounded.** A member is read whole with `fs::read(&path)`
+before it is decoded or rejected, which the D-0721 limits entry records, and
+the sentence is rendered whole with `let whole = why.to_string();` before it
+is cut. Both are one member's locals, gone before the next member is read.
+The census still holds every decoded row, as D-0720 records.
+
+**Proof.**
+`a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+walks `MAX_MEMBERS + 1` members, the even-numbered ones empty and the odd
+ones one field where five are declared, so neither kind alone reaches the cap,
+and requires `TooManyMembers { members: MAX_MEMBERS, cap: MAX_MEMBERS }`.
+`a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal` requires the
+1,000,000-byte field's finding to be exactly the sentence's first
+`MAX_FINDING_BYTES` bytes and its note, with a capacity under twice the cap,
+and a three-field member's finding to equal its refusal whole. On origin/main
+(with only the constant added so the tests compile), and again with only the
+two fixed lines reverted, they fail at "the census walked past the cap: 25001
+decoded and 25000 rejected, 50001 members against a cap of 50000" and "the
+first 1024 bytes of the sentence and a note of the rest; got 1000033 bytes".
+Both pass here. `a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` holds
+the boundary: a sentence exactly at the cap is whole, one a byte past it notes
+one byte, and a cap inside a three-byte character is cut back to the last
+whole one. `every_refusal_sentence_fits_the_finding_cap_before_its_field`
+holds the sizing. It walked a hand list at first, which review found left a
+later `CsvError` variant unchecked. With a variant appended whose sentence
+runs past the cap, that list still passed; the walk does not compile
+(E0004, the variant not covered) until the variant is named in `after`, and
+named as the last variant's successor it fails at "2027 bytes before any
+field". C4-PULL-05. `docs/06-limits.md` records the bounds.
+
+### D-0726 — Credit a rolling answer to the governor only after its body is accepted — 2026-09-28
+
+Review of D-0723 found that `HttpSource::post_json` still credited the
+governor on any 2xx status before its body was read: the block
+`else if status.is_success() { g.record_success(); }` ran before
+`let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;`.
+D-0723 added two refusals after that point, a body past the cap and one that
+is not UTF-8, so the additive increase was also credited for answers this build
+refuses. A body the socket cuts short was already refused after the credit on
+origin/main, whose read was `.text()` then
+`.map_err(|why| Refusal::transport(format!("{why}")))?`. Ledger row
+W1-pull2-11 records the credit-before-read, and it is open.
+
+**Decision: move the success credit on this path to after the body is
+accepted.** A 429 is still recorded as a throttle as soon as its status is
+seen, by the branch `if status.as_u16() == 429` that runs before the
+non-success return. The success credit now runs after `strict_discovery_body` returns the
+body, so every refusal that function makes, and every failed body read,
+leaves the allowance and the successes banked toward its next step where they
+were.
+
+**What this does not close.** W1-pull2-11 stays open for the rest of it.
+`post_json` calls no `weigh_answered_body`, so a 2xx answer whose body carries
+a vendor refusal is still returned and still credited. `Discovery::get` still
+credits before it reads its body. Both are that row's.
+
+**Proof.** `a_rolling_answer_this_build_refuses_earns_the_governor_nothing`
+gives each answer a governor of its own, shared with its source, throttled
+once and banked `SUCCESSES_PER_STEP` minus one successes, so one more credit
+steps the allowance up. It sends a body cut short of its `Content-Length`, a
+`Content-Length` one past `MAX_RESPONSE_BYTES`, and a body that is not UTF-8,
+tries all three before asserting, and requires each allowance unmoved. A clean
+answer must then step its allowance up. On origin/main, on this branch before
+the change, and again with only the change reverted, it fails at "a refused
+answer earned the governor a success it did not deliver: a body the socket
+cuts short (4 to 5); a body declaring more than the cap (4 to 5); a body that
+is not UTF-8 (4 to 5)". On origin/main the last of the three was not refused
+at all, the lossy read D-0723 replaced. It passes here. C4-PULL-06.
+
+**The throttle half is held too.** Review found that no test drove
+`post_json` with a 429 and then read the governor, so the sentence above had
+nothing behind it: with that branch matching 430 instead of 429, every test in
+`cargo test -p pull --lib` passed. `a_rolling_429_backs_the_governor_off_before_its_refusal_returns`
+answers `post_json` with a 429 from a governor one success short of a step,
+requires the allowance to fall below where it stood, and requires the refusal
+to carry status 429. With the branch matching 430 it fails at "a 429 on the
+rolling path backs the governor off: 4 !< 4", and with `record_success` in
+place of `record_throttled` at "5 !< 4". It passes here.
+### D-0956 — Parse a 2xx vendor answer once for both the refusal check and the decode, and cut the refusal it names — 2026-09-29
+
+**What was wrong.** `HttpSource::window_async` weighed every 2xx body for a
+refusal and then decoded it. For a feed whose spec declares `error_names`, the
+refusal check called `refusal::disposition_of(text, contract)`, which runs
+`serde_json::from_str(body)`, and then `decode_body` ran its own
+`serde_json::from_str` over the same text. Every successful window was parsed
+twice, and the body is bounded only by `MAX_RESPONSE_BYTES`. `docs/06-limits.md`
+§83.1 said the linear refusal read was never called on a success path
+(W1-pull2-1). When that 2xx body did name a refusal, `weigh_answered_body`
+formatted the whole body into `FetchError::VendorRefused::detail` with no cut,
+although `trim` states that a refusal body reaching an error string is cut, and
+the non-2xx door already calls it (UC-22).
+
+**The change.** `HttpSource::settle_answer` parses the body once through
+`parse_answer` and hands the one `serde_json::Value` to both readers:
+`refusal::disposition_of_value`, which parses nothing itself, and
+`decode_value`, which is `decode_body` over a parsed value. `decode_body` keeps
+its signature and its not-JSON fault. The refusal is still read first, and a
+body that is not JSON is still a decode fault, not a success. The refusal's
+`detail` is now built from `trim(text)`: at most 500 characters of the body.
+What a window decodes to is unchanged, so no run identity moves.
+
+`refusal::disposition_of` now parses through `http::parse_answer` as well, so
+every JSON parse on this path goes through the one function a test can count.
+
+**Proof.**
+`pull::http::tests::a_success_body_is_parsed_once_for_both_the_refusal_check_and_the_decode`
+counts calls to `parse_answer` on its own thread: one for `disposition_of`
+alone over a bars body, one for `settle_answer` over a bars body, one for a
+body naming `DH-901`, one for a body that is not JSON.
+`pull::http::tests::a_window_fetched_over_a_socket_parses_its_body_once` serves
+a 200 bars body on loopback to a source declaring Dhan's error names and counts
+one parse across the whole `window_async` call. With the refusal check put back
+in its origin/main shape, `crate::refusal::disposition_of(text, contract)` in
+`weigh_parsed`, both tests count two and fail. With `window_async` decoding the
+text again after `settle_answer`, the socket test counts two and fails. With
+`disposition_of` reading `serde_json::from_str` directly again, the first test's
+`disposition_of` count is zero and it fails.
+`pull::http::tests::a_refusal_under_a_200_is_trimmed_before_it_reaches_the_error`
+pads a `DH-901` body to over 10,000 characters and requires the detail to be
+its prefix plus exactly 500 characters; on origin/main it measured 10,177.
+
+### D-0957 — Read a stated UTC offset by position, with no allocation, and refuse a misplaced colon — 2026-09-29
+
+**What was wrong.** `stated_offset`'s doc says "A fixed number of byte
+comparisons on a suffix. No allocation." The body stripped every `:` from the
+whole tail after byte 19 into a new `String` and then counted what was left.
+That allocated once per Kite bar, walked a tail of any length, and accepted a
+colon anywhere: `+0:530`, `+:0530` and `+0530:` each read as IST
+(W1-pull2-7).
+
+**The change.** The tail is matched as a byte slice of exactly five bytes
+(`+0530`) or six with the colon at index 3 (`+05:30`); anything else is
+`None`. The digits are read by position with no allocation. `Z` and the
+bounded hours and minutes checks are unchanged, so every offset the old reader
+accepted in one of those two shapes reads to the same seconds.
+
+**Proof.**
+`pull::http::tests::a_stated_offset_is_read_by_position_and_a_misplaced_colon_is_refused`
+reads `+0530`, `+05:30`, `-0330` and `Z`, and reads `+1045`, `-0945`,
+`+1000`, `+14:00`, `-1400` and `+0559`, whose tens-of-hours and
+minutes-units digits are not zero and which sit on both bounds. It refuses six
+misplaced-colon tails; wrong-length, non-digit, unsigned, out-of-bound, NUL and
+space tails; an empty stamp; a stamp whose byte 19 falls inside a character;
+and a tail of 2^20 zeros. On origin/main it fails on `+0:530`, which the old
+reader returned as `Some(19800)`. The 2^20-zero tail is a refusal check only:
+the old reader refused it too, so it is not evidence about cost. That the new
+reader neither walks nor copies the tail rests on the source line
+`let ([sign, h1, h2, m1, m2] | [sign, h1, h2, b':', m1, m2]) = *tail.as_bytes() else {`,
+which matches a slice of five or six bytes and allocates nothing.
+### D-0960 — Check the size first on the strict constituent decode, and remember a refused symbol in `Catalogue::index` — 2026-09-29
+
+**W1-pull3-9.** `pull::nse::constituents_strict` compared the header before
+the size. A body past `MAX_DOCUMENT_BYTES` whose first line was not the header
+came back as `NseError::HeaderUnexpected`, whose `got` is
+`first_line(body).trim_end_matches('\r').to_owned()`; with no newline that is
+the whole body. `constituents` already checked the size first. The strict
+entry point now refuses with `NseError::TooLarge` before the header check.
+`the_strict_decode_refuses_a_document_past_the_bound_before_its_header` fails
+without the change with "expected TooLarge, got a refusal whose Debug form is
+8388637 bytes", and also pins that a body exactly at the bound is still
+refused by its header.
+
+**W1-pull3-8.** `pull::nseindex::Catalogue::index` skipped a symbol only when
+`mapping.resolved.contains_key(&key)`. A refused symbol that appeared again
+under the same collapsed key was resolved again and pushed into `refused`
+again. It now inserts every collapsed key it tries, resolved or refused, into
+one local `HashSet` reserved from the iterator's lower size hint, and skips a
+key whose insert finds it already there, so a refusal is reported once, under
+the first spelling that arrived. `a_refused_symbol_repeated_in_the_master_is_reported_once`
+fails without the change with five refused rows where two are expected.
+
+Neither function has a production caller outside `pull`'s own tests:
+`constituents_strict` is called only from `nse.rs` tests, and
+`Catalogue::index` only from `nseindex.rs` tests.
+
+### D-0961 — State the costs `nseindex` and `note_absorbed` actually pay — 2026-09-29
+
+**W1-pull3-1.** The `# Cost` section of `pull::nseindex` said the catalogue
+scan is paid once through `Catalogue::index`, "after which every lookup through
+`Mapping::get` is a hash hit". Production does not take that path. The one
+production caller, `api::indexmap::join`, calls
+`nse.matcher.resolve(&symbol)` (`crates/api/src/indexmap.rs`) for each feed
+index symbol on every `GET /indexmap.json`, and `Catalogue::index` is called
+only from `nseindex.rs` tests. `join` first resolves the name a feed renames
+the symbol from (`index_alias_source`), when there is one, and then the symbol
+itself, so each feed symbol costs up to two resolves per request, and each
+resolve of a name not published verbatim scans the catalogue. The section now
+says so. The code is
+unchanged: the route re-reads the catalogue from disk on each request and
+claims no §3 rule 4 bound in its own `# Cost` section, so there is no load at
+which to pay the scan once.
+
+**W1-pull3-5.** The `# Cost` section of `pull::rate::ABSORBED_MICROS` said
+"One `fetch_add` on the wait path". `note_absorbed` calls `fetch_update`, and
+the pinned 1.97.1 toolchain's `core::sync::atomic` implements that, through
+`try_update`, as
+`while let Some(next) = f(prev) { match self.compare_exchange_weak(prev, next, set_order, fetch_order) {`.
+It is lock-free, not wait-free: an attempt that loses a race or fails
+spuriously runs the closure again. The doc comment and the inline comment now
+say that. The code is unchanged, because `fetch_add` would wrap rather than
+saturate.
+### D-0966 — Index the vendor master once per crawl pass, not once per index — 2026-09-29
+
+**What was wrong (W1-pull3-0).** `pull::resolve::crawl`'s `# Cost` section
+said the join "indexes the master **once** for the whole pass rather than per
+index". The code called `pull::universe::resolve` once per constituent file,
+and that function built its key map and its symbol set from the whole master
+on every call, then walked the master a third time to count `extra`. Each
+index therefore cost O(master), and a pass O(indices x master).
+
+**The change.** `pull::universe::MasterIndex` holds the key map, a count of
+rows per non-blank trading symbol, and the total of those rows. `crawl` builds
+it once, before the first category, and calls `MasterIndex::resolve` per
+index. That call probes the key map once per published name, and computes
+`extra` as the rows with a symbol minus the rows carrying each distinct name the
+index publishes, so it no longer walks the master. `universe::resolve` remains
+for a single index and is now `MasterIndex::new(..).resolve(..)`.
+
+**Proof.** `pull::resolve::tests::the_master_is_indexed_once_per_pass_not_once_per_index`
+reads `crawl`'s source: exactly one `MasterIndex::new(` call, before the
+category loop, and no call to `universe::resolve`. A slice cannot count its
+own reads, so this is a shape test, not a timing. It fails on `origin/main`.
+`pull::universe::tests::extra_counts_every_unnamed_row_once_through_repeats_and_blanks`
+requires the new `extra` to equal the old master walk on a master that lists
+one symbol twice and carries a blank symbol, and a file that repeats a name and
+publishes a blank one, on both keys.
+`pull::universe::tests::one_master_index_answers_each_index_as_a_fresh_join_would`
+requires one index reused across three resolutions to answer each as a fresh
+`universe::resolve` does. Building the index is still O(master) once per pass;
+that is the stated cost, not a limit this removes.
+
+### D-0967 — A repeated month or cell is one cell in `Selection::cells` and `gaps` — 2026-09-29
+
+**What was wrong (W1-pull4-1).** `Selection::of` removes a repeated instrument
+because, in its own words, "a duplicate would pull the same window twice and
+the second write would be refused as not following the first". `cells` did not
+do the same for months: a month the caller repeated produced every one of its
+cells twice. `gaps` did not remove a repeated cell either, so it listed the
+same cell twice in `missing` or counted it twice in `held`.
+
+**The change.** `cells` keeps each month once, at its first position, before
+building cells, and still orders them instrument-major. `gaps` skips a cell it
+has already seen, so a repeated cell is listed or counted once. Both use one
+pre-sized hash set, reserved from the input's length, and stay O(input).
+`Work::requested` now documents that it counts distinct cells.
+
+**Proof.** `pull::work::tests::a_repeated_month_yields_each_cell_once_in_first_seen_order`
+and `pull::work::tests::a_repeated_cell_is_missing_once_and_held_once`, each
+failing on `origin/main`.
+
+**Also in this batch (GAP14-65, no decision needed).** Assertions in
+`crates/pull/tests/unit.rs` compared a value with itself (`assert_eq!(path,
+path)`, `assert_eq!(one, one)`, `assert_eq!(one.key, one.key)`,
+`assert_eq!(genesis, genesis)`, `assert_eq!(read, read)`), which no derived
+`PartialEq` can fail. Each now compares against an independently built equal
+value and uses `assert_ne!` against a value differing in one field.
+### D-0740 — An Admission decision reads the validation's issued projection instead of re-reconciling the whole search — 2026-09-29
+
+**What was wrong (W3-runner1-0).** `AdmissionPolicyV1::evaluate_v2_projection`,
+`evaluate_v3_projection` and `evaluate_v3_exact_grid_projection` each built
+their walk-forward authority through `search_authority_projection()`, which
+runs the full private-seal reconciliation (`reconcile_anchored_admission_v2`,
+`reconcile_anchored_search_v3`, `reconcile_anchored_search_v4`) over every fold
+of the opaque validation. That work does not depend on the candidate, and the
+production caller (`cli::population_admission_v4`) makes one decision per
+candidate against one borrowed validation, so the same reconciliation ran once
+per candidate. `docs/06-limits.md` §167 had called that evaluation O(C).
+
+**The change.** The three issuing doors now keep the projection their one
+reconciliation derived in a private `issued` field, and the three
+walk-forward constructors read it through `issued_authority_projection()`,
+which copies fixed-size fields. The fields are private and written only by the
+issuing door, so the value cannot drift from what that reconciliation saw.
+`search_authority_projection()` is unchanged and still revalidates for any
+caller that asks for it. A value without an issued projection is refused
+with `SealMismatch`. No decision's bytes change: the projection read is the
+one the same reconciliation computed.
+
+**Proof.** `admission::tests::per_candidate_admission_never_re_reconciles_the_opaque_validation`
+counts reconciliations with a test-only per-thread probe: 21 decisions across
+V2, V3 and the exact grid add 0, and the revalidating door adds 1. With only
+the three call sites reverted it reports 21.
+`validate::tests::an_unissued_opaque_validation_refuses_the_sealed_projection`
+pins the refusal.
+
+### D-0741 — The training attestation carries the slice facts, so a per-run price does not rebuild them — 2026-09-29
+
+**What was wrong (W3-runner2-0).** `ResolvedExitGridV1::evaluate_with_attested`
+said "no bar is re-read and no byte is re-hashed here; what remains is the
+grid", but it called `grid::evaluate_resolved_policy_v1`, which ran
+`trade::SliceFacts::of(bars, column)` on every call: a walk over every
+execution bar, a `HashMap` and two prefix vectors of the slice's length, per
+run. The expression twin (`evaluate_expression_with_attested`, through
+`grid::evaluate_resolved_expression_policy_v1`) did the same, and
+`materialize_expression_coordinate` did it once per coordinate through
+`grid::materialize_expression_cell`. The facts depend only on the bars and
+column the token already borrows.
+
+**The change.** `AttestedTrainingV1` now holds the `SliceFacts` its
+attestation derived, and the three doors pass them down; the two resolved grid
+functions take the facts as a parameter, and
+`grid::materialize_expression_cell_over` is the materializer over given facts
+(the public `materialize_expression_cell` derives them and delegates). The
+token loses `Clone`, `Copy` and `Debug`, which no caller used; it stays `Sync`.
+No price changes: the facts are the same function of the same borrowed bars
+and column, and the attested and single-shot doors still return equal grids.
+
+**Proof.** `pricing_runs_over_one_attestation_derives_the_slice_facts_once`
+and `programs_and_coordinates_over_one_attestation_derive_the_slice_facts_once`
+count derivations with a test-only per-thread probe in `SliceFacts::of`. On
+the unfixed doors they report 5 extra derivations for five runs and 33 for
+three programs and their 30 coordinates; with the fix, 0.
+
+**What it does not change.** The walk after the facts still visits every
+column row, and `evaluate_training_grid_attested` still runs
+`let attested = self.attest_training(series, column, horizon)?;` on every
+call, so a caller that prices each run through it still reads the whole slice
+per run.
+
+### D-0742 — The stationary bootstrap refuses a mean block above one million, where its ppm restart draw floors to zero — 2026-09-30
+
+**What was wrong (W3-runner1-2).** `bootstrap::stationary_indices` sets the
+continuation probability in parts per million:
+`1_000_000_u64.saturating_sub(1_000_000 / block as u64)`. For a block of
+1,000,001 or more the quotient is 0, the continuation is 1,000,000 ppm, and no
+draw ever restarts: every draw is one cyclic rotation of the series, whose
+mean equals the sample mean. Only a zero block was refused, so
+`reality_check`, `spa`, their receipts, `romano_wolf`, its receipts and
+`family_tests_v1` answered over rotations. On origin/main
+`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point` fails
+with `Reality Check answered over rotations: Some(0.001)` — p = 1/(999+1) for
+noise with a 3 paisa edge.
+
+**The change.** `bootstrap::MAX_BLOCK = 1_000_000`. Every entry point named
+above, and the family pass's `Stepdown`, refuses a block above it the way it
+already refused a zero block: `None`, `Err(FamilyTestsRefusalV1::…)`, or the
+legacy empty vector of `romano_wolf`. A block at or below the ceiling computes
+exactly what it computed before, so no answered verdict changes.
+
+**What it does not change.** The refusal is the arithmetic ceiling only. A
+block at or below one million is not compared with the series length: the
+test answers at a block of 1,000,000 over 200 periods. Recorded in
+`docs/06-limits.md`.
+
+**Proof.** `bootstrap::block_ceiling_tests::a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`.
+
+### D-0743 — An Admission V2/V3 door refuses a probability whose floor ppm hides an exact value above its ceiling — 2026-09-30
+
+**What was wrong (GAP5-49).** `AdmissionEvidenceV2::new` and its V3 twin store
+each exact probability through `AdmissionExactProbabilityV2::ppm`, a floor,
+and the fixed policy gates PBO, family-wise Romano--Wolf, SPA, White and
+candidate Romano--Wolf with `check_max_u64` over that stored value
+(`value > ceiling`). A fraction just above a ceiling floors onto it and
+passes: on origin/main SPA `2_501 / 50_019` floors to 50,000 ppm, the
+fixture's 5% ceiling, `rejects_at_ppm(50_000)` is false, and the V2 verdict
+does not fail SPA.
+
+**The change.** `evaluate_v2_projection`, `evaluate_v3_projection` and
+`evaluate_v3_exact_grid_projection` refuse with
+`AdmissionV{2,3}ArithmeticRefusal::ProbabilityProjection(reason)` when a
+max-gated probability's floor ppm is within its ceiling while the exact
+fraction is not (`!rejects_at_ppm(ceiling)`), naming the first such gate in
+the order PBO, FWER, SPA, White, candidate Romano--Wolf. A decision record's
+verdict is re-derived by the V1 evaluation over the evidence's floor ppm
+slots (`values: evidence.values,` in `evaluate_v2` and `evaluate_v3`), and
+`AdmissionDecisionV3::from_canonical_parts` refuses a supplied verdict unequal
+to it (`let computed = policy.evaluate_v3(&evidence);`), so a correct failure
+cannot be written in these versions; refusing is the loud alternative to a record that passes a gate its
+exact value fails. Every value these doors decided correctly before is decided
+byte-identically: the refusal fires only where the old verdict was wrong. A
+ceiling projection in new record versions is the way to decide these values
+instead of refusing them, and is not done here.
+
+**What it does not change.** The cli-side V1 evidence builders
+(`boolean_admission_v1`, `boolean_admission_reader`,
+`index_stop_qualification_numeric`) also fill max-gated fields with
+`.ppm()`; they are outside the runner crate and outside this change.
+
+The evidence bytes themselves keep each exact fraction in their statistics
+section (`AdmissionExactProbabilityV2::new(reader.read_u64()?, reader.read_u64()?)`
+in `read_probability_v2` and `read_probability_v3`); it is the verdict, re-derived
+from the floor ppm slots, that cannot carry the correct failure.
+
+**Proof.** `admission::tests::a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`.
+### D-0976 — Price a ranked row from the compiler's widths, and pin the header to them — 2026-09-29
+
+**What was wrong (W3-runner4-3).** The `crates/runner/src/rank.rs` module
+header said a `Scored` was 120 bytes, pricing `Edge` at 64 for eight fields.
+`Edge` in `crates/runner/src/outcome.rs` declares fourteen: `n`, `mean_paisa`,
+`wins`, `win_sum`, `adverse_sum`, `favourable_sum`, `losses`, `loss_sum`,
+`min_win_paisa`, `max_win_paisa`, `max_loss_paisa`, `mismatched`, `refused`,
+`t`. The peak it derived from that width (67 MB at `keep = 10_000` on fourteen
+cores) and the `top_of` comment's forty-chunk example (48 MB, against 1.2 MB)
+were understated with it.
+
+**The change.** The header and the `top_of` comment now state `Scored` 168
+bytes (`ConditionMask` 48, `hits` 8, `Edge` 112), a heap row
+`Marked<Scored>` 176 bytes, the chunk-heap peak at about 98.6 MB
+(56 x 10,000 x 176), and the forty-chunk example at 70.4 MB against 1.8 MB.
+No code path changed; this is a documentation correction, so no run identity
+moves.
+
+**Why a test and not another hand count.** This paragraph has now carried a
+stale width three times. `rank::tests::the_header_widths_and_peak_are_the_measured_type_widths`
+builds every figure above from `core::mem::size_of` and requires the source to
+contain it, so the next field added to `Edge` fails the build until the text
+moves. It also requires `Scored` to be its three fields with no padding and
+every lens wrapper (`ByPayoff`, `ByPath`, `ByAsymmetry`) to have the
+`Marked<Scored>` width. On `origin/main` (2c209309) the test fails with
+`stale width in rank.rs`, naming the phrase it expected: a `Scored` of 168
+bytes, `ConditionMask` 48, `hits` 8, `Edge` 112.
+
+### D-0977 — Refuse a p-value outside [0, 1] in Benjamini–Hochberg instead of counting it — 2026-09-29
+
+**What was wrong (GAP5-53).** `runner::significance::benjamini_hochberg`
+sorted with `f64::total_cmp` and counted every value at or below its rank's
+threshold. `total_cmp` puts `-NaN` first and `+NaN` last, so on `origin/main`
+`[-NaN, 0.04]` answered 2, `[NaN, 0.04]` answered 0, and `[-1, 0.9]` answered
+1: the sign bit of a NaN decided the count, and a negative value was a
+finding. Measured by a probe test on 2c209309:
+`left: (2, 0, 1)`, `right: (0, 0, 0)`.
+
+**The change.** The function returns `Option<usize>` and answers `None`,
+before sorting, when any value is NaN of either sign, infinite, below zero or
+above one. A p-value outside `[0, 1]` is a defect upstream; counting it, or
+silently dropping it, would be the fallback §4 bans. Both ends of `[0, 1]` are
+still answered. The function has no caller outside its own tests (`git grep
+benjamini_hochberg -- crates/` names only `crates/runner/src/significance.rs`;
+the one other tracked mention is gate 8's sort comment in
+`.github/workflows/ci.yml`, whose "three tests, which pass at most six
+elements" was already wrong about the hundred-element Bonferroni test and is
+now one test short as well; that comment is left for the gate's own owner and
+recorded here as stale), so no report and no run identity changes.
+`significance::tests::benjamini_hochberg_refuses_a_value_that_is_not_a_probability`
+proves it.
+
+**Not done.** The ledger row also asked for a charter source row for
+Benjamini and Hochberg (1995). This change adds none: no source for it is
+recorded in `docs/00-charter.md`, and writing one without reading the source
+would be the invention §3 rule 1 forbids. The citation remains UNVERIFIED in
+the charter's sense.
+### D-0765 — Count a directory the store catalog cannot list, rather than skip it — 2026-09-29
+
+**What happened (W3-store1-4).** `store::catalog::walk` kept the walk going
+when a directory below `bars/` failed `read_dir`, which is right: one locked
+corner must not hide the rest of the store. But it did so with a bare
+`continue` and no census bucket, and it read entries with `flatten()`, which
+throws away an entry the operating system could not read. Reproduced on
+origin/main 2c209309: two months, the `BANKNIFTY` directory at mode 000, gave
+`Census { seen: 1, spot: 1, .. }` with `reconciles()` true. The second month
+was on disk and the census did not mention it, although the module header
+says nothing is dropped silently (S-25).
+
+**The change.** `Census` gains `unreadable`: a directory below `bars/` that
+could not be listed, or an entry that could not be read, is counted there
+once and toward `seen`, and `reconciles` sums it with the other buckets. The
+walk still continues past it, and the root failing is still
+`CatalogError::BarsUnreadable`. The same fixture now gives `seen 2, spot 1,
+unreadable 1`, and the readable month is still the one row
+(`a_directory_the_walk_cannot_list_is_counted_not_dropped`). What the locked
+directory holds stays unknown: it is counted once, not per file, because the
+walk cannot see its files.
+
+**Printed since D-0769.** When this entry was written, the `cli` reports that
+print a catalog census (`batch::census_lines`, `research::render`, and the
+pool surface) did not print the new bucket. D-0769 prints it in all three.
+
+### D-0766 — The store catalog does not follow a symbolic link; it counts it — 2026-09-29
+
+**What happened (W3-store1-5).** `store::catalog::walk` decided whether to
+descend with `Path::is_dir`, which follows a link. Reproduced on origin/main
+2c209309: one real month plus `bars/groww/NSE/back -> ../..` gave
+`Census { seen: 33, spot: 1, wrong_depth: 32, .. }` on macOS, the walk
+re-entering the tree through the link until `read_dir` failed on the kernel's
+link limit and that failure was swallowed. The count depends on the scratch
+root, and was re-measured on 2026-09-30 with the same test binary: `seen 34,
+wrong_depth 33` with the root under `/private/tmp/claude-501/`, and `seen 33,
+wrong_depth 32` for the same directory reached as `/tmp/claude-501/`, because
+`/tmp` is itself a link (`/tmp -> private/tmp`) and spends one of the limit's
+links. No test asserts either count. The comment above the walk's stack
+said the explicit stack dealt with a symlink loop; it did not. A link that
+resolved to nothing answered `is_dir` false and was classified as a bar file.
+
+**The change.** The walk reads `DirEntry::file_type`, which describes the entry
+itself. A symbolic link, to a file or a directory, resolving or not, is counted
+once in the new `Census::linked` bucket and toward `seen`, and is never
+followed; `reconciles` sums it with the other buckets. An entry whose type
+cannot be read is `unreadable` (D-0765). The same fixture now gives
+`seen 2, spot 1, linked 1, wrong_depth 0`
+(`a_symlink_loop_is_counted_once_and_not_walked`).
+
+**Why not follow links with a visited set.** `docs/02-store-format.md` §9 lists
+a symlink at a path component as a hazard that defeats vendor-prefix
+isolation, so a link under `bars/` is counted as something this store does
+not produce rather than resolved.
+
+**What this narrows, and where it is named.** A vendor or symbol directory
+under `bars/` that is itself a symbolic link was walked and its months offered
+to `sweep-all` before this entry, and is not offered now: its months are absent
+from `sweep-all`, `research-plan` and `pool` (the reviewer's probe: a linked
+`bars/dhan` gave `held=1` on origin/main 2c209309 and `held=0, linked: 1` here).
+`sweep-stored`, which is given the month by name and opens it through
+`BarFile::open_existing`, still reaches it by reading: that open is
+`fault(File::open(&bars_path), &bars_path, Action::Open)` in
+`crates/store/src/file.rs`, and `File::open` follows a link (not run here). D-0769 prints the `linked`
+count in all three reports, so the narrowing is named on the page rather than
+silent.
+
+### D-0767 — A month stem must be digits only before it is parsed — 2026-09-29
+
+**What happened (W3-store1-6).** `store::catalog::parse_month` checked the
+width of `yyyy` and `mm` and then parsed them as integers. Rust's unsigned
+integer `FromStr` accepts a leading `+`, so the stem `2026-+8` passed the width
+check and was listed as the month `2026-08`. Reproduced on origin/main
+2c209309: `groww/NSE/INDEX/NIFTY/1min/2026-+8.bin` alone gave `spot 1,
+malformed_month 0` and a held `2026-08`, a path the renderer would write as
+`2026-08.bin`, which did not exist. The comment above the width check says a
+hand-made name must not masquerade as one the writer produced.
+
+**The change.** After the width check, every byte of both fields must be an
+ASCII digit, or the stem is `malformed_month`. `2026-+8.bin` and `+026-08.bin`
+beside `2026-08.bin` now give `malformed_month 2, spot 1` and one row
+(`a_signed_month_field_is_malformed_not_a_second_spelling`).
+
+### D-0768 — A non-UTF-8 path component is counted, not dropped — 2026-09-29
+
+**What happened (W3-store1-7).** `store::catalog::classify` built the path's
+components with `filter_map(|c| c.as_os_str().to_str())`, which drops a
+component that is not UTF-8. The depth test then ran on a list one level
+short. Reproduced on origin/main 2c209309 by calling `classify` on
+`bars/<0xFF>/groww/NSE/INDEX/NIFTY/1min/2026-08.bin`: `spot 1` and a held
+`groww` NIFTY `2026-08` for a seven-level path under an unnamed first level.
+
+**The change.** The components are collected as `Option<Vec<&str>>`; one
+non-UTF-8 component files the whole path in the new `Census::non_utf8` bucket,
+which counts toward `reconciles`. The store renders its paths from a `String`
+(`StorePath::to_path_buf` pushes `self.to_string()`), so no such name is one it
+wrote.
+
+**Honest limit.** The proof calls `classify` directly
+(`a_non_utf8_component_is_counted_and_never_dropped`). The walk-level fixture
+could not be built on this machine: `create_dir_all` with a `0xFF 0xFE`
+component returned `Illegal byte sequence` (errno 92) on the APFS volume the
+tests run on. The ledger names ext4 as a filesystem that allows such names;
+that was not run here.
+
+### D-0769 — The store catalog refuses a `bars` it cannot stat, and names every entry it did not offer — 2026-10-01
+
+**What happened (root probe).** `store::catalog::walk` opened with
+`if !bars.is_dir() { return Ok(Holdings::default()) }`. `Path::is_dir` answers
+false on every failure to stat, so three different faults returned `Ok` with a
+zero census that reconciled, the same answer as "nothing pulled yet": a store
+root at mode 000 holding a real month, a `bars` that is a regular file, and a
+`bars` link that resolves to nothing. Found by a review of D-0765 and
+reproduced on this branch before the change:
+`a_bars_path_that_is_not_a_directory_is_refused_by_name`,
+`a_dangling_bars_link_is_refused_not_empty` and
+`a_store_root_that_cannot_be_searched_is_refused` each failed with
+`Holdings { held: [], census: Census { seen: 0, .. } }` where a refusal was
+expected. It predates the branch: the reviewer's probe gave the same `Ok` on
+origin/main 2c209309.
+
+**The change.** `bars_present` stats `root/bars` without following it
+(`symlink_metadata`); `NotFound` there, and only there, is the empty store.
+Anything else is followed with `metadata`: a directory is walked, and a
+non-directory or a failure to stat is `CatalogError::BarsUnreadable` naming
+the reason (`it is not a directory`, or the operating system's own message).
+`bars` itself may still be a link to a directory, because the root is
+operator configuration (`a_bars_link_to_a_real_directory_is_walked`); links
+below it stay counted and not followed (D-0766). The test
+`a_bars_path_that_is_not_a_directory_reports_an_empty_store`, which pinned the
+old answer, is replaced by
+`a_bars_path_that_is_not_a_directory_is_refused_by_name`: the old behaviour
+is the defect.
+
+**What happened (entry dispatch).** Two further gaps in the per-entry step,
+found by the same review. First, `walk` counted an entry the operating
+system could not read, and an entry whose type could not be read, as
+`unreadable`, but no test reached either branch: deleting both
+`count_unreadable()` calls left every store test green (a surviving mutant,
+`CLAUDE.md` §4). Second, every entry that was neither a link nor a directory
+went to `classify` as a bar file, so a FIFO named `2026-09.bin` at spot depth
+became a held spot month (the reviewer's `mkfifo` probe gave
+`held=["2026-08", "2026-09"]`, and origin/main 2c209309 gives the same).
+
+**The change.** The per-entry decision is one function, `admit`, which takes
+`io::Result<(FileType, PathBuf)>`: a failure to read the entry and a failure
+to read its type arrive as one `Err` and are counted by one call, which
+`an_entry_the_os_could_not_read_is_one_unreadable_entry` reaches with an
+injected `io::Error`. Only `FileType::is_file` is classified; anything that
+is not a regular file, a directory or a link is counted in the new
+`Census::not_regular` bucket, which `reconciles` sums
+(`an_entry_that_is_not_a_regular_file_is_never_classified_as_a_month` with
+the type of `/dev/null`, and `a_socket_named_like_a_month_is_not_a_held_month`
+on a real tree, where the socket stands in for a FIFO because the standard
+library can create one).
+
+**What happened (the operator surface).** D-0765 to D-0768 counted the new
+buckets on `store::catalog::Census`, and no report printed them. The review's
+fixture held `RELIANCE` and `TCS` under `NSE/CASH` and `NIFTY` and `BANKNIFTY`
+under `NSE/INDEX`, with `TCS` and `BANKNIFTY` at mode 000: `research-plan`
+printed `TCS | 0/81 | ...`, the same row as a stock never pulled, and
+`sweep-all` printed `store holds 2 spot instrument-month(s)` and nothing about
+the two locked directories. A linked `BANKNIFTY` directory, which D-0766
+stopped offering, likewise appeared on no line.
+
+**The change.** `Census::unoffered_report` is the one spelling: a `NOT
+OFFERED` line naming the `unreadable`, `linked`, `non_utf8` and `not_regular`
+counts when any is non-zero, and a `CATALOG CENSUS DOES NOT RECONCILE` line
+when the buckets do not sum to `seen`; an empty string otherwise
+(`the_unoffered_report_names_every_unwalked_bucket_and_is_silent_otherwise`).
+`batch::census_lines` (`sweep-all`), `research::render` (`research-plan`)
+and the pool's `head_under` print it
+(`the_report_names_the_entries_the_catalog_did_not_offer`,
+`a_sweep_over_a_store_with_a_linked_symbol_directory_names_the_link`,
+`the_inventory_names_the_entries_the_catalog_did_not_offer`,
+`the_pool_page_names_the_entries_the_catalog_did_not_offer`).
+
+**Printed, not refused.** One locked or linked corner does not refuse the
+whole report, for the reason `walk` does not refuse it: it must not hide the
+rest of the store. The report degrades loudly and names the count, as
+`CLAUDE.md` §4 allows. What an unreadable directory or a link holds stays
+unknown, and the line says so.
+
+**Not changed here.** The walk keeps no set of visited `(device, inode)`
+pairs, so a cycle made by a bind mount or a directory hard link is still
+descended; `docs/06-limits.md` §86 records that the linear bound holds for an
+acyclic tree only. Not run on this machine.
+### D-0750 — A grammar cursor's equality is its encoded state — 2026-09-29
+
+**What was wrong (ET-expressions-3).** `vocab::expression_search::Cursor`
+derived `PartialEq`, so `==` also compared the instruction scratch `code`,
+which `encode` does not write and `decode` rebuilds only below `at`. After a
+cursor emits a candidate, the slot at `at` still holds that candidate's last
+instruction, and `decode` leaves it `Pad`. A checkpoint reopened from a
+cursor's own bytes therefore compared unequal to that cursor. On `origin/main`
+(2c209309) the new test fails with the message
+`a reopened checkpoint equals its source`.
+
+**The change.** `Cursor` implements `PartialEq` as `encode() == encode()` and
+`Eq` on top of it. The scratch is not state: `advance` writes the slot at `at`
+before it reads the prefix. The new test drives 400 one-node steps over a
+two-bit alphabet, requires at least one candidate and one backtrack, and after
+every step requires the reopened checkpoint to equal the cursor in both
+directions, and the cursor before the step to differ from the cursor after it.
+The unit test
+`a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not` asserts
+that the reopened scratch really differs after a one-leaf candidate while the
+two cursors compare equal, and that one further step compares unequal.
+
+### D-0751 — Display is lossless text, not a parser round trip — 2026-09-29
+
+**What was wrong (ET-expressions-2).** `Expression`'s `Display` comment said
+only that the fixed wire grammar can exceed the parser's limits. Programs the
+parser itself accepted exceed them too: every NOT renders as `!(`, two nesting
+levels, and every binary node is fully parenthesised.
+`display_can_exceed_the_parser_limits_for_programs_the_parser_accepted` pins
+three such programs, one refused `SourceCapacity` and two `NestingCapacity`,
+and shows each survives `encode` and `decode` exactly.
+
+**Decision.** Recorded, not changed. The rendered text is what `api` serves:
+`crates/api/src/booleanjson_tests.rs` pins a row's `expression` as
+`(0 | !(1))`. Changing that text is a change of its own. The
+comment now states the limit, and `docs/06-limits.md` records it. The cli
+re-reads operator text through the parser, and so meets the limit, in
+`cli expression-stored` (`crates/cli/src/expression.rs`:
+`let expression = Expression::parse(source)`) and in the explicit program
+catalog (`crates/cli/src/boolean_catalog_command.rs`, `parse_catalog`:
+`let program = Expression::parse(line)`).
+
+### D-0752 — A grammar node budget bounds choices, not progress — 2026-09-29
+
+**What was wrong (ET-expressions-5).** The limits said node budgets control one
+invocation and one transition replays at most 4,096 nodes, and said nothing
+of how many nodes separate two candidates. `Cursor::advance` tries every rank
+at every position, so that number grows with the alphabet and can exceed
+4,096. `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+counts it.
+
+**Decision.** Recorded, not changed. Pruning a refused leaf's remaining ranks
+would move the node counts and pause points a saved search depends on: with
+that pruning, the test above fails on its pinned counts (D-0754). `advance`'s
+comment and `docs/06-limits.md` state the limit.
+
+### D-0753 — One grammar node revalidates its whole prefix — 2026-09-29
+
+**What was wrong (ET-o1-proof-coverage-5).** Each grammar choice calls
+`valid_prefix` on the whole prefix over a fresh 1,151-slot stack, and nothing
+said so. `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+pins it: both edges of the stack width by behaviour, the scan from the first
+instruction by behaviour, and the inline array and `advance`'s one
+whole-prefix call per choice by source shape (D-0754).
+
+**Decision.** Recorded, not changed: incremental validation would have to keep
+per-position stack state beside the encoded cursor, which `decode` must then
+rebuild. The cost is stated in `advance`'s comment and in `docs/06-limits.md`,
+with the time per node recorded as unmeasured.
+
+### D-0754 — The grammar-search proofs pin what they name, and `Cursor`'s `Debug` is its state — 2026-10-01
+
+**What was wrong.** Review round 4 on this batch found three proofs weaker than
+the sentences citing them. The D-0753 test asserted
+`size_of::<[usize; MAX_INSTRUCTIONS]>()`, a type it named itself, so widening,
+narrowing or moving `valid_prefix`'s stack to the heap still passed, and it
+never looked at `advance`, so an incremental validator there would have passed
+too. Invariant row C4-VOCAB-01 said one node step *always* changes the encoded
+state, while `advance` on an exhausted cursor returns `Exhausted` before any
+write. D-0752 said pruning would keep the candidate stream, which no test
+compared. `Cursor` also kept a derived `Debug` beside its encoded-state
+equality, so two equal cursors printed their differing scratch.
+
+**The change.**
+`prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack` now
+requires a prefix of `MAX_INSTRUCTIONS` operands to be accepted and one of
+`MAX_INSTRUCTIONS + 1` to be refused with room left to reduce it, and reads the
+source: `valid_prefix` holds `let mut starts = [0_usize; MAX_INSTRUCTIONS];`
+once before its scan, and `advance`'s node loop calls
+`valid_prefix(prefix, usize::from(self.length))` over `self.code.get(..=at)`
+and names no other validator. It fails with the stack sized by the prefix, by
+`MAX_INSTRUCTIONS + 1`, by 64, by `MAX_INSTRUCTIONS / 2 + 1`, or on the heap at
+full width, and with `advance` calling a helper instead. C4-VOCAB-01 is scoped
+to the 400 steps its test drives, and
+`cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch` now also
+requires an exhausted cursor's step to leave its bytes and the work counter
+unchanged. The unbacked D-0752 clause is replaced by what the pruning break
+shows. `Cursor` writes `Debug` by hand from the encoded fields (the alphabet up
+to `count`, `length`, `at`, `finished`, the digits up to `length`), and
+`a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not` pins
+the text, its equality across a reopen and its refusal to panic on a corrupted
+count or length. No stored byte, encoded cursor, displayed expression or run
+identity changes.
+
+**Still open, not changed.** Per-node validation still grows with the prefix
+(D-0753), a node budget still does not bound progress between candidates
+(D-0752), and displayed text still cannot always be re-entered (D-0751).
+`docs/07-plan.md` lists all three as open.
+### D-0926 — Name a missing or extra middle fold-audit bar as absent, and roll a failed global replay append back to its starting length — 2026-09-30
+
+**Fold audit (W2-cli5-7).** `fold_audit::compare` paired stored record i with
+folded record i. A coarse file missing one MIDDLE bucket then compared every
+later stored bar with the fold's next bucket, so each was reported as a
+`ts_micros` field disagreement and the last fold bucket was named absent,
+although the neighbouring test's doc says a file with more or fewer records "is
+named as that, rather than reported as a field disagreement". That test removed
+only the LAST bucket, where position and timestamp agree. `compare` now walks
+the two sequences with two cursors. Heads that open at the same time are
+compared field by field as before. When they differ, the head of one side is
+named absent from the other if the other side's head opens no earlier than the
+NEXT bar on this side; otherwise the two heads are one bar whose timestamp
+differs, and it is still named as the `ts_micros` field, so the existing
+`every_stored_field_disagreement_retains_its_exact_position_and_values` holds
+unchanged. A bucket the file lacks is reported at its index in the fold, which
+is the index the positional pairing gave a bucket missing from the end.
+`fold_audit::tests::a_missing_or_extra_middle_record_names_only_that_record`
+removes one middle bucket and inserts one stray bar, and
+`fold_audit::tests::two_missing_or_stray_middle_records_and_a_moved_bar_are_each_named_once`
+removes two from the middle and two from the end, inserts two, and moves one
+middle bar earlier and later; both
+require exactly the disagreements named above each time.
+
+The absent and present labels assume a stored file whose opening times
+strictly increase, which the store's writer enforces (`BatchNotOrdered`, "A
+batch whose own timestamps do not strictly increase", and
+`TimestampsOutOfOrder` for a batch that does not follow what is committed). On
+a file damaged after writing, pairing by time named one bar both files hold as
+absent from the store AND as present only in the store. `compare` therefore
+refuses such a file before pairing, naming the first record that does not
+follow; `fold_audit_range` reports that refusal on its rung's line, as it does
+any unreadable rung.
+`fold_audit::tests::a_stored_file_out_of_opening_time_order_is_refused_before_pairing`
+swaps two middle bars, repeats the last bar, and repeats a bar at `i64::MAX`,
+and requires the refusal each time.
+
+`Disagreement.at` counts in the fold for a bucket the file lacks and in the
+stored file otherwise, so one report could print "record 2" twice about two
+bars. `Disagreement::line` renders the first as "fold record N" and the rest as
+"stored record N", and the fold-audit report prints that line;
+`fold_audit::tests::a_rendered_disagreement_names_which_file_its_index_counts_in`
+requires both exact lines.
+
+**Append rollback (W2-cli5-6).** V1 `append_encoded`, V2 `append_encoded_v2`
+and V2's inline candidate and stream-header loops wrote records one
+`write_all` at a time and returned on the first error with no rollback. A write
+that extends the file and then fails leaves a partial record, and
+`check_record_file` refuses a body that is not a whole number of strides ("has
+a ragged {payload}-byte record body") on every later open; a record that
+refused to encode after earlier ones were written left those behind as well.
+`frontier.rs` already truncates to its measured end in the same situation. All
+four V1/V2 append sites, and V3's `append_records`, now go through one
+`global_replay::append_encoded_with`, which takes the starting length from its
+seek to the end, and on any encode or write error truncates back to it and says
+so in the refusal, or says that the truncation also failed.
+`global_replay::tests::a_partial_append_write_rolls_back_to_its_starting_length`
+fails a write after one whole record and three bytes of the next, and requires
+the file back at its starting length, and a refused truncation named;
+`global_replay::tests::a_refused_append_leaves_the_file_exactly_as_long_as_it_was`
+and
+`global_replay_v2::tests::a_refused_v2_append_leaves_the_file_exactly_as_long_as_it_was`
+refuse the second record's encoding on a real file, and
+`global_replay_v3::tests::a_refused_v3_append_leaves_the_file_exactly_as_long_as_it_was`
+does the same through V3's `append_records`. The two V2 commit sites are
+pinned at commit level:
+`global_replay_v2::tests::a_refused_v2_commit_leaves_its_candidate_and_stream_files_as_long_as_they_were`
+calls `append_prepared_files` once with a second candidate that refuses to
+encode and once with a receipt whose second stream header overflows its
+candidate range, and requires the candidate file, then the stream file, back at
+its starting length. W2-cli5-6 named V1 and V2; V3
+had the same loop, so it takes the same rollback. The rollback is per file: a
+commit that appends to several files and fails on a later one leaves the earlier
+files' whole records in place, as before. A process killed between two writes
+runs no rollback; `docs/06-limits.md` records that under D-0927.
+
+### D-0927 — Record the whole-ledger re-reads on Global Replay V1 appends and V3 commits instead of removing them — 2026-09-30
+
+W2-cli5-1 and W2-cli6-2 found two per-append costs that `docs/06-limits.md`
+§140 and §166 did not state: V1 hashes all four replay files before and after
+each new publication, and V3 re-reads and decodes all five files on every open,
+commit and audit, and re-validates every committed block through
+`validate_committed_block`, `validate_semantics` and `schedule_candidates`,
+which sorts each block's candidates. Both are kept and recorded, not removed.
+V1's first hash is the stale-writer check that
+`global_replay::tests::same_length_external_mutation_makes_open_writer_stale`
+requires; that test overwrites one byte inside the first record, so it pins a
+pre-append check, not one that spans the whole file. V1's second hash, after
+the append, is kept only for simplicity: no test requires it, and the first
+pass's hasher extended with this call's bytes would give the same baseline.
+V3's reload is taken inside `commit_locked`, which runs while the writer lock
+is held. Making either O(1) per append needs a design and a proof this batch
+does not have. The costs, the source lines they are read from, the
+killed-process tail left by D-0926, and the unsynced rollback are recorded in
+`docs/06-limits.md` under "Global Replay V1 appends and V3 commits re-read
+their whole ledger". Nothing was timed.
+### D-0936 — A selection ledger that grew also re-reads what it had already indexed — 2026-09-29
+
+**What happened.** W2-cli14-5. `SelectionLedger::absorb_new`,
+`SelectionLedgerV2::absorb_new` (`crates/cli/src/selection.rs`) and
+`SelectionLedgerV3::absorb_new` (`crates/cli/src/selection_v3.rs`) refused a
+file that shrank (`if len < self.scanned`) and a same-length change
+(`if len == self.scanned { require_generation_unchanged(..) }`). When the file
+grew, they rechecked the 40-byte header, seeked to `self.scanned` and decoded
+only the new records. A second handle that rewrote a record this handle had
+already indexed, and also appended a valid one, was absorbed: the three tests
+below appended successfully on origin/main (`2c209309`).
+
+**The change.** When the length grew past the indexed length, each
+`absorb_new` now calls `require_indexed_records_unchanged` before decoding the
+new records. It re-reads every indexed record after the header, in file order,
+and requires it to equal `to_bytes()` of the receipt held in memory; a
+difference refuses with "rewrote already-indexed selection record" and nothing
+is appended. The tests are
+`selection::tests::rewrite_plus_append_of_an_indexed_selection_record_refuses_before_append`,
+`selection::tests::selection_v2_rewrite_plus_append_of_an_indexed_record_refuses_before_append`
+and
+`selection_v3::tests::rewrite_plus_append_of_an_indexed_record_refuses_before_append`;
+each also requires the file length to be unchanged by the refused append. An
+honest append by another handle is still absorbed, in file order:
+`selection::tests::file_order_survives_stale_absorb_and_reopen_and_read_only_stays_read_only`,
+`selection::tests::selection_v2_honest_growth_by_another_handle_is_absorbed_in_file_order`
+and `selection_v3::tests::honest_growth_by_another_handle_is_absorbed_in_file_order`.
+Each format passes its own header length to the shared helper.
+
+**What it costs, and why it is accepted.** The re-read is O(indexed records)
+and runs only on the growth branch. An append through the same handle leaves
+the file length equal to `self.scanned` (after its write the append advances
+`self.scanned` by `.checked_add(SELECTION_STRIDE)`, `SELECTION_V2_STRIDE` or
+`SELECTION_V3_STRIDE`, then runs
+`self.generation = validated_generation(&self.file, &self.path, self.scanned)?;`), so the
+next append takes the same-length branch and does not re-read. The cost is
+paid when another handle appended since this one last looked, which already
+costs a decode of every record that handle added. The constant-size
+generation cannot separate "grew" from "rewrote and grew", because an honest
+append changes the same metadata. This does not defend against an actor able
+to forge metadata or to restore identical bytes; it compares bytes only.
+Recorded in `docs/06-limits.md`.
+
+### D-0937 — Population V6 sizes its receipt index by its records, and two lookup costs are stated as they are — 2026-09-29
+
+**W2-cli13-2, changed.** `PopulationV6Ledger::scan` (`crates/cli/src/population_v6.rs`)
+ran `self.receipts.try_reserve(usize::try_from(self.bounds.authorities)..)` on
+every open and after every append, so it allocated and initialised an index
+sized by the configured authority ceiling rather than the data. It now
+reserves `receipt_index_capacity(self.record_count, self.bounds.authorities)`:
+`record_count / BLOCK_MANIFEST_RECORDS`, capped by the authority bound. A
+complete block is `candidate_count + BLOCK_MANIFEST_RECORDS` records (the
+scan's `checked_add(BLOCK_MANIFEST_RECORDS)`), so the reservation covers every
+complete block the file's records can hold, up to that bound.
+`population_v6::tests::scan_sizes_the_receipt_index_by_records_not_by_the_authority_bound`
+opens an empty ledger under an authority bound of `1 << 16` and requires a
+capacity of 0, then appends one block and reopens and requires a capacity
+below `1 << 16`; on origin/main the empty-ledger assertion failed with a
+capacity of 114688.
+`population_v6::tests::receipt_index_capacity_is_records_over_four_capped_by_authorities`
+pins the arithmetic. The scan itself still reads every record; only the
+reservation changed.
+
+**W2-cli13-3, stated, not changed.**
+`CommittedStoredPopulationV6::selected_stored_oos_witnesses` resolves each
+requested strategy with `.find(|row| row.population().candidate_semantic_id() == *strategy)`
+over the source rows, under `if strategies.len() > 25`. That is O(C) per
+strategy. The same call runs `let before = self.execution_v4_source()?;` and
+`let after = self.execution_v4_source()?;`, which re-authenticate the retained
+source and project every row, so an index would not change the call's class.
+The function had no cost statement; it now has one, and
+`population_v6::tests::replay_lookup_cost_doc_names_the_live_linear_find`
+holds that statement to the lines above. The lookup was not rewritten,
+because an index would not change the call's class and the defect's own
+verdict was that the scan was undocumented.
+
+**W2-cli14-0, corrected.** The module doc of `crates/cli/src/selection_v5.rs`
+said "Exact lookup after open is one expected/amortized-O(1) `HashMap` probe".
+`structural_receipt` runs `self.require_unchanged()` before
+`self.receipts.get(selection_id)`, and `require_unchanged` runs
+`self.rows.require_unchanged()?; self.completions.require_unchanged()?;`,
+each of which reaches `measured_generation`, whose `while remaining != 0` loop
+feeds every byte of the file to `hasher.update(chunk)`. The lookup is O(F);
+the probe inside it is average O(1). The doc now says so, and
+`selection_v5::tests::module_doc_states_lookup_is_o_f_because_it_rehashes_both_files`
+pins both the corrected sentence and the source lines it rests on. The
+rehash is the integrity check the ledger relies on and is kept.
+### D-0950 — A refusal under a 200 is a refusal on the rolling POST and on discovery, and an undeclared document length is bounded while it is read — 2026-09-29
+
+**W1-pull2-11.** `HttpSource::window_async` already weighed a 2xx body
+against the vendor's `error_names` contract before it told the governor the
+call succeeded. `HttpSource::post_json` and `Discovery::get` did not: both
+called `record_success` on any 2xx before the body was read and returned the
+body as `Ok`. So a Dhan `DH-901` under a 200 raised the allowance and reached
+the caller as a body to decode. Both paths now record only a 429 from the
+status, and weigh the body through the same `weigh_body` that `window_async`
+uses: a body-named throttle is recorded as a throttle, any other named refusal
+moves nothing, and only a body naming no refusal is recorded as a success. A
+named refusal is returned as a `chain::Refusal` carrying the status the vendor
+sent and the body, with `credential_dead` set exactly when the body names a dead
+session. `http::tests::a_refusal_under_a_200_on_the_post_and_discovery_paths_is_never_a_success`
+drives `DH-901`, `DH-904`, `DH-905` and a clean body through both paths over a
+loopback socket, and requires the refusal, its status, its `credential_dead`
+and the direction the per-second allowance moved (unchanged, down, unchanged,
+up). On origin/main it fails on the first row: `post_json` returned the
+`DH-901` body as `Ok`.
+
+**W1-pull3-3 and W1-pull3-6.** `resolve::HttpDocuments::body_of` refused a
+declared `Content-Length` past `nse::MAX_DOCUMENT_BYTES` before reading, but an
+answer that declared no length (chunked, or delimited by the close) was read to
+its end by `Response::text` and only then compared with the bound. The body is
+now read frame by frame and the read stops at the first frame that would carry
+it past the bound, so the bytes held never exceed `MAX_DOCUMENT_BYTES`. The decoded text is
+`String::from_utf8_lossy` over the bytes, which is what `text()` was in this
+build: reqwest 0.12.28 is built without its `charset` feature (no `encoding_rs`
+in `Cargo.lock`), and its `text()` under `#[cfg(not(feature = "charset"))]` is
+`String::from_utf8_lossy(&full)`.
+`resolve::tests::an_undeclared_length_past_the_bound_is_refused_before_it_is_all_read`
+offers eight times the bound with no `Content-Length`, both close-delimited and
+chunked, and requires the server to have written less than it offered; on
+origin/main the server wrote all 67108864 bytes.
+`resolve::tests::an_undeclared_length_at_the_bound_is_read_whole` requires
+exactly the bound to be read whole and one byte past it to be refused.
+
+**The throttle half stays on the status.** Only the success half of the
+governor feedback moved behind the body; a 429 is still recorded from the
+status alone, by `record_throttle_status`.
+`http::tests::a_429_on_the_post_and_discovery_paths_narrows_the_allowance`
+primes the governor as above and requires a 429 to be returned as a refusal
+carrying 429 and to narrow the per-second allowance on both paths, and a 503
+and a 401 to leave it unchanged. It passes on origin/main as well: it pins
+behaviour the correction keeps, not the defect.
+
+### D-0951 — A text timestamp is read only when its whole 19-byte shape is right — 2026-09-29
+
+**UC-23.** `http::local_seconds` read six numbers at fixed offsets, checked
+nothing at bytes 4, 7, 10, 13 and 16, and ignored everything after byte 19. So
+`2026x08-04 09:15:00` was read as a stamp, and on an `IsoDateTimeText` feed
+(Groww's descriptor) `2026-08-04T09:15:00Z` was read as 09:15 local and then
+shifted by IST, a 5h30m error with nothing to refuse it. `i64::from_str` also
+takes a sign, so `-1` passed as an hour. `local_seconds` now requires exactly 19
+bytes: `-` at 4 and 7, `T` or a space at 10, `:` at 13 and 16, and an ASCII
+digit everywhere else. The `IsoDateTimeOffset` arm of `one_stamp`, which reads a
+stamp that carries its own zone, hands `local_seconds` its first 19 bytes and
+leaves the rest to `stated_offset`, as before.
+`http::tests::a_text_stamp_is_refused_unless_its_whole_shape_is_right` requires
+the `T` and space separators to read alike, refuses each listed malformed stamp
+under both `IstDateTimeText` and `IsoDateTimeText`, and requires a `+0530` stamp
+under `IsoDateTimeOffset` to read as the local time less 19800 seconds. On
+origin/main it fails on `2026x08-04 09:15:00`, read as `Some(1785834900)`.
+### D-0952 — Refuse a rolling open-interest cell that is not a count, instead of storing a zero, a truncation or the null sentinel — 2026-09-29
+
+**What was wrong (GAP16-22).** `pull::rolling::read` read every present
+open-interest cell through `number`, which answered `0` for a cell it could not
+read, truncated a fraction, and passed a literal `i64::MIN` through. That value
+is `OI_NULL`, the store's open-interest null (`CLAUDE.md` §7). So a cell of
+`"12345"` or `true` was stored as a measured zero, `1234.5` as `1234`, and
+`-9223372036854775808` as an absence the vendor never stated. Reproduced on
+origin/main code with the test added: `rolling::tests::an_open_interest_cell_that_is_not_a_count_is_refused`
+failed with `a string is not a count: "12345" gave Ok([Row { .. open_interest: 0 }, ..])`.
+
+**The choice.** Refuse, not degrade. A present open-interest cell is now read
+by `rolling::count`: an integer is the value; a decimal is accepted only when
+`csv::paisa` reads it as a whole number; a negative is refused, because
+`store::format::Bar::counts_are_sane` would refuse it later without naming the
+cell; and `i64::MIN` is refused, as `http::one_number` already refuses it on
+the intraday path. The refusal is a new `RollingError::Uncountable` carrying
+the field name and the cell's text. `null` and an absent cell still read as
+`OI_NULL`, and `0` still reads as a real zero. The test drives each refused
+spelling, and `0`, `12345`, `12345.0` and `null` as controls.
+
+**Not changed.** Volume and timestamp cells still go through `number`, which
+still answers `0` for a cell it cannot read. The ledger row named open
+interest, and this entry changes nothing else; the doc comment on `number` says
+so.
+
+### D-0953 — Bound the census walk by every member it opens, check the calendar's day arithmetic, and hold its session count — 2026-09-29
+
+**The census cap (W1-pull1-2).** `archive::descend` checked `MAX_MEMBERS`
+against `out.len()`, the accepted members only. Under `Malformed::Collect`, the
+walk `read_dir_reporting` and `folder::read_census` use, a member that failed to
+decode was pushed to `rejected` and the walk went on, so a folder of undecodable
+members was opened and kept in full with no bound. Reproduced on origin/main code with the test added:
+`archive::tests::a_census_of_malformed_members_is_refused_at_the_member_cap`
+failed with `(kept, rejected) = Ok((0, 50001))`. The cap now counts
+`out.len() + rejected.len()`, and the test requires
+`TooManyMembers { members: MAX_MEMBERS, cap: MAX_MEMBERS }`. Under
+`Malformed::Refuse` nothing is ever pushed to `rejected`, so the ingest walk's
+count is unchanged.
+
+**Checked day arithmetic (ET-bars-candles-store-5).** `Calendar::kind_of` and
+`Calendar::from_observed` subtracted days unchecked, and the workspace sets
+`overflow-checks = true` in `[profile.release]`, so a day near either end of
+`i64` panicked. Reproduced on origin/main code with the test added:
+`calendar::extreme_day_tests::an_extreme_day_is_unmeasured_rather_than_a_panic`
+panicked at the `epoch_day - self.first` subtraction in `kind_of` with
+"attempt to subtract with overflow". The
+four subtractions are now `checked_sub`. A day that cannot be indexed reads
+`Unmeasured`. A span that does not fit is handled the way the existing
+`try_from` fallback already handled one: the calendar holds the first day
+alone and every other day reads `Unmeasured`, never `Closed`. The test pins
+`span() == 1` and `Unmeasured` for that case.
+
+**The session count (W1-pull1-4).** `Calendar::sessions` filtered the whole
+`kinds` vector on every call. It is now counted once in `from_observed`, after
+the SEBI override is written, and held in a private field. Reproduced on
+origin/main code with the test added:
+`calendar::extreme_day_tests::sessions_is_counted_once_at_construction_not_per_call`
+empties `kinds` after construction and failed with `left: 0, right: 3`. The
+same test pins the override day as counted once, and the empty calendar as zero.
+### D-0972 — White's Reality Check earns nothing from a family in which no row ever varied — 2026-09-29
+
+**The defect (GAP5-51).** When every row of a family is constant, every
+recentred resample of every row is exactly `0.0`, so White's bootstrap maximum
+is a point mass at zero on every draw. A positive constant then never met or
+exceeded the observed statistic, and
+`white_reality_check_receipt_v1(&[vec![1; 100]], 1000, 7, DEFAULT_BLOCK)`
+returned the strongest probability 1,000 draws can express, 1/1001, and
+`family_tests_v1` carried it into the shared walk while its SPA receipt beside
+it counted 1001/1001. Measured on `origin/main` (2c209309) by this entry's
+tests before the change: the receipt was `matched_or_exceeded: 0,
+exact_p_value: ExactFamilyTestPValueV1 { matched_or_exceeded_plus_one: 1,
+draws_plus_one: 1001 }`, and `family_tests_v1` returned `Ok` with the same
+White fields and `SpaReceiptV1 { .. matched_or_exceeded: 1000 .. }`. The
+finding's own probe recorded the legacy half: "constant +1 legacy
+reality_check p=0.000999000999000999 clears=true", and Romano--Wolf's
+adjusted receipt refusing the same row (`rw_adjusted=false`).
+
+**Why it is the point mass, and only the point mass.** `reality_check` already
+answers `p = 1` for fewer than two periods on exactly this reasoning: the
+stationary bootstrap can only reproduce the sample, so "a p-value computed
+against a point mass is not a weak result, it is an absent one". A family in
+which no row varied reaches the same point mass from the other side. A family
+with at least one varying row does not: its null has spread, and the comment
+on `a_zero_variance_strategy_does_not_clear_the_studentized_tests` records
+that a riskless positive mean beating that spread is White's intended answer.
+So the rule is narrower than the finding's first suggestion (refuse any
+nonzero constant row, the `bootstrap_zero_v2` rule): that would have reversed
+a documented choice for mixed families, which this entry does not make.
+
+**The change.**
+
+- `reality_check` answers `p = 1` when every row is constant, beside its
+  existing zero-draw and one-period cases.
+- `white_reality_check_receipt_v1` refuses (`None`) a family in which every
+  row is constant and the observed statistic is positive. That is the only
+  point-mass case that counted anything but every draw; a nonpositive
+  statistic against the same point mass already counts `(B+1)/(B+1)`, and
+  those receipts are unchanged. Refusal rather than a restated `p = 1`,
+  because a different probability under the unchanged V1 procedure domain
+  would change what existing V1 bytes mean.
+- `family_tests_v1` refuses the same family with
+  `FamilyTestsRefusalV1::White`, after Romano--Wolf's refusal and before any
+  draw, so the shared walk still equals the separate procedures.
+
+**Who sees it.** `bootstrap_zero_v2` already refuses every nonzero constant
+row before the shared walk (`if first != 0 { return
+Err(FamilyRefusal::RomanoWolf(Refusal::NonzeroConstant { strategy })) }`), so
+it cannot reach the new refusal, and `boolean_qualification_v1` runs that
+zero-conservative evaluation with `?` on the line before its White receipt. A
+family reaching the new refusal holds a positive constant row, so neither
+path reaches it. The three
+`population_statistics_v2` call sites require the Romano--Wolf adjusted
+receipt beside White (each `romano_wolf_adjusted_p_values_v1(..)` ends in
+`?`), and that receipt refuses every zero-variance row, so a family reaching
+the new refusal there was already refused; it is now refused one call
+earlier, by the White message on the line before. The Boolean statistics
+measurement calls the White receipt without that requirement and now refuses
+such a family with its existing `"Boolean statistics White procedure
+refused"`. Its reader, `boolean_statistics_reader.rs`, decodes the stored
+White words (`pub white: [u64; 8]`) and names neither
+`white_reality_check_receipt_v1` nor `family_tests_v1`, so records already
+written are read as written. The legacy `reality_check` feeds the audit
+report's White row in `cli`, which now reads `p = 1` for such a family.
+
+**Tests.** `a_family_that_never_varied_mints_no_white_evidence` (runner
+`bootstrap`) and
+`a_family_that_never_varied_is_refused_by_white_in_the_shared_walk_too`
+(runner `bootstrap::family_pass`) fail on the unchanged code with the 1/1001
+receipt and pass with the change.
+`handled_zero_variance_keeps_named_procedure_compatibility` keeps its White
+assertion on a constant beside a varying row, the case this entry leaves
+measured.
+
+### D-0973 — The legacy Romano--Wolf stepdown decides on the exact finite-resample rule, in one walk, and refuses an alpha above one — 2026-09-29
+
+**The defects.** Three findings on one private function,
+`romano_wolf_aligned`, behind the public `romano_wolf` and
+`romano_wolf_receipt`:
+
+- **GAP5-52.** It rejected a strategy whose statistic exceeded a rounded
+  `1 - alpha` quantile of the bootstrap maxima, where
+  `romano_wolf_adjusted_p_values_v1` and
+  `ExactResamplingPValueV1::rejects_at_ppm` decide on the exact
+  `(1 + strict exceedances) / (B + 1) <= alpha` rule. The two disagreed. The
+  test `the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects`
+  compares 3,000 decisions (40 seeds x 5 shifts x 5 alphas x 3 strategies,
+  400 draws) and on `origin/main` (2c209309) failed with
+  `329 disagreements`: 164 at alpha 0, 164 at alpha 1 ppm and 1 at alpha
+  1,000,000 (seed 23, shift 1, strategy 2). The grid found none at 50,000 or
+  100,000 ppm; the finding's own probe did, at 1,000 draws: "tried=2000
+  legacy_only=1 [(268, 2, 51)] exact_only=2 [(178, 5, 50), (339, 2, 49)]".
+- **W3-runner1-4.** `romano_wolf` passed `alpha_ppm` unchecked, and
+  `1_000_000 - alpha` saturated to the smallest bootstrap maximum, so an
+  alpha above one rejected almost every strategy while `romano_wolf_receipt`
+  refused the same input. `an_alpha_above_one_rejects_nothing` failed on
+  `origin/main` with "alpha 1000001 is not a probability".
+- **W3-runner1-1.** Every round of the stepdown recomputed every survivor's
+  resampled mean over every draw: O(R·B·S·N) for R rounds, undocumented.
+  `each_null_statistic_is_computed_once_however_many_rounds` counts the null
+  statistics computed for eight strategies at 300 draws over a two-round
+  stepdown; on `origin/main` the count was 3,300, not 2,400.
+
+**The change.** One rewrite of `romano_wolf_aligned`:
+
+- The rejection test is the exact rule: a survivor is rejected in a round
+  when fewer than `floor((B + 1) * alpha_ppm / 1_000_000)` of the maxima
+  over the surviving set strictly exceed its statistic. The statistic,
+  canonical order, tie rule, index matrix and seed are the adjusted
+  receipt's, so the common `sqrt(n)` factor the legacy statistic carried on
+  both sides of the comparison is gone. `quantile`, its only user gone, is
+  removed.
+- The surviving set is always a suffix of the canonical order, so one walk
+  from the weakest strategy builds every suffix's maxima once and keeps each
+  suffix's bar (the `admissible`-th largest maximum, by
+  `select_nth_unstable_by`); the rounds read the bars forwards. Cost
+  O(S·B·N + S·B + S log S) time and O(B·N + B + S) space, not
+  measured by a bench.
+- An `alpha_ppm` above `1_000_000` and zero draws return empty, the legacy
+  vector's rendering of malformed input; `romano_wolf_receipt` already
+  refused both.
+- A zero-variance strategy is never rejected. Its statistic and every null
+  draw of it are `0.0`, so under the exact rule alone no draw would exceed
+  it and it would earn the strongest probability the draws can express --
+  the point mass D-0972 refuses for White. The adjusted receipt refuses such
+  a family outright; this legacy vector keeps answering it, as it always
+  has, without rejecting that row.
+
+**What a caller now sees.** A family with no zero-variance row gets the
+adjusted receipt's decisions at every alpha, and nothing at alpha 0. Rounds
+keep their meaning and, within a round, ascending caller position. The one
+non-test caller outside `runner` is `cli`'s audit, which passes
+`runner::bootstrap::romano_wolf(..).len()` to the report's Romano--Wolf row,
+so that count can change where the old boundary and the exact rule disagreed.
+
+**Tests.** `the_stepdown_rejects_exactly_what_the_adjusted_receipt_rejects`,
+`alpha_zero_rejects_nothing`, `an_alpha_above_one_rejects_nothing` and
+`each_null_statistic_is_computed_once_however_many_rounds` fail on
+`origin/main` and pass with the change.
+`a_strategy_that_never_varied_is_never_rejected` passes on both: it pins
+the zero-variance rule the exact boundary would otherwise break.
+### D-0982 — An expression-search cursor is equal to another exactly when their checkpoint bytes are equal — 2026-09-29
+
+**What happened.** `W3-vocab1-3`: `vocab::expression_search::Cursor` derived
+`PartialEq`, so equality compared its scratch `code` array as well as its
+state. `encode` does not write that array and `decode` rebuilds it only below
+`at`, while `advance` leaves the emitted instruction in `code[at]` when it
+returns a candidate. A cursor and the decode of its own bytes therefore
+compared unequal right after a candidate, although their encodings were equal.
+Production callers compare `.encode()`, so no run was affected.
+
+**The choice.** `PartialEq` is written by hand as
+`self.encode() == other.encode()`, and `Eq` is kept. The scratch program is
+not state: every slot below `at` is a function of `digits` and the alphabet,
+and every slot from `at` up is written before it is read. Equality is now the
+same relation a checkpoint comparison already used.
+`a_cursor_equals_the_decode_of_its_own_bytes_after_every_node` checks, after
+each of 64 single-node steps over the alphabet `[0, 369]`, that the decode of
+the bytes equals the cursor and that the cursor no longer equals its start. It
+fails on the derived impl at the first candidate.
+
+### D-0983 — State the expression-grammar node's prefix scan as a limit instead of rewriting it — 2026-09-29
+
+**What happened.** `W3-vocab1-0`: `Cursor::advance` counts one unit of work per
+grammar node, and each node revalidates its whole prefix through
+`valid_prefix`, which zeroes a 1,151-entry stack and walks the prefix,
+comparing sibling operand slices at each `And` or `Or`. `docs/06-limits.md`
+named the 4,096-node replay bound and nothing about the cost of one node.
+
+**The choice.** Record the cost, do not change it in this batch. Making a node
+O(1) needs an incremental operand stack carried and restored across
+backtracking, and the sibling comparison is a slice comparison whose length is
+the operand's; neither is a small change to a wire-versioned cursor, and the
+audit's own verdict was that the cost is undocumented rather than unbounded.
+`docs/06-limits.md` now has a section quoting the five source lines, and
+`the_per_node_prefix_scan_the_limit_names_is_the_code` requires each quoted
+line in both the source and that section, so the limit fails the build if the
+code changes under it.
+
+**Also in this batch, without a locked choice.** `ET-vocabulary-conditions-bits-1`
+replaced the line-number pointers in `vocab::implication`'s exactness proof,
+and the stale `daily.rs:579` pointer in an `engine` test message, with symbol
+names and quoted source; `implication_pointers.rs` refuses a `daily.rs:<line>`
+pointer in either file and finds every quoted excerpt in the file it is
+attributed to. `ET-vocabulary-conditions-bits-2` corrected the stale present-tense
+counts in `vocab`'s prose and one in `indicators::evaluator`, and
+`the_present_tense_position_counts_in_this_crates_prose_match_the_table` and
+`the_documented_evaluator_position_count_is_the_live_table` now read them.
+### D-1390 — A derived calendar ending on `i64::MAX` names `i64::MAX` as its last day — 2026-10-02
+
+**What happened.** `pull::calendar::Calendar::last_day` computed
+`first.saturating_add(len).saturating_sub(1)`. The add saturated first and the
+subtraction then stepped back one, so a one-day calendar on `i64::MAX`
+reported `i64::MAX - 1` as its last day. That is a day before the only day it
+holds, and its own `kind_of(i64::MAX)` answers `Open` for it.
+
+**The change.** `last_day` adds `len - 1`, and an empty calendar still answers
+`first - 1`. Pinned by
+`calendar::runtime_tests::a_calendar_ending_on_the_last_i64_names_it_as_its_last_day`.
+Before the change the same assertion failed with
+`left: 9223372036854775806, right: 9223372036854775807`. The call is O(1).
+The unchecked subtractions in `kind_of` and `from_observed` are a separate
+defect. `origin/fix/c4-pull` (D-0953) already fixes them, so they are not
+repeated here.
+
+### D-1391 — `Observed::from_runs` says that nothing marks a dropped run, and the test its doc named now exists — 2026-10-02
+
+**What happened.** The doc said runs past `MAX_WINDOWS` "are dropped and the
+count says so", and that `a_third_window_is_dropped_rather_than_merged` pins
+this. No test had that name anywhere in the workspace. The count does not say
+so either: it is `MAX_WINDOWS` for two runs or ten, and the session is
+identical to the two-run one.
+
+**The change.** The doc now states that the drop is unmarked and that a
+caller must compare `runs.len()` with `MAX_WINDOWS` itself. The named test
+exists and asserts the drop: 105 bars, the third run not expected, the gap not
+merged, and equality with the two-run session. Behaviour is unchanged.
+
+### D-1392 — `chain::month` asks a repeated expiry once and files a repeated contract name once per expiry — 2026-10-02
+
+**What happened.** The walk trusted the vendor's lists to name each date and
+each contract once. An expiries answer naming one date twice issued two
+contracts calls and filed every contract of that date twice. A contracts answer
+naming one contract twice filed it twice. The "Contracts discovered" count was
+inflated and the bars request was built twice for one contract.
+
+**The change.** Expiries are deduplicated in vendor order before the walk.
+Names are deduplicated within one expiry's answer, and only there: the same
+name under a second expiry still reaches `fno::read_contract`, whose token check
+refuses it by name, so a dedup cannot hide that disagreement. No name or date
+is dropped from the set. Each dedup is one `HashSet` insert per item, which is
+amortised O(1). Pinned by
+`chain::tests::a_repeated_expiry_or_name_is_asked_and_filed_once`. It failed
+before with three calls where two were expected.
+
+### D-1393 — Every credential-config load is noted, including the reads that never reached `parse` — 2026-10-02
+
+**What happened.** `CredentialConfig::load` returned through `?` on an absent,
+unreadable, non-regular, oversized or non-UTF-8 file, before `note_load` ran.
+So P-07's headline case, the missing file, left no `pull.config` line. Yet
+`note_load`'s doc said the log could tell "the file is missing" from "the file
+names no vendor". `emit_sites` recorded the gap as deliberate in a comment,
+which made the doc and the test disagree.
+
+**The change.** `load` calls one private `read_and_parse` and notes whatever it
+returns. The log record carries the file path, the vendor count and the level;
+it never carries a segment, so P-18 is unchanged. A new `emit_sites` row,
+`drive_config_absent`, requires a `refused` record naming the absent file. The
+row failed before and passes after; the test was run as an unprivileged user
+because, as root, unrelated rows of that test fail.
+
+### D-1394 — `path_for`'s comment and the config module header stop claiming `parse` refuses an absent vendor — 2026-10-02
+
+**What happened.** The comment in `CredentialConfig::path_for` said `parse`
+refuses a configuration missing any vendor, so the `MissingVendor` arm was
+"unreachable by any input". `parse` stopped refusing that case when absent
+brokers were allowed. The arm is reached by any config naming fewer vendors
+than `Vendor::ALL`. The module header also listed "a missing vendor table"
+among the refusals made at load. `read_bounded`'s doc cited `path_for`'s
+reasoning, which no longer holds.
+
+**The change.** Doc and comment only. The header says a missing table is
+refused at use, by `fields` and `path_for`. `pull::unit` now asserts
+`path_for(Vendor::Dhan, ..)` on a Groww-only config is `MissingVendor`. That
+assertion passes before and after, which is the evidence that the old comment
+was false.
+
+### D-1311 — An option strike must be positive — 2026-10-02
+
+**What happened.** `parse_strike` accepted any decimal, so a strike of
+`-19450`, `0` or `0.004` (zero paisa after the half-up snap) validated, and the
+row was declined as `Skip::LiveContract`, a routine skip. A malformed row was
+indistinguishable from a legitimate one, which §4 forbids.
+
+**The change.** The snapped value must be greater than `Paisa::ZERO`; anything
+else is `Malformed`. The smallest strike still read is one paisa (`0.005`).
+No exchange source is needed for "a strike is positive": a strike is a price
+level, and a level at or below zero is not one. Proved by
+`vendor::tests::a_strike_at_or_below_zero_is_malformed_not_a_live_contract`,
+which failed before the change (`-19450` decoded as
+`Ok(Skipped(Declined { reason: LiveContract, .. }))`). One comparison; O(1).
+
+The same lane-4 commit also carried D-1310 (index promotion of `EQ` rows only)
+and D-1312 (ASCII-only trimming). Both duplicate D-0785 and D-0787, already on
+this branch, so neither was taken and neither number heads an entry.
+
+### D-1330 — A lake contract name's underlying is matched exactly, never case-folded — 2026-10-02
+
+**What was wrong.** `crates/lake/src/contract.rs`'s header says every field
+but the month must be exactly as the lake writes it, and the exchange and the
+side are refused in lower case. The underlying went through `Symbol::new`,
+which upper-cases ASCII letters, so `NSE-nifty-01Apr20-10000-CE` parsed to the
+same `InstrumentKey` as `NSE-NIFTY-01Apr20-10000-CE` and `Display` rendered it
+back as the upper-case name. Two directory names reached one identity — the
+type `CLAUDE.md` §3 rule 3 hashes into a run — and the round trip the header
+promises did not return the directory the name came from.
+
+**The change.** `ContractName::parse` refuses an underlying holding any ASCII
+lower-case byte as `BadUnderlying`, before `Symbol::new`. Case folding over
+underlyings is not injective the way it is over the twelve month tokens, so
+the month's tolerance is not extended to it. Cost: one pass over at most
+`MAX_NAME_BYTES` (64) bytes, bounded by the existing length check.
+
+**Not measured here.** The real lake is not on this machine, so "no real
+underlying is written in lower case" is UNVERIFIED by this change; the
+`#[ignore]`d round-trip test in `tests/refusals.rs` checks every real name and
+would show one. Test:
+`lake::contract::a_lower_case_underlying_is_refused_rather_than_folded_onto_the_real_one`.
+
+### D-1332 — The unknown-codec refusal gets a test that fails when the arm is removed — 2026-10-02
+
+**What was wrong.** `Columns::pages` refuses every codec but `UNCOMPRESSED`
+and `ZSTD` as `UnknownCodec`, and no test reached that arm. Replacing it with
+`_ => Codec::Uncompressed` left every lake test green, and that mutation is
+not a loud failure: the reader would treat SNAPPY bytes as raw values.
+
+**The change.** Test only. An uncompressed file's footer is patched so one
+column declares SNAPPY, GZIP or LZ4_RAW; the read must refuse naming that
+column and codec, and the unpatched file must decode. With the arm folded away
+the read succeeds and the test fails. Test:
+`lake::synthetic::a_column_under_an_unimplemented_codec_is_refused_by_name_not_read_as_raw`.
+
+### D-1333 — Lake error rendering is pinned where a field swap survived — 2026-10-02
+
+**What was wrong.** `error.rs`'s render test checks one substring per variant,
+so swapping two same-typed fields survived: `NoSuchRowGroup { asked: 9, held:
+2 }` rendered "row group 2 asked for, file holds 9" still contains "9", and
+`ImpossibleDate` with day and month swapped still contains "31".
+
+**The change.** Test only. The full sentence is pinned for the multi-field
+variants. Test: `lake::error::two_same_typed_fields_are_rendered_in_their_own_places`.
+The lane-4 commit also pinned `NotRepresentable`'s `source()`; that half is
+already held by `not_representable_exposes_its_core_error_as_the_source`
+(GAP14-64) and was not taken. The same lane's D-1331 (signed expiry) duplicates
+W3-lake1-3, already on this branch, and was not taken either.
+
+### D-1341 — Validate a cursor checkpoint's selected prefix once, not once per index — 2026-10-02
+
+**What happened.** `Cursor::decode` rebuilt the selected prefix and called
+`valid_prefix` on `code[..=index]` for every `index < at`. Each call re-walked
+the prefix from the start and cleared its 1,151-slot stack, so one decode was
+Θ(at²) instruction steps plus `at` clears of 9.2 KB. Measured in release on
+this machine, 200 decodes each: 4.7 µs at `at = 1`, 19.0 µs at `at = 100`,
+836.7 µs at `at = 1150`. Checkpoint readers decode every stored step.
+
+**The change.** One `valid_prefix` call on the whole selected prefix when
+`at > 0`. It is equivalent, not a weaker check: the walk refuses an operator
+the stack cannot feed at the index where it occurs, so every intermediate
+stack is still checked; and the slack `remaining − (depth − 1)` falls by 2, 1
+or 0 per instruction and never rises, so a final prefix that can still reduce
+implies every shorter prefix could. After the change the same measurement gave
+2.5 µs, 4.0 µs and 5.1 µs. Decode is now bounded by the fixed `CURSOR_BYTES`
+rather than by `at²`. Wall-clock figures are from a shared machine and are
+not a bench gate (§3 rule 6). `valid_prefix` itself is untouched; its
+per-step cost in `advance` is the limit D-0983 states.
+
+**Proof.** `one_check_of_the_whole_prefix_equals_a_check_at_every_index`
+compares the two answers exhaustively over five opcodes, every prefix up to six
+instructions and every length up to eight (63,465 cases, both outcomes
+present). The existing decode refusal and every-node resume tests pass
+unchanged.
+
+### D-1342 — The vocab crate doc is checked against the crate and the law — 2026-10-02
+
+**What happened.** `crates/vocab/src/lib.rs` had drifted in four places. Its
+module table named four of the seven public modules and omitted `expression`,
+`expression_search` and `implication`. It said (until ET-vocabulary-conditions-bits-2 corrected the number) that
+the table holds 365 positions; it holds 370. It said `CLAUDE.md` §5 permits vocab one arrow, to `core`; §5
+and gate 22 give it none. And the run identity quoted on `VOCAB_VERSION` had
+eight terms, without `feed`, which D-0225 made the ninth.
+
+**The change.** The doc is corrected, and
+`tests::the_crate_doc_names_every_module_the_table_size_and_the_identity`
+holds it: every `pub mod` must appear in the module table, the table size must
+be `table::COUNT`, the stale arrow sentence must be gone, and the quoted
+identity must equal `CLAUDE.md` §3 rule 3's, read from the file. It failed
+before the correction (`the module table must name `expression``) and passes
+after. No code, bit, or `VOCAB_VERSION` changes.
+
+D-1340, the third part of the same lane-4 commit, duplicates D-0750 and D-0982
+(cursor equality is its encoding), already on this branch, and was not taken.
+The module table keeps the `the 370 positions, their names` shape that
+`the_present_tense_position_counts_in_this_crates_prose_match_the_table` reads.
+
+### D-1360 — Read the GDFL header row instead of skipping it — 2026-10-02
+
+**What happened.** `csv::decode_rows` skipped line one of every
+`Columns::Gdfl` body without looking at it. A GDFL member that arrived without
+its header lost its first data row with `Ok` and one row short. A header that
+named the same ten columns in another order would have been decoded against
+the wrong offsets. Shown on `origin/main`: a headerless two-row body decoded to
+`Ok(1)`.
+
+**The change.** `Columns::header()` returns the header a shape opens with
+(`Some` for GDFL, `None` for the three TrueData shapes). Line one is compared
+with it after the CRLF and whitespace trim every line already gets, and
+anything else is refused whole as `CsvError::HeaderMismatch`. The text is
+`csv::GDFL_HEADER`, the row recorded in `docs/08-vendor-samples.md`.
+`vendor.rs`'s descriptor now names that constant instead of a second copy of
+the string. A blank line one is refused as a mismatch rather than skipped.
+An empty body is unchanged. Proven by
+`csv::tests::a_gdfl_header_that_is_not_the_declared_one_refuses_the_file`.
+
+### D-1362 — Cap one archive member's size before reading it — 2026-10-02
+
+**What happened.** `archive::descend` read each member with `fs::read`, with
+no size bound. `csv::decode`'s `MAX_ROWS` acts only after the whole file is in
+memory, and blank lines are not rows. Shown on `origin/main`: a sparse member of
+256 MiB + 1 byte was read whole and then refused as a field-count error.
+
+**The change.** `archive::MAX_MEMBER_BYTES` = 256 MiB. This is an engineering
+bound (`MAX_ROWS` rows at 268 bytes each), not a vendor fact. `read_bounded`
+checks the open handle's length first and reads through `take(cap + 1)`, so a
+file that grows after the check is also refused. The new refusal is
+`ArchiveError::MemberTooLarge`. The census path refuses it as well, because a
+size bomb is a fault and not another product. Proven by
+`archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read`.
+`docs/06-limits.md` records it. The same lane-4 commit carried D-1361
+(hyphenated underlyings) and D-1363 (the walk's peak memory); D-0722 and
+D-0720, already on this branch, hold both, so neither was taken.
+
+### D-1380 — Seed a recovery plan's windows under one journal sync — 2026-10-02
+
+**What happened.** api-06. `recovery::seeded` wrote each queued window of a new
+plan with its own `journal.append(item)`, and `Journal::append` ends in
+`durable_sync`, one `sync_all` per record. `POST /pull/recovery` waits for
+`seeded` (`activate_durable` is awaited before the 202), so a plan of `n`
+windows cost `n` record syncs on the request, up to the 100,000-window bound.
+`prepare_successor` did the same for a successor's scope. Counted, before the
+change, on this thread by a test-only counter in `recovery_journal::counted`:
+seeding 2 windows cost 4 record syncs and 40 windows cost 42 (`n + 2`: the
+windows, the seal, the activation pointer); preparing 2 cost 3 and 40 cost 41
+(`n + 1`).
+
+**The change.** `Journal::append_new` writes a batch of records that are all
+new and distinct keys, as fixed-stride images, then syncs once and checks the
+filename once, then publishes them. Any invalid body, known key or repeated key
+refuses the whole batch before any I/O without poisoning the handle; any I/O
+uncertainty poisons it and publishes nothing, the same contract `append` has.
+Complete records written before a failure can survive on disk; they are new
+`Queued` windows, which the next seed skips and a reopen replays, exactly as a
+single append whose sync failed. `seeded` and `prepare_successor` hand it the
+windows not already in the journal. `prepare_successor` now checks every
+existing window against the request before writing any, where it used to append
+as it went. State transitions still go through `append`, one sync each.
+
+**Proof.** `recovery::tests::seeding_a_plan_costs_the_same_record_syncs_for_two_windows_as_for_forty`
+and `recovery::tests::preparing_a_successor_costs_the_same_record_syncs_for_two_windows_as_for_forty`
+require 3 and 2 record syncs at both sizes (they failed before with
+`[(2, 4), (40, 42)]` and `[(2, 3), (40, 41)]`), and a rerun that adds nothing.
+`recovery_journal::tests::a_seed_batch_syncs_once_whatever_its_size_and_replays_as_single_appends`,
+`a_seed_batch_naming_a_known_or_repeated_key_refuses_whole_and_unpoisoned` and
+`a_failed_seed_batch_sync_publishes_nothing_and_poisons` pin the journal
+contract on the fault-injection fixture. The bytes written still grow with the
+plan (1,024 per window); only the sync count is now constant. Not timed.
+
+### D-1381 — Rank each recovery window once when ordering a plan — 2026-10-02
+
+**What happened.** api-06. `recovery::plan` (on every `POST /pull/recovery`)
+and `recovery::validate_seal` (on every preflight, seed and boot resume)
+ordered windows with `sort_by_key(|row| (server::param(&row.body,
+"granularity") != "1day", row.body.clone()))`. `sort_by_key` recomputes the key
+for both sides of each comparison, so each comparison parsed a body for its
+granularity and cloned two bodies. Counted before the change by
+`ordering_a_plan_ranks_each_window_exactly_once_at_any_size`, on the order a
+seal check meets (rows from a `HashMap`, modelled by ordering on the blake3
+work key): 80 windows took 1,032 key computations, about 12.9 per window,
+against 2 log2 80 ≈ 12.6. A reversed input took 158 for 80, because the
+standard sort finds runs; the cost is input-order dependent.
+
+**The change.** Both call `scope_order(rows, scope_rank)`, which is
+`sort_by_cached_key`: `n` ranks, then a sort of those. It is stable like
+`sort_by_key`, so the order and every plan identity derived from it are
+unchanged. The comparisons remain O(n log n); the parse-and-clone per
+comparison is gone.
+
+**Proof.** The test requires exactly one rank per window at 4 and 80 windows,
+the same order as `plan` produced and the same `scope_identity`, the daily
+windows first, and an empty plan ranking nothing.
+
+### D-1382 — State the census rebuild behind `pullrun::rows_now`, on the pull run's tick and passes and on each recovery attempt — 2026-10-02
+
+**What happened.** api-05. `pullrun::rows_now` is `census_now`, summed. Its
+doc said "One manifest read per vendor per pass — four reads, not four per
+leg." That was wrong three ways: there are five vendors (`Vendor::ALL`), the
+conductor's ticker also calls it every `ROWS_TICK` (5 s), and on a cache hit it
+reads no manifest at all, only five `stat`s. On a miss, which is the first call
+after any vendor's manifest moved, `census_now` runs `census::read_all` (every
+vendor's whole manifest, up to `MAX_MANIFEST_BYTES` each, every entry
+checksum-verified) and `held_entries` (a sort of every held entry), so that
+call costs O(manifest bytes + E log E), E the store's held entries. During a
+pull every committed leg rewrites its vendor's manifest, so the tick, and the
+reads around each pass, miss. `recovery::retry_day` calls `rows_now` after
+each attempt, which is again a miss whenever the attempt committed bars.
+
+**Why stated, not fixed.** The manifest header carries `total_rows`, so a
+header-only read would be O(vendors). It would skip the walk that decides
+which generation answers: a damaged newest generation is stepped over by
+`Manifest::load`, and a header read would count rows the census itself
+refuses, the "receipt says" reading `rows_now` exists to avoid. The cache that
+would have to change lives in `server.rs`, outside this item. The rebuild is
+also shared: the census it builds serves `/store.json` and the other
+`census_now` callers until a stamp moves again. In recovery, each attempt
+already makes `recovery_spot`'s own `census::read_all` (D-0686's section in
+`docs/06-limits.md`), so `rows_now` adds at most one more rebuild per attempt,
+not a new growth class.
+
+**Stated.** `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)",
+and the corrected `rows_now` doc. UNMEASURED: no count or timing of rebuilds in
+a run was taken.
+### D-1410 — The execution cadence is measured on bars `0..=i`, not on the whole slice — 2026-10-02
+
+**What was wrong.** `CLAUDE.md` §3 rule 7 says that at bar N the engine may
+read bars `0..N`. On a native, signal-sourced column, `runner::trade::SliceFacts::of`
+took its cadence from `median_step_micros_over`, the median same-day step of
+the WHOLE slice, and `SessionBounds::of` and `trade::forced_exits` did the
+same. Every trade and outcome then used that one number. It decided whether a
+fill was immediate, where the horizon deadline fell, which paths counted as
+unbroken, which bars could still be filled before 15:10, and whether a day's
+15:09 record proved a forced close (that proof requires a one-minute
+cadence). So bars after a trade could change the trade.
+
+**Measured.** `crates/runner/tests/prefix_only_cadence.rs` takes eight
+one-minute sessions, then appends forty later sessions that keep every other
+minute. The appended sessions hold more same-day steps than the first eight,
+so the whole-slice median moved from one minute to two. On `origin/main` all
+three original tests failed. Every trade the eight sessions had completed
+disappeared (`h=1 Long`: the kept list was `[]` against a non-empty prefix list). `forward(..).at(0)`
+went from `Some(28)` to `None`. `SessionBounds::day_ended(0)` went from
+`true` to `false`. The column itself did not change, because `Column::build`
+is prefix-stable.
+
+**The change.** `outcome::prefix_median_steps_over` computes, for each bar
+`i`, the upper median (sorted index `len / 2`, the same order statistic as
+before) of the qualifying gaps between rows `(j-1, j)` with `j <= i`. A gap
+qualifies if it is positive, falls within one IST day, and has both rows
+accepted. A two-heap running median does this in one forward pass. Before
+the first qualifying gap, bar `i` takes the gap `(i, i + 1)`, if that gap
+qualifies. That gap is the first step of a position opened at `i`, and the
+position holds it before any exit can happen, so a completed trade still
+reads nothing after its exit. Without this rule the first bar of every slice
+could neither enter nor measure. The first full-suite run caught that in four
+existing tests: `the_return_is_close_to_close_and_the_tail_has_none`,
+`a_coarse_rung_prices_exact_horizons_but_not_an_unproved_square_off`,
+`a_bar_the_run_refused_can_never_price_an_outcome` and
+`completeness_not_a_later_day_proves_a_session_ended`. All four pass
+unchanged with the rule.
+`SliceFacts` holds a `Cadence`. A fill-sourced column has the fixed one-minute
+cadence, unchanged from before. A native column has the per-bar prefix table.
+The walk reads `step_at(entry)`, and `forward` reads `step_at(i)`.
+`SessionBounds::with_steps` proves a day with the cadence at its own 15:09
+row and tests each bar's fillability with that bar's own cadence.
+`SliceFacts::step_micros()` stays as a diagnostic. It is the cadence at the
+last bar, which is exactly the old whole-slice value, so
+`signal_candle_stop` (fill-sourced, one minute) and cli's sparse-slice test
+are unaffected. The old whole-slice median remains as a `#[cfg(test)]`
+oracle. `the_prefix_cadence_ends_on_the_whole_slice_median` requires every
+prefix entry to equal that oracle recomputed on `bars[..=i]`. On a slice with
+one uniform cadence, every trade is therefore clocked exactly as before.
+
+**Cost.** Each `SliceFacts`, `SessionBounds::of` or `forced_exits`
+derivation goes from O(n) selection to O(n log g), where g is the number of
+gaps seen so far. This is paid once per slice and never per candidate. The
+bound is named in `docs/06-limits.md`.
+
+**Not changed, and why.** The excursion look-ahead is W3-runner2-7: a refused
+bar after a level exit un-prices the trade
+(`crates/runner/src/excursion.rs:1053`). Another lane owns it.
+`grid::evaluate` derives exit ladders from the slice it is given. Its own doc
+records that this is in sample by design, and out-of-sample callers pass
+training ladders through the fixed-level path. `resample` emits the trailing
+bucket, and its doc assigns dropping that bucket to a streaming caller.
+`vwap::availability_of` belongs to lane 3, and no production code calls it.
+
+### D-0802 — Price every entry, exit and exit combination from GDFL one-second data at each second's worst-case high or low, rank on those fills, keep the search on Zerodha minutes and their rungs, and trade the underlying spot — 2026-10-01
+
+**The operator's design, stated in chat in six messages.** Each is quoted
+verbatim and in order, typos and all, as the operator's own words.
+
+**Where they came from, and what of that this repository cannot check.** The
+six messages reached this entry relayed by the session that wrote it, as sent
+on 1 October 2026 (IST). No tracked file and no command can confirm that date or
+where each message began and ended; that rests on the chat as relayed. The
+relayed task text gives each of the six as a whole quotation, and they are
+quoted below as that relay gives them, with no mark added. **A different relay
+said otherwise about three of them**: a review round of an earlier draft of
+this entry reported that message 1 is the part of a longer message that states
+this design, and that messages 2 and 3 were each followed by a pasted block of
+the operator's standing instructions (O(1) bounds, a dynamic incremental
+scalable approach, coverage of exceptional cases and a comparison artifact),
+which is not part of this design. That review round is the only source for
+either report; neither this entry's author nor any reader of this repository
+can check it, so it is recorded here and not carried into the quotations. If
+it is right, message 1 is an excerpt and messages 2 and 3 are quoted without
+their pasted blocks. Message 3 corrects message 2;
+message 4 answers item D of an earlier, unmerged draft of this entry, which had
+left open which prices the ranking reads. This entry does not record whether
+messages 4, 5 and 6 carried other text.
+
+> 1. "see dude as of now for usign condiitons espeiclal y for entry
+> we wil lhave minute level pulled data from zerodha right dude then from there
+> we will alwyas use gdfl provided tick data for precise entires exits and exit
+> combiantion right dude sot his flow si the precise expected veiw and deeisgn
+> now dude okay?"
+>
+> 2. "bro see now opur pure aim si to use ticks for precise entries and exits
+> but to do our deep drill brutoe force backettsign we will use zerodha minute
+> level dude okay?"
+>
+> 3. "see not only 1 minute we have multiple tiemframes dude for deep dirll down
+> brute force backettsign dude but for entries an exits alone precisley w ewill
+> alwyas sue the gdfl herefater dude okay? see clealry noe for undelrying we wil
+> lalwyas use its undelryign spots dude so once again we wil luse nifty and
+> banknifty wil lbe used its undelrying spot index where it wont have any volume
+> dude okay?"
+>
+> 4. "See I clealry told you for precise entries and exits we will always use
+> one and only gdfl seconds level data dude see our main aim is to store gdfl
+> every one second level data and from there always it need to pick it's high
+> and low dude okay do you understand my point dude"
+>
+> 5. "Bro for gdfl entilrey we have seconds level snapshot dude so you don't
+> need to worry we have all the data dude so you just design the system design
+> architecture dude okay"
+>
+> 6. "See previously when we ran the deep drill down brute force backtesting we
+> faced the issues as worst fills since we had only minimum one minute high low
+> and so many settings and configurations completely discarded dude that too
+> with our exit grid combiantions dude so our idea is to do the precise filling
+> of entries exits and exit grid combiantions entilrey purely precisely based on
+> these second level data dude using worst case as high low dude so that we can
+> use all the settings configurations especially to reduce the massive slippage
+> fillings right dude am I right bro"
+
+**What it decides, as the operator confirmed it.**
+
+**A. The search is unchanged.** The deep brute-force search (the conditions,
+the mask search and the level-wise ladder of `CLAUDE.md` §6) runs on Zerodha
+one-minute data **and on the rungs the engine folds from it** with
+`pull::fold`, not on one-minute bars alone. Message 2 said "zerodha minute
+level"; message 3 corrects it to "not only 1 minute". That is the sweep as it
+already stands (D-0139: a coarser rung is a fold of minutes already on disk).
+Which bars a condition fires on, and so which candidates exist, is decided on
+those minutes and rungs. **The prices those candidates are ranked on are GDFL
+one-second fills (D).** This entry adds no condition, no rung, no ranking
+criterion and no ingest path.
+
+Zerodha is the minute source the operator named. This entry does **not**
+narrow the sweep's feed: `cli`'s stored sweep takes the vendor as a parameter
+and accepts the other stored minute feeds (Groww, Dhan) today, and those runs
+stay legitimate and separately identified by `feed` (§3 rule 3). Excluding a
+feed from the search would need its own entry.
+
+**That includes GDFL rows folded to minutes, and it goes this way: such a
+search stays legal and is not this design.** The GDFL descriptor in
+`pull::vendor` serves a minute and a day folded from one-second snapshots as
+well as the second itself (its comment there cites D-0141), so a search over
+GDFL minutes, or over rungs folded from them, is a stored minute search like
+Groww's or Dhan's: this entry neither forbids it nor adopts it. The operator
+named Zerodha for the search (messages 1 and 2), so a GDFL-minute search is
+not the search this entry describes, and a report of one must not present
+itself as the operator's design. Today that descriptor reads only the
+`GFDLNFO_TICK_` contract archives, which §1 never sweeps (**Not built**), so no
+such search over the spot or the cash equities exists. If one is built, its
+signal feed and its fill feed are both GDFL, and consequence 1 still keeps the
+signal digest and the fill digest separate terms. What is rejected is a
+search on GDFL **seconds** (**Rejected**).
+
+**B. Every fill is priced from GDFL one-second data, at that second's
+worst-case high or low, hereafter, always, and from no other source.** Message
+1 says "tick data" and message 2 "ticks"; message 3 names "the gdfl"; message 4
+names the product and the source; message 6 names the price:
+
+- **B1. One source.** Precise entries and exits use "one and only gdfl
+  seconds level data". No other vendor, no other rung, no futures or options
+  contract's print, no one-minute bar and no interpolated price may price a
+  fill.
+- **B2. One-second records, high and low.** GDFL is stored as one-second
+  records, and every fill is picked from a second's high and low. Message 4
+  asks for that and names no storage format, so **this entry fixes none**: the
+  format is the fill engine's own entry to decide (consequence 5). "Every one
+  second" means every second in which GDFL printed a row. A second with no row
+  **has no price and is never a fill**: nothing synthesises, carries forward or
+  interpolates a price for it, and no fill reads one (consequence 2,
+  **Rejected**). Whether such a second is absent from the store or occupies an
+  empty slot that says "no row" is a format question, left open with the rest
+  of the format (consequence 4).
+- **B3. The worst case at the second.** Message 6: "using worst case as high
+  low". Every fill takes the second's **adverse** extreme, by direction: a buy
+  fills at the second's high and a sell at its low. A long enters at the high
+  of its entry second and leaves at the low of its exit second; a short enters
+  at the low and leaves at the high. That holds for the entry, every horizon
+  exit, the forced square-off and every stop, target and trail in every
+  exit-grid combination. **A stop, target or trail whose level lies inside one
+  second's low and high fills at that second's adverse extreme, not at the
+  level.** What follows from that, stated rather than left to be found:
+  - A stop fills at or beyond its level, never better. That is the direction
+    of today's pessimistic stop leg (`runner::grid`'s `stop_slippage`, which
+    worsens a stop to the minute's adverse extreme), at one second instead of
+    one minute.
+  - A target is a limit order, which an exchange fills at its level or better,
+    and `runner::grid` books it at its level for that reason. Under B3 a target
+    fills at the second's adverse extreme, which can be **worse than its
+    limit**: a long target at T fills at the low of the second whose high
+    reached T. That is more conservative than the order type guarantees; it is
+    the worst case the operator chose, and every GDFL-priced report must say
+    that targets are booked at the second's worst case, not at their limit.
+  - For a **target**, when a whole second lies beyond its level (the second
+    opened past it), even that second's adverse extreme is past the level, so
+    the fill is better than the level. For a **stop**, the same kind of second
+    fills worse than the level, as the first point says. In both cases no row
+    in that second printed the level.
+  - Inside one second, an exit's price no longer depends on which order fired
+    first: any exit in that second sells at its low (long) or buys at its high
+    (short). What intra-second order can still decide is set out in
+    consequence 7.
+
+  For GDFL-priced runs this supersedes `runner::grid`'s rule that fills a level
+  at the level when the bar's range contains it and at the bar's open only on
+  a gap (`level_fill`, counted in the `Cell::gapped` field), and UE-06's
+  optimistic leg at the one-minute Open. Those rules stay the live code until
+  the fill engine replaces them; this entry changes no code.
+
+That covers every entry fill, every exit fill and every exit combination (the
+horizons, stops, targets, trails, grid walks and the fixed 15:10 IST forced
+square-off that UE-02 and UE-04 name). "Always" admits no fallback: once the
+fill engine exists, a trade whose one-second evidence is missing, unreadable,
+ambiguous or too stale (consequence 2) is dropped or refused by name and
+counted. It is never priced from one-minute OHLC instead (`CLAUDE.md` §4: no
+fallback that hides a failure). Until that engine exists, one-minute pricing
+(UE-06) is the only pricing in the repository, its reports keep saying so, and
+no minute-priced result may be presented as GDFL-priced.
+
+**Why: message 6.** The operator's reason is the size of the worst case. A
+one-minute fill is bracketed by the minute's high and low (UE-06's pessimistic
+leg is the direction-aware PrintedExtreme, and `stop_slippage` worsens a stop
+to the minute's adverse extreme), and in his words that gave worst fills and
+massive slippage and discarded many settings and exit-grid combinations. A
+second's range is narrower than its minute's, so its worst case is smaller.
+**One day was measured for this entry**, from the GDFL index files of
+26 May 2026 described under UNVERIFIED item 1: over 09:15:00 to 15:29:59 IST,
+taking each bucket's highest `LTP` minus its lowest, NIFTY 50's mean
+one-minute range was **8.68 points** against a mean one-second range of
+**1.03 points**, and NIFTY BANK's was **29.74** against **2.27**. The means are
+over the session's 375 minutes and over the seconds that had a row (22,499 for
+NIFTY 50, 22,498 for NIFTY BANK), computed with `awk` over the two CSV files.
+That is one day on two series, not a general claim. How many settings or
+exit-grid combinations one-minute fills discarded, and how many one-second
+fills would keep, is not recorded anywhere and was not measured.
+
+**C. The traded instrument is the underlying spot.** NIFTY and BANKNIFTY are
+traded as their spot index, `NSE-NIFTY` and `NSE-BANKNIFTY`, which carries
+**no volume**. That is the operator's statement. The GDFL index files read for
+this entry agree on one day: on 26 May 2026 every column after `LTP` was zero
+in every row of both files (UNVERIFIED item 9). So **nothing in fill pricing
+for an index may depend on traded volume**: no VWAP, no volume-weighted fill,
+no last-traded-quantity filter, and no participation or liquidity cap computed
+from index volume. A folded record's volume field is a sum (D-0123 item 5) and
+is never read to price an index fill. For the 208 F&O underlyings that are
+shares, `CLAUDE.md` §1 already names the stock's own cash price series; the
+operator did not change that. The surface stays 210 instruments, 208 shares
+and the two indices (D-0682), and neither widens nor narrows (§3 rule 2). A
+futures or options contract's data never stands in for the spot: §1 never
+sweeps a contract, and pricing a spot trade from a contract's print would fill
+the trade on an instrument it never named.
+
+**D. CLOSED by message 4 — ranking, exit-grid selection and out-of-sample
+scoring read GDFL one-second fills.** The earlier draft left two readings
+open: (a) rank, select exits and score out of sample on one-minute prices and
+re-price only the survivors from GDFL; or (b) read GDFL for all of it.
+Message 4 says fills use one source, "one and only", so a score computed from
+minute-priced fills is a score of fills priced from a second source. (b) is
+the design; (a) and any mixed form are rejected (see **Rejected**). Under B3
+those fills are the one-second worst-case fills.
+
+In the live code the ranking is not price-free: `runner`'s `rank_prepared`
+scores every survivor on the execution-priced column (`scored_on =
+scoring_column.unwrap_or(&column)`, then `offer_retired(level, next,
+scored_on, forward)`), and D-0436 says "Every candidate grid, plain walk,
+chosen exit and out-of-sample score consumes those projected execution bars".
+UE-03 keeps walk-forward selection in signal-index space and reprojects
+pricing afterwards. Under this entry the projected execution prices, every
+exit-grid walk and every out-of-sample score are GDFL one-second fills. The
+**search** over conditions (which bars fire, which candidates exist, the
+level-wise ladder) stays on Zerodha minutes and their rungs (A), and UE-03's
+signal-index selection is unchanged.
+
+What that costs, stated rather than hidden:
+
+- **Coverage, as the operator stated it (message 5).** Ranking needs GDFL
+  one-second data for the **whole tested history** of every instrument it
+  ranks, in sample and out of sample, not only for the trades a survivor
+  finally takes. Message 5 states that GDFL second-level snapshot data covers
+  everything this design needs. That is recorded as an **operator statement of
+  1 October 2026**, the lane `docs/00-charter.md` gives such statements
+  (§4g), not as a vendor-verified fact. It removes coverage as a blocker to
+  designing and building the engine. It does not replace the check at run
+  time: a window with no GDFL seconds still refuses (next bullet). What this
+  repository's author could see on 1 October 2026 is in UNVERIFIED item 4.
+- **No fallback, at three sizes.** A trade whose fill instant has no GDFL
+  second within its bound (consequence 2) has no fill: it is dropped by name
+  and counted. A candidate whose evaluation window (an instrument's in-sample
+  or out-of-sample span) holds no GDFL one-second data at all is refused for
+  that window by name and excluded from the ranking. A run whose tested
+  history holds no GDFL seconds ranks nothing and says why. None of these is
+  ever filled or scored from one-minute OHLC.
+- **Partial coverage is a selection effect.** A candidate scored only on the
+  trades that could be filled is scored on a subset its own signals chose.
+  Whether a candidate with some dropped trades is still ranked, and up to
+  what count or share, is locked in the engine's entry; every report carries
+  the dropped count either way.
+- **Cost.** Fill reads now happen for every candidate the ranking scores, not
+  only for a final few (consequence 4).
+
+**What it changes in earlier decisions.**
+
+- **D-0015** deferred tick data, second-level data and the paid CSV vendors
+  "until a minute-level sweep has produced a profitable result", because the
+  data costs money that is not recoverable "if the minute-level hypothesis does
+  not hold". **That lifting condition is not shown to be met:** no entry in
+  this ledger records it as met, and this entry does not claim it is; a
+  cost-excluded or in-sample figure is not the out-of-sample, charged result
+  §1 requires before a pooled result means anything. This entry **supersedes
+  that deferral for fill pricing only**: entries, exits and exit combinations,
+  and the ranking, exit-grid selection and out-of-sample scores computed from
+  those fills (D). It does so **on the operator's decision alone**, not
+  because D-0015's condition was satisfied. D-0015's rationale (do not buy on
+  an extrapolation) is set aside by the operator, not answered by evidence;
+  message 5 states the data is already in hand. D-0015 deferred four things,
+  and this entry resolves each by name:
+  - **tick data:** lifted for fill pricing only, in the form message 4 names,
+    GDFL one-second records. D-0118 recorded that the GDFL "TICK" archive this
+    repository measured is a one-second conflated snapshot, and message 5
+    calls GDFL's data a "seconds level snapshot", so the operator's "tick" and
+    his "seconds level data" name one product here. It does not become a
+    search input (A);
+  - **second-level data:** lifted for fill pricing only, as the same lift, and
+    stays deferred as a search input;
+  - **bid/ask:** stays deferred. Whether a quote side ever becomes a fill input
+    depends on UNVERIFIED item 9 below and needs its own entry;
+  - **the two paid CSV vendors:** GDFL is lifted for fill pricing only.
+    Nothing is lifted for TrueData, and whatever later entries decided about it
+    is unchanged.
+
+  This entry changes no other part of D-0015. That is not a claim that the
+  rest of D-0015 stands as written: later entries had already changed other
+  parts of it, among them the day rung (D-0054), the intraday rungs (D-0077,
+  the entry headed "Five intraday rungs join the table"; another entry also
+  heads D-0077),
+  GDFL and TrueData as bought-CSV folder feeds (D-0123), and Zerodha among the
+  minute feeds beyond D-0015's "two brokers". D-0015 also deferred the
+  sparse-grid dilemma, and fill pricing now has to resolve it (consequence 4).
+- **D-0123** made GDFL a folder feed read from bought CSVs: no REST, no token,
+  reach is the files present, and a missing path halts. Unchanged. Its item 5,
+  the one-second fold, is the **starting point** for the stored one-second
+  records, not a format this entry fixes (consequence 5). A month GDFL files do
+  not cover has no one-second records and so no fills, and refuses rather than
+  falling back.
+- **D-0118 and D-0139** recorded that the GDFL "TICK" archive this repository
+  measured is a one-second conflated snapshot, made `Granularity::Tick`
+  unrequestable, and landed the operator's word "tick" on the `1s` rung.
+  Messages 4 and 5 settle the resolution: fills are priced at one second. This
+  entry does not re-enable `Tick` and does not assert that GDFL sells
+  trade-by-trade prints. Every GDFL-priced report must say its fills are
+  one-second worst-case fills.
+- **The live invariants on execution evidence: D-0436, UE-01, UE-02, UE-03,
+  UE-04, UE-05 and UE-06.** They describe today's code, and each says
+  something B, B3 or D contradicts:
+  - **UE-01 and D-0436's same-feed half.** UE-01 makes every stored non-`1min`
+    audit load "the same feed, underlying, month/span and `1min` rung" as its
+    execution series, and refuses "sub-minute" execution evidence; D-0436 says
+    `audit-stored`, `audit-range` and the stored screening door "load the same
+    feed, underlying and month/span at `1min`". This design needs a
+    **different** feed for execution (GDFL against Zerodha signals) at
+    **sub-minute** resolution, so it breaks both conditions. `cli`'s audit
+    banner says every fill is on "exact next-minute OHLCV from the same feed,
+    instrument and month" (`crates/cli/src/lib.rs`); that sentence changes
+    with them.
+  - **D-0436's pricing half, UE-02 and UE-04.** A signal on any rung enters
+    only on the stored one-minute bar whose timestamp equals the signal bar's
+    close; neither the next available row nor an interpolated or tick price
+    may substitute; the forced fill uses only the exact 15:09 interval.
+  - **UE-03's execution half**, which is stated in one-minute terms: training
+    execution ends strictly before the first test signal, and the test
+    execution label path ends at the last test signal close "plus the
+    configured one-minute horizon". Its signal-index selection is unchanged
+    (D); its execution boundaries need restating at one second.
+  - **UE-05**, whose data term "domain-separates complete ordered signal and
+    execution digests": the execution digest becomes a digest of GDFL
+    one-second records under a different feed (consequence 1).
+  - **UE-06**: the round trip is bracketed by stored one-minute Open
+    (optimistic) and the direction-aware stored PrintedExtreme (pessimistic)
+    with no tick added. B3 replaces that with the one-second adverse extreme.
+
+  **Those are the principal rows, not the whole list.** Other live rows in
+  `docs/04-invariants.md` pin one-minute or bracketed execution the same way,
+  and B, B3 or D contradicts each of these once the fill engine lands:
+  - **XP-02**, the row D contradicts most directly: "Derived trade floors and
+    ranking are always measured on the actual one-minute execution slice,
+    independent of the signal rung." Under D the ranking reads GDFL one-second
+    fills; its independence from the signal rung is what consequence 3 keeps.
+  - **CO-01**: a Candidate row's entry and exit indices and timestamps "must
+    match the one-minute execution bars". A GDFL-priced trade row's entry and
+    exit are seconds.
+  - **XM-01** restates UE-02's alignment: a signal aligns only to the
+    one-minute bar whose open equals the signal bar's close. **XM-05** makes
+    every shipping audit path reproject its signal column onto exact
+    one-minute execution timestamps.
+  - **DR-02** names "the exact minute slice priced by the exit grid" as a
+    bound fact of the run identity.
+  - **SB-01 and SB-02** restate UE-04: only the exact accepted 15:09 one-minute
+    record prices the forced exit, and no neighbouring minute proves it.
+  - **EB-05**: a time exit exists only at its exact accepted one-minute
+    endpoint or at the 15:10 boundary proved by the 15:09 record.
+  - **EB-07**: the favourable excursion is measured from the optimistic entry
+    (the open) and the adverse one from the pessimistic entry, which is the
+    bracket consequence 7 reopens and the anchor consequence 13 must lock.
+  - **EG-01 and EG-02**: the exit-grid policy trains on each instrument's and
+    side's one-minute adverse and favourable distribution (the ladder source
+    consequence 13 must lock); opening gaps apply
+    before a same-bar retrace; and OOS replay refuses every non-one-minute
+    execution shape before pricing
+    (`oos_replay_refuses_every_non_one_minute_or_corrupt_shape_before_pricing`).
+  - **The D-0581/D-0582 section's stop rows**, which carry no id: a later stop
+    gap keeps "both conservative and optimistic readings", and an entry at
+    15:09 can stop or close in its own minute.
+  - **OOS-01, SO-01 and GR3-02**, which require exact-minute execution
+    evidence, a one-minute execution subspan, or a minute-granular lock and
+    VIX stamp.
+
+  **The search behind that list, so it can be repeated.** On 1 October 2026 the
+  id-bearing rows of `docs/04-invariants.md` were selected with Gate 27's own
+  row pattern, `` ^\| *`?[A-Z][A-Z-]*-[0-9]{2,3}[a-z]?`? *\| `` (1,209 rows), and
+  searched case-insensitively for "one-minute", "1min", "next-minute" and
+  "exact minute": 40 rows, XP-02 and CO-01 among them. Letting "exact minute"
+  also match "exact-minute" (`exact[ -]minute`) gives 43, adding OOS-01, SO-02
+  and VX-01. Gate 27's pattern allows no digit in an id's prefix, so it skips
+  GR3-02; the same pattern with `[A-Z][A-Z0-9-]*-` in place of `[A-Z][A-Z-]*-`
+  (1,228 rows) gives 40 and 44, the fourth added row being GR3-02. Some
+  matches (RG-01, for one) are about pulls, not execution, and a row that pins
+  minute execution in other words is found by none of these searches.
+  **The list above is therefore not exhaustive**, and the entry that lands the
+  fill engine must audit every invariant that pins one-minute or bracketed
+  execution, not only the rows named here.
+
+  Those invariants stay true until the fill engine replaces that code. **This
+  entry edits neither them nor any code.** The entry that lands the fill engine
+  must supersede D-0436's same-feed and pricing halves, rewrite UE-01, UE-02,
+  UE-03's execution half, UE-04, UE-05 and UE-06 and every other row its audit
+  finds, beside the tests that prove the new rules, keeping their refusal of
+  substitution (consequence 2).
+
+**Not built.** No GDFL fill engine exists. No code reads a GDFL one-second
+record to price a fill or to score a candidate, and no run identity names a
+fill feed. The reader's one GDFL descriptor reads `GFDLNFO_TICK_` archives
+(`pull::vendor`), so no code path reads GDFL's index or cash-equity files
+today, and this entry does not claim that any GDFL month is stored on any
+machine. It records a design and the one day measured for it; it changes no
+behaviour.
+
+**UNVERIFIED — each must be read from a source and recorded in
+`docs/00-charter.md` before any code relies on it (`CLAUDE.md` §3 rule 1).**
+D-0045 first recorded that GDFL appears nowhere in the charter, and D-0118
+named the same gap for GDFL's granularity floor. `docs/00-charter.md` §4g now
+records message 5 as an operator statement, the one day measured below, and
+these items. Where an item gives a measurement, it is a measurement of the
+files named, on the day named, and no more.
+
+1. **What GDFL supplies for the `NSE-NIFTY` and `NSE-BANKNIFTY` spot index.**
+   Every GDFL file the repository read before this entry was NFO
+   (`GFDLNFO_TICK_01072025`, options and futures, `docs/08-vendor-samples.md`).
+   For this entry one index day was read from an extracted GDFL copy outside
+   this repository, on 1 October 2026 (IST): a directory on the operator's own
+   storage named `NSE_Tick_2018-09-01_to_2026-09-24` (where it is mounted is
+   machine layout, not a fact about the data, and is not recorded here; its
+   name ends at 24 September 2026, though its folder names run to
+   30 September 2026, item 4; why is not recorded). Anyone with that copy can
+   repeat every figure below with `awk`; a review of this entry reported doing
+   so from that directory, with every figure matching. The day read is
+   **26 May 2026**, folder
+   `GFDLCM_INDICES_TICK_26052026` at
+   `INDICES/<yyyy>/<MON_yyyy>/GFDLCM_INDICES_TICK_<ddmmyyyy>/<NAME>.NSE_IDX.csv`,
+   141 files that day. Measured in its two files `NIFTY 50.NSE_IDX.csv` and
+   `NIFTY BANK.NSE_IDX.csv`:
+   - header `Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest`,
+     the same ten names `pull::csv::Columns::Gdfl` decodes; date `dd/mm/yyyy`,
+     time `hh:mm:ss`, no sub-second field;
+   - NIFTY 50: 101,686 rows from 09:07:03 to 16:09:13; NIFTY BANK: 50,936 rows
+     from 09:07:04 to 16:09:13;
+   - inside 09:15:00 to 15:29:59, about **4.0 rows per second** for NIFTY 50
+     (90,360 rows over 22,499 seconds, up to 10 in one second) and about
+     **2.0** for NIFTY BANK (45,272 over 22,498, up to 5); rows sharing a
+     second carry no tiebreaker, and many repeat the same price;
+   - every column after `LTP` is zero in every row of both files, so the
+     volume columns carry nothing (C);
+   - pre-open and post-close rows are present: 1,908 and 955 rows before
+     09:15:00, and 9,418 and 4,709 rows from 15:30:00 on. 26 May 2026 is a
+     standard 09:15–15:29 session in `pull::calendar` (its bit is set in the
+     compiled `TRADED` table and the day is in neither the irregular nor the
+     length-unmeasured list; read from the table, not by running the code), so
+     on this day "outside the session" and "outside 09:15:00 to 15:29:59" are
+     the same seconds. On a non-regular day they are not (consequence 14);
+   - one session second with no row in NIFTY 50 (14:16:23) and two in NIFTY
+     BANK (10:48:06 and 14:16:23);
+   - **the time column steps backward 25 times in each file**, by one or two
+     seconds, roughly every fifteen minutes; the first in NIFTY 50 is data row
+     12,954, stamped 10:00:26 after a row stamped 10:00:27. What a backward
+     step means (a late row, a clock correction or something else) is
+     UNVERIFIED, and consequence 5 says what it does to the existing fold.
+
+   That is one day. Whether every other day has the same layout, density and
+   backward steps is not known.
+2. **What GDFL supplies for the cash equities** of the 208 F&O underlyings that
+   are shares (D-0682), the series C prices them on. On the same copy, the
+   same day, `STOCKS/2026/MAY_2026/GFDLCM_STOCK_TICK_26052026` held 3,429
+   files; one was read, `RELIANCE.NSE.csv`: the same ten-name header, 17,626
+   rows, a nonzero `BuyPrice` or `SellPrice` on all but one row, and a
+   nonzero `LTQ` on 15,816 rows. No other
+   equity file was read, and the mapping from GDFL's equity file names to the
+   208 underlyings is not written (item 8).
+3. **Two untracked files in the main checkout are not evidence.** They are
+   outside version control, so no reader of this repository can see or
+   re-check them, and they may no longer exist when this is read.
+   `GFDLNFO_TICK_06012019.zip` and `GFDLNFO_TICK_07012019.zip` were seen on
+   1 October 2026 at 450 bytes each, each with one 18-byte member,
+   `GFDLNFO_TICK_<ddmmyyyy>/Options/S.NFO.csv`, whose whole content is
+   `ts,ltp`, a newline, `1,06012019` (or its `07012019` twin) and a newline.
+   That is not GDFL's ten-column layout. An untracked `outer.zip` with the same
+   file timestamp (24 September 2026, 23:08) holds the same `07012019` member,
+   and `unzip -l` warns of 576 extra bytes in it. Nothing records who made
+   these files or why; they say nothing about GDFL's product, and their 2019
+   dates are file names, not a date range.
+4. **The date range.** Operator-stated (message 5): GDFL second-level data
+   covers everything this design needs. What was seen, on the copy item 1
+   names, on 1 October 2026: 2,001 folders named
+   `GFDLCM_INDICES_TICK_<ddmmyyyy>`, whose names carry dates from 3 September
+   2018 to 30 September 2026, each holding a `NIFTY 50.NSE_IDX.csv` and a
+   `NIFTY BANK.NSE_IDX.csv` file, and 2,001 folders named
+   `GFDLCM_STOCK_TICK_<ddmmyyyy>`. That is a count of folder and file names.
+   Their contents were not read, except the one day in items 1 and 2, and no
+   count was taken of trading days in that span, so whether any day is
+   missing or empty is UNVERIFIED, and the run-time refusal of D stands.
+5. **Timestamp precision.** Whole seconds, no sub-second field and no
+   tiebreaker in the three files read on 26 May 2026 (items 1 and 2). Whether
+   that holds for every date and every series is not known.
+6. **The clock and alignment.** Whether GDFL's `Time` column is IST exchange
+   time, vendor receive time or something else, and whether a row stamped
+   `hh:mm:ss` belongs to `[ss, ss+1)`. D-0015 records, in the documented lane,
+   two GDFL epoch-second fields, `LastTradeTime` and `ServerTime`. Neither name
+   is in the CSV files read for this entry, but the pair shows GDFL itself
+   distinguishes a trade clock from a server clock, and which of them, if
+   either, the CSV's one `Time` column carries is not known. How GDFL seconds
+   align with each Zerodha minute bar and each folded rung window is
+   unmeasured: they are two vendors with two clocks, and no day has been read
+   from both. Whether every second of a session has a GDFL row is known only
+   for the one day in item 1, where all but one or two did.
+7. **Price basis across the two vendors.** A signal is computed from Zerodha's
+   series and its fill is priced from GDFL's series for the same instrument;
+   that assumes the two agree on level. For the cash equities, whether either
+   vendor adjusts history for splits, bonuses or other corporate actions, and
+   whether they adjust alike, is not known. A difference would silently
+   mis-price a fill against its signal. D-0694 already says corporate actions
+   are unchecked on every stock report; that does not change here.
+8. **GDFL's instrument naming and its mapping to `InstrumentKey`.** On
+   26 May 2026 the index files' `Ticker` column read `NIFTY 50.NSE_IDX` and
+   `NIFTY BANK.NSE_IDX`, and the equity file `RELIANCE.NSE`. Whether those
+   spellings hold on every date, and how every F&O underlying's cash series is
+   spelled, is not recorded, so no resolver to `NSE-NIFTY`, `NSE-BANKNIFTY` or
+   an underlying's cash key can be written yet. D-0015's two GDFL spellings
+   are both for contracts.
+9. **Which field a one-second record is folded from.** For the two index files
+   of 26 May 2026, `LTP` is the only field that is not zero, so an index record
+   can only be folded from it. The equity file read that day carries `LTP`,
+   quote fields and `LTQ`; whether a quote side ever enters a fill is the
+   deferred bid/ask question. Whether those layouts hold on every date is not
+   known.
+10. **The price of the data.** Not recorded. Message 5 states the data is in
+    hand, so no purchase blocks this design. D-0015 records two live quotes,
+    both for F&O data. Trading charges are consequence 11.
+11. **GDFL's licence terms** for this use. The charter records none.
+
+**Consequences that must be designed, each with its own entry, before the fill
+engine is built.**
+
+1. **Run identity (`CLAUDE.md` §3 rule 3, D-0225, UE-05).** The identity's
+   ninth term is one `feed`. A GDFL-priced result has a signal feed (Zerodha)
+   and a fill feed (GDFL), and under D the ranking read the fill feed too. The
+   fill feed and the digest of the one-second data the fills read must both
+   enter the identity, domain-separated, so a GDFL-priced result can never
+   share a `RunId` with a minute-priced one even when every other term is
+   equal, and changing one one-second record re-keys the run as UE-05 does for
+   a hidden one-minute row. That changes the law's list, so it needs a
+   `CLAUDE.md` edit and its own entry, as D-0225 did.
+2. **No look-ahead and no stale substitution (§3 rule 7, D-0436, UE-02,
+   UE-04).** A signal is unknowable until its signal bar closes (D-0436). The
+   earliest legal entry second is the first one-second record at or after
+   that close instant, in the same IST session, and never a second inside the
+   signal bar. What "the same session" is on a day that is not a regular
+   09:15–15:30 session, and which calendar says so, is consequence 14.
+   **"First at or after" needs an upper bound.** D-0436 and UE-02
+   refuse "the next available" row as a substitute, and UE-04 accepts only the
+   exact 15:09 interval; on sparse seconds an unbounded "first at or after"
+   would bring that substitution back. **The bound must cover every fill, not
+   only the two endpoints.** Each exit kind B names needs its rule locked
+   before it is built, and none is chosen here:
+   - the **entry**: how long after the signal bar's close its second may be;
+   - a **horizon exit** at a set instant (entry plus N minutes): how long after
+     that instant the first second may be. "First second at or after entry+N"
+     with no bound is the same next-available substitution D-0436 and UE-02
+     refuse;
+   - the **forced square-off**: how long before 15:10:00 IST its last second
+     may be;
+   - a **stop, target or trail crossed inside a gap** between seconds, where
+     the last second before the gap is on one side of the level and the first
+     second after it is on the other: whether the fill is that first second's
+     adverse extreme (B3), bounded by how long the gap may be, or the trade is
+     dropped. It is never the level (B3);
+   - **whether the entry second can itself trigger an exit.** Today it can: a
+     minute grid evaluates the entry bar's own crossing (`runner::grid`: "a
+     level closer than a typical bar's own range is hit by the entry bar
+     itself"), and the D-0581/D-0582 rows let a 15:09 entry stop in its own
+     minute. The worst case at the second (B3) is that it can too: a long that
+     enters at its entry second's high, where that same second's low is
+     through the stop, is stopped in that second at its low. Reading exits
+     only from the seconds after the entry second would hide that adverse move,
+     which is the optimistic reading. Rule 7 does not require it, because the
+     entry second already lies after the signal close. The engine's entry
+     locks this; if it chooses any reading but the worst case, it must say the
+     result is not the worst case.
+
+   A fill outside its bound drops the trade by name and is counted (B). Under
+   B3 a fill reads one whole second's adverse extreme over every row stamped
+   in it, so no order among rows sharing a second is needed to price it. The
+   forced square-off reads only seconds strictly before 15:10:00 IST (UE-04's
+   policy, which today holds for every session; what it does on a session
+   that does not reach 15:10 or is halted across it is consequence 14).
+   Whether a row stamped `hh:mm:00` falls after the close of the
+   minute ending at `hh:mm:00` depends on UNVERIFIED item 6, and what a
+   backward-stamped row (item 1) does to "after" depends on consequence 5.
+3. **A signal on a higher rung.** A rung bar is left-labelled, so its close is
+   its label plus the rung length. The entry second is chosen exactly as at
+   one minute: the first one-second record at or after that close, same
+   session, within consequence 2's bound. It does not wait for a minute bar
+   and never reads the rung's own bar as a price. A bucket whose close falls
+   in the next session is unreachable, as UE-02 already holds.
+4. **O(1) per operation (§3 rule 4), or an honest limit.** One-second records
+   exist only for seconds that had rows, so instant to record is not the
+   store's arithmetic `base + header + i·56` (D-0002); D-0015 named the
+   sparse-grid problem this raises. `pull::fold` anchors an intraday rung at
+   the open, where one second tiles a **regular** 09:15–15:30 session into
+   22,500 slots (`store::path::Timeframe::SECOND_1`). A non-regular session
+   has other times and another count. 2021-02-24 traded again from 15:45 to
+   17:00, and a grid anchored at 09:15 with 22,500 slots has no slot for
+   those seconds. The 2025-10-21 Muhurat traded 13:45–14:44, which does lie
+   inside such a grid, but as 3,600 session seconds among 22,500 slots, so
+   the grid alone cannot tell a slot outside that session from a session
+   second with no row (consequence 14). Two shapes are open: a dense
+   per-session offset table built once at write, or a fixed-slot grid with
+   one slot per session second in which an empty slot says "no row" and is
+   never read as a price (that is not a synthesised second: it carries no
+   price). A fixed-slot grid must say where its slots come from on a
+   non-regular day.
+   A third is to record the true cost in `docs/06-limits.md` before it ships.
+   None is chosen here. **The number that drove D-0015's deferral goes with the
+   fixed-slot shape:** D-0015 recorded ~1.26 MB per instrument per day for a
+   dense one-second grid (22,500 slots of the 56-byte record). Carried to this
+   design as an **extrapolation, not a measurement**: 210 instruments over the
+   2,001 day folders counted by name (UNVERIFIED item 4) is about
+   1.26 MB × 210 × 2,001 ≈ 0.53 TB, before any sibling file. On the one day
+   measured, the index files had a row in all but one or two of the 22,500
+   session seconds (item 1), so a sparse store of those two files would have
+   been almost as large as a dense one; the cash equities' density was not
+   measured. The engine's entry weighs that disk cost against the O(1) bound
+   and its limits in `docs/06-limits.md`, and states both.
+
+   Entry and horizon fills depend on the instant and the direction, not on
+   the candidate: under B3 a long's entry at an instant takes that second's
+   high and a short's its low, and the exits take the other extreme. So they
+   can be projected once per run **per direction**, as D-0436's execution bars
+   are projected once today.
+   Walking seconds across a hold to evaluate stops, targets and trails costs
+   the number of seconds in the hold, per trade and per exit-grid cell; that
+   is not O(1) and must be stated and measured, not hidden. Under D that cost
+   is paid for every candidate the ranking scores, inside `runner`, which
+   gate 17 keeps silent. No measurement of any of this
+   has been taken.
+5. **The one-second store (`docs/02-store-format.md`).** B2 asks that GDFL be
+   stored as one-second records; **the format is the fill engine's entry to
+   choose**, by which one meets O(1) (consequence 4) and the store law. The
+   starting point is what already exists: `Timeframe::SECOND_1`, the `1s`
+   directory under GDFL's own vendor prefix, the 56-byte record (D-0002) with
+   `timeframe_secs` 1, and D-0123 item 5's fold at `Bucket::SECOND`, in which
+   the high and low are the extremes over every row stamped in the second, the
+   open is the first row in file order and the close the last, nothing is
+   sorted, and prices are paisa `i64` (§7). Whether the engine reuses those
+   records or adds a fixed-slot grid (consequence 4) is open; either way a new
+   field or layout is a new file version at its own stride (§4 bans a dynamic
+   schema; D-0011 forbids widening the base record), append-only (§3 rule 8)
+   and read through a read-only mapping (D-0003), and
+   `docs/02-store-format.md`, which names only minute and coarser paths today,
+   must document it. **What the existing fold does with the measured files:**
+   `pull::fold` refuses a snapshot stamped before the one before it
+   (`FoldError::OutOfOrder`) rather than sorting, because a sort would invent
+   an order and change which price became the open. Both index files of
+   26 May 2026 step backward 25 times (UNVERIFIED item 1), so the fold as it
+   stands would refuse each of them whole. Before any index month is stored,
+   the engine's entry must decide what a backward step does: refuse the day by
+   name, or a locked rule that keeps file order. It is never a silent sort.
+   The high and low of a second do not depend on row order, which is what B3
+   reads; its open and close do. **Rows outside the session are the other open
+   rule.** The measured index files carry 1,908 and 955 rows before 09:15:00
+   and 9,418 and 4,709 from 15:30:00 on (item 1), on a day that was a regular
+   session, and `pull::fold` does not refuse an out-of-session row: it buckets
+   it like any other. Whether those seconds are stored as one-second records
+   or excluded at write is the engine's entry to lock. Either way no fill
+   reads them: consequence 2 keeps every fill inside the same IST session and
+   the forced square-off before 15:10:00, and that must be a stated rule with
+   its own test, not a side effect of the bounds. **"Outside the session"
+   means outside that day's own session windows, not outside 09:15 to
+   15:30.** On a non-regular day the two differ: a fixed 09:15–15:30 rule
+   would class 2021-02-24's 15:45–17:00 trading as out of session and the
+   Muhurat hour's surrounding seconds as in session. Which calendar supplies
+   those windows is consequence 14.
+6. **The volume-less index (C), and the equities.** An index fill is priced
+   from the index level alone, with no volume-weighted fill of any kind. What
+   slippage model, if any, applies beyond B3's worst case to a spot-index fill
+   is not decided here. The cash equities do carry traded quantity (item 2):
+   whether an equity fill may read it, for a participation cap or a
+   volume-based slippage, is **not decided here**; this entry neither allows
+   nor forbids it, and it needs its own entry. B3 applies to equities as to
+   indices.
+7. **The optimistic/pessimistic bracket and the ambiguous second.** Today every
+   exit cell is priced twice. When one minute bar reaches both the stop and
+   the target, minute data cannot say which came first, so `Cell::pessimistic`
+   resolves it as the stop and `Cell::optimistic` as the target
+   (`crates/runner/src/grid.rs`, "The ambiguous bar is resolved twice, never
+   once"). The trail's ambiguous bar is resolved by the same machinery:
+   `ExitChoices` carries both anchors and `read_trip` prices only the orders
+   that can still own the selected exit bar. `audit::grid` orders its rows on
+   the pessimistic total, and `RankingPolicyV1` scores "pessimistic profit" as
+   one of its eleven criteria (`crates/runner/src/topn.rs`). **B3 settles the
+   price:** every fill is the second's adverse extreme, so in a second that
+   reaches both a stop and a target the exit price is the same whichever fired
+   first. What intra-second order can still decide: which reason the trade is
+   reported under, and whether a trail fired at all in the second that also
+   raised its peak (the fold drops the order inside a second, consequence 5).
+   Before a GDFL-priced exit grid is built or ranked, an entry must lock:
+   whether any optimistic figure is kept at all (if one is, it is a reported
+   bound and never a fill, and D's ranking does not read it); the rule for the
+   trail's same-second peak; the reason a two-order second is reported under;
+   what happens to the pessimistic-profit criterion and the grid's ordering
+   when every fill is already the worst case; what `Cell::gapped` counts when
+   no fill is at a level; and how a report states the residual ambiguity
+   rather than hiding it. Not decided here.
+8. **Idempotence (§3 rule 5).** The same GDFL files must give the same fills
+   byte for byte. A second's high and low do not depend on row order; its open
+   and close do, and the existing fold keeps file order and never sorts
+   (D-0123). The fill rules of consequence 2 and the backward-step rule of
+   consequence 5 must add no step that sorts.
+9. **India VIX stamping at a fill instant.** `NSE-INDIAVIX` is stamped onto
+   observable trades and its lookup is exact-minute only (VX-01). A one-second
+   fill falls inside a minute, so which VIX minute a GDFL-priced entry and exit
+   carry must be locked without reading a minute that had not closed at the
+   fill instant. VIX stays reference only (§1).
+10. **The data and its licence.** D-0015 deferred the purchase ("the data is not
+    bought now") without saying whose act it is. Message 5 states the data is
+    in hand. What stays the operator's is the licence for this use
+    (UNVERIFIED item 11), recorded in `docs/07-plan.md` §3 as blocked on the
+    operator. **What waits on it, and what does not:** designing and building
+    the reader, the resolver and the ingest job (consequence 12) and testing
+    them on fixture rows do not wait. Running that job over the GDFL files,
+    which writes a converted copy of the data into this store, does: the
+    charter records no licence term, and a stored copy is a use of the data
+    that this repository cannot judge for itself.
+11. **The charge stack on a GDFL fill.** The stack itself is unchanged: this
+    entry changes the price of a fill, not which charges apply, and §1's rule
+    that no equity result enters Selection V6 or execution authority without a
+    charter-sourced equity charge stack still holds. What must be locked is
+    how the stack attaches: every term computed from a fill's price or value
+    must read the same one-second worst-case fill price the result's profit
+    reads, never a minute price beside it; and a dropped trade carries no
+    charge. The entry that lands the engine names that and tests it.
+12. **The reader and the ingest job — the first build step.** It is numbered
+    12 only so the numbers above keep their meaning; nothing else in this
+    list can be exercised on GDFL data until it exists. Today the one GDFL
+    descriptor reads `GFDLNFO_TICK_` archives (`pull::vendor`) and nothing
+    reads GDFL's index or cash-equity files. Each of these needs designing,
+    with its own entry:
+    - a reader for the measured layout: `GFDLCM_INDICES_TICK_<ddmmyyyy>` and
+      `GFDLCM_STOCK_TICK_<ddmmyyyy>` folders under
+      `INDICES/<yyyy>/<MON_yyyy>/` and `STOCKS/<yyyy>/<MON_yyyy>/`, holding one
+      CSV per series named `<NAME>.NSE_IDX.csv` or `<NAME>.NSE.csv`, decoded
+      with the ten-name header `pull::csv::Columns::Gdfl` already knows
+      (UNVERIFIED items 1 and 2: one day measured);
+    - a resolver from GDFL's file names and `Ticker` values to `InstrumentKey`
+      for `NSE-NIFTY`, `NSE-BANKNIFTY` and each F&O underlying's cash series,
+      refusing by name any file it cannot resolve (UNVERIFIED item 8);
+    - the job that folds each file into one-second records in the format
+      consequence 5 chooses, with consequence 5's rules for backward-stamped
+      and out-of-session rows, and that refuses rather than skips a file it
+      cannot read.
+
+    Building and testing them waits on nothing; running the job over the
+    GDFL files waits on the licence (consequence 10).
+13. **Where exit levels are placed: the anchor and the ladders.** B3 says what
+    price a level fills at; it does not say where the level is. Message 6's
+    stated purpose, keeping the settings and exit-grid combinations one-minute
+    fills discarded, depends on that placement as much as on the fill, and
+    today every part of it is a one-minute quantity:
+    - **The anchor.** A stop, target or trail level is a ppm distance from
+      `entry_opt`, the entry minute's Open, on every reading
+      (`runner::grid`: "THE ANCHOR IS `entry_opt` ON ALL THREE", and
+      `EntryPrices::anchor`, "the only price a level can be reconstructed
+      against"). EB-07 measures the favourable excursion from that open. Under
+      B3 the one-minute Open is no longer a fill, and the entry fill is the
+      entry second's adverse extreme. The engine's entry must lock which price
+      a level is measured from: that worst-case entry fill, another price of
+      the entry second (its open, its opposite extreme), or something else.
+      Measured from the worst-case fill, a stop of distance d is d from the
+      price the trade paid. Measured from any better price, the trade bears d
+      plus the gap between that price and its fill, so the nominal stop
+      understates the loss it allows. Whichever is chosen, the report says
+      which.
+    - **The ladders.** The rungs come from one-minute quantities today: the
+      derived step, which `runner::grid`'s `Levels` describes as "a function of
+      the instrument's median bar range", and the rung count `cli::grid_rungs`
+      derives from the same median bar range (`runner::validate`); the
+      quantile ladders, placed "at quantiles of the excursions the instrument
+      actually produced" on minute bars (`runner::excursion`,
+      `Ladder::from_excursions`); EG-01's training one-minute adverse and
+      favourable distribution; and the stop ladder's floor, which exists
+      because "on one-minute execution a level closer than a typical bar's own
+      range is hit by the entry bar itself" (`runner::grid`, `Levels`). The
+      engine's entry must lock, for each, whether it is derived from GDFL
+      one-second data, from the Zerodha minutes and rungs the signal was found
+      on, or from neither. If a ladder stays on
+      minute quantities, the one-minute range can still set how close the
+      nearest stop may be, and settings message 6 wants kept can stay
+      discarded by the ladder rather than by the fill.
+    - **Does a ladder read a second source?** D allows one fill source.
+      A level is not a fill, but exit-grid selection reads the fills those
+      levels produce, so an excursion ladder trained on minute bars makes the
+      grid's selection depend on minute prices. Whether that is a second
+      price source under message 4's "one and only" is the question the
+      engine's entry answers by name, not by default.
+
+    None of this is chosen here. Until it is locked, no GDFL-priced exit grid
+    is built or ranked.
+14. **Non-regular sessions, and which calendar classifies a GDFL day and
+    second.** Every consequence above that names 09:15, 15:30, 15:10 or
+    22,500 describes a regular session, and not every trading day is one.
+    `CLAUDE.md` §5 names `pull::calendar::kind_of` as the canonical IST
+    session authority. It answers a day as `Open` with one or two windows,
+    `OpenLengthUnmeasured`, `Closed` or `Unmeasured`, and its tables hold:
+    - four sessions that are not 09:15–15:29 (its `IRREGULAR` table):
+      2021-02-24, the systems-outage day, normal trading 09:15–11:40 and
+      15:45–17:00; the disaster-recovery Saturdays 2024-03-02 and 2024-05-18,
+      09:15–09:59 and 11:30–12:29; and the 2025-10-21 Muhurat, 13:45–14:44;
+    - five earlier Muhurat days, 2020-11-14, 2021-11-04, 2022-10-24,
+      2023-11-12 and 2024-11-01, as `OpenLengthUnmeasured`: a daily bar
+      proves each traded and no minute bar measured its hours;
+    - a compiled range of 2 December 2019 to 4 September 2026 (`FIRST_DAY`,
+      `LAST_DAY`). Any other day is `Unmeasured`. The GDFL folder names
+      counted for this entry run from 3 September 2018 to 30 September 2026
+      (UNVERIFIED item 4), so every folder dated before 2 December 2019 or
+      after 4 September 2026 names a day this table does not classify.
+
+    UE-04 already holds that "Regular, extended and non-regular data all face
+    the same clock", so these days are live inputs, not curiosities. Before a
+    GDFL month is stored or a GDFL fill is read, the engine's entry must lock:
+    - **which calendar classifies a GDFL day and each of its seconds**:
+      `pull::calendar::kind_of`, as §5 names, or another authority with its
+      own entry. A GDFL file's own rows never define a session: a row is
+      evidence that GDFL printed something at that second, not that the
+      exchange was in session (the measured index files print from 09:07 to
+      16:09 on a regular day, item 1);
+    - **what happens to a GDFL day the calendar answers `Closed`,
+      `Unmeasured` or `OpenLengthUnmeasured`**: refused by name or classified
+      by a sourced extension of the calendar, and never treated as a regular
+      session by default (that default is the guess `kind_of`'s own comments
+      refuse);
+    - **which seconds a session window covers**: a window's minutes are
+      inclusive bar opens, so whether its last minute `m` covers seconds
+      `m:00` to `m:59`, as its bar does, is a rule to state, together with
+      what the store does with the seconds between two windows;
+    - **the out-of-session rule of consequence 5 on such days**, read from the
+      day's own windows, so that 2021-02-24's 15:45–17:00 trading is in
+      session and the seconds around the Muhurat hour are not;
+    - **the forced square-off on such days**: UE-04 fixes it at 15:10 for
+      every session, and "a session lacking 15:09 drops only holds that need
+      the forced boundary". So on the Muhurat hour and the two Saturdays a
+      hold that would need 15:10 is dropped today, and on 2021-02-24 15:10
+      falls inside the halt. Whether a one-second engine keeps that fixed
+      clock is to be stated; anchoring the square-off to each session's own
+      end instead would change UE-04 and needs its own entry and test;
+    - **"the same session" in consequences 2 and 3** when a signal bar's close
+      falls in the gap between two windows of one day: whether the first
+      second of the next window is the same session or the entry is dropped;
+    - **the store layout of consequences 4 and 5 on such days**, so that a
+      fixed-slot grid, if chosen, says where its slots come from when the
+      session is not 09:15–15:30.
+
+    None of this is chosen here. No measurement of a GDFL file for any
+    non-regular day has been taken: the one day read, 26 May 2026, was a
+    regular session (item 1).
+
+**Rejected.**
+
+- **Falling back to one-minute OHLC** when a second is missing, stale or
+  unreadable. It is the fallback that hides a failure (`CLAUDE.md` §4).
+  Message 3 says "alwyas" and message 4 says "always" and "one and only".
+- **Ranking on minute prices and re-pricing only the survivors from GDFL**,
+  the earlier draft's reading (a), and any mixed form (for example, exit grid
+  on GDFL, condition ranking on minutes). Message 4 allows one fill source,
+  and a score is computed from fills.
+- **Running the condition search on GDFL seconds** (the `1s` rung or any
+  sub-minute series). Messages 1 to 3 keep the search on minutes and the
+  rungs folded from them, and messages 1 and 2 name Zerodha for it. A search
+  over GDFL rows folded to minutes is not rejected here; A says which way it
+  goes.
+- **A futures or options contract's data in place of the spot** (C): it would
+  fill a trade on an instrument the trade never named, and §1 never sweeps a
+  contract.
+- **A volume-weighted (VWAP) or volume-filtered index fill** (C): the spot
+  index carries no volume.
+- **Filling a stop, target or trail at the level itself**, whether the level
+  lies inside a second's low and high or was crossed inside a gap between
+  seconds: message 6 names the second's worst case (B3).
+- **A synthesised, carried-forward or interpolated second.** A second in which
+  GDFL printed no row has no price and prices no fill, whatever the format
+  stores for it (B2). Filling it would
+  undo consequence 2's bound and price a fill from a row that does not exist.
+- **Sorting GDFL rows** to repair a backward step or to order a shared second.
+  A sort invents an order and changes which price became the open (D-0123);
+  consequence 5 names the open question.
+
+**Companion edits.** `docs/00-charter.md` §4g records message 5 as an operator
+statement, the one day measured for this entry, and the GDFL facts still not
+recorded. `docs/07-plan.md` §3 records the licence as the question that waits
+on the operator, and what waits on it: running the ingest job over the GDFL
+files (consequence 10). §4 item 6 carries the work that needs no permission:
+consequence 12 first, as the first build step, then consequences 1 to 9, 11,
+13 and 14 in this entry's order; consequence 10 is the §3 row.
+`docs/04-invariants.md`, `docs/06-limits.md`, `docs/02-store-format.md` and all
+code are untouched, because nothing has been built.
+
 ### D-0910 — Verify the old tail block before a following append re-seals it — 2026-10-02
 
 **The defect (audit finding W3-store1-3).** `BarFile::append` takes the
@@ -43765,7 +48538,1738 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
-### D-1202 — The api serve edge refuses what it used to ignore, states its request caps, and caches the audit roll-up — 2026-10-02
+### D-0953 — API request costs named per route; one index observation per instrument; a page orders only itself; `/store` fresh in every view; the serve lock names one holder — 2026-10-02
+
+**What happened.** An audit (cluster B6: W1-api5-0 to W1-api5-11, UC-20,
+R9-api-cx-2, GAP14-63) found eleven paths in `crates/api` whose cost grows
+with the store or the universe and which `docs/06-limits.md` did not name,
+two bugs, and one untested guard.
+
+**Changed.**
+
+* *W1-api5-0.* `land_spot` landed each body through `land_bodies_scheduled`,
+  which took the index observation itself, so every body after the first
+  missed the census cache (each body's append moves the manifest stamp), read
+  every vendor manifest whole, sorted the vendor's entries and re-derived the
+  index calendar. The observation is now taken once per instrument, before
+  the first body appends, and handed to every body through the new
+  `land_bodies_observed`. It is still a snapshot before any append, and the
+  observation stays diagnostic, never schedule authority. `land_one` keeps
+  its one call.
+* *W1-api5-4.* `bars::window` partitioned at `offset + limit` with an uncapped
+  `offset`, so a page near or past the end of a 1.9-million-bar window ordered
+  every row. `bars::page_of` partitions at `offset`, then at `limit`, and
+  orders only the page; an offset past the end compares nothing. The output is
+  unchanged: the comparator is total.
+* *UC-20.* `/store?show=gaps` drew its axis and cells from `Site::series` and
+  `Site::censuses`, the boot snapshot, and every `/store` view printed the boot
+  census notes beside fresh vendor cards. Both now come from the request's
+  `census_now`. The two notes that warned the counters were "this process's
+  startup read" had become false and are removed.
+* *R9-api-cx-2.* `take_serve_lock` stamped `serve.lock` without truncating,
+  so a shorter stamp left an earlier holder's tail and a refused instance
+  quoted two pids. The holder now cuts the file to its stamp after writing it,
+  and the refusal quotes the first line only.
+
+**Documented, not changed.** W1-api5-1 (`from_window` and `record_held` read
+the whole census per call), W1-api5-2 (a `census_now` miss, which is every
+request while a pull lands), W1-api5-3 (`/instruments.json`), W1-api5-5
+(`/calendar.json`), W1-api5-6 (a filtered `/store`), W1-api5-7
+(`/verify.json`), W1-api5-8 (`/bars.json` past the last bar), W1-api5-9
+(`/indexmap.json`) and W1-api5-11 (`spot_targets`, `resolved_master_rows`)
+are in `docs/06-limits.md`'s D-0953 section, which also corrects §34's
+"not reachable today". The route docs for `/calendar.json`, `/verify.json`
+and `/indexmap.json` now state those costs. `api::server::cost_limits_tests`
+holds each bullet to the source shape it describes.
+
+**GAP14-63.** `a_symbol_this_feed_holds_no_file_for_is_not_named_in_from`
+covers the `calendar.sessions() > 0` guard on the exchange branch of
+`/calendar.json`; it fails when the guard is removed.
+
+**Not decided.** Caching the decoded census across windows in `pull`
+(W1-api5-1) changes the durability path of the counter and is left to that
+crate. W1-api5-8's whole-month fallback stays because it is what reads a
+header naming zero-filled records correctly. Invariants APIC-01 to APIC-06.
+
+### D-0952 — One audited route list, an owed terminal, and the journal's growth stated — 2026-10-02
+
+**The defects (audit findings GAP14-57, W1-api3-5, W1-api3-0).** (1)
+`operation_audit::audited_route` was a 21-arm `match` and its test named 10 of
+the routes, so deleting the `/frontier.json` arm survived the whole `api`
+suite while it silently dropped that route's invocation record and, because
+the admission layer reads the same function, its cross-site read refusal. (2)
+`request_audited` wrote the terminal record through `detail::run`, which
+answers `Saturated` before spawning when the four shared detail slots are
+taken. At that point the handler has already run. The refusal dropped the
+closure that owned the armed `Attempt`; its `Drop` wrote `Cancelled` with
+status 0, `fsync` included, synchronously on the Tokio worker, and the
+client's real answer (for `POST /backtest/run`, one that launched an engine
+task) was replaced by a 503. (3) Every audited request, polled reads
+included, adds one file to one flat directory and 256 bytes to the index, with
+no retention, and `docs/06-limits.md` said nothing about it.
+
+**The choice.** (1) The routes are one `pub(crate) const AUDITED: [&str; 21]`;
+`audited_route` returns the matching entry by a scan bounded by the type.
+A test parses the production router's registrations and requires every
+registered path to be in `AUDITED` or in an explicit exemption list with a
+reason, and every entry of either to be registered; a live-router test sends
+another site's `GET`, `HEAD` and `POST` to every audited route and requires a
+`403` before the journal exists, then one same-origin `GET` each and exactly
+one record each. The index-stop routes are in the exemption list as not
+journaled and not decided: whether they should be is left open, not chosen
+here. (2) The terminal is written through a new `detail::run_owed`, which
+takes a slot past `MAX_CONCURRENT` and is never refused. The slot still
+counts against new detail work while it runs. (3) `docs/06-limits.md` states
+the per-request growth and the owed terminal's bound, and a test pins the
+byte and file counts and checks the section is there.
+
+**Rejected.** (a) Holding a detail slot across the handler so the terminal
+always has one: four slow audited requests would then starve every detail
+read and every handler that needs a slot itself. (b) Retrying `detail::run`
+until a slot frees: an unbounded wait with no refusal to show for it, while
+the handler's work is already done. (c) A `match` plus a parallel array: two
+lists for one fact is the drift this fixes. (d) Rotation or sharding of the
+journal directory: a store format change that needs its own decision; this
+one states the cost instead.
+
+Invariants OAU-01, OAU-02 and OAU-03; `docs/06-limits.md` has the bounds.
+
+### D-0915 — The store write boundary refuses a stamp outside the path's IST month or off the rung's grid — 2026-10-02
+
+**What happened.** Findings ET-bars-candles-store-2 and ET-bars-candles-store-3.
+`BarFile::append` checked OHLC, counts and order and nothing about WHEN a bar
+was. A `2024-06` one-minute file took a 2030 bar, `i64::MIN`, 09:15:30 and a
+2024-07-01 bar. Each one committed. The file is append-only and strictly
+increasing, so one stamp past the month's end refused every later real bar of
+that month. Month membership was checked only upstream, in
+`pull::ingest::months_in`, and the grid only in `pull::fetch::land` and the
+fold.
+
+**The change.** `BarFile` keeps an `Admission` built once at open from the path
+month and the header timeframe. `append` asks it of every bar after `survey`,
+and `repair::publish` asks the same of a merged revision. Two new named
+refusals, `StoreError::OutsideMonth` and `StoreError::OffGrid`, carry the batch
+index, the stamp and the month or `timeframe_secs`. Nothing is written on
+either.
+
+* **The month is the IST calendar month.** `months_in` files a bar under
+  `IstMoment::from_epoch_secs(ts).day().year_month()`, so
+  `YearMonth::ist_bounds_micros` returns `[00:00 IST on the 1st, 00:00 IST on
+  the 1st of the next month)`, computed in O(1) by Hinnant's civil-to-day
+  formula. `store` cannot name `pull::session::IST_OFFSET_SECS` because `pull`
+  depends on `store`. It keeps a copy, `store::path::IST_OFFSET_SECS`, and
+  `pull::session` asserts at compile time that the two are equal.
+* **The grid is the fold's.** Intraday rungs use `pull::fold`'s open anchor:
+  `(ts + 19,800 s − 555 min) mod width == 0`. For 1, 3, 5 and 15 minutes that
+  is the same grid a midnight anchor gives, so vendor-direct bars on those rungs
+  are unaffected. The 30- and 60-minute rungs are only ever written by the
+  fold, at 09:15. The `1day` rung admits any whole second, because
+  `Window::verdict` records that vendors stamp a daily bar at midnight, the
+  open or the close.
+* **Session membership is not checked here.** The venue hours and the trading
+  calendar live in `pull`, and `store` may not depend on it. A test pins that a
+  03:00 IST bar is admitted, and `docs/06-limits.md` states the limit.
+
+**Fixtures that changed, and why each change is legitimate.** Every fixture
+below stamped bars that its own path ruled out:
+
+* `store::checksum_audit_tests` stamped 1970 minutes into a 2025-05 file.
+* `store::write`'s overlay test used 2023-11 stamps in a 2024-06 file.
+* `api::emitted` used a stamp 40 s past a minute.
+* `store::repair`'s row-ceiling test put 100,000 consecutive minutes in one
+  month, which holds at most 44,640. It now runs on the 1s rung.
+* `store`'s `ratio` bench filled 100,000 minutes from 1970. It now uses 1s bars
+  from 2024-06-01 IST, and the record geometry, and so the cost being measured,
+  is the same at every rung.
+* `api::server::tests::committed_off_grid_minutes_do_not_certify_the_gap_page`
+  tests the reader's defence against off-grid minutes already on disk. Append
+  can no longer produce that state, so the test lays a pre-D-0915 unsealed file
+  by hand.
+
+**Three more fixtures, in `cli`, changed for the same reason.**
+`checksum_receipts_tests` stamped 1970 minutes into a 2025-05 file.
+`vix_reference`'s off-grid and wrong-month tests, and `audited_stored`'s
+off-grid screen test, need a bad stamp already on disk. They now append an
+on-grid, in-month bar and then move its stamp and reseal its block (and, for
+the screen test, its header slot) by hand, which forges a pre-D-0915 file.
+
+**What was run, and what was not.** The full `store`, `pull` and `api` test
+suites and the `store` ratio bench, whose ratios all stayed within the ceiling.
+The tests that still fail also fail on `origin/main` in this environment:
+permission-denial tests that cannot fail as root, plus
+`pull::emit_sites::every_emit_site_in_this_crate_reaches_a_file`. The `cli`
+library suite ran to completion except
+`step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte`.
+That test takes about an hour and was stopped after running for more than 60
+seconds, so its result under this change is UNVERIFIED. The `cli` failures
+were re-run after the fixture changes and passed.
+`boolean_search_command::integration_tests::generated_search_recovers_same_ordinal_and_refuses_missing_ancestry`
+failed under the 8-thread full run and passed when run by itself; its
+failure output was not captured. Files written before this decision are not
+rechecked on open.
+
+### D-0950 — Withhold the calendar months the daily rung did not read, derive each series once under concurrency and off the async workers, and state what a derivation reads — 2026-10-02
+
+**What was wrong.** Five audit findings, all in `crates/api/src/calendar_of.rs`.
+
+* *R9-api-law-0 and W1-api2-9 (bugs).* `Calendar::from_observed` fills every
+  unobserved day between the first and last observed day with `Closed`.
+  `derive` adds days only from the daily rung, so a month whose daily file is
+  absent (the census holds it at the minute rung only), or whose daily records
+  failed their checks (`read_days` refuses the whole month), became a run of
+  `Closed` days. `json()` omits closed days, so `/calendar.json` answered 200
+  with that month missing and nothing saying why. D-0695's fourth repair
+  closed only the held-file-that-did-not-open case; its text and `cached`'s
+  doc called the minute-only month correct to keep, which was true of keeping
+  it and not of what it said.
+* *W1-api2-0 (cost).* The minute pass asked `in_month` of every traded day for
+  every month, twice when the counter matched: O(months × days) calls to
+  `Day::from_days`, on every cache miss and once per spot series on the
+  exchange branch.
+* *W1-api2-1 (cost).* `read_days` and `read_minute_spans` do one positional
+  read per record, and nothing in `docs/06-limits.md` said so.
+* *W1-api2-11 (cost/robustness).* `calendar_json` had no `.await`, so a miss
+  derived every spot series on a Tokio worker; `gaps_json` derived its peer
+  vote the same way; and `cached` released its lock before deriving, so
+  concurrent misses on one key each derived it.
+
+**The change.**
+
+1. `pull::calendar::Calendar::withhold_closed(from, to)` turns the `Closed`
+   days of a range inside the span into `Unmeasured` and leaves open days,
+   including the 2021-02-24 override, alone. `derive` records which months'
+   daily rung was read whole and withholds every other civil month in the
+   span, naming each in `Report::withheld`. `agree` treats an `Unmeasured`
+   reading as no vote (not "silent"), and withholds a day no reading proved
+   shut, including a day in the gap between two readings' spans. `json()`
+   carries a `withheld` array of `{from, to}` runs. A derivation that withheld
+   or could not read a month writes one `api.calendar` `withheld` event at
+   Warn. A calendar with withheld months is still kept under its stamp: what
+   it says is now true of the store until the manifest moves.
+2. `derive` files each traded day under its civil month once, as it is first
+   read, and each month's counter and full-session marking read only that
+   month's days.
+3. `Report::records_read` counts the record reads, and `docs/06-limits.md`
+   states the O(records) bound. The walk is not made O(1): which days traded
+   is what the daily records say.
+4. `calendar_of::Cache` is a struct (same `lock()` for the kept map) with a
+   flight per key and stamp: one request derives, the rest wait and are given
+   its answer; a leader that unwinds abandons the flight and a waiter leads
+   again. `/calendar.json` and `/gaps.json`'s peer vote run through
+   `detail::run_calendar`, a blocking-pool admission of 8 separate from the
+   detail pool, answering 429 when saturated.
+
+**Tests.** Each failed against the pre-change code where it can be run there
+(the fields it reads were added as inert shims for that run):
+`a_month_held_only_at_the_minute_rung_is_withheld_not_closed` (February came
+out `Closed`), `a_corrupt_daily_month_is_withheld_not_served_as_holidays`
+(0 of 29 days of a corrupt leap-year February unmeasured; also a December
+across the year boundary and a corrupt first month outside the span),
+`derive_classifies_each_traded_day_once_not_once_per_month` (1,152
+classifications for 48 days), `a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked`,
+`the_derivation_walk_is_named_in_the_limits_document`,
+`concurrent_misses_on_one_key_derive_once_and_share_the_answer`,
+`a_leader_that_unwinds_strands_no_follower_and_keeps_nothing`,
+`a_day_no_reading_proved_shut_is_withheld_and_withholding_is_not_silence`,
+`withholding_turns_only_closed_days_inside_the_span_into_unmeasured`, and the
+route tests in `calendar_route_tests.rs`. The single-flight tests count
+derivations and hold the leader open until every follower is waiting, so
+their result does not depend on timing.
+
+**Not done.** The `/ingest` page does not read `withheld` and still shows a
+withheld in-span day as a holiday; that needs `web/` and a `web/build`
+rebuild (Gate W1). `folder::answer`, `indexmap::Published::read` and the rest
+of `/gaps.json` still read inline on async workers. `docs/06-limits.md`
+records both.
+
+### D-0995 — Re-run permission-refusal tests as an unprivileged uid when the suite runs as root — 2026-10-02
+
+**What happened.** On a cloud container the suite runs as root, and every test
+that closes a fixture with `chmod` (mode `000`, `0o300`, `0o444`, `0o555`,
+`0o222`) and expects the host to refuse failed there: root bypasses the mode
+bits (`CAP_DAC_OVERRIDE`), so the open, list, rename or write the test expects
+to be refused succeeds, and the refusal under test never runs. Several of these
+tests already said so in their own comments ("assumes this process is not
+root") and stopped there.
+
+**The change.** Test-only. Each such test is now a thin `#[test]` that calls
+`where_permission_binds(<harness name>, <body>)`, and its original body moved
+unchanged into `<name>_body`. The helper re-runs the named test alone in a child
+of the same test binary: as uid 65534 (`nobody`) when this process is root,
+since `setuid` away from root drops every capability and the mode bits decide
+again, and as the parent's own uid otherwise. The child sees a marker variable
+and runs the body; the parent asserts the child exited zero AND that the harness
+printed `1 passed`, because `--exact` with a name that matches nothing exits
+zero having run nothing. The SAME production refusal runs under the SAME
+assertions on every host. Nothing is skipped and nothing returns early.
+
+**Why not the alternatives.** Skipping as root leaves the refusal untested on
+exactly that host and is the test that asserts nothing `CLAUDE.md` §4 bans.
+Root-proof path fixtures (a directory where a file belongs, a file where a
+directory belongs) reach `IsADirectory`/`NotADirectory`, not
+`PermissionDenied`, and several tests assert the `Denied` mapping itself; for
+the telemetry rename-isolation case no path shape can make the rename refuse
+while the preceding unlink succeeds. The immutable flag needs an `ioctl`, which
+needs `unsafe`, which every crate denies. Reading the uid needs no `libc`
+either: it is the owner of a file the process has just created.
+
+**Why the child is spawned for non-root too.** A branch taken only as root
+would be lines a non-root coverage profile never reaches, and gate 20 compares
+`crates/telemetry`'s uncovered lines exactly. Always spawning means the same
+lines run on every host; the inherited `LLVM_PROFILE_FILE` carries the child's
+counts into the profile, as `crates/api/src/isolated.rs` already relies on. The
+failure message is formatted before the `assert!` for the same reason.
+
+**Where.** `crates/telemetry/src/lib.rs` (`tests::where_permission_binds`, kept
+inside the `#[cfg(test)]` block so gate 21's production-site counts are
+unchanged); `crates/store/tests/support/mod.rs`;
+`crates/pull/tests/support/mod.rs`, which `crates/pull/src/lib.rs` also mounts
+under `#[cfg(all(test, unix))]` for `emit_sites`; `crates/api/src/isolated.rs`.
+**Not yet shown:** gate 20's workspace profile in CI with these tests running
+through a child; the counts are expected unchanged because every moved body
+line still runs, in the child.
+
+### D-0951 — JSON renderers: reuse a current catalog on a first page, and state every per-request walk — 2026-10-02
+
+**The defects (audit findings W1-api1-5, W1-api1-6, W1-api1-4, W1-api2-2,
+W1-api2-3, W1-api6-3).** Six JSON routes pay a cost per request that grows
+with saved evidence, and `docs/06-limits.md` stated none of them. The worst
+was W1-api1-5: `booleanjson::render_with_budget` and
+`booleanevidencejson::render_with_budget` dropped their cached reader on every
+request without a `completion` pin, so every first page hashed and decoded the
+whole saved body again (for the evidence routes, every linked catalog body as
+well) under the one process-wide mutex, even when nothing had changed.
+
+**The choice for W1-api1-5.** Both renderers now decide through one function,
+`detail::must_admit(held, pinned, current)`. A request whose root, identity,
+model and budget match the held reader reuses it when it is pinned (unchanged:
+the projection's own check refuses a changed generation), or when it is
+unpinned and the reader's `require_current` passes. That is the generation and
+lease check every warm page already trusts, so an unpinned page served warm is
+the page a fresh admission would have served. A changed generation, a busy
+publisher or a corrupt receipt still reaches a fresh admission, which serves
+the replacement or refuses; none of them is served from memory.
+`booleanjson::tests::an_unpinned_first_page_reuses_a_current_catalog_and_reopens_only_on_change`
+was run before the change and failed (65 cold admissions for 65 identical
+first pages, against 1 expected).
+
+**The choice for the other five: state them.** Each is a walk the route's
+safety argument depends on, and removing one is a design change, not a fix:
+- W1-api1-6: the currency checks per linked catalog are what make a page over
+  C catalogs safe against any of them changing.
+- W1-api1-4: the qualified campaign route serves a mutable latest snapshot, so
+  a cache would need its own currency argument.
+- W1-api2-2: the five catalog reads are the "catalog changed between pages"
+  guard, and three of them live in `cli::candidate_trades`.
+- W1-api2-3: the single trade-reader slot is one bounded allocation.
+- W1-api6-3: `with_verified` deliberately caches no refusal, so a repaired
+  ledger is served on the next request.
+Each now has a bullet in `docs/06-limits.md` under D-0951, and a test that
+reads the bullet and counts or quotes the source line that pays the cost, so a
+change to either fails until the other follows.
+
+**Rejected.** (1) Caching a refusal in `/engine/top.json`: it would keep
+refusing after the operator repaired the file, the hidden failure CLAUDE.md §4
+bans in reverse. (2) Several slots per Boolean route: it bounds nothing more
+than one slot does, and it multiplies the memory a slot may hold by the slot
+count. (3) Changing `booleanoosjson` and `indexstopjson`, which have the same
+unpinned-first-page shape: they were not in the findings, and
+`docs/06-limits.md` says they are unchanged.
+
+Invariants JR-01 to JR-07; `docs/06-limits.md`, "JSON renderers: cold
+admissions and per-request walks".
+
+### D-0914 — Measure the cold bar lookup, give it its own 10,000-floor budget, and read its block into the stack — 2026-10-02
+
+**What was wrong.** Two audit findings, one defect. C-28 and C-29
+(`crates/store/benches/ratio.rs`) re-read one fixed index, so after the first
+call `verify_block_of` returned on its one-block memory and only the warm path
+was timed. The cold path — every read that lands in a block other than the last
+one verified, which is every random access and every bisection probe — was
+never measured, and allocated `vec![0u8; span]` per call in `verify_block_of`,
+plus a second in `past_the_commit` for a tail block holding records past the
+commit.
+
+**The change.**
+
+1. **Two bench rows.** C-BC-01, `cold_record_read_is_flat_in_the_file`, reads
+   fourteen indices in fourteen distinct blocks in turn, block 0 to the tail,
+   at 1×, 10× and 100× the record count, under the 3.0× ceiling. C-BC-02,
+   `cold_record_read_stays_within_its_budget`, holds the same cold read to a
+   floor budget.
+2. **Its own budget, 10,000 floors.** Measured 2,066.247 floors before the
+   change and 2,394.687 / 2,096.921 / 2,443.033 after, on a shared `x86_64`
+   host. C-29's 800 does not hold for the cold read, and the row printed OVER
+   BUDGET at 800 before this budget was set. Folding the cold read into C-29
+   by raising 800 would have loosened the warm read's bound by 12× to cover a
+   different operation; a second named budget keeps both honest. 10,000 is the
+   worst observed with roughly 4× left over, the rule C-29 used.
+3. **A stack buffer.** `MAX_BLOCK_LEN`, derived from the bar, overlay and
+   greeks geometries and pinned to 4,088, sizes one array for the covered range
+   and one for the records past the commit. `past_the_commit` reads into the
+   caller's array and returns a borrow of it. `slice_of` is the one door into
+   both arrays and refuses a length past `MAX_BLOCK_LEN` as
+   `FormatError::BlockLengthMismatch` naming the block; no geometry a
+   `BarFile` opens produces one. The caching in `read_row` and
+   `verify_block_of` is untouched.
+4. **Gate 14's store row** names C-BC-01 and C-BC-02.
+
+**Considered and refused.** A counting global allocator to prove the absence
+of allocation by measurement: it needs `unsafe impl GlobalAlloc`, and
+`unsafe_code` is denied workspace-wide. C-BC-03 is a source-shape test instead,
+named as one, beside edge tests that drive the buffer through the public door.
+
+**Not shown.** Removing the allocation did not visibly lower the cold cost on
+this host; the CRC dominates it. No dedicated-hardware or `aarch64`
+measurement was taken. `docs/06-limits.md` records both. Four store tests
+(`durability.rs` ×3, `write.rs` ×1) fail in this container because it runs as
+root and permission bits do not refuse root; they fail identically on
+`origin/main` and are not touched here.
+
+### D-0994 — Replay a retained Candidate's Execution V3 dispositions once per exact row set, not once per reauthentication — 2026-10-02
+
+**What happened.** `cli::step3_orchestrator::all_rung_tests::all_eight_stored_rungs_publish_exact_selection_chains_and_reuse_every_byte`
+took about 58 of the 65 minutes of a full `cargo test --workspace` on a
+4-core box. Run alone from the same `test` profile binary on that box it took
+55m05s (3,304.90 s reported by libtest, load average 4.9 at start, 2.0 at
+the end).
+
+**Why, measured rather than read.** The profile is already `opt-level = 3`
+(`[profile.test]` inherits `[profile.dev]`), so the build profile was not the
+lever. 43 `gdb` stack samples of the test thread, taken about 25 s apart
+from its start, put 37 inside
+`RetainedStoredExecutionContextV1::execution_v3_replay`: a full rebuild of the
+`CandidateUniverseProductionSourceV1`, its BLAKE3 data digests over every
+signal, minute and daily bar, and a fresh Runner replay of every Long and
+Short disposition. The callers were the nested before/after
+reauthentication doors. `CommittedStoredPopulationV5::execution_v3_source`
+replays both families; `commit_stored_execution_v3` calls it twice;
+`CommittedStoredExecutionV3::ordered_authenticated_dispositions` calls it
+twice; `require_committed_execution_rung_v1` calls that plus one more;
+`CommittedStoredAllRungExecutionV3::require_live_topology` repeats that for
+every rung; and `PreparedSelectionV5::from_committed_execution` makes four
+more. That is dozens of identical replays per rung per pass, and the test
+makes two passes over eight rungs.
+
+**Why the repeats proved nothing.** The replay reads only the capability's
+private retained context (owned bars, grids, policies), its retained
+Candidate receipt and the authenticated Candidate rows. Neither of the first
+two has a `&mut` path after construction. Recomputing the same deterministic
+function of the same inputs can only return the remembered value. What can
+change between calls is on disk, and every call still re-checks that.
+
+**The change.** `CommittedStoredCandidatePreAdmissionV1` holds one
+`OnceLock` memo: the first successful replay and the complete row set it was
+computed from. `execution_v3_replay_authority` still requires the admitted
+root before and after, still reopens and fully authenticates the Candidate
+ledger through `authenticated_candidate_population_rows`, and still calls the
+strict source guard. Only then, if the fresh rows equal the remembered rows
+exactly, does it return the remembered authority instead of replaying. A
+different row set is replayed in full, and a failed replay is not
+remembered. No other check, door or file changed. The all-rung test was not
+edited: every assertion, input and code path it had is still there, and each
+fresh commit (both passes) still runs the full replay once per family.
+
+**Measured after.** The same test, same box, same profile: 8m14.8s
+(494.81 s, load average 4.3 at start, 4.8 at the end). The remaining time is
+the two Candidate sweep passes and the disk-backed reauthentication reads,
+which are real work.
+`cli::step3_orchestrator::execution_v3_replay_runs_once_per_exact_row_set_and_still_reauthenticates_live_inputs`
+pins the bound: one replay for three calls on unchanged rows, equality with
+an independent replay, a full replay for a different row set, and a refusal
+before the replay when a Candidate byte is flipped. `docs/04-invariants.md`
+XR-01 and XR-02; `docs/06-limits.md` records what stays non-constant.
+
+### D-0949 — Give each autopilot rung its own frontier, key stalls by month and rung, and cache the rung work lists per masters parse — 2026-10-02
+
+**The defects (audit findings W1-api1-2, W1-api1-8, W1-api1-7, W1-api1-1, all in
+`crates/api/src/autopilot.rs`).**
+
+* *W1-api1-8 (bug) and W1-api1-2 (cost).* `FeedState::observe` pushed a fresh
+  `Stall { retried: 0, .. }` every time a month burned `MAX_MONTH_ATTEMPTS`.
+  `reconsider` puts a stalled month back on the ladder, so a reconsidered month
+  that failed again added a second entry with a full allowance. Nothing ever
+  removed an entry: not a completion, not a revive. Retries per stalled month
+  were therefore unbounded (one every `STALL_RECHECK_SECS` while idle), the
+  stated bound of `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = 9 attempts per
+  month was not enforced, and the list grew by one entry per failure for the life
+  of the process. `reconsider`, `stall_note`, the survey's clone and
+  `Status::json` (under the status mutex, on every `GET /autopilot.json`) each
+  walk that list, so their cost grew without bound too. A test comment said the
+  stall "leaves only when the month actually completes"; no code did that.
+* *W1-api1-7 (bug).* `fly` alternates the day and minute rungs over one feed
+  table, and `FeedState` had one frontier. A day pass that completed month F
+  moved it to F+1, and the next minute pass scanned upward from F+1, so minute
+  months below the day frontier were never examined for the life of the process,
+  and every restart repeated it. The per-month counters (`attempts`, `dry`,
+  `backoff`) crossed between rungs the same way.
+* *W1-api1-1 (cost).* `fly` called `tracked_series` on every pass: a filter of
+  the whole merged master universe, `sort_unstable` and `dedup`, O(U log U) for
+  U rows (2,787 real, 50,000 in the bench fixture), back to back while working
+  and every `IDLE_POLL_SECS` while idle. Its doc comment said it was computed
+  once at start.
+
+**The choice.**
+
+1. *One place per rung.* `FeedState` gains `rung` (which rung its live
+   `frontier`, `attempts`, `dry` and `backoff` belong to) and `parked: Place`
+   (the other rung's four fields). `RUNGS = [Day1, Minute1]` names the two
+   rungs `fly` alternates. `FeedState::enter(rung)` swaps the four fields in
+   O(1), and is a no-op for the live rung; `round` calls it for every feed
+   before anything else, so every caller of `round` gets the right place.
+   Halts, the credential re-read allowance, `months_done` and `last_reason`
+   stay per feed: a dead credential or a full disk is not a rung's fault.
+2. *A stall is keyed by (month, rung).* `Stall` gains `rung`.
+   `FeedState::record_stall` updates an existing entry for the same key: its
+   `attempts` add up (saturating at `u8::MAX`), its reason is replaced, and its
+   `retried` and `at_unix` are kept, so a reconsidered month that fails again
+   does not renew its allowance. `observe`'s `complete` arm calls
+   `FeedState::unstall`, which removes the entry for the live rung's frontier
+   month. `reconsider` moves the stall's own rung: the live frontier when the
+   stall's rung is live, otherwise `parked`. The 9-attempt bound is now
+   measured by a test, not only stated. `/autopilot.json` names each stall's
+   `timeframe`.
+3. *The work lists are cached per masters parse.* `server::Parsed` gains
+   `generation`, zero at load and moved by every `Site::reparse` that swaps a
+   universe in (a refused reparse leaves both alone). `SeriesCache` holds one
+   list per rung timeframe with the generation it was built at; a pass costs
+   one read lock and one integer compare, and a rebuild happens once per rung
+   per parse. `fly` reads both its opening instrument count and every pass's
+   list through it.
+
+**What is O(1) and what is not.** `enter` and the cache lookup are O(1) per
+pass. The stall list is bounded but its walks are not O(1): `record_stall` and
+`unstall` scan one feed's list, and `reconsider`, `stall_note` and
+`Status::json` scan every feed's. Each list now has at most one entry per
+(month, rung), so it is bounded by twice the months between the feed's floor and
+yesterday. `Status::json` must render every entry, so its cost cannot be below
+the list's length. `docs/06-limits.md` states the bound.
+
+**Rejected.** (1) Two feed tables, one per rung: halts, store probes and the
+status page would split in two, and a dead credential would be met twice.
+(2) A map keyed by (month, rung) for O(1) dedup: it would not make
+`Status::json` or `stall_note` O(1), and the bounded scan runs once per
+`MAX_MONTH_ATTEMPTS` failed ticks. (3) Removing a stall when the month is passed
+by the dry-round rule: a dry month stored nothing, and the stall is the only
+record that it was ever asked for. (4) Keying the cache on `Parsed::at`: two
+parses on a coarse or stepped clock can carry one timestamp, and a counter
+cannot.
+
+**Not changed.** `docs/06-limits.md` §70 still describes the minute rung as
+pinned; D-0153's order and §70's text predate the alternation and are left for
+their own correction.
+
+Invariants AU-W1A-a through AU-W1A-d; `docs/06-limits.md` has the bound.
+
+### D-0948 — Enforce §8's re-read-and-halt on the pull paths that ship, and decide a credential halt only from that comparison — 2026-10-02
+
+**What was wrong.** These are findings GAP2-36, GAP2-37 and GAP2-38.
+`CLAUDE.md` §8 says a stale token is re-read, and if the re-read returns the
+same dead value the pull halts loudly. `pull::secret::CredentialReader::reread_after_rejection`
+states that rule, and its own doc says no shipped caller reaches it. The shipped
+spot loop, `broker_run`, read Parameter Store again for every instrument and
+never compared the value with the one the vendor had rejected. A dead token
+therefore produced one more rejected request for every instrument left in the
+universe. The two F&O walks, `roll_every` for Dhan's offset cells and `fno_land`
+for Groww's named contracts, built one source and sent its token to every
+remaining cell. `fetch_rolling` reduced `Refusal.credential_dead` to plain text,
+and `fetch_chain_chunks` wrote the contract symbol in front of the marker, so
+neither walk could even see the verdict. A death after the first chunk of a spot
+instrument came back as `Ok` with the marker inside `unfetched`. Nothing read it
+there, and the control character reached the operator's page. GAP2-37: the
+autopilot then halted a feed as *"re-reading it returned the same value"* for any
+reason whose text contained the word `credential`. That included an unreachable
+or throttled Parameter Store, a missing `credentials.toml` and an absent AWS
+identity, and in none of those cases was any value compared. GAP2-38: invariants
+P-06 and P-09 cited tests of the unwired port only. The SSM action literal was
+named by no test, so changing it to a write action passed the whole suite.
+
+**The change.**
+- `pull::http::Credential::print` and `HttpSource::credential_print` give a
+  SHA-256 fingerprint of the credential. The input is domain-separated and
+  length-prefixed. Comparison is constant-time, and `Debug` is a redaction with
+  no accessor for the bytes. Only fingerprints are compared or kept; the secret
+  is never held twice and never logged.
+- `api::credential_law` holds the rule. `Watch` is one run's memory: what the
+  last request carried, and which value is known to be dead. `Watch::reread` is
+  called once per rejection and never in a loop. Its three outcomes are:
+  - The value is unchanged: the run halts as `CredentialStop::SameValue`.
+  - The re-read fails: the run halts as `CredentialStop::Unreadable(class)`.
+    It cannot tell whether the token rotated, and it will not send the rejected
+    value again.
+  - The value changed: the run continues with it. A later read that hands back
+    the rejected value is refused before the socket.
+
+  A configuration fault (`Unread::Configuration`) stops a spot run at once,
+  because every instrument would fail it the same way. A transport fault
+  (`Unread::Transport`) fails only that instrument.
+- `broker_run`, `roll_every` and `fno_land` call it. Spot reads the marker from
+  both the `Err` arm and `unfetched`. `fetch_rolling` and `fetch_chain_chunks`
+  put `CREDENTIAL_DEAD` first. A stop is set on `BrokerRun::stopped`, together
+  with the instruments not asked, and as receipt facts on the F&O pages. The
+  existing `CREDENTIAL_FACT` line is added only for the same-value verdict.
+- `credentialed_source` and `read_credential` return a classed `Unreadable`.
+  Parameter Store's own `SecretError::Unreachable`, which covers a timeout, a
+  throttle and a 5xx, is transport. `AccessDenied`, `NotFound`, an unbuildable
+  path, an unset HOME, an unusable configuration and no AWS identity are
+  configuration.
+- `autopilot::FeedState::observe` halts on `TickOutcome::credential` and never on
+  prose. `SameValue` halts as `Halt::Credential`. Configuration halts as the new
+  `Halt::Configuration`, whose sentence names the configuration and claims no
+  re-read. Transport, or no verdict, goes to the existing bounded backoff and
+  stall. The autopilot's own re-read allowance (`CREDENTIAL_REREADS`,
+  `FeedState::rereads`) and `credential_is_feedwide` are removed, because the run
+  now makes the one re-read itself. `autopilot::outcome_of` is split out of
+  `tick` so the hand-off can be tested.
+- `Site::credentials` selects the source. It is Parameter Store in every
+  constructor. A `Scripted` source exists only under `cfg(test)`, so the shipped
+  loops can be driven against a loopback vendor with no AWS.
+- `pull::ssm::fixed_headers` is the one place `get_parameter` takes its
+  `content-type` and `x-amz-target` from.
+  `ssm::tests::the_only_action_on_the_wire_is_get_parameter` pins the literal
+  `AmazonSSM.GetParameter` and a body of exactly `Name` and `WithDecryption`.
+
+**Proof.** `api::server::credential_law_tests` drives the three production loops
+against a scripted credential source and a fake vendor that answers 401. The
+fake counts the requests it receives. Same value: one request and no more, one
+re-read, and a reason naming the feed, `access-token` and §8 but not the value.
+`outcome_of` and `observe` then give `Halt::Credential`. Rotated value: the next
+request carries the new token. Rejected value handed back: refused before the
+socket. Failed re-read: a halt that does not say "same value", and the autopilot
+backs off. Configuration fault: no request and no re-read, then
+`Halt::Configuration`. A mid-walk rejection stops every remaining rolling cell
+and named contract, and a mid-walk rotation sends the rest with the new token.
+`autopilot::tests::an_unreachable_parameter_store_is_never_a_dead_token` is the
+finding's own case. Invariants P-05, P-06 and P-09 now cite these tests.
+
+**Cost.** O(1) per instrument or cell: one 32-byte comparison. A rejection adds
+one Parameter Store read and one SHA-256, at most once per rejection. Neither
+grows with the universe, the window or the cross product.
+
+**Not changed.** `pullrun`'s multi-leg runner still reads F&O pages through
+`credential_fault_in_page`. Those pages now carry `CREDENTIAL_FACT` only for a
+same-value stop, but the runner's prose fallback list is unchanged. The masters
+refresh (`mastersrun::credentialed_zerodha`) reads one credential for one
+download and has no loop to halt.
+
+### D-0947 — The `indicators` crate header states the code's position counts, and a test now reads it; four stale mechanism and cost claims corrected — 2026-10-02
+
+**What was stale (cloud audits ET-indicators-7, ET-indicators-10, UC-1).**
+
+- `crates/indicators/src/lib.rs` said **eleven** of the vocabulary's **232**
+  live positions were computable in its first paragraph and **52** of 232 in
+  its summary. Its table summed to 205, omitted `gap`, `trend`, the crossings
+  and their ordinals, 276–279 and the weekday rows, and its `fib` row listed 17
+  positions (19–29 includes tombstones 19 and 25) beside a Count of 15.
+  Counted from the code on this change: `Evaluator::positions()` returns
+  **328**, `vocab::table::LIVE` has **328** bits, and the twelve sources are
+  CurDayFib 11, `daily` 44, `fib` 27, `orb` 20, `pattern` 62, `session` 25,
+  `vwap` 20, `gap` 11, `trend` 14, crossings 85 (17 levels × 5), 276–279 4,
+  weekdays 5 — disjoint, summing to 328.
+- The same header said `PastPrefix` "enforces" no look-ahead "by removing the
+  future from the borrow". `PastPrefix` has no production caller; what holds
+  the property is that `Column::build` streams one bar at a time, as
+  `CLAUDE.md` §3 rule 7 (D-0212) already says. `docs/04-invariants.md` V-02
+  credited an "index-guarded accessor" the same way.
+- Its cost paragraph described one family's work and quoted 24.4 → 22.4 ns per
+  bar, a figure from when the crate computed the current-day ladder alone. It
+  now cites `C-I-01` (1.009×) and `C-I-05` (404,052 to 496,491 ps, the D-0690
+  runs) as cited, not re-measured.
+- `Evaluator::positions()`'s doc said "238 positions today, which is every live
+  bit". 238 is the module half (the sources above minus crossings and
+  weekdays); the total is 328. The test below it said "323 = 238 + 85" and now
+  says 328 = 238 + 85 + 5, matching its own assertion.
+- `docs/06-limits.md` §51 said `isqrt_i128` "does not execute at all" on swept
+  data. Since D-0507 `cli::stored::vwap_availability` returns `Present` for
+  every cash equity, so equity sweeps reach it through the VWAP sigma bands.
+- `docs/03-vocabulary.md` called 56–59 "break events ... true only on the
+  handful of bars where a level was taken out". `Structure::classify` makes
+  56–57 (`bos_*`) states, true on every bar beyond the latched swing in the
+  direction in force; 58–59 (`choch_*`) fire on the flip bar, because
+  `Structure::advance` moves the latch. (The audit's wording says all four are
+  states; the code says only the `bos` pair is, which is also F-A9DB2D's
+  reading.)
+
+**The guard.** `crates/indicators/tests/module_doc_counts.rs` gains
+`the_crate_header_table_and_summary_are_the_code`. It parses the lib.rs header
+table and requires: each row's Count equals the positions it lists; no position
+in two rows; the rows' union equals `Evaluator::positions()`; each module's own
+`positions()`, the current-day range and `CROSSINGS` each equal exactly one row;
+and the summary's two numbers equal `Evaluator::positions().len()` and
+`LIVE.popcount()`. **Against origin/main's lib.rs it fails**: `lib.rs row
+[`fib`] — previous-day ladders, both directions: Count says 15 and the Positions
+cell lists 17`. Hand mutations of the new header also fail it: the old "52 of
+232" summary, a deleted weekday row, and `gap` split over two rows. The existing
+module-header test now also reads `gap.rs` and `trend.rs`, which state their
+counts in the checked form and were not read (8 modules, was 6).
+
+Not added to `docs/11-findings.md`, which records the 2026-08-11 sweep and its
+digest. **Left open:** `CLAUDE.md` §3 rule 7 still says `cli` and `runner` pass
+`Availability::Absent`; the stored equity path passes `Present` by kind
+(D-0507), which does not read the slice and so does not reopen the look-ahead
+point that sentence makes. That file is the session law and is not edited here.
+
+### D-0946 — The pull does not keep every Muhurat day off disk; the calendar list does, and a 43-bar in-hours stub is now pinned — 2026-10-02
+
+**What was false (cloud audit GAP12-10).** The header of
+`CHARTER_NON_REGULAR_IST_DAYS` in `crates/indicators/src/evaluator.rs` said
+five of the six Muhurats "never reach disk" because `pull::fetch::land` drops
+every bar outside `[09:15, 15:30)` and "hardcodes a 15:30 close", so only
+2025-10-21 needed the list. The charter's DR-drill row repeated it ("unlike
+five of the six Muhurats ... nothing keeps them off disk by accident").
+
+**What the code does, read here.** `land` calls `session::Window::verdict`,
+which takes the hours from the listing's venue table through
+`Venue::hours_on` (`NSE_INDEX_SESSIONS`, `NSE_CASH_SESSIONS`,
+`NSE_DERIVATIVES_SESSIONS`), not from one constant; a bar outside them is
+counted (`outside_session`, `DropCensus`) and dropped. For the index and cash
+venues on every listed date those tables say 09:15–15:30, so an evening
+ceremony's minutes are dropped and any in-hours bar dated that day is kept.
+Whether a Muhurat day is on disk therefore depends on what the vendor sent,
+not on the pull.
+
+**What was measured, and by whom.** The audit reported that dhan's store holds
+43 bars dated 2021-11-04, 14:47–15:29 IST. That is the audit's measurement; the
+store is not available to this change and nothing here re-measured it.
+`crates/pull/src/calendar.rs`'s "no minute bar anywhere in the store" for the
+five pre-2025 Muhurats is a statement about the Zerodha store it was measured
+on and is not changed here.
+
+**The change.** The header now says what `land` does and that the list, not
+the pull, keeps such a day out of the previous-day anchor, `Prev5` and the
+previous-session edge. The 18_935 entry carries the reported on-disk shape.
+Three test comments and one assertion message that called 2025-10-21 "the one"
+listed day whose bars reach disk are corrected, and so is the charter's DR row.
+
+**The test, and what it does not show.**
+`evaluator::tests::a_muhurat_session_inside_the_pull_window_does_not_become_yesterday`
+feeds a 375-bar session, 43 bars at 14:47–15:29 on day 18_935, and a 375-bar
+session, and requires the third day's 44 `daily` positions and 16 previous-day
+Fibonacci positions on every bar, `sessions_completed` and `has_yesterday` to
+equal the same fixture without the stub. Two one-bar stubs, at 15:29 and at
+09:15, cover the window's boundaries. Each stub declared regular
+(`Calendar::all_regular`) must change those bits, so the equality cannot pass
+with the calendar ignored. **It passes on `main` before this change**: the
+defect was the documentation, and the calendar already listed 18_935. It
+guards against the list being trimmed on the strength of the old header. With `Calendar::is_non_regular` mutated by hand to answer `false` for 18_935 (the const assertion refuses removing it from the array outright), the test fails on its first case: "43 bars 14:47-15:29 on 2021-11-04 changed the next day's previous-day pivot or Fibonacci bits, the rolling-window count or yesterday".
+ No
+production line changed. Not added to `docs/11-findings.md`, which records the
+2026-08-11 sweep and its digest. `crates/indicators/src/gap.rs:918` carries a
+similar "the one the pull's window admits" comment; it is left for the worker
+editing that file.
+
+### D-1430 — `runner::resample` anchors intraday buckets at the 09:15 open, as `pull::fold` does — 2026-10-02
+
+**The defect (C3 "resample", audit finding probeengine-2).** `runner::resample`
+keyed every bucket on `(ts + IST offset).div_euclid(period)`, an IST-midnight
+grid, while its own doc said a 5-minute bar from 09:17..09:19 is stamped 09:15
+and `pull::fold` (the store's fold authority) anchors every intraday rung at the
+09:15 open. The two agree only when the period divides 555 minutes. For 2, 10,
+30 and 60 minutes the first bar of each session was stamped 09:14, 09:10, 09:00
+and 09:00 and held only part of a period; a period that does not divide a day
+(7, 75 minutes) moved to a different clock offset each day. Shown on
+`origin/main` by a probe: the 2-minute first bucket of 09:15..10:30 was stamped
+`1728013440000000` where 09:15 is `1728013500000000`.
+
+**The choice.** The rule is restated, not imported (`runner` may not depend on
+`pull` or `store`): an intraday period uses the anchor `IST offset − 555
+minutes`, a period of 1,440 minutes or more keeps IST midnight, exactly the
+`bucket.secs() >= 86_400` split `pull::fold` makes. The intraday grid restarts
+at every 09:15: a bar's bucket start is `t − ((t + A) mod day) mod period`, two
+`rem_euclid` and one checked subtraction per bar, O(1). For every period that
+divides a day (every rung the store files) that is edge for edge the
+continuous grid `pull::fold` walks, including a bucket that spans IST midnight.
+For one that does not (7, 75 minutes) it deliberately differs: a continuous grid
+drifts 1,440 mod period minutes a day, and the restart keeps every session's
+first bar at 09:15, the cut-short bucket being the overnight one ending at the
+next 09:15. `crates/cli/tests/resample_matches_fold.rs` holds
+`runner::resample` and `pull::fold` to byte-equal bars at 2, 3, 5, 10, 15, 30,
+60 and 1,440 minutes, because `cli` is the one crate that can name both.
+
+**Callers.** Every call site is a test (`identity.rs`, `validate.rs`,
+`outcome.rs`, `signal_candle_stop_tests.rs`). The signal-candle fixture relied
+on midnight edges: it signalled at 10:00, which is not an edge on the 2/10/30/60
+open grid, and listed last buckets of 15:28/15:20/15:00/15:00. It now signals
+at 10:15 (an edge for every rung) and its last buckets are the open grid's
+15:29/15:25/15:15/15:15. The outcome test's doc, which said the hourly rung is
+stamped 09:00 … 15:00, now says the fixture hand-builds those stamps.
+
+**Rejected.** (1) A dev-dependency on `pull` from `runner`: it adds an arrow
+`CLAUDE.md` §5 does not draw. (2) Keeping midnight and documenting it: the
+stamped-before-the-open bar is the leading stub `pull::fold` calls "a lie", and
+a resampled 60-minute run would not match the store's own 60-minute rung.
+
+Invariants RSM-01, RSM-02.
+
+### D-1431 — `runner::resample` refuses its `i64` edges instead of saturating — 2026-10-02
+
+**The defect.** `bucket_of` used `saturating_add`, `bucket_start` used
+`saturating_mul`/`saturating_sub`, and the volume sum used `saturating_add`. A
+saturated key or start stamped a bar outside the bucket it was folded into (a
+bar at `i64::MAX` was stamped `9223372017000000000`, 330 minutes away at a
+5-minute period), and two `i64::MAX` volumes summed to `i64::MAX` reported as a
+measured volume. Both are a fallback that hides a failure, which `CLAUDE.md` §4
+bans; the module's own test asserted the clamp as correct.
+
+**The choice.** `resample` returns `Result<Vec<Candle>, ResampleError>`.
+`GridOverflow { at, ts_micros }` is returned when the anchored key or the bucket
+start is not an `i64`; `VolumeOverflow { at, bucket_micros }` when a bucket's
+volume sum is not. The period multiply needed no guard: `u32::MAX` minutes is
+about 2.6 × 10^17 µs, and a `const` assertion proves it, so the dead
+`saturating_mul` is gone rather than made checked. Each bar still costs a fixed
+number of checked operations, O(1). No market value reaches either error.
+
+**Rejected.** (1) Panicking: §4's loud death. (2) Dropping the bar: a silent
+change of answer. (3) Clamping the period at construction: the period is never
+the overflowing term.
+
+`pull::fold` still saturates its own volume sum; that is its file and is not
+changed here.
+
+Invariant RSM-03.
+### D-1420 — Lay every fixed-width terminal table out from its rows, so no two columns touch and every header stays over its figures — 2026-10-02
+
+**The defect (batch-1 audit item C3, "poolcols").** Every fixed-width table
+the `cli` renders was one `format!` string of adjacent width specifiers --
+`{:<5}{:>10}{:>9}{:>14}` -- with no literal separator. Padding was the only
+thing keeping two figures apart, so a cell that filled its width ran into its
+neighbour, and a wider one also pushed every later column off its header.
+Driven at the extremes their own types allow, each test below failed on
+`origin/main`:
+
+- `top`: `655351844674407370955161518446744073709551615-₹9,22,…` -- rank,
+  hits and n read as one number.
+- `results`: a full 16-byte feed ran into the rung
+  (`abcdefghijklmnopqrstuvwxyzabcdef`), and `months` into `depth`.
+- the screen, consistency, descent, `range-all`, window-shape and pool
+  pass-1 tables: two to six of their nine to eleven columns merged
+  (`-9223372036854775808-9223372036854775808…`).
+- `ledger-all`'s Top-10 block and `ledger-v6`'s route row already had two
+  literal spaces between columns, so their figures stayed apart. But their
+  headers were off at ordinary values: `worstLoss` is nine characters over an
+  eight-character column, and `draws/seed` is ten characters over nine.
+
+**The choice.** One helper, `cli::columns`, lays out a table's header and body
+together. The widths written at each call site stay as MINIMUMS, so a table
+whose figures fit renders byte for byte as before (pinned by
+`figures_that_fit_render_exactly_as_the_format_string_did`). A column widens,
+for every row at once, only as far as it needs to keep one space from its
+neighbour. A right-aligned column keeps the space on its left, a left-aligned
+one on its right, and a right column followed directly by a left one gets one
+literal space. A refusal row carries only its first cell, which still counts
+toward that column's width, so a `REFUSED:` sentence cannot touch it. Widths
+are counted in characters, the unit `format!` pads in.
+
+Two tables could not be measured as they were written, and were changed so
+they can be:
+
+- `descend` wrote each row into the report as its step landed. The progress
+  line on stderr still prints at that moment. The report on stdout, which is
+  read whole, now lays its table out after the last step.
+- `ledger-v6` printed its header once, above the first rung, and each rung's
+  selection report was written between the rows. Each route row now carries
+  its own header, laid out with it.
+
+`ledger-all`'s Top-10 visit now buffers one rung's (at most ten) rows before
+it renders them.
+
+**Rejected.** (1) Widening every money column to the 26 characters that
+`rupees(i64::MIN)` needs: every ordinary table would grow by about 100
+characters to handle a value no real run produces. Measuring the rows reaches
+the same guarantee without that cost. (2) Patching each format string with
+one extra space: that changes every ordinary table, and it still misaligns
+the header once a figure overflows. (3) Per-site width arithmetic: the
+fourteen copies of one rule are the drift this replaces.
+
+**Scope, stated.** `api` has no fixed-width text table; its renderers emit
+HTML and JSON. These are key/value lists whose columns already have literal
+separators and no header: `quality_block`, `verify` (its longest claim
+is 60 characters, in a 62-character column), the `ledger-all` gate census and worksheet, and
+`batch`'s month lines. They are left as they are. The pooled pass-2 table in
+`pool.rs` (`net` beside `dd>=`) is another lane's finding (GAP13-16), so it is
+not changed here.
+
+Invariants TC-01 to TC-03.
+
+### D-0942 — A refused anchored signal bar is decided before the daily cursor walks, so refusals cost no daily walk — 2026-10-02
+
+**What was found.** W3-indicators1-0, and W3-indicators1-1 is the same
+defect. `AnchoredEvaluator::step_with_warmth` copied itself, advanced the
+daily cursor on the copy with `advance_before`, then ran `step_known`. A
+refusal discarded the copy, so the next refused bar walked the same daily
+references again from the committed cursor. `Column::build_from` keeps folding
+after a refusal, so a burst of refused bars before the first accepted bar (or
+spanning many days after the last one) cost O(daily) each and O(signal x
+daily) per run. The audit measured 110 ns per refused bar with 10 references
+and 277,355 ns with 40,000. The module doc (`anchored.rs` "Join and cost")
+claimed `O(signal + daily)`.
+
+**Why the walk is not simply committed on refusal.** A refused bar may carry a
+LATER IST day than the next accepted bar: a zero-priced bar stamped three days
+ahead is refused as `PriceNotPositive`, and the next ordinary bar, still after
+the last accepted timestamp, is accepted. Committing the refused bar's walk
+would install references from days at or after the accepted bar's day, which
+is look-ahead. It would also move `census.consumed`, whose doc counts records
+made strictly earlier than an ACCEPTED signal day, and change
+`current_reference` after a trailing refusal.
+
+**The change.** When the walk would be non-empty (the reference at the cursor
+is strictly before the signal day), the bar is first stepped on a throwaway
+copy of the COMMITTED evaluator; a refusal returns from there and no reference
+is walked. This is exact because no refusal in `Evaluator::stepped` reads the
+three fields the walk writes: `prev5`, `yesterday` and `previous` are written in
+external-daily mode only by `install_external_daily_reference`
+(`close_the_books` returns early), and `SessionState::step` reads `previous`
+only for its bits after its own `check_evaluable`. So the committed evaluator
+refuses exactly the bars the advanced one refuses, with the same `Corrupt`,
+and nothing a later accepted bar sees changes.
+
+**Cost, stated.** A refused bar costs one fold and no walk. An accepted bar
+whose day has an unconsumed prior reference costs one extra fold (the probe)
+and walks those references once; that happens at most once per accepted
+signal day. Total walk is at most the number of daily references, so total
+work is `O(signal + daily)` for any order of refused and accepted bars.
+UNVERIFIED as a bench: the proof is a walk-step count, not a timing.
+
+**Proved by.**
+`indicators::anchored::tests::refused_signal_bars_never_rewalk_the_daily_references`
+offers 3,000 refused bars of six refusal kinds (zero price, negative low,
+inverted, straddling range, negative volume, overflowing VWAP accumulator)
+over 2,000 unconsumed references, then one accepted bar, and requires exactly
+2,000 walk steps in total. On the pre-fix code it fails with
+`left: 6000000, right: 0`.
+`the_pre_fix_step_walks_every_pending_reference_per_refusal` keeps the old
+step as an oracle and shows it walking 500 steps for 10 refusals over 50
+references where the new step walks 0.
+`the_refusal_probe_runs_once_per_day_with_a_pending_prior_reference` pins
+the probe's own price: three probes over four days of five bars, one per day
+with a strictly earlier unconsumed reference, none for a same-day reference
+or after the references run out.
+`mixed_refused_and_accepted_bars_match_the_pre_fix_step_exactly` drives 4,000
+pseudo-random bars per availability, including refused later-day bars
+followed by accepted earlier-day bars, duplicate and receding timestamps,
+negative volumes and accumulator overflows, and requires every result (mask,
+known set, warmth, refusal) and the cursor, installed reference, census,
+Prev5 fill, anchor and warm-up verdict after every step to equal the oracle's.
+The walk counter is a `#[cfg(test)]` thread-local, so the count is
+deterministic and absent from production builds.
+
+### D-0944 — Key the gap family's 3-minute candle by clock span, not by counting three bars — 2026-10-02
+
+**What was wrong.** `docs/09-design-sources.md` §4 defines `X1` as the
+previous day's **last 3-minute candle** and `X2` as today's **first 3-minute
+candle**, and ties candles to the fold grid anchored at IST midnight.
+`indicators::gap::GapFib` counted three BARS (`CANDLE_MINUTES = 3` as a bar
+count, a three-slot ring for the tail, a `today_bars` counter for the opening
+candle) and never read `ts_micros`. Two consequences, both reachable on real
+data (findings ET-indicators-2 and ET-indicators-11, one defect):
+
+* **A missing minute let a bar of the next candle in.** The store is about
+  1.32% missing minutes. With 09:16 missing, the count took 09:15, 09:17 and
+  09:18, so 09:18's high became `X2` (the audit's attack07: `x2 = 1,090,000`
+  where the 09:15-09:17 candle printed 1,051,000). The same happened at the
+  other end: with 15:29 missing, 15:26 entered `X1`. The exact-minute overlay
+  (`anchored::overlay_exact_minute_gapfib`) uses the same `GapFib`, and its
+  cadence check admits holes, so it inherited the defect.
+* **On a rung of three minutes or more the candle was three rung bars**: 9
+  minutes at 3, 15 at 5, 45 at 15, 180 at 60. The module doc claimed the
+  opposite ("a single bar *is* the candle").
+
+**The change.** A bar's candle is its span on the 3-minute grid anchored at
+IST midnight, `(ts + IST offset) div 1 minute div 3`, computed by
+`gap::candle_bucket`. The 09:15 open is minute 555, a multiple of three, so
+09:15-09:17 and 15:27-15:29 are each one span, and the grid is the same one
+the open-anchored fold produces for every rung that divides 555.
+
+* `X1` is the running candle at the session's end: every bar of the session
+  stamped in the span of its last bar. A bar of a new span restarts the
+  candle; it never widens the old one.
+* `X2` is the running candle of the session's first span. It is final when a
+  bar stamped in a later span arrives, and it is closed **before** that bar is
+  emitted, the order `orb::Orb::step` uses for `mark_closed`. The leg is built
+  from earlier bars only, so no bar is measured against a leg containing
+  itself.
+* `Evaluator::known_after` now reads the gap family's availability from the
+  POST-step `GapFib`. The leg is settled before the emit and the fold never
+  moves it, so the post-step leg is exactly the one the bar's truth read; the
+  pre-step read would be one bar stale on the bar that closes the candle.
+  `GapFib::step_known` pairs truth with availability the same way.
+
+O(1) per bar: one span key, one comparison, at most one establish, a
+two-field fold. The struct went from 160 bytes to 96, so
+`size_of::<Evaluator>()` went from 1792 to 1728. The ceiling came down from
+1824 to 1760, keeping the 32 bytes of slack `docs/10-shared-core.md` states.
+
+**Choices made where the spec is silent, and why.**
+
+* **Partly missing candle: what traded inside its span.** This is the rule the
+  module already applied to a short session's last candle ("refusing a
+  half-day outright would drop a real gap"). Nothing is filled and no bar of a
+  neighbouring span is borrowed to make up a count. A session with fewer than
+  three minutes, or one minute in its opening span, still gets a leg once a
+  later span trades.
+* **Wholly missing opening span: the first span that traded.** The module sees
+  no session timetable and cannot tell a data hole from a late open. Fixing the
+  opening span at 09:15, as `orb` fixes its windows, would refuse the leg on
+  every late-open day and on the Muhurat session, which this module has
+  answered on until now. Recorded in `docs/06-limits.md` as a limit, not a
+  verified property.
+* **Coarser rungs: one rung bar is the candle.** Every rung of three minutes or
+  more stamps bars at least three minutes apart, so each bar starts in its own
+  span and `X1`/`X2` are the session's last and first rung bar. That is the
+  closest object the rung holds. The module does not know the rung, exactly
+  as `orb` does not, and abstaining for a rung belongs to the caller. A rung
+  below three minutes that does not divide it (two) places bars by their start
+  minute.
+
+**What did not change.** On a complete one-minute session the span and the
+count take the same three bars at both ends, and the bar that closes the
+opening candle (09:18) is the bar the count first measured against the leg.
+Two tests pin that byte for byte against digests taken on `origin/main` at
+`bc531631` before the change: twelve complete sessions through `GapFib`
+(truth and availability of positions 132-142), and the same sessions through
+the whole `Evaluator` (all 384 positions, truth and availability). The only
+observable difference on a complete session is when `GapFib::leg()` reports
+the leg: on 09:18's arrival rather than after 09:17's fold. No production
+caller reads it between those two points.
+
+**Tests, each run against the pre-fix code and seen to fail there:**
+`gap::tests::a_missing_0916_does_not_let_0918_into_x2`,
+`a_missing_last_minute_of_yesterday_does_not_pull_in_the_candle_before`,
+`a_session_shorter_than_three_minutes_is_keyed_by_clock_not_count`,
+`gaps_on_both_sides_of_the_night_keep_each_candle_inside_its_span`,
+`on_a_coarser_rung_one_bar_is_the_candle` (rungs 3, 5, 15 and 60), and
+`gap_known_readiness::missing_minutes_keep_each_candle_inside_its_clock_span`,
+whose independent oracle now reads clock spans. `docs/04-invariants.md` IF-25.
+
+**Not recorded in `docs/11-findings.md`.** That ledger holds the 2026-08-11
+sweep and the audits appended to it; ET-indicators-2 and ET-indicators-11 come
+from the batch-2 queue, which has no row there to dispose of. Adding one would
+change the ledger's digest and stated counts in a branch that other lane
+branches also touch; if the operator wants batch-2 findings in that ledger,
+that is its own change.
+
+### D-0957 — Fourteen stale or false written claims corrected against the code, and a test that reads them back — 2026-10-02
+
+**What happened.** A lane-3 audit named fourteen sentences in the documents,
+`CLAUDE.md`, `AGENTS.md` and a few source comments that the code contradicts:
+GAP5-50, UC-6, AC-whp-o1-1, AC-gates-o1-4, AC-whp-tb-3, AC-whp-tb-6,
+AC-whp-tb-7, ET-o1-proof-coverage-7, -8 and -9, UC-17,
+ET-strategies-trades-ranking-costs-9, R9-csr-o1-0 and
+ET-vocabulary-conditions-bits-3. Each was checked against the code at
+bc531316 before anything was edited; all fourteen held. No code path changes
+here. The corrections are to text, plus one test that was cited and missing.
+
+**What was false, and what is true now.**
+
+- **CSCV enumeration (GAP5-50).** Charter §4e said the paper's "equal-block
+  complementary enumeration" is carried. It is not. Bailey et al.'s
+  Algorithm 2.3 forms all `C(S,S/2)` training sets, so every complementary
+  pair is scored in both orientations; D-0476's layout keeps segment 0 on the
+  test side and scores `C(S-1,S/2)` = `C(S,S/2)/2` splits
+  (`cli::population_statistics_v2::canonical_split_count`). The swapped
+  orientation, whose in-sample winner can differ, is never scored; at `S = 2`
+  that is one split against the paper's two, so the estimate can only be 0
+  or 1. **The operator's choice between (a) a new CSCV policy version that
+  enumerates all `C(S,S/2)` and (b) keeping the half enumeration is not made
+  here.** This entry takes (b) only in the sense of making the documents
+  true: the charter row now names the deviation. D-0476 itself states
+  `C(S-1,S/2)` correctly and claims no paper authority for it, so it is not
+  amended. Choosing (a) needs its own entry and a new policy digest, since the
+  current one names `train-bit-zero-absent`.
+- **Non-Rust files (UC-6).** D-0211 and `docs/06-limits.md` §42 said the one
+  non-Rust file in the graph is `libc`'s `etc/libc-util.py`. On this host,
+  over the 140 registry packages `cargo tree --workspace -e normal,build,dev`
+  names, sixteen scripts ship in six crates (`libc`, `parquet`,
+  `parquet-format-safe`, `tracing`, `untrusted`, `zerocopy`). None is `.c`,
+  `.h`, `.S`, `.asm` or `.js`, and no build script runs any of them. §42 now
+  says so. D-0211 keeps its text, since this ledger is append-only; this
+  sentence is its correction.
+- **Ranked streaming (AC-whp-o1-1).** `docs/06-limits.md` §5 said the ranked
+  path no longer returns survivor vectors and that only ranked entry points
+  take the streamed result. `sweep-stored` and `sweep-audited-stored` run
+  `stored_month_kernel`, which calls `cli::and_checkpoint::run`. That walks
+  with the retaining checkpoint sink, and `runner::rank_checkpointed_sweep`
+  then ranks the whole retained `Sweep`. `docs/20-sweep-resume.md` said
+  encoding uses fixed scratch space. Its only production caller collects the
+  payload into a growing `BoundedBytes` `Vec` of up to 64 MiB − 96. Both
+  documents now say so. The retention itself is unchanged: this entry
+  records it and does not remove it.
+- **Gate 17's premise (AC-gates-o1-4).** `CLAUDE.md` §5, `AGENTS.md` and
+  `cli`'s structural-event doc said `cli` holds no loop over bars or
+  candidates. It holds both. `window_range_percentile` walks bars, and
+  `screen` walks every candidate in `by_evidence.par_iter()`, ticking a
+  relaxed counter per candidate and emitting once per `stride`. The
+  `CLAUDE.md` edit is the minimum that makes the sentence true. Gate 17's
+  list and its rule are unchanged.
+- **Crossing rows (AC-whp-tb-3).** CX-01..CX-03 described a `previous_mask`
+  field that has never existed. The state is `last_side` and
+  `crossings_seen`, reset at the rollover. The rows cited tests that never
+  drive an `Evaluator` and named an early return that is a `continue`. They
+  now cite the last-definite-side oracle in
+  `indicators/tests/crossing_known_readiness.rs`, which spans eight sessions.
+  CX-04 cited no test, and `table::CROSSINGS`' doc named
+  `the_crossing_map_names_only_live_two_sided_levels`, which nobody had
+  written. It is written now, in `crates/vocab/tests/table.rs`. CX-04 also
+  gave a false reason for the VWAP pair's absence: `cli` binds
+  `Availability::Present` for every cash equity. The two `previous_mask`
+  comments in `vocab::table` now name `last_side`.
+- **Checksums at birth (AC-whp-tb-6).** S-06 and S-06b, and the matching
+  comments in `store::block` and `store::emits`, said no writer sets
+  `FLAG_CHECKSUMS`. `store::file::initialise` passes it. S-06 is now ✓ on
+  `store::file::tests::a_flipped_byte_in_a_committed_block_is_refused_and_names_the_block`.
+  S-06b now describes the month an earlier build wrote flag-clear: it is read
+  unverified and gains no sidecar.
+- **R-03 (AC-whp-tb-7).** R-03 said the short walk differs from the long one,
+  which contradicts WF-01 (D-0387: the fold picks the side). The row now
+  claims what its test asserts: the short arm runs, and `side_of` maps the
+  two directions apart.
+- **Layer 8's ceiling (ET-o1-proof-coverage-7, UC-17).**
+  `docs/07-o1-architecture.md` said 1.4×. The engine harness asserts
+  `CEILING_PERMILLE = 3_000`.
+- **Stale limits (ET-o1-proof-coverage-8).** §5 tabulated `C(238, k)` and
+  counted memory for the deleted `seen` set. The table is now `C(328, k)`
+  from `LIVE`. At 473,490,550 rows, k=4 is 3.53× `DEFAULT_CEILING`. §7c said
+  there is no bar reader, that every row but C-08 is a ratio, and that
+  `/instruments` has no index. `docs/04-invariants.md` and §40.2 said no
+  bench times a syscall, yet `C-28` and `C-29` time `read_record`. Each is
+  corrected in place with a pointer here.
+- **C-03/C-04/C-E-10/C-E-11 (ET-o1-proof-coverage-9).** These were
+  "measurement pending". `cargo bench -p engine` at bc531316, 2026-10-02, on
+  a 4-core host shared with other builds (load average about 23):
+  C-E-10 1.000× and 1.028×, C-E-11 1.011× and 1.560×, against the 3.0×
+  ceiling. The bench times its own `HashSet<u32>` and `Vec<Itemset>`, not
+  the engine's call sites. The rows say so and are ◐, not ✓.
+- **Tail re-verification cost (R9-csr-o1-0).** The D-0688 limits section said
+  the tail's `fstat` is paid on the first verification per handle, and that
+  bit rot warns twice. A handle remembers one block, so every touch of the
+  tail after another block pays the `fstat`, both reads and one more
+  `store.block` WARN. `store::tail_proof` already counted that WARN. The
+  limits text and the `verified` field's doc now say it.
+- **§72 (ET-strategies-trades-ranking-costs-9).** §72 said the peaks are
+  walked for every profitable candidate in every cell. They are walked once
+  per trade, in pass two of `evaluate_timed`, and the per-cell reads are
+  indexed (EB-06).
+- **C-V-03/C-V-06 (ET-vocabulary-conditions-bits-3).** These rows named 234
+  live bits and position 279. The bench uses `LIVE` (328) and
+  `NEXT_FREE − 1` (369). C-V-06's "a scan does not" now says "an early-exit
+  scan does not", since a full scan is flat too. The bench's own comments
+  are corrected the same way. The dated 2026-08-11 figures keep their 234
+  and are labelled as such.
+
+**The check, so these cannot drift back.**
+`crates/vocab/tests/stale_claims.rs` reads the documents and compares them
+with the code:
+- §5's live count and every `C(n, k)` row against `LIVE`;
+- Layer 8's ceiling against the engine bench's constant;
+- C-V-03/C-V-06 against `LIVE` and `NEXT_FREE`;
+- the charter's CSCV row against `canonical_split_count`'s binomial;
+- §5's stored-door paragraph against `stored_month_kernel`;
+- the absence of `previous_mask` from every source and document but this
+  append-only ledger;
+- every test path that the eleven corrected rows cite, which must exist as a
+  `fn` in the named crate;
+- the sentences as they were written, which must not return.
+
+Every test in that file fails on bc531316 and passes after this change.
+It lives in `vocab` because two checks need `LIVE` and `NEXT_FREE` directly.
+`vocab`'s `[dependencies]` and `[dev-dependencies]` stay empty.
+
+**What is not claimed.** The UC-6 inventory is one host's registry on one
+date and is not checked mechanically. The engine bench ratios are one run
+on a loaded shared machine. No figure in this entry is a measurement on
+dedicated hardware.
+
+### D-0945 — Remove the two crossing tests that called no production code; the real guard is `crossing_known_readiness.rs` — 2026-10-02
+
+**What was wrong (cloud audit AC-whp-tb-4).** `evaluator.rs` carried
+`mod band_crossing_tests`, whose only import was the `Side` enum. Its two tests,
+`an_unknown_side_does_not_erase_the_side_before_it` and
+`the_first_definite_side_of_a_session_is_recorded_and_not_reported`, each
+rebuilt the crossing rule in a local loop ("the rule, applied exactly as
+`crossings_of` applies it") and asserted on that loop's count. Neither called
+`crossings_of` or any public path to it. The first test's doc said it "fails
+the moment the code goes back to reading the previous bar", and the earlier
+entry in this ledger that introduced the last-definite-side rule says the same
+test "asserts both halves". Neither statement was true of the code: a change to
+`crossings_of` could not reach either test.
+
+**Measured, not argued.** Two mutations of `crossings_of` were applied by hand
+and each was run against both the in-file module and
+`crates/indicators/tests/crossing_known_readiness.rs`, which drives the public
+`Evaluator::step_known`:
+
+| Mutation | `band_crossing_tests` (2) | `crossing_known_readiness.rs` (3) |
+|---|---|---|
+| An `Unknown` bar clears the remembered side (the previous-bar rule) | 2 passed | 2 FAILED, 1 passed |
+| The first definite side of a session is reported as a crossing | 2 passed | 3 FAILED |
+
+The failures were `a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it`
+(truth bit, line 201 / 200) and
+`every_crossing_and_ordinal_matches_a_last_definite_side_oracle_including_known_non_events`
+(`known bit296 day1 minute2` under the first mutation, `bit313 day0 minute1`
+under the second), plus
+`available_crossing_negation_survives_column_handoff_and_refusal_is_transactional`
+under the second. Both mutations were reverted.
+
+**The change.** Test-only plus one doc paragraph. The module is deleted rather
+than rewritten: the integration tests already reach the production function
+and already fail under both mutations, so a rewritten in-file pair would have
+duplicated them. `crossings_of`'s doc now names the tests that do guard it,
+the path they reach it by, and why the old module is gone. No production line
+changed, so no test fails before and passes after; the evidence for this entry
+is the mutation table above. Not added to `docs/11-findings.md`, which records
+the 2026-08-11 sweep and its digest; the cloud audit's id is cited here.
+
+### D-0941 — A daily reference record must be a price: `DailyReference::new` validates with `check_evaluable`, not `check` — 2026-10-02
+
+**What was found.** ET-indicators-1, and UC-3 is the same defect.
+`indicators::anchored::DailyReference::new` validated its bar with
+`Candle::check`. That function admits an all-zero record by contract (its own
+doc and `a_defaulted_candle_is_all_zero_and_its_open_interest_is_a_real_zero`
+pin that), and `DailyLevels::from_daily_bar(0, 0, 0)` has no sign check. So an
+ELIGIBLE daily bar with `low <= 0` became the next day's anchor: it installed a
+0/0/0 pivot, CPR and both previous-day Fibonacci ladders, pushed Prev5 and set
+PreviousSession, and the pivot-family bits fired on every bar of the next day
+(the audit's attack counted 13). `Evaluator::stepped` refuses the very same
+record as `Corrupt::PriceNotPositive`, so the signal door and the anchored door
+disagreed about what a price is. The live caller is
+`cli::stored::daily_context_from_span`, which wraps every stored `1day` bar.
+
+**The change.** `DailyReference::new` calls `bar.check_evaluable()`, which is
+`check` plus `low <= 0 -> PriceNotPositive` run LAST, so every structural
+refusal keeps its old name (`RangeOverflows` for a straddling span,
+`NegativeVolume` for a negative volume) and only a record that passed all of
+`check` can newly refuse. It applies to excluded records too: an excluded row is
+still offered and counted as evidence of a session, and a record that is not a
+price is not evidence of one. The fixture in
+`malformed_or_unusable_daily_ohlcv_is_named_at_construction` that reached
+`LevelOverflows` through `low = 0` now reaches it with `low = 1`.
+
+**How a caller sees it.** Every caller already propagates the error: `cli`'s
+`daily_context_from_span` turns it into a refusal of the whole daily context
+naming the record's timestamp and `Corrupt(PriceNotPositive)`; the replay codec
+and the candidate-universe fixture `map_err` or `expect` it. Nothing drops the
+record or reuses an older anchor in its place (§4).
+
+**Proved by.**
+`indicators::anchored::tests::a_nonpositive_daily_record_is_refused_exactly_as_the_evaluator_refuses_it`
+(all-zero, `low = 0` with `high > 0`, negative low, all-negative ordered,
+`low = i64::MIN + 1`; both eligibilities; the evaluator's own refusal of each;
+precedence of `RangeOverflows` and `NegativeVolume`) fails on the pre-fix code
+with `left: Ok(DailyReference { … Eligible(DailyLevels { pdh: 0, pdl: 0, pivot:
+0, … }) })`. `the_smallest_positive_daily_record_is_still_an_eligible_anchor`
+pins the admitted side at one paisa, and
+`cli::stored::tests::a_nonpositive_stored_daily_record_refuses_the_daily_context_by_name`
+pins the caller's loud refusal.
+
+**What it does not claim.** The audit reported a store scan with zero
+all-zero daily records; that was not re-measured here. The defect was latent
+on the stored data that scan covered, and is closed for any record that
+reaches the anchored path.
+
+### D-0943 — The exact-minute overlay clamps a stub bucket onto the caller's per-day session close, not onto a stored minute — 2026-10-02
+
+**What was wrong.** Three findings against the same clamp in
+`crates/indicators/src/anchored.rs`, GAP12-5, GAP12-7 and GAP4-47. On the four
+rungs whose day-final bucket is a stub (`2min`, `10min`, `30min`, `60min`), the
+overlay pulled the formula's minute `t + rung - 1` back onto the day's last
+STORED minute whenever that minute-of-day lay past every minute-of-day in the
+whole supplied slice. Two defects followed.
+
+1. **Truncated sessions were mapped on some rungs and refused on others.** A day
+   missing 15:29, or stopping at 15:16, had its last `30min`/`60min` bucket (and
+   its `2min`/`10min` one when 15:29 alone was missing) priced off 15:28 or 15:16,
+   while `3min`, `5min` and `15min` refused the same bytes for 15:29.
+2. **A later day decided an earlier answer.** The threshold was a maximum over
+   the WHOLE slice, so one off-session minute on a later day (16:20, or 15:40 for
+   `2min`/`10min`) flipped every earlier day's last stub bucket from mapped to
+   `MissingClosingMinute`. That is look-ahead, which `CLAUDE.md` §3 rule 7 bans,
+   and the test that claimed the opposite appended a 09:15 minute at `15min`,
+   where no version of the clamp ever looked.
+
+**The choice.** The two options the findings named were a caller-supplied
+per-day close and a causal running maximum over earlier minutes. The causal
+maximum still guesses the close from bytes: it cannot tell a truncated first day
+from a complete one, and it reads a short session such as a Muhurat as a hole.
+The caller already has the authority. `indicators` stays `vocab`-only (gate 22):
+both public bridges take `session_close: impl Fn(i64) -> Option<u16>`, the IST
+minute-of-day at which that day's final one-minute bar opens. `cli` passes
+`stored::nse_session_close_minute`, which reads `pull::calendar::kind_of` and
+returns the last window's `to`, or `None` for a closed, unmeasured-length or
+out-of-range day. The rule for each signal bar is then
+`min(demanded, close)` when `close >= t`, else `demanded`, and the minute stamped
+exactly there must be stored on that day or the join refuses naming it. The
+slice-wide maximum and the per-day `HashMap` of last stored minutes are removed.
+Per signal bar this is one caller call and one comparison, and the bound is
+UNVERIFIED as a measurement.
+
+**What changes for a run.** A day that loses its final minute now refuses on all
+eight rungs alike, where it used to refuse on three and be mapped onto an
+earlier minute on the other four. Doors that withhold a day on a
+`MissingClosingMinute` refusal now withhold it on the stub rungs too. Whether any
+stored day actually lacks its 15:29 was not measured here. No output on intact
+data changes, because the calendar close of a regular day is the 15:29 the old
+rule read off the bars.
+
+**Honest limits.** A day the caller cannot place keeps the formula's minute and
+so refuses its stub bucket. On a two-window day only the last window's close is
+a clamp target, so a bucket straddling the gap between windows still refuses.
+Both kinds of day are already withheld from stored sweeps by
+`SWEPT_SERIES_CALENDAR_POLICY` and the calendar boundary. A caller passing a
+close that is not a real minute-of-day (`u16::MAX`) gets the formula's minute,
+never a wrapped one.
+
+**Proof.** In `indicators::anchored::tests`:
+`a_truncated_final_stub_bucket_refuses_on_every_stub_rung`,
+`a_later_days_off_session_minute_cannot_change_an_earlier_mapping`, the
+rewritten `future_exact_minutes_cannot_change_an_already_mapped_signal_column`
+(a `60min` rung with a later-day 16:20 minute),
+`a_short_session_closes_at_the_callers_close_for_that_day`,
+`a_bucket_opening_after_the_session_close_is_never_pulled_back_onto_it`,
+`intact_sessions_resolve_on_every_rung_including_a_bucket_opening_on_the_close`
+and `an_unplaced_day_keeps_the_formula_minute_and_an_empty_day_changes_nothing`.
+All but the `intact_sessions_...` guard failed against `origin/main` at bc53131
+and all seven pass here; the updated
+`a_day_with_no_stored_minutes_refuses_from_either_side` now expects the 15:29
+close rather than the formula's 16:14. The cli helper is
+pinned by `cli::stored::tests::the_overlay_session_close_is_the_calendars_last_window_close`.
+
+### D-0940 — Compute VWAP sigma as the exact floor of the weighted standard deviation, not from a floored mean — 2026-10-02
+
+**What was wrong.** `indicators::vwap::Vwap::sigma` computed
+`isqrt(floor(p2v/V) − floor(pv/V)²) / 3`. Flooring the mean before squaring
+it adds up to `2·M·frac(M)` to the ×3-scale variance, where `M = pv/V` is
+about three times the price. Two bars at 100.00 and 100.01 rupees, volume 1
+each, have half a paisa of dispersion and reported a sigma of **57** paisa;
+at 57,000.00/57,000.01 rupees it reported **1,378**. The sweep findings
+ET-indicators-0 and ET-indicators-12 (the same defect from two lenses)
+reproduced exact sigmas of 0/3/38 paisa reported as 912/47/324. Sigma is the
+near scale of position 145 and sets every band level for 146–152 and
+190–197, so a close of 10,020 against a VWAP of 10,000 was reported INSIDE
+all three bands (152, 192, 197) when exact arithmetic puts it ABOVE all three
+(146, 148, 193).
+
+**F-9A880B's "cannot bite any run this engine sweeps" is false, and is
+corrected.** `cli::stored::vwap_availability` maps `Kind::Equity` to
+`Availability::Present` (D-0506, D-0507), so every cash-equity sweep has
+evaluated these positions on the inflated sigma. Spot indices are `Absent`
+and were never affected. Existing equity results that used any of these
+twenty positions were computed on the old sigma; they are not rewritten
+(append-only history), and a rerun is a new run under a new `commit` term of
+the run identity.
+
+**The change.** With `q = floor(pv/V)`, `r = pv − qV` and
+`C = p2v − q·(pv + r)` (which equals `Σ v·(P − q)²`, so is an exact
+non-negative integer), the ×3 variance is `C/V − (r/V)²`. Writing
+`C = wV + s`, its floor is `w`, less one exactly when `s·V < r²`. Sigma is then
+`isqrt(that floor) / 3`, which equals `floor(σ)` of the exact
+volume-weighted standard deviation in paisa. The derivation and the overflow
+argument are on the method's doc comment. `q·(pv + r)` is bounded by
+`p2v + pv` for any folded state (Cauchy–Schwarz and `P >= 3`), far inside
+`i128` under `ACC_CEILING`; `s·V` and `r²` are not (total volume passes `2^64`
+after two `i64::MAX`-volume bars), so they are compared as 256-bit products
+by a new branch-free `wide_mul`. Every `i128` step stays `checked_`.
+
+**Cost.** Still O(1) per call: two more Euclidean divisions and two
+fixed-size 256-bit products, no loop. The bounded-not-flat square root is
+unchanged and remains recorded in `docs/06-limits.md`.
+
+**Proof.** `vwap::tests::sigma_is_the_exact_floor_whatever_the_remainder_of_the_mean`
+folds 600 generated sessions (prices 1 paisa to 5 × 10⁸, volumes 1 to
+`i64::MAX`) and checks every state against an independent big-integer oracle
+(`floor(sqrt(V·p2v − pv²) / 3V)` by bisection on limb arithmetic), requiring
+most states to have `pv mod V != 0`.
+`sigma_is_exact_where_the_remainder_squared_leaves_i128` and
+`maximal_volumes_at_minimal_prices_stay_exact` cover the range where `r²`
+leaves `i128`; `a_half_paisa_spread_has_no_band_width` pins the bit
+positions; `sigma_refuses_when_the_remainder_sum_leaves_i128` covers the new
+`checked_` guard; `the_wide_product_comparison_is_exact` checks `wide_mul`.
+Three of these fail on the pre-fix code, e.g. *"the old formula said 57 —
+left: Some(57), right: Some(0)"*. Every pre-existing sigma test passes
+unchanged: their fixtures have `r = 0`, which is why none saw this.
+
+**Not shown.** No stored equity month was re-swept to measure how many
+recorded candidates change; that is a rerun, not part of this fix.
+
+### D-0913 — State the timestamp lookup's bisection cost in the limits register, and stop saying no bench times a syscall — 2026-10-02
+
+**What happened.** An audit (W3-store1-0, W3-store1-1) found
+`store::file::first_at_or_after` and `already_stored` documented only in
+source comments. The first is a bisection that `api` `/bars.json` calls twice
+per request. The second is that bisection plus a batch-long comparison, on
+`BarFile::append`'s duplicate path. `docs/06-limits.md` had no entry for
+either, and the `BarFile::first_at_or_after` doc called its own bound "read
+from the source rather than measured". A second finding
+(ET-bars-candles-store-12) found three copies of the sentence "no bench in
+this repository times a syscall": `BarFile::read_record`'s doc,
+`docs/06-limits.md` §40.2 and the C-01 note in `docs/04-invariants.md`. It is
+stale, because C-28 and C-29 time `read_record`, which is one `pread` per call.
+
+**The change.** No production code changed. The bisection already uses
+`ceil(log2(n_valid + 1))` reads, the fewest any comparison search over sorted
+records can use, so the requested probe-count reduction had nothing to remove.
+`store::file::first_at_or_after_never_probes_more_than_the_bisection_height`
+now asserts that bound, and that it is tight, exhaustively for 0 to 150
+records (crossing the block edges at 73 and 146). It also checks the
+one-minute month ceiling of 11,625 records (fourteen reads) and counters up to
+2^62. Its counting reader models the handle's one-slot block cache and asserts
+at most one cold verify per read. `docs/06-limits.md` gains a section with
+both bounds, the per-read cold-verify cost, both callers and what stays
+UNVERIFIED (wall-clock time, a cold block, a cold device). The three stale
+sentences now say that C-28 and C-29 time a warm `pread`.
+`crates/store/tests/bisect_cost.rs` fails the build if the section loses a
+bound or a caller, or if the stale sentence comes back in any of the three
+places. Invariant S-BISECT-01 names the probe test.
+
+**Not decided.** A multi-block cache or a per-month timestamp index would
+lower the cold-verify count. Each is a memory or format decision with its own
+cost, and neither is taken here. ET-bars-candles-store-9, a bench that times a
+cold block verify, remains open.
+
+### D-0980 — State `O_NOFOLLOW` per architecture in one module, `store::open_flags`, and refuse the x86_64 literal everywhere else — 2026-10-02
+
+**What was wrong.** Finding W2-cli4-2. Twenty-four open sites, twenty-three
+in `crates/cli` and one in `crates/store/src/checksum_audit.rs`, passed
+`0x20000` as `O_NOFOLLOW` for every Linux target. That value comes from the
+kernel UAPI `asm-generic/fcntl.h` and is right on x86_64. arm64 overrides it
+in `arch/arm64/include/uapi/asm/fcntl.h`: there `O_NOFOLLOW` is `0100000`
+(`0x8000`) and bit 17 is `O_LARGEFILE`. So on aarch64 Linux every one of
+these "no-follow" opens followed a final symlink, the execution lease and
+the evidence readers among them. `readonly_file.rs` and `checksum_audit.rs`
+already gated themselves to x86_64 and aarch64 and still wrote the x86_64
+bit for both, and the comment in `readonly_file.rs` cited the generic header
+as though arm64 used it. Sixteen modules each kept their own copy of the
+constant. `O_NONBLOCK` (`0x800`) is the same on both architectures and was
+not wrong.
+
+**The change.** `store::open_flags` now holds `O_NOFOLLOW` and `O_NONBLOCK`,
+with values for x86_64 Linux/Android, aarch64 Linux/Android and macOS, each
+next to the header it comes from. No other target gets a constant. Every site
+reads those constants. `checksum_audit::open_regular` and
+`readonly_file::open` keep their `Unsupported` refusal on other targets.
+`cli` adds a `compile_error!` for Linux or Android on any other architecture,
+because its other sites have no refusal path. It goes in `cli` and not in
+`store` so that `store` still builds, and refuses, on such a host. glibc and
+musl share the values because they come from the kernel, not from the C
+library.
+
+**Why `store` and not `core` or `libc`.** `libc` would be the workspace's
+first external dependency for three integers, and that would need a
+`cargo deny` argument. `core` is shared with other projects and holds "the
+nouns" (`docs/10-shared-core.md`), not host flags. `store` is
+brutex-specific, already owns OS-level file handling (`flock`), and both of
+its users can reach it: `cli` depends on `store`, and `store` owns the
+remaining site.
+
+**Proof.** `crates/store/tests/open_flags.rs`. It pins the value on each
+target, opens a real symlink with the flag and gets `ELOOP` where a plain
+open reads the target, and walks every `.rs` file under `crates/` refusing
+any hex literal equal to `1 << 17` outside the module. Before the fix that
+walk named all 24 sites. Rows S-NOFOLLOW-01 to S-NOFOLLOW-03 in
+`docs/04-invariants.md`.
+
+**Honest limits.** CI runs on x86_64 Linux. The aarch64 and macOS value
+tests compile only on those hosts, and no aarch64 run has been measured
+here. The aarch64 value is taken from the kernel header above, and libc
+0.2.189 agrees (`linux/gnu/b64/aarch64/mod.rs`: `O_NOFOLLOW = 0x8000`). The
+source walk catches the literal, but it cannot catch a site that builds the
+bit some other way, such as `1 << 17`.
+
+### D-0912 — Serve a sealed month's records from the verified block's own bytes, not a fresh read the check never saw — 2026-10-02
+
+**What was wrong (ET-bars-candles-store-0).** `BarFile::read_row` read the
+record with its own `pread` and then called `verify_block_of`, which returned
+`Ok` at once whenever the handle's `verified: AtomicU64` already named that
+block. So after the first read in a block, every later read in it served fresh
+disk bytes that no check had run over: a record damaged after its block was
+verified came back as a plausible wrong price. The field's doc called the
+single-block cache "a cost, not a correctness hole: a re-verification reaches
+the same verdict", but on the warm path no re-verification happened at all.
+`a_block_is_verified_once_per_handle_and_not_once_per_record` damaged only the
+sidecar, so the bars it served stayed correct and it could not see this.
+
+**The change.** The handle now caches the verified block's BYTES as well as
+its index: `verified: Mutex<VerifiedBlock>`, with a fixed
+`[u8; MAX_BLOCK_LEN]` (4,096; a `const` assertion walks `Layout::KNOWN` so a
+wider geometry fails to compile). A cold read of a block is one `pread` of its
+covered range into that buffer. The CRC check runs over exactly those bytes,
+and every read in the block, the first included, copies its record out of
+them. The cache is keyed by `(block, n_valid)`, so an append that grows the
+tail block is a miss. `seal_committed` still clears it. The block field is set
+to `NO_BLOCK` before a fill and to the block only after the check passes, so a
+refused or interrupted fill leaves nothing cached. The per-cold-block
+`vec![0u8; span]` in `verify_block_of` is gone with it, which is the
+allocation ET-o1-proof-coverage-4 names. An unsealed file is unchanged: it
+reads its record directly, because there is nothing to verify it against.
+
+**What it costs, said rather than claimed.** Cold read: one `pread` of at
+most one block (it was two, record then block), plus the sidecar's four bytes,
+plus the tail block's `fstat`. Warm read: one uncontended lock and one copy of
+the record's bytes, with no syscall (it was one `pread`). Still O(1) per read
+(§3 rule 4), and **UNVERIFIED as a measured bound**: no bench was run for this
+change. `BarFile` grows by about 4 KiB. Reads through ONE handle shared across
+threads now serialise on the lock; two handles do not share it.
+
+**Refusal order kept.** When the block read comes up short, the record alone
+is read again, on that failure path only, so a truncated record is still named
+`ShortRead` at its own offset (`tests/write.rs`). With the sidecar gone, that
+record read still comes before `ChecksumsMissing`.
+
+**What a warm read means now.** It serves the bytes that matched the sidecar
+when they were read, even if the disk has since changed. It is never an
+unverified byte. A block left and re-entered gets a fresh check against the
+disk as it then stands. Invariants ETBCS-01..03.
+
+### D-0911 — The store's read door opens nonblocking and refuses a non-regular file; the catalog does not hold one — 2026-10-02
+
+**What was wrong (AC-whp-cx-0).** `BarFile::open_existing` is the read door
+behind every stored sweep, `/bars`, the pull's ingest and scrub, and
+`store::repair`. It opened the bar file and the `.lock` with `File::open` and
+the `.crc` with a plain read-only open. None passed `O_NONBLOCK` and nothing
+checked the file type, so a FIFO (or a symlink to one) at any of the three
+names parked the caller in `open(2)` until a writer appeared: no refusal, no
+timeout, no log line. `catalog::walk` sent every non-directory entry to
+`classify`, so a FIFO spelled like a month was listed as a held month and then
+hung the first reader. Reproduced before the fix: a probe test made a real
+FIFO at each sibling and every open was still blocked at the 3 s bound, and the
+walk returned `["2024-06", "2024-07"]` for one real month beside a FIFO.
+
+**The change.** `file::open_read` now opens with `O_NONBLOCK`, using the values
+`checksum_audit::open_regular` already carries for Linux x86_64/aarch64 and
+macOS, then asks the handle by `fstat` whether it is a regular file. A
+directory is refused as `StoreError::IsADirectory`. Anything else that is not
+a regular file is the new `StoreError::NotARegularFile { path, action }`, which
+names the path the store asked for. All three read opens in `open_existing`
+use it, and an absent `.lock` or `.crc` is still `None`. Symlinks are still
+followed, with no `O_NOFOLLOW`, so a symlink to a real bar file stays readable,
+as it was. The audited door is unchanged. `catalog::walk` now uses `stat`
+instead of `open` for each entry. A FIFO, device, socket or dangling link is
+counted in the new `Census::not_regular` bucket and is never classified, and
+`Census::reconciles` adds that bucket. `StoreError` is `#[non_exhaustive]` and
+no other crate builds `Census` field by field, so no caller changes.
+
+**Honest limits.** `O_NONBLOCK` stays set on the returned handle. That has no
+effect on `pread` of a regular file, and the lock is taken with `LOCK_NB`
+anyway. On a unix host outside the verified list there is no verified
+`O_NONBLOCK` value, so every read open refuses as `Unsupported`, as
+`checksum_audit::open_regular` already does there, rather than fall back to a
+racy name check (the first draft did, and Gate 18 showed its line was code no
+test on a verified host could reach). Only Linux x86_64 has run the tests. The write door `open_or_create` is not
+covered by this entry. It creates files and opens them read-write, and this
+finding was about the read path. A dangling symlink named like a month used to
+be listed and then refused as `Missing` on open. It is now counted as
+`not_regular` and not listed.
+
+**Proof.** `crates/store/tests/fifo.rs` has eight tests, recorded as
+`docs/04-invariants.md` S-WHPCX-01 and S-WHPCX-02. The S-25 bucket count is
+updated from seven to eight.
+
+### D-0920 — Refuse an overflowing discount factor in `Contract::check`, on the way in, so the solver cannot report an infinite intrinsic value — 2026-10-02
+
+**What happened.** Audit finding W1-greeks1-0. `Contract::check` took
+`carry_discount = e^-qT`, `forward = S·e^-qT` and `discounted_strike = K·e^-rT`
+unguarded. `MAX_RATE * MAX_YEARS` is 1000 against `ln(f64::MAX)` = 709.78, so
+`rate = -7.1` or `carry = -7.1` at `years_to_expiry = 100`, every value inside
+every accepted bound, makes a factor infinite. `MAX_RATE`'s documentation said
+the overflow was contained "on the way OUT", by `Contract::greeks` checking its
+own result. That held for `price` and `greeks` and not for the solver:
+`implied_volatility` reads `no_arbitrage_bounds` before it evaluates the model.
+Measured before the fix: at `S = K = 100, T = 100, r = -7.1` a put quoted at 10
+returned `PriceBelowIntrinsic { price: 10.0, intrinsic: inf }` rather than
+`NotRepresentable`. A named refusal that carries an infinity reads like a real
+arbitrage violation.
+
+**The product overflows on its own too.** With the factor finite the leg can
+still be infinite: `e^700` is 1.01e304 and `MAX_UNDERLYING` (1e12) times it is
+past `f64::MAX`. So `spot = 1e12, carry = -7.0, T = 100` overflows `forward`
+with `carry_discount` finite, and `strike = 1e12, rate = -7.0` does the same to
+`discounted_strike`. Both are reachable and both are tested.
+
+**Decision.** `Contract::check` returns `GreeksError::NotRepresentable` when
+`carry_discount`, `forward` or `discounted_strike` is not finite. Every public
+path goes through `check` first, so `price`, `greeks` and `implied_volatility`
+(call and put) refuse in the same way. `Contract::greeks` keeps its output
+check for overflows that no input check sees. The input bounds are unchanged:
+`MAX_RATE` still only keeps an input plausible, and its documentation now says
+the containment is on the way in. The test
+`a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out` is
+replaced by
+`greeks::bsm::a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in`.
+It asserts `check`, `price`, `greeks` and `implied_volatility` for both kinds on
+all four overflowing witnesses (rate, carry, `S·e^-qT`, `K·e^-rT`). It also
+asserts that at `-7.0` the rate alone and the carry alone still price, and that
+rate and carry together at `-7.0` still solve a call and a put back to 0.2 to
+1e-9 relative. It failed before the change on the assertion above. Invariant
+G-38.
+
+**Not changed, stated so it is not assumed.** The other direction, a factor that
+underflows to zero (`carry = +10, T = 100` gives `e^-1000 = 0`), stays finite
+and is not refused here. This finding did not cover it and no measurement of
+its effect on the solver was taken.
+
+### D-0921 — Raise the bisection from 64 to 75 halvings, so its final bracket is narrower than one ulp anywhere in the band — 2026-10-02
+
+**What happened.** Audit finding W1-greeks1-1. `Checked::bisect` performs
+`BISECTION_STEPS` fixed halvings of `[MIN_VOLATILITY, MAX_VOLATILITY] =
+[1e-6, 5]`. The solver's module documentation, `docs/06-limits.md` §29 and
+D-0046's entry above said the final bracket, `(5 − 1e-6)/2^64 ≈ 2.7e-19`, is
+narrower than one unit in the last place of any volatility in that band. That
+is false below `2^-9`. `ulp(1e-6)` is `2^-72 ≈ 2.12e-22`, so at the floor the
+bracket was about 1,280 ulps wide. Measured at 64 halvings: a bisected solve of
+a contract whose true volatility is `1e-5` (`S = 100`, `T = 1/365`, `K` two
+`σ√T` below spot, a put) stopped with its two ends 160 ulps apart.
+
+**Decision.** `BISECTION_STEPS` goes from 64 to **75**, the least count with
+`(5 − 1e-6)/2^75 ≈ 1.32e-22 < 2.12e-22`. 74 leaves `2.65e-22`. The claim is now
+true and is not just reworded. The bisection stays fixed-count, with no early
+exit and no tolerance test. `MAX_ITERATIONS` follows arithmetically:
+`2 + 8 + 75 + 1 = 86`, up from 75. Every solve that reaches the bisection costs
+eleven more model evaluations, and a solve that finishes in Newton costs the
+same as before. The halving loop moved into `Checked::bracket`, which returns
+the `(low, high)` pair, so a test can see the bracket and not only its
+midpoint. Behaviour is otherwise unchanged.
+
+**Proved and measured.**
+`greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band`
+computes `ulp(MIN_VOLATILITY)` from `f64::to_bits`/`from_bits`, not from a
+typed constant, and asserts the exact-arithmetic width after `BISECTION_STEPS`
+halvings is below it and the width after one fewer is not.
+`greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility`
+runs every bisected solve on the shared grid and on true volatilities of
+`1.5e-6`, `1e-5` and `1e-4` near the money. It asserts that the two `f64` ends
+are equal or adjacent, that the quote lies between their model prices, and
+that the answer is one of them. Measured: 370 bisected solves, 22 of them
+below `2^-9`. Both tests fail at 64. Invariant G-39. The grid round trip is
+unchanged at 64 and at 75: 1,032 solved, 312 refused, worst relative volatility
+`2.33e-6`.
+
+**Stated so it is not over-read.** "The `f64` ends finish adjacent" is
+arithmetic for exact halving. For the rounded midpoints the code computes, it
+is measured on the inputs above and not proved for every input. It is also a
+statement about the bracket around the crossing of the *computed* price, not
+about distance to the true volatility. The quote's own rounding moves that
+crossing by far more than one ulp of a volatility: up to `2.3e-6` relative on
+the same set, which G-08 bounds.
+
+**What was re-measured and what was not.** The unit tests re-measure the worst
+total, now 86 (`the_reported_cost_is_every_model_evaluation`,
+`the_iteration_count_never_exceeds_the_arithmetic_bound`). `cargo bench -p
+greeks` was re-run in a Linux x86_64 container (Intel Xeon 2.80 GHz, 4 vCPU),
+not on the operator's machine: C-G-03 reported 7 and 79 of 86 evaluations and
+1.166× per evaluation, all ratios within the ceiling. The operator-machine
+figures in `docs/04-invariants.md` (7 and 68 of 75, 1.195×) are now labelled as
+taken at 64 halvings. The calibration table in the solver header and in §29 was
+measured on a separate harness, not on this code, and is unaffected. The
+`cargo mutants` counts in §29 were not re-run. Entries above this one that say
+64, 75 or `2.7e-19` (D-0046 and its follow-ups) are left as written, because
+the ledger is append-only and this entry supersedes them. The solver header,
+`MAX_ITERATIONS`' documentation, the bench header, `docs/04-invariants.md`
+G-09, G-31 and C-G-03, and `docs/06-limits.md` §29 are corrected.
+
+### D-0922 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
+
+**What was wrong.** `Ladder::try_next_level_observing` checked
+`pairs_walked + pairs >= pair_budget` once at the start of each outer row of a
+prefix block. Two defects followed (audit findings W3-engine1-3 and
+ET-masks-evaluation-sweep-5). The inner loop walked its whole row before the
+next check, so a halt could report up to `block.len() - 1` pairs past the
+budget: with every bit frequent at k=2 the block is the whole frontier. And the
+check also ran on a block's last row, which has no pair to walk, so a level
+whose need equalled the budget was reported as `Breach::Pairs` with a partial
+frontier although every pair had been walked. Bars `{0,1,2},{0,1,2},{}` need
+four pairs; a budget of four halted.
+
+**The change.** The check moved inside the inner loop, before the pair is
+counted. A pairs halt now records exactly `pair_budget`, and a walk that needs
+exactly its budget completes. One integer compare per pair. The checkpoint
+reader accepts an unhalted `pairs == pair_budget` (it refused `>=`), and still
+accepts a named pairs halt with `pairs > pair_budget`, so checkpoints written
+before this change still read. A run whose pair budget binds now reports a
+different `Halt::pairs` and, where the old overshoot crossed a level, a
+different partial frontier; `commit` is in the run identity, so the two are
+distinct runs. No production caller sets a pair budget below the default, which
+the candidate ceiling reaches first (`DEFAULT_PAIR_BUDGET`'s doc).
+Tests: `engine::tests::the_pair_budget_is_exact_at_both_edges`,
+`a_walk_that_needs_exactly_its_pair_budget_completes_and_its_checkpoint_reads_back`.
+
+### D-0923 — A checkpoint resumes under any support-lane count — 2026-10-02
+
+**What was wrong.** `Checkpoint::validate_for` refused a resume whose
+`support_lanes` differed from the checkpoint's (finding
+ET-masks-evaluation-sweep-2). The lane count is a scheduling sentinel, outside
+the run identity, and `a_support_lane_bound_changes_only_scheduling` proves it
+changes no answer. `cli` derives lanes from `available_parallelism` divided by
+the rungs sharing the machine, so an interrupted `sweep-stored` AND checkpoint
+was refused on any host or container with a different core count.
+
+**The change.** The comparison is removed; the resumed walk schedules with the
+caller's lanes. Every answer-bearing term (identity, rows, offered sequence,
+`min_hits`, ceiling, pair budget) is still compared exactly. The checkpoint
+format is unchanged and still records the lane count in force when it was
+written. Test:
+`a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer`
+(1, 2, 3 and `usize::MAX` lanes, each equal to the uninterrupted walk).
+
+### D-0924 — Time the production join and k=1 primitives, skip the parents' subset probes, and name the join's Theta(k) and sort costs — 2026-10-02
+
+**What was wrong.** Gate 8's engine rows timed stand-ins (findings
+ET-masks-evaluation-sweep-8, ET-o1-proof-coverage-0 and -2, W3-engine1-0 and
+-1). C-E-08 timed `a.union(b).popcount()` over a bench-local vector, a popcount
+production no longer performs, while the subset prune and meaning prune that
+production does run per pair were never timed. C-E-10 and C-E-11 built their
+own `HashSet` and `Vec`, so an O(n) regression in the production dedup or
+append would have shipped with gate 8 green. The subset prune is Theta(k) per
+candidate while its doc called it "O(1)" and "a 384-probe loop", and the doc was
+attached to `BATCH_PER_LANE`. The per-level sorts in `JoinIndex::try_new` and
+`sort_canonically` cost O(|F| log |F|) and were stated only in a code comment.
+
+**The change.** A public `engine::primitives` module carries the production
+operations: `offer` (the k=1 insert `first_level` calls), `append` (the push
+`drain` calls) and `JoinProbe`, which indexes a frontier with the production
+`JoinIndex` and walks every pair through `join_screen`, the one function the
+level join now calls for the union and both prunes. C-E-08 times `JoinProbe`
+from a 105-wide to a 990-wide frontier; new row C-E-12 times one subset probe
+from k=4 to k=320; C-E-10 and C-E-11 call `offer` and `append`. The subset prune
+now skips the two parents, which came from the frontier the set was built from
+and could only answer yes: `k - 2` probes for a survivor, none at k=2.
+`skipping_the_parents_never_changes_the_subset_prune` checks it against the
+full k-probe walk, and the exhaustive-join oracle test now carries its own full
+check. `docs/06-limits.md` names the Theta(k) prune and the O(|F| log |F|)
+per-level sorts. The walk's exit count falls from 17 to 16 because both prunes
+leave by one skip.
+
+### D-0925 — `engine::support` adds a hit without branching on it — 2026-10-02
+
+**What was wrong.** Its doc said "no branch on the answer" and its body was
+`if b.hits(mask) { n + 1 } else { n }` (finding ET-masks-evaluation-sweep-6).
+The function is a test and bench reference; the live path is
+`Column::support`, which C-E-02b already pins.
+
+**The change.** The body adds `u64::from(b.hits(mask))`. Same answers; the
+existing support tests and C-E-06's agreement check cover it.
+
+### D-0926 — Say that `duplicates` is a structural zero at k>=2, replace the assertions that read it back, and correct the drain and append descriptions — 2026-10-02
+
+**What was wrong.** Every k>=2 level is built by `joined_frontier`, which
+writes `duplicates: 0` as a literal (finding AC-whp-tb-5). Three engine test
+assertions and one oracle test asserted `duplicates == 0` as "the witness" that
+the prefix join emits each k-set once; none could fail. `DEFAULT_PAIR_BUDGET`'s
+doc and the join comment called it a "measured zero". Separately (finding
+ET-masks-evaluation-sweep-3), `CLAUDE.md` §3 rule 4 described lane-local `kept`
+vectors folded with one `extend` per chunk, `drain`'s doc described `parts`
+vectors and a `seen` set, `docs/06-limits.md` §5 priced the deleted `seen` set
+and named `HashSet::try_reserve`, and `cli/src/batch.rs` called
+`DEFAULT_CEILING` `1 << 26` where it is `1 << 27`.
+
+**The change.** The dead assertions are removed or replaced by distinctness of
+the level's survivors, which can fail; `generated == 1` remains the witness
+where it already was. The prose now says the zero is proved by the join's shape
+and written, not counted. `CLAUDE.md`, `drain`'s doc, §5 and `batch.rs` describe
+what the code does: one reserved `out`, disjoint count slices, one serial
+in-order push per survivor, `Vec::try_reserve`, and `1 << 27`.
+
+### D-1202 — The api serve edge refuses what it used to ignore, and states its request caps; the audit roll-up is D-0732's — 2026-10-02
 
 **The defects (audit findings probeapi-4, probeapi-5, probeapi-7, rustonly-4,
 o1api-3, o1api-4, o1api-21; all low).**
@@ -43828,10 +50332,15 @@ o1api-3, o1api-4, o1api-21; all low).**
    a failed spawn is printed. It is the operator's desktop, as `open` and
    `explorer.exe` are on the other two families. Whether a given host's
    `xdg-open` is a script is UNVERIFIED; the doc on `open_in_browser` says so.
-6. The month roll-up is cached in the census wire cache beside `/store.json`'s
-   bodies, under a separate key, so it is built once per census `Arc` that
-   `census_now` hands out and dies with that snapshot. A poisoned cache renders
-   the same bytes uncached.
+6. *o1api-21 is covered by D-0732, not by this entry.* This branch first
+   cached the month roll-up in the census wire cache under a separate key.
+   `final/all-fixes` fixed the same finding independently in W1-api1-0
+   (D-0732): `site.audit_rollup`, a `RollupCache` keyed on the census `Arc`
+   that counts only the asked feed. Folding the two would have left two caches
+   for one fact, so the wire-cache path, its `audit_months` accessor, its key
+   and its test were removed when this branch merged `final/all-fixes`, and
+   D-0732's implementation is the only one. D-1202 changes nothing in
+   `audit_json.rs`.
 
 **Rejected.** (1) Parsing the query once into a slice table for every handler:
 it changes over 130 call sites in 20 files, several on branches still open, to
@@ -43843,8 +50352,9 @@ value the client sent. (4) Dropping the browser auto-open on Linux: the run
 procedure is one click, and the opt-out already exists. (5) Exiting when stdout
 closes: the banner is a convenience, the server is the product. (6) A new
 `Site` field for the roll-up: the wire cache already has the right key and
-lifetime.
+lifetime. (Moot: D-0732's `RollupCache` is the one cache; see choice 6.)
 
 Invariants AF-PROBEAPI4-a, AF-PROBEAPI5-a, AF-PROBEAPI7-a, AF-O1API3-a,
-AF-O1API4-a and AF-O1API21-a; `docs/06-limits.md` states what the caps do not
-bound and what the roll-up cache costs on a miss.
+AF-O1API4-a and AF-O1API21-a (the last points at D-0732's tests);
+`docs/06-limits.md` states what the caps do not bound, and D-0732's own
+section states what the roll-up costs on a miss.

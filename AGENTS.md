@@ -273,9 +273,14 @@ any kind — not the file it opened, not the bars it read, not a refusal — so 
 `/logs` page covered the pull half of the data path and nothing of the read half.
 Gate 17 silences `vocab engine indicators runner`, because those hold the loops
 and its rule is not "each call is cheap" but "the innermost loop calls nothing at
-all". `cli` holds no loop over bars and none over candidates: it is the
-structural boundary, one event per run and one per instrument-month, which is the
-granularity gate 17's own comment prescribes as the affordable one. D-0226.
+all". `cli` is not on that list, and it is NOT loop-free: it walks bars (for
+example `window_range_percentile`) and `screen` walks every candidate in
+`by_evidence.par_iter()`, calling `GridProgress::tick` per candidate — one
+relaxed `fetch_add`, with an event only on every `stride`-th candidate. Its
+events are emitted at structural boundaries — per run, per instrument-month, and
+that `stride` — which is the granularity gate 17's own comment prescribes as the
+affordable one. This said `cli` held no loop over bars or candidates until
+D-0957 corrected it. D-0226.
 
 `cli` once deliberately had no `store` arrow, on the reasoning that the
 operator's standing rule forbade both a vendor pull and the bars already on

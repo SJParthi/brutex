@@ -31,25 +31,10 @@ pub(super) struct Encoded {
 #[derive(Debug)]
 struct Snapshot {
     source: Weak<Vec<census::VendorCensus>>,
-    bodies: HashMap<(Vendor, Body), Encoded>,
+    bodies: HashMap<(Vendor, Format), Encoded>,
 }
 
-/// What one cached body is: a `/store.json` encoding, or `/audit.json`'s month
-/// roll-up for the same feed.
-///
-/// The roll-up is a JSON fragment, not a document, and it is cached here rather
-/// than beside its route because it is derived from the same immutable census
-/// snapshot and goes stale at the same moment: one cache keyed on one census
-/// `Arc` serves both, and neither can outlive the census it was built from.
-/// o1api-21, D-1202.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum Body {
-    Wire(Format),
-    AuditMonths,
-}
-
-/// At most three bodies per fixed vendor (two wire formats and the audit
-/// roll-up), for one immutable source generation.
+/// At most two formats per fixed vendor, for one immutable source generation.
 /// The mutex coalesces cold encoding; callers run it on a blocking worker.
 #[derive(Default, Debug)]
 pub(super) struct Cache(Mutex<Option<Snapshot>>);
@@ -60,47 +45,11 @@ impl Cache {
         self.0.lock().is_ok_and(|held| held.is_none())
     }
 
-    #[cfg(test)]
-    pub(super) fn holds_audit_months(&self, vendor: Vendor) -> bool {
-        self.0.lock().is_ok_and(|held| {
-            held.as_ref()
-                .is_some_and(|snapshot| snapshot.bodies.contains_key(&(vendor, Body::AuditMonths)))
-        })
-    }
-
-    /// Runs `holder` with the lock held, so a test can poison it.
-    #[cfg(test)]
-    pub(super) fn while_held(&self, holder: impl FnOnce()) {
-        let _held = self.0.lock();
-        holder();
-    }
-
     pub(super) fn get(
         &self,
         source: &Arc<Vec<census::VendorCensus>>,
         vendor: Vendor,
         format: Format,
-        build: impl FnOnce() -> Result<String, String>,
-    ) -> Result<Encoded, String> {
-        self.get_body(source, vendor, Body::Wire(format), build)
-    }
-
-    /// `/audit.json`'s month roll-up for `vendor`, built at most once per
-    /// census snapshot. o1api-21, D-1202.
-    pub(super) fn audit_months(
-        &self,
-        source: &Arc<Vec<census::VendorCensus>>,
-        vendor: Vendor,
-        build: impl FnOnce() -> String,
-    ) -> Result<Encoded, String> {
-        self.get_body(source, vendor, Body::AuditMonths, || Ok(build()))
-    }
-
-    fn get_body(
-        &self,
-        source: &Arc<Vec<census::VendorCensus>>,
-        vendor: Vendor,
-        key: Body,
         build: impl FnOnce() -> Result<String, String>,
     ) -> Result<Encoded, String> {
         let mut held = self.0.lock().map_err(|_| "census wire cache is poisoned")?;
@@ -110,13 +59,13 @@ impl Cache {
         if !same {
             *held = Some(Snapshot {
                 source: Arc::downgrade(source),
-                bodies: HashMap::with_capacity(3 * Vendor::ALL.len()),
+                bodies: HashMap::with_capacity(2 * Vendor::ALL.len()),
             });
         }
         let current = held
             .as_mut()
             .ok_or("census wire snapshot was unavailable")?;
-        if let Some(encoded) = current.bodies.get(&(vendor, key)) {
+        if let Some(encoded) = current.bodies.get(&(vendor, format)) {
             return Ok(encoded.clone());
         }
         let body = build()?;
@@ -124,7 +73,7 @@ impl Cache {
             etag: super::census_etag(&body),
             body: Bytes::from(body),
         };
-        current.bodies.insert((vendor, key), encoded.clone());
+        current.bodies.insert((vendor, format), encoded.clone());
         Ok(encoded)
     }
 }

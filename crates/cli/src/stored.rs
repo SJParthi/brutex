@@ -504,6 +504,29 @@ fn hash_open_session_v1(
     Ok(expected)
 }
 
+/// The IST minute-of-day at which `day`'s FINAL one-minute bar opens, read from
+/// [`pull::calendar::kind_of`], or `None` when the calendar does not place one.
+///
+/// This is the session close `indicators::anchored`'s exact-minute overlay clamps a
+/// short day-final signal bucket onto (D-0943). It used to derive that close from the
+/// minute slice itself, which mapped a truncated session onto whatever minute it
+/// stopped at and let a LATER day's minute decide an EARLIER day's mapping. The
+/// calendar answers for one day from that day alone. On a two-window day it is the
+/// last window's close. `Closed`, `OpenLengthUnmeasured` and `Unmeasured` answer
+/// `None`, so the overlay keeps the formula's minute and refuses rather than invent
+/// a session end. O(1): one `kind_of` call, itself a bounded walk. **UNVERIFIED as a
+/// measured bound**, read off the source as `kind_of`'s own is.
+#[must_use]
+pub fn nse_session_close_minute(day: i64) -> Option<u16> {
+    match pull::calendar::kind_of(day) {
+        DayKind::Open(session) => usize::from(session.count)
+            .checked_sub(1)
+            .and_then(|last| session.windows.get(last))
+            .map(|window| window.to),
+        DayKind::Closed | DayKind::OpenLengthUnmeasured | DayKind::Unmeasured => None,
+    }
+}
+
 /// Hash one complete day-level calendar decision.
 fn hash_calendar_day_v1(
     day: i64,
@@ -3324,6 +3347,44 @@ mod tests {
     use super::*;
     use store::format::Bar;
 
+    /// D-0943: the overlay's session close is the calendar's last window close per day.
+    ///
+    /// A regular day closes 15:29; the two-window disaster-recovery Saturday closes at
+    /// its SECOND window's 12:29; the 2021-02-24 outage at 16:59. A closed day, a
+    /// Muhurat whose length was never measured, and a day outside the calendar answer
+    /// `None`, so the overlay refuses rather than inventing a session end.
+    #[test]
+    fn the_overlay_session_close_is_the_calendars_last_window_close() {
+        let regular = pull::calendar::FIRST_DAY;
+        assert_eq!(
+            pull::calendar::kind_of(regular),
+            DayKind::Open(Session::full())
+        );
+        assert_eq!(nse_session_close_minute(regular), Some(15 * 60 + 29));
+        assert_eq!(nse_session_close_minute(19_784), Some(12 * 60 + 29));
+        assert_eq!(
+            nse_session_close_minute(pull::calendar::SYSTEMS_OUTAGE_DAY),
+            Some(16 * 60 + 59)
+        );
+        let closed = (pull::calendar::FIRST_DAY..=pull::calendar::LAST_DAY)
+            .find(|day| pull::calendar::kind_of(*day) == DayKind::Closed)
+            .expect("the calendar holds a weekend");
+        assert_eq!(nse_session_close_minute(closed), None);
+        assert_eq!(
+            pull::calendar::kind_of(18_935),
+            DayKind::OpenLengthUnmeasured
+        );
+        assert_eq!(nse_session_close_minute(18_935), None);
+        for outside in [
+            pull::calendar::FIRST_DAY - 1,
+            pull::calendar::LAST_DAY + 1,
+            i64::MIN,
+            i64::MAX,
+        ] {
+            assert_eq!(nse_session_close_minute(outside), None, "day {outside}");
+        }
+    }
+
     /// A store root of this test's own, so `cargo test`'s threads cannot collide.
     ///
     /// The same idiom `crates/store`'s own tests use, tagged per test and
@@ -4667,6 +4728,34 @@ mod tests {
         let why = daily_context_from_span(incomplete, &signal).expect_err("hole is not a holiday");
         assert!(why.contains("missing 2026-07"), "{why}");
         assert!(why.contains("cannot be called a holiday"), "{why}");
+    }
+
+    /// D-0941. A stored all-zero (or any `low <= 0`) 1day record used to pass
+    /// `DailyReference::new` and become the next day's eligible anchor. It now
+    /// refuses the whole daily context by name, rather than being dropped
+    /// silently or substituted with an older anchor.
+    #[test]
+    fn a_nonpositive_stored_daily_record_refuses_the_daily_context_by_name() {
+        let signal = [
+            candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_600_000),
+            candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_600_100),
+        ];
+        for (low, high) in [(0, 0), (0, 100), (-100, 100)] {
+            let mut bad = candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 0);
+            bad.open = low;
+            bad.close = low;
+            bad.low = low;
+            bad.high = high;
+            let daily = daily_span(vec![
+                candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+                bad,
+            ]);
+            let why = daily_context_from_span(daily, &signal)
+                .expect_err("a nonpositive daily record is not reference evidence");
+            assert!(why.contains("not usable reference evidence"), "{why}");
+            assert!(why.contains("PriceNotPositive"), "{why}");
+            assert!(why.contains(&bad.ts_micros.to_string()), "{why}");
+        }
     }
 
     fn minute_on_ist_day(day: i64, minute: i64, close: i64) -> Candle {

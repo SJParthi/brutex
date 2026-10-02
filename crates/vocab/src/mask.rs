@@ -1,8 +1,8 @@
 //! A 384-bit condition mask, because the table no longer fits in a `u128`.
 //!
 //! `docs/03-vocabulary.md` shipped 74 conditions in a `u128` with 54 positions
-//! of headroom. The table in [`crate::table`] defines 280 positions, so every
-//! configuration of that headroom overflows. Four words replace one, and the
+//! of headroom. The table in [`crate::table`] defines 370 positions, so every
+//! configuration of that headroom overflows. A 6-word array replaces it, and the
 //! claim this module has to carry is that widening does **not** cost the
 //! per-operation bound `CLAUDE.md` §3 rule 4 asks for.
 //!

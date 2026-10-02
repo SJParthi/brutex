@@ -1206,8 +1206,25 @@ fn past_a_ctime_tick(path: &Path, change: impl Fn()) {
 /// driven here. Like `folder`'s unreadable-folder test, this needs a process
 /// the permission binds, which a root process is not.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+#[test]
+fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_manifest_directory_this_process_may_not_search_is_not_served_as_absent",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a test runtime")
+                .block_on(
+                    a_manifest_directory_this_process_may_not_search_is_not_served_as_absent_body(),
+                );
+        },
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+async fn a_manifest_directory_this_process_may_not_search_is_not_served_as_absent_body() {
     let fixture = Fixture::new("census-request-manifest-unsearchable");
     let dir = fixture.root.join("manifest");
     fs::create_dir_all(&dir).expect("an empty manifest directory");
@@ -1495,8 +1512,25 @@ async fn bars_names_every_unreadable_census_when_no_readable_census_holds_the_na
 /// directory tests, this needs a process the permission binds, which a root
 /// process is not.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+#[test]
+fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_permission_change_on_a_manifest_file_is_seen_on_the_next_request",
+        || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a test runtime")
+                .block_on(
+                    a_permission_change_on_a_manifest_file_is_seen_on_the_next_request_body(),
+                );
+        },
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+async fn a_permission_change_on_a_manifest_file_is_seen_on_the_next_request_body() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-manifest-file-mode");
     fixture.publish(&[(Segment::Index, "NIFTY")], 0);
@@ -2091,6 +2125,15 @@ fn a_fault_the_census_cache_declines_rebuilds_the_store_body_on_every_request() 
 #[cfg(unix)]
 #[test]
 fn a_fault_its_stamp_can_see_is_cached() {
+    crate::isolated::where_permission_binds(
+        "server::census_request_tests::a_fault_its_stamp_can_see_is_cached",
+        a_fault_its_stamp_can_see_is_cached_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_fault_its_stamp_can_see_is_cached_body() {
     use std::io::ErrorKind;
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = Fixture::new("census-request-kept-faults");
@@ -3852,68 +3895,5 @@ async fn a_name_the_census_does_not_hold_keeps_no_calendar() {
     assert!(
         kept_nifty(&fixture).is_some_and(|(_, again)| Arc::ptr_eq(&kept.1, &again)),
         "the held name's next call met its calendar"
-    );
-}
-
-/// o1api-21, D-1202: `/audit.json`'s month roll-up is built once per census
-/// snapshot, not once per poll; a new manifest is a new snapshot and a new
-/// roll-up; and a poisoned cache renders the same bytes uncached.
-#[test]
-fn the_audit_month_rollup_is_built_once_per_census_snapshot() {
-    let fixture = Fixture::new("census-request-audit-rollup");
-    fixture.publish_nifty(&[may()], 0);
-    let poll = || {
-        crate::audit_json::body(
-            &fixture.site,
-            Vendor::Dhan,
-            0,
-            at(5),
-            Ok(Day::new(2025, 6, 2).expect("fixture date")),
-        )
-    };
-    assert!(fixture.site.census_wire.is_empty());
-    let first = poll();
-    assert!(
-        first.contains(r#""instrument_months":1,"bars":"#)
-            && first.contains(r#""months":[{"month":"2025-05","instrument_months":1,"bars":"#),
-        "{first}"
-    );
-    assert!(
-        !fixture.site.census_wire.is_empty(),
-        "the poll must have kept its roll-up"
-    );
-    assert!(fixture.site.census_wire.holds_audit_months(Vendor::Dhan));
-    assert!(!fixture.site.census_wire.holds_audit_months(Vendor::Groww));
-    assert_eq!(poll(), first, "an unchanged store answers the same bytes");
-
-    // A further month is a new manifest, so a new snapshot and a new roll-up.
-    fixture.publish_nifty(&[may(), june()], 1);
-    let grown = poll();
-    assert!(grown.contains(r#""instrument_months":2,"#), "{grown}");
-    assert!(
-        grown.contains(r#"{"month":"2025-06","instrument_months":1,"#),
-        "{grown}"
-    );
-
-    // Poisoned: the same bytes, rendered without the cache.
-    std::thread::scope(|scope| {
-        #[expect(
-            clippy::panic,
-            reason = "the poison is the fixture: a holder must die with the lock held"
-        )]
-        let died = scope
-            .spawn(|| {
-                fixture
-                    .site
-                    .census_wire
-                    .while_held(|| std::panic::panic_any("died holding the wire cache"));
-            })
-            .join();
-        assert!(died.is_err(), "the holder panicked");
-    });
-    assert_eq!(
-        poll(),
-        grown,
-        "a poisoned cache changes the cost, not the bytes"
     );
 }

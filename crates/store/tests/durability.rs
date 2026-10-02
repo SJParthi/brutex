@@ -39,6 +39,9 @@
     clippy::indexing_slicing
 )]
 
+#[cfg(unix)]
+mod support;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,6 +104,15 @@ fn month_path(month: u8) -> StorePath<'static> {
 #[cfg(unix)]
 #[test]
 fn a_directory_flush_the_host_refuses_is_returned_and_named() {
+    support::where_permission_binds(
+        "a_directory_flush_the_host_refuses_is_returned_and_named",
+        a_directory_flush_the_host_refuses_is_returned_and_named_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_directory_flush_the_host_refuses_is_returned_and_named_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("NOFLUSH");
@@ -167,6 +179,15 @@ fn a_directory_flush_the_host_refuses_is_returned_and_named() {
 #[cfg(unix)]
 #[test]
 fn a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for_one() {
+    support::where_permission_binds(
+        "a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for_one",
+        a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for_one_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for_one_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("NOSIDECARFLUSH");
@@ -260,6 +281,15 @@ fn a_sidecar_flush_the_host_refuses_is_returned_and_only_an_empty_month_asks_for
 #[cfg(unix)]
 #[test]
 fn the_sidecar_flush_follows_the_sidecars_creation_so_a_refused_flush_leaves_the_new_name() {
+    support::where_permission_binds(
+        "the_sidecar_flush_follows_the_sidecars_creation_so_a_refused_flush_leaves_the_new_name",
+        the_sidecar_flush_follows_the_sidecars_creation_so_a_refused_flush_leaves_the_new_name_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn the_sidecar_flush_follows_the_sidecars_creation_so_a_refused_flush_leaves_the_new_name_body() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let scratch = Scratch::new("SIDECARORDER");
