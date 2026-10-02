@@ -43762,6 +43762,65 @@ underflows to zero (`carry = +10, T = 100` gives `e^-1000 = 0`), stays finite
 and is not refused here. This finding did not cover it and no measurement of
 its effect on the solver was taken.
 
+### D-0921 — Raise the bisection from 64 to 75 halvings, so its final bracket is narrower than one ulp anywhere in the band — 2026-10-02
+
+**What happened.** Audit finding W1-greeks1-1. `Checked::bisect` performs
+`BISECTION_STEPS` fixed halvings of `[MIN_VOLATILITY, MAX_VOLATILITY] =
+[1e-6, 5]`. The solver's module documentation, `docs/06-limits.md` §29 and
+D-0046's entry above said the final bracket, `(5 − 1e-6)/2^64 ≈ 2.7e-19`, is
+narrower than one unit in the last place of any volatility in that band. That
+is false below `2^-9`. `ulp(1e-6)` is `2^-72 ≈ 2.12e-22`, so at the floor the
+bracket was about 1,280 ulps wide. Measured at 64 halvings: a bisected solve of
+a contract whose true volatility is `1e-5` (`S = 100`, `T = 1/365`, `K` two
+`σ√T` below spot, a put) stopped with its two ends 160 ulps apart.
+
+**Decision.** `BISECTION_STEPS` goes from 64 to **75**, the least count with
+`(5 − 1e-6)/2^75 ≈ 1.32e-22 < 2.12e-22`. 74 leaves `2.65e-22`. The claim is now
+true and is not just reworded. The bisection stays fixed-count, with no early
+exit and no tolerance test. `MAX_ITERATIONS` follows arithmetically:
+`2 + 8 + 75 + 1 = 86`, up from 75. Every solve that reaches the bisection costs
+eleven more model evaluations, and a solve that finishes in Newton costs the
+same as before. The halving loop moved into `Checked::bracket`, which returns
+the `(low, high)` pair, so a test can see the bracket and not only its
+midpoint. Behaviour is otherwise unchanged.
+
+**Proved and measured.**
+`greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band`
+computes `ulp(MIN_VOLATILITY)` from `f64::to_bits`/`from_bits`, not from a
+typed constant, and asserts the exact-arithmetic width after `BISECTION_STEPS`
+halvings is below it and the width after one fewer is not.
+`greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility`
+runs every bisected solve on the shared grid and on true volatilities of
+`1.5e-6`, `1e-5` and `1e-4` near the money. It asserts that the two `f64` ends
+are equal or adjacent, that the quote lies between their model prices, and
+that the answer is one of them. Measured: 370 bisected solves, 22 of them
+below `2^-9`. Both tests fail at 64. Invariant G-39. The grid round trip is
+unchanged at 64 and at 75: 1,032 solved, 312 refused, worst relative volatility
+`2.33e-6`.
+
+**Stated so it is not over-read.** "The `f64` ends finish adjacent" is
+arithmetic for exact halving. For the rounded midpoints the code computes, it
+is measured on the inputs above and not proved for every input. It is also a
+statement about the bracket around the crossing of the *computed* price, not
+about distance to the true volatility. The quote's own rounding moves that
+crossing by far more than one ulp of a volatility: up to `2.3e-6` relative on
+the same set, which G-08 bounds.
+
+**What was re-measured and what was not.** The unit tests re-measure the worst
+total, now 86 (`the_reported_cost_is_every_model_evaluation`,
+`the_iteration_count_never_exceeds_the_arithmetic_bound`). `cargo bench -p
+greeks` was re-run in a Linux x86_64 container (Intel Xeon 2.80 GHz, 4 vCPU),
+not on the operator's machine: C-G-03 reported 7 and 79 of 86 evaluations and
+1.166× per evaluation, all ratios within the ceiling. The operator-machine
+figures in `docs/04-invariants.md` (7 and 68 of 75, 1.195×) are now labelled as
+taken at 64 halvings. The calibration table in the solver header and in §29 was
+measured on a separate harness, not on this code, and is unaffected. The
+`cargo mutants` counts in §29 were not re-run. Entries above this one that say
+64, 75 or `2.7e-19` (D-0046 and its follow-ups) are left as written, because
+the ledger is append-only and this entry supersedes them. The solver header,
+`MAX_ITERATIONS`' documentation, the bench header, `docs/04-invariants.md`
+G-09, G-31 and C-G-03, and `docs/06-limits.md` §29 are corrected.
+
 ### D-0922 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
 
 **What was wrong.** `Ladder::try_next_level_observing` checked

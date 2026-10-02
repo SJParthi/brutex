@@ -1153,7 +1153,7 @@ with the decision that signs it.
 | G-06 | The normal CDF matches published values at twelve points, on a **relative** tolerance so the tail is actually checked | `greeks::normal::the_cdf_matches_known_values` | ✓ |
 | G-07 | Both Hart branches and both saturating tails are exercised, and the two branches meet at the split inside Hart's own tail accuracy | `greeks::normal::both_hart_branches_and_both_saturating_tails_are_exercised` | ✓ |
 | G-08 | `volatility -> price -> IV` recovers the **volatility** to 1e-4 relative, and every point that does not is refused as one of exactly two named kinds whose counts account for the whole refusal count. Measured worst 2.33e-6; the superseded `price -> IV -> price` form is asserted too and is the weaker of the two — it measures `0e0` at the point where the volatility is 5.14% wrong. D-0046 | `greeks::solver::a_volatility_round_trips_through_the_solver_and_back` | ✓ |
-| G-09 | One solve never costs more than `BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS + FINAL_EVALUATION = 2 + 8 + 64 + 1 = 75` model evaluations — **every** evaluation, not only the ones inside the search — and both methods are actually exercised | `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound` | ✓ |
+| G-09 | One solve never costs more than `BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS + FINAL_EVALUATION = 2 + 8 + 75 + 1 = 86` model evaluations (75 before D-0921 raised the halvings from 64) — **every** evaluation, not only the ones inside the search — and both methods are actually exercised | `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound` | ✓ |
 | G-10 | The same inputs give the same volatility **bit for bit**, and the same iteration count and method, **within one process and one target**. Bit-for-bit reproducibility does NOT hold across targets — a different libm moves 140 of 1,344 solved volatilities by up to 4.22e-14 relative — and `docs/06-limits.md` §18 carries the measurement (`CLAUDE.md` §3 rules 5 and 6) | `greeks::solver::the_solver_is_idempotent_to_the_bit` | ✓ |
 | G-11 | A price does not determine a volatility when one unit in the last place *the price actually has* — set by the two legs it is a difference of, not by its own magnitude — moves the answer by more than `1e-3` of itself; that is **refused**, never returned | `greeks::solver::a_price_that_does_not_determine_a_volatility_is_refused_not_returned` | ✓ |
 | G-12 | A quote at or below the discounted intrinsic value is refused on both sides, and a negative quote lands in the same refusal with `intrinsic` printed as zero | `greeks::solver::a_price_at_or_below_the_discounted_intrinsic_is_refused_on_both_sides` | ✓ |
@@ -1167,10 +1167,11 @@ with the decision that signs it.
 | G-20 | A rung past `MAX_STEPS` is refused rather than truncated into range by the one `f64 -> i32` cast in the crate | `greeks::moneyness::a_rung_beyond_the_bound_is_refused_rather_than_truncated_into_range` | ✓ |
 | G-29 | Every bound is INCLUSIVE: the value exactly on it is accepted, which is what stops the refusal above from being satisfied by refusing everything | `greeks::bsm::every_bound_accepts_the_value_exactly_on_it` | ✓ |
 | G-30 | The Brenner-Subrahmanyam seed lands within 1% of the answer at the money, and the search then finishes in Newton in at most four steps | `greeks::solver::the_seed_lands_next_to_the_answer_at_the_money` | ✓ |
-| G-31 | The reported iteration count is the work actually done, floor as well as ceiling: the three fixed evaluations plus at least one Newton step, and the bisection's 64 halvings on top of the Newton steps that preceded them | `greeks::solver::the_iteration_count_is_the_work_actually_done` | ✓ |
+| G-31 | The reported iteration count is the work actually done, floor as well as ceiling: the three fixed evaluations plus at least one Newton step, and the bisection's 75 halvings on top of the Newton steps that preceded them | `greeks::solver::the_iteration_count_is_the_work_actually_done` | ✓ |
 | G-32 | The reported cost is **every** model evaluation, checked against a count the solver did not compute — a thread-local counter inside `Checked::greeks`, the one function all of them pass through — on a Newton solve, on the worst solve and on a refusal | `greeks::solver::the_reported_cost_is_every_model_evaluation` | ✓ |
 | G-33 | The scale the `Indeterminate` guard screens on is the sum of the two legs the price is a difference of, and it is measurably coarser than one ulp of the price itself — 100.8× on a one-day in-the-money NIFTY strike | `greeks::bsm::the_price_scale_is_the_two_legs_and_it_dwarfs_the_price_they_leave` | ✓ |
 | G-38 | A discount factor or leg that overflows with every input inside its bound — `rate` or `carry` at `-7.1` with `T = 100`, or a spot or strike at `MAX_UNDERLYING` with the factor finite at `-7.0` — is refused as `NotRepresentable` **on the way in**, by `Contract::check`, on every path: `price`, `greeks`, and `implied_volatility` for a call and a put. It never reaches the solver's arbitrage bounds as `PriceBelowIntrinsic { intrinsic: inf }`. Just inside the edge, at `-7.0`, the contract still prices and still solves. D-0920 | `greeks::bsm::a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in` | ✓ |
+| G-39 | The bisection's final bracket is narrower than one unit in the last place anywhere in `[MIN_VOLATILITY, MAX_VOLATILITY]`: `(5 − 1e-6)/2^75 ≈ 1.32e-22` against `ulp(1e-6) = 2^-72 ≈ 2.12e-22`, the finest in the band, computed from the bits rather than typed in; 75 is the least such count. End to end, every bisected solve on the shared grid and on true volatilities down to `1.5e-6` stops with its two `f64` ends equal or adjacent, the quote between their prices and the answer one of them. Both fail at the old 64 halvings. **Not** a claim of distance to the true volatility, which the quote's own rounding governs. D-0921 | `greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band` · `greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility` | ✓ |
 
 ### Complexity rows for the greeks
 
@@ -1184,7 +1185,7 @@ when it renumbered `K-*` to `C-K-*`.
 
 **The solver row is a different shape from the other two, and the difference is
 the point.** `greeks::solver` opens by saying it is not O(1) and is not claimed
-to be; what it has is an ARITHMETIC ceiling of `MAX_ITERATIONS` = 75 model
+to be; what it has is an ARITHMETIC ceiling of `MAX_ITERATIONS` = 86 model
 evaluations, held by `G-09` and `G-32`. Timing an easy solve against a hard one
 and calling the ratio a bound would be measuring the evaluation COUNT, which is
 allowed to differ. So `C-G-03` measures cost **per model evaluation** — the part
@@ -1197,7 +1198,7 @@ unbounded in time.
 | C-G-01 | A closed-form price costs the same whatever it is pricing: at the money against a strike a tenth of spot and one ten times it, and one day to expiry against five years | `greeks::bench::a_price_costs_the_same_whatever_the_contract_is` | ✓ |
 | C-G-05 | One Black-Scholes price costs a bounded multiple of the per-price **floor** — one fused multiply-add on the same contract's own fields, no `exp`, no CDF, no branch on moneyness. **This is the row a ratio cannot replace**: every other row here divides one price cost by another, so a UNIFORM slowdown cancels, and an audit measured a mask operation 174× slower passing its crate's ratio rows at 0.98×–1.00×. Measured over four runs: 29.966, 30.025, 29.798, 31.418 floors — a 1.05× spread, the tightest of the workspace's budgets because both legs are register float arithmetic. Budget **100**, sized on the worst observed with 3.18× left for a different microarchitecture | `greeks::bench::a_price_stays_within_its_budget` | ✓ |
 | C-G-02 | The full greek set costs the same across those same contracts — every greek falls out of the same two normal-CDF evaluations, so none of them adds a data-dependent path | `greeks::bench::the_full_greek_set_costs_the_same_whatever_the_contract_is` | ✓ |
-| C-G-03 | One **model evaluation** costs the same however hard the quote is, so `G-09`'s ceiling of 75 evaluations is a bound on work and not merely on step count — and the evaluation count each solve reports is checked against `MAX_ITERATIONS` in the bench as well as in the unit test | `greeks::bench::one_model_evaluation_costs_the_same_however_hard_the_quote_is` | ✓ |
+| C-G-03 | One **model evaluation** costs the same however hard the quote is, so `G-09`'s ceiling of 86 evaluations is a bound on work and not merely on step count — and the evaluation count each solve reports is checked against `MAX_ITERATIONS` in the bench as well as in the unit test | `greeks::bench::one_model_evaluation_costs_the_same_however_hard_the_quote_is` | ✓ |
 
 Measured on the operator's machine, 2026-08-09, `cargo bench -p greeks`, exit 0.
 C-G-01 spanned **0.943× – 0.998×** at ~23–25 ns a price; C-G-02 **0.996×** and
@@ -1207,7 +1208,12 @@ under the ceiling of 75 — a **9.7× spread in count** — and the cost per
 evaluation across that spread was **1.195×**. A bench that had timed the two
 solves against each other would have reported ~9.7× and breached, on a crate
 whose bound was never violated. That is the measurement this row exists to
-avoid mis-stating.
+avoid mis-stating. **Those figures were taken at 64 halvings.** D-0921 raised the
+count to 75 and the ceiling to 86; the operator's machine has not re-run the
+bench since. Re-run on 2026-10-02 in a Linux x86_64 container (Intel Xeon
+2.80 GHz, 4 vCPU, `rustc` 1.97.1), not the operator's machine: the same two
+solves reported **7 and 79 of 86** evaluations, and the cost per evaluation was
+**1.166×**, all ratios within the ceiling.
 
 A strike ten times spot is used in C-G-01 and C-G-02 but NOT in C-G-03: its
 model price is close enough to zero that the solve is refused before it starts,

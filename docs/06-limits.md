@@ -1952,21 +1952,37 @@ ceiling that is **arithmetic**:
 ```text
 MAX_ITERATIONS = BRACKET_EVALUATIONS + NEWTON_STEPS + BISECTION_STEPS
                  + FINAL_EVALUATION
-               = 2 + 8 + 64 + 1
-               = 75
+               = 2 + 8 + 75 + 1
+               = 86
 ```
 
-The bisection performs exactly 64 halvings of `[1e-6, 5]` with no early exit,
-no tolerance test and no stagnation detection. `(5 − 1e-6)/2^64 ≈ 2.7e-19` is
-narrower than one unit in the last place of any volatility in the band, so a
-fixed count is sufficient rather than merely safe — and its cost does not
-depend on any input value, because it does not read the input to decide when
-to stop.
+The bisection performs exactly 75 halvings of `[1e-6, 5]` with no early exit,
+no tolerance test and no stagnation detection. `(5 − 1e-6)/2^75 ≈ 1.32e-22` is
+narrower than `ulp(1e-6) = 2^-72 ≈ 2.12e-22`, the finest unit in the last place
+in the band, so a fixed count is sufficient rather than merely safe — and its
+cost does not depend on any input value, because it does not read the input to
+decide when to stop. 75 is the least count that does it; 74 leaves `2.65e-22`.
 
-**This said 72 until D-0046, and 72 was wrong by three.** The two evaluations
+**It was 64 halvings until D-0921, and this paragraph's claim was false.**
+`(5 − 1e-6)/2^64 ≈ 2.71e-19` is wider than one ulp of any volatility below
+`2^-9`, by up to about 1,280× at the floor. Measured at 64: a bisected solve at
+a true volatility of `1e-5` stopped with its two ends 160 ulps apart. The
+arithmetic is `greeks::solver::the_final_bracket_is_narrower_than_one_ulp_anywhere_in_the_band`,
+with the ulp computed from the bits. The end-to-end check,
+`greeks::solver::a_bisected_solve_ends_on_adjacent_floats_even_at_a_tiny_volatility`,
+runs every bisected solve on the shared grid and on true volatilities down to
+`1.5e-6`. **What stays unproved:** the code halves with rounded midpoints, so
+"the `f64` ends finish equal or adjacent" is measured on those inputs, not
+proved for every input. The answer's distance to the *true* volatility is set
+by the quote's own rounding, not by the bracket. On that set it is up to
+`2.3e-6` relative. The cost was eleven more evaluations on every solve that
+reaches the bisection.
+
+**This said 72 until D-0046, and 72 was wrong by three** (at 64 halvings, when
+the true ceiling was 75). The two evaluations
 that establish the bracket and the one at the answer were never counted, while
 the constant's own documentation called itself "the largest total number of
-model evaluations one solve can cost". A refused solve costs 75 as well. The
+model evaluations one solve can cost". A refused solve costs the ceiling as well. The
 test named for the bound read the `iterations` field, which was
 `spent + BISECTION_STEPS` by construction and therefore could not observe the
 gap; `greeks::solver::the_reported_cost_is_every_model_evaluation` now counts
@@ -1975,10 +1991,10 @@ at `Checked::greeks`, the one function every evaluation passes through.
 **Measured on an 819-point grid of moneyness × maturity × volatility — by the
 calibration harness, whose rescuer was Brent and whose bisection exited early.
 This is NOT a measurement of the shipped solver.** It is why the shipped shape
-was chosen. The shipped solver uses a fixed 64-halving bisection and is
-measured at a worst total of **75**, which is also its arithmetic ceiling. The
+was chosen. The shipped solver uses a fixed 75-halving bisection and is
+measured at a worst total of **86**, which is also its arithmetic ceiling. The
 table below counts *search* evaluations only, which is what that harness
-counted; add three for the bracket and the answer to compare it with 75.
+counted; add three for the bracket and the answer to compare it with 86.
 
 | Newton cap | by Newton | rescued | worst total | median |
 |---|---|---|---|---|
@@ -2474,9 +2490,14 @@ The first pass missed **eleven**, and every one of them was a real hole:
 2. `solver.rs` — `price(middle) < price` against `<=` inside the bisection. The
    two differ only when the model price at a midpoint equals the target
    exactly, and at that point **both** choices keep the root inside the
-   bracket. The final answers can differ by at most the final bracket width,
-   `2.7e-19`, which is below one unit in the last place of any volatility the
-   function returns.
+   bracket. The final answers can differ by at most the final bracket width.
+   This said `2.7e-19` and called it below one ulp of any volatility the
+   function returns. At 64 halvings that was false for volatilities below
+   `2^-9`. At 75 halvings (D-0921) the exact-arithmetic width is `1.32e-22`,
+   below `ulp(1e-6)`, and the end-to-end check finds the `f64` ends adjacent
+   on every bisected solve it runs. The mutation counts in this section were
+   taken before D-0921 moved the bisection into `Checked::bracket`; they have
+   not been re-run.
 
 `CLAUDE.md` §9 asks for no surviving mutant on a touched module. Two survive,
 both on a comparison whose boundary is unreachable, and neither corresponds to
