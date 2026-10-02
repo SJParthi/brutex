@@ -10510,3 +10510,20 @@ row into hash sets built by `bounded_set`.
 Each rescan re-authenticates the ledger after a write or around a read.
 Making any of them incremental would change what the call proves, and is
 recorded here, not done.
+## The weekly expiry takes more than one pass near a regime change — D-0770, 30 September 2026
+
+Since D-0770, `costs::expiry::next_weekly_on` reads the regime at the day
+asked and, when a later row starts on or before that regime's next weekday,
+moves to that start and reads again (`Some(start) => from = start`). An ask
+with no row start in the way answers on its first pass; an ask in the days
+before a row start takes another pass for each start it crosses. `from` only
+moves to a strictly later start in the fixed `later` array
+(`[Option<DatedRow<V>>; MAX_LATER_ROWS]`, `dated.rs`), so the pass count is
+bounded by that compile-time constant and by no input. The call stays
+constant-bounded; it is no longer the same work at every calendar position.
+
+What is measured does not cover the difference. C-K-08
+(`the_calendar_position_does_not_change_the_expiry_cost`, `benches/ratio.rs`)
+times NIFTY asked on 2024-06-06 against 2024-06-07, two days inside one
+regime, each a single pass. A boundary-crossing ask is not timed, and its cost
+relative to a single pass is UNMEASURED.

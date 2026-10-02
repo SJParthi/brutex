@@ -45112,3 +45112,87 @@ ASCII but outside that set, so `str::trim` used to strip it and
 kept the row. Proven by
 `core::vendor::tests::whitespace_outside_ascii_is_not_trimmed_from_an_id_a_series_or_a_class`
 (C4-CORE-03).
+### D-0770 — Read the weekly expiry regime at the expiry, not only at the day asked — 2026-09-29
+
+**Defect (W3-costs1-0).** `costs::expiry::next_weekly_on` read the weekly
+regime once, at the day asked, and projected that regime's weekday forward.
+When a later row started between the day asked and that weekday, the answer
+was a day the table's own regime says is not an expiry. Reproduced on
+`origin/main` 2c209309: NIFTY asked 2025-08-29 answered 2025-09-04, a
+Thursday, while the NIFTY Tuesday row starts 2025-09-02; BANKNIFTY asked
+2023-09-03 answered 2023-09-07, while the Wednesday row starts 2023-09-04 and
+cites "the first Wednesday weekly expired 2023-09-06". Asked one day later the
+answers went back to 2025-09-02 and 2023-09-06, so the function was not
+monotone.
+
+**The change.** Each pass reads the regime at `from` and computes its weekday's
+offset. If a later row starts after `from` and on or before that day, `from`
+moves to that row's start and the regime is read again; otherwise the pass
+answers. A withdrawal met on the way answers `None` and an unverified row met on
+the way is refused, never projected across. `from` only moves to a strictly
+later row start, so the passes are bounded by the fixed `later` array
+(`dated::MAX_LATER_ROWS`), not by any input. The module documentation and the
+public example now state this.
+
+**What it changes.** `next_weekly_expiry` has no caller on the sweep path: its
+caller is `pull::rolling::expiry_of`, which dates options contracts (options
+data is deferred) and which `api`'s F&O walk asks, through
+`cadence_has_contracts_on`, only whether a date exists. No run identity term is computed
+from it. The two source-answer rows in `the_next_weekly_lands_on_the_source_answers` that
+pinned the defect (NIFTY 2025-09-01 to 2025-09-04, BANKNIFTY 2023-09-03 to
+2023-09-07) now pin 2025-09-02 and 2023-09-06. The cost note on
+`api::server::cadence_has_contracts_on`, which said "One dated-table lookup per
+call", now names the bound stated in `costs::expiry`'s module documentation.
+Invariant C4-COSTS-01.
+
+### D-0771 — Floor the printed-extreme sell at one tick, as the worst case already is — 2026-09-29
+
+**Defects (W3-costs1-1, ET-strategies-trades-ranking-costs-4).**
+`costs::fill::fills_at` with `Anchor::PrintedExtreme` sold at the bar low with
+no floor, under a comment saying "a low it accepted is a price that traded".
+`Bar::new` deliberately admits "A **low** below one tick, or below zero", so the
+sell could be ₹0.00 or negative: the free sale the module header's sell floor
+calls "an impossible one". Reproduced with the fix reverted (the `fill.rs`
+arm is byte-identical to `origin/main` 2c209309 in that state):
+`the_printed_extreme_sell_is_floored_at_one_tick_as_the_worst_case_is` fails
+with `left: Paisa(4) right: Paisa(5)` for a long whose exit low is 4 paisa, and
+`a_printed_extreme_sell_below_zero_prices_at_the_floor_and_does_not_overflow`
+panics "attempt to subtract with overflow" at the `trip::position` subtraction
+whose comment says it "cannot overflow", because a negative sell notional is
+outside the `[0, i64::MAX]` range that comment assumes.
+
+**The change.** The printed-extreme sell is `sell.max(TICK)`: a low of one tick
+or more is the print, unchanged; a low below one tick sells at one tick. That is
+the floor `worst_case_fills` already applies to the same anchor, and it keeps
+the printed reading's sell at or above the worst case's on every bar the test
+table offers. The buy leg is unchanged: `Bar::new` refuses a sub-tick high. A
+refusal was the alternative and was not taken: `runner::trade` calls this arm
+with `.ok()?`, so a refusal there would drop the trade without a word, which is
+the hidden fallback `CLAUDE.md` §4 bans, while the floor is the module's stated
+law for a degenerate low.
+
+**What it changes.** On the runner path `indicators::evaluator` refuses first
+(`if bar.low <= 0 { return Err(Corrupt::PriceNotPositive); }`), so a zero or
+negative low never reaches this arm there; a positive low below one tick (1 to 4
+paisa) can, and its worst-reading sell moves from that low up to 5 paisa.
+Whether any stored bar has such a low is UNMEASURED. No run identity term is a
+fill-model version; the `commit` term separates runs before and after this
+change. Invariant C4-COSTS-02.
+
+### D-0772 — Refuse an open outside its bar under its own name — 2026-09-29
+
+**Defect (W3-costs1-2).** `costs::fill::Bar::new` refused an open outside
+`low..=high` as `CostError::InvertedBar { high, low: open }`, whose message is
+"a bar's low {low} is above its high {high}". For `Bar::new(98_00, 101_00,
+99_00)` that printed "a bar's low 9800 is above its high 10100", which is false:
+the low is 9900 and the open is below it. Reproduced with the fix reverted:
+`an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar` fails
+with `left: "a bar's low 9800 is above its high 10100; ..."`.
+
+**The change.** A new `CostError::OpenOutsideBar { open, high, low }` (the enum
+is `#[non_exhaustive]`) carries each value in its own field and prints "a bar's
+open {open} is outside its own range {low}..={high}; it is refused rather than
+filled at". A bar whose low is above its high is still `InvertedBar`, whatever
+its open. Which bars are refused is unchanged; only the error that names the
+refusal moves. `runner::trade` discards this error with `.ok()?`, so no run
+output changes. Invariant C4-COSTS-03.
