@@ -36,6 +36,7 @@ fn failed() -> TickOutcome {
         complete: false,
         stopped: false,
         journal_error: None,
+        credential: None,
     }
 }
 
@@ -48,6 +49,7 @@ fn completed() -> TickOutcome {
         complete: true,
         stopped: false,
         journal_error: None,
+        credential: None,
     }
 }
 
