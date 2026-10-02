@@ -7,7 +7,7 @@ Checkpoint for pause/resume. Updated after each item. Branch per item: `fix/clou
 | Unit | Findings | State | PR |
 |---|---|---|---|
 | W3-store1-3 | W3-store1-3 | MERGED | https://github.com/SJParthi/brutex/pull/22 |
-| AC-whp-cx-0 | AC-whp-cx-0 | pushed, in review | https://github.com/SJParthi/brutex/pull/24 |
+| AC-whp-cx-0 | AC-whp-cx-0 | Gate 18 mutant fixed (7be2243), CI rerunning | https://github.com/SJParthi/brutex/pull/24 |
 | ET-bars-candles-store-0 | ET-bars-candles-store-0 | pushed, in review | https://github.com/SJParthi/brutex/pull/25 |
 | W3-store1-0 | W3-store1-0, W3-store1-1, ET-bars-candles-store-12 | pushed, in review | https://github.com/SJParthi/brutex/pull/27 |
 | ET-o1-proof-coverage-4 | ET-o1-proof-coverage-4, ET-bars-candles-store-9 | in progress | - |
@@ -34,3 +34,5 @@ Medium first: o1cli-1, probestore-3, probeapi-3 (cli half). Then: o1store-1, o1s
 ## Usage mode (08:15 UTC)
 
 Weekly usage at 45%: lane 1 now runs at most 2 agents (the step3 test-speed agent + one sequential workflow). Order: review pushed PRs, batch-1 rest, then lane1-b units U1, U2, U9(+U3), U4... Root-permission test fix paused with partial work in its worktree (resume later). Stop and checkpoint at 85%.
+
+| extra | fix/cloud-step3-test-speed | pushed (55m -> 8m15s) | https://github.com/SJParthi/brutex/pull/40 |
