@@ -1390,10 +1390,13 @@ impl Evaluator {
 
     /// Every position this evaluator can ever set.
     ///
-    /// The union of nine sources' own `positions()` — eight modules and the current-day
-    /// Fibonacci rung range — so it cannot drift from them: adding a position to a
-    /// module adds it here, plus the four this type computes itself. 328 positions today,
-    /// which is every live bit in the table.
+    /// The union of eight modules' own `positions()` and the current-day Fibonacci rung
+    /// range, so it cannot drift from them, plus three sets this type claims itself:
+    /// 276–279, the five weekday rows, and every position `vocab::table::CROSSINGS`
+    /// names. That is 328 positions today,
+    /// which is every live bit in the table. `tests/evaluator_position_count.rs` reads
+    /// that count against this list and the live mask; the crate header states it once
+    /// more and `tests/module_doc_counts.rs` checks the header.
     #[must_use]
     pub fn positions() -> Vec<u16> {
         let mut all: Vec<u16> = Vec::new();
@@ -1735,7 +1738,7 @@ mod tests {
         // arithmetic moving.
         const WEEKDAYS: usize = 5;
         let all = Evaluator::positions();
-        // 323 = 238 measured by a module + 85 derived from the mask. NOT a
+        // 328 = 238 measured by a module + 85 derived from the mask + 5 weekdays. NOT a
         // literal beside a different literal: the derived half is spelled from
         // `CROSSINGS` so the two cannot drift, which is the same reason
         // `positions()` reads that table rather than listing indices.

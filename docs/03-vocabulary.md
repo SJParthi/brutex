@@ -577,11 +577,17 @@ No threshold, so nothing here is UNVERIFIED.
 | 278 | `structure_up_in_force` | the last break was upward |
 | 279 | `structure_down_in_force` | the last break was downward |
 
-Bits 56–59 are **break events** — `bos_up`, `bos_down`, `choch_up`, `choch_down` — each true
-only on the handful of bars where a level was taken out. `Structure::last` holds which
-direction is in force *between* those events, which is the regime, and it was unpublished: a
-sweep could ask "did structure break up on this bar" and could not ask "is the structure
-up".
+Bits 56–59 are `bos_bullish`, `bos_bearish`, `choch_bullish` and `choch_bearish`, and they
+are **not all events**. This paragraph used to call all four "break events ... each true only
+on the handful of bars where a level was taken out", and the section below already
+contradicted it. `Structure::classify` compares the close against the latched swing on every
+bar, so `bos_bullish`/`bos_bearish` (56–57) are **states**: true on every bar that closes
+beyond the swing in the direction already in force, for as long as that swing is the latch.
+`choch_bullish`/`choch_bearish` (58–59) fire on the bar the direction flips; the next bar
+beyond the same swing classifies as a `bos`, because `Structure::advance` has moved the
+latch (F-A9DB2D, D-0947). `Structure::last` holds which direction is in force, which is the
+regime, and it was unpublished: a sweep could ask "did structure break on this bar" and could
+not ask "is the structure up".
 
 **Neither is set before the first break.** There is no structure yet, and §4 forbids a bit
 evaluating to "probably". Same source and same latch as 56–59, so no new formula and no

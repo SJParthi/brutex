@@ -3588,10 +3588,21 @@ passes. So the row asserts the bound and the root, and prints the cost with
 ### Why it is not made genuinely flat
 
 Dropping the convergence exit would run all 130 iterations every call, paying the
-worst case always to buy a uniformity no caller needs. And **VWAP abstains
-entirely on spot indices**, which carry no traded volume, so on the data this
-engine actually sweeps `isqrt_i128` does not execute at all. Spending 200× on the
-common case for a function that never runs would be the wrong trade made loudly.
+worst case always to buy a uniformity no caller needs. **VWAP abstains on spot
+indices**, which the stored paths sweep with `Availability::Absent`, so on an
+index `isqrt_i128` does not execute.
+
+**It does execute on equities, and this section used to say it never ran on
+swept data at all.** Since D-0507, `cli::stored::vwap_availability` answers
+`Availability::Present` for every cash-equity key, so an equity sweep reaches
+`isqrt_i128` through the VWAP sigma bands (`vwap.rs`, the variance's square
+root) on every bar where enough volume has contributed for a sigma. The 217×
+spread is therefore a real per-call spread on equity runs. It stays bounded by
+`ITERATION_CEILING`, and its share of a whole bar is inside what gate 8 measures:
+`C-R-05` builds the column with `Availability::Present` on bars that carry volume,
+and D-0690 recorded the VWAP family adding about 42% to 44% per bar on that
+fixture. The reason not to make it flat is the first one above, not that it never
+runs. D-0947.
 
 `crates/indicators/src/vwap.rs` states the bound at both the module header and the
 function, and both point here.
