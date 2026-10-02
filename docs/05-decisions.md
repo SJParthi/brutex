@@ -43718,3 +43718,36 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-1170 — `forward` slides its excursion window instead of building a sparse table — 2026-10-02
+
+**What was wrong (audit W3-runner3-4).** `outcome::forward` built
+`RangeExtremes::of(bars)` on every call: a sparse table of highs and lows,
+Θ(n log n) time and two tables of about `n·log₂ n` `i64`s. `forward` runs once
+per ranked run and once per walk-forward fold, so at 1,222,791 bars that was
+some 21 levels per call. The table's doc said a monotonic deque "cannot answer a
+variable one", and that was the reason given for the cost.
+
+**Why the reason was wrong.** The excursion window is `[i + 1, exit(i)]`. Its
+width varies, but both ends only move forward as `forward` walks the entries:
+`i` increases, and `exit(i)` is either the exact deadline `ts(i) + H·step`
+(increasing, because accepted bars have strictly increasing timestamps) or that
+day's forced bar, which every later entry of the day shares and every later day
+exceeds. A pair of monotonic deques whose two ends only advance pushes and pops
+each bar at most once.
+
+**The change.** `WindowExtremes` replaces `RangeExtremes`: O(bars) per
+`forward`, amortised O(1) per query, memory bounded by the window. A query whose
+right end moves backwards is still answered correctly by clearing and refilling
+from its left end; `forward` never issues one, and the unit test drives that
+branch. `Forward` also carries each outcome's exit bar (`Forward::exit_at`),
+which the test uses to check every excursion against a direct scan of
+`[i + 1, exit]` and which D-1171 uses.
+
+**Outputs.** Unchanged. Maxima and minima of integers are exact, so every
+`adverse_at` and `favourable_at` is the same value as before.
+`the_sliding_window_agrees_with_a_full_scan_on_every_query`,
+`every_forward_excursion_is_the_scan_over_its_own_window` and
+`forward_builds_no_power_of_two_table` pin it. The last one fails on the
+previous tree. **Not measured:** no bench row times `forward`. The O(bars) bound
+is argued from the code (§3 rule 6).

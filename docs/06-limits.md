@@ -9879,3 +9879,12 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Runner outcome, excursion and trade bounds — D-1170 onward, 2 October 2026
+
+* **`forward`'s excursions: O(bars) per call (D-1170).** The window
+  `[i + 1, exit]` is answered by two monotonic deques whose ends only advance,
+  so each bar is pushed and popped at most once. Memory is bounded by the
+  widest window, not `n·log n`. A query that moved backwards would cost
+  Θ(window) for that query. `forward` issues none, and the test that walks
+  every exit checks that. Not timed. No bench row covers `forward`.

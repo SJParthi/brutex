@@ -5354,3 +5354,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
+
+### Runner outcome, excursion and trade follow-ups (D-1170 onward)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| Every excursion `forward` measures is the exact highest high and lowest low over `[i + 1, exit]`, read from two monotonic deques whose ends only advance. A backwards or jumping query is answered by refilling, never from a stale maximum. Each exit is after its entry and never before an earlier entry's exit. No power-of-two table is built (D-1170). | `runner::outcome::window_tests::the_sliding_window_agrees_with_a_full_scan_on_every_query`, `runner::outcome::window_tests::every_forward_excursion_is_the_scan_over_its_own_window`, `runner::outcome::window_tests::forward_builds_no_power_of_two_table` | ✓ |

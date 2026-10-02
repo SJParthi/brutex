@@ -369,6 +369,15 @@ pub struct Forward {
     /// How far price ran IN FAVOUR of the entry close over `[i+1, exit]`, in
     /// paisa, non-negative. `None` exactly where `ret` is `None`.
     favourable: Vec<Option<i64>>,
+    /// The last bar this position was exposed to: the bar its outcome was
+    /// priced on, the earlier of the horizon and that day's forced close.
+    /// `None` exactly where `ret` is `None`.
+    ///
+    /// Carried because the window `[i + 1, exit]` is what two outcomes SHARE,
+    /// and [`edge`]'s overlap correction pairs two hits only while the older
+    /// window still reaches past the newer entry. A bar-index gap cannot say
+    /// that across a session boundary -- D-1171.
+    exits: Vec<Option<usize>>,
     /// `true` at `i` when the outcome is absent because a BAR WAS REFUSED,
     /// rather than because `i` is in the tail.
     ///
@@ -424,6 +433,13 @@ impl Forward {
     #[must_use]
     pub fn favourable_at(&self, i: usize) -> Option<i64> {
         self.favourable.get(i).copied().flatten()
+    }
+
+    /// The bar the outcome at `i` was priced on, or `None` exactly where
+    /// [`Self::at`] is `None`. Always later than `i`.
+    #[must_use]
+    pub fn exit_at(&self, i: usize) -> Option<usize> {
+        self.exits.get(i).copied().flatten()
     }
 
     /// How many bars have an outcome at all.
@@ -484,88 +500,159 @@ impl Forward {
     }
 }
 
-/// UNVERIFIED performance: no named cost test or measured latency bound is established here.
-/// Range maximum and minimum over any `[lo, hi]` in O(1), built once.
+/// Range maximum and minimum over the excursion window `[entry + 1, exit]`,
+/// answered by two monotonic deques that slide with it.
 ///
-/// # Why a sparse table and not a sliding deque
+/// # Why a sliding deque answers this window after all — D-1170
 ///
-/// The excursion window is `[entry + 1, exit]`, and `exit` is the EARLIER of the
-/// horizon and that day's forced close -- so its width varies per entry. A
-/// monotonic deque answers a fixed-width sliding window; it cannot answer a
-/// variable one without either re-walking (Θ(h) per query) or widening the
-/// window past the real exit, which would report an excursion the position was
-/// never exposed to. `CLAUDE.md` §3 rule 1 forbids the second and §3 rule 4
-/// forbids the first.
+/// This was a sparse table, under a doc that said a monotonic deque "answers a
+/// fixed-width sliding window; it cannot answer a variable one". That is true of
+/// a window whose ends may move BACKWARDS and false of this one. The window's
+/// width does vary -- `exit` is the earlier of the horizon and that day's
+/// forced close -- but both of its ends only ever move FORWARD as `forward`
+/// walks the entries in order:
 ///
-/// A sparse table answers any range in O(1) from two overlapping power-of-two
-/// blocks, because max and min are idempotent -- overlapping twice is harmless.
-/// Build is O(n log n) once per `forward`, which is per RUN, not per candidate
-/// and not per bar.
-struct RangeExtremes {
-    /// `levels[k][i]` is the extreme over `[i, i + 2^k)`. Level 0 is the bars
-    /// themselves.
-    highs: Vec<Vec<i64>>,
-    lows: Vec<Vec<i64>>,
+/// * the left end is `i + 1`, and `i` only increases;
+/// * the right end is `exit(i)`. Every accepted bar has a strictly later
+///   timestamp than the one before it, so the exact-deadline exit
+///   `ts(i) + H·step` increases with `i`; an entry whose deadline passes the
+///   forced close exits on that day's forced bar, and every later entry that
+///   day does too; and a later day's forced bar is later in the slice.
+///
+/// A deque whose two ends only advance pushes and pops each bar at most once,
+/// so a whole `forward` is O(bars) and one query is amortised O(1). The sparse
+/// table it replaces was Θ(n log n) time and two `n·log₂ n` tables of memory
+/// per `forward` -- per ranked run and per walk-forward fold, at 1,222,791 bars
+/// some 21 levels. The answers are integer maxima and minima, so they are
+/// bit-identical; `the_sliding_window_agrees_with_a_full_scan_on_every_query`
+/// checks every query against a direct scan.
+///
+/// # A query that moves backwards is still answered, at the cost it really has
+///
+/// [`Self::over`] does not TRUST the monotonicity above. A right end earlier
+/// than the last bar already pushed cannot be served from the deques, so they
+/// are cleared and rebuilt from the query's left end -- Θ(window) for that one
+/// query, and correct. `forward` never issues one; the branch exists so that a
+/// future caller with a different order gets the right answer rather than a
+/// stale maximum, and the unit test drives it.
+///
+/// **UNVERIFIED as a measured bound.** No bench row times `forward`; the
+/// O(bars) total is argued from the shape above. `CLAUDE.md` §3 rule 6.
+struct WindowExtremes {
+    /// Indices into the slice whose highs are strictly decreasing front to
+    /// back; the front is the window's maximum.
+    highs: std::collections::VecDeque<(usize, i64)>,
+    /// Indices whose lows are strictly increasing front to back; the front is
+    /// the window's minimum.
+    lows: std::collections::VecDeque<(usize, i64)>,
+    /// The first slice index not yet pushed.
+    next: usize,
 }
 
-impl RangeExtremes {
-    fn of(bars: &[Candle]) -> Self {
-        let n = bars.len();
-        let mut highs: Vec<Vec<i64>> = vec![bars.iter().map(|b| b.high).collect()];
-        let mut lows: Vec<Vec<i64>> = vec![bars.iter().map(|b| b.low).collect()];
-        let mut width = 1_usize;
-        while width.saturating_mul(2) <= n {
-            let prev = highs.len().saturating_sub(1);
-            let span = n.saturating_sub(width.saturating_mul(2)).saturating_add(1);
-            let mut nh: Vec<i64> = Vec::with_capacity(span);
-            let mut nl: Vec<i64> = Vec::with_capacity(span);
-            for i in 0..span {
-                let (a, b) = (i, i.saturating_add(width));
-                let hi = highs
-                    .get(prev)
-                    .map_or(i64::MIN, |row| row.get(a).copied().unwrap_or(i64::MIN))
-                    .max(
-                        highs
-                            .get(prev)
-                            .map_or(i64::MIN, |row| row.get(b).copied().unwrap_or(i64::MIN)),
-                    );
-                let lo = lows
-                    .get(prev)
-                    .map_or(i64::MAX, |row| row.get(a).copied().unwrap_or(i64::MAX))
-                    .min(
-                        lows.get(prev)
-                            .map_or(i64::MAX, |row| row.get(b).copied().unwrap_or(i64::MAX)),
-                    );
-                nh.push(hi);
-                nl.push(lo);
-            }
-            highs.push(nh);
-            lows.push(nl);
-            width = width.saturating_mul(2);
+impl WindowExtremes {
+    fn new() -> Self {
+        Self {
+            highs: std::collections::VecDeque::new(),
+            lows: std::collections::VecDeque::new(),
+            next: 0,
         }
-        Self { highs, lows }
     }
 
-    /// The highest high and lowest low over `[lo, hi]` inclusive, or `None` when
-    /// the range is empty or out of bounds.
-    fn over(&self, lo: usize, hi: usize) -> Option<(i64, i64)> {
-        if hi < lo {
+    /// The highest high and lowest low over `bars[lo..=hi]`, or `None` when the
+    /// range is empty or reaches past the slice.
+    fn over(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
+        if hi < lo || hi >= bars.len() {
             return None;
         }
-        let len = hi.saturating_sub(lo).saturating_add(1);
-        // The largest k with 2^k <= len. `usize::BITS - leading_zeros` is that
-        // exponent plus one, so one subtraction gives it without a float log.
-        let k = usize::BITS
-            .saturating_sub(len.leading_zeros())
-            .saturating_sub(1) as usize;
-        let width = 1_usize.checked_shl(u32::try_from(k).ok()?)?;
-        let second = hi.checked_sub(width)?.saturating_add(1);
-        let hr = self.highs.get(k)?;
-        let lr = self.lows.get(k)?;
-        Some((
-            (*hr.get(lo)?).max(*hr.get(second)?),
-            (*lr.get(lo)?).min(*lr.get(second)?),
-        ))
+        // BACKWARDS, OR A JUMP PAST EVERYTHING HELD: start again at `lo`. A
+        // right end before the last pushed bar cannot be served by popping, and
+        // a left end past `next` makes every held index stale.
+        if hi.saturating_add(1) < self.next || lo > self.next {
+            self.highs.clear();
+            self.lows.clear();
+            self.next = lo;
+        }
+        while self.next <= hi {
+            let bar = bars.get(self.next)?;
+            while self.highs.back().is_some_and(|&(_, h)| h <= bar.high) {
+                self.highs.pop_back();
+            }
+            self.highs.push_back((self.next, bar.high));
+            while self.lows.back().is_some_and(|&(_, l)| l >= bar.low) {
+                self.lows.pop_back();
+            }
+            self.lows.push_back((self.next, bar.low));
+            self.next = self.next.saturating_add(1);
+        }
+        while self.highs.front().is_some_and(|&(at, _)| at < lo) {
+            self.highs.pop_front();
+        }
+        while self.lows.front().is_some_and(|&(at, _)| at < lo) {
+            self.lows.pop_front();
+        }
+        self.highs
+            .front()
+            .zip(self.lows.front())
+            .map(|(&(_, high), &(_, low))| (high, low))
+    }
+}
+
+/// The parallel lanes `forward` fills, one slot per offered bar in each.
+///
+/// One type so an absent outcome is ONE call that writes every lane. It was
+/// five pushes repeated at eight exits from the loop, and a lane added to seven
+/// of them would have shifted every later index of the eighth by one.
+struct Lanes {
+    ret: Vec<Option<i64>>,
+    /// WHY an outcome is absent -- see `Forward::refused`.
+    refused: Vec<bool>,
+    /// `None` exactly where `ret` is `None`, so a caller cannot read an
+    /// excursion for an outcome that does not exist.
+    adverse: Vec<Option<i64>>,
+    favourable: Vec<Option<i64>>,
+    /// See `Forward::exits`.
+    exits: Vec<Option<usize>>,
+}
+
+impl Lanes {
+    fn with_capacity(bars: usize) -> Self {
+        Self {
+            ret: Vec::with_capacity(bars),
+            refused: Vec::with_capacity(bars),
+            adverse: Vec::with_capacity(bars),
+            favourable: Vec::with_capacity(bars),
+            exits: Vec::with_capacity(bars),
+        }
+    }
+
+    /// No outcome at this bar; `refused` says whether a bar was refused.
+    fn absent(&mut self, refused: bool) {
+        self.ret.push(None);
+        self.refused.push(refused);
+        self.adverse.push(None);
+        self.favourable.push(None);
+        self.exits.push(None);
+    }
+
+    /// A measured outcome, its two excursions and the bar it exited on.
+    fn measured(&mut self, moved: i64, up: Option<i64>, down: Option<i64>, exit: usize) {
+        self.ret.push(Some(moved));
+        self.refused.push(false);
+        self.adverse.push(down);
+        self.favourable.push(up);
+        self.exits.push(Some(exit));
+    }
+
+    fn into_forward(self, horizon: Horizon, bars_len: usize) -> Forward {
+        Forward {
+            horizon,
+            bars_len,
+            ret: self.ret,
+            refused: self.refused,
+            adverse: self.adverse,
+            favourable: self.favourable,
+            exits: self.exits,
+        }
     }
 }
 
@@ -585,28 +672,19 @@ impl RangeExtremes {
 pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     let h = horizon.as_bars() as usize;
     let facts = crate::trade::SliceFacts::of(bars, column);
-    // EXCURSIONS, BUILT ONCE. See `RangeExtremes` for why this is a sparse table
-    // and `Forward::adverse` for why the ranking stage needed it at all.
-    let extremes = RangeExtremes::of(bars);
+    // EXCURSIONS, SLID ONCE. See `WindowExtremes` for why two deques that only
+    // advance answer this window, and `Forward::adverse` for why the ranking
+    // stage needed it at all.
+    let mut extremes = WindowExtremes::new();
 
     // PASS THREE: the return, from entry to the earlier of the horizon and the
     // forced close.
-    let mut ret: Vec<Option<i64>> = Vec::with_capacity(bars.len());
-    // Parallel to `ret`, marking WHY an outcome is absent. Pre-sized for the same
-    // reason `ret` is: gate 11 rule 3 asks every collection on this path to be
-    // sized once rather than grown.
-    let mut refused: Vec<bool> = Vec::with_capacity(bars.len());
-    // THE TWO EXCURSION LANES, parallel to `ret`. `None` exactly where `ret` is
-    // `None`, so a caller cannot read an excursion for an outcome that does not
-    // exist -- the same discipline `refused` already keeps.
-    let mut adverse: Vec<Option<i64>> = Vec::with_capacity(bars.len());
-    let mut favourable: Vec<Option<i64>> = Vec::with_capacity(bars.len());
+    // Every lane pre-sized once: gate 11 rule 3 asks every collection on this
+    // path to be sized once rather than grown. See `Lanes`.
+    let mut lanes = Lanes::with_capacity(bars.len());
     for i in 0..bars.len() {
         if !facts.accepts(i) {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(true);
             continue;
         }
         // NO ENTRY ON A FORCED-EXIT BAR. At the square-off the position is being
@@ -615,17 +693,11 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // `bar_open + tf > forced_minute`, which [`SessionBounds::fillable`]
         // answers per day rather than against a fixed minute.
         let Some(square_off) = facts.exits().get(i).copied().flatten() else {
-            ret.push(None);
-            refused.push(false);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(false);
             continue;
         };
         let Some(start) = bars.get(i).map(|bar| bar.ts_micros) else {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(true);
             continue;
         };
         let span = i64::try_from(h).unwrap_or(i64::MAX);
@@ -654,25 +726,16 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             square_off.bar
         } else if deadline <= forced_stamp {
             let Some(want) = facts.at_timestamp(deadline) else {
-                ret.push(None);
-                refused.push(true);
-                adverse.push(None);
-                favourable.push(None);
+                lanes.absent(true);
                 continue;
             };
             want
         } else {
-            ret.push(None);
-            refused.push(false);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(false);
             continue;
         };
         if exit <= i {
-            ret.push(None);
-            refused.push(false);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(false);
             continue;
         }
         // A BAR THIS RUN ALREADY REFUSED MAY NOT PRICE AN EXIT.
@@ -715,10 +778,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // runs and nothing said why. A silent smaller sample is a quieter version
         // of the same §4 failure.
         if !facts.path_accepts(i, exit) {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(true);
             continue;
         }
         let Some((later, now)) = bars
@@ -726,14 +786,10 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
             .zip(bars.get(i))
             .map(|(later, now)| (later.close, now.close))
         else {
-            ret.push(None);
-            refused.push(true);
-            adverse.push(None);
-            favourable.push(None);
+            lanes.absent(true);
             continue;
         };
-        ret.push(Some(later.saturating_sub(now)));
-        refused.push(false);
+        let moved = later.saturating_sub(now);
         // THE EXCURSIONS OVER THE BARS THIS POSITION IS ACTUALLY EXPOSED TO.
         //
         // `[i + 1, exit]`, not `[i, i + h]`: the entry bar's own range is before
@@ -752,25 +808,17 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // facts.
         let (up, down) =
             extremes
-                .over(i.saturating_add(1), exit)
+                .over(bars, i.saturating_add(1), exit)
                 .map_or((None, None), |(high, low)| {
                     (
                         Some(high.saturating_sub(now).max(0)),
                         Some(now.saturating_sub(low).max(0)),
                     )
                 });
-        favourable.push(up);
-        adverse.push(down);
+        lanes.measured(moved, up, down, exit);
     }
 
-    Forward {
-        horizon,
-        bars_len: bars.len(),
-        ret,
-        refused,
-        adverse,
-        favourable,
-    }
+    lanes.into_forward(horizon, bars.len())
 }
 
 /// The median positive same-session gap between consecutive bars, in
@@ -3478,5 +3526,140 @@ mod refusal_coverage {
         let column = Column::build(&dirty, &mut evaluator(Availability::Present));
         assert_eq!(column.acceptance_census().accumulator_too_large, 1);
         assert_forward_refuses_the_path(&clean, &dirty, Availability::Present, victim);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod window_tests {
+    use super::{Horizon, WindowExtremes, forward};
+    use indicators::column::Column;
+    use indicators::evaluator::{Evaluator, Widths};
+    use indicators::pattern::Thresholds;
+    use indicators::vwap::Availability;
+    use indicators::{Candle, OI_NULL};
+
+    fn evaluator() -> Evaluator {
+        Evaluator::new(
+            Widths::pinned().expect("pinned widths are valid"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        )
+    }
+
+    /// The full-scan answer the sliding window must reproduce exactly.
+    fn scan(bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
+        let window = bars.get(lo..=hi)?;
+        let high = window.iter().map(|b| b.high).max()?;
+        let low = window.iter().map(|b| b.low).min()?;
+        Some((high, low))
+    }
+
+    /// A wobbling series whose maxima and minima move inside every window.
+    fn wobble(n: usize) -> Vec<Candle> {
+        (0..n)
+            .map(|i| {
+                let k = i64::try_from(i).unwrap_or(0);
+                let close = 1_000_000 + (k * 7_919) % 1_009 - (k * 104_729) % 503;
+                Candle::new(
+                    k.saturating_mul(60_000_000),
+                    close,
+                    close + (k * 31) % 17 + 1,
+                    close - (k * 13) % 23 - 1,
+                    close,
+                    100,
+                    OI_NULL,
+                )
+            })
+            .collect()
+    }
+
+    /// Every query, in the order `forward` issues them and in orders it never
+    /// does -- backwards, repeated, jumping past everything held, empty and out
+    /// of range -- returns exactly what a direct scan returns, and the deques
+    /// never hold more than the window.
+    #[test]
+    fn the_sliding_window_agrees_with_a_full_scan_on_every_query() {
+        let bars = wobble(400);
+        let mut window = WindowExtremes::new();
+        // Monotone ends, variable width: the shape `forward` produces.
+        for lo in 1..390_usize {
+            let hi = (lo + (lo * 7) % 15).min(399);
+            assert_eq!(
+                window.over(&bars, lo, hi),
+                scan(&bars, lo, hi),
+                "[{lo}, {hi}]"
+            );
+            assert!(
+                window.highs.len() <= hi - lo + 1,
+                "the deque outgrew [{lo}, {hi}]"
+            );
+            assert!(
+                window.lows.len() <= hi - lo + 1,
+                "the deque outgrew [{lo}, {hi}]"
+            );
+        }
+        // Backwards, then a repeat, then a jump past everything held.
+        for (lo, hi) in [(10, 20), (5, 9), (5, 9), (300, 310), (0, 0), (399, 399)] {
+            assert_eq!(
+                window.over(&bars, lo, hi),
+                scan(&bars, lo, hi),
+                "[{lo}, {hi}]"
+            );
+        }
+        // Empty and out of range are absent, never a stale maximum.
+        assert_eq!(window.over(&bars, 7, 6), None);
+        assert_eq!(window.over(&bars, 398, 400), None);
+        assert_eq!(WindowExtremes::new().over(&[], 0, 0), None);
+    }
+
+    /// And through `forward` itself: every measured excursion equals the scan
+    /// over the bars the position was exposed to, `[i + 1, exit]`.
+    #[test]
+    fn every_forward_excursion_is_the_scan_over_its_own_window() {
+        let bars = crate::synthetic::sessions(8);
+        let column = Column::build(&bars, &mut evaluator());
+        for horizon in [1_u32, 15, 400] {
+            let f = forward(&bars, &column, Horizon::bars(horizon).expect("positive"));
+            let mut measured = 0_u32;
+            let mut last_exit = 0_usize;
+            for i in 0..bars.len() {
+                let (Some(up), Some(down)) = (f.favourable_at(i), f.adverse_at(i)) else {
+                    assert_eq!(f.exit_at(i), None, "no outcome, no exit, at {i}");
+                    continue;
+                };
+                let exit = f.exit_at(i).expect("a measured outcome has an exit");
+                assert!(exit > i, "the exit at {i} is not after its entry");
+                // BOTH ENDS ONLY ADVANCE, which is what lets the deques slide.
+                assert!(exit >= last_exit, "the exit moved back at {i}, H={horizon}");
+                last_exit = exit;
+                let (high, low) = scan(&bars, i + 1, exit).expect("a held window");
+                let now = bars.get(i).expect("entry").close;
+                assert_eq!(up, (high - now).max(0), "favourable at {i}, H={horizon}");
+                assert_eq!(down, (now - low).max(0), "adverse at {i}, H={horizon}");
+                measured += 1;
+            }
+            assert!(measured > 100, "H={horizon} measured only {measured}");
+        }
+    }
+
+    /// The sparse table is gone from the live path, not merely unused: its
+    /// doubling loop was the Θ(n log n) build and its tables the n·log n memory.
+    #[test]
+    fn forward_builds_no_power_of_two_table() {
+        let source = include_str!("outcome.rs");
+        let live = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("a source prefix");
+        assert!(!live.contains("RangeExtremes"), "the sparse table is back");
+        assert!(
+            !live.contains("width.saturating_mul(2) <= n"),
+            "the doubling build is back"
+        );
+        assert!(live.contains("WindowExtremes::new()"), "forward must slide");
     }
 }
