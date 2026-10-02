@@ -9907,3 +9907,14 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Condition names resolve through a compile-time index (audit o1engine-24)
+
+- **`vocab::table::index_of` resolves a name in one FNV-1a hash over at most
+  the longest name's bytes plus a probe of at most 4 slots (7 for a token no
+  row carries), measured over every row and every slot of the 2,048-slot
+  table.** `Expression::parse` used it to replace a scan of all 370 rows per
+  token. A token longer than every name is refused before it is hashed.
+  Parsing remains setup work bounded by the 4,096-byte source cap, not a
+  per-bar cost. Proved by
+  `vocab::table::tests::every_name_is_found_by_its_index_and_no_other_token_is`.
