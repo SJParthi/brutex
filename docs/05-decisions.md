@@ -53362,3 +53362,39 @@ every hunk: it duplicated rows and paragraphs that both sides had edited, so
 a mid-file two-sided hunk is resolved by hand and the resolver refuses it.
 
 Invariant C4-API-07 names the surviving page test; Gate 27b holds the numbering.
+
+### D-1451 — Keep `.github/workflows/ci.yml` small enough for GitHub to start, by moving Gate 11's allowlist reasons into `docs/06-limits.md` — 2026-10-02
+
+**What was observed.** Every CI run on `final/all-fixes` (#74) ended as
+`failure` with zero jobs and no log, and its run name was the file path
+`.github/workflows/ci.yml`, not the workflow's `name: CI`. A workflow GitHub
+cannot load fails that way. The same happened on every branch whose `ci.yml`
+was large: lane 3's `fix/cloud-o1api-33` at 543,933 bytes, lane 2's
+`lane2-wip/lane2b-ci` at 541,069, `wip/final-fold-w2c30` at 556,995, and the
+combined branch at 559,829. Branches at 497,805 to 503,395 bytes (main, #35's
+`e6518e38`) loaded and ran as `CI`. The YAML parses, has no duplicate key,
+and its `${{ }}` expressions are byte-identical to the 503,395-byte file
+that runs. **The cause is inferred, not documented:** the only difference
+found is size, and the line falls between 503,395 and 541,069 bytes,
+consistent with a 512 KiB (524,288-byte) ceiling on a workflow file.
+UNVERIFIED against GitHub's own documentation.
+
+**The decision.** Gate 11's seven largest comment blocks, the per-rule
+reasons and history for every `allow_*` count (rules 2, 3, 4, 5, 5d, 6-and-7
+and 7, about 110 KB), move verbatim to `docs/06-limits.md` under
+"Gate 11 allowlist reasons". Each block's rule header stays in `ci.yml`
+with a pointer to its section. Nothing the gate executes changed, and no
+count, path or allowlist line moved. The file drops to 460,322 bytes.
+
+**The rule that follows.** A new or changed Gate 11 count gets its reason in
+that `docs/06-limits.md` section in the same change, not as a comment
+beside the list. A reason that exists only in a commit message is the
+undeclared allowance gate 11 exists to refuse. Every lane: keep `ci.yml`
+well under 524,288 bytes. A branch over it gets no CI at all, which looks
+like a red build with no failing step.
+
+**Rejected.** Splitting the gates across two workflow files: `ci-ok`'s
+`needs:` cannot reach a job in another workflow, and five tests
+`include_str!` this one file. Deleting the reasons: they are the record
+gate 11's counts rest on. Shortening the shell: the bytes are 70%
+comments, and the code is what the gates run.

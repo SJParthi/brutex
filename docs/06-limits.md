@@ -12450,3 +12450,1462 @@ not:
   before or after; the fairness claim is that grants follow lock order, which
   is the order `std::sync::Mutex` hands the lock out, and that order is not
   itself FIFO-guaranteed by the standard library.
+
+## Gate 11 allowlist reasons — moved from `.github/workflows/ci.yml`, D-1451, 2 October 2026
+
+Gate 11 declares, per rule, the files allowed a counted number of banned
+constructs on the O(1) paths, and each count carried its reason and its
+history as comments beside the list. Those comments had grown to about 110 KB
+and the workflow file past the size GitHub will start (D-1451), so they live
+here now, verbatim and in the gate's order. Each part names the rule whose
+`allow_*` list it explains; the list itself, and the counts the gate enforces,
+stay in `ci.yml`. A change to a count changes its reason here in the same commit.
+
+### Gate 11 — rule 2. CLAUDE.md section 7, BOTH HALVES OF IT.
+
+~~~~text
+THE LAW STRING USED TO SAY ONLY "never a float", AND SECTION 7 DOES
+NOT SAY ONLY THAT. It says prices are paisa integers and never a
+float, and in the next sentence that statistical values keep full
+precision and are never rounded for storage. The rule was printing
+half its own source, so every full-precision statistic in the
+workspace read as a violation of a law that permits it. The note
+below used to say "no such code exists yet". It exists now — three
+crates of it — so the law string was corrected to state the rule
+this gate actually enforces. D-0065.
+
+THE LINE THIS RULE DRAWS IS PRICE vs STATISTIC, NOT INTEGER vs
+FLOAT. Each entry below was read occurrence by occurrence and is
+one or the other:
+  price.rs      the ONE sanctioned float boundary on a PRICE path —
+                the file says so itself. The vendor sends rupees as
+                an IEEE double and something has to accept it;
+                everything downstream of that `Ok` is an integer
+                forever.
+  vendor.rs     parse_strike, the other end of that same boundary.
+                Hands its f64 straight to `from_rupees_half_up` and
+                does no arithmetic of its own.
+  greeks/*      73 occurrences, every one a model input, a model
+                output or a polynomial coefficient. NO PAISA CAN
+                REACH THIS CRATE: no member of this workspace
+                depends on it (it is shared with `tickvault` by git
+                URL), its manifest has an empty dependency table
+                that gate 9b enforces, and there is no `i64` and no
+                `Paisa` in its surface. Snapping a gamma of
+                0.00017142680429549402 to a two-decimal grid makes
+                it 0.00. D-0046.
+  lake/bar.rs   8 greek fields plus `paisa_from_lake`, which is a
+                boundary PARAMETER and not a stored value: its
+                whole body delegates to `Paisa::from_rupees_half_up`
+                and attaches the column and row to the refusal. The
+                money fields beside it are already `Paisa`.
+  lake/reader.rs the raw Parquet DOUBLE reader and its buffer. Every
+                caller is `price`, `optional_price` — both of which
+                convert EVERY row to `Paisa` before returning — or
+                one of the eight greeks. Traced: no f64 price
+                leaves this file.
+  telemetry/*   `Value::Float`, its `From`, its owned twin, the
+                JSON number writer and the JSON number reader. An
+                ENCODER type, not a value type: `Value::paisa`
+                exists and produces `Value::Int`, and the `Float`
+                variant's own doc reads "Never a price."
+`crates/core/src/vendor.rs` had an entry here because `parse_strike` routed the
+strike through a binary float. It parses the digits now, so the entry is removed
+rather than left loose -- CI warned `no longer matches rule 2 -- tighten it`, and
+a loose allowlist is a gate reading stronger than it is.
+`crates/runner/src/significance.rs` earns its line the same way greeks does.
+CLAUDE.md §7 makes PRICES paisa integers and in the same sentence keeps
+"statistical values (Sharpe, p-values, ratios) at full precision" -- rule
+2's own title says both halves. No paisa figure reaches that module: it
+consumes a trial COUNT and returns a t-THRESHOLD, and its module-scope
+allow carries the same reason.
+`crates/runner/src/outcome.rs` is the same case one layer down: the
+forward RETURN is paisa i64 throughout, and only the mean and the
+t-statistic derived from it are floating. Transaction costs are
+deliberately absent from that module, so no rupee figure is being
+rounded -- `crates/costs` owns money and this owns a measurement.
+`crates/runner/src/report.rs` needs its OWN reason and cannot borrow the
+one above: `paisa()` converts a float mean INTO the paisa integer, which
+is precisely the conversion rule 2 exists to watch. The reason it is
+allowed is the direction of travel -- a statistic arrives and money
+leaves, saturating at the i64 bounds rather than truncating, so the
+float is the input being discarded and never the value being kept.
+An adversarial audit proposed moving the function next to the other
+float-bearing module instead; that fails, because outcome.rs is pinned
+at exactly 5 and would then measure 8.
+significance.rs MOVED FROM 7 TO 18, and the count is the whole point of
+pinning it: the reason above did not change, the module did. It gained
+Bailey-Lopez de Prado's expected-maximum (EULER_MASCHERONI, expected_max_bailey),
+Benjamini-Hochberg, Acklam's inverse-normal quantile and the Abramowitz-Stegun
+normal CDF, and each carries its own f64 signature or constant. Every one of
+the 18 is a STATISTIC -- a threshold, a p-value, a quantile, a count coerced
+to compute one. Not one is a price: no paisa figure enters this module at all,
+which is what separates it from report.rs two lines up. The count was raised by
+reading all 18 against that test, not by taking the number the gate printed.
+EIGHT ROWS ADDED OR RAISED, AND NOT ONE OF THEM IS A PRICE. §7's
+sentence has two halves and this rule enforces both: paisa is `i64`
+and never a float, AND "statistical values keep full precision".
+Every site below is the second half. They went undeclared because
+this gate sits behind gate 1e in the same job, so a failing
+`cargo build` skipped it -- for long enough that five files with no
+row at all accumulated.
+
+  pull/pricing.rs 22, pull/tenor.rs 5 -- an interest RATE and a
+    years-to-expiry, both dimensionless ratios feeding Black-Scholes.
+    `Rate::annual` and `Tenor::years` are what `greeks` takes; a
+    paisa `i64` cannot express 0.0675.
+  api/ingest.rs 1 -- `text.parse::<f64>()` on the `rate` PARAMETER,
+    the operator-supplied annual rate, refused by name through
+    `Refusal::UnreadableRate` when it will not parse or leaves
+    `MAX_PLAUSIBLE_RATE`. Not a price field.
+  api/server.rs 4 -- `millionths_to_decimal`, an `i64` count of
+    millionths rendered for display. The i64 is the value; the f64
+    is the rendering, exact to 2^53.
+  runner/grid.rs 4 -- a Wilson interval: the `Z = 1.959964`
+    constant and trade/win COUNTS cast for the arithmetic. A count
+    is exact in f64 far past any run this engine can hold.
+  store/format.rs 14 -- the greeks record. Volatility, delta, gamma,
+    theta, vega, rho are statistical values, and the file's own doc
+    says so before declaring them.
+  runner/significance.rs 18 -> 21 -- three more in the same
+    multiple-comparison arithmetic the eighteen already cover.
+  runner/outcome.rs 5 -> 8 -> 15 -- the three Newey-West
+    accumulators added with the overlap correction, then the payoff
+    terms. `cross_a`, `cross_b` and `cross_c` are weighted
+    cross-products of forward MOVES; `win_sum` and `loss_sum` are
+    those moves accumulated by side so `payoff_bp` can divide one by
+    the other. In every case the moves are read as paisa `i64` from
+    the store and only the STATISTIC over them is a float, which is
+    exactly the half of §7 that says statistical values keep full
+    precision. A ratio of two sums has no paisa representation.
+
+  cli/live.rs 1, added 2026-08-29. One `ln`, in `expected_rewrites`,
+  which answers "how many times will a bounded top-N be rewritten
+  over N candidates" -- keep * ln(N/keep), the standard record-count
+  bound. It touches NO MONEY: the inputs are two counts and the
+  output is a count of FILE WRITES, used to argue that a few hundred
+  rewrites is affordable against a few hundred million candidates.
+  Section 7's ban is about prices and this function cannot see one.
+  It exists so that affordability claim is a function anyone can call
+  rather than a table anyone must trust.
+EIGHT MORE ROWS, AND THE TEST APPLIED TO EVERY ONE OF THEM WAS THE
+SAME QUESTION §7 ASKS: is this figure a PRICE, or is it a STATISTIC
+over prices? A price is paisa `i64` and never a float; a statistical
+value keeps full precision and is never rounded for storage. Every
+site below was opened and read against that test, and not one of the
+121 is a price.
+
+  runner/admission.rs 4 -- a Wilson lower bound, the same shape
+    `runner/grid.rs` is already allowed for and with the same three
+    ingredients: the `Z = 1.959_964` constant, the trade and win
+    COUNTS cast for the arithmetic, and a probability scaled to parts
+    per million. Counts are exact in `f64` far past any run this
+    engine can hold, and a probability has no paisa representation.
+  runner/bootstrap.rs 29 -> 48 -- the module grew the stationary and
+    circular block bootstraps, the Romano--Wolf stepdown and the
+    studentised statistic. The added occurrences are studentised test
+    STATISTICS, p-values, `f64::NEG_INFINITY` seeds for a running
+    maximum, a `sqrt` of a period count, sample variance and the
+    quantile threshold. `mean_at` reads an `i64` return series and
+    divides by a count, which is the ratio §7's second half admits.
+    Costs are absent from this module entirely; `crates/costs` owns
+    money and this owns a resampling procedure.
+  runner/outcome.rs 17 -> 18 -- one more accumulator on the same
+    Newey--West and payoff arithmetic the existing entry describes.
+    The forward RETURN is paisa `i64` throughout and only the mean,
+    the t-statistic and the ratios derived from them are floating.
+  runner/outcome.rs 29 -> 26 -- TIGHTENED, not raised: the entry
+    read 29 while this rule's own count measured 26 on 2026-10-02
+    (D-1189), so three float sites had left the module and the
+    allowance kept room for three new ones nobody had read. The
+    reason above is unchanged; only the slack is gone.
+  runner/validate.rs 1 -- `direction_from_training_edge(mean_paisa:
+    f64)`, and the parameter name is why it earns a sentence rather
+    than a line. It is not a price: its only production caller passes
+    `crate::outcome::edge(..).mean_paisa`, which is the MEAN of the
+    forward moves and is the statistic `outcome.rs` is allowed for.
+    The function reads its SIGN and returns a `Direction`; nothing is
+    stored, rounded or compared against a tick grid.
+  cli/institutional_evidence.rs 7 -- the same Wilson interval as
+    `runner/admission.rs`, plus `probability_ppm`, which multiplies a
+    [0,1] probability by `PPM` and floors it to a `u64`. The float is
+    the input being discarded and the integer is what is kept, which
+    is the direction of travel `runner/report.rs` is allowed for.
+  cli/institutional_statistics.rs 19 -- White's Reality Check and
+    Hansen's SPA: an observed statistic, two test statistics and two
+    p-values, each stored as `to_bits`/`from_bits` so the RECORD is a
+    `u64` and the float exists only either side of it. The remaining
+    two are `require_finite` and `require_probability`, which refuse a
+    NaN or an out-of-band value by name.
+  cli/population_statistics_v2.rs 18, cli/population_statistics_v3.rs
+    11 -- the durable statistics ledgers, and the same `to_bits`
+    discipline: `statistic`, `probability`, `wilson_lower` and
+    `romano_wolf_statistic` are accessors over stored `u64` bit
+    patterns, `wilson_lower`/`wilson_lower_v3` are the Wilson interval
+    again, and `value()` is a numerator over a denominator. A ratio of
+    two counts has no paisa representation, which is the sentence this
+    whole rule turns on.
+  runner/bootstrap_family_pass.rs 17 -- D-0606's one walk over the
+    bootstrap draws: the same resampled means, standard errors, White
+    and SPA maxima and Romano--Wolf statistics `runner/bootstrap.rs`
+    is allowed for, computed once for all three tests instead of once
+    each. Only integer exceedance counts cross threads, so no float is
+    ever summed in an order that depends on the thread count.
+  greeks/solver.rs 13 -> 14 (D-0921). The new line is
+    `Checked::bracket(&self, price: f64, kind) -> (f64, f64)`, the
+    no-arbitrage volatility bracket the fixed-step bisection starts
+    from. A volatility is a statistic with no paisa representation,
+    the same reason the other 13 in this file are allowed.
+  runner/bootstrap.rs 48 -> 49 (D-1197). The new line is the
+    Romano--Wolf null table, `Vec<Vec<f64>>` of studentized resampled
+    means, built once instead of per round. A t-statistic has no paisa
+    representation, the reason the other 48 are allowed.
+  runner/bootstrap.rs 49 -> 51 (D-0973, D-1198). The merge with
+    lane 4 replaced that null table with D-0973's one-walk stepdown,
+    whose running maxima, selection scratch and per-rank bars are
+    the same studentized statistics; lane 4's own tree measured 51
+    against its allowance of 48. No price is among them.
+  cli/institutional_evidence.rs 7 -> 8 -- GAP5-54 (D-0930) replaced
+    `probability_ppm`, two lines that took `ceil(p * PPM)` in `f64`,
+    with `bootstrap_fraction`, three lines that recover the exact
+    integer `k/(draws+1)` behind the runner's p-value: `value *
+    denominator as f64` rounded to the `u64` numerator, the bit-exact
+    check that `numerator / denominator` reproduces the p-value, and
+    the refusal message naming the `f64` it cannot represent above
+    2^53. The float is again the input discarded for an integer, the
+    direction of travel `runner/report.rs` is allowed for, and the ppm
+    and the decision are now integer arithmetic on that fraction.
+~~~~
+
+### Gate 11 — rule 3. docs/07 law 2: pre-size every map.
+
+~~~~text
+Only HashMap/HashSet. A BTreeMap has no `with_capacity` — capacity
+is not a concept for a B-tree — so including it would put three
+un-fixable entries in the allowlist and teach a reader to ignore
+it. A BTreeMap being O(log n) is a real but DIFFERENT complaint,
+and this is not the instrument for it.
+manifest.rs::genesis reserves nothing because nothing is known yet
+to reserve from; the doc comment argues it and points at
+docs/06-limits.md §17. Layer 3's guarantee is about the LOADED
+index, which is the one a query touches, and that one is reserved.
+
+catalog.rs::build_trigrams is the one place here where the bound is
+genuinely not knowable, and the reason is circular rather than
+lazy: THE MAP'S SIZE IS THE NUMBER OF DISTINCT TRIGRAMS, AND
+COUNTING DISTINCT TRIGRAMS NEEDS THE MAP. What can be counted
+before the loop is the number of trigram WINDOWS — one per
+(name, offset) — which is an upper bound only in the sense that
+every key came from some window; it reserves per window rather than
+per key, and the ratio between them is how many names share a
+trigram, which is a property of the data and not computable from it
+ahead of the pass. Reserving the window count would trade a
+reservation that grows with the universe for a key count bounded by
+a three-byte alphabet. The build runs ONCE, inside `Catalog::build`
+from `Site::new`, into an Arc<Site> (D-0039) — never in a handler.
+IF IT EVER MOVES ONTO A REQUEST PATH THIS ENTRY IS WRONG and must
+be deleted rather than re-pinned, which is the same condition the
+rule 4 merge.rs entry names.
+
+TWO MORE FILES WOULD SIT ON THIS LIST IF THEY HAD BEEN ALLOWLISTED
+INSTEAD OF FIXED, and they are named so nobody re-derives the same
+reasoning: merge.rs::merge now reserves `asserted` from the same
+`capacity` the map 33 lines below it already used, and
+pull::work::Selection::of reserves from the iterator size hint.
+
+`crates/api/src/autopilot.rs` IS A THIRD SHAPE, AND IT IS NOT AN UNSIZED
+MAP AT ALL: THE SIZE IS KNOWN, AND IT IS ZERO. `SpotRequest::members` is
+documented as the instruments actually ticked, or EMPTY for the target's
+whole set -- empty is the SENTINEL and not a fallback. The autopilot names
+no member because it backfills the swept target entire, so the correct
+reservation for that set is nothing, and `HashSet::new()` allocates nothing.
+The incident behind this rule is a map reserved to exactly its load and then
+rehashing on the NEXT insert. Here there is no next insert: `asked` is bound
+with no `mut`, and its only use is `broker_run(&asked, site)`, which takes
+`&SpotRequest` and reads the field through `is_empty()` and `contains()` and
+nothing else. "Never inserted into" is therefore a fact the BORROW CHECKER
+enforces, not a promise this comment makes -- an auditor confirms it by
+looking for a `mut` on `asked` or a `members.insert` on that path and finding
+neither. The crate's one `members.insert` belongs to the OTHER construction
+site, in ingest.rs, which reserves `named.len()` because it does name members.
+This entry exempts the empty case only.
+DECLARED RATHER THAN REWORDED: `with_capacity(0)` is the same non-reservation
+and rule 3 matches it deliberately, so rewriting the line to dodge the grep
+would be the mute button this gate exists to refuse.
+SIX SITES SURFACED WHEN THIS RULE STARTED RUNNING AGAIN, AND TWO OF
+THEM WERE FIXED RATHER THAN DECLARED. That order is the point: an
+allowlist entry is for a map whose size is genuinely unknowable when
+it is built, not for one nobody got around to reserving.
+
+  FIXED, not listed -- `api/server.rs::price_group` now reserves
+    `group.len()`, the same bound the `quotes` Vec on the line above
+    already used; and `cli/results.rs::open` reserves
+    `(len - HEADER) / stride`, which the file's own length gives
+    before the walk starts.
+
+  LISTED, because nothing is known yet to reserve from:
+  api/server.rs 1 -- the `calendars` cache, built empty inside a
+    `Mutex` at construction and filled lazily per vendor. The count
+    is not merely unknown, it is zero at that point.
+  api/trades.rs 2 -- REMOVED, and the reason is where the code went.
+    The entry read "`blocks`, on a file THIS CALL just created and on
+    the reopen path", and that store no longer lives in `api`: the
+    1,033-line per-trade writer moved to `cli::trades` because the
+    crate arrow runs `api -> cli` and the trades exist inside
+    `cli::audit_bars`. `api/trades.rs` is a READER now and holds no
+    map of its own -- its module header says so. This gate reported
+    the row as loose on every run; a stale allowance makes the list
+    read stronger than it is, so it goes rather than being re-pinned.
+    `cli/trades.rs 1` below carries the surviving half of the reason.
+  pull/src/nse.rs 1 -- `seen`, deduplicating hrefs while scanning one
+    exchange page. The number of distinct links is what the scan is
+    for; reserving would need the answer first. Bounded by one HTTP
+    response, never by bars, months or instruments.
+
+  cli/population.rs 10 -- these are deliberately allocation-free
+    constructors, not ten unreserved insertion paths. Four belong
+    to `FactsBuilder`; `reserve_one` calls `try_reserve(1)` on every
+    map/set before `observe` inserts a row. Five build scan/reconcile
+    indexes: the three streamed indexes call fallible `reserve_map`
+    before each insert, and the two reconciled indexes reserve the
+    exact receipt count before their loops. The last is the empty V3
+    index when that optional legacy-read file is absent; every later
+    growth path also calls `reserve_map` before insertion. Replacing
+    any of these with `with_capacity` would discard the explicit
+    allocation-refusal path that returns `PopulationRefusal`.
+  cli/selection.rs 2 -- `SelectionIndexes::with_capacity` knows the
+    caller-bounded receipt count, but both maps start allocation-free
+    and immediately `try_reserve(capacity)` before the scan inserts.
+    The spelling preserves a reported `SelectionRefusal` if the
+    reservation fails; no insert can precede either reservation.
+
+This is the same shape `manifest.rs::genesis` is listed for, and its
+doc comment makes the same argument pointing at docs/06-limits.md §17.
+
+FORTY-THREE MORE FILES, AND THEY ARE FOUR SHAPES, NOT FORTY-THREE
+CASES. The durable-ledger family under `crates/cli` landed after this
+rule was last read and every one of its index maps trips the grep.
+Each of the 152 sites was opened and put into one of the four groups
+below. Exactly one fitted none of them and was FIXED at the source:
+`cli/institutional_statistics.rs::record_subjects` grew from an
+unreserved zero while `records.len()` sat four lines above it, and now
+calls `try_reserve(records.len())` before its walk. Its file still
+appears below, because this rule refuses the SPELLING `HashSet::new()`
+and the fix is the reservation on the next line -- which is exactly why
+every shape-1 entry here needs a sentence rather than a count.
+
+SHAPE 1 -- ALLOCATION-FREE, THEN A FALLIBLE RESERVATION, ALWAYS BEFORE
+THE FIRST INSERT. This is `cli/population.rs`'s and `cli/selection.rs`'s
+reason above, and it is the majority: 84 of the 152 sites are a
+`HashMap::new()`/`HashSet::new()` binding whose very next statement is
+`try_reserve(capacity)` or `reserve_map(..)`, with the capacity taken
+from a count the caller already proved -- `(len - HEADER) / STRIDE`,
+`records.len()`, `completions.len()`, a declared `bounds` ceiling.
+`with_capacity` cannot express that: it aborts on allocation failure,
+and these paths return a named refusal instead. Rewriting them to dodge
+the grep would trade a reported refusal for an abort, which is the
+opposite of what `CLAUDE.md` §4 asks.
+
+SHAPE 2 -- EMPTY AT CONSTRUCTION BECAUSE NOTHING HAS BEEN READ YET, AND
+`scan()` RESERVES BEFORE IT INSERTS. Every ledger in this family opens
+by building its handle with an empty index and then calling `scan()` on
+the next line; `scan` begins `self.receipts.clear()` (or `.audits`) and
+a `try_reserve` against the record count it has just measured from the
+file length. The map is genuinely sized ZERO at the construction site --
+the file has not been read -- which is `api/trades.rs`'s reason one
+layer down. Traced individually: anchored_search_lineage_v2/v3/v4,
+candidate_universe, execution_v3, execution_v4, population_admission_v2,
+population_admission_v3, population_base_evidence_ledger_v2,
+population_finalization_v2, population_finalization_v3, population_v5,
+population_v6, pre_admission_data, population_statistics_v2 and
+selection_v5 (whose `scan` builds reserved locals and MOVES them in).
+
+SHAPE 3 -- THE KEY COUNT CANNOT BE COUNTED WITHOUT THE MAP. This is
+`api/catalog.rs::build_trigrams`'s reason, restated per site: the map is
+keyed by something COARSER than the thing being walked, so its final
+size is the number of DISTINCT keys and counting those needs the map.
+`api/ladder.rs::earliest` is keyed by `(exchange, segment, symbol)` over
+a month list; `api/server.rs::spot_months_by_identity` drops the
+timeframe from `(Series, YearMonth)`; `cli/population.rs::index_blocks`,
+`population_admission_v4`, `population_finalization_v4` and
+`population_statistics_v3` key by BLOCK over records, and a block's
+length is a field inside it, so the block count is not `len / stride`.
+`admission_store.rs`'s per-block strategy set is the same thing one
+level down. Reserving the walk length instead would trade a reservation
+that grows with the store for a key count bounded by the data's shape,
+which is the trade `build_trigrams` already refused.
+
+SHAPE 4 -- THE SIZE IS KNOWN AND IT IS A COMPILE-TIME CONSTANT, or it
+is zero. `api/autopilot.rs`'s entry is the zero case and these are its
+siblings. `runner/lib.rs` and `runner/rank.rs` are literally
+`HashSet::with_capacity(0)` on the arm where the next level does not
+exist: the binding carries no `mut`, its only uses are `.len()` and
+`.contains()`, and "never inserted into" is therefore enforced by the
+borrow checker rather than promised here. `cli/population.rs`'s two
+`else { HashMap::new() }` arms are the optional V3 and V4 legacy
+receipt files being ABSENT. `all_rung_selection_v5`, `global_replay`,
+`global_replay_v2` and `global_replay_v3` build uniqueness sets over
+`[T; 8]` and `[T; 16]` arrays and over `CANONICAL_RUNGS_SECONDS`, so
+the insert count is eight, sixteen, or eight times the module's own
+Top-25 cap -- fixed at compile time in every case. `cli/knobs.rs`'s
+process-wide store holds one entry per KNOB, which rule 4's own
+`knobs::render` entry below measures at fourteen. `cli/trades.rs` is
+the freshly created file, which holds only a header and therefore no
+blocks at all.
+
+WHAT THIS LIST DOES NOT SAY. It does not say any of these maps is
+cheap, and it does not say the ledgers' `open` is O(1) -- their own
+module headers say the opposite, at length, and gate 12 holds them to
+it. It says only that no map here grows from an unreserved zero on a
+path where the count was available, which is what law 2 asks.
+
+REMOVED, NOT LOOSENED: `runner/outcome.rs` was a SHAPE 3 row, its
+forced-close map keyed by IST session day. D-1177 counts the
+whole-minute 15:09 records first and reserves exactly that bound
+(`HashMap::with_capacity(candidates)`, and the proved-day set at
+`required.len()`), so the file has no unsized map left and its row
+was only loose. D-1189 deletes it; a new unsized map there is red.
+
+`api/recovery_journal.rs` 1, D-1380 -- SHAPE 1. `append_new`'s `fresh`, the
+set that refuses a seed batch naming one recovery key twice, is bound
+`HashSet::new()` and its very next statement is
+`fresh.try_reserve(records.len())`, the batch length counted before
+the walk; no insert precedes it. The `images` Vec just above it
+is reserved the same way. `with_capacity` would abort on allocation
+failure where this path returns the `io::Error` the journal reports.
+~~~~
+
+### Gate 11 — rule 4. docs/07 layer 12: bounded page, never O(universe).
+
+~~~~text
+
+  runner/rank.rs   THREE, and the bound is the module's whole purpose.
+                   A `BinaryHeap` capped at `keep` is what makes memory
+                   O(keep) instead of O(combinations) -- measured, the
+                   difference between 2.1 MB and 21,200 GB at a hundred
+                   billion. The final `sort_unstable_by` orders `keep`
+                   entries, never the universe, and exists so the output
+                   is byte-identical across processes per §3 rule 5.
+                   Rule 4 is right to ask; the answer is that this file
+                   is the bound rather than a breach of it.
+Each of these was traced to its callers before it was written down.
+FIVE of the nine files are new here only because this rule had
+never run: the boundary check above exited before it ever printed,
+and the four that were already listed are the four that happened to
+sit in the truncated region.
+
+THE census.rs ENTRY WAS STALE IN BOTH ITS COUNT AND ITS REASON. It
+read 1 and named `grid_instruments`, a function that no longer
+exists in that file. The two sorts actually there are different
+functions with a different argument, re-derived below rather than
+re-pinned — which is the whole difference between an allowlist and
+a mute button.
+
+  BUILT ONCE AT STARTUP, into an Arc<Site> (D-0039). Never in a
+  handler. If any of these moves into one, the entry is wrong and
+  must be deleted rather than re-pinned:
+    autopilot.rs tracked_series — its own doc says "computed once
+                when the autopilot starts ... that belongs beside
+                the manifest load, not inside a tick".
+    catalog.rs  build_orders (COLUMNS sorts of the universe, once)
+                AND Catalog::search. The second IS per request and
+                is allowed anyway: it sorts the HIT LIST of a
+                substring search, which layer 12 names as "the
+                named exception and stays O(universe)" and
+                docs/06-limits.md §24 measures at 6.53 ms.
+    census.rs   held_series ONLY, and the word ONLY is a correction --
+                see the paragraph below this list. It runs in
+                `Site::new` beside the manifest load, sorts the
+                store's own held keys, and is sorted for
+                REPRODUCIBILITY rather than for display: the pager
+                addresses a row by ordinal, and HashMap order is
+                not stable between processes. docs/06-limits.md §32.
+    master.rs   skipped_by_reason — sorts DECLINE REASONS, bounded
+                by the Skip vocabulary. Reached from `universe()`.
+    merge.rs    single_vendor_members — O(universe log universe),
+                allowed only because `universe()` runs once.
+    render.rs   folder_suggestions — the ~/Downloads walk, bounded
+                by MAX_FOLDER_SUGGESTIONS and called from
+                `Site::new`. docs/06-limits.md §34.
+
+  BOUNDED BY A CONSTANT, wherever they run:
+    archive.rs  the member list, bounded by MAX_MEMBERS, which the
+                walk checks on every push and refuses past.
+    manifest.rs newest-generation pick — bounded by MAX_SLOTS, 2.
+
+  PER RUN, NOT PER REQUEST:
+    server.rs   broker_run sorts the tracked universe ONCE before
+                making one network request per member of it, for
+                reproducibility — an unordered backfill resumes
+                somewhere different after every restart. The sort
+                is not the cost of that function.
+    server.rs   instruments_json sorts per request, over the
+                TRACKED universe (~800 by decision) and not the
+                master, which its own comment states and which the
+                type-ahead's bound depends on. It is the one entry
+                here that is per request and not the layer-12
+                exception, and it is the one to look at first if
+                this list is ever audited again.
+`select_nth_unstable`, `BinaryHeap` and `collect::<BTreeSet/Map>` were
+outside rule 4 and are the same class: a selection, a heap and an ordered
+collect each cost at least O(n) in what they consume. All three have zero
+live occurrences today, so widening costs nothing and shuts the hole
+before anybody uses it.
+
+The two entries below are bounded sorts, not O(universe), and each is
+bounded by something the type system or the vocabulary fixes:
+  engine   TWO sorts since the prefix join (D-0138 era). `sort_canonically`
+           orders ONE level's frequent set; `next_level` also sorts the
+           frontier by (prefix, mask) to form the join's blocks, because
+           `sort_canonically`'s word order groups by the HIGHEST bit and
+           prefix blocks are NOT contiguous under it. Both are per level,
+           never per candidate.
+  engine   `sort_canonically` orders ONE level's frequent set, which the
+           ladder has already bounded, and canonical order is what makes a
+           rerun byte-identical under §3.5.
+  eval     `Evaluator::positions()` sorts the position list it just built.
+           Its length is bounded by `vocab::table::NEXT_FREE`, a
+           compile-time constant, and it is called once per run.
+THE TWO ENTRIES BELOW WERE PREDICTED HERE AND ARE NOW DUE. The note that stood
+here said `constituents.rs` and `coverage.rs` were not in the committed tree
+yet -- another session had them staged -- so an entry naming them would have
+been a STALE ALLOWLIST ENTRY, which this gate treats as a failure rather than a
+note, correctly, because such an entry makes the gate read stronger than it is.
+It closed: "when those files land, rule 4 will refuse them and their owner adds
+the entries." They landed in 6a58d7c and 6a58d7c's successors, both are tracked
+and clean, and rule 4 refuses them. So the entries go in -- but re-derived from
+the code rather than trusted from that prediction, because a forecast is not a
+trace:
+
+  ALL THREE SORTS ARE STARTUP-ONLY. Not one is reachable from an HTTP handler.
+  Every one funnels through `Read::new` (server.rs), reached only as
+  `universe()` <- `Site::load` <- `Site::serving` <- `run_in`, once per process
+  and BEFORE the router is built. The route handlers consume the finished
+  `Vec<String>` -- `health` reads `report_from(&site.read)`, and
+  `render::notes_block` takes `&[String]`. The only other production caller of
+  `universe()` is the `report` CLI subcommand, one invocation per process;
+  `instruments_html` re-parses per call but every call site is past that file's
+  `#[cfg(test)]`. D-0039/D-0042 is the decision that makes this so.
+
+    constituents.rs  TWO sorts, both bounded by ONE index tier's published
+                     membership, never the universe. `unresolved_lines` sorts
+                     `join.lacks`; `reason_lines` sorts one decline reason's
+                     names inside one unjoinable bucket. `Tier::published`
+                     states every size -- Nifty50 50, Nifty100 100, Nifty200
+                     200, Nifty500 500, TotalMarket 750, FnoUnderlyings 213 --
+                     and `TierJoin::accounted` asserts the five buckets sum to
+                     it. So the longest possible sort is 750 names, and
+                     `reason_lines` is at most 2 groups per bucket because
+                     `NoIsin::reason` is a four-word vocabulary that
+                     `is_a_malformed_name` splits two and two.
+    coverage.rs      ONE sort, and it is the only one of the three whose reason
+                     is written at the site: "a `HashMap` walk is not ordered
+                     and a reason list that reshuffles between restarts is a
+                     list an operator cannot diff. `CLAUDE.md` §3 rule 5."
+                     `from_master` runs only where `target.tier()` is None,
+                     which `ingest.rs` pins to Swept and Indices: Swept is
+                     bounded by `InstrumentKey::SWEPT`, which is two entries,
+                     NIFTY and BANKNIFTY; Indices is the merged index series,
+                     measured at 35. That 35 is a MEASUREMENT and not a
+                     compile-time cap -- a vendor adding index series grows it
+                     -- and it is recorded that way rather than as a bound.
+
+WHAT THIS DOES NOT COVER, said plainly so the entry cannot be read as wider
+than it is: `crates/api`'s own ratio bench reports THIRTY C-15 breaches, up to
+2,346 ps per instrument per request against a 1,000 ps ceiling. That is
+per-request work and these three sorts are not on a request path, so declaring
+them here cannot and does not silence it. C-15 is undocumented in
+`docs/06-limits.md` and unrecorded in `docs/11-findings.md`, and gate 8 is red
+on it.
+`crates/runner/src/significance.rs` ONE sort, and the procedure is DEFINED on
+a sorted list: Benjamini-Hochberg (1995) compares the k-th smallest p-value
+against k/m*FWER, so "the k-th smallest" is the algorithm and not an
+implementation convenience. Removing the sort does not make it cheaper, it
+makes it a different and wrong procedure.
+WHAT IT IS BOUNDED BY, and THIS ENTRY WAS WRONG ONCE, so the correction is
+kept rather than quietly overwritten. It first read: "the slice is the
+p-values of the RETAINED findings, and retention is the bounded top-N heap
+in `rank.rs` -- `Ranked::top` is capped before this is ever called." It is
+never called. `benjamini_hochberg` has NO production caller: `report.rs`
+uses `trials`, `effective_trials`, `expected_max_bailey`, `expected_max_t`
+and `bonferroni_t`, and nothing in any crate references this function or
+`p_value` outside their own module. An adversarial verifier checked the
+bound instead of the arithmetic and found the caller chain was invented --
+which is the exact defect rule 4 exists to catch, written into the gate as
+an enforced claim.
+THE TRUE BOUND, stated as what it is: the slice is caller-supplied through a
+`pub fn` taking `&mut [f64]`, so TODAY nothing structural bounds it, and the
+only callers are this module's three tests, which pass at most six elements.
+The intended caller is the bounded top-N heap, and when it is wired the bound
+becomes real and this text must be re-derived rather than reused. UNVERIFIED
+as a measured figure; no bench covers it.
+It is `sort_unstable_by(f64::total_cmp)` and not a comparator of its own: a
+NaN p-value under a partial_cmp-based comparator is the ordering bug rule 4's
+neighbour in `rank.rs` already carries a reason about.
+`crates/pull/src/folder.rs` ONE sort, and its bound is the constant archive.rs
+is ALREADY allowed for. `census_of` sorts the instrument NAMES of an
+already-decoded walk -- one `String` per `Member`, so `instruments.len() ==
+members.len()` at the sort. Those members reach it from `archive::descend`,
+which refuses with `ArchiveError::TooManyMembers` at `out.len() >= MAX_MEMBERS`
+BEFORE every push, so the length is capped at 50,000: a compile-time constant
+checked in one place, not a caller's habit. It is not the universe in any
+sense -- a `Member`'s name is a file STEM from `archive::instrument_name`, and
+these are CSVs an operator bought, never the instrument master. `read_census`
+is the only production caller; the other four are in crates/pull/tests/.
+IT IS PER REQUEST, declared rather than glossed: `GET /folder.json` reaches it
+through `api::folder::answer`, and that same call does one `fs::read`, one
+UTF-8 validation and one `csv::decode` PER MEMBER. The walk is the cost; a
+sort of at most 50,000 short strings is not.
+NOT FIXABLE BY DELETION. Names come off stems while the walk sorts by PATH, so
+walk order is not name order; `dedup` needs the ordered vector and
+`Census::collisions` is counted from it; and the order is what makes the body
+byte-identical between runs under CLAUDE.md section 3 rule 5. A `HashSet` would
+trade this entry for a rule-5 breach, which is the worse defect.
+STALE DOC, NAMED RATHER THAN LEFT: `docs/06-limits.md` section 65 still says of
+this walk "Nothing is sorted and nothing is collected". That was true of
+`read_reach`/`reach_of` and stopped being true of `read_census` at D-0141. The
+bound is archive.rs's cap, not that sentence. Section 65 also records that NO
+timing has been taken against a real purchased archive; none is claimed here.
+`crates/runner/src/excursion.rs` ONE SELECTION SITE, NOT A SORT, and a
+quantile IS an order statistic -- the same argument the significance.rs
+entry above makes about Benjamini-Hochberg. `Ladder::from_excursions`
+places its rungs at quantiles of the excursions the instrument actually
+produced, so that a stop level is "the level a fifth of moves reached"
+rather than a number somebody typed. This entry used to say "ONE sort";
+D-1172 replaced the full `sort_unstable` with `select_nth_unstable`
+called from the deepest rung position down, each inside the prefix the
+previous selection left, so the work is expected O(n) per ladder
+rather than Theta(n log n), and the slice is left PERMUTED, not sorted.
+It is still one occurrence because rule 4's pattern matches the
+selection's spelling. Removing the selection does not make it cheaper;
+it makes it a different and wrong procedure. (D-1189 corrects this text.)
+WHAT BOUNDS IT: one entry per TRADE on the training bars, and
+`crate::trade` takes non-overlapping positions with a minimum hold of one
+bar, so the slice is at most the bar count and is usually far smaller --
+68 trades against 1,124 signals at the default horizon. It is NOT the
+candidate count and NOT the frequent-itemset count, so it does not grow
+with the sweep. Called once per fold at a `crate::validate` boundary,
+never per bar and never on a request path.
+`select_nth_unstable` on `i64` (`Ppm`) and not a comparator: these are
+integer parts-per-million, so there is no NaN and no partial order to
+get wrong.
+`crates/runner/src/pbo.rs` ONE sort, and a median IS an order statistic
+-- the third time this rule meets that argument, after Benjamini-Hochberg
+and the excursion quantiles. `probability_of_overfitting` sorts the
+per-fold relative placements to take their middle value. Removing the
+sort does not make it cheaper, it makes the median wrong.
+WHAT BOUNDS IT: one entry per FOLD. Folds are the operator's split count
+-- a handful, three in the tests -- and are neither the candidate count
+nor the frequent-itemset count, so it does not grow with the sweep at
+all. Called once at the end of a whole walk-forward, which is the
+coarsest boundary in this crate.
+`sort_unstable` on `i64` and not a comparator: these are integer parts
+per million, so there is no NaN and no partial order to get wrong.
+`crates/runner/src/audit.rs` ONE sort, and it is a RENDER ordering rather
+than a computation: the exit-grid table puts the no-levels baseline row
+first and the rest by pessimistic total, so a reader comparing "with
+levels" against "without" does not have to hunt for the row that IS the
+comparison. Removing it does not change a single number, only where they
+appear on the page.
+WHAT BOUNDS IT: one entry per GRID CELL, and the grid is
+`(stops + 1) x (targets + 1) x (trails + 1)` -- 125 at the shipped rung
+count. It is neither the candidate count nor the frequent-itemset count,
+so it does not grow with the sweep. Called once per rendered report at
+the coarsest boundary this crate has, and the render touches no bar.
+TWO matches since D-1195 (o1runner-11), and still one ordering: a
+`select_nth_unstable_by_key` picks the `keep` rows the table shows and
+`sort_by_key` orders only those, O(n + keep log keep) instead of a
+full sort of every cell. Same rows, same order, by test.
+`crates/api/src/census.rs` — THE SECOND OF ITS TWO SORTS IS PER REQUEST,
+AND THIS ENTRY SAID THE OPPOSITE. The startup group above used to name
+`held_series` AND `held_entries` together under a heading that reads
+"Never in a handler. If any of these moves into one, the entry is wrong
+and must be deleted rather than re-pinned." One of them had already
+moved, and nothing here noticed.
+
+WHAT IS ACTUALLY TRUE, traced rather than assumed:
+  held_series   startup only. Its one production call site is
+                `Site::new` (server.rs), and every other reference is
+                in that file's or census.rs's own tests.
+  held_entries  startup AND per request. `Site::new` calls it, and so
+                does `server::census_now`, which is reached from THREE
+                route handlers: `instruments_json` (`/instruments.json`),
+                `store_json` (`/store.json`) and `audit_json::store_block`
+                (`/audit.json`). That is not an accident to be fixed --
+                `census_now`'s own doc explains it, and the reason is a
+                real defect it repaired: the cached startup snapshot went
+                on showing 20.4 M rows against a live 139.7 M after four
+                hours of backfill, so a monitoring page was understating
+                the store 6.8x. A page that must be current cannot read a
+                snapshot.
+
+SO THE ENTRY STAYS AT 2 AND THE REASON CHANGES, which is the difference
+between an allowlist and a mute button. The bound is no longer "it runs
+once"; it is what the sort is OVER: one `(Series, YearMonth)` per
+instrument-month some vendor manifest holds -- 194 on this operator's
+disk, per census.rs's own measurement -- and never the instrument
+universe, which is the quantity layer 12 is written about. It grows with
+what has been INGESTED, so it is a number that moves, and NO BENCH
+MEASURES IT: `docs/06-limits.md` §32 covers the startup call and predates
+the per-request one. That is an honest gap and is recorded here rather
+than papered over by leaving the old sentence in place.
+
+THIS GATE CANNOT DECIDE THE QUESTION, said plainly: "per request" is not
+decidable from text, which rule 4's own preamble states. What a gate CAN
+do is refuse to carry a justification that a five-minute trace falsifies.
+
+STALE IN THE SOURCE TOO, NAMED RATHER THAN EDITED: `held_entries`' own
+doc comment still reads "it runs where `held_series` runs — once, at
+startup", and `held_series`' reads "not on a request path". The first of
+those two sentences is now false. `crates/api` belongs to another line of
+work; correcting it there is that owner's change, and this note is the
+report.
+PROSE LIVES OUTSIDE THE QUOTES, AND THAT IS NOT A STYLE CHOICE.
+
+These seven lines sat INSIDE the single-quoted `allow_sort` string.
+The staleness audit at the end of `check()` reads column 1 of every
+non-blank line -- `awk 'NF{print $1}'` -- so it took the bare token
+`#` as a path and ran `git ls-files --error-unmatch '#'`, which
+fails. Gate 11 therefore printed "STALE ALLOWLIST ENTRY -- # is not a
+tracked file" seven times and exited 1 on EVERY run, for a reason
+with nothing to do with the tree. `allow_search`, `allow_float`,
+`allow_unsized`, `allow_panic` and `allow_assert` all keep their
+prose outside the quotes; this one list was the outlier.
+
+Gate 1e's own comment names why that matters more than the red
+itself: "red for the wrong reason trains a reader to ignore the
+gate."
+
+The entry the prose was about, kept here where the audit cannot read
+it as a path: `catalog::walk` returns a listing addressed by ORDINAL,
+built from a `read_dir` whose order the filesystem chooses. A page
+whose row 5 differs between two runs over identical bytes is not a
+listing, and every deterministic alternative costs the same or more
+-- a `BTreeSet` is O(n log n) on insert and a hash set returns
+nothing repeatable. CLI-only: `crates/cli/src/batch.rs` is the sole
+caller, so it is never on a request path. docs/06-limits.md
+section 86.
+EIGHT FILES ADDED. They surfaced when this rule started running
+again behind gate 1e, and ONE OF THEM WAS A REAL BREACH THAT WAS
+FIXED RATHER THAN LISTED -- which is what the rule is for.
+
+  api/bars.rs 2 -- FIXED, then declared. `GET /bars/window.json`
+    ordered EVERY bar in the range and then took `.skip().take()`:
+    roughly 1.9 million rows at a 240-month window to hand back a
+    thousand, which is layer 12's breach exactly. It now partitions
+    to `offset + limit` in O(n) and orders only that. Both remaining
+    constructs are bounded by the caller's PAGE. The order is
+    unchanged because the comparator is total, and
+    `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+    runs both strategies and requires them to agree.
+  api/bars.rs 2 -> 3 -- D-1446, W1-api5-4. The single partition at
+    `offset + limit` still ordered every row BEFORE the page, and
+    `offset` is uncapped, so a page past the end ordered the whole
+    window to answer nothing. `page_of` now partitions at `offset`,
+    then at `limit` inside the rest, then orders only the page: three
+    constructs, each bounded by the window or by the PAGE, never by
+    the rows outside it. An offset at or past the end returns before
+    any of them. Measured by
+    `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
+  api/server.rs 2 -> 4 -- one is the target list, ALSO FIXED here: it
+    ordered by `underlying` alone, a PARTIAL key over
+    `{exchange, segment, underlying, kind}`, so equal-comparing
+    targets kept HashMap order under an unstable sort while the
+    comment above promised reproducibility. Now the whole derived
+    `Ord`. The others order a REQUEST's own member list and one
+    symbol page's entries, both for byte-stability under §3 rule 5.
+  api/calendar_of.rs 3 -- `owed`, `seen_by`, `silent` inside `agree`,
+    all bounded by the VENDOR CALENDAR COUNT: one entry per feed for
+    one day. Not by bars, days or instruments.
+  api/indexmap.rs 1, api/pullrun.rs 1 -- one index's constituents,
+    and the legs of one pull group. Both are a page's worth.
+  cli/lib.rs 5 -- the support ladder's rungs and the report's rows.
+    The ladder is a compile-time list of eight; the rows are what is
+    printed, which is capped before it is ordered.
+  pull/nseindex.rs 1 -- the REFUSED entries of one exchange page,
+    ordered so the refusal list is byte-identical between runs.
+  runner/grid.rs 2 -- the exit grid's distinct values, bounded by the
+    rung x stop ladders, both compile-time.
+knobs.rs and trades.rs, added 2026-08-29 with the sweep request's own
+knobs and the per-combination calendar. Both sorts exist for CLAUDE.md
+section 3 rule 5 -- same inputs, same outputs, byte for byte -- and
+neither is on a per-bar or per-candidate path.
+
+knobs::render sorts at most FOURTEEN pairs, once per run, so the audit
+line naming a run's settings reads the same whatever order a HashMap
+happened to iterate. Without it two identical runs log two different
+strings and a reader cannot diff them.
+
+trades::by_period sorts calendar buckets by key, once per period per
+HTTP request. A calendar read out of order is not a calendar, and the
+buckets come out of a HashMap. The bound is the number of distinct
+days in the span -- 1,671 for the eighty-one months on disk -- not the
+number of trades and not the number of bars.
+
+sweeprun.rs 1 -> 5 for rule 7 below: the four added are the rung
+allowlist checks (`EVERY_RUNG.contains`) and the month range guard,
+every one against a FIXED EIGHT-ELEMENT static or a range literal.
+
+live.rs 1, added 2026-08-29. `current` sorts the live files it found
+by run identity, once per poll. `read_dir` order is unspecified, so
+without it two polls of one page can return the same runs in
+different order -- and the bound is the number of runs IN FLIGHT,
+which is the eight rungs `range_over` walks, not the number of
+candidates and not the number of bars. Section 3 rule 5 again.
+
+exit_grid_policy.rs 3, added 2026-08-30. Resolution sorts the three
+TRAINING-derived integer axes: adverse stop, favourable target and
+full-range trailing samples. Nearest-rank percentiles require that
+exact order and must return an observed member, not an interpolated
+or approximate rung. This is the named O(T) resolution boundary in
+docs/06-limits.md section 133, before any later coordinate lookup;
+none of the three sorts is inside a bar, candidate or cell loop.
+
+`crates/api/src/server.rs` WAS LISTED TWICE, AT 4 AND AT 2, AND THE
+SECOND LINE HAS NEVER BEEN READ. `check` resolves an allowance with
+`awk '$1==F{print $2; exit}'`, which stops at the FIRST match, so the
+file's real allowance was 4 and the `2` below it was decoration. That
+is worse than a wrong number: a reader auditing this list would add 4
+and 2, get 6, and believe six sorts were accounted for when four were.
+There is one row for that file now and it carries the measured count.
+
+SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
+
+  api/logs.rs 1 -- `both_halves` merges the served and the `cli` tail
+    and orders the UNION newest-first. Each half was already capped by
+    `telemetry::DEFAULT_KEEP_FILES` and by the query's own limit before
+    it arrived, so the slice is at most twice one page and never the
+    log. The comment two lines below it says so in the source.
+  api/server.rs 4 -> 7 -- the three added are all bounded by a page or
+    by a series, not by the universe. `peer_calendar` and the
+    `calendar_json` handler order the KEYS of `spot_months_by_identity`,
+    which is one entry per distinct spot `(exchange, segment, symbol)`
+    -- two swept instruments plus the merged index series, measured at
+    35 in `api/coverage.rs`'s own entry above. `spot_months_by_identity`
+    and `months_for` order ONE series' months and then `dedup`, which
+    is what stops the same month being probed once per rung: measured
+    during a live repull at 4,446 wasted probes from a single page.
+    Both exist for `CLAUDE.md` §3 rule 5 -- a `HashMap` walk is not
+    ordered, and `from` ships the names that voted.
+  cli/global_replay_v3.rs 1 -- `schedule_candidates` orders the
+    candidates by `(entry_micros, rank, strategy_digest, witness_id,
+    candidate_ordinal)` before the occupancy fold. The bound is the
+    module's own topology: `TOP_PER_RUNG` per rung across
+    `CANONICAL_RUNGS_SECONDS`, both compile-time. It is not the
+    candidate universe and not the frequent-itemset count. The order IS
+    the procedure -- a single-position schedule read out of time order
+    is not a schedule -- so removing the sort makes it wrong, not
+    cheaper, which is the argument `significance.rs` already makes.
+  cli/population_statistics_v3.rs 1 -- canonicalisation, once per
+    authority: `(family_code, family_sequence)` is the order the
+    receipt's digest is DEFINED on, and the two family counts were
+    checked against the vector's length on the line above. Bounded by
+    one authority's candidate count, never by bars.
+  runner/bootstrap.rs 1 -> 2 -- the second is `quantile`, and a
+    quantile IS an order statistic: the same argument
+    `runner/excursion.rs` and `runner/pbo.rs` are already allowed for.
+    Its slice is the bootstrap DRAWS, a caller-set replicate count, and
+    it is `sort_unstable_by(f64::total_cmp)` and not a `partial_cmp`
+    comparator for the NaN reason `rank.rs` records. The first is the
+    Romano--Wolf stepdown, whose slice is the strategies being compared
+    and whose decreasing order the 2005 procedure is defined on.
+  runner/outcome.rs 1 -- `select_nth_unstable` for the MEDIAN bar step,
+    which is a selection rather than a sort and is O(n) expected. It is
+    reached only from `SliceFacts::with_step`, whose own doc says it
+    exists "so its horizon clock and its session boundaries share one
+    measurement and no candidate loop can allocate the median sample
+    again" -- once per slice, never per candidate and never per bar.
+  runner/pbo.rs 1 -> 2 -- the second is the identical median over FOLD
+    placements in the bottom-half rate, beside the one already listed.
+    Folds are the operator's split count, a handful.
+  runner/bootstrap_family_pass.rs 1 -- the Romano--Wolf stepdown order
+    again (D-0606): `sort_unstable_by` on `total_cmp`, ties broken by
+    position, over the same slice of strategies and in the same
+    decreasing order as the first `runner/bootstrap.rs` entry.
+  runner/bootstrap.rs 2 -> 4 -- D-0973 rewrote the legacy stepdown
+    `romano_wolf_aligned` as one backward walk. `quantile` and its
+    sort went; three came in, each over strategies or draws and never
+    over bars or the universe. (1) `order.sort_unstable_by` is the
+    same descending-statistic order, ties by caller position, as the
+    adjusted receipt's `stepdown_order` -- D-0973 makes the legacy
+    vector decide on that receipt's order, so it must build it.
+    (2) `select_nth_unstable_by(position, f64::total_cmp)` is a
+    SELECTION of each suffix's bar from the B draw maxima: O(B) per
+    strategy, the "linear runtime for all inputs" fallback its doc
+    comment quotes. (3) `this_round.sort_unstable_by_key` orders one
+    round's rejected strategies by caller position; rounds partition
+    the strategies, so all rounds together sort S once. The stated
+    cost is O(S·B·N + S·B + S log S), in the function's own doc.
+  runner/outcome.rs 1 -> 4 -- D-1410. The production cadence is now
+    `prefix_median_steps_over`, a two-heap running median so bar `i`
+    reads only bars `0..=i`: `use std::collections::BinaryHeap` and
+    the `lower`/`upper` heaps are the three `BinaryHeap` lines. It
+    runs once per `SliceFacts::of`, `SessionBounds::of` or
+    `trade::forced_exits` -- once per slice, never per candidate --
+    and docs/06-limits.md "The prefix cadence is O(n log g) per slice"
+    states it. The fourth is the former entry's
+    `select_nth_unstable` in `median_step_micros`, now a
+    `#[cfg(test)] fn` kept as the oracle the prefix cadence must end
+    on. This scanner drops `#[cfg(test)] mod` blocks, not a
+    `#[cfg(test)]` fn, so it still counts a line no build runs.
+~~~~
+
+### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
+
+~~~~text
+THIS RULE REFUSES A SPELLING, and these ten occurrences are what
+that costs. Nine of them are not `Result::expect` at all:
+`telemetry::json::Scan::expect(&mut self, want: u8) ->
+Result<(), LineFault>` is a PARSER method, every call site is
+`self.expect(b'"')?` or `scan.expect(b'{')?`, and every one
+propagates rather than panicking. Renaming it to satisfy a grep
+would be the tail wagging the gate.
+
+ssm.rs::hmac is the one real `Result::expect` in shipping code, and
+it stays. `Hmac::new_from_slice` returns `InvalidLength`, which HMAC
+cannot produce for any key length; the alternatives are to
+propagate an error no input can cause — an arm no test can enter,
+which is the coverage hole CLAUDE.md section 4 calls a test that
+asserts nothing — or to substitute a key, which is a fallback that
+hides a failure. The `expect` message names the reason and rule 5c
+below now sees the local allow that goes with it.
+crates/pull/src/totp.rs USED TO CARRY a real `unreachable!()`:
+
+    .unwrap_or_else(|_| unreachable!("HMAC accepts every key length"))
+
+It was allowlisted at ONE, with the note that the entry "is the report, and
+it is meant to be removed rather than kept" -- allowlisted only because the
+file belonged to another line of work at the time, not because the defect
+was acceptable. It has now been fixed at the source: `TotpError` gained an
+`HmacRefusedTheKey` variant and the call is a `?`, so the function refuses
+instead of dying and no coverage region is left that no input can close.
+The entry is gone rather than reworded, which is what "removed rather than
+kept" asked for. A NEW `unreachable!` in that file now fails this gate with
+no allowance at all, which is the stronger state.
+`crates/api/src/server.rs` 2, and ONE OF THE TWO IS PROSE. `note_header` carries
+a real `.expect("a sanitised note is visible ASCII")`, sound because
+`note_alphabet` emits only 0x20..=0x7E, exactly the alphabet a header value
+admits, so the `Result` arm is a project region no input can enter -- which the
+coverage floor cannot hold and which `unreachable!()` would only rename. The
+SECOND match is not code at all: the words `unreachable!()` appear inside that
+attribute's own `reason = "..."` string, explaining why `unreachable!()` was
+avoided. The corpus drops whole-line `//` but an attribute's reason text is not
+a comment, so the rule counts its own explanation -- the same self-referential
+shape gate 15 already documents about a gate that spells its banned word out.
+Declared rather than papered over by rewording the justification, because the
+justification is the useful artefact and the miscount is the gate's.
+`crates/runner/src/rank.rs` 1, AND IT IS NOT `Option::unwrap`. The line is
+`let scored = marked.ranked.unwrap();` inside `ordered`, and `marked.ranked`
+is a `K: Ranked1` -- this module's own trait, declared 160 lines above it:
+
+    trait Ranked1: Ord + Sized {
+        fn wrap(scored: Scored) -> Self;
+        fn unwrap(self) -> Scored;
+    }
+
+Both implementations return the value by move -- `Scored::unwrap` is `self`
+and `ByPayoff::unwrap` is `self.0` -- so neither can panic and neither has a
+`None` arm to reach. It is the `telemetry::json::Scan::expect` case exactly:
+a method whose NAME is a banned spelling, on a type that is not `Result` or
+`Option`. Renaming it to satisfy a grep would be the tail wagging the gate,
+which is the sentence this rule already uses about the parser.
+
+`crates/cli/src/all_rung_population_v5.rs` HAD A REAL ONE AND IT WAS FIXED
+RATHER THAN LISTED. `sweeper(index)` closed its match with
+`unreachable!("canonical all-rung index is bounded by eight")`. The claim was
+true -- the only caller walks `CANONICAL_RUNG_NAMES_V1`, which is `RUNG_COUNT`
+long -- and it was still the `CLAUDE.md` §4 breach this rule exists for, plus
+a coverage region no input could enter. It returns `Option<&Sweeper>` now and
+the call site turns `None` into a named refusal carrying the ordinal, so an
+authoring mistake surfaces as a message rather than an abort part-way through
+a receipt-last transaction. No allowance is added for it, which is the
+stronger state -- the same one `crates/pull/src/totp.rs` reached.
+~~~~
+
+### Gate 11 — rule 5d. `assert!` is a panic that clippy does not lint.
+
+~~~~text
+
+THE HOLE. `clippy::panic` covers `panic!` and nothing else, and rule
+5's grep above spells out four macros and two methods -- not one of
+them `assert!`. So a runtime `assert!(cond)` dropped into a shipping
+function is refused by no lint, counted by no rule, and named nowhere
+in this file. It is the same CLAUDE.md section 4 breach every other
+spelling on rule 5's list is -- degrade loudly or refuse, never die --
+and it was the one spelling nothing could see.
+
+WHY IT IS A SEPARATE RULE AND NOT THREE MORE ALTERNATIVES IN RULE 5'S
+PATTERN. Measured over this workspace's own production scope: 290
+occurrences of `assert!`, `assert_eq!` and `assert_ne!` across 41
+files. 286 OF THEM ARE COMPILE-TIME -- `const _: () = assert!(..)`
+items and `const NAME: T = { .. assert!(..) .. }` initialisers, the
+idiom this repository reaches for constantly because a const
+assertion fails the BUILD, and a build failure is the loudest refusal
+there is. Folding them into rule 5 would have produced a 41-line
+allowlist whose entries all say "these are const assertions", which is
+the mute button this gate exists to refuse, and it would go red every
+time somebody added a good one.
+
+SO THE RULE READS ONLY THE `fn` SCOPE, and the classifier is five
+lines because the delimiter is the thing not to get wrong here. It
+does NOT count braces and does NOT look for an item's end: braces live
+in string literals, and `crates/api/src/render.rs` is the proof --
+`const STYLE: &str` is a CSS literal full of `{`, `}` and `;`, and
+`crates/api/src/bars.rs` and `crates/api/src/calendar.rs` carry two
+more. Every end-of-item scanner tried against those three got them
+wrong. Instead each line carries the KIND of the last item opened
+above it:
+
+  * a line declaring a const ITEM -- `const NAME:` or `const _:`,
+    never `const fn`, which has no `:` after the name -- sets the kind
+    to const, but ONLY when it does not end in `;`. A complete
+    one-line const cannot contain a later line, so
+    `fn f() { const LIMIT: usize = 4; assert!(..) }` still scores that
+    assert as runtime. That was the one silent false negative worth
+    closing, and closing it costs one clause.
+  * a line declaring an `fn` sets the kind to fn.
+  * only lines whose kind is fn reach the grep.
+
+WHAT IT CANNOT SEE, said rather than discovered later:
+  * an `fn` DECLARED INSIDE a const initialiser flips the kind, and
+    the rest of that initialiser then reads as runtime. That is a
+    false POSITIVE -- loud, resolved by a human, and the direction
+    this repository errs in. Zero occurrences today.
+  * `debug_assert!` is deliberately NOT matched: the `_` before
+    `assert` fails the boundary guard. `[profile.release]` does not
+    set `debug-assertions`, so it defaults off and the macro compiles
+    to nothing in the shipped binary. It is not a shipping panic, and
+    claiming it was would be the overselling this gate's preamble
+    warns about.
+  * whether an assert inside a `const fn` is ever REACHED at runtime.
+    All three entries below are exactly that case, so each one is
+    traced to its callers rather than assumed.
+
+THE THREE ENTRIES:
+
+  crates/core/src/universe.rs 2
+    `MemberIndex::<N>::build`, a `pub const fn`. Its SIX production
+    call sites are all `pub static NAME: MemberIndex<N> =
+    MemberIndex::build(&TABLE);` at file scope -- FNO_INDEX, NTM_INDEX
+    and the four NIFTY_* -- so both assertions are const-evaluated and
+    a breach is a build failure, which is what the comment block above
+    them already says. The only runtime calls are in that file's own
+    `#[cfg(test)]` module, which this gate never scans, and one of them
+    exists precisely to OBSERVE the panic:
+    `a_table_size_that_is_not_a_power_of_two_is_refused` calls
+    `MemberIndex::<12>::build(&[])` at runtime because, in its own
+    words, a const panic is a build failure and a build failure is not
+    a red test.
+  crates/pull/src/manifest.rs 1
+  crates/store/src/layout.rs 1
+    The same shape twice: `Layout::declared`, a `pub const fn` whose
+    only callers are `pub const V1`/`V2`/`V3` in the same file. The
+    RUNTIME sibling is `Layout::declare`, which returns a `Result` and
+    names the offending field -- which is what section 4 asks for --
+    and both doc comments already say so: a const panic cannot format
+    a field name, and `declare` does.
+
+Pinned rather than removed, because removing any of the three removes
+a compile-time check that is doing real work. The count is a ceiling
+on the same ratchet every rule above uses: a third assert in either
+`declared`, a fifth in `build`, or a first one anywhere else, is a red
+build and a visible diff on this file.
+
+THREE MORE, AND ONLY ONE OF THEM IS A RUNTIME ASSERT AT ALL:
+
+  crates/store/src/file.rs 1
+    `read_row::<W>` opens with `const { assert!(W::LEN <= MAX_ROW_LEN,
+    ..) }` -- an INLINE CONST BLOCK, evaluated per monomorphisation, so
+    a `Row` wider than the stack buffer fails to COMPILE at that line.
+    The doc directly above it says exactly that, and says why a
+    `debug_assert` would have been wrong: it disappears in release,
+    which is where the store runs. The classifier above misses it
+    because it recognises `const NAME:` and `const _:` items and a bare
+    `const {` block is neither -- a false POSITIVE, which the rule's own
+    "what it cannot see" list names as the direction this repository
+    errs in.
+  crates/cli/src/population_admission_v3.rs 1
+    `population_v5_test_canonical_admission_record_for` is a
+    `#[cfg(test)]` fn at module scope, so it is never compiled into the
+    shipped binary at all. Gate 11's subtraction only drops an inline
+    `#[cfg(test)] mod NAME { .. }`; a `#[cfg(test)]` FUNCTION stays in
+    scope, which is right -- the scanner cannot tell a test helper from
+    a shipping one by shape alone -- and the assert it holds is the
+    fixture proving itself against the same embedded verifier reopen
+    uses. Its own doc says "not compiled into production".
+  crates/cli/src/candidate_universe.rs 1
+    THE ONE REAL RUNTIME ASSERT, and it is declared rather than removed
+    because the alternative is worse. `put_bytes(raw, offset, bytes)`
+    asserts `offset + bytes.len() <= raw.len()` before writing. Traced:
+    all forty-odd call sites pass a LITERAL offset (or a literal plus a
+    `const` stride) into a fixed-width `[u8; ROW_PAYLOAD_BYTES]` or
+    `[u8; RECEIPT_BYTES]`, so the condition is decided entirely by the
+    layout constants and no input can move it. Deleting the assert
+    leaves the `if let Some(target) = raw.get_mut(..)` below it, which
+    would SKIP the write silently -- the fallback that hides a failure
+    §4 bans in the same table as the panic. Between a loud abort on an
+    authoring error and a silently short record on disk, this rule's own
+    law -- degrade loudly or refuse, never die -- prefers the first only
+    because the second is not a refusal at all. It is the weakest entry
+    in this list and the right fix is a fallible codec, which is a
+    change to that module's owner rather than to this file.
+~~~~
+
+### Gate 11 — rules 6 and 7. THE LINEAR MEMBERSHIP SCAN.
+
+~~~~text
+
+WHY THESE EXIST, AND THE DEFECT THAT PROVES THEY DO.
+
+Rules 1-5 ban a binary search, a float, an unsized map, a sort and a
+panic. **None of them can see a linear scan**, and on 2026-08-21 an
+audit found one that had been shipping: `pull::nse::index_links`
+deduplicated with `seen.contains(&href)` -- a scan of everything kept
+so far -- INSIDE the loop that pushed to `seen`. O(n^2), with nothing
+bounding n, under a module header claiming "a constant that does not
+depend on how many matches there are".
+
+Gate 8 could not catch it: no bench named that path. Gate 11 could
+not catch it: `contains` was not a banned spelling. It was found by a
+human reading, which is exactly the coverage this gate exists to stop
+depending on. D-0224.
+
+THE SPELLING IS AMBIGUOUS, AND THAT IS WHY THERE IS AN ALLOWLIST
+RATHER THAN A BAN.
+
+`x.contains(&v)` is O(1) on a `Range` (two comparisons) and on a
+`HashSet` (one probe), and O(n) on a slice or a `Vec`. A text scan
+cannot tell them apart -- gate 11's own preamble says it refuses the
+spelling, not the behaviour -- so every occurrence is DECLARED with
+its bound, the same answer gate 1d gives for path-shaped literals and
+gate 20 for uncovered lines. A new one is red until somebody says
+which of the three it is.
+
+MEASURED, NOT GUESSED. Against the 56,494-line non-test corpus this
+gate builds: 17 occurrences of rule 6 in 9 files, 26 of rule 7 in 14.
+Every one was opened and classified before it was written down here.
+
+---- rule 6: the explicit linear search --------------------------
+Unambiguous -- `.iter().find`/`.position` IS a scan. The historical
+occurrences below are bounded by something fixed at COMPILE TIME.
+One separately named preprocessing boundary is data-sized and is
+admitted only because its O(M) cost is recorded in section 134; no
+exception is a per-bar, per-candidate or per-cell lookup:
+
+  api/{server,autopilot,audit_json}.rs -- 9 of these are
+    `censuses.iter().find(|c| c.vendor == feed)`, bounded by
+    FEED_COUNT (5 today, capped at 8 by `VendorSet(u8)`). One is
+    `self.unread`, the same per-vendor list.
+    server.rs 7 -> 8 (D-0695), and the census searches 9 -> 10: the
+    tenth is `calendar_json`'s, which finds the asked feed's census
+    once per request (it was `unreadable_calendar`'s until D-0695's
+    fourth repair, which also asks that row whether a bar file is
+    held, and moved the one search up rather than adding a second).
+    Its rows are `census_now`'s, and `census::read_all` and
+    `unreadable_root` yield exactly one row per `Vendor::ALL` entry,
+    so it sees at most FEED_COUNT rows, once per `/calendar.json`
+    request -- never per entry, per bar or per series.
+    `.filter().next()` would hide it from this rule at the same cost,
+    which is why it is declared rather than respelt.
+  pull/vendor.rs -- `rung_routes`, `layouts` and the granularity rows
+    are the descriptor's own `&'static` arrays, units long.
+  pull/fno.rs -- `MONTHS`, twelve.
+  pull/manifest.rs -- the NUL terminator inside a FIXED-WIDTH field;
+    the bound is the field, a compile-time constant.
+  pull/ssm.rs -- `AWS_FAULTS`, a `const` table.
+  pull/config.rs -- the credential file's own field list.
+  pull/resolve.rs -- a canned-answer fixture's list.
+THREE ROWS ADDED, AND ALL THREE ARE BOUNDED BY A NUMBER IN THE TYPE
+OR IN A `const` -- which is exactly the bound this rule asks for, as
+against "bounded by the data". They surfaced when the rule started
+running again behind gate 1e.
+
+  cli/src/lib.rs -- `EVERY_RUNG.iter().find(..)`. `EVERY_RUNG` is
+    `[&str; 8]`, the eight timeframes this engine sweeps, and the
+    refusal three lines below prints all eight by name. Eight, fixed
+    at compile time, and a ninth would be a `docs/05-decisions.md`
+    entry rather than a longer scan.
+  cli/src/results.rs -- `read_field(raw: &[u8; 16])`. The bound is in
+    the SIGNATURE: sixteen bytes, looking for the NUL that ends a
+    fixed-width text field. It cannot see a seventeenth byte.
+  api/src/backtest.rs -- the same function, one crate over, reading
+    the same ledger's fields independently. Its parameter is a slice
+    rather than an array, so the bound is the caller's: every
+    production call site is `text(take(16, &mut at))`. Sixteen again.
+    The independent decode is deliberate -- see the `STRIDE_BYTES`
+    assertion in that file for why this crate does not import the
+    other's reader.
+  runner/src/exit_grid_policy.rs -- one exact-subslice attestation
+    locates the requested execution slice's first candle inside the
+    complete daily-reference minute context, then byte-compares the
+    whole contiguous candidate. It runs once while sealing the
+    three-stream execution identity, is O(M) in that context, and is
+    the honest preprocessing limit recorded by section 134 -- never
+    a fallback lookup in evaluation or replay.
+FOUR MORE ROWS, AND TWO OF THEM ARE THE FIXED-WIDTH FIELD CASE THE
+`pull/manifest.rs` ENTRY ABOVE ALREADY NAMES:
+
+  cli/population_admission_v2.rs, cli/population_finalization_v2.rs
+    -- one each, and they are the same function under two names:
+    `require_remaining_zero` walks the record's trailing RESERVE region
+    looking for the first nonzero byte, so it can name the offset in
+    the refusal. The slice is `self.bytes[self.cursor..]`, and
+    `self.bytes` is one FIXED-STRIDE record -- the bound is the stride,
+    a compile-time constant, exactly as it is for the NUL terminator in
+    `pull/manifest.rs`. It cannot see a byte past the record, and the
+    sibling `require_zero_reserve` on the line above uses `.any()`,
+    which this rule does not match, over the identical region.
+  cli/lib.rs 2 -> 4 -- the two added are bounded by the same eight the
+    existing pair already are, plus the exit grid. `EVERY_RUNG.iter()
+    .find(..)` appears at two more call sites (`[&str; 8]`, and the
+    refusal beside each prints all eight by name). `rungs.iter().find(
+    |r| !EVERY_RUNG.contains(r))` validates the operator's `--rungs`
+    argument once before a run starts: each probe is against those same
+    eight, and the outer list is one command line. `exits.cells.iter()
+    .find(|cell| **cell == selected.cell)` locates the selected cell in
+    a REBUILT exit grid, which `runner/grid.rs`'s own rule 4 entry
+    bounds at the rung x stop ladders, both compile-time; it runs once
+    per admitted candidate at the record step, never inside the sweep.
+  runner/validate.rs 2 -- `visible.in_sample_all.iter().position(|v| *v
+    == best)` in the two anchored provenance checks. This is the one
+    entry here NOT bounded by a compile-time table, and it is written
+    down as what it is: the slice is one fold's retained candidate
+    placements, which `rank.rs`'s bounded top-N heap caps at `keep` --
+    a runtime parameter, not a constant. Two facts make it a declaration
+    rather than a defect. It runs once per FOLD at a validation
+    boundary, never per bar and never per candidate. And the `.max()`
+    immediately above it on the same expression is already a full pass
+    over that slice, so deleting the `position` would not change the
+    cost -- it would only lose the check that the chosen ordinal IS the
+    argmax, which is the whole point of the comparison.
+THE 41 CHAINED SITES D-1115 PINNED UNREAD, EACH NOW OPENED (D-1121).
+Rule 6 began reading method chains at D-1115, which pinned what it
+newly saw in `allow_scan_unread` without reading it. Every one was
+read for this entry and its bound is below; the per-file totals in
+`allow_scan` are the old rows plus the pinned ones, unchanged in sum.
+None is a per-candidate scan over data that an O(1) structure would
+remove at a cost worth paying, so none was rewritten.
+
+  COMPILE-TIME TABLES AND FIXED-WIDTH FIELDS
+  api/indexstoprankingjson.rs, cli/index_stop_qualification_numeric
+    .rs, cli/index_stop_store.rs -- `EVERY_RUNG`, `[&str; 8]`.
+  cli/boolean_rung_scope.rs, cli/index_stop_search.rs --
+    `ledger_all::LEDGER_RUNGS`, `[&str; 8]`.
+  api/pullrun.rs -- `ladder_rank`'s local `PULL_ORDER`, `[&str; 5]`.
+  cli/index_stop_vix_codec.rs -- `Vendor::ALL`, `[Vendor; 5]`.
+  cli/stored.rs -- `CHARTER_NON_REGULAR_IST_DAYS`, `[i64; 9]`. This
+    one runs once per stored bar in `excludes`; nine comparisons
+    is the bound, and it does not grow with the bars.
+  pull/rolling.rs 3 -- `RollingSpec::expiry_flags`, `expiry_codes`
+    and `sides`, each a `&'static` descriptor slice (2, 3 and 2).
+  pull/vendor.rs 5 -- `window_caps`, `granularity_tokens`,
+    `listings`, `groups` and `segment_tokens`, each a `&'static`
+    descriptor slice a few rows long.
+  runner/grid.rs 1 of 2 -- `Choices::iter`, five `Option<Ended>`
+    flattened, once per priced bar: five is the bound.
+  runner/research_family.rs -- the NUL in a 24-byte name field of a
+    fixed `RESEARCH_FAMILY_BYTES_V1` record.
+  telemetry/record.rs -- `Record::field`, at most `MAX_FIELDS`
+    (twelve), enforced by `Record::decode`.
+  vocab/expression.rs -- REMOVED (o1engine-24): a name token now
+    resolves through `vocab::table::index_of`, a compile-time hash
+    index, so the row-order scan of `table::TABLE` is gone and the
+    row was loose. A new search there is red.
+  api/booleanjson.rs 2, cli/boolean_qualification_reader.rs --
+    `grids()`, whose return type is `&[GridContext; 2]`.
+  cli/boolean_campaign_codec.rs 2 -- `state.rows`, which `validate`
+    refuses unless it holds exactly eight rows, one per rung; both
+    searches run after `validate`.
+
+  BOUNDED BY THE FEED COUNT, the same bound as the census rows above
+  api/autopilot.rs 1 of 2, api/server.rs 1 of 9 -- census rows, one
+    per `Vendor::ALL` entry.
+  pull/config.rs 2 of 3 -- `CredentialConfig::vendors`; `parse`
+    refuses a vendor named twice, so it holds at most `Vendor::ALL`.
+  cli/strict_range_knobs.rs -- request knob overrides. The slice type
+    does not bound it; its two production callers do: `api::sweeprun
+    ::knobs_in` emits at most one per row of its `KNOBS` table, and
+    `ledger_v6` passes `&[]`.
+  cli/global_replay_v4.rs -- one entry minute's offered attempts,
+    which `schedule_group` refuses above `MAX_INTENTS_PER_MINUTE`
+    (200) before this search runs. Up to 200 x 200 per full minute,
+    the ceiling docs/06-limits.md section 132 already states.
+  api/expressionsearchjson.rs -- the snapshot session cache, which
+    `render` holds at eight by evicting the oldest.
+
+  DATA-SIZED, AT A PREPARATION OR VALIDATION BOUNDARY
+  cli/candidate_universe.rs, cli/pre_admission_data.rs,
+    runner/signal_candle_stop.rs 1 of 2 -- locate the execution
+    slice's first bar in the complete minute context. O(M) in that
+    context, once per attestation, beside an O(M) ordering or hash
+    pass over the same slice; the cost docs/06-limits.md sections
+    134 and 142 record. A binary search would be cheaper and rule 1
+    bans it.
+  runner/signal_candle_stop.rs 1 of 2 -- the first daily period at
+    or after `first_day`, O(days) once per evaluation. The `filter`
+    on the next statement walks the same periods and the evaluation
+    then walks every signal bar, so the search adds no order.
+  runner/validate.rs 4 -- the argmax re-checks (the two rows above
+    plus `anchored` V4's and `choice_matches_visible_v2`'s), each over
+    one fold's retained placements, each beside a `.max()` over the
+    same slice, once per fold.
+  runner/validate.rs 4 -> 5 (D-1186) -- `first_live`, the first OOS
+    row with any bit set, found by one `position` over the confined
+    column ONCE per validation and then shared by every candidate,
+    whose walks each used to start at row 0. It replaces
+    candidates x training rows of dead steps with one linear pass.
+  cli/lib.rs (counted in its 7) -- `final_selection` finds the best
+    row that traded over every priced row, once per screen, after two
+    sorts of the same rows.
+  cli/population_v6.rs -- each requested strategy (refused above 25)
+    is found among the retained population rows: at most 25 walks of
+    O(P), once per replay request, after `execution_v4_source` has
+    rebuilt all P rows.
+  pull/cash_auction.rs 1 of 2 -- `Columns::parse` finds five required
+    and three lifecycle names in one CSV header (120 columns in the
+    NSE file the test reads), once per file, never per record.
+  runner/grid.rs 1 of 2 -- `Grid::baseline`, one grid's cells. No
+    production caller in the workspace calls it; tests do.
+
+  THREE OLDER ROWS, COUNTED BEFORE D-1121 AND NEVER WRITTEN DOWN
+  api/store_wire.rs -- `censuses.iter().find(|c| c.vendor == feed)`,
+    the census search the api/server.rs entry above names: one row
+    per `Vendor::ALL` entry, once per wire request.
+  api/sweeprun.rs 1 -- the counted site is one of two, and both are
+    bounded: `EVERY_RUNG.iter().copied().find(..)` probes the eight
+    rungs once per asked rung, before a run starts; and
+    `observe_elsewhere`'s `lifecycle.records.iter().find(..)` walks
+    `status_tail(.., 256)`, a telemetry query capped at 256 records,
+    once per status request.
+  pull/cash_auction.rs 2 of 2 -- the five `REQUIRED` probes in
+    `Columns::parse`, the same header walk as the lifecycle probes
+    above: once per file, never per record.
+~~~~
+
+### Gate 11 — rule 7: the ambiguous membership test
+
+~~~~text
+Three shapes share one spelling. Each file below is one of:
+
+  RANGE, two comparisons -- `(500..=599)`, `(1..=3650)`,
+    `(FIRST_YEAR..=LAST_YEAR)`, `(MIN_VOLATILITY..=MAX_VOLATILITY)`,
+    the surrogate ranges in `telemetry/json.rs`, `pricing`'s rate
+    band, and `runner/split.rs` whose `Fold::train` is
+    `(Range<usize>, Range<usize>)`.
+  HASH PROBE, O(1) -- `asked.members` and `Vendor::MASTERED` in
+    `server.rs`, `frequent` in `engine`, `held` in `fnowork`,
+    `redundant` in `runner/closed.rs`, `kept` in `cli`,
+    `read_already` in `telemetry/tail.rs`, `asserted` in `merge.rs`,
+    `join.compared` in `constituents.rs`.
+  FIXED `const` ARRAY -- `core/vendor.rs`'s segment table is at most
+    FOUR `&str`, and `NSE_PLACEHOLDER_SCRIPS` is the exchange's own
+    short placeholder list.
+
+TWO ARE BOUNDED BY A CONSTANT RATHER THAN BY THEIR TYPE, and they are
+the two worth re-reading if either file changes:
+  pull/pricing.rs -- `!out.why.contains(&sentence)` IS a `Vec` scan,
+    and it is guarded by `out.why.len() < REASONS_KEPT` on the same
+    line, so the scan can never exceed five. Remove the guard and the
+    bound goes with it.
+  api/assets.rs -- `decoded.contains(&0)` scans one decoded asset for
+    a NUL. Bounded by the asset, which is bounded at the boundary,
+    and it runs once per asset rather than per request.
+THREE ENTRIES ADDED, AND TWO OF THEM ARE THE RANGE CASE THIS RULE'S
+OWN PREAMBLE NAMES. An adversarial audit reported rule 7 as unable
+to tell `Range::contains` from `Vec::contains`, which is true and is
+the stated design -- the rule refuses the SPELLING and asks a person
+which of the three it is. These three were undeclared, so the rule
+was red on the tree while being invisible in CI behind gate 1e.
+
+  api/sweeprun.rs   -- `(1..=12).contains(&m)`, the month check in
+    `asked_from`. A `RangeInclusive` over two `u64` literals: two
+    comparisons, no allocation, no probe. O(1) by construction.
+  pull/calendar.rs  -- `(FIRST_DAY..=LAST_DAY).contains(&epoch_day)`
+    guarding `kind_of`. Both ends are `const`, so the range is fixed
+    at compile time. The line above it already says "O(1), no hash,
+    no allocation" and this is the declaration that makes the
+    sentence checkable rather than asserted.
+  api/calendar_of.rs -- `owed.contains(&bars)` in `agree`, and this
+    one IS a `Vec` scan. It is declared rather than removed because
+    it is bounded by the VENDOR COUNT and not by the data: `owed`
+    holds the distinct session lengths seen for ONE day across
+    `live`, which is `readings` filtered -- one entry per vendor
+    calendar. Two spot instruments and a handful of feeds. It does
+    not grow with bars, days, instruments or months, which is the
+    bound rule 6's entries are held to and the one that matters.
+    The second (D-1443) is `proved.contains` in `withhold_unproved`,
+    a HASH-FREE but ordered probe: `proved` is a `BTreeSet` of the
+    `(year, month)` pairs whose daily rung was read whole, at most one
+    per month in the span, so each probe is O(log months) and it runs
+    once per civil month, never per bar or per day.
+  cli/src/lib.rs 2 -> 3 -- the third is the HASH PROBE case this
+    rule's preamble names. `closed_by_evidence` collects the closed
+    set into a `HashSet` and then filters the ranked top through
+    `kept.contains(&scored.mask)`: one probe per candidate, and the
+    cost does not move when either side grows. The other two are a
+    `const` command table and a `(1..=3650)` range.
+  cli/src/population.rs 3 -- two `RangeInclusive` checks validate
+    year/month with two comparisons; the third scans the literal
+    eight-element canonical rung array. None grows with data.
+  cli/src/selection.rs 1 -- the same literal eight-element canonical
+    rung array validates a receipt timeframe. The linear bound is
+    eight at the source site, independent of receipt count.
+TWENTY-ONE MORE ROWS, AND EVERY ONE FALLS IN THE THREE SHAPES THIS
+RULE'S PREAMBLE ALREADY NAMES. They arrived with the durable-ledger
+family under `crates/cli`, and each was opened and classified before
+it was written here:
+
+  THE FIXED `const` ARRAY, and it is the same array almost every time.
+    `CANONICAL_RUNGS`, `CANONICAL_RUNGS_SECONDS`,
+    `CANDIDATE_SIGNAL_RUNGS_SECONDS_V1`, `GLOBAL_REPLAY_V2_RUNGS_SECONDS`
+    and `crate::EVERY_RUNG` are all `[_; 8]`, the eight timeframes §1
+    names, and several sites spell the same eight as a literal array
+    inline. Two spell TEN -- `[.., 7_200, 14_400]` -- which is the
+    eight plus the two coarser rungs those two ledgers accept as
+    stored input. `crates/indicators`' `CHARTER_NON_REGULAR_IST_DAYS`
+    is `[i64; 9]`, the charter's own list of non-regular sessions.
+    Files: batch.rs, candidate_universe.rs, execution_capability.rs,
+    global_replay_v2.rs, global_replay_v3.rs, population_statistics_v2
+    .rs (2 of its 7), population_statistics_v3.rs (1 of 3),
+    pre_admission_data.rs, selection.rs (raised 1 -> 2), selection_v3
+    .rs, selection_v4.rs, selection_v5.rs, stored.rs (4 of its 5 --
+    the fourth is `withheld_by_charter`, a `[i64; 9]::contains` over
+    the charter day list, D-0502),
+    stored_data_completeness.rs.
+  THE RANGE, two comparisons and no allocation. `(1970..=9999)`,
+    `(1..=12)`, `(0..1_000_000_000)` on a nanosecond field,
+    `(2..=64)` on a segment count, `(0.0..=1.0)` on a probability and
+    `(0..=PPM)` on a parts-per-million placement. Files:
+    institutional_evidence.rs, institutional_statistics.rs,
+    population_admission_v2.rs, population_admission_v3.rs,
+    population_finalization_v2.rs, population_observations_v1.rs,
+    population_statistics_v2.rs, population_statistics_v3.rs,
+    stored.rs (its fifth).
+  THE HASH PROBE, one lookup and no scan. `runner/src/lib.rs` and
+    `runner/src/rank.rs` probe the `HashSet<ConditionMask>` of
+    redundant masks once per itemset -- the same set those two files
+    are allowed a `with_capacity(0)` for under rule 3, on the arm
+    where it is empty. `runner/src/outcome.rs` probes a
+    `HashSet<i64>` of proved session days.
+
+THREE SITES ARE NONE OF THE THREE AND ARE DECLARED AS WHAT THEY ARE:
+`seen_ranks.contains(&false)` in population_statistics_v2.rs (twice)
+and population_statistics_v3.rs (once) walks a `Vec<bool>` of length
+one-per-candidate asking whether ANY Romano--Wolf rank is still
+unfilled. That is a completeness question over a permutation, so it is
+O(candidates) by definition and no data structure makes it cheaper --
+the same "removing it makes it wrong, not cheaper" argument rule 4
+carries about Benjamini-Hochberg. It runs once per authority
+validation, never per bar and never per candidate. The fourth odd one
+is `[a, b, c, d, e].contains(&0)` in population_statistics_v2.rs,
+which is a five-element array literal checking that five declared
+bounds are all nonzero.
+
+  cli/src/candidate_trades.rs 1 -> REMOVED (D-0991). Its one site
+    was the linear `evaluated.grid.cells.contains(&cell)` in
+    `Capture::record_inner`, rescanning the grid a second time after
+    `shown_cell` had already returned a copy of one of its own cells.
+    D-0991 deleted it -- the existing equality check proves
+    membership -- so the file no longer matches this rule and its
+    row would only make the allowlist read looser than the tree.
+~~~~
