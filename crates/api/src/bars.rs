@@ -1005,20 +1005,14 @@ pub fn window(
     // `extremes_of` and the per-file change fold each need every row; the read
     // is O(bars) because of the question being asked. What is removed is the
     // ordering of rows nobody will see.
-    let want = offset.saturating_add(limit);
-    if want == 0 {
-        all.clear();
-    } else if want < all.len() {
-        all.select_nth_unstable_by(want - 1, order);
-        all.truncate(want);
-    }
-    all.sort_by(order);
-
-    let bars = all
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .collect::<Vec<WindowBar>>();
+    //
+    // AND THE ROWS BEFORE THE PAGE ARE NOT ORDERED EITHER. `want` was
+    // `offset + limit`, and `offset` comes off the query string uncapped, so a
+    // page near the end of a 1.9-million-bar window ordered all of them again,
+    // and an offset past the end ordered every row to answer none. `page_of`
+    // partitions twice instead: once at `offset`, once at `limit` inside what
+    // is left, and orders only the page. W1-api5-4, D-0953.
+    let bars = page_of(all, offset, limit, order);
 
     Ok(Window {
         total,
@@ -1028,6 +1022,44 @@ pub fn window(
         faults,
         extremes,
     })
+}
+
+/// The rows `offset .. offset + limit` of `all` under `order`, in that order.
+///
+/// Equal to ordering all of `all` and slicing, when `order` is a total order
+/// (no two rows compare equal), which is what `window`'s comparator is: its
+/// timestamp tie-break is unique within a series.
+///
+/// # Cost
+///
+/// Two partitions and one ordering of the page: an `O(n)` partition at
+/// `offset` (skipped when it is zero), an `O(n - offset)` partition at `limit`
+/// inside what is left, then `O(limit log limit)` to order the page. An offset
+/// at or past the end answers empty with no comparison at all. The ordering of
+/// rows before or after the page, which an `offset + limit` partition paid
+/// near the end of a window, is gone. `std`'s `select_nth_unstable_by` is the
+/// partition, and the comparison count is measured, not argued, by
+/// `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
+/// W1-api5-4, D-0953.
+fn page_of<T>(
+    mut all: Vec<T>,
+    offset: usize,
+    limit: usize,
+    mut order: impl FnMut(&T, &T) -> std::cmp::Ordering,
+) -> Vec<T> {
+    if limit == 0 || offset >= all.len() {
+        return Vec::new();
+    }
+    if offset > 0 {
+        all.select_nth_unstable_by(offset, &mut order);
+    }
+    let mut page = all.split_off(offset);
+    if limit < page.len() {
+        page.select_nth_unstable_by(limit - 1, &mut order);
+        page.truncate(limit);
+    }
+    page.sort_by(&mut order);
+    page
 }
 
 struct OpenedWindow {
@@ -1298,27 +1330,84 @@ mod tests {
             .collect();
         let order = |a: &(i64, i64), b: &(i64, i64)| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));
 
-        for (offset, limit) in [(0, 1), (0, 10), (5, 10), (57, 10), (0, 60), (59, 1), (0, 0)] {
+        for (offset, limit) in [
+            (0, 1),
+            (0, 10),
+            (5, 10),
+            (57, 10),
+            (0, 60),
+            (59, 1),
+            (0, 0),
+            (60, 1),
+            (61, 5),
+            (usize::MAX, usize::MAX),
+            (1, usize::MAX),
+            (59, usize::MAX),
+            (30, 0),
+        ] {
             let mut whole = rows.clone();
             whole.sort_by(order);
             let expected: Vec<(i64, i64)> = whole.into_iter().skip(offset).take(limit).collect();
-
-            let mut paged = rows.clone();
-            let want = offset.saturating_add(limit);
-            if want == 0 {
-                paged.clear();
-            } else if want < paged.len() {
-                paged.select_nth_unstable_by(want - 1, order);
-                paged.truncate(want);
-            }
-            paged.sort_by(order);
-            let got: Vec<(i64, i64)> = paged.into_iter().skip(offset).take(limit).collect();
-
+            let got = super::page_of(rows.clone(), offset, limit, order);
             assert_eq!(
                 got, expected,
                 "offset={offset} limit={limit}: the bounded page must be the \
                  same rows in the same order as the unbounded one"
             );
+        }
+    }
+
+    /// **A page orders itself and nothing else, wherever its offset lands.**
+    /// W1-api5-4, D-0953.
+    ///
+    /// `window` partitioned at `offset + limit` and ordered everything before
+    /// that, so a page near the end of the window (or an offset past it, which
+    /// the query string does not cap) ordered every row. Counted here with a
+    /// comparator that counts: over 200,000 rows in three adversarial input
+    /// orders, the page at the very end costs a linear number of comparisons,
+    /// within a bound an `n log n` ordering of the whole window (some 3.5
+    /// million comparisons here) cannot meet, and an offset past the end costs
+    /// none.
+    #[test]
+    fn the_page_orders_only_itself_wherever_the_offset_lands() {
+        const N: usize = 200_000;
+        const N_I64: i64 = 200_000;
+        const LIMIT: usize = 1_000;
+        let inputs: [(&str, Vec<(i64, i64)>); 3] = [
+            ("ascending", (0..N_I64).map(|i| (i, i)).collect()),
+            ("descending", (0..N_I64).rev().map(|i| (i, i)).collect()),
+            (
+                "one primary value",
+                (0..N_I64).map(|i| (7, (i * 7919) % N_I64)).collect(),
+            ),
+        ];
+        for (name, rows) in inputs {
+            for offset in [0, N / 2, N - LIMIT, N - 1, N, N + 1, usize::MAX] {
+                let compared = std::cell::Cell::new(0_u64);
+                let order = |a: &(i64, i64), b: &(i64, i64)| {
+                    compared.set(compared.get() + 1);
+                    a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+                };
+                let got = super::page_of(rows.clone(), offset, LIMIT, order);
+                let mut whole = rows.clone();
+                whole.sort_unstable();
+                let expected: Vec<_> = whole.into_iter().skip(offset).take(LIMIT).collect();
+                assert_eq!(got, expected, "{name} offset={offset}");
+                // Two linear partitions and one ordering of the page.
+                let bound = 12 * N as u64 + 2 * (LIMIT as u64) * 10;
+                assert!(
+                    compared.get() <= bound,
+                    "{name} offset={offset}: {} comparisons against a linear bound of {bound}",
+                    compared.get()
+                );
+                if offset >= N {
+                    assert_eq!(
+                        compared.get(),
+                        0,
+                        "{name} offset={offset}: an empty page compares nothing"
+                    );
+                }
+            }
         }
     }
 

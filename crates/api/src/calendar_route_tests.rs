@@ -85,6 +85,44 @@ impl Fixture {
         fs::write(path, manifest.image()).expect("publish complete fixture census");
     }
 
+    /// A census entry for `symbol` at `timeframe`, and NO bar file anywhere.
+    ///
+    /// At a rung `calendar_of::derive` never opens (it reads `1day` and
+    /// `1min`), the derivation opens nothing the census holds, so it is not a
+    /// refusal: it is an empty calendar. GAP14-63.
+    fn census_only(&self, vendor: Vendor, segment: Segment, symbol: &str, timeframe: Timeframe) {
+        let month = YearMonth::new(2025, 5).expect("fixture month");
+        let ts = i64::from(
+            Day::new(2025, 5, 2)
+                .expect("fixture date")
+                .days_from_epoch(),
+        ) * 86_400_000_000;
+        let path = manifest_path(&self.root, vendor);
+        let bytes = if path.exists() {
+            fs::read(&path).expect("existing manifest")
+        } else {
+            Vec::new()
+        };
+        let mut manifest = Manifest::open_image(vendor, &bytes).expect("manifest");
+        manifest
+            .record(Entry {
+                key: EntryKey {
+                    contract: None,
+                    exchange: Exchange::Nse,
+                    segment,
+                    symbol: Symbol::new(symbol).expect("symbol"),
+                    timeframe,
+                    month,
+                },
+                rows: 1,
+                first_ts_micros: ts,
+                last_ts_micros: ts,
+            })
+            .expect("one entry with no file behind it");
+        fs::create_dir_all(path.parent().expect("manifest parent")).expect("manifest directory");
+        fs::write(path, manifest.image()).expect("publish the census");
+    }
+
     async fn get(&self, query: &str) -> (axum::http::StatusCode, Value) {
         let uri = format!("/calendar.json?{query}").parse().expect("uri");
         let (status, headers, body) =
@@ -136,6 +174,68 @@ async fn calendar_reads_current_feed_and_cash_identity_after_startup() {
     let (status, unknown) = fixture.get("feed=notafeed").await;
     assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
     assert!(unknown.to_string().contains("notafeed"));
+}
+
+/// **A symbol this feed holds no file for is not a voter, and is not named in
+/// `derivedFrom`.** GAP14-63, D-0953.
+///
+/// The exchange branch of `/calendar.json` keeps a reading only when its
+/// calendar has a session (`calendar.sessions() > 0`). Nothing tested that
+/// guard: with it removed, every symbol below would be listed as a source the
+/// exchange calendar was derived from, though none of them contributed a day,
+/// and their empty calendars would vote in `agree`. Two census-only symbols at
+/// rungs the derivation never opens (one index, one cash), and a symbol only
+/// another feed holds a file for.
+#[tokio::test]
+async fn a_symbol_this_feed_holds_no_file_for_is_not_named_in_from() {
+    let fixture = Fixture::new("calendar-route-empty-voter");
+    fixture.day(Vendor::Dhan, Segment::Index, "NIFTY", 2);
+    fixture.census_only(
+        Vendor::Dhan,
+        Segment::Index,
+        "GHOSTIDX",
+        Timeframe::MINUTE_5,
+    );
+    fixture.census_only(Vendor::Dhan, Segment::Cash, "GHOSTEQ", Timeframe::MINUTE_15);
+    fixture.day(Vendor::Zerodha, Segment::Index, "ZONLY", 5);
+
+    let (status, exchange) = fixture.get("feed=dhan").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{exchange}");
+    let from: Vec<_> = exchange["derivedFrom"]
+        .as_array()
+        .expect("sources")
+        .iter()
+        .map(|name| name.as_str().expect("source name"))
+        .collect();
+    assert_eq!(from, ["NIFTY"], "{exchange}");
+    assert_eq!(exchange["sessions"], 1, "{exchange}");
+    assert_eq!(
+        exchange["days"][0]["day"],
+        Day::new(2025, 5, 2).expect("date").days_from_epoch()
+    );
+
+    // THE SAME SYMBOLS, ASKED BY NAME, ARE AN EMPTY ANSWER AND NOT A REFUSAL:
+    // the census names them and no held file failed to open.
+    for name in ["GHOSTIDX", "GHOSTEQ"] {
+        let (status, body) = fixture.get(&format!("feed=dhan&symbol={name}")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{name}: {body}");
+        assert_eq!(body["sessions"], 0, "{name}: {body}");
+    }
+    // AND A FEED HOLDING ONLY CENSUS-ONLY SYMBOLS NAMES NO SOURCE AT ALL.
+    fixture.census_only(
+        Vendor::Groww,
+        Segment::Index,
+        "GHOSTIDX",
+        Timeframe::MINUTE_5,
+    );
+    let (status, groww) = fixture.get("feed=groww").await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{groww}");
+    assert_eq!(
+        groww["derivedFrom"].as_array().expect("sources").len(),
+        0,
+        "{groww}"
+    );
+    assert_eq!(groww["sessions"], 0, "{groww}");
 }
 
 #[tokio::test]

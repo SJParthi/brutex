@@ -4520,8 +4520,13 @@ fn store_body(
 ///
 /// # Cost
 ///
-/// O(1) per entry, and the walk is the ask: a scrub of a vendor is a scrub of
-/// every month it claims. Nothing is sorted and nothing is read whole.
+/// One bar file opened per held entry (its header and two records read), and
+/// the walk is the ask: a scrub of a vendor is a scrub of every month it
+/// claims. Nothing is sorted. The walk itself is `Manifest::newest`, which
+/// builds a set over the manifest's whole append log, so a request is
+/// `O(log length)` in memory plus `O(E_v)` file opens. This said "O(1) per entry
+/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-0953;
+/// `docs/06-limits.md`'s D-0953 section.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -5134,9 +5139,14 @@ pub struct Site {
     reload_lock: std::sync::Mutex<()>,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
     pub censuses: Vec<census::VendorCensus>,
-    /// The coverage grid's instrument axis — every series the censuses hold,
-    /// plus the two the engine sweeps. Sorted, so a row's ordinal is stable
-    /// across reloads and restarts.
+    /// The coverage grid's instrument axis AT STARTUP — every series the boot
+    /// censuses held, plus the two the engine sweeps. Sorted, so a row's
+    /// ordinal is stable across reloads and restarts.
+    ///
+    /// **No request draws from it.** `/store?show=gaps` built its axis here,
+    /// so a series first pulled after boot had no row until a restart. It now
+    /// takes `census::held_series` over the request's own fresh census. UC-20,
+    /// D-0953.
     pub series: Vec<census::Series>,
     /// Folders holding CSVs, walked once at startup rather than per render.
     pub folders: Vec<String>,
@@ -5182,14 +5192,11 @@ pub struct Site {
     pub autopilot: autopilot::Control,
     /// When the manifests above were read, in epoch seconds.
     ///
-    /// **A counter on this page is as old as this process.** The censuses are
-    /// read once into an `Arc<Site>` — D-0039, and re-reading them per request
-    /// is the O(entries) cost that split exists to remove — so a pull performed
-    /// by *this running server* is on disk and in the journal while these
-    /// counters still say what they said at startup. That is a real staleness
-    /// and it is now said out loud on `/store` rather than left for an operator
-    /// to discover: [`store_html`] compares this against the newest audit
-    /// record, which is one 256-byte read.
+    /// [`store_html`] compared this against the newest audit record and warned
+    /// that its counters were this process's startup read. Every half of that
+    /// page now reads the census fresh (D-0352, and D-0953 for the gaps view
+    /// and the census notes), so the warning had become false and is gone.
+    /// UC-20. This stays the time the boot snapshot above was taken.
     pub loaded_at: i64,
 }
 
@@ -6162,6 +6169,41 @@ fn land_bodies_scheduled(
     // Snapshot before any source append. Observations explain refusals only;
     // Runtime preserves the static authority even when all index feeds agree.
     let observed_calendar = ingestion_observations(landed, site);
+    land_bodies_observed(
+        landed,
+        site,
+        cash_schedule,
+        bodies,
+        observed_calendar.as_deref(),
+    )
+}
+
+/// [`land_bodies_scheduled`], with the index observation already taken.
+///
+/// # Why the observation is a parameter
+///
+/// `land_spot` lands one instrument one body at a time, and it called
+/// [`land_bodies_scheduled`] per body, so [`ingestion_observations`] ran per
+/// body too. Each body's append rewrites the vendor's manifest, which moves the
+/// stamp `census_now` is keyed on. So every body after the first missed the
+/// census cache, read every vendor manifest whole, sorted and deduplicated
+/// every entry, and then missed the calendar cache and derived the index
+/// calendar again over the same months. On a first fill that is every body.
+/// W1-api5-0, D-0953.
+///
+/// `land_spot` now takes the observation ONCE per instrument, before its first
+/// body appends, and hands it to every body. That is still a snapshot before
+/// any source append, which is what the observation must be. A body's own
+/// window never needs an earlier body's bars: bodies are disjoint windows, and
+/// the observation is diagnostic, never schedule authority. The cost that
+/// remains per instrument is written in `docs/06-limits.md`'s D-0953 section.
+fn land_bodies_observed(
+    landed: &BrokerWindow,
+    site: &Site,
+    cash_schedule: Option<&pull::cash_auction::Schedule>,
+    bodies: &[(pull::session::Window, pull::fetch::RawWindow)],
+    observed_calendar: Option<&pull::calendar::Calendar>,
+) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
         // THE INSTRUMENT'S OWN CLASS, WHICH DECIDES THE SESSION CLOCK.
@@ -6185,7 +6227,7 @@ fn land_bodies_scheduled(
     };
     let plan = pull::ingest::Plan {
         cash_schedule,
-        calendar: observed_calendar.as_deref().map_or_else(
+        calendar: observed_calendar.map_or_else(
             pull::calendar::Runtime::default,
             pull::calendar::Runtime::from_observed,
         ),
@@ -7277,13 +7319,20 @@ async fn land_spot(
     dated: &mut std::collections::HashMap<u32, pull::cash_auction::DailyEligibility>,
 ) -> pull::ingest::Ingested {
     let mut done = pull::ingest::Ingested::default();
+    // ONE OBSERVATION PER INSTRUMENT, NOT ONE PER BODY. Each body's append
+    // moves the manifest stamp, so a per-body observation re-read every vendor
+    // manifest and re-derived the index calendar once per body. Taken here,
+    // before the first append, it is the same snapshot-before-append the
+    // observation has always been. See `land_bodies_observed`. W1-api5-0, D-0953.
+    let observed_calendar = ingestion_observations(landed, site);
     for bodies in landed.bodies.chunks(1) {
         match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
-            Ok(schedule) => done.absorb(land_bodies_scheduled(
+            Ok(schedule) => done.absorb(land_bodies_observed(
                 landed,
                 site,
                 schedule.as_ref(),
                 bodies,
+                observed_calendar.as_deref(),
             )),
             Err(why) => {
                 let _noted = telemetry::emit(
@@ -14719,13 +14768,23 @@ pub fn store_html(
     } else {
         // The product, as before: bounded by construction, so the last page is
         // a division rather than a walk and `?page=999` clamps.
-        let total = census::grid_rows(site.series.len());
+        //
+        // THE AXIS AND THE CELLS FROM THE SAME FRESH READING AS EVERY OTHER
+        // HALF OF THIS PAGE. They came from `site.series` and `site.censuses`,
+        // both filled once in `Site::new`, so after a pull by this process the
+        // gaps view still drew the startup store: a series first pulled since
+        // boot had no row, and a month landed since boot was a hollow cell
+        // beside a vendor card counting it. UC-20, D-0953. The axis is
+        // `held_series` over this request's censuses: O(keys log keys) per
+        // `show=gaps` request, written in `docs/06-limits.md`'s D-0953 section.
+        let series = census::held_series(&censuses);
+        let total = census::grid_rows(series.len());
         let last = total.saturating_sub(1) / PAGE_ROWS;
         let page = page.min(last);
         (
             census::coverage_page(
-                &site.series,
-                &site.censuses,
+                &series,
+                &censuses,
                 today,
                 page.saturating_mul(PAGE_ROWS),
                 PAGE_ROWS,
@@ -14740,37 +14799,22 @@ pub fn store_html(
          header, and every grid cell is one hash probe",
         site.store_root.display()
     )];
-    // A COUNTER ON THIS PAGE IS AS OLD AS THIS PROCESS, and until now nothing
-    // said so. The censuses are read once into an `Arc<Site>` (D-0039), so a
-    // pull run by this very server lands on disk and in the journal while these
-    // cards still say what they said at startup. The audit journal is what
-    // makes the staleness detectable in constant time: one 256-byte read of the
-    // newest record, compared against the second the site was loaded.
+    // NO "STARTUP READ" WARNING ANY MORE, BECAUSE THERE IS NO STARTUP READ ON
+    // THIS PAGE. Two notes said a pull had run since the manifests were read
+    // and that the counters were this process's startup read. D-0352 made the
+    // rows and the vendor cards fresh, and D-0953 made the gaps view and the
+    // census notes fresh, so both notes had become false: they told the
+    // operator to restart to see what the page was already showing. UC-20.
     let journal = site.journal();
     let log = journal.look();
-    if let Some(record) = newest_record(&journal, &log)
-        && record.at_unix_secs >= site.loaded_at
-    {
-        // TWO NOTES, EACH UNDER `render::clamp`'s 160-byte ceiling. One long
-        // note would be cut mid-sentence by the renderer, and a truncated
-        // warning is a warning nobody finishes reading.
-        notes.push(format!(
-            "UNCHECKED — a pull ran at {}; these manifests were read at {}. \
-             Restart to refresh, or see /audit.",
-            ist_stamp(record.at_unix_secs),
-            ist_stamp(site.loaded_at)
-        ));
-        notes.push(
-            "The counters below are this process's startup read; re-reading them \
-             per request is the cost D-0039 removed."
-                .to_owned(),
-        );
-    }
     let trouble = journal_trouble(&log);
     if !trouble.is_empty() {
         notes.push(format!("UNAVAILABLE — audit journal {trouble}"));
     }
-    notes.extend(site.censuses.iter().map(census::VendorCensus::note));
+    // THE NOTES FROM THIS REQUEST'S CENSUSES, not `site.censuses`. The boot
+    // snapshot printed "UNAVAILABLE — no manifest" beside a fresh vendor card
+    // counting months, on every view of this page. UC-20, D-0953.
+    notes.extend(censuses.iter().map(census::VendorCensus::note));
     let mut notes = render::Notes::build(&notes);
     // The master notes ride along, because an `UNAVAILABLE` master is why the
     // grid may be down to the two swept series — but ALREADY PREPARED. Cloning
@@ -16372,8 +16416,14 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
             // address and pid into this file after taking the lock, and reading a
             // locked file is not itself a locked operation.
+            //
+            // THE FIRST LINE ONLY. A holder stamps one line. A file stamped by a
+            // build that did not cut it to its own stamp can still carry an
+            // older, longer holder's tail after that line, and quoting the whole
+            // file showed the operator a second, stale pid as though it held the
+            // store. R9-api-cx-2, D-0953.
             let held_by = std::fs::read_to_string(&path).unwrap_or_default();
-            let held_by = held_by.trim();
+            let held_by = held_by.lines().next().unwrap_or_default().trim();
             release_root(&key);
             return Err(format!(
                 "REFUSED: another brutex api is already serving this store.\n  \
@@ -16394,8 +16444,16 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     };
     // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
     // written by the instance that actually holds it.
+    //
+    // AND CUT TO THE STAMP'S OWN LENGTH. The file is opened without truncation,
+    // because truncating before the lock is held would erase a live holder's
+    // stamp. So a previous holder whose stamp was longer left its tail after
+    // this one, and the file named two pids. The length is set after the write,
+    // so a refused reader sees this stamp's line first at every moment, and the
+    // reader quotes only that line. R9-api-cx-2, D-0953.
     let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes());
+    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes())
+        .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)));
     Ok(ServeLock {
         held: Some(file),
         root: key,
@@ -18475,6 +18533,113 @@ mod tests {
         );
     }
 
+    /// **One instrument's bodies land on ONE index observation, so landing
+    /// them reads no vendor manifest when the census is warm.** W1-api5-0,
+    /// D-0953.
+    ///
+    /// `land_spot` landed each body through `land_bodies_scheduled`, which
+    /// took the observation itself. Each body's append rewrote Zerodha's
+    /// manifest and moved the census stamp, so every body after the first
+    /// missed the census cache and read every manifest whole: three reads for
+    /// four bodies here, and one per body on a real first fill. The observation
+    /// is now taken once per instrument, before the first append.
+    ///
+    /// Four one-day bodies, the first of them on the day the daily bar proves,
+    /// and a fifth that is EMPTY: an empty answer lands nothing and must cost
+    /// nothing either.
+    #[tokio::test]
+    async fn one_instrument_lands_every_body_on_one_index_observation() {
+        use pull::fetch::{RawRow, RawWindow};
+        use pull::session::{IST_OFFSET_SECS, Window};
+        use pull::vendor::{Feed, Granularity, Listing, Transport};
+        let (site, _) = readiness_fixture("observation-once", "INE002A01018");
+        let days = [
+            day(2026, 9, 1),
+            day(2026, 9, 2),
+            day(2026, 9, 3),
+            day(2026, 9, 4),
+        ];
+        let midnight = |date: Day| i64::from(date.days_from_epoch()) * 86_400 - IST_OFFSET_SECS;
+        let row = |timestamp| RawRow {
+            timestamp,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 0,
+            open_interest: None,
+        };
+        let Transport::Http(spec) = Feed::Zerodha.descriptor().transport else {
+            panic!("HTTP descriptor");
+        };
+        let first = Window::new(days[0], days[0]).unwrap();
+        let mut landed = BrokerWindow {
+            listing: Listing::Index,
+            contract: None,
+            unfetched: None,
+            instrument: "NIFTY".to_owned(),
+            origin: "test only".to_owned(),
+            spec,
+            exchange: "NSE",
+            segment: "INDEX",
+            store_vendor: Vendor::Zerodha,
+            window: first,
+            granularity: Granularity::Day1,
+            bodies: vec![(
+                first,
+                RawWindow {
+                    rows: vec![row(midnight(days[0]))],
+                },
+            )],
+        };
+        let daily = super::land_one(&landed, &site);
+        assert_eq!(daily.bars_committed, 1, "{:?}", daily.failures);
+
+        landed.granularity = Granularity::Minute1;
+        landed.window = Window::new(days[0], day(2026, 9, 5)).unwrap();
+        landed.bodies = days
+            .iter()
+            .map(|&date| {
+                (
+                    Window::new(date, date).unwrap(),
+                    RawWindow {
+                        rows: (0..375)
+                            .map(|minute| row(midnight(date) + (555 + minute) * 60))
+                            .collect(),
+                    },
+                )
+            })
+            .chain(std::iter::once((
+                Window::new(day(2026, 9, 5), day(2026, 9, 5)).unwrap(),
+                RawWindow { rows: Vec::new() },
+            )))
+            .collect();
+        let key = brutex_core::instrument::InstrumentKey::index(
+            brutex_core::instrument::Exchange::Nse,
+            "NIFTY",
+        )
+        .unwrap();
+        let manifest = pull::manifest::manifest_path(&site.store_root, Vendor::Zerodha);
+        // WARM: the census and the calendar both cached at the current stamp.
+        let warm = super::ingestion_observations(&landed, &site).expect("NIFTY is observed");
+        assert!(warm.sessions() > 0);
+        let base = census::manifest_reads::of(&manifest);
+        let mut dated = std::collections::HashMap::new();
+        let done = super::land_spot(&landed, &key, &site, &mut dated).await;
+        assert_eq!(done.members, 5, "every body landed: {done:?}");
+        assert_eq!(done.bars_committed, 4 * 375, "{:?}", done.failures);
+        assert_eq!(
+            census::manifest_reads::of(&manifest) - base,
+            0,
+            "landing five bodies of one instrument read the manifest per body"
+        );
+        // AND THE NEXT INSTRUMENT'S OBSERVATION STILL SEES THE NEW STORE: the
+        // stamp moved, so it reads once, and once only.
+        let after = super::ingestion_observations(&landed, &site).expect("NIFTY is observed");
+        assert!(after.sessions() >= warm.sessions());
+        assert_eq!(census::manifest_reads::of(&manifest) - base, 1);
+    }
+
     async fn cash_month_replay_fixture(
         tag: &str,
     ) -> (Site, BrokerWindow, brutex_core::instrument::InstrumentKey) {
@@ -19336,6 +19501,81 @@ mod tests {
         );
         drop(second);
         drop(child);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The serve lock names exactly one holder: the one that holds it.**
+    /// R9-api-cx-2, D-0953.
+    ///
+    /// `serve.lock` is opened without truncation, so a holder whose stamp was
+    /// shorter than the last one left that one's tail in the file, and a
+    /// refused instance quoted the whole file: two pids, one of them stale,
+    /// shown as the holder. The holder now cuts the file to its own stamp, and
+    /// the refusal quotes the first line only, which also covers a file left
+    /// long by a holder that predates the cut.
+    #[test]
+    fn the_serve_lock_names_only_its_holder_after_a_longer_stale_stamp() {
+        let root = crate::scratch::path("serve-lock-stale-tail");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let lock_path = root.join(SERVE_LOCK);
+        // A MEBIBYTE OF STALE STAMPS, multi-line, with the widest address and
+        // pid a stamp can carry.
+        let stale =
+            "addr=[2001:db8::ffff:ffff]:65535 pid=4294967295\nGARBAGE pid=31337\n".repeat(16_384);
+        std::fs::write(&lock_path, &stale).expect("a stale lock file");
+
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("an address");
+        let taken = take_serve_lock(&root, addr).expect("a free store");
+        assert_eq!(
+            std::fs::read_to_string(&lock_path).expect("reads"),
+            format!("addr={addr} pid={}\n", std::process::id()),
+            "the file is this holder's stamp and nothing after it"
+        );
+        drop(taken);
+
+        // A HOLDER THAT DID NOT CUT: its short stamp over the stale megabyte.
+        std::fs::write(&lock_path, &stale).expect("stale again");
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("the lock file"),
+            lock_path.clone(),
+        )
+        .expect("nothing else holds it");
+        std::io::Write::write_all(&mut &*squatter, b"addr=127.0.0.1:8080 pid=4242\n")
+            .expect("stamp");
+        let refused = take_serve_lock(&root, addr).expect_err("the store is held");
+        assert!(
+            refused.contains("held by: addr=127.0.0.1:8080 pid=4242\n"),
+            "{refused}"
+        );
+        for stale_word in ["4294967295", "GARBAGE", "31337", "2001:db8"] {
+            assert!(!refused.contains(stale_word), "{stale_word}: {refused}");
+        }
+        drop(squatter);
+
+        // AN EMPTY FIRST LINE IS "NOT YET STAMPED", never the stale line after it.
+        std::fs::write(&lock_path, format!("\n{stale}")).expect("an unstamped head");
+        let squatter = store::flock::Flock::try_lock(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("the lock file"),
+            lock_path.clone(),
+        )
+        .expect("nothing else holds it");
+        let refused = take_serve_lock(&root, addr).expect_err("the store is held");
+        assert!(
+            refused.contains("had not yet stamped the file"),
+            "{refused}"
+        );
+        assert!(!refused.contains("4294967295"), "{refused}");
+        drop(squatter);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -21576,25 +21816,66 @@ mod tests {
         assert!(!first.contains("class=\"pager\""), "{first}");
     }
 
+    /// A Dhan manifest at `root` holding one 1-minute month of each named
+    /// index series, written whole as a pull's install leaves it.
+    fn publish_index_months(root: &Path, symbols: &[&str], month: store::path::YearMonth) {
+        use pull::manifest::{Entry, EntryKey, Manifest, manifest_path};
+        // A DISTINCT MODIFIED TIME PER PUBLICATION, set explicitly below, so
+        // the census cache's stamp moves whatever the filesystem's resolution.
+        static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut manifest = Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis manifest");
+        for name in symbols {
+            manifest
+                .record(Entry {
+                    key: EntryKey {
+                        contract: None,
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(name).expect("a symbol"),
+                        timeframe: store::path::Timeframe::MINUTE_1,
+                        month,
+                    },
+                    rows: 8_250,
+                    first_ts_micros: 1_751_350_800_000_000,
+                    last_ts_micros: 1_751_363_940_000_000,
+                })
+                .expect("records");
+        }
+        let path = manifest_path(root, Vendor::Dhan);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&path, manifest.image()).expect("writes");
+        let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("reopens")
+            .set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + tick),
+            )
+            .expect("stamps");
+    }
+
     #[test]
     fn the_store_grid_pages_when_it_is_larger_than_one_page() {
         // 200 rows per page against 36 months means the pager appears at six
         // instruments. Without a fixture that large the paging arms are code no
         // test enters.
+        //
+        // EIGHT HELD SERIES ON DISK, PLUS THE TWO SWEPT ONES THE AXIS ALWAYS
+        // NAMES, is ten. This set `site.series` by hand; the gaps view now draws
+        // its axis from the request's own census (UC-20, D-0953), so the ten
+        // rows have to be in a manifest to be on the page.
         let dir = agreeing("storepager");
-        let mut site = site("storepager", &dir);
-        site.series = (0..10)
-            .filter_map(|i| {
-                Some(census::Series {
-                    contract: None,
-                    exchange: brutex_core::instrument::Exchange::Nse,
-                    segment: brutex_core::instrument::Segment::Index,
-                    symbol: brutex_core::symbol::Symbol::new(&format!("IDX{i:02}")).ok()?,
-                    timeframe: store::path::Timeframe::MINUTE_1,
-                })
-            })
-            .collect();
-        assert_eq!(census::grid_rows(site.series.len()), 360);
+        let site = site("storepager", &dir);
+        let names: Vec<String> = (0..8).map(|i| format!("IDX{i:02}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        publish_index_months(
+            &site.store_root,
+            &names,
+            store::path::YearMonth::new(2026, 8).expect("a month"),
+        );
+        let (censuses, _) = census_now(&site);
+        assert_eq!(census::grid_rows(census::held_series(&censuses).len()), 360);
 
         let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(first.contains("page 1 of 2"), "{first}");
@@ -27830,20 +28111,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The store page says out loud that its counters predate a pull this
-    /// process has since performed.
+    /// The store page no longer calls its counters a startup read after a pull,
+    /// because they are not one. UC-20, D-0953.
+    ///
+    /// This test pinned two notes: "UNCHECKED — a pull ran at …; these
+    /// manifests were read at …" and "the counters below are this process's
+    /// startup read". Every half of the page now reads the census per request,
+    /// so both told the operator to restart to see what the page already
+    /// showed. A journal record newer than the site's load must leave the page
+    /// without either, in both views.
     #[test]
-    fn the_store_page_says_when_its_counters_are_older_than_the_last_pull() {
+    fn the_store_page_no_longer_calls_fresh_counters_a_startup_read() {
         let dir = agreeing("storestale");
         let site = site("storestale", &dir);
-        let fresh = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
-        assert!(
-            !fresh.contains("these manifests were read at"),
-            "nothing has happened yet: {fresh}"
-        );
-
-        // A record stamped after the site loaded is exactly the case the note
-        // exists for: the bars and the manifest moved, and these cards did not.
         let later = std::time::SystemTime::now() + std::time::Duration::from_mins(1);
         site.journal()
             .append(&audit::Record::refused(
@@ -27854,25 +28134,82 @@ mod tests {
                 "",
             ))
             .expect("appends");
-        let stale = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
+        for query in ["show=gaps", ""] {
+            let page = store_ok(&site, day(2026, 8, 7), 0, query);
+            assert!(
+                !page.contains("UNCHECKED — a pull ran at"),
+                "{query}: {page}"
+            );
+            assert!(!page.contains("startup read"), "{query}: {page}");
+            assert!(!page.contains("Restart to refresh"), "{query}: {page}");
+        }
+    }
+
+    /// **`/store?show=gaps` draws its axis, its cells and its census notes from
+    /// the census as it is now, not as it was at boot.** UC-20, D-0953.
+    ///
+    /// The site loads over an empty store. A pull then publishes a manifest
+    /// holding NIFTY and a series nobody held at boot, and a second pull grows
+    /// it again. Before the fix the gaps view still drew two rows of hollow
+    /// cells from `site.series` and `site.censuses`, and every view printed
+    /// "dhan: UNAVAILABLE — no manifest" beside a vendor card counting months.
+    #[test]
+    fn the_gaps_view_and_the_census_notes_read_the_store_as_it_is_now() {
+        let dir = agreeing("storegapsfresh");
+        let site = site("storegapsfresh", &dir);
+        let today = day(2026, 8, 7);
+        let august = store::path::YearMonth::new(2026, 8).expect("a month");
+
+        let boot = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            stale.contains("UNCHECKED — a pull ran at"),
-            "the staleness is named, not left to be discovered: {stale}"
+            boot.contains("72 instrument-month(s) in the grid"),
+            "{boot}"
         );
-        // IT SURVIVES THE RENDERER'S CLAMP WHOLE. `render::clamp` cuts a note
-        // past 160 bytes at its last comma and appends "… and N more", so a
-        // warning that is too long is a warning whose second half nobody reads.
-        // Asserting the closing tag right after the last word is what proves
-        // this one was not cut — a `contains("Restart")` would pass on a
-        // truncated note too.
+        assert!(!boot.contains("class=\"sw q4\""), "nothing held: {boot}");
+        assert!(boot.contains("dhan: UNAVAILABLE — no manifest"), "{boot}");
+
+        // THE FIRST PULL: NIFTY, and NEWIDX, which the boot axis never named.
+        publish_index_months(&site.store_root, &["NIFTY", "NEWIDX"], august);
+        for query in ["show=gaps", ""] {
+            let page = store_ok(&site, today, 0, query);
+            assert!(
+                !page.contains("dhan: UNAVAILABLE — no manifest"),
+                "{query}: the boot census note is gone: {page}"
+            );
+            assert!(
+                page.contains("dhan: 2 month(s), 16500 row(s)"),
+                "{query}: the note is this request's census: {page}"
+            );
+        }
+        let after = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            stale.contains("Restart to refresh, or see /audit.</li>"),
-            "the whole note reaches the page, uncut: {stale}"
+            after.contains("108 instrument-month(s) in the grid"),
+            "three series on the axis, the new one included: {after}"
         );
+        assert!(after.contains("NSE-INDEX-NEWIDX"), "{after}");
+        assert_eq!(
+            after.matches("class=\"sw q4\"").count(),
+            2,
+            "both held months are filled cells: {after}"
+        );
+        assert!(after.contains("held, 8250 row(s)"), "{after}");
+
+        // A SECOND PULL, AND A PAST-THE-END PAGE: the axis grows again and the
+        // clamp lands on the new last page, not the boot one.
+        let many: Vec<String> = (0..8).map(|i| format!("LATE{i:02}")).collect();
+        let mut names: Vec<&str> = many.iter().map(String::as_str).collect();
+        names.extend(["NIFTY", "NEWIDX"]);
+        publish_index_months(&site.store_root, &names, august);
+        let grown = store_ok(&site, today, 0, "show=gaps");
         assert!(
-            stale.contains("class=\"loud\""),
-            "UNCHECKED is one of the words that makes a note loud: {stale}"
+            grown.contains("396 instrument-month(s) in the grid"),
+            "{grown}"
         );
+        assert!(grown.contains("page 1 of 2"), "{grown}");
+        let clamped = store_ok(&site, today, 999, "show=gaps");
+        assert!(clamped.contains("page 2 of 2"), "{clamped}");
+        assert!(clamped.contains("showing 196"), "{clamped}");
+        let _ = std::fs::remove_dir_all(&site.store_root);
     }
 
     /// A vendor on loopback that answers once, and reports it was reached.
@@ -30793,7 +31130,10 @@ pub(crate) fn hex32(bytes: [u8; 32]) -> String {
 /// and this is an operator route rather than a bar path, so **the per-operation
 /// bound of §3 rule 4 is not claimed for it** — saying otherwise would be the
 /// measurement §3 rule 6 forbids inventing. The join walks the index symbols
-/// the feed lists, not the master's several hundred thousand rows.
+/// the feed lists, not the master's several hundred thousand rows. Finding
+/// those symbols is a filter over every key of the merged universe, so a
+/// request is O(catalogue bytes + U). W1-api5-9, D-0953; `docs/06-limits.md`'s
+/// D-0953 section.
 async fn indexmap_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -30863,10 +31203,18 @@ async fn indexmap_json(
 ///
 /// # Cost
 ///
-/// One map probe per series on a hit, keyed on the stamp the census's own
-/// `stat` calls already took; a re-derivation only after the vendor's manifest
-/// has been rewritten, which is what a pull does. See
+/// The calendar itself is one map probe per series on a hit, keyed on the stamp
+/// the census's own `stat` calls already took, and a re-derivation only after
+/// the vendor's manifest has been rewritten, which is what a pull does. See
 /// [`crate::calendar_of::cached`].
+///
+/// **The request around those probes is not that cheap, and this paragraph
+/// used to stop before saying so.** Both branches collect, sort and dedup the
+/// asked feed's census entries (`held_entries`, `O(E_v log E_v)`) on every
+/// request, and the exchange branch adds three key `String`s and a deep clone
+/// of each spot series' calendar, then `agree` over every day. W1-api5-5,
+/// D-0953; `docs/06-limits.md`'s D-0953 section, which
+/// `api::server::cost_limits_tests` pins to this source.
 /// The condition vocabulary, so a stored mask can be read as names.
 ///
 /// # Why this route exists at all
@@ -31480,6 +31828,10 @@ mod calendar_route_tests;
 #[cfg(test)]
 #[path = "census_request_tests.rs"]
 mod census_request_tests;
+
+#[cfg(test)]
+#[path = "cost_limits_tests.rs"]
+mod cost_limits_tests;
 
 #[cfg(test)]
 #[path = "bars_window_route_tests.rs"]
