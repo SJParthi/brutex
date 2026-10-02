@@ -3,11 +3,11 @@
 //!
 //! * §126 said each fold's execution prefix is cut by a binary
 //!   `partition_point`, O(log E). The cut is a forward-only cursor,
-//!   `MonotonicExecutionPrefix` in `src/validate.rs`, whose index only grows:
+//!   `MonotonicExecutionPrefix` in `crates/runner/src/validate.rs`, whose index only grows:
 //!   all cuts of one family together cost O(E + F), amortised O(1) per
 //!   execution bar (finding o1runner-9).
 //! * §113 said a trade walk is linear in the signals it must decide. `walk_core`
-//!   in `src/trade.rs` visits every row of the column and asks `fires` of each,
+//!   in `crates/runner/src/trade.rs` visits every row of the column and asks `fires` of each,
 //!   so it is linear in the column's rows; the signal count bounds only the
 //!   work after a row fires (finding o1runner-10).
 //! * §96 said no build script exists in this repository and that gate 13 layer
@@ -18,6 +18,9 @@
 //! the build rather than skipping the check. A separate test crate, as
 //! `crates/cli/tests/pool_and_escape_docs.rs` is, because a document read into
 //! the library's own tests would rebuild them whenever a line of it changed.
+//! It lives under `cli`, not `runner`: gate 22 keeps the sweep crates from
+//! including anything but documents and source, and this test reads the CI
+//! workflow (D-1450).
 
 #![allow(
     clippy::expect_used,
@@ -28,9 +31,9 @@
 )]
 
 const LIMITS: &str = include_str!("../../../docs/06-limits.md");
-const VALIDATE: &str = include_str!("../src/validate.rs");
-const TRADE: &str = include_str!("../src/trade.rs");
-const CLI_BUILD: &str = include_str!("../../cli/build.rs");
+const VALIDATE: &str = include_str!("../../runner/src/validate.rs");
+const TRADE: &str = include_str!("../../runner/src/trade.rs");
+const CLI_BUILD: &str = include_str!("../build.rs");
 const CI: &str = include_str!("../../../.github/workflows/ci.yml");
 
 /// The body of one `### §N —` section, up to the next `### ` heading.

@@ -701,23 +701,6 @@ pub fn host_for(region: &str) -> String {
     format!("ssm.{region}.amazonaws.com")
 }
 
-/// The credential-dependent headers this request puts on the wire.
-///
-/// Returned as data rather than applied in place so a test can hold it beside
-/// [`Signable::signed_headers`] and prove the two agree. They must: AWS rebuilds
-/// the canonical request from what it *receives*, so a name that is signed and
-/// not sent — or sent and not signed — produces `SignatureDoesNotMatch` on a
-/// credential that is perfectly valid.
-///
-/// That is precisely what happened. `signed_headers` added
-/// `x-amz-security-token` whenever a session token was present and the request
-/// set four fixed headers regardless, so every Parameter Store read under a
-/// temporary credential was refused. It survived because this machine holds a
-/// long-lived key pair with no session token, making the arm unreachable, and
-/// every test stopped at `Signable` — the half that was already correct.
-///
-/// The condition below reads `identity.session_token`, the same field
-/// `Signable` carries, so the two cannot drift.
 /// The headers every `GetParameter` request carries whatever the identity.
 ///
 /// # Why a function and not two literals at the call site
@@ -737,6 +720,23 @@ pub const fn fixed_headers() -> [(&'static str, &'static str); 2] {
     [("content-type", CONTENT_TYPE), ("x-amz-target", TARGET)]
 }
 
+/// The credential-dependent headers this request puts on the wire.
+///
+/// Returned as data rather than applied in place so a test can hold it beside
+/// [`Signable::signed_headers`] and prove the two agree. They must: AWS rebuilds
+/// the canonical request from what it *receives*, so a name that is signed and
+/// not sent — or sent and not signed — produces `SignatureDoesNotMatch` on a
+/// credential that is perfectly valid.
+///
+/// That is precisely what happened. `signed_headers` added
+/// `x-amz-security-token` whenever a session token was present and the request
+/// set four fixed headers regardless, so every Parameter Store read under a
+/// temporary credential was refused. It survived because this machine holds a
+/// long-lived key pair with no session token, making the arm unreachable, and
+/// every test stopped at `Signable` — the half that was already correct.
+///
+/// The condition below reads `identity.session_token`, the same field
+/// `Signable` carries, so the two cannot drift.
 fn wire_headers(identity: &AwsIdentity) -> Vec<(&'static str, &str)> {
     match identity.session_token.as_deref() {
         Some(token) => vec![("x-amz-security-token", token)],

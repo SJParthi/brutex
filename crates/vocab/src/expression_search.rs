@@ -156,16 +156,18 @@ impl Cursor {
     /// A node budget bounds choices, not progress (D-0752): every rank is
     /// tried at every position, so nodes per emitted candidate grow with the
     /// alphabet, and more than 4,096 nodes can pass between two candidates.
-    /// One choice is not O(1) either (D-0753): it revalidates the whole prefix
-    /// from its first instruction over a fresh `MAX_INSTRUCTIONS`-slot stack,
-    /// bounded by the fixed 1,151-instruction capacity. The node counts are
-    /// counted by `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
-    /// in `crates/vocab/tests/expression_search.rs`; this loop's one whole-prefix
-    /// call per choice, the inline stack and both edges of its width are
-    /// pinned by
-    /// `invariant_tests::prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
-    /// in this module. The time per node is unmeasured, UNVERIFIED
-    /// (`docs/06-limits.md`, D-0753).
+    /// One choice checks only its new instruction (D-0983, o1engine-23): it
+    /// calls `Cursor::place`, which extends the recorded start and depth of the
+    /// prefix by that one instruction, instead of revalidating the whole prefix
+    /// from its first instruction as it did until then (D-0753). The node
+    /// counts are counted by
+    /// `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+    /// in `crates/vocab/tests/expression_search.rs`; this loop's one `place`
+    /// call per choice and no whole-prefix call are pinned by
+    /// `invariant_tests::prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`,
+    /// and `place` admitting exactly what the full re-walk admitted by
+    /// `vocab::expression_search::the_incremental_prefix_check_admits_exactly_what_the_full_rewalk_did`.
+    /// The time per node is unmeasured, UNVERIFIED (`docs/06-limits.md`).
     ///
     /// # Errors
     /// An impossible cursor invariant or exhausted cumulative counter.

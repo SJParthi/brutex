@@ -1609,6 +1609,18 @@ jobs:
           # parse and overflow fixtures, `i64::MIN` among them. No digit string
           # is a path segment this repository configures.
           signed_number='-1 -125 -2450 -19801 -1e300 -9223372036854775808'
+          # Met only in the combined fold (D-1450): branches written before
+          # D-1109 let a segment begin with `-` carried these, and none is a
+          # path segment. `-0`, `-5`, `-0945` and `-1400` are numeric
+          # fixtures: a calendar date's month and day pieces, a malformed CSV
+          # minute and a negative open interest, and the UTC offsets
+          # `kind_of`'s offset parser is driven with (D-0957). `-token` is the
+          # tail the decoded scan reads from the invented `access-token` and
+          # `x-token` header names `header_name` already declares whole.
+          # `--exact`, `--nocapture` and `--test-threads=1` are the libtest
+          # flags `crates/pull/tests/support/mod.rs` hands the re-executed test
+          # binary it runs as an unprivileged user (root-permission tests).
+          fold_literal='-0 -5 -0945 -1400 -token --exact --nocapture'
 
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
@@ -1621,7 +1633,7 @@ jobs:
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
-          ${ssm_region_fixture} ${inner_literal} ${signed_number}"
+          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build: `grep -q` exits
@@ -2878,13 +2890,36 @@ jobs:
             files=$(grep -v '^UNRESOLVED ' "$u16/closure" || true)
             printf '  %s root(s), %s file(s) in their closure\n' \
               "$(printf '%s\n' "$other" | grep -c .)" "$(printf '%s\n' "$files" | grep -c .)"
+            # ONE FILE IS EXCEPTED, BY NAME, AND ONLY FOR WHAT IT DECLARES
+            # (D-1450). `crates/pull/tests/allocation.rs` implements
+            # `GlobalAlloc` to COUNT heap allocations, the one way to prove
+            # `pull::csv`'s "no allocation per row" against an allocation
+            # rather than against a spelling (D-0721, D-0724). It is a test
+            # crate root, never linked into a shipped binary, it carries the
+            # `#![allow(unsafe_code)]` gate 5 counts as one of its three, and
+            # every method forwards unchanged to `System`. D-1103 wrote this
+            # layer while that file lived on another branch ("the tree uses
+            # none"); the two met in the combined fold. The exception is a
+            # file, not a pattern: any other root with `unsafe`, and any
+            # `extern` or `asm!` even in this file, is still refused.
+            allow_unsafe_test_root='crates/pull/tests/allocation.rs'
             # shellcheck disable=SC2086
-            if ! "$scan" unsafe $files > "$u16/found"; then
+            "$scan" unsafe $files > "$u16/found" || true
+            grep -vF "${allow_unsafe_test_root}:" "$u16/found" > "$u16/refused" || true
+            excepted=$(grep -F "${allow_unsafe_test_root}:" "$u16/found" || true)
+            beyond=$(grep -v ': `unsafe`$' <<< "$excepted" || true)
+            if [ -n "$beyond" ]; then
+              echo "  REFUSED  the excepted allocator file holds more than unsafe:"
+              sed 's/^/             /' <<< "$beyond"
+              bad=1
+            fi
+            if [ -s "$u16/refused" ]; then
               echo "  REFUSED  unsafe outside a forbidding crate root:"
-              sed 's/^/             /' "$u16/found"
+              sed 's/^/             /' "$u16/refused"
               bad=1
             else
-              echo "  ok       none"
+              printf '  ok       none outside %s (%s site(s) there, D-1450)\n' \
+                "$allow_unsafe_test_root" "$(grep -cF "${allow_unsafe_test_root}:" "$u16/found" || true)"
             fi
           fi
 
@@ -3231,6 +3266,14 @@ jobs:
           # An UNDECLARED file with any print fails. That is how a crate added
           # tomorrow is covered on its first day, and it is the whole point of the
           # glob above.
+          # `api/src/main.rs:eprintln!` (D-1200, probeapi-3) is the refusal of
+          # an argument that is not valid Unicode, printed to the operator's
+          # terminal before `api::server::run` is reached: it is the misuse
+          # message, the same kind of sentence `server.rs` prints for a bad
+          # command. It is not left terminal-only: `note_exit` emits
+          # `api.main` with the exit code `MISUSED` and the argument count on
+          # every exit, this one included.
+          #
           # `cli/src/main.rs:print!` is the PROGRAM'S OWN OUTPUT, not a
           # diagnostic. `cli::run` renders its whole report into a String and
           # main writes it to stdout in one call -- which is the shape that
@@ -3316,6 +3359,7 @@ jobs:
           #     the bisected-solve census, the same kind as the five beside them.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
+          api/src/main.rs:eprintln!:1
           api/src/server.rs:println!:16
           api/src/server.rs:eprintln!:9
           api/src/server.rs:print!:1

@@ -3976,7 +3976,9 @@ fn require_exact_execution_subspan(
 /// that meets no window, is refused naming why.
 ///
 /// O(1): one bounded calendar lookup plus a walk over at most
-/// [`pull::calendar::MAX_WINDOWS`] windows.
+/// [`pull::calendar::MAX_WINDOWS`] windows. Exercised at every rung and
+/// measured window end by
+/// `cli::candidate_universe::session_close_minute_clamps_to_every_measured_window_end`.
 fn session_close_minute_v1(
     bar_ts_micros: i64,
     signal_length_micros: i64,

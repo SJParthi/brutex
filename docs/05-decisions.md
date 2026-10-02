@@ -53081,6 +53081,22 @@ the same defect independently.
 - `lake::reader`: probestore-7 repeats W3-lake1-4 (D-0775). The duplicate
   `LakeError::SentinelValue` variant is not added; its row test asserts
   `OpenInterestIsNullSentinel`; its "What is NOT checked" doc is kept.
+- `store::catalog` symlinks: D-0996 (probestore-3) followed a link to a file
+  and counted a link to a directory as `symlinked_dir`; D-0766 never follows
+  any link and counts each in `linked`, which also closes the loop D-0996
+  fixed. D-0766 is kept and `symlinked_dir` is not added; D-0996's loop test
+  now expects `linked`. A symlinked month is therefore not held.
+- Gates that one branch tightened while another branch added what they now
+  refuse, meeting only here: gate 16 layer 1b (D-1103, no `unsafe` in any test
+  root) against D-0724's counting allocator in `crates/pull/tests/allocation.rs`
+  — the one file is excepted by name, `unsafe` only, because it is the only
+  proof that counts an allocation rather than a spelling; gate 22 against
+  D-1204's drift test reading `ci.yml` from `crates/runner/tests` — moved to
+  `crates/cli/tests/limits_doc_drift.rs`; gate 1d (D-1109, segments may begin
+  with `-`) against numeric fixtures and libtest flags — declared as
+  `fold_literal`; gate 23 against D-1200's `api/src/main.rs` misuse print —
+  declared; gate 10 against an invariant row naming `std::env::args_os` as a
+  path — reworded; gate 12 against D-1449's unnamed proof — named.
 - `pull::csv`: D-0721's `fields_of` and D-1203's `split_fields` both moved a
   row's fields into a fixed array. `fields_of` is kept; D-1203's row-vector
   reservation, which D-0721 did not make, is added, and the D-0721 limit that
