@@ -17,7 +17,7 @@ Checkpoint for pause/resume. Updated after each item. Branch per item: `fix/clou
 
 ## Batch 2 (lane1-b.md, 64 findings)
 
-State: planning units. Next after batch 1.
+State: 41 units planned in fix-queue/lane1-b-plan.md (U3 folded into U9's branch, U14 into U1's). All 39 branches being fixed now, 2 at a time, U21 first.
 
 ## Resume
 
