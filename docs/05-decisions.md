@@ -44010,3 +44010,42 @@ tree (`HashMap::new()`). **Reported, not edited:** gate 11 rule 3's allowlist
 entry `crates/runner/src/outcome.rs 1` in `ci.yml` no longer matches, and the
 gate will warn that it is loose. Removing it is a `ci.yml` edit for the lane
 that owns that file.
+
+### D-1178 — The asymmetry and path keys are read on the side the combination is traded — 2026-10-02
+
+**What was wrong (audit AC-whp-cx-1).** `Edge::payoff_bp` was fixed to read its
+side from `mean_paisa < 0`, the same rule `cli::side_of_evidence` uses to trade
+a combination short. The two sibling keys that the other two lenses rank on were
+not fixed. `worst_reward_risk_bp` (`Lens::Asymmetry`, D-0593) always divided
+`min_win_paisa`, the smallest UP move, by `max_loss_paisa`, the largest DOWN
+move. `path_ratio_bp` (`Lens::Path`) always divided the up excursion by the down
+one. For a combination traded short these are the long's figures. An ideal
+short, with every move down, scored 0 on asymmetry and near 0 on path, and was
+cut. `ByAsymmetry` then broke ties on `max_win_paisa`, which for a short is its
+worst loss. The audit's worked example, moves of [-300, -300, -300, +10],
+scored 3 bp where the short's true figure is 3000 bp.
+
+**The change.** `Edge` gains `min_loss_paisa`, the smallest losing move's
+magnitude (a short's smallest win). `Sides` tracks it beside the other extrema,
+and like them it is not persisted. When `mean_paisa < 0`:
+
+* `worst_reward_risk_bp` is `min_loss_paisa / max_win_paisa`;
+* `path_ratio_bp` is `adverse_sum / favourable_sum`;
+* the new `largest_gain_paisa` is `max_loss_paisa`. `ByAsymmetry` breaks ties on
+  it, and it reads `max_win_paisa` for a long, as before.
+
+A zero or positive mean reads exactly as before.
+
+**Outputs that change.** Asymmetry and path scores, and therefore the
+`Lens::Asymmetry` and `Lens::Path` orders, for every combination with a negative
+mean. Long-side combinations are unchanged. The persisted sweep-evidence row
+carries neither key, so no stored value changes.
+
+**Tests.** `a_short_is_scored_on_the_moves_that_go_its_way` covers the worked
+example (3000 and 9000 bp), its mirror traded long (equal scores), the
+always-down short (unbounded on both) and a flat sample (the floor).
+`the_asymmetry_tie_break_reads_the_traded_side` covers two never-gave-back
+shorts tied at `i64::MAX`: the one paying 1,000 must lead the one paying 100,
+although its `|t|` is smaller. `min_loss_paisa` did not exist on the previous
+tree, so these do not compile there. Read on that tree, the example's path
+ratio is 10/900 = 1 bp.

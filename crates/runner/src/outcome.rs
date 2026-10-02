@@ -1039,6 +1039,13 @@ pub struct Edge {
     /// Zero when nothing lost — which is a real sample and not a missing one,
     /// and [`Self::worst_reward_risk_bp`] says what it does about it.
     pub max_loss_paisa: f64,
+    /// The SMALLEST losing forward move as a MAGNITUDE, in paisa. Zero when
+    /// nothing lost.
+    ///
+    /// A SHORT's smallest win, which [`Self::worst_reward_risk_bp`] needs when
+    /// the combination is traded short and which no other field can recover --
+    /// D-1178. Not persisted, like the other three extrema.
+    pub min_loss_paisa: f64,
     /// Bars whose source index lay OUTSIDE the slice the `Forward` came from.
     ///
     /// Non-zero means the caller paired a `Column` with a `Forward` built from a
@@ -1111,22 +1118,38 @@ impl Edge {
     /// what to do with it, and `CLAUDE.md` §4 asks that the decision be visible
     /// rather than folded into a sentinel here.
     ///
-    /// **Nothing won.** `min_win_paisa` is zero, so the ratio is zero — the
+    /// **Nothing won.** The smallest win is zero, so the ratio is zero — the
     /// floor, tying with the worst. A setup that never won is not asymmetric,
     /// it is absent, and ranking it above anything would be the fallback that
     /// hides a failure §4 bans.
+    ///
+    /// # Read on the side the combination is traded -- D-1178
+    ///
+    /// `cli::side_of_evidence` trades a combination SHORT exactly when
+    /// `mean_paisa < 0`, and [`Self::payoff_bp`] already reads its side that
+    /// way. This read the LONG's figures for every combination: an ideal short
+    /// whose every move was down has no up move, scored the floor and was cut. For
+    /// a short the wins are the DOWN moves, so the ratio is the smallest down
+    /// move ([`Self::min_loss_paisa`]) over the largest up move
+    /// ([`Self::max_win_paisa`]). Moves of [-300, -300, -300, +10] score 3000,
+    /// not 3.
     #[must_use]
     pub fn worst_reward_risk_bp(&self) -> i64 {
-        if self.min_win_paisa <= 0.0 {
+        let (smallest_gain, largest_giveback) = if self.mean_paisa < 0.0 {
+            (self.min_loss_paisa, self.max_win_paisa)
+        } else {
+            (self.min_win_paisa, self.max_loss_paisa)
+        };
+        if smallest_gain <= 0.0 {
             return 0;
         }
-        if self.max_loss_paisa <= 0.0 {
+        if largest_giveback <= 0.0 {
             return i64::MAX;
         }
         // A ratio of two paisa magnitudes is bounded by the instrument's own
         // range, and a value that somehow is not saturates below rather than
         // wrapping into a plausible number.
-        let ratio = self.min_win_paisa / self.max_loss_paisa * 100.0;
+        let ratio = smallest_gain / largest_giveback * 100.0;
         if !ratio.is_finite() || ratio <= 0.0 {
             return 0;
         }
@@ -1282,6 +1305,22 @@ impl Edge {
         clamped
     }
 
+    /// The largest single move IN THE TRADED DIRECTION, in paisa: the largest
+    /// up move for a long, the largest down move's magnitude for a short
+    /// (`mean_paisa < 0`) -- D-1178.
+    ///
+    /// `rank::ByAsymmetry` breaks ties on "how much it pays when it pays", and
+    /// read `max_win_paisa` for every combination. For a short that is its
+    /// WORST loss, so ties were broken toward the short that hurt most.
+    #[must_use]
+    pub fn largest_gain_paisa(&self) -> f64 {
+        if self.mean_paisa < 0.0 {
+            self.max_loss_paisa
+        } else {
+            self.max_win_paisa
+        }
+    }
+
     /// What the PATH offered, in hundredths: mean favourable excursion over
     /// mean adverse excursion. `300` reads 3.00.
     ///
@@ -1306,25 +1345,34 @@ impl Edge {
     /// asking. Same disclaimer `payoff_bp` carries, for the same reason.
     ///
     /// Zero adverse excursion is `i64::MAX`, not an error: a combination whose
-    /// hits never traded below their entry is the best possible shape for a
+    /// hits never traded against their entry is the best possible shape for a
     /// stop, and it is a fact about the sample rather than a promise.
+    ///
+    /// # Read on the side the combination is traded -- D-1178
+    ///
+    /// `favourable_sum` is the UP excursion and `adverse_sum` the DOWN one, which
+    /// is a long's reading. For a combination traded short (`mean_paisa < 0`,
+    /// the rule `cli::side_of_evidence` and [`Self::payoff_bp`] use) the down run
+    /// is the reward and the up run the risk, so the two are swapped. Read long
+    /// for every combination, the best short scored near the floor.
     #[must_use]
     pub fn path_ratio_bp(&self) -> i64 {
         const UNBOUNDED: f64 = 9.0e18;
+        let (reward, risk) = if self.mean_paisa < 0.0 {
+            (self.adverse_sum, self.favourable_sum)
+        } else {
+            (self.favourable_sum, self.adverse_sum)
+        };
         if self.n == 0 {
             return 0;
         }
-        if self.adverse_sum <= 0.0 {
-            // Never went against the entry at all. `favourable_sum` of zero as
-            // well means nothing moved either way, which is no ratio rather
-            // than an infinite one.
-            return if self.favourable_sum > 0.0 {
-                i64::MAX
-            } else {
-                0
-            };
+        if risk <= 0.0 {
+            // Never went against the position at all. A reward of zero as well
+            // means nothing moved either way, which is no ratio rather than an
+            // infinite one.
+            return if reward > 0.0 { i64::MAX } else { 0 };
         }
-        let ratio = self.favourable_sum / self.adverse_sum * 100.0;
+        let ratio = reward / risk * 100.0;
         if !ratio.is_finite() || ratio >= UNBOUNDED {
             return i64::MAX;
         }
@@ -1472,6 +1520,9 @@ struct Sides {
     /// against `min_win` is a division rather than a sign argument.
     /// Unsigned because the magnitude of `i64::MIN` is not an `i64`.
     max_loss: u64,
+    /// The SMALLEST strictly negative observation as a magnitude. Zero when
+    /// nothing lost; opened by the first loss, as `min_win` is by the first win.
+    min_loss: u64,
 }
 
 impl Sides {
@@ -1506,6 +1557,9 @@ impl Sides {
             self.losses = self.losses.saturating_add(1);
             self.loss_sum = self.loss_sum.saturating_add(i128::from(x));
             self.max_loss = self.max_loss.max(x.unsigned_abs());
+            if self.min_loss == 0 || x.unsigned_abs() < self.min_loss {
+                self.min_loss = x.unsigned_abs();
+            }
         }
     }
 }
@@ -1947,6 +2001,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         min_win_paisa: wide(i128::from(sides.min_win)),
         max_win_paisa: wide(i128::from(sides.max_win)),
         max_loss_paisa: wide(i128::from(sides.max_loss)),
+        min_loss_paisa: wide(i128::from(sides.min_loss)),
         t,
     };
 
