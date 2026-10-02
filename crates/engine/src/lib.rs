@@ -108,6 +108,94 @@ pub mod column;
 pub mod keep;
 pub mod resume;
 
+/// The rule-4 primitives as production runs them, exposed so
+/// `benches/ratio.rs` times the code the sweep calls rather than a copy of it.
+///
+/// # Why this module exists
+///
+/// `CLAUDE.md` §3 rule 4 names five per-operation costs and gate 8 measures
+/// them. Three of the engine's rows -- C-E-08 (one join pair), C-E-10 (k=1
+/// duplicate rejection) and C-E-11 (result append) -- used to build their OWN
+/// `HashSet`, `Vec` and `union().popcount()` loop inside the bench, so an O(n)
+/// regression in the production operation would have shipped with every row
+/// green. A bench target links only this crate's public surface, so the
+/// production operations are routed through the functions below and the bench
+/// calls the same functions. Nothing here is a second implementation: each
+/// item is the one the sweep itself calls. D-0924.
+pub mod primitives {
+    use core::hash::BuildHasher;
+    use std::collections::{HashSet, TryReserveError};
+
+    use vocab::ConditionMask;
+
+    use crate::{Itemset, JoinIndex, MaskSet, join_screen};
+
+    /// k=1 duplicate rejection: `false` when `position` was already offered.
+    ///
+    /// The one call `Ladder::first_level` makes per offered position. Expected
+    /// O(1) on a set pre-sized to the offered width; that is amortised hash
+    /// table evidence, not an adversarial worst-case bound.
+    #[inline]
+    pub fn offer<S: BuildHasher>(offered: &mut HashSet<u32, S>, position: u32) -> bool {
+        offered.insert(position)
+    }
+
+    /// Result append: the one call the batch drain makes per frequent
+    /// candidate, into a vector the drain has already reserved for the whole
+    /// batch, so it never allocates on that path.
+    #[inline]
+    pub fn append(out: &mut Vec<Itemset>, item: Itemset) {
+        out.push(item);
+    }
+
+    /// One prior frontier indexed exactly as the level join indexes it.
+    pub struct JoinProbe {
+        index: JoinIndex,
+    }
+
+    impl JoinProbe {
+        /// Index `previous` as `try_next_level_observing` does.
+        ///
+        /// # Errors
+        /// Allocation refusal while reserving the membership set or the keyed
+        /// prefix vector.
+        pub fn try_new(previous: &[Itemset]) -> Result<Self, TryReserveError> {
+            Ok(Self {
+                index: JoinIndex::try_new(previous)?,
+            })
+        }
+
+        /// Walk every pair of every prefix block through the production
+        /// per-pair screen. Returns `(pairs, survivors)`.
+        #[must_use]
+        pub fn screen_every_pair(&self) -> (u64, u64) {
+            screen_blocks(&self.index.frequent, &self.index.keyed)
+        }
+
+        /// Previous-frontier masks held after the join's own dedup.
+        #[must_use]
+        pub fn width(&self) -> usize {
+            self.index.keyed.len()
+        }
+    }
+
+    fn screen_blocks(frequent: &MaskSet, keyed: &[(ConditionMask, ConditionMask)]) -> (u64, u64) {
+        let mut pairs = 0_u64;
+        let mut survivors = 0_u64;
+        for block in keyed.chunk_by(|a, b| a.0 == b.0) {
+            for (offset, (_, a)) in block.iter().enumerate() {
+                for (_, b) in block.iter().skip(offset.saturating_add(1)) {
+                    pairs = pairs.saturating_add(1);
+                    if join_screen(frequent, a, b).is_some() {
+                        survivors = survivors.saturating_add(1);
+                    }
+                }
+            }
+        }
+        (pairs, survivors)
+    }
+}
+
 use core::hash::{BuildHasher, Hasher};
 use std::collections::{HashSet, TryReserveError};
 
@@ -136,8 +224,9 @@ const MASK_HASH_MIX: u64 = 0x517c_c1b7_2722_0a95;
 ///
 /// `std`'s `RandomState` draws a fresh seed per PROCESS, so the iteration order
 /// of a `HashSet` differs between two runs of the same input. Nothing in this
-/// crate iterates one — `seen` is asked only for `len` and for whether an insert
-/// was new — so that randomness never reached an answer. A fixed seed removes
+/// crate iterates one — the join's `MaskSet` of the previous frontier is asked
+/// only whether a subset is present (the `seen` duplicate set it was written
+/// for is deleted; D-0926) — so that randomness never reached an answer. A fixed seed removes
 /// the possibility rather than relying on it staying unreached, which is what
 /// `CLAUDE.md` §3 rule 5 is for.
 const MASK_HASH_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -163,7 +252,8 @@ impl BuildHasher for MaskHash {
 /// hold keys an attacker chose, and it pays several rounds per eight bytes to
 /// make collisions unfindable.
 ///
-/// Nothing about that applies to `seen`. Its keys are [`ConditionMask`]s the
+/// Nothing about that applies to the join's `MaskSet` (written for the deleted
+/// `seen` set, which hashed the same keys). Its keys are [`ConditionMask`]s the
 /// sweep generated itself from a fixed vocabulary — no caller, no request, no
 /// network reaches them — and each is 48 bytes of bits that are already spread.
 /// The work `SipHash` does is real and is spent defending against a threat that
@@ -180,7 +270,7 @@ impl BuildHasher for MaskHash {
 /// # What this does NOT change
 ///
 /// Collisions are still resolved by full key comparison inside the set, so a
-/// weaker hash cannot make `seen` admit a duplicate or reject a new candidate.
+/// weaker hash cannot make the subset prune answer a membership wrongly.
 /// It can only make lookups slower if the distribution were poor, which is why
 /// the rotate is there and why `the_mask_hasher_separates_orderings` measures it.
 #[derive(Clone, Copy, Debug)]
@@ -497,7 +587,7 @@ impl Frontier {
 /// where the frequent frontier empties, justified by anti-monotonicity. That
 /// argument is sound and it is **not a termination guarantee**. If a set of P
 /// positions co-occurs on at least `min_hits` bars, then every subset of it is
-/// frequent, [`every_subset_is_frequent`] never prunes, and the frontier at
+/// frequent, [`every_non_parent_subset_is_frequent`] never prunes, and the frontier at
 /// level k is `C(P, k)`. At P = 40 that is 137,846,528,820 itemsets at level 20
 /// — 7.7 TB — and correlated bits on a range-bound session are ordinary, not
 /// pathological. Before this type the only thing between that and the operator
@@ -757,19 +847,28 @@ pub const DEFAULT_CEILING: usize = 1 << 27;
 /// machine — while every run below 11% support was killed at 1,500 seconds.**
 /// Memory was never the binding constraint. Time was, and nothing counted it.
 ///
-/// `2^34` is 17.2 billion pair iterations. The per-pair cost is a mask union and
-/// a popcount, measured by `C-E-08` in `crates/engine/benches/ratio.rs`, so the
-/// budget is stated in the unit the bench measures rather than in seconds, which
-/// would be a claim about a machine rather than about the work.
+/// `2^34` is 17.2 billion pair iterations. The per-pair cost is the production
+/// screen -- a mask union, the subset prune and the meaning prune -- measured
+/// through `engine::primitives::JoinProbe` by `C-E-08` (flat across frontier
+/// width) and `C-E-12` (one subset probe flat across depth) in
+/// `crates/engine/benches/ratio.rs`. It said "a mask union and a popcount" and
+/// the bench timed exactly that stand-in while production ran neither the
+/// popcount nor any timed prune (D-0924). The subset prune makes the per-pair
+/// cost Theta(k), so a pair at k=40 is dearer than one at k=3 and this budget
+/// bounds work, not seconds; `docs/06-limits.md` names that. It is stated in
+/// the unit the bench measures rather than in seconds, which would be a claim
+/// about a machine rather than about the work.
 /// # IT CANNOT BIND AT THE SHIPPED CEILING, and that is recorded rather than
 /// left for the next reader to discover
 ///
 /// This budget exists because time was the binding constraint and nothing
 /// counted it. At the shipped constants it still does not, and the arithmetic
-/// is short: the prefix join makes `duplicates` a **measured zero** — every
-/// pair contributes exactly one distinct candidate — so `seen` grows one entry
-/// per pair walked. [`Ladder::exhausted`] tests `admitted + seen.len() >=
-/// ceiling` in the same loop that counts pairs, and [`DEFAULT_CEILING`] is
+/// is short: the prefix join is injective, so `duplicates` is a **structural
+/// zero** at k>=2 — proved by the join's shape and written as a literal, not
+/// counted (it was called a "measured" zero here, which it never was; D-0926) —
+/// and every pair contributes exactly one distinct candidate. [`Ladder::exhausted`]
+/// tests `admitted + emitted >= ceiling` before every pair is admitted, and
+/// [`DEFAULT_CEILING`] is
 /// `2^27` against this `2^34`. The ceiling is **128x smaller**, so it trips
 /// 128 pairs-worth of work before this budget is approached, and every
 /// default-configured halt reports [`Breach::Candidates`] — a MEMORY reason —
@@ -1423,7 +1522,7 @@ impl Ladder {
             // position was pushed to `excluded` once per occurrence -- D-0080 requires an
             // excluded position be NAMED, and naming one three times reports three
             // exclusions where there is one position.
-            if !offered.insert(p) {
+            if !primitives::offer(&mut offered, p) {
                 duplicates = duplicates.saturating_add(1);
                 continue;
             }
@@ -1713,9 +1812,11 @@ impl Ladder {
         // A candidate therefore recovers its own block. Two pairs cannot collide
         // inside a block, and two blocks cannot collide with each other.
         //
-        // The repository already knew: `DEFAULT_PAIR_BUDGET`'s doc states
-        // "the prefix join makes `duplicates` a measured zero", and
-        // `one_k_set_is_evaluated_once_however_many_pairs_produce_it` asserts it.
+        // The repository already knew: `DEFAULT_PAIR_BUDGET`'s doc states the
+        // join is injective, and
+        // `one_k_set_is_evaluated_once_however_many_pairs_produce_it` pins it by
+        // `generated`. (`duplicates` is a literal zero at k>=2, not a
+        // measurement; D-0926.)
         // What nothing did was draw the conclusion that the set is therefore
         // dead weight.
         //
@@ -1784,8 +1885,9 @@ impl Ladder {
         // and their union is S. So S is enumerated. Uniqueness: any pair
         // producing S must contribute S's two largest positions as its two
         // highest bits, which is that same pair and no other — so `duplicates`
-        // becomes a MEASURED zero rather than an assumed one, and `seen` is
-        // kept precisely to keep measuring it.
+        // is a PROVED zero. It is written as a literal in `joined_frontier`,
+        // not counted, and the tests witness the property by what was
+        // generated rather than by reading that literal back (D-0926).
         //
         // # The grouping is built, not assumed
         //
@@ -1816,49 +1918,48 @@ impl Ladder {
         let mut pairs: u64 = 0;
         'join: for block in keyed.chunk_by(|a, b| a.0 == b.0) {
             for (offset, (_, a)) in block.iter().enumerate() {
-                // THE PAIR BUDGET, CHECKED ONCE PER OUTER ROW so it costs nothing
-                // per pair. The count is exact rather than estimated because the
-                // inner loop below increments it.
-                //
-                // This is the budget that bounds TIME. The candidate ceiling
-                // bounds bytes, and the two are five orders of magnitude apart on
-                // a wide frontier -- see `Halt::pairs`. Without this, the only
-                // symptom of a `min_hits` set too low is a process that never
-                // returns, which is the opposite of the loud refusal
-                // `CLAUDE.md` §4 requires.
-                if pairs_walked.saturating_add(pairs) >= self.pair_budget {
-                    halted = Some(self.halt(
-                        k,
-                        admitted.saturating_add(emitted),
-                        pairs_walked.saturating_add(pairs),
-                        Breach::Pairs,
-                    ));
-                    break 'join;
-                }
                 for (_, b) in block.iter().skip(offset.saturating_add(1)) {
+                    // THE PAIR BUDGET, CHECKED BEFORE EVERY PAIR. One integer
+                    // compare, so per-pair checking costs nothing a reader could
+                    // measure against the hash probes below.
+                    //
+                    // This is the budget that bounds TIME. The candidate ceiling
+                    // bounds bytes, and the two are five orders of magnitude
+                    // apart on a wide frontier -- see `Halt::pairs`. Without
+                    // this, the only symptom of a `min_hits` set too low is a
+                    // process that never returns, which is the opposite of the
+                    // loud refusal `CLAUDE.md` §4 requires.
+                    //
+                    // # It was checked once per OUTER ROW, and that was two defects
+                    //
+                    // The row check let the inner loop finish its row, so a halt
+                    // reported up to `block.len() - 1` pairs past the budget: a
+                    // soft bound that `Halt::pairs` never admitted. And it ran on
+                    // the LAST row of a block too, which has no pair to walk, so a
+                    // level whose pair need EQUALLED the budget was reported as
+                    // `Breach::Pairs` with a partial frontier although every pair
+                    // had been walked. Checked here, a halt means a pair really
+                    // was refused, and `Halt::pairs == pair_budget` exactly.
+                    // D-0922.
+                    if pairs_walked.saturating_add(pairs) >= self.pair_budget {
+                        halted = Some(self.halt(
+                            k,
+                            admitted.saturating_add(emitted),
+                            pairs_walked.saturating_add(pairs),
+                            Breach::Pairs,
+                        ));
+                        break 'join;
+                    }
                     pairs = pairs.saturating_add(1);
-                    // No popcount filter, because the grouping already IS that
-                    // filter: `a` and `b` share a prefix of k−2 positions and
-                    // differ in their highest, so the union has exactly k. A
-                    // branch here could never be taken, and an unreachable
-                    // branch is a coverage hole -- the property is proved by
-                    // `every_generated_candidate_has_exactly_k_bits` instead.
-                    let cand = a.union(b);
                     // THE CEILING, AND IT IS CHECKED BEFORE ANY COUNTER MOVES.
                     //
-                    // Placement is the whole correctness argument. Guarding `out.len()`
-                    // would guard the wrong number: `seen` is filled BEFORE the support
-                    // test, so a level whose survivors all fall under `min_hits` still
-                    // allocates every distinct candidate it enumerated -- the level that
-                    // goes extinct is the level that allocates most. `seen` is the
-                    // allocation, so `seen` is what is bounded.
-                    //
-                    // Checking here, rather than after `seen.insert`, keeps
-                    // `Frontier::reconciles` an invariant: nothing half-processed is
-                    // ever counted. The cost is that a level which has admitted exactly
-                    // `ceiling` distinct candidates halts even if every remaining pair
-                    // would have been a duplicate. That is conservative in the safe
-                    // direction and it is stated rather than hidden.
+                    // Placement is the whole correctness argument. `admitted +
+                    // emitted` counts every candidate this walk has accepted for
+                    // evaluation, and the batch and `out` are where those bytes
+                    // live -- so a level whose survivors all fall under `min_hits`
+                    // still reserves room for every candidate it enumerated.
+                    // Checking before `emitted` moves keeps `Frontier::reconciles`
+                    // an invariant: nothing half-processed is ever counted.
                     //
                     // THE TWO MEMORY BOUNDS ARE ASKED AS ONE QUESTION, and that is
                     // what makes the halt reachable from a test. Written as two
@@ -1884,64 +1985,21 @@ impl Ladder {
                     generated = generated.saturating_add(1);
                     // NO DUPLICATE REJECTION, BECAUSE THERE ARE NO DUPLICATES.
                     //
-                    // This comment used to read "the same k-set arises from
-                    // several pairs and must be evaluated once", and that is
-                    // true of a NAIVE join. It is not true of a PREFIX join,
-                    // which is what this is: a candidate's two highest bits are
-                    // exactly the pair that made it, so the pair is recoverable
-                    // from the candidate and no second pair can produce it. See
-                    // the block comment where `emitted` is declared.
-                    //
-                    // `duplicates` therefore stays at zero and is still reported
-                    // — a reader comparing levels should see the field, and a
-                    // future join that broke the property would have to change
-                    // this line to make it non-zero again.
+                    // A candidate's two highest bits are exactly the pair that
+                    // made it, so the pair is recoverable from the candidate and
+                    // no second pair can produce it. See the block comment where
+                    // `emitted` is declared. `duplicates` is therefore a
+                    // structural zero at k>=2 -- written as a literal in
+                    // `joined_frontier`, never counted -- and the tests that pin
+                    // the property witness it by DISTINCTNESS of what was
+                    // generated, not by reading that literal back.
                     emitted = emitted.saturating_add(1);
-                    // Subset prune, justified by anti-monotonicity: a bar matches a
-                    // mask iff every bit is set, so adding a bit can only remove
-                    // hits. If any (k-1)-subset is infrequent the k-set cannot be
-                    // frequent, and it is never evaluated against a single bar.
-                    if !every_subset_is_frequent(&cand, &frequent_prev) {
+                    // Both prunes, as one call the bench times directly -- see
+                    // [`join_screen`] for what each refuses and why.
+                    let Some(cand) = join_screen(&frequent_prev, a, b) else {
                         pruned = pruned.saturating_add(1);
                         continue;
-                    }
-                    // MEANING PRUNE, AND IT IS A DIFFERENT AXIS FROM THE ONE
-                    // ABOVE.
-                    //
-                    // Anti-monotonicity kills a candidate whose subset is
-                    // INFREQUENT. It has nothing to say about a candidate whose
-                    // bits restate each other: `close_above_pivot_s2_band` and
-                    // `close_above_pivot_s3_band` are both spectacularly
-                    // frequent and so is their union, so the prune above is
-                    // right not to fire — and the result was a ranked table
-                    // headed by seven conditions carrying four facts.
-                    //
-                    // MEASURED, the live sweep's leading row:
-                    // `{15, 65, 82, 84, 182, 186, 185}`, where 84, 182 and 186
-                    // are each exactly implied by 82. It fired on 200,813 bars
-                    // of 609,722 and won 52%.
-                    //
-                    // ONE PAIR IS ENOUGH, WHICH IS WHY THIS STAYS O(1). `keyed`
-                    // groups by `without_highest`, so `a` and `b` share k−2
-                    // positions and differ ONLY in their highest bit. `a ∪ b`
-                    // therefore introduces exactly one pair that neither parent
-                    // already held. By induction from k=2 — where the parents
-                    // are single bits and the pair is checked directly — if
-                    // every level refuses a candidate whose one new pair is
-                    // dead, no surviving itemset can contain a dead pair. So
-                    // this is two six-word scans and a `match`, not a walk over
-                    // the candidate's bits.
-                    //
-                    // COUNTED AS `pruned`, deliberately: `Frontier::reconciles`
-                    // balances `generated` against the reasons a candidate left,
-                    // and a separate counter would need a column everywhere that
-                    // identity is checked. The cost is that the ladder table
-                    // cannot say WHICH prune fired. Named here because the table
-                    // cannot name it.
-                    if !parents_informative(a, b) {
-                        pruned = pruned.saturating_add(1);
-                        continue;
-                    }
+                    };
                     // COUNTED IN A BATCH, ACROSS EVERY CORE. `column.support`
                     // is Theta(bars) with fixed-six-word work per bar and dominates the
                     // whole walk; everything above it here is a hash probe or a
@@ -2027,6 +2085,59 @@ impl JoinIndex {
     }
 }
 
+/// The per-pair work of the join that is not a counter: the union, the subset
+/// prune and the meaning prune. `Some(candidate)` when the pair survives both.
+///
+/// One function so that `benches/ratio.rs` C-E-08 and C-E-12 time THIS code
+/// through [`primitives::JoinProbe`] rather than a stand-in. C-E-08 used to
+/// time `a.union(b).popcount()` -- a popcount production no longer performs --
+/// while the subset prune, the one per-pair cost that grows, had no row at
+/// all. Everything else a pair costs in `try_next_level_observing` is an
+/// integer compare, a `try_reserve` that is a capacity test while the batch
+/// fits, two counter adds and a `Vec::push` into a pre-sized batch. D-0924.
+///
+/// # The subset prune
+///
+/// Justified by anti-monotonicity: a bar matches a mask iff every bit is set,
+/// so adding a bit can only remove hits. If any (k-1)-subset is infrequent the
+/// k-set cannot be frequent, and it is never evaluated against a single bar.
+///
+/// # The meaning prune, and it is a different axis
+///
+/// Anti-monotonicity kills a candidate whose subset is INFREQUENT. It has
+/// nothing to say about a candidate whose bits restate each other:
+/// `close_above_pivot_s2_band` and `close_above_pivot_s3_band` are both
+/// spectacularly frequent and so is their union, so the subset prune is right
+/// not to fire -- and the result was a ranked table headed by seven conditions
+/// carrying four facts.
+///
+/// MEASURED, the live sweep's leading row: `{15, 65, 82, 84, 182, 186, 185}`,
+/// where 84, 182 and 186 are each exactly implied by 82. It fired on 200,813
+/// bars of 609,722 and won 52%.
+///
+/// ONE PAIR IS ENOUGH, WHICH IS WHY THIS PART STAYS O(1). `keyed` groups by
+/// `without_highest`, so `a` and `b` share k-2 positions and differ ONLY in
+/// their highest bit. `a | b` therefore introduces exactly one pair that
+/// neither parent already held. By induction from k=2 -- where the parents are
+/// single bits and the pair is checked directly -- if every level refuses a
+/// candidate whose one new pair is dead, no surviving itemset can contain a
+/// dead pair.
+///
+/// Both refusals are counted as `pruned`, deliberately: `Frontier::reconciles`
+/// balances `generated` against the reasons a candidate left, and a separate
+/// counter would need a column everywhere that identity is checked. The cost
+/// is that the ladder table cannot say WHICH prune fired.
+///
+/// No popcount filter, because the grouping already IS that filter: `a` and
+/// `b` share a prefix of k-2 positions and differ in their highest, so the
+/// union has exactly k. The property is proved by
+/// `every_generated_candidate_has_exactly_k_bits`.
+fn join_screen(frequent: &MaskSet, a: &ConditionMask, b: &ConditionMask) -> Option<ConditionMask> {
+    let cand = a.union(b);
+    (every_non_parent_subset_is_frequent(&cand, frequent) && parents_informative(a, b))
+        .then_some(cand)
+}
+
 /// The only newly introduced pair is formed by the two parents' highest bits.
 fn parents_informative(a: &ConditionMask, b: &ConditionMask) -> bool {
     highest_position(a)
@@ -2061,13 +2172,14 @@ fn joined_frontier(
 /// How many bars the mask matches.
 ///
 /// One [`ConditionMask::hits`] per bar and nothing else — no allocation, no
-/// early exit, no branch on the answer.
+/// early exit, no branch on the answer. The hit is added as `u64::from(bool)`;
+/// the body used to read `if b.hits(mask) { n + 1 } else { n }`, a source-level
+/// branch on the answer under a doc that denied one. D-0925.
 #[must_use]
 pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
-    bar_bits.iter().fold(
-        0_u64,
-        |n, b| if b.hits(mask) { n.saturating_add(1) } else { n },
-    )
+    bar_bits
+        .iter()
+        .fold(0_u64, |n, b| n.saturating_add(u64::from(b.hits(mask))))
 }
 
 /// Would growing the candidate set by `by` be refused by the allocator?
@@ -2152,39 +2264,6 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
     *m
 }
 
-/// True when every (k−1)-subset of `cand` is in the previous frequent frontier.
-///
-/// Walks the SET bits, k of them, not the whole 384-bit width.
-///
-/// # What this actually bought, which is less than it looks
-///
-/// The previous form scanned all 384 positions as
-/// `if cand.get(b) && !frequent.contains(..)`. Its doc called that "384 probes
-/// where k would do" and a bench comparison was written expecting a large win.
-/// **It was 8%.** `&&` short-circuits, so the number of `HashSet` lookups was
-/// already k — the 384 were cheap bit tests, not probes, and the doc's own
-/// wording had oversold the cost of the thing it was complaining about.
-///
-/// Kept because 8% of the sweep is real and the code is strictly less work, not
-/// because the estimate was right. `crates/vocab` still exposes no bit
-/// iterator; `column::set_positions` is `crates/engine`'s own, which is why this
-/// needed no change outside the crate.
-///
-/// # The measurement this used to cite was of a different function
-///
-/// This block named `C-E-02` as its proof. That row now benches the live
-/// `Column::support` path and still never calls this function — so the citation
-/// was for the wrong subject, and this per-candidate subset loop has no isolated
-/// bench row. Found by an adversarial audit.
-///
-/// **UNVERIFIED as a measured figure.** The O(1) bound above is read off the
-/// loop's constant limit, which is sound as an argument and is not a
-/// measurement. No row in `crates/engine/benches/ratio.rs` covers this function
-/// yet, and naming one that does not would be worse than admitting none does.
-///
-/// It also matters more since the prefix join landed: with the join no longer
-/// walking a million pairs, this 384-probe loop is now a materially larger
-/// share of what a level costs than it was when the citation was written.
 /// Candidates one lane counts before a batch is drained.
 ///
 /// # Sized so the spawn disappears, and no larger
@@ -2247,18 +2326,23 @@ fn lanes() -> usize {
 ///
 /// # Why the dedup and the budget stay sequential
 ///
-/// Everything upstream of this call mutates shared state — `seen` admits or
-/// rejects a duplicate, the pair counter decides a halt — and those are hash
-/// probes and integer adds. Moving them would need locks and would change when
+/// Everything upstream of this call mutates shared state — the pair counter
+/// decides a halt, the ceiling counter decides a refusal, and the subset prune
+/// reads the previous frontier — and those are hash probes and integer adds.
+/// (This named a `seen` set admitting or rejecting duplicates; that set is
+/// deleted, D-0926.) Moving them would need locks and would change when
 /// a budget fires, which changes the ANSWER. `Column::support` is the opposite:
 /// it takes `&Column`, touches no shared state, and costs `Theta(bars)`. Only
 /// the expensive, shared-nothing half is spread.
 ///
 /// # Determinism
 ///
-/// `scope` joins its handles in the order they were spawned, so `parts` is in
-/// chunk order and `out` receives the same sequence a single lane would have
-/// produced. `sort_canonically` then runs over the level regardless, so §3 rule
+/// Workers write support counts into disjoint, positionally fixed slices of one
+/// `counts` vector, and after every worker has finished one serial loop appends
+/// the survivors to `out` in candidate order through
+/// [`primitives::append`] — so `out` receives the same sequence a single lane
+/// would have produced. (This described per-chunk `parts` vectors that no
+/// longer exist; D-0926.) `sort_canonically` then runs over the level regardless, so §3 rule
 /// 5 holds twice over. `a_batched_level_is_identical_to_a_single_lane_one`
 /// measures it rather than trusting either argument.
 ///
@@ -2300,7 +2384,7 @@ fn drain(
     // worker owns a growing result vector and this loop cannot allocate.
     for (mask, hits) in batch.iter().zip(counts) {
         if hits >= min_hits {
-            out.push(Itemset { mask: *mask, hits });
+            primitives::append(out, Itemset { mask: *mask, hits });
         } else {
             *infrequent = infrequent.saturating_add(1);
         }
@@ -2309,8 +2393,38 @@ fn drain(
     Ok(())
 }
 
-fn every_subset_is_frequent(cand: &ConditionMask, frequent: &MaskSet) -> bool {
-    set_positions(cand).all(|b| frequent.contains(&cand.without_bit(b)))
+/// True when every (k-1)-subset of a join candidate, other than its two
+/// parents, is in the previous frequent frontier.
+///
+/// # Theta(k), not O(1), and that is the honest bound
+///
+/// One expected-O(1) `MaskSet` probe per set bit below the candidate's two
+/// highest, so `k - 2` probes for a candidate that survives (fewer for one
+/// that is refused early), each hashing seven words and comparing 48 bytes.
+/// `k` is bounded by [`ConditionMask::BITS`] = 384, which makes the walk
+/// bounded but not constant: the per-candidate cost GROWS with depth. This
+/// used to be described as "O(1)" and as "a 384-probe loop" in the same doc
+/// while the code walked `k` set bits and had no bench row. `C-E-12` now
+/// measures the per-PROBE cost flat from k=4 to k=320, which is the constant
+/// part, and `docs/06-limits.md` names the Theta(k) per candidate. D-0924.
+///
+/// # Why the two parents are skipped
+///
+/// A prefix-join candidate is `a | b` with `a = P + {x}` and `b = P + {y}`,
+/// `x < y` its two highest positions. Removing `y` gives `a` and removing `x`
+/// gives `b`, and both came out of the very frontier `frequent` was built
+/// from, so their probes could only ever answer "yes". At k=2 that leaves no
+/// probe at all. This makes the function correct ONLY for a candidate the
+/// prefix join built; [`join_screen`] is its one caller.
+///
+/// `crates/vocab` exposes no bit iterator; `column::set_positions` is
+/// `crates/engine`'s own, and yields positions in ascending order, which is
+/// what lets `take(k - 2)` stop short of the two parents.
+fn every_non_parent_subset_is_frequent(cand: &ConditionMask, frequent: &MaskSet) -> bool {
+    let below_parents = usize::try_from(cand.popcount().saturating_sub(2)).unwrap_or(usize::MAX);
+    set_positions(cand)
+        .take(below_parents)
+        .all(|b| frequent.contains(&cand.without_bit(b)))
 }
 
 /// Order by the mask's words, then by hits.
@@ -2831,8 +2945,14 @@ mod tests {
              ONE quantity under a prefix join, which is the property the deleted \
              set used to be needed to confirm"
         );
-        assert_eq!(
-            level.duplicates, 0,
+        // No pair repeats a candidate another pair already made, witnessed by
+        // DISTINCTNESS of what survived rather than by `duplicates`, which is a
+        // literal zero at k>=2 and cannot fail (D-0926).
+        assert!(
+            level
+                .frequent
+                .windows(2)
+                .all(|w| matches!(w, [x, y] if x.mask != y.mask)),
             "no pair repeats a candidate another pair already made"
         );
         assert!(
@@ -3685,6 +3805,151 @@ mod tests {
         }
     }
 
+    /// THE PAIR BUDGET IS EXACT AT BOTH EDGES. D-0922.
+    ///
+    /// It was checked once per outer row of a prefix block. Two defects
+    /// followed. A row ran to its end before the next check, so a halt
+    /// reported up to `block.len() - 1` pairs PAST the budget. And the check
+    /// also ran on a block's last row, which has no pair, so a level whose
+    /// need EQUALLED the budget halted with a partial frontier although every
+    /// pair had been walked. Bars `{0,1,2},{0,1,2},{}` need exactly four
+    /// pairs (three at k=2 in one block, one at k=3); the old join refused a
+    /// budget of four.
+    #[test]
+    fn the_pair_budget_is_exact_at_both_edges() {
+        let small = bars(&[&[0, 1, 2], &[0, 1, 2], &[]]);
+        let live = [0, 1, 2];
+        let unbounded = Ladder::with_min_hits(1).walk(&small, &live);
+        assert!(unbounded.completed());
+        let exact = Ladder::with_min_hits(1)
+            .with_pair_budget(4)
+            .walk(&small, &live);
+        assert!(
+            exact.completed(),
+            "a budget equal to the need must complete, halted: {:?}",
+            exact.halted
+        );
+        assert_eq!(exact.levels, unbounded.levels);
+        let short = Ladder::with_min_hits(1)
+            .with_pair_budget(3)
+            .walk(&small, &live);
+        let halt = short.halted.unwrap_or_default();
+        assert_eq!((halt.breach, halt.pairs), (Breach::Pairs, 3));
+
+        // ONE BLOCK OF NINE IS 36 PAIRS IN EIGHT ROWS. The first row alone is
+        // eight, so a row-granular check let a budget of five walk eight.
+        let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let b = bars(&[wide, wide, &[]]);
+        for budget in [1, 5, 8, 9, 35] {
+            let s = Ladder::with_min_hits(1)
+                .with_pair_budget(budget)
+                .walk(&b, wide);
+            let halt = s.halted.unwrap_or_default();
+            assert_eq!(
+                (halt.breach, halt.pairs),
+                (Breach::Pairs, budget),
+                "budget {budget}: a halt must stop AT the budget, never past it"
+            );
+            for level in &s.levels {
+                assert!(level.reconciles(), "level {} lost a candidate", level.k);
+            }
+        }
+    }
+
+    /// Skipping the two parents' subsets never changes the prune's answer
+    /// for a candidate the prefix join builds. Every pair of every block of
+    /// every 2- and 3-subset frontier over eight positions is checked
+    /// against the full k-probe walk, with frontiers that hold all, some and
+    /// none of the non-parent subsets. D-0924.
+    #[test]
+    fn skipping_the_parents_never_changes_the_subset_prune() {
+        let positions: Vec<u32> = vec![0, 1, 63, 64, 127, 128, 300, 383];
+        let all_of = |k: usize| -> Vec<ConditionMask> {
+            let n = positions.len();
+            (0_u32..(1 << n))
+                .filter(|m| usize::try_from(m.count_ones()).is_ok_and(|c| c == k))
+                .map(|m| {
+                    positions
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| m & (1 << i) != 0)
+                        .fold(ConditionMask::default(), |acc, (_, &p)| acc.with_bit(p))
+                })
+                .collect()
+        };
+        let mut checked = 0_u32;
+        for k in [2_usize, 3] {
+            let every = all_of(k);
+            for keep in [1_usize, 2, 3] {
+                let frontier: Vec<ConditionMask> = every
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % keep == 0)
+                    .map(|(_, m)| *m)
+                    .collect();
+                let frequent: MaskSet = frontier.iter().copied().collect();
+                for a in &frontier {
+                    for b in &frontier {
+                        if without_highest(a) != without_highest(b)
+                            || highest_position(a) >= highest_position(b)
+                        {
+                            continue;
+                        }
+                        let cand = a.union(b);
+                        let full =
+                            set_positions(&cand).all(|x| frequent.contains(&cand.without_bit(x)));
+                        assert_eq!(
+                            every_non_parent_subset_is_frequent(&cand, &frequent),
+                            full,
+                            "parents {a:?} {b:?}"
+                        );
+                        checked = checked.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 100,
+            "the sweep must reach real pairs, reached {checked}"
+        );
+    }
+
+    /// The bench primitives are the production primitives: the probe walks
+    /// exactly the pairs a level walks and keeps exactly the candidates that
+    /// survive both prunes, and `offer` / `append` behave as the set and
+    /// vector they front. D-0924.
+    #[test]
+    fn the_bench_primitives_agree_with_the_level_they_stand_for() {
+        let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let b = bars(&[wide, wide, &[0, 1, 2], &[]]);
+        let s = Ladder::with_min_hits(1).walk(&b, wide);
+        for pair in s.levels.windows(2) {
+            let [prev, next] = pair else { continue };
+            let built = primitives::JoinProbe::try_new(&prev.frequent);
+            assert!(built.is_ok(), "fixture-sized reservation");
+            let Ok(probe) = built else { continue };
+            let (pairs, survivors) = probe.screen_every_pair();
+            assert_eq!(pairs, next.generated, "k={} pairs", next.k);
+            assert_eq!(
+                survivors,
+                next.generated.saturating_sub(next.pruned),
+                "k={} survivors",
+                next.k
+            );
+            assert_eq!(probe.width(), prev.frequent.len());
+        }
+        let mut offered = HashSet::new();
+        assert!(primitives::offer(&mut offered, 7));
+        assert!(!primitives::offer(&mut offered, 7), "a repeat is rejected");
+        let mut out = Vec::new();
+        let item = Itemset {
+            mask: ConditionMask::default().with_bit(3),
+            hits: 2,
+        };
+        primitives::append(&mut out, item);
+        assert_eq!(out, vec![item]);
+    }
+
     /// The default ceiling, named once so the test above reads clearly.
     fn engine_ceiling() -> usize {
         DEFAULT_CEILING
@@ -3945,9 +4210,14 @@ mod tests {
              to the same answer on over a thousand candidates."
         );
         assert_eq!(
-            exits, 17,
+            exits, 16,
             "the shipping region of this file may leave a loop early in exactly \
-             seventeen places, and every one is accounted for.\n\
+             sixteen places, and every one is accounted for.\n\
+             \x20 IT WAS SEVENTEEN UNTIL D-0924 folded the subset prune and the \
+             meaning prune into one `join_screen` call, so both refusals now \
+             leave by ONE `let .. else {{ continue }}` skip; and D-0922 moved \
+             the pair-budget exit from the outer row into the inner pair, \
+             which moved it without adding or removing one.\n\
              Five resource-safety exits were added: four setup returns refuse \
              support-column or level-record storage before computation; one \
              batch exit reports MEMORY or WORKERS and rolls back uncommitted \
@@ -3959,20 +4229,21 @@ mod tests {
              six-word bound as `without_highest` beside it, and deliberately \
              beside it: the prefix join's correctness rests on both agreeing \
              about which bit is highest, so they are read together.\n\
-             \x20 1 FILTER SKIP -- a candidate whose ONE new pair restates \
+             \x20 THE MEANING PRUNE -- a candidate whose ONE new pair restates \
              itself or cannot hold. `vocab::implication` proves the pivot chain \
              exact from `daily.rs:206-215` and the single shared band half at \
              `daily.rs:579`; anti-monotonicity cannot reach it, because both \
              bits are frequent and so is their union. It advances rather than \
-             truncating -- the level still enumerates every other pair.\n\
+             truncating -- the level still enumerates every other pair. It \
+             shares the subset prune's skip since D-0924.\n\
              \x20 AND THE TEN THAT WERE ALREADY HERE:\n\
              \x20 1 EMPTY-BATCH RETURN -- `drain` handing back an untouched \
              tally when there is nothing to count. It is not optional: \
              `len.div_ceil(lanes())` on an empty batch is a chunk width of \
              zero, and `chunks(0)` panics.\n\
              \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
-             breach, the join's outer row on the pair budget, the join's inner \
-             pair on whichever memory bound `exhausted` names;\n\
+             breach, the join's pair on the pair budget before it is walked, \
+             the join's pair on whichever memory bound `exhausted` names;\n\
              \x20 2 EXHAUSTION RETURNS inside `exhausted` -- the ceiling, which \
              a caller set, and the allocator, which nobody set;\n\
              \x20 3 FILTER SKIPS, which advance rather than truncate -- a \
@@ -3983,7 +4254,7 @@ mod tests {
              the join rather than rejected inside it;\n\
              \x20 1 KEY RETURN -- `without_highest` handing back the join's \
              grouping key once it has found the top word.\n\
-             It was NINE until `every_subset_is_frequent` became a one-line \
+             It was NINE until the subset check became a one-line \
              `set_positions(cand).all(..)`, which deleted its `return false`. \
              Before that it was nine for a changed reason: the prefix join \
              removed the `popcount != k` skip and added the `without_highest` \
@@ -4066,7 +4337,7 @@ mod tests {
     /// The hole this closes: a frontier that never empties.
     ///
     /// Four positions that co-occur on most bars. Every subset of a frequent set
-    /// is frequent, so `every_subset_is_frequent` never prunes and extinction —
+    /// is frequent, so `every_non_parent_subset_is_frequent` never prunes and extinction —
     /// §6's entire replacement for a depth parameter — never happens. Before the
     /// ceiling the only thing under this was the allocator.
     #[test]
@@ -4590,12 +4861,11 @@ mod tests {
             "the prefix join must REACH it once, not reach it three times and \
              discard two"
         );
-        assert!(
-            k3.is_some_and(|l| l.duplicates == 0),
-            "and the duplicate counter is the witness: a prefix join that emitted \
-             the same k-set twice would be enumerating pairs it has no business \
-             walking"
-        );
+        // `duplicates == 0` USED TO BE ASSERTED HERE AS "THE WITNESS", AND IT
+        // COULD NOT FAIL: every k>=2 level is built by `joined_frontier`, which
+        // writes `duplicates: 0` as a literal and counts nothing. The live
+        // witness is `generated == 1` above -- a join that reached {0,1,2}
+        // twice would report two. D-0926.
     }
 
     /// The prefix join returns exactly what an exhaustive pairwise join returns.
@@ -4635,7 +4905,7 @@ mod tests {
                 for c in oracle.iter().skip(i.saturating_add(1)) {
                     let cand = a.union(c);
                     if cand.popcount() == level.k
-                        && every_subset_is_frequent(&cand, &prev)
+                        && set_positions(&cand).all(|x| prev.contains(&cand.without_bit(x)))
                         && support(&b, &cand) >= min_hits
                     {
                         next.insert(cand);
@@ -4668,7 +4938,7 @@ mod tests {
     /// | Truncation | Why the count did not move |
     /// |---|---|
     /// | `if halt.is_some() \|\| (bars > 100 && k >= 3)` | folded into the existing `break`'s condition |
-    /// | `frequent.len() > 4096 \|\|` in `every_subset_is_frequent` | folded into the existing `return false`'s condition |
+    /// | `frequent.len() > 4096 \|\|` in the subset check (now `every_non_parent_subset_is_frequent`) | folded into the existing `return false`'s condition |
     /// | `.take(1024)` on the join's outer row loop | that header was not pinned at all |
     /// | `.step_by(stride)` on the inner loop | the pin is `contains`, so any suffix passes |
     /// | the `'join` loop wrapped in `if column.bars() <= 1000` | an `if` carries no exit token |
@@ -4921,10 +5191,9 @@ mod tests {
             "the repeated mask must yield ONE candidate, not two -- {{0,1,2}} \
              is produced once because the repeat never reaches the join"
         );
-        assert_eq!(
-            level.duplicates, 0,
-            "and nothing is rejected AFTER the fact, because nothing repeats"
-        );
+        // `duplicates == 0` was asserted here too, against the literal zero
+        // `joined_frontier` writes; it could not fail. `generated == 1` above is
+        // the property. D-0926.
         // AND IT LEAVES BY THE PRUNE, NOT BY THE BARS. `{0,1,2}` needs all three
         // of its 2-subsets frequent and the fixture supplies only `{0,1}` and
         // `{0,2}` — `{1,2}` is absent — so anti-monotonicity refuses it before a

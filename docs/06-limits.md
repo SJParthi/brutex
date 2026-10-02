@@ -94,9 +94,11 @@ The `HashSet` column is the raw key bytes and understates the real cost: hashbro
 keeps a load factor near 7/8 and adds one control byte per slot.
 
 **k=4 is the first whole-vocabulary level at the shipped candidate ceiling.**
-Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` and the raw
-`seen` keys alone are 12.63 GiB before allocator overhead, the previous
-frontier, batches or ranking. At k=5 the join itself dominates everything:
+Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` alone is
+6.80 GiB before allocator overhead, the previous frontier's membership set and
+keyed copy, batches or ranking. (This sentence priced a `seen` duplicate set at
+another 5.83 GiB; the prefix join is injective and that set was deleted, so it
+no longer exists to price. D-0926.) At k=5 the join itself dominates everything:
 `|F|²/2` pair-unions is 8.49 × 10¹⁵ six-word ORs, months of work independent
 of the bars.
 
@@ -120,7 +122,9 @@ be the other.
 | `Breach::Memory` | the allocator | an honest refusal, discovered at runtime | overcommit |
 
 `Ladder::exhausted` asks both as one question. The allocator half is
-`HashSet::try_reserve`, which returns rather than aborts, so the walk halts
+`Vec::try_reserve` on the level's result vector, sized for every pending batch
+candidate (it was `HashSet::try_reserve` on the deleted `seen` set until
+D-0926 corrected this sentence), which returns rather than aborts, so the walk halts
 naming memory instead of dying. It takes what a 4 GB machine has and what a
 48 GB machine has and works out which at runtime.
 
@@ -9879,3 +9883,45 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Engine join costs that are not O(1) — D-0922 to D-0926, 2 October 2026
+
+Three per-level and per-candidate costs of the prefix join were stated
+nowhere, or stated wrongly. Each is named here with its bound.
+
+**The pair budget is exact (D-0922).** It is checked before every pair, so a
+`Breach::Pairs` halt records exactly `pair_budget` pairs, and a walk that needs
+exactly its budget completes. It was checked once per outer row: a halt could
+report up to one block width minus one pair past the budget, and a level whose
+need equalled the budget halted on the final, empty row. The budget bounds
+pairs walked, not wall time; the cost of one pair still depends on depth, below.
+
+**The subset prune is Theta(k) per candidate, not O(1) (D-0924).** For a
+candidate the prefix join builds, the prune probes the previous frontier's
+`MaskSet` once per set bit below the two parents: `k - 2` expected-O(1) probes
+for a survivor, each hashing seven words and comparing 48 bytes. `k` is bounded
+by the 384-bit mask, so the cost is bounded and grows with depth. The two
+parents' own probes, which could only answer "yes", are skipped. `C-E-12`
+measures the per-probe cost flat from k=4 to k=320; it does not and cannot make
+the per-candidate cost constant. So a level's join work is
+`pairs x (O(1) + Theta(k))`, and `DEFAULT_PAIR_BUDGET`, which counts pairs,
+bounds a deep level's time less tightly than a shallow one's.
+
+**Indexing each level sorts it: O(|F| log |F|) per level (D-0924).**
+`JoinIndex::try_new` builds `(without_highest(mask), mask)` for each of the
+previous level's `|F_{k-1}|` survivors, sorts by twelve-word keys and dedups;
+`sort_canonically` then sorts the `|F_k|` survivors by their seven-word key.
+Both are comparison sorts, so each level costs `O(|F| log |F|)` comparisons
+beyond the join, and the cost grows with the frontier. It replaced an
+`|F|^2 / 2` pairwise scan, and it is per level, never per pair or per bar.
+
+**Duplicate rejection at k>=2 is absent, not measured (D-0926).** The prefix
+join is injective, so `duplicates` is written as a literal zero at k>=2 and no
+operation counts it. Its tests witness injectivity through `generated` and
+distinct survivors, not by reading that literal back.
+
+**Not measured for this change:** the new and corrected gate 8 rows (C-E-08,
+C-E-10, C-E-11, C-E-12) ran in a shared four-core container with other builds
+in flight; their recorded ratios are what that run printed and are not a
+quiet-machine measurement.
+

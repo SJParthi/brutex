@@ -43718,3 +43718,105 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0922 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
+
+**What was wrong.** `Ladder::try_next_level_observing` checked
+`pairs_walked + pairs >= pair_budget` once at the start of each outer row of a
+prefix block. Two defects followed (audit findings W3-engine1-3 and
+ET-masks-evaluation-sweep-5). The inner loop walked its whole row before the
+next check, so a halt could report up to `block.len() - 1` pairs past the
+budget: with every bit frequent at k=2 the block is the whole frontier. And the
+check also ran on a block's last row, which has no pair to walk, so a level
+whose need equalled the budget was reported as `Breach::Pairs` with a partial
+frontier although every pair had been walked. Bars `{0,1,2},{0,1,2},{}` need
+four pairs; a budget of four halted.
+
+**The change.** The check moved inside the inner loop, before the pair is
+counted. A pairs halt now records exactly `pair_budget`, and a walk that needs
+exactly its budget completes. One integer compare per pair. The checkpoint
+reader accepts an unhalted `pairs == pair_budget` (it refused `>=`), and still
+accepts a named pairs halt with `pairs > pair_budget`, so checkpoints written
+before this change still read. A run whose pair budget binds now reports a
+different `Halt::pairs` and, where the old overshoot crossed a level, a
+different partial frontier; `commit` is in the run identity, so the two are
+distinct runs. No production caller sets a pair budget below the default, which
+the candidate ceiling reaches first (`DEFAULT_PAIR_BUDGET`'s doc).
+Tests: `engine::tests::the_pair_budget_is_exact_at_both_edges`,
+`a_walk_that_needs_exactly_its_pair_budget_completes_and_its_checkpoint_reads_back`.
+
+### D-0923 — A checkpoint resumes under any support-lane count — 2026-10-02
+
+**What was wrong.** `Checkpoint::validate_for` refused a resume whose
+`support_lanes` differed from the checkpoint's (finding
+ET-masks-evaluation-sweep-2). The lane count is a scheduling sentinel, outside
+the run identity, and `a_support_lane_bound_changes_only_scheduling` proves it
+changes no answer. `cli` derives lanes from `available_parallelism` divided by
+the rungs sharing the machine, so an interrupted `sweep-stored` AND checkpoint
+was refused on any host or container with a different core count.
+
+**The change.** The comparison is removed; the resumed walk schedules with the
+caller's lanes. Every answer-bearing term (identity, rows, offered sequence,
+`min_hits`, ceiling, pair budget) is still compared exactly. The checkpoint
+format is unchanged and still records the lane count in force when it was
+written. Test:
+`a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer`
+(1, 2, 3 and `usize::MAX` lanes, each equal to the uninterrupted walk).
+
+### D-0924 — Time the production join and k=1 primitives, skip the parents' subset probes, and name the join's Theta(k) and sort costs — 2026-10-02
+
+**What was wrong.** Gate 8's engine rows timed stand-ins (findings
+ET-masks-evaluation-sweep-8, ET-o1-proof-coverage-0 and -2, W3-engine1-0 and
+-1). C-E-08 timed `a.union(b).popcount()` over a bench-local vector, a popcount
+production no longer performs, while the subset prune and meaning prune that
+production does run per pair were never timed. C-E-10 and C-E-11 built their
+own `HashSet` and `Vec`, so an O(n) regression in the production dedup or
+append would have shipped with gate 8 green. The subset prune is Theta(k) per
+candidate while its doc called it "O(1)" and "a 384-probe loop", and the doc was
+attached to `BATCH_PER_LANE`. The per-level sorts in `JoinIndex::try_new` and
+`sort_canonically` cost O(|F| log |F|) and were stated only in a code comment.
+
+**The change.** A public `engine::primitives` module carries the production
+operations: `offer` (the k=1 insert `first_level` calls), `append` (the push
+`drain` calls) and `JoinProbe`, which indexes a frontier with the production
+`JoinIndex` and walks every pair through `join_screen`, the one function the
+level join now calls for the union and both prunes. C-E-08 times `JoinProbe`
+from a 105-wide to a 990-wide frontier; new row C-E-12 times one subset probe
+from k=4 to k=320; C-E-10 and C-E-11 call `offer` and `append`. The subset prune
+now skips the two parents, which came from the frontier the set was built from
+and could only answer yes: `k - 2` probes for a survivor, none at k=2.
+`skipping_the_parents_never_changes_the_subset_prune` checks it against the
+full k-probe walk, and the exhaustive-join oracle test now carries its own full
+check. `docs/06-limits.md` names the Theta(k) prune and the O(|F| log |F|)
+per-level sorts. The walk's exit count falls from 17 to 16 because both prunes
+leave by one skip.
+
+### D-0925 — `engine::support` adds a hit without branching on it — 2026-10-02
+
+**What was wrong.** Its doc said "no branch on the answer" and its body was
+`if b.hits(mask) { n + 1 } else { n }` (finding ET-masks-evaluation-sweep-6).
+The function is a test and bench reference; the live path is
+`Column::support`, which C-E-02b already pins.
+
+**The change.** The body adds `u64::from(b.hits(mask))`. Same answers; the
+existing support tests and C-E-06's agreement check cover it.
+
+### D-0926 — Say that `duplicates` is a structural zero at k>=2, replace the assertions that read it back, and correct the drain and append descriptions — 2026-10-02
+
+**What was wrong.** Every k>=2 level is built by `joined_frontier`, which
+writes `duplicates: 0` as a literal (finding AC-whp-tb-5). Three engine test
+assertions and one oracle test asserted `duplicates == 0` as "the witness" that
+the prefix join emits each k-set once; none could fail. `DEFAULT_PAIR_BUDGET`'s
+doc and the join comment called it a "measured zero". Separately (finding
+ET-masks-evaluation-sweep-3), `CLAUDE.md` §3 rule 4 described lane-local `kept`
+vectors folded with one `extend` per chunk, `drain`'s doc described `parts`
+vectors and a `seen` set, `docs/06-limits.md` §5 priced the deleted `seen` set
+and named `HashSet::try_reserve`, and `cli/src/batch.rs` called
+`DEFAULT_CEILING` `1 << 26` where it is `1 << 27`.
+
+**The change.** The dead assertions are removed or replaced by distinctness of
+the level's survivors, which can fail; `generated == 1` remains the witness
+where it already was. The prose now says the zero is proved by the join's shape
+and written, not counted. `CLAUDE.md`, `drain`'s doc, §5 and `batch.rs` describe
+what the code does: one reserved `out`, disjoint count slices, one serial
+in-order push per survivor, `Vec::try_reserve`, and `1 << 27`.

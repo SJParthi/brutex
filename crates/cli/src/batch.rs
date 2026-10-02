@@ -70,8 +70,9 @@ use store::catalog::{self, Held};
 ///
 /// # Why the whole-store sweep needs its own ceiling
 ///
-/// `engine::DEFAULT_CEILING` is `1 << 26` and its own doc prices that at
-/// **8 GiB** — more than an ordinary machine has. So on a single sweep the
+/// `engine::DEFAULT_CEILING` is `1 << 27` (this said `1 << 26`, the value
+/// before D-0304; corrected by D-0926) and its own doc's table prices `2^26`
+/// at **8 GiB**, so `2^27` is more still — more than an ordinary machine has. So on a single sweep the
 /// constant never binds and the real bound is `Ladder::cannot_grow`, a genuine
 /// `try_reserve` probe. `engine::Breach::Memory`'s doc states that as the
 /// design: the sweep *"uses what a 4 GB machine has and what a 48 GB machine
@@ -571,8 +572,9 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     // A STATED CEILING, BECAUSE THE DEFAULT ONE IS THE MACHINE'S FREE MEMORY.
     //
     // This was `Ladder::with_min_hits(min_hits)` alone, which leaves
-    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 26`,
-    // priced by its own doc at 8 GiB, more than an ordinary machine has. So the
+    // `engine::DEFAULT_CEILING` in force — and that constant is `1 << 27`
+    // (written here as `1 << 26` until D-0926), more than the 8 GiB its own doc
+    // prices `2^26` at, so more than an ordinary machine has. So the
     // bound that actually binds is not the constant: it is `cannot_grow`, a real
     // `try_reserve` probe. `Breach::Memory`'s doc says that is deliberate — the
     // sweep "uses what a 4 GB machine has and what a 48 GB machine has,

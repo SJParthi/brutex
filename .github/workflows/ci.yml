@@ -7139,7 +7139,7 @@ jobs:
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
           vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
           indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
-          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
+          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11 C-E-12
           runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
