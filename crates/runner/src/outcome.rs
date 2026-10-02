@@ -143,12 +143,23 @@ impl SessionBounds {
         // rows as well as verdicts makes a duplicate timestamp ambiguous even
         // when the evaluator accepts the first and rejects the second.
         let required_open = FORCED_EXIT_MINUTE.saturating_sub(1);
+        let is_required = |bar: &Candle| {
+            bar.ts_micros.rem_euclid(60_000_000) == 0
+                && ist_minute_of_day(bar.ts_micros) == required_open
+        };
+        // PRE-SIZED FROM AN EXACT UPPER BOUND -- D-1177. The map holds one entry
+        // per IST day that has a whole-minute 15:09 record, so it can never need
+        // more entries than there are such records. Counting them first is one
+        // pass of two integer tests per bar, and the reservation can then never
+        // be too small, whatever the slice's shape: a coarse rung, a single
+        // session, or a slice of nothing but 15:09 rows. `bars.len() / 375 + 1`
+        // would under-reserve on exactly those slices, and reserving
+        // `bars.len()` would reserve a million entries for a few hundred days.
+        let candidates = bars.iter().filter(|bar| is_required(bar)).count();
         let mut required: std::collections::HashMap<i64, (u64, Option<usize>)> =
-            std::collections::HashMap::new();
+            std::collections::HashMap::with_capacity(candidates);
         for (index, bar) in bars.iter().enumerate() {
-            if bar.ts_micros.rem_euclid(60_000_000) != 0
-                || ist_minute_of_day(bar.ts_micros) != required_open
-            {
+            if !is_required(bar) {
                 continue;
             }
             let day = exact_ist_day(bar.ts_micros);
@@ -162,12 +173,16 @@ impl SessionBounds {
                 })
                 .or_insert((1, is_accepted(index).then_some(index)));
         }
-        let proved: std::collections::HashSet<i64> = required
-            .iter()
-            .filter_map(|(&day, &(count, accepted_index))| {
-                (step == 60_000_000 && count == 1 && accepted_index.is_some()).then_some(day)
-            })
-            .collect();
+        // At most one proved day per entry of `required`, so that is its size.
+        let mut proved: std::collections::HashSet<i64> =
+            std::collections::HashSet::with_capacity(required.len());
+        proved.extend(
+            required
+                .iter()
+                .filter_map(|(&day, &(count, accepted_index))| {
+                    (step == 60_000_000 && count == 1 && accepted_index.is_some()).then_some(day)
+                }),
+        );
         let mut stamped: Vec<BarBound> = Vec::with_capacity(bars.len());
         let mut current: Option<ReverseSession> = None;
 
@@ -4421,5 +4436,66 @@ mod missing_minute_tests {
         );
         assert!(!f.was_refused(bars.len()) && !f.was_missing(bars.len()));
         assert!(!f.was_missing(usize::MAX));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod presize_tests {
+    use super::{FORCED_EXIT_MINUTE, SessionBounds};
+    use indicators::{Candle, OI_NULL};
+
+    fn at_1509(day: i64) -> Candle {
+        let minute = FORCED_EXIT_MINUTE - 1;
+        let ts = (day * 1_440 + minute) * 60_000_000 - indicators::IST_OFFSET_MICROS;
+        Candle::new(ts, 100, 110, 90, 100, 1, OI_NULL)
+    }
+
+    /// o1runner-8: the per-day map is sized from an exact upper bound, never
+    /// grown from empty, and the proved set from the map.
+    #[test]
+    fn the_forced_close_map_is_pre_sized_from_its_exact_bound() {
+        let source = include_str!("outcome.rs");
+        let start = source
+            .find("pub(crate) fn with_step")
+            .expect("with_step exists");
+        let body = source
+            .get(start..)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("a body");
+        assert!(
+            !body.contains("HashMap::new()"),
+            "the map grows from empty again"
+        );
+        assert!(body.contains("HashMap::with_capacity(candidates)"));
+        assert!(body.contains("HashSet::with_capacity(required.len())"));
+    }
+
+    /// The shapes `bars.len() / 375 + 1` would under-reserve: a slice of
+    /// nothing but 15:09 rows, one per day, and a day with two of them. The
+    /// answers are the same as before -- each lone record proves its day, and a
+    /// duplicated one proves nothing.
+    #[test]
+    fn a_slice_of_only_forced_close_rows_proves_each_lone_day() {
+        let mut bars: Vec<Candle> = (20_000..21_000).map(at_1509).collect();
+        let bounds = SessionBounds::with_step(&bars, 60_000_000, None);
+        assert!(
+            (0..bars.len()).all(|i| bounds.day_ended(i)),
+            "a lone 15:09 proves its day"
+        );
+
+        bars.insert(500, at_1509(20_500));
+        let bounds = SessionBounds::with_step(&bars, 60_000_000, None);
+        assert!(
+            !bounds.day_ended(500) && !bounds.day_ended(501),
+            "a duplicate proves nothing"
+        );
+        assert!(bounds.day_ended(499) && bounds.day_ended(502));
+
+        let empty = SessionBounds::with_step(&[], 60_000_000, None);
+        assert!(!empty.day_ended(0));
     }
 }

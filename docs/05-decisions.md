@@ -43983,3 +43983,30 @@ be absent, unpriceable and missing, with `Edge::missing == Edge::refused`.
 out-of-range indices. These tests did not compile on the previous tree: neither
 `was_missing` nor `Edge::missing` existed, and nothing could tell the two
 absences apart.
+
+### D-1177 — The forced-close day map is pre-sized from an exact upper bound — 2026-10-02
+
+**What was wrong (audit o1runner-8).** `SessionBounds::with_step` built its
+per-day map of 15:09 records with `HashMap::new()` and let it grow by
+resizing. That is against docs/07 law 2 ("pre-size every map"), which gate 11
+rule 3 enforces. `outcome.rs` was on that rule's allowlist for this one line.
+The `proved` set beside it was collected from an iterator whose lower size hint
+is zero, so it also grew from empty.
+
+**The change.** One pass first counts the whole-minute 15:09 records. Each map
+entry is a distinct IST day that has such a record, so that count is an exact
+upper bound, and the map is reserved at it. The reservation can never be too
+small, whatever the slice's shape. The suggested `bars.len() / 375 + 1` would
+under-reserve on a coarse rung, a single session or a slice of only 15:09 rows,
+and reserving `bars.len()` would reserve a million entries for a few hundred
+days. `proved` is reserved at `required.len()`, its own exact bound, and
+extended. The extra pass costs two integer tests per bar, once per slice.
+
+**Outputs.** Unchanged. `a_slice_of_only_forced_close_rows_proves_each_lone_day`
+pins the answers on the shape a per-375 bound under-reserves: 1,000 lone 15:09
+rows each prove their day, and a duplicated one proves nothing.
+`the_forced_close_map_is_pre_sized_from_its_exact_bound` fails on the previous
+tree (`HashMap::new()`). **Reported, not edited:** gate 11 rule 3's allowlist
+entry `crates/runner/src/outcome.rs 1` in `ci.yml` no longer matches, and the
+gate will warn that it is loose. Removing it is a `ci.yml` edit for the lane
+that owns that file.
