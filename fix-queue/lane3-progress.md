@@ -1,7 +1,7 @@
 # Cloud fix lane 3 progress (checkpoint; resume from here after any pause)
 
 Decision numbers: D-0940..D-0959, then D-1200..D-1299. Branch per fix: fix/cloud-<id>.
-Updated: 2026-10-02 17:20 UTC. Budget rule: max 2 agents; stop at 95-97% weekly usage after pushing everything and updating resume/RESUME-20261003.md.
+Updated: 2026-10-02 17:20 UTC. Budget rule: max 2 agents; stop at 98% weekly usage (never past 99%) after pushing everything and updating resume/RESUME-20261003.md.
 
 ## Set 1 (lane3.md)
 | Fix | Findings | Branch | D | State | PR |
