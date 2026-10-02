@@ -4734,9 +4734,8 @@ mod tests {
 ///
 /// The flag values are the ones `crate::checksum_audit::open_regular` already
 /// carries for the same hosts. On any other unix host there is no verified
-/// value, so the name is `stat`ed first and a non-regular file refused before
-/// the open; that check races a concurrent swap, which is the honest limit
-/// there.
+/// value, so every read open is refused as unsupported rather than risk a
+/// blocking open, exactly as `open_regular` refuses there.
 fn open_read(path: &Path) -> Result<File, ReadOpen> {
     use std::os::unix::fs::OpenOptionsExt as _;
     #[cfg(all(
@@ -4754,14 +4753,11 @@ fn open_read(path: &Path) -> Result<File, ReadOpen> {
         )
     )))]
     let flags = {
-        if let Ok(named) = fs::metadata(path) {
-            if !named.is_file() {
-                return Err(ReadOpen::NotRegular {
-                    directory: named.is_dir(),
-                });
-            }
-        }
-        0
+        let _ = path;
+        return Err(ReadOpen::Host(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "store reads require verified macOS or Linux x86_64/aarch64 open flags",
+        )));
     };
     let file = fs::OpenOptions::new()
         .read(true)

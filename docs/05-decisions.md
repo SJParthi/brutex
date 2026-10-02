@@ -43749,9 +43749,11 @@ no other crate builds `Census` field by field, so no caller changes.
 
 **Honest limits.** `O_NONBLOCK` stays set on the returned handle. That has no
 effect on `pread` of a regular file, and the lock is taken with `LOCK_NB`
-anyway. On a unix host outside the verified list, the name is `stat`ed before
-the open. That check races a concurrent swap, so the guarantee there is weaker,
-and only Linux x86_64 has run the tests. The write door `open_or_create` is not
+anyway. On a unix host outside the verified list there is no verified
+`O_NONBLOCK` value, so every read open refuses as `Unsupported`, as
+`checksum_audit::open_regular` already does there, rather than fall back to a
+racy name check (the first draft did, and Gate 18 showed its line was code no
+test on a verified host could reach). Only Linux x86_64 has run the tests. The write door `open_or_create` is not
 covered by this entry. It creates files and opens them read-write, and this
 finding was about the read path. A dangling symlink named like a month used to
 be listed and then refused as `Missing` on open. It is now counted as
