@@ -34,8 +34,8 @@ Updated: 2026-10-02 17:20 UTC. Budget rule: max 2 agents; stop at 98% weekly usa
 | Fix | Findings | Branch | D | State | PR |
 |---|---|---|---|---|---|
 | C1 api hardening | probeapi-1, probeapi-2, probeapi-3 (api half) | fix/cloud-probeapi-1 | D-1200 | worker running | |
-| C2 pull | o1api-44, probestore-1 | fix/cloud-o1api-44 | D-1201 | worker running | |
-| C3 api low | probeapi-4, -5, -7, rustonly-4, o1api-3, -4, -21 | fix/cloud-probeapi-4 | D-1202 | next | |
+| C2 pull | o1api-44, probestore-1 | fix/cloud-o1api-44 | D-1201 | pushed ad0ac021, no PR (rule) | |
+| C3 api low | probeapi-4, -5, -7, rustonly-4, o1api-3, -4, -21 | fix/cloud-probeapi-4 | D-1202 | worker running | |
 | C4 pull low | o1api-33, -34, -36, -39, -54, probestore-2 | fix/cloud-o1api-33 | D-1203 | next | |
 | C5 docs/tests | o1runner-9, o1runner-10, rustonly-3, audit-root | fix/cloud-o1runner-9 | D-1204 | next | |
 
