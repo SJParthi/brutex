@@ -10266,3 +10266,24 @@ quoted here in the source and counts two parent checks around one
 `persistence::verify` in each level's method. The bracketing is what proves nothing changed while
 the check ran, and removing either side would weaken that proof; a cheaper
 proof is a design change this entry does not make.
+## Interrupted Population ledger writes: what recovers and what still refuses — D-0916, D-0917, 29 September 2026
+
+* **Recovered.** An Admission V3 or V4 record append whose `write_all` returns
+  an error is truncated back to its committed length. An Admission V4 or
+  Finalization V4 data file left empty or as an exact prefix of its constant
+  header is completed by the next writer. A Finalization V3 whole-row prefix
+  with no Completion is completed by the exact retry. Each is proved by the
+  tests named in `docs/04-invariants.md` rows C4-CLI-05-01 to C4-CLI-05-04.
+* **Still refused.** Rollback runs only when the error returns inside the
+  process. A process killed, or a machine that loses power, partway through a
+  record leaves a ragged tail, and the open path still refuses it: Admission V4
+  with `Admission V4 data file is ragged`, Admission V3 and Finalization V3
+  through `checked_record_count` (`if !bytes.is_multiple_of(stride_u64)`). A
+  failed `set_len` during rollback also leaves the tail and says so in its
+  refusal. Finalization V3's own `append_raw` is still
+  `file.seek(SeekFrom::End(0)).and_then(|_| file.write_all(raw))` with no
+  rollback. A short header whose bytes are not an exact prefix of the constant
+  header is refused, never rewritten.
+* **Not measured.** The failures are injected by a write closure that writes
+  half a record and returns an error, and by files written by hand. No test
+  physically injects ENOSPC, EIO, a kill or a power loss.

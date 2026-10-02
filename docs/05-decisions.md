@@ -44708,3 +44708,77 @@ stale-writer and reopened-writer tests keep the writer's append refusals.
 exclusive lock over a whole row of zeros for two seconds before writing the
 real row, and requires the refresh not to have finished while the lock is held,
 then to index the real row and record no damage.
+### D-0916 — Roll a failed Admission append back, and let the V4 writers finish a header a crash left torn — 2026-09-29
+
+**What was wrong.** Three ways a single interrupted write made a Population
+ledger refuse every later open, read-only included, for good:
+
+- **W2-cli10-3.** Admission V3 and V4 `append_raw` were
+  `file.seek(SeekFrom::End(0)).and_then(|_| file.write_all(raw))` with no
+  rollback. A write error partway through a record left a ragged tail, and the
+  next open refused the whole file. Reproduced on `origin/main` (2c209309) by
+  appending half a record to a committed ledger: Admission V3 answered
+  `Admission V3 decision file has ragged length 9216, not a multiple of 2048`
+  and Admission V4 `Admission V4 data file is ragged`.
+- **W2-cli10-4, W2-cli11-5.** Admission V4 and Finalization V4 write their
+  64-byte header only when `open_child` reports the file as newly created. A
+  crash after the create and before the header reached disk left an empty or
+  short file, which is not newly created on the next open, so `verify_header`
+  refused it forever. Reproduced on `origin/main` with an empty data file: the
+  writer answered `cannot read Admission V4 header: failed to fill whole
+  buffer` and `cannot read Finalization V4 header: failed to fill whole
+  buffer`.
+
+**The change.**
+
+- `append_raw` in both Admission modules now goes through
+  `append_with_rollback`, which records the end offset, and when the write
+  returns an error truncates the file back to it with `set_len` and refuses
+  naming the write error (`truncated back to {end} bytes`), or both errors when
+  the truncation fails too.
+- The Admission V4 and Finalization V4 writer, under its exclusive lock, treats
+  a data file shorter than the header whose every byte equals the constant
+  header's byte at that offset (`holds_torn_header`) as not yet initialised,
+  and writes the whole header from offset 0. A reader never repairs: it still
+  refuses and the file is left byte-identical. Short content that is not an
+  exact header prefix still refuses and is left byte-identical. A whole
+  64-byte header is not rewritten.
+
+**What this does not do.** Rollback runs only when `write_all` returns an
+error inside the process; a process killed partway through a record still
+leaves a ragged tail that every open refuses, and nothing here injects a
+physical ENOSPC, EIO or power loss. See `docs/06-limits.md`.
+
+Tests: `a_partial_append_error_truncates_back_and_committed_authority_stays_readable`
+(Admission V3 and V4), `empty_or_torn_header_prefix_is_reinitialized_by_the_writer_only`
+and `a_whole_header_is_not_rewritten_by_the_writer` (Admission V4 and
+Finalization V4).
+
+### D-0917 — Complete an exact partial Finalization V3 row prefix on the exact retry — 2026-09-29
+
+**What was wrong (W2-cli11-4).** `append_locked` appends a block's rows one at
+a time and syncs them once, after the loop, so a crash can leave any whole-row
+prefix of the block on disk with no Completion. `scan` admits such a prefix as
+the trailing block, but `complete_trailing` accepted only a trailing block
+whose rows equalled the whole retry
+(`trailing.rows != prepared.rows` refused). The exact rerun was therefore
+refused for good and the ledger took no further commit. Reproduced on
+`origin/main` (2c209309) with a one-row prefix: `Finalization V3 trailing
+block 1635a011… is not exact retry 1635a011…`, the same identity on both
+sides.
+
+**The change.** `complete_trailing` accepts a trailing block with the retry's
+Finalization identity whose rows are a prefix of the retry's rows
+(`prepared.rows.starts_with(&trailing.rows)`). It checks the append bound for
+the missing rows and one Completion, appends the missing rows at their
+physical positions after the kept prefix, syncs them, and then writes the
+Completion as before. For every prefix length of the fixture the completed
+row and Completion files are byte-identical to an uncrashed write, and a
+second rerun reuses. A retry with a different identity still refuses with
+`not exact retry` and leaves the row file byte-identical.
+
+**What this does not do.** A torn partial row (a row file that is not a whole
+number of rows) is still refused as ragged by `checked_record_count`, and
+Finalization V3 `append_raw` has no rollback; see `docs/06-limits.md`.
+
+Test: `every_exact_partial_row_prefix_without_completion_recovers_on_exact_retry`.
