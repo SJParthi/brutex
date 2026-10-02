@@ -161,7 +161,7 @@ fn cold_order(n: u64) -> Vec<u64> {
 ///
 /// Failed before D-0914: `verify_block_of` held `vec![0u8; span]` and
 /// `past_the_commit` held `vec![0u8; span]` and `Vec::new()`. The covered range
-/// now goes into the handle's fixed buffer (D-0912) and the records past the
+/// now goes into the handle's fixed buffer (D-1433) and the records past the
 /// commit into a `[0u8; MAX_BLOCK_LEN]` on the stack through `slice_of`.
 #[test]
 fn the_cold_verify_path_reads_into_the_stack_not_the_heap() {

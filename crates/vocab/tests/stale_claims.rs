@@ -1,5 +1,5 @@
 //! Fourteen written claims an audit found false, each checked against the code
-//! it describes so it cannot drift back — D-0957.
+//! it describes so it cannot drift back — D-1448.
 //!
 //! # Why this file exists
 //!
@@ -17,7 +17,7 @@
 //! a copy of their values, and `vocab` is the crate that has them with no
 //! dependency to add. The rest are static reads of tracked files, which any
 //! crate's test can do; keeping them beside the two that need `vocab` keeps
-//! the D-0957 checks in one place.
+//! the D-1448 checks in one place.
 //!
 //! # What it does not check
 //!
@@ -121,7 +121,7 @@ fn the_charter_names_the_cscv_half_enumeration_as_a_deviation() {
         !cscv.contains("equal-block complementary enumeration and rank event are carried"),
         "the charter must not say the paper's enumeration is carried"
     );
-    for needed in ["`C(S-1,S/2)`", "`C(S,S/2)`", "deviation", "D-0957"] {
+    for needed in ["`C(S-1,S/2)`", "`C(S,S/2)`", "deviation", "D-1448"] {
         assert!(cscv.contains(needed), "the CSCV row must name {needed}");
     }
     let code = read("crates/cli/src/population_statistics_v2.rs");

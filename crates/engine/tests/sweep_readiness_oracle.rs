@@ -152,7 +152,7 @@ fn assert_offer_accounting(
             .iter()
             .skip(1)
             // `duplicates` and `excluded` are literal zeros at k>=2 and could
-            // not fail here; distinct canonical survivors can (D-0926).
+            // not fail here; distinct canonical survivors can (D-1440).
             .all(|level| level
                 .frequent
                 .windows(2)

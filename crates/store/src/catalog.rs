@@ -143,7 +143,7 @@ pub struct Census {
     /// makes none, so it is not a month whatever its name. D-0769.
     ///
     /// A FIFO spelled `2026-08.bin` used to be listed as a held month, and the
-    /// first reader to open it blocked forever. D-0911, AC-whp-cx-0.
+    /// first reader to open it blocked forever. D-1432, AC-whp-cx-0.
     pub not_regular: u64,
 }
 

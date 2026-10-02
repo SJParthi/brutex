@@ -49,7 +49,7 @@
 //! The daily rung is always walked, and is cheap by construction: 1,671 records
 //! across the whole window, ~94 KiB. Every walk is one positional read per
 //! record, counted in [`Report::records_read`]; `docs/06-limits.md` states the
-//! O(records) bound under D-0950.
+//! O(records) bound under D-1443.
 //!
 //! # A month whose daily rung was not read is withheld, not closed
 //!
@@ -57,7 +57,7 @@
 //! the census holds at another rung only, or whose daily records failed their
 //! checks, is `Unmeasured` day by day and named in `withheld` on the wire,
 //! rather than filled with `Closed` between the days on either side of it.
-//! D-0950.
+//! D-1443.
 //!
 //! # What ONE instrument's bars cannot tell you, measured
 //!
@@ -128,7 +128,7 @@ type DayRuns = Vec<(i64, Vec<(u16, u16)>)>;
 /// (W1-api2-11). A miss now registers a flight for its key and stamp; a
 /// request that finds one waits for it and is answered what it derived. A
 /// leader that panics abandons its flight, and each waiter then tries again,
-/// one of them as the new leader. D-0950.
+/// one of them as the new leader. D-1443.
 #[derive(Default)]
 pub struct Cache {
     /// The kept calendars, keyed by series, each under the stamp it was
@@ -266,14 +266,14 @@ pub struct Report {
     ///
     /// A month the census holds only at the minute rung, one it does not hold
     /// at all, and one whose daily records failed their checks prove nothing
-    /// about which of their days the exchange was shut. Before D-0950 every
+    /// about which of their days the exchange was shut. Before D-1443 every
     /// such day inside the span was `Closed`, and `/calendar.json` served the
     /// month as a run of holidays. R9-api-law-0, W1-api2-9.
     pub withheld: Vec<YearMonth>,
     /// Bar records this derivation read, one positional read each: every
     /// record of every daily month that opened, plus every record of every
     /// minute month whose counter did not match. Not O(1); the bound is in
-    /// `docs/06-limits.md` under D-0950, and the count is pinned by
+    /// `docs/06-limits.md` under D-1443, and the count is pinned by
     /// `api::calendar_of::a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked`.
     /// W1-api2-1.
     pub records_read: u64,
@@ -324,14 +324,14 @@ pub fn derive(
     // `Day::from_days`, quadratic in the history's length, on every cache miss
     // and once per spot series on the exchange branch (W1-api2-0). Filing the
     // day here costs one classification per distinct day, and each month then
-    // reads only its own days. D-0950.
+    // reads only its own days. D-1443.
     let mut by_month: BTreeMap<(u16, u8), Vec<i64>> = BTreeMap::new();
     // THE MONTHS WHOSE DAILY RUNG WAS READ WHOLE, and only those may call a day
     // `Closed`. A month the census holds at another rung only, or whose daily
     // records failed their checks, proves nothing about which of its days the
     // exchange was shut, and `Calendar::from_observed` would otherwise fill it
     // with `Closed` because it sits between two observed days. Those months are
-    // withheld below. R9-api-law-0, W1-api2-9, D-0950.
+    // withheld below. R9-api-law-0, W1-api2-9, D-1443.
     let mut proved: std::collections::BTreeSet<(u16, u8)> = std::collections::BTreeSet::new();
     for month in months {
         // OPENED HERE, AND READ BELOW, so a file that did not open is told
@@ -456,7 +456,7 @@ pub fn derive(
 
 /// Withhold every month inside `calendar`'s span whose daily rung was not read
 /// whole, so none of its days reads as `Closed`. R9-api-law-0, W1-api2-9,
-/// D-0950.
+/// D-1443.
 ///
 /// `from_observed` fills every unobserved day between the first and last
 /// observed day with `Closed`. That is a claim the daily rung makes, and only
@@ -1208,10 +1208,10 @@ pub(crate) mod tests {
     }
 
     /// **A MONTH THE DAILY RUNG DID NOT PROVE IS WITHHELD, NOT A RUN OF
-    /// HOLIDAYS.** R9-api-law-0, D-0950.
+    /// HOLIDAYS.** R9-api-law-0, D-1443.
     ///
     /// January and March hold daily bars; February is held only at the minute
-    /// rung, with a full session on 2 February. Before D-0950 every February
+    /// rung, with a full session on 2 February. Before D-1443 every February
     /// day came out `Closed` and `/calendar.json` answered 200 with the month
     /// simply missing, while January's genuine closure (7 January, no daily bar
     /// in a month whose daily file was read) is still `Closed`.
@@ -1313,7 +1313,7 @@ pub(crate) mod tests {
     }
 
     /// **A DAILY MONTH WHOSE RECORDS FAIL THEIR CHECKS IS WITHHELD, NOT SERVED
-    /// AS HOLIDAYS.** W1-api2-9, D-0950.
+    /// AS HOLIDAYS.** W1-api2-9, D-1443.
     ///
     /// Three cases over calendar edges: a corrupt February in a leap year
     /// (2024, so 29 days withheld), a corrupt December across a year boundary,
@@ -1416,7 +1416,7 @@ pub(crate) mod tests {
     }
 
     /// **ONE CIVIL-MONTH CLASSIFICATION PER TRADED DAY, NOT ONE PER MONTH PER
-    /// DAY.** W1-api2-0, D-0950.
+    /// DAY.** W1-api2-0, D-1443.
     ///
     /// `derive` asked `in_month` of every traded day for every month, twice on
     /// a month whose counter matched, so a span of M months and D days cost
@@ -1492,7 +1492,7 @@ pub(crate) mod tests {
     }
 
     /// **WHAT A DERIVATION READS IS COUNTED, RECORD BY RECORD.** W1-api2-1,
-    /// D-0950.
+    /// D-1443.
     ///
     /// The reads are one positional read per record and are not O(1): the
     /// bound is the records of every daily month plus the records of every
@@ -1555,22 +1555,22 @@ pub(crate) mod tests {
     }
 
     /// **THE LIMIT IS WRITTEN WHERE `CLAUDE.md` §10 SAYS LIMITS LIVE.**
-    /// W1-api2-1, D-0950: the per-record walk was documented only in this
+    /// W1-api2-1, D-1443: the per-record walk was documented only in this
     /// module's header.
     #[test]
     fn the_derivation_walk_is_named_in_the_limits_document() {
         let limits = include_str!("../../../docs/06-limits.md");
         let section = limits
-            .split("## The calendar derivation reads records, one positional read each — D-0950")
+            .split("## The calendar derivation reads records, one positional read each — D-1443")
             .nth(1)
-            .expect("docs/06-limits.md carries the D-0950 section");
+            .expect("docs/06-limits.md carries the D-1443 section");
         for named in [
             "read_days",
             "read_minute_spans",
             "records_read",
             "O(records)",
         ] {
-            assert!(section.contains(named), "the D-0950 limit names `{named}`");
+            assert!(section.contains(named), "the D-1443 limit names `{named}`");
         }
     }
 
@@ -1602,7 +1602,7 @@ pub(crate) mod tests {
     }
 
     /// **CONCURRENT MISSES ON ONE KEY DERIVE ONCE AND SHARE THE ANSWER.**
-    /// W1-api2-11, D-0950.
+    /// W1-api2-11, D-1443.
     ///
     /// Eight requests miss the same series at the same stamp. The derivation
     /// is held open until the other seven are waiting on it, so the count is
@@ -1675,7 +1675,7 @@ pub(crate) mod tests {
     }
 
     /// **A LEADER THAT UNWINDS STRANDS NO FOLLOWER AND KEEPS NOTHING.**
-    /// W1-api2-11, D-0950.
+    /// W1-api2-11, D-1443.
     ///
     /// Alone: the panic reaches its own caller, no flight and no calendar are
     /// left, and the next request derives normally. With three followers
@@ -1977,7 +1977,7 @@ pub struct Derived {
 /// file it could not open is one `holds` says the store does not hold. A month
 /// held at the minute rung and not the daily one opens no daily file and is
 /// still kept, because the census says so, and so is a minute file the store
-/// never held. Kept, and since D-0950 no longer kept as holidays: such a
+/// never held. Kept, and since D-1443 no longer kept as holidays: such a
 /// month's days are withheld (`Unmeasured`, named in `withheld` on the wire),
 /// because a daily rung that was not read proves no day shut. R9-api-law-0. A held file whose records fail their checks did open, and is
 /// kept too, as the census cache keeps a manifest whose bytes do not decode:
@@ -2140,7 +2140,7 @@ fn derived_and_kept(
     // A MONTH WITHHELD OR UNREADABLE IS SAID WHERE THE OPERATOR READS, once
     // per derivation. `read_days` refused such a month and nothing was logged,
     // so the only trace of it was a month missing from a 200. W1-api2-9,
-    // D-0950.
+    // D-1443.
     if !report.withheld.is_empty() || !report.unreadable.is_empty() {
         let first = report.unreadable.first().map_or("", String::as_str);
         let _dropped_when_filtered = telemetry::emit_if!(
@@ -2246,7 +2246,7 @@ pub fn json(calendar: &Calendar) -> String {
     // of holidays: 200, the month simply missing, and nothing saying why.
     // `withheld` names each stretch the store cannot speak for, so a reader
     // can tell "the exchange was shut" from "this was not measured".
-    // R9-api-law-0, W1-api2-9, D-0950.
+    // R9-api-law-0, W1-api2-9, D-1443.
     out.push_str("],\"withheld\":[");
     let mut run: Option<(i64, i64)> = None;
     let mut first = true;
@@ -2443,7 +2443,7 @@ pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
                     silent.push(name.clone());
                 }
                 // NOT MEASURED IS NOT A VOTE EITHER WAY. A reading whose daily
-                // rung was not read for this day's month withheld it (D-0950):
+                // rung was not read for this day's month withheld it (D-1443):
                 // it is no more silent about the day than a reading whose span
                 // does not reach it.
                 DayKind::Unmeasured => {}
@@ -2453,7 +2453,7 @@ pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
             // NOBODY SAW A SESSION, AND NOBODY PROVED THE DAY SHUT EITHER: every
             // reading in range withheld it, or none reaches it (a gap between
             // two readings' spans). `from_observed` would fill it with `Closed`,
-            // so it is withheld below instead. D-0950.
+            // so it is withheld below instead. D-1443.
             if !shut {
                 withheld.push(day);
             }
@@ -2556,7 +2556,7 @@ mod agreement {
     const SHORT_RUN: [(u16, u16); 1] = [(555, 614)];
 
     /// **A DAY NO READING PROVED SHUT IS WITHHELD FROM THE AGREEMENT, AND A
-    /// WITHHELD READING IS NOT SILENT.** D-0950.
+    /// WITHHELD READING IS NOT SILENT.** D-1443.
     ///
     /// NIFTY covers days 100-110 and withheld 104-106 (its daily rung was not
     /// read there); BANKNIFTY covers 100-102 and 108-110 only, as two readings

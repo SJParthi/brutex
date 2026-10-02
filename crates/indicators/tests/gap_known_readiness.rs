@@ -33,7 +33,7 @@ fn day_of(bar: &Candle) -> i64 {
     (bar.ts_micros + 330 * MINUTE).div_euclid(DAY)
 }
 
-/// The bar's span on the 3-minute grid anchored at IST midnight (D-0944): the
+/// The bar's span on the 3-minute grid anchored at IST midnight (D-1441): the
 /// source's candle is a clock span, so membership is read off the stamp.
 fn span_of(bar: &Candle) -> i64 {
     (bar.ts_micros + 330 * MINUTE).div_euclid(3 * MINUTE)
@@ -224,7 +224,7 @@ fn all_eleven_gap_predicates_and_negations_match_independent_pre_fold_levels() {
     }
 }
 
-/// D-0944 through the whole evaluator: minutes missing on both sides of the night.
+/// D-1441 through the whole evaluator: minutes missing on both sides of the night.
 /// Yesterday lacks 15:29 and spikes at 15:26; today lacks 09:16 and spikes at 09:18.
 /// The independent oracle reads clock spans, so a three-bar count would take 15:26
 /// into `X1` and 09:18 into `X2` and disagree with it on truth AND availability.

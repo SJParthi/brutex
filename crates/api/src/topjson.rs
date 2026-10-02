@@ -419,7 +419,7 @@ mod tests {
     }
 
     /// **A refusal that persists costs a cold open on every request, and
-    /// that is stated.** W1-api6-3, D-0951.
+    /// that is stated.** W1-api6-3, D-1444.
     ///
     /// `with_verified` drops a handle whose refresh refuses and caches no
     /// refusal, so while the damage stays on disk each request runs `open`

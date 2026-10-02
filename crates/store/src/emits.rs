@@ -307,7 +307,7 @@ fn drive_commit_refused(_root: &Path) -> Handed {
 /// `store::file::initialise` sets [`FLAG_CHECKSUMS`] on every month it
 /// creates, so only a direct `block::verify` of a flag-clear header — a month
 /// an earlier build wrote — trips this; `docs/04-invariants.md` S-06b,
-/// corrected by D-0957. That file is not corrupt; it predates the flag, and the
+/// corrected by D-1448. That file is not corrupt; it predates the flag, and the
 /// line is the only place that distinction survives.
 fn drive_block_unverifiable(_root: &Path) -> Handed {
     let plain = Header::genesis(SYMBOL, 60, 0)

@@ -96,7 +96,7 @@ pub fn seal(layout: Layout, n_valid: u64, block: u64, bytes: &[u8]) -> Result<u3
 /// production door: `BarFile` serves it unverified without calling [`verify`],
 /// and `checksum_audit` refuses its header before calling [`verify`]. This arm
 /// answers a direct caller holding a flag-clear header — `docs/04-invariants.md`
-/// S-06b, corrected by D-0957, which also corrected S-06's "no writer sets the
+/// S-06b, corrected by D-1448, which also corrected S-06's "no writer sets the
 /// flag". Such a file is not corrupt; it simply predates the flag. Without this line the only record
 /// of that is a `ChecksumsAbsent` returned to a caller that may well treat it
 /// as a verification failure, which is the conflation S-06b exists to forbid:
@@ -134,7 +134,7 @@ fn note_unverifiable(header: &Header, block: u64) {
 ///
 /// This said nothing set [`crate::format::FLAG_CHECKSUMS`]. `store::file::initialise`
 /// now sets it at birth, and `BarFile`'s reads reach this through
-/// [`verify_through`] — `docs/04-invariants.md` S-06, corrected by D-0957.
+/// [`verify_through`] — `docs/04-invariants.md` S-06, corrected by D-1448.
 ///
 /// # Why `Error`, and why it is bounded by structure
 ///

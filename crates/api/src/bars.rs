@@ -1044,7 +1044,7 @@ pub fn window(
     //
     // `page_of` partitions in O(n) and orders only the page's own rows, so the
     // cost goes from `O(n log n)` to `O(n) + O(limit log limit)`. D-0733 first
-    // bounded it by the nearer end of the window; D-0953 bounds it by the page.
+    // bounded it by the nearer end of the window; D-1446 bounds it by the page.
     //
     // THE OUTPUT IS UNCHANGED, and that is what a TOTAL comparator buys: with
     // the timestamp as tie-break no two rows ever compare equal, so the set of
@@ -1065,7 +1065,7 @@ pub fn window(
     // page near the end of a 1.9-million-bar window ordered all of them again,
     // and an offset past the end ordered every row to answer none. `page_of`
     // partitions twice instead: once at `offset`, once at `limit` inside what
-    // is left, and orders only the page. W1-api5-4, D-0953.
+    // is left, and orders only the page. W1-api5-4, D-1446.
     let bars = page_of(all, offset, limit, order);
 
     Ok(Window {
@@ -1094,7 +1094,7 @@ pub fn window(
 /// near the end of a window, is gone. `std`'s `select_nth_unstable_by` is the
 /// partition, and the comparison count is measured, not argued, by
 /// `api::bars::tests::the_page_orders_only_itself_wherever_the_offset_lands`.
-/// W1-api5-4, D-0953.
+/// W1-api5-4, D-1446.
 fn page_of<T>(
     mut all: Vec<T>,
     offset: usize,
@@ -1386,7 +1386,7 @@ mod tests {
         let order = |a: &(i64, i64), b: &(i64, i64)| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1));
 
         // EVERY OFFSET, including each one past the end, against the
-        // unbounded page (D-0733, and since D-0953 through `page_of`).
+        // unbounded page (D-0733, and since D-1446 through `page_of`).
         for offset in 0..=62 {
             for limit in [0, 1, 2, 10, 29, 30, 31, 60, 61] {
                 let mut whole = rows.clone();
@@ -1402,7 +1402,7 @@ mod tests {
             }
         }
         // AND THE EDGES NO OFFSET ABOVE REACHES: limits and offsets at
-        // `usize::MAX`, where `offset + limit` would overflow (W1-api5-4, D-0953).
+        // `usize::MAX`, where `offset + limit` would overflow (W1-api5-4, D-1446).
         for (offset, limit) in [(usize::MAX, usize::MAX), (1, usize::MAX), (59, usize::MAX)] {
             let mut whole = rows.clone();
             whole.sort_by(order);
@@ -1455,7 +1455,7 @@ mod tests {
     }
 
     /// **A page orders itself and nothing else, wherever its offset lands.**
-    /// W1-api5-4, D-0953.
+    /// W1-api5-4, D-1446.
     ///
     /// `window` partitioned at `offset + limit` and ordered everything before
     /// that, so a page near the end of the window (or an offset past it, which

@@ -622,7 +622,7 @@ const fn ist_day_start_micros(ist_day: i64) -> i64 {
 /// equity-derivatives session from 2026-08-03 is 385 minutes, which divides only by
 /// `1min` and `5min`, so there `3min` and `15min` end with a 1- and a 10-minute bar
 /// as well (`pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`,
-/// D-0956). On the index file measured below, the other four rungs' final bucket is a
+/// D-1447). On the index file measured below, the other four rungs' final bucket is a
 /// stub, and the closing minute the formula asked for is after the close:
 ///
 /// | Rung | Bars per day | Last bar opens | Formula demanded | Exists |

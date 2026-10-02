@@ -32,7 +32,7 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// must not be refused because sweep detail reads are busy, nor the reverse.
 /// Concurrent misses on one series share one derivation
 /// (`calendar_of::Cache`), so this bounds blocking threads, not derivations
-/// per key. W1-api2-11, D-0950.
+/// per key. W1-api2-11, D-1443.
 pub const MAX_CALENDAR_CONCURRENT: usize = 8;
 
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
@@ -58,7 +58,7 @@ impl Permit {
     ///
     /// It is never refused, and it still counts: while it is held,
     /// [`Permit::try_take`] sees one more active task and refuses new work
-    /// sooner. D-0952.
+    /// sooner. D-1445.
     fn owed() -> Self {
         ACTIVE.fetch_add(1, Ordering::AcqRel);
         Self(&ACTIVE)
@@ -97,7 +97,7 @@ where
 }
 
 /// Runs a calendar derivation outside Tokio's worker pool, in the calendar
-/// pool of [`MAX_CALENDAR_CONCURRENT`] slots. W1-api2-11, D-0950.
+/// pool of [`MAX_CALENDAR_CONCURRENT`] slots. W1-api2-11, D-1443.
 ///
 /// # Errors
 ///
@@ -134,7 +134,7 @@ where
 /// used to leave a false `Cancelled`. The slot it takes is counted against
 /// [`run`]'s admission but bypasses its cap, so at most one owed task exists
 /// per audited request whose handler has returned; `docs/06-limits.md`
-/// (D-0952) states that this count is bounded by in-flight requests, not by
+/// (D-1445) states that this count is bounded by in-flight requests, not by
 /// [`MAX_CONCURRENT`]. UNVERIFIED: no bench times this path.
 ///
 /// # Errors
@@ -687,7 +687,7 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
 }
 
 /// Whether a Boolean observation route must authenticate its saved body again
-/// rather than project from the reader its single slot holds. W1-api1-5, D-0951.
+/// rather than project from the reader its single slot holds. W1-api1-5, D-1444.
 ///
 /// `held` is whether the slot holds a reader for exactly this root, identity,
 /// model and budget. A pinned request (`pinned`) over a held reader reuses it
@@ -697,7 +697,7 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
 /// generation and lease check a warm page makes) and authenticates again only
 /// when that check refuses. `current` is not called when nothing is held or the
 /// request is pinned. What a cold admission still costs is stated in
-/// `docs/06-limits.md` under D-0951 and is UNVERIFIED as a measurement.
+/// `docs/06-limits.md` under D-1444 and is UNVERIFIED as a measurement.
 pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> bool) -> bool {
     !held || (!pinned && !current())
 }
@@ -715,7 +715,7 @@ mod tests {
         MAX_SCAN_BYTES, Page, Selector, must_admit, preflight, run, seek_window, window,
     };
 
-    /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-0951.
+    /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-1444.
     ///
     /// Nothing held: admit, and the currency check is never asked (there is
     /// no reader to ask). Held and pinned: reuse without asking, so the
@@ -754,7 +754,7 @@ mod tests {
     }
 
     /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
-    /// SLOT.** W1-api2-11, D-0950. Driven on a pool of the test's own, so no
+    /// SLOT.** W1-api2-11, D-1443. Driven on a pool of the test's own, so no
     /// route test sharing the real pools can see it.
     #[test]
     fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
@@ -784,7 +784,7 @@ mod tests {
     }
 
     /// **A CALENDAR DERIVATION RUNS OFF THE ASYNC WORKER.** W1-api2-11,
-    /// D-0950. On a current-thread runtime the worker is the test's own
+    /// D-1443. On a current-thread runtime the worker is the test's own
     /// thread, so work that reports another thread ran on the blocking pool.
     #[tokio::test(flavor = "current_thread")]
     async fn a_calendar_derivation_runs_off_the_async_worker() {

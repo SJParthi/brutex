@@ -390,7 +390,7 @@ fn prose(text: &str) -> String {
 
 /// C-V-02 does not catch an early-exit `hits`, so nothing may say it does.
 ///
-/// Audit findings ET-o1-proof-coverage-3 and -13 (D-0917): an early-exit word
+/// Audit findings ET-o1-proof-coverage-3 and -13 (D-1436): an early-exit word
 /// loop in `hits` measured 1.09x to 2.06x across words 1 to 5, under the 3.0x
 /// ceiling, so C-V-02 passed it. The guard that refuses that loop is the
 /// source-shape unit test `hits_does_the_same_work_for_every_input` in

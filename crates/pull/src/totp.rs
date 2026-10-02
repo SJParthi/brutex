@@ -617,7 +617,7 @@ mod tests {
         );
     }
 
-    /// **NO PATH OUTSIDE THIS MODULE COMPUTES A CODE.** D-0956.
+    /// **NO PATH OUTSIDE THIS MODULE COMPUTES A CODE.** D-1447.
     ///
     /// Two comments said otherwise: `pull::vendor`'s Groww `Auth` row said the
     /// vendor's `api-key` "is spent by `pull::totp` to MINT the daily token",

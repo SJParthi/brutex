@@ -37,7 +37,7 @@
 //!   exactly the edges [`LOCK_ONLY_EDGES`] names, each with its reason, and
 //!   every other edge counts as compiled. Target `cfg` expressions are not
 //!   evaluated: a new target-gated path to a declared crate fails here and has
-//!   to be argued into that table. D-0916.
+//!   to be argued into that table. D-1435.
 //! * Anything in `web/`, which `CLAUDE.md` §2 exempts by path.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -545,7 +545,7 @@ fn the_dependency_set_has_not_moved_without_review() {
     // rustls's `ring` feature -- one new line in one `dependencies` list, every
     // name unchanged -- left it green (UC-7, UC-13). The fingerprint now covers
     // every package's dependency list too. `Cargo.lock` is byte-identical to
-    // the commit before, so there is no new package to scan. D-0916.
+    // the commit before, so there is no new package to scan. D-1435.
     assert_eq!(
         h, 0xA685_8949_AA8A_D9CE,
         "the dependency SET or GRAPH changed — a package was added, removed or \
@@ -577,7 +577,7 @@ fn no_declared_native_dependency_is_compiled_any_more() {
     // Read from the lock's dependency EDGES, walked from the workspace members.
     // The version this replaces filtered on a hand-written
     // `compiled_on_this_target: false` in every row, so it passed with ring
-    // re-enabled and compiled (UC-7, UC-13, ET-rust-only-purity-5; D-0916).
+    // re-enabled and compiled (UC-7, UC-13, ET-rust-only-purity-5; D-1435).
     let lock = lock_text();
     let pkgs = parse_lock(&lock);
     let roots = pkgs.iter().filter(|p| p.workspace).count();
@@ -600,7 +600,7 @@ fn no_declared_native_dependency_is_compiled_any_more() {
     }
     // A lock-format change that renamed `dependencies = [` would leave the walk
     // with no edges, and a walk over no edges reaches nothing and passes. The
-    // lock records 474 edge lines as of D-0916; 300 leaves room to shrink.
+    // lock records 474 edge lines as of D-1435; 300 leaves room to shrink.
     let edges: usize = pkgs.iter().map(|p| p.deps.len()).sum();
     assert!(
         edges > 300,
@@ -626,7 +626,7 @@ fn no_declared_native_dependency_is_compiled_any_more() {
          a vendored binding to another language and a build.rs that invokes an \
          external process, both without exception. Either remove the dependency \
          or record the breach in DECLARED and change this assertion back — but \
-         do not let a green suite imply purity that is gone. See D-0211, D-0916.",
+         do not let a green suite imply purity that is gone. See D-0211, D-1435.",
         named.join("\n  ")
     );
 }

@@ -449,7 +449,7 @@ impl Granularity {
         reason = "the two `None` arms return the same value and state DIFFERENT facts, which \
                   is the whole point of naming every arm. `Minute30 | Hour1` is 'crates/store \
                   ships a directory, and a VENDOR's bar at this rung sits on a grid nothing \
-                  here has captured' (D-0956); `Tick | Second5 | Week1` is 'crates/store \
+                  here has captured' (D-1447); `Tick | Second5 | Week1` is 'crates/store \
                   ships no directory at all'. Merging them would put a rung refused for an \
                   unverified vendor grid beside three refused for absence, and the next \
                   reader deciding whether a rung can be enabled would have to re-derive \
@@ -471,7 +471,7 @@ impl Granularity {
             // `pull::ingest::derive_all` files 30min and 60min bars folded from
             // the minute without ever asking this function. The const block
             // that was meant to notice the move kept passing, because it
-            // asserted the 555-minute arithmetic and not the fold. D-0956.
+            // asserted the 555-minute arithmetic and not the fold. D-1447.
             //
             // WHAT THIS FUNCTION STILL DECIDES is whether a bar a VENDOR served
             // at this rung may be filed as it arrived (`pull::ingest::Plan`).
@@ -653,7 +653,7 @@ rung_matches_store! {
 // `crate::fold`, whose intraday anchor is the open, and it did not fire when
 // that anchor moved — which is why the fold's real first-bar stamp is pinned by
 // a test that runs the fold, `pull::anchor::store_timeframe_follows_the_fold_anchor`,
-// rather than by a `const` that cannot. D-0956.
+// rather than by a `const` that cannot. D-1447.
 const _: () = {
     assert!(Timeframe::MINUTE_1.aligns_with_the_open());
     assert!(Timeframe::MINUTE_3.aligns_with_the_open());
@@ -677,7 +677,7 @@ const _: () = {
 // from 2026-08-03, and 360 for the continuous session of a cash security
 // eligible for the closing auction from that day. `pull::fold::complete_minutes_for_venue` derives it from the venue
 // row; `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session` pins
-// it. D-0956.
+// it. D-1447.
 
 // THE SIX ABOVE PLUS THE DAY ARE EVERY ENTRY `Timeframe::KNOWN` HOLDS.
 //
@@ -3163,7 +3163,7 @@ impl HttpSpec {
     ///
     /// CONSTANT WORK, not a scan. The table holds at most one row per
     /// [`Listing`] variant — THREE: `Index`, `Equity`, `Derivative` (this read
-    /// "two" while Groww shipped three rows; D-0956) — so this costs the same
+    /// "two" while Groww shipped three rows; D-1447) — so this costs the same
     /// against a universe of 800 as against one. The bound is pinned by
     /// `pull::vendor::every_listing_table_holds_at_most_one_row_per_class`.
     /// Same shape as [`Self::granularity_token`] above.
@@ -3962,7 +3962,7 @@ impl Descriptor {
     /// `pull::vendor::every_feed_answers_every_rung_with_one_of_two_verdicts`
     /// walks the whole `FEED_COUNT` × `GRANULARITY_COUNT` matrix — 5 × 11
     /// today, and that test pins both numbers so this sentence cannot go stale
-    /// again (it said 4 × 11 after Zerodha made five; D-0956) — and
+    /// again (it said 4 × 11 after Zerodha made five; D-1447) — and
     /// `pull::vendor::the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer`
     /// proves the ordering the single comparison rests on.
     ///
@@ -4691,7 +4691,7 @@ const GROWW: Descriptor = Descriptor {
             // token is minted outside this repository — `CLAUDE.md` §8.
             // `pull::totp` computes a code and is wired to no token exchange;
             // `pull::totp::no_path_outside_this_module_computes_a_code`
-            // pins that. D-0956.
+            // pins that. D-1447.
             key_field: None,
         },
         date_format: DateFormat::DashedYmdMidnight,
@@ -6036,7 +6036,7 @@ mod tests {
                 //      grid counted from the 09:15 open disagree at it —
                 //      `aligns_with_the_open` is false — so a VENDOR's bar at
                 //      that rung sits on a grid nothing here has captured
-                //      (UNVERIFIED; see `store_timeframe`, D-0956). It is not a
+                //      (UNVERIFIED; see `store_timeframe`, D-1447). It is not a
                 //      fold stub: `crate::fold` anchors at the open.
                 //
                 // The second arm is asserted through the store's predicate, not
@@ -6112,7 +6112,7 @@ mod tests {
         // vendor for them, and `pull::ingest::derive_all` files them from the
         // minute. 30min and 60min have one and `store_timeframe` refuses it,
         // because the midnight-counted and open-counted grids disagree there
-        // and the vendor's choice is UNVERIFIED (D-0956). All four are the rungs
+        // and the vendor's choice is UNVERIFIED (D-1447). All four are the rungs
         // that do not divide 555.
         //
         // NONE OF THE FOUR IS A FOLD STUB. This comment used to call them
@@ -6127,7 +6127,7 @@ mod tests {
             "2min, 10min, 30min and 60min are the rungs that do not divide the \
              555 minutes from IST midnight to the open, so the midnight and \
              open grids disagree on them; if that set changed, store_timeframe's \
-             refusal must be revisited (D-0956)"
+             refusal must be revisited (D-1447)"
         );
         // Coarsest last, which is the order `Granularity::ALL` walks and the
         // order a backfill lands them in.
@@ -8307,7 +8307,7 @@ mod tests {
     /// EVERY FEED ANSWERS EVERY RUNG, AND THE ANSWER IS ONE OF TWO VERDICTS.
     ///
     /// The whole `FEED_COUNT` × `GRANULARITY_COUNT` matrix — 5 × 11, pinned
-    /// below (it read 4 × 11 after a fifth feed landed; D-0956) — because a
+    /// below (it read 4 × 11 after a fifth feed landed; D-1447) — because a
     /// capability with a hole in it is a
     /// capability a caller has to guess at. Two verdicts: the vendor refuses
     /// the rung outright, or it does not — and the second splits into the one
@@ -8388,7 +8388,7 @@ mod tests {
         // doc, this test's doc and docs/04-invariants.md GF-03 all said 4 × 11
         // for as long as there were five feeds. They now say 5 × 11, and this
         // is what fails when a sixth feed or a twelfth rung makes that false.
-        // D-0956.
+        // D-1447.
         assert_eq!(
             (Feed::ALL.len(), FEED_COUNT, GRANULARITY_COUNT),
             (5, 5, 11),
@@ -8405,7 +8405,7 @@ mod tests {
     /// exhaustive `match`, so a fourth variant fails to compile here rather
     /// than leaving the bound's premise stale again. This test,
     /// `pull::vendor::every_listing_table_holds_at_most_one_row_per_class`, is
-    /// the proof that doc names. D-0956.
+    /// the proof that doc names. D-1447.
     #[test]
     fn every_listing_table_holds_at_most_one_row_per_class() {
         const fn slot(listing: Listing) -> usize {

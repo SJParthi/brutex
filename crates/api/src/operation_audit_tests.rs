@@ -32,7 +32,7 @@ impl Drop for Scratch {
 
 /// Every route the server registers that the invocation journal does NOT
 /// record, each with the reason. A new route must land in [`AUDITED`] or here,
-/// by name, or the test below fails. D-0952.
+/// by name, or the test below fails. D-1445.
 pub(crate) const EXEMPT: &[(&str, &str)] = &[
     ("/dashboard", PAGE),
     ("/instruments", PAGE),
@@ -94,7 +94,7 @@ const PAGE: &str = "a page, script or health check; not a sweep result or contro
 const DATA: &str = "a store, pull, ingest, master or autopilot route; D-0568 selects sweep \
      result and control requests only";
 const INDEX_STOP: &str = "an index-stop read or launch probe no decision has selected for \
-     journaling; left open by D-0952, not decided";
+     journaling; left open by D-1445, not decided";
 
 /// The registered routes that are not [`EXEMPT`]: what the journal must
 /// cover, read off the router rather than off [`AUDITED`].
@@ -552,7 +552,7 @@ fn oldest_invocation_ends_the_exact_newest_first_cursor() {
 ///
 /// The handler saturates the shared pool itself, after the start was written
 /// and before the terminal runs: the shape four concurrent detail reads give a
-/// `POST /backtest/run` that already launched its engine task. Until D-0952 the
+/// `POST /backtest/run` that already launched its engine task. Until D-1445 the
 /// terminal's `detail::run` answered `Saturated`, the armed attempt was dropped,
 /// its `Drop` wrote `Cancelled`/0 on the Tokio worker, and the client got a 503
 /// saying the handler already ran. Every outcome class is tried, a handler's
@@ -616,7 +616,7 @@ async fn a_terminal_owed_while_every_slot_is_taken_records_the_handlers_real_out
 /// **AN OWED TASK IS NEVER REFUSED, AND IT COUNTS AGAINST NEW WORK WHILE IT
 /// RUNS.** With every free slot taken, `run_owed` still runs; while it runs, a
 /// slot freed by the test is not enough for `run`, because the owed task holds
-/// one past the cap. Once it returns, everything it took is back. D-0952.
+/// one past the cap. Once it returns, everything it took is back. D-1445.
 #[tokio::test]
 async fn an_owed_task_runs_past_a_full_pool_and_counts_while_it_runs() {
     let apart = crate::detail::apart_from_slot_owners().await;
@@ -659,7 +659,7 @@ async fn an_owed_task_runs_past_a_full_pool_and_counts_while_it_runs() {
 /// two 256-byte records (start and terminal) in the one flat directory, and
 /// nothing is ever removed: the directory's entry count and the bytes on disk
 /// grow with every request ever served, which `docs/06-limits.md` states under
-/// D-0952. Reading a page stays at most 32 rows however many exist.
+/// D-1445. Reading a page stays at most 32 rows however many exist.
 #[tokio::test]
 async fn each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_removed() {
     let _apart = crate::detail::apart_from_slot_owners().await;
@@ -696,14 +696,14 @@ async fn each_audited_request_adds_one_file_and_one_index_slot_and_nothing_is_re
 
 /// **THE GROWTH IS WRITTEN WHERE A LIMIT IS LOOKED FOR.** `docs/06-limits.md`
 /// had no line for the journal's per-request growth; D-0568 said only that
-/// storage grows with history. W1-api3-0, D-0952.
+/// storage grows with history. W1-api3-0, D-1445.
 #[test]
 fn the_journals_per_request_growth_is_stated_in_the_limits() {
     let limits = include_str!("../../../docs/06-limits.md");
     let section = limits
         .split("\n## ")
-        .find(|section| section.contains("D-0952"))
-        .expect("a D-0952 section in docs/06-limits.md");
+        .find(|section| section.contains("D-1445"))
+        .expect("a D-1445 section in docs/06-limits.md");
     // Line breaks and sentence case are the document's to choose.
     let section = section
         .split_whitespace()

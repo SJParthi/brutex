@@ -3085,7 +3085,7 @@ pub fn install_log() -> String {
 /// `screen`'s `by_evidence.par_iter()` among them (see [`note_grid_progress`]) —
 /// but every call site of this function is a boundary: one per run, or one per
 /// instrument-month in a batch. That is the granularity gate 17's own comment
-/// prescribes as the affordable one. D-0957 corrected "holds no loop".
+/// prescribes as the affordable one. D-1448 corrected "holds no loop".
 /// The token a log record is bound to when no browser attempt supplied one.
 ///
 /// # Why the telemetry run id and not a fresh number

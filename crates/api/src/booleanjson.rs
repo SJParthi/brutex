@@ -4,7 +4,7 @@
 //! An unpinned first page reuses a held catalog that is still current
 //! (`detail::must_admit`); a new key or a changed generation is cold, and the
 //! one slot makes alternating keys cold every time. `docs/06-limits.md`,
-//! D-0951, states that cost, which is UNVERIFIED as a measurement.
+//! D-1444, states that cost, which is UNVERIFIED as a measurement.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_observation::{
     Cell, Coordinate, ExecutionRefusalBitsV1 as Refusal, ExitGridSelectorV1, ForcedStopV1,

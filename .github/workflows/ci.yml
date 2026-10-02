@@ -957,7 +957,7 @@ jobs:
           # 8). It never mints -- section 8 forbids it, because a local mint
           # would invalidate the token another system shares; the test
           # pull::totp::no_path_outside_this_module_computes_a_code pins
-          # that, D-0956. This gate seeing these six numbers is the evidence
+          # that, D-1447. This gate seeing these six numbers is the evidence
           # that the implementation is pinned to the published vectors rather
           # than to whatever it happens to produce.
           #
@@ -5850,7 +5850,7 @@ jobs:
           #     unchanged because the comparator is total, and
           #     `selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
           #     runs both strategies and requires them to agree.
-          #   api/bars.rs 2 -> 3 -- D-0953, W1-api5-4. The single partition at
+          #   api/bars.rs 2 -> 3 -- D-1446, W1-api5-4. The single partition at
           #     `offset + limit` still ordered every row BEFORE the page, and
           #     `offset` is uncapped, so a page past the end ordered the whole
           #     window to answer nothing. `page_of` now partitions at `offset`,
@@ -6786,7 +6786,7 @@ jobs:
           #     calendar. Two spot instruments and a handful of feeds. It does
           #     not grow with bars, days, instruments or months, which is the
           #     bound rule 6's entries are held to and the one that matters.
-          #     The second (D-0950) is `proved.contains` in `withhold_unproved`,
+          #     The second (D-1443) is `proved.contains` in `withhold_unproved`,
           #     a HASH-FREE but ordered probe: `proved` is a `BTreeSet` of the
           #     `(year, month)` pairs whose daily rung was read whole, at most one
           #     per month in the span, so each probe is O(log months) and it runs

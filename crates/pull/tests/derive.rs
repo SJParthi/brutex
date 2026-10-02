@@ -1407,7 +1407,7 @@ fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
 }
 
 /// **EVERY WINDOW AND EVERY ROLLING ANSWER READS THE WHOLE CENSUS, AND THE
-/// REGISTER SAYS SO.** W1-pull2-0 and W1-pull2-6, D-0955; the read half D-0953
+/// REGISTER SAYS SO.** W1-pull2-0 and W1-pull2-6, D-0955; the read half D-1446
 /// left to this crate.
 #[test]
 fn d_0955_each_census_write_reads_the_whole_census_and_the_register_says_so() {

@@ -1015,7 +1015,7 @@ fn a_truncation_under_an_open_handle_is_a_short_read() {
         "a block that cannot be verified is not served, even where its bytes survive"
     );
     // AND A RECORD THAT IS GONE REFUSES EARLIER, at its own offset rather than
-    // the block's. Since D-0912 a read fetches the whole block in one `pread`
+    // the block's. Since D-1433 a read fetches the whole block in one `pread`
     // and, when that comes up short, re-reads the record alone to name it —
     // so record 9's own missing bytes are what is reported, and the block seal
     // is never reached. Two different refusals for two different

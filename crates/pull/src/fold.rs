@@ -182,7 +182,7 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     // for the closing auction leaves none. Pinned against
     // `complete_minutes_for_venue` by
     // `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`
-    // (D-0956). A trailing stub is a different object from a leading one: it
+    // (D-1447). A trailing stub is a different object from a leading one: it
     // is stamped correctly and holds the trades that happened in it. The
     // leading stub was mislabelled. One is a short final bar; the other is a
     // lie.

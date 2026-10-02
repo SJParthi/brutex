@@ -1,7 +1,7 @@
 //! Bounded observation-only views of saved Boolean statistics and admission.
 //! An unpinned first page reuses a held model that is still current
 //! (`detail::must_admit`); every page checks currency once per linked catalog,
-//! several times. `docs/06-limits.md`, D-0951, states both costs, which are
+//! several times. `docs/06-limits.md`, D-1444, states both costs, which are
 //! UNVERIFIED as measurements.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_evidence::{
@@ -234,7 +234,7 @@ enum Reader {
 }
 impl Reader {
     /// The held model's own currency check, which walks every linked catalog
-    /// it authenticated. D-0951.
+    /// it authenticated. D-1444.
     fn require_current(&self) -> Result<(), String> {
         match self {
             Self::Statistics(reader) => reader.require_current(),

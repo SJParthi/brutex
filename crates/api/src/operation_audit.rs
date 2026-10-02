@@ -55,7 +55,7 @@ fn read_failure(why: &str, busy: bool) -> Response {
 /// deleting the `/frontier.json` arm dropped both its audit record and its
 /// cross-site refusal and every `api` test still passed. The length is in the
 /// type: removing an entry without changing the count does not compile.
-/// D-0952.
+/// D-1445.
 pub(crate) const AUDITED: [&str; 21] = [
     "/backtest/run",
     "/backtest/descend",
@@ -172,7 +172,7 @@ pub(crate) async fn request_audited(
     // full detail pool must not refuse this write: refusing dropped the armed
     // attempt, whose `Drop` then wrote `Cancelled`/0 synchronously on this
     // Tokio worker and replaced the handler's real answer with a 503. The owed
-    // slot still counts against new detail work. D-0952.
+    // slot still counts against new detail work. D-1445.
     match crate::detail::run_owed(move || {
         let mut attempt = attempt;
         attempt.finish(phase, status.as_u16())

@@ -1,12 +1,12 @@
 #![cfg(test)]
-//! `docs/06-limits.md`'s D-0953 section, held to the source it describes.
+//! `docs/06-limits.md`'s D-1446 section, held to the source it describes.
 //!
 //! Each finding the section documents rather than changes gets one test. The
 //! test checks two things: that the section's bullet for the finding names the
 //! function that pays the cost and the bound it pays, and that the source
 //! still has the shape that makes the bound true. A change that removes the
 //! cost fails here until the bullet is updated, and a bullet that drops its
-//! function or bound fails here too. W1-api5-0 through W1-api5-11, D-0953.
+//! function or bound fails here too. W1-api5-0 through W1-api5-11, D-1446.
 #![expect(
     clippy::expect_used,
     clippy::panic,
@@ -21,11 +21,11 @@ const VERIFY: &str = include_str!("verify.rs");
 const INGEST: &str = include_str!("../../pull/src/ingest.rs");
 const MANIFEST: &str = include_str!("../../pull/src/manifest.rs");
 
-/// The D-0953 section, from its heading to the next `## ` heading or the end.
+/// The D-1446 section, from its heading to the next `## ` heading or the end.
 fn section() -> &'static str {
     let from = LIMITS
-        .split_once("## API request and pull costs that still grow with the store — D-0953")
-        .expect("docs/06-limits.md has the D-0953 section")
+        .split_once("## API request and pull costs that still grow with the store — D-1446")
+        .expect("docs/06-limits.md has the D-1446 section")
         .1;
     from.split_once("\n## ").map_or(from, |(own, _)| own)
 }
@@ -36,7 +36,7 @@ fn bullet(id: &str) -> String {
     let head = format!("* **{id} — ");
     let from = section()
         .split_once(head.as_str())
-        .unwrap_or_else(|| panic!("the D-0953 section has a bullet for {id}"))
+        .unwrap_or_else(|| panic!("the D-1446 section has a bullet for {id}"))
         .1;
     let end = ["\n* ", "\n### ", "\n## "]
         .iter()
@@ -350,7 +350,7 @@ fn w1_api5_11_spot_targets_and_resolve_walk_the_universe_whatever_they_return() 
 fn section_34_is_corrected_where_it_went_stale() {
     let corrections = section()
         .split_once("### Corrections to earlier sections")
-        .expect("the D-0953 section corrects §34")
+        .expect("the D-1446 section corrects §34")
         .1
         .split_whitespace()
         .collect::<Vec<_>>()

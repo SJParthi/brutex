@@ -228,7 +228,7 @@ const MASK_HASH_MIX: u64 = 0x517c_c1b7_2722_0a95;
 /// of a `HashSet` differs between two runs of the same input. Nothing in this
 /// crate iterates one — the join's `MaskSet` of the previous frontier is asked
 /// only whether a subset is present (the `seen` duplicate set it was written
-/// for is deleted; D-0926) — so that randomness never reached an answer. A fixed seed removes
+/// for is deleted; D-1440) — so that randomness never reached an answer. A fixed seed removes
 /// the possibility rather than relying on it staying unreached, which is what
 /// `CLAUDE.md` §3 rule 5 is for.
 const MASK_HASH_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -867,7 +867,7 @@ pub const DEFAULT_CEILING: usize = 1 << 27;
 /// counted it. At the shipped constants it still does not, and the arithmetic
 /// is short: the prefix join is injective, so `duplicates` is a **structural
 /// zero** at k>=2 — proved by the join's shape and written as a literal, not
-/// counted (it was called a "measured" zero here, which it never was; D-0926) —
+/// counted (it was called a "measured" zero here, which it never was; D-1440) —
 /// and every pair contributes exactly one distinct candidate. [`Ladder::exhausted`]
 /// tests `admitted + emitted >= ceiling` before every pair is admitted, and
 /// [`DEFAULT_CEILING`] is
@@ -1818,7 +1818,7 @@ impl Ladder {
         // join is injective, and
         // `one_k_set_is_evaluated_once_however_many_pairs_produce_it` pins it by
         // `generated`. (`duplicates` is a literal zero at k>=2, not a
-        // measurement; D-0926.)
+        // measurement; D-1440.)
         // What nothing did was draw the conclusion that the set is therefore
         // dead weight.
         //
@@ -1889,7 +1889,7 @@ impl Ladder {
         // highest bits, which is that same pair and no other — so `duplicates`
         // is a PROVED zero. It is written as a literal in `joined_frontier`,
         // not counted, and the tests witness the property by what was
-        // generated rather than by reading that literal back (D-0926).
+        // generated rather than by reading that literal back (D-1440).
         //
         // # The grouping is built, not assumed
         //
@@ -1942,7 +1942,7 @@ impl Ladder {
                     // `Breach::Pairs` with a partial frontier although every pair
                     // had been walked. Checked here, a halt means a pair really
                     // was refused, and `Halt::pairs == pair_budget` exactly.
-                    // D-0922.
+                    // D-1438.
                     if pairs_walked.saturating_add(pairs) >= self.pair_budget {
                         halted = Some(self.halt(
                             k,
@@ -2332,7 +2332,7 @@ fn lanes() -> usize {
 /// decides a halt, the ceiling counter decides a refusal, and the subset prune
 /// reads the previous frontier — and those are hash probes and integer adds.
 /// (This named a `seen` set admitting or rejecting duplicates; that set is
-/// deleted, D-0926.) Moving them would need locks and would change when
+/// deleted, D-1440.) Moving them would need locks and would change when
 /// a budget fires, which changes the ANSWER. `Column::support` is the opposite:
 /// it takes `&Column`, touches no shared state, and costs `Theta(bars)`. Only
 /// the expensive, shared-nothing half is spread.
@@ -2344,7 +2344,7 @@ fn lanes() -> usize {
 /// the survivors to `out` in candidate order through
 /// [`primitives::append`] — so `out` receives the same sequence a single lane
 /// would have produced. (This described per-chunk `parts` vectors that no
-/// longer exist; D-0926.) `sort_canonically` then runs over the level regardless, so §3 rule
+/// longer exist; D-1440.) `sort_canonically` then runs over the level regardless, so §3 rule
 /// 5 holds twice over. `a_batched_level_is_identical_to_a_single_lane_one`
 /// measures it rather than trusting either argument.
 ///
@@ -2954,7 +2954,7 @@ mod tests {
         );
         // No pair repeats a candidate another pair already made, witnessed by
         // DISTINCTNESS of what survived rather than by `duplicates`, which is a
-        // literal zero at k>=2 and cannot fail (D-0926).
+        // literal zero at k>=2 and cannot fail (D-1440).
         assert!(
             level
                 .frequent
@@ -3911,7 +3911,7 @@ mod tests {
         }
     }
 
-    /// THE PAIR BUDGET IS EXACT AT BOTH EDGES. D-0922.
+    /// THE PAIR BUDGET IS EXACT AT BOTH EDGES. D-1438.
     ///
     /// It was checked once per outer row of a prefix block. Two defects
     /// followed. A row ran to its end before the next check, so a halt
@@ -4320,7 +4320,7 @@ mod tests {
              sixteen places, and every one is accounted for.\n\
              \x20 IT WAS SEVENTEEN UNTIL D-0924 folded the subset prune and the \
              meaning prune into one `join_screen` call, so both refusals now \
-             leave by ONE `let .. else {{ continue }}` skip; and D-0922 moved \
+             leave by ONE `let .. else {{ continue }}` skip; and D-1438 moved \
              the pair-budget exit from the outer row into the inner pair, \
              which moved it without adding or removing one.\n\
              Five resource-safety exits were added: four setup returns refuse \
@@ -4971,7 +4971,7 @@ mod tests {
         // COULD NOT FAIL: every k>=2 level is built by `joined_frontier`, which
         // writes `duplicates: 0` as a literal and counts nothing. The live
         // witness is `generated == 1` above -- a join that reached {0,1,2}
-        // twice would report two. D-0926.
+        // twice would report two. D-1440.
     }
 
     /// The prefix join returns exactly what an exhaustive pairwise join returns.
@@ -5299,7 +5299,7 @@ mod tests {
         );
         // `duplicates == 0` was asserted here too, against the literal zero
         // `joined_frontier` writes; it could not fail. `generated == 1` above is
-        // the property. D-0926.
+        // the property. D-1440.
         // AND IT LEAVES BY THE PRUNE, NOT BY THE BARS. `{0,1,2}` needs all three
         // of its 2-subsets frequent and the fixture supplies only `{0,1}` and
         // `{0,2}` — `{1,2}` is absent — so anti-monotonicity refuses it before a

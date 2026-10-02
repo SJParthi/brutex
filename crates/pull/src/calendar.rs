@@ -823,7 +823,7 @@ mod tests {
     }
 
     /// **A WITHHELD STRETCH IS UNMEASURED, NEVER CLOSED, AND NEVER LOSES A
-    /// SESSION.** D-0950: a stretch whose daily rung was not read cannot claim
+    /// SESSION.** D-1443: a stretch whose daily rung was not read cannot claim
     /// the exchange was shut on it.
     #[test]
     fn withholding_turns_only_closed_days_inside_the_span_into_unmeasured() {
@@ -1426,7 +1426,7 @@ impl Calendar {
     /// rung was read whole. A caller that knows a stretch was NOT read (its daily
     /// file is absent, or one of its records failed its checks) withholds that
     /// stretch here, so the gap reads as "not measured" rather than as a run of
-    /// holidays that never happened. D-0950.
+    /// holidays that never happened. D-1443.
     ///
     /// Open days are left alone: a bar is proof, wherever it came from, and the
     /// 2021-02-24 regulator override stays open. Days outside the span are

@@ -18,10 +18,10 @@ same closure decisions and trial counts as an uninterrupted streamed run.
 | Can a partial frontier look complete? | Checkpoints preserve the halt; the rank adapter requires an extinction witness or a named halt. | Engine resource-halt regression; runner `checkpoint_rank_adapter_refuses_a_missing_terminal_or_mismatched_column` |
 | Are high condition bits retained? | Each mask remains six little-endian `u64` words. Test positions cross 63/64 and 127/128 and reach 369. | Independent exhaustive-subset oracle and codec round trip. |
 | Will reranking lose earlier combinations? | Every retained level feeds the existing `Accumulator::offer_retired` exactly once. A halted successor cannot prove its predecessor closed. | Runner `checkpoint_ranking_preserves_streamed_scores_trials_and_partial_closure` |
-| Can another input or policy reuse a checkpoint? | Engine compares the supplied identity, row count, exact offered sequence, threshold, candidate ceiling and pair budget. The support-lane count is scheduling only and is taken from the caller (D-0923). The caller must additionally bind and verify the exact signal/scoring/data bytes. | `resumed_identity_column_offers_and_every_configuration_term_must_match`; `a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer` |
+| Can another input or policy reuse a checkpoint? | Engine compares the supplied identity, row count, exact offered sequence, threshold, candidate ceiling and pair budget. The support-lane count is scheduling only and is taken from the caller (D-1439). The caller must additionally bind and verify the exact signal/scoring/data bytes. | `resumed_identity_column_offers_and_every_configuration_term_must_match`; `a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer` |
 | Can malformed bytes become a plausible answer? | The codec refuses unsupported versions, foreign identity, truncated/trailing bytes, invalid sizes, malformed masks/order, excluded survivor positions, non-reconciling counters and inconsistent halts. Durable cryptographic integrity is the caller's separate obligation. | `truncated_trailing_foreign_and_malformed_payloads_are_refused` and the public resume corruption regressions. |
 | Does the stored command actually use recovery? | The stored single-month sweep calls the durable wrapper and the ordinary rank adapter. A fresh attempt restores prior rows and records the current boundary once. | Five passing `cli::and_checkpoint::tests`, including persisted restart and the actual ranked helper. |
-| Is memory bounded independently of the answer size? | No. Retaining all survivor history costs O(total survivors). `engine::resume::CheckpointView::write_to` streams with fixed scratch, but its only production caller, `cli::and_checkpoint::encode`, collects the whole payload into a growing `BoundedBytes` `Vec` (doubling, capped at 64 MiB − 96) before publishing, so encoding holds O(payload) bytes. Recovery reads the full payload into memory (`Journal::latest`) and decoding then allocates the declared bounded history fallibly. D-0957. | Source contract, not an O(1) claim. |
+| Is memory bounded independently of the answer size? | No. Retaining all survivor history costs O(total survivors). `engine::resume::CheckpointView::write_to` streams with fixed scratch, but its only production caller, `cli::and_checkpoint::encode`, collects the whole payload into a growing `BoundedBytes` `Vec` (doubling, capped at 64 MiB − 96) before publishing, so encoding holds O(payload) bytes. Recovery reads the full payload into memory (`Journal::latest`) and decoding then allocates the declared bounded history fallibly. D-1448. | Source contract, not an O(1) claim. |
 | Does this prove all historical and future inputs? | No. The tests are finite differential, corruption and resource-boundary evidence. | The matrix explicitly contains 120 input/configuration cases. |
 
 ## Integration contract
@@ -125,10 +125,10 @@ cumulative admitted count. These are validation rules, not a second search.
 A checkpoint without a named halt requires `pairs <= pair_budget`. The shared
 join checks its budget before every pair, so a walk whose pair need equals the
 budget exactly completes, and a pairs halt is recorded with `pairs ==
-pair_budget`. Until D-0922 the check ran once per outer row, including a block's
+pair_budget`. Until D-1438 the check ran once per outer row, including a block's
 final row, which has no pair to walk: a level that needed exactly the budget
 was reported halted with a partial frontier, and a halt could report up to one
-block width minus one pair past the budget. A checkpoint written before D-0922
+block width minus one pair past the budget. A checkpoint written before D-1438
 can therefore still carry `pairs > pair_budget` under a named pairs halt, and it
 remains readable: validation still requires only `pairs >= pair_budget` there.
 Resuming preserves the original halt and counters. The budget bounds pairs
@@ -144,7 +144,7 @@ and completing still read every chunk. Neither serialization nor
 reading/ranking/searching a growing result set is claimed to have O(1) time or
 space.
 
-The support-lane count is not compared on resume (D-0923): it is a scheduling
+The support-lane count is not compared on resume (D-1439): it is a scheduling
 sentinel outside the run identity, and the resumed walk uses the caller's
 lanes, so a checkpoint resumes on a host with a different core count. The lane
 count recorded in the checkpoint is the one in force when it was written. The
@@ -209,13 +209,13 @@ accounting, empty frontiers, zero-row and zero-policy states, and halt identity.
 One reproduced defect allowed an explicitly always-false bit 64 to survive in
 an otherwise consistent checkpoint; excluding those positions from the allowed
 survivor mask now refuses it. A second validation correction rejects an
-unhalted checkpoint beyond its pair budget (at or beyond, until D-0922 made a
+unhalted checkpoint beyond its pair budget (at or beyond, until D-1438 made a
 walk that needs exactly its budget complete). Valid version 1 bytes remain
 unchanged.
 
 The resource regression uses actual shared-engine outcomes: pair budget 1
 halts with exactly one pair walked (it retained an outer-row overshoot before
-D-0922), and candidate ceiling 2 with pair budget 3 produces a candidate halt
+D-1438), and candidate ceiling 2 with pair budget 3 produces a candidate halt
 after three pairs. Both decode and resume unchanged.
 Memory and worker halt tags also have codec tests; those tags do not establish
 that a physical allocator or operating-system thread failure was induced.

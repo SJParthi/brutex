@@ -771,7 +771,7 @@ mod tests {
     }
 
     /// **A candidate page reads the whole sealed catalog five times, and
-    /// that is stated with the count the source pays.** W1-api2-2, D-0951.
+    /// that is stated with the count the source pays.** W1-api2-2, D-1444.
     ///
     /// Two reads are `render`'s own; `tier` pays one through `pinned`, and
     /// `candidates_page` pays two (entry and exit). Each is counted off the
@@ -818,7 +818,7 @@ mod tests {
     }
 
     /// **The trade page keeps one reader, so a change of candidate re-reads
-    /// every one of its trades, and that is stated.** W1-api2-3, D-0951.
+    /// every one of its trades, and that is stated.** W1-api2-3, D-1444.
     #[test]
     fn a_trade_pages_single_slot_and_cold_reread_are_stated() {
         let api = include_str!("candidatejson.rs");

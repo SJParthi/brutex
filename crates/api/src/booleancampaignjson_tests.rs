@@ -388,7 +388,7 @@ fn a_campaign_expecting_a_stock_family_states_the_equity_note_and_an_index_campa
 }
 
 /// **The qualified campaign route walks its whole history on every GET, and
-/// that is stated.** W1-api1-4, D-0951.
+/// that is stated.** W1-api1-4, D-1444.
 ///
 /// No cache is added: the route serves a mutable latest snapshot. The bullet
 /// must name the walk, its bound and the absence of a cache, and the source

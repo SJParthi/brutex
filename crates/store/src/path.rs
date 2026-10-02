@@ -360,7 +360,7 @@ impl Timeframe {
     /// from the open, so every intraday rung it writes — thirty and sixty
     /// included — begins the day at 09:15. A short bar, where a rung leaves
     /// one, is the session's LAST, and which rungs leave one depends on the
-    /// venue's session length (D-0956).
+    /// venue's session length (D-1447).
     pub const MINUTE_3: Self = Self {
         secs: 180,
         name: "3min",
@@ -407,7 +407,7 @@ impl Timeframe {
     /// [`Self::aligns_with_the_open`] answers `false` for it. `pull::fold`
     /// counts from the open, so the bars it files here begin at 09:15; the
     /// predicate matters to a writer whose bars arrive on someone else's
-    /// grid (D-0956).
+    /// grid (D-1447).
     ///
     /// It is in [`Self::KNOWN`] because the store's job is to have somewhere to
     /// FILE a rung, and the alignment question belongs to whoever produces the
@@ -446,7 +446,7 @@ impl Timeframe {
     /// from IST midnight would open the session with a 15-minute stub stamped
     /// 09:00. `pull::fold` counts from the open, so the bars it files here
     /// begin at 09:15, and the 375-minute index session ends with a 15-minute
-    /// bar at 15:15. See [`Self::MINUTE_3`] and D-0956.
+    /// bar at 15:15. See [`Self::MINUTE_3`] and D-1447.
     pub const MINUTE_30: Self = Self {
         secs: 1_800,
         name: "30min",
@@ -456,7 +456,7 @@ impl Timeframe {
     /// from IST midnight would open the session with a 45-minute stub stamped
     /// 09:00. `pull::fold` counts from the open, so the bars it files here
     /// begin at 09:15, and the 375-minute index session ends with a 15-minute
-    /// bar at 15:15. See [`Self::MINUTE_3`] and D-0956.
+    /// bar at 15:15. See [`Self::MINUTE_3`] and D-1447.
     pub const MINUTE_60: Self = Self {
         secs: 3_600,
         name: "60min",
@@ -519,7 +519,7 @@ impl Timeframe {
     /// arrives already stamped by someone else — a vendor's bar at this rung —
     /// could sit on either grid, and the two put the first edge at different
     /// minutes. `pull::vendor::Granularity::store_timeframe` refuses such a bar
-    /// on that ground. D-0956.
+    /// on that ground. D-1447.
     #[must_use]
     pub const fn aligns_with_the_open(self) -> bool {
         self.secs.is_multiple_of(60)

@@ -22,7 +22,7 @@
 //!   `hits` reads all six words whichever one fails. This pair is evidence
 //!   only: an early-exit word loop measured 1.09x to 2.06x across words 1 to 5,
 //!   under the 3.0x ceiling, so it passes this row. The guard against that loop
-//!   is the source-shape test named below (D-0917);
+//!   is the source-shape test named below (D-1436);
 //! * a **1-bit** candidate against one requiring every live bit (`LIVE`), because the cost must not
 //!   depend on how much the candidate requires — that is what lets the Apriori
 //!   ladder walk to any depth without the per-test cost growing with `k`.
@@ -86,7 +86,7 @@ fn cost_ps<T>(reps: u32, mut op: impl FnMut() -> T) -> u128 {
 ///
 /// Both directions breach, as in `crates/engine/benches/ratio.rs`. An input that
 /// is CHEAPER than the baseline is as much a data dependence as one that is
-/// dearer, and a one-sided check passed every such case (D-0917).
+/// dearer, and a one-sided check passed every such case (D-1436).
 ///
 /// A zero on either side is a FAILURE and not a pass. An operation that timed
 /// at zero picoseconds was optimised away, and a ratio against nothing is not a
@@ -281,7 +281,7 @@ fn a_hit_and_a_miss_cost_the_same() -> bool {
 /// shared runner's noise, so Gate 8 would flake. The guard is the source-shape
 /// unit test `vocab::mask::hits_does_the_same_work_for_every_input`, which
 /// refuses `while`, `for`, `loop`, `return`, `if`, `match`, `&&` and `||` in the
-/// body. This row is evidence that the compiled function agrees (D-0917).
+/// body. This row is evidence that the compiled function agrees (D-1436).
 /// [`ratio`] breaches in both directions, so a word that became CHEAPER than
 /// word 0 fails here too.
 fn a_miss_costs_the_same_in_every_word() -> bool {

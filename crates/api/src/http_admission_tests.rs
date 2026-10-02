@@ -544,7 +544,7 @@ fn a_journaled_read_is_refused_only_when_it_names_another_site() {
 /// fetch-site values, a repeated one and one that is not text; every answer is
 /// a `403` with no audit id, and the journal directory does not exist after
 /// all of them. Then one same-origin `GET` per route adds exactly one record
-/// labelled `GET <route>`, a `POST`-only route's `405` included. D-0952.
+/// labelled `GET <route>`, a `POST`-only route's `405` included. D-1445.
 #[tokio::test]
 async fn every_audited_route_refuses_another_sites_request_before_the_journal() {
     let _apart = crate::detail::apart_from_slot_owners().await;

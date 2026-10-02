@@ -8,7 +8,7 @@
 //! and why the operator's ladder — 2, 3, 5, 10, 15, 30, 60 — could not exist.
 //! `store_timeframe` still refuses a VENDOR's bar at thirty and sixty, for a
 //! different reason that `store_timeframe_follows_the_fold_anchor` below pins:
-//! the vendor's grid at those rungs is UNVERIFIED. D-0956.
+//! the vendor's grid at those rungs is UNVERIFIED. D-1447.
 //!
 //! `crate::fold` anchors an intraday rung at the OPEN. This asserts it against a
 //! real session rather than against the arithmetic that motivated it, because a
@@ -606,7 +606,7 @@ fn a_bucket_whose_volume_leaves_i64_is_refused_not_capped() {
 ///    counted from IST midnight has an edge at that same first stamp — that
 ///    is, when a vendor's bar lands on a stored edge whichever of the two
 ///    grids it was stamped on. Where they differ, the vendor's grid is
-///    UNVERIFIED and the bar is refused. D-0956.
+///    UNVERIFIED and the bar is refused. D-1447.
 ///
 /// A rung the store ships no directory for must answer `None`, and the daily
 /// rung, which is not on an intraday grid, must answer `Some`.
@@ -672,7 +672,7 @@ fn store_timeframe_follows_the_fold_anchor() {
 /// for the closing auction runs 360, where nothing is ragged. The length here
 /// is read from the venue row (`Venue::hours_on`, and the dated cash close),
 /// never written down, so any doc table has to be derived the same way.
-/// D-0956.
+/// D-1447.
 #[test]
 fn derived_rung_stub_minutes_follow_the_venue_session() {
     use pull::fold::complete_minutes_with_cash_schedule;

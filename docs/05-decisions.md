@@ -43719,7 +43719,7 @@ coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
 
-### D-0961 — Close a Search V4 signal prefix at the last minute its session traded, not at `ts + rung − 1min` — 2026-10-02
+### D-1449 — Close a Search V4 signal prefix at the last minute its session traded, not at `ts + rung − 1min` — 2026-10-02
 
 **What was wrong (W2-cli3-7).** `CandidateSearchColumnBuilderV1::build` in
 `crates/cli/src/candidate_universe.rs` demanded the exact closing minute of a
@@ -48623,7 +48623,7 @@ change is a separate guard above them and leaves their lines alone.
 
 Invariants PSG-01 to PSG-03; `docs/06-limits.md` has the remaining bound.
 
-### D-0918 — Bound rupee text at 64 bytes and refuse longer text by name — 2026-10-02
+### D-1437 — Bound rupee text at 64 bytes and refuse longer text by name — 2026-10-02
 
 **The defect (audit finding o1store-2).** `Paisa::from_rupee_text_half_up`
 walks its input three times (two `bytes().all(..)` digit checks and the
@@ -49405,7 +49405,7 @@ Invariants AF-W1A65-a, AF-W1A65-b, AF-W1A61-a, AF-W1A64-a, AF-W1A62-a,
 AF-W1A62-b, AF-W1A19-a and AF-R9CX1-a; `docs/06-limits.md` has the costs and
 what stays unbounded.
 
-### D-0956 — Say why a vendor's 30min and 60min bars are refused, state rung raggedness per venue, and correct four pull comments that described code that is not there — 2026-10-02
+### D-1447 — Say why a vendor's 30min and 60min bars are refused, state rung raggedness per venue, and correct four pull comments that described code that is not there — 2026-10-02
 
 **Cloud audit GAP12-8, GAP12-11, GAP2-43, W1-pull4-2 and W1-pull4-3. All five
 were documentation defects. Code behaviour stays the same; the commit adds four
@@ -49534,7 +49534,7 @@ for 30min and 60min. No other cost changed, so `docs/06-limits.md` is
 untouched. Not added to `docs/11-findings.md`, which records the 2026-08-11
 sweep.
 
-### D-0917 — C-V-02 is evidence, not the guard against an early-exit `hits`; the vocab ratio breaches both ways — 2026-10-02
+### D-1436 — C-V-02 is evidence, not the guard against an early-exit `hits`; the vocab ratio breaches both ways — 2026-10-02
 
 **The defect (audit findings ET-o1-proof-coverage-3 and ET-o1-proof-coverage-13).**
 `crates/vocab/benches/ratio.rs` (module doc and the C-V-02 doc),
@@ -49565,7 +49565,7 @@ different loop, and the mutant's gap stays a small fraction of the call.
 (3) Editing D-0103's text: the ledger is append-only, so this entry is the
 correction.
 
-### D-0916 — Read native-dependency reachability from the lock's edges, and fingerprint the edges — 2026-10-02
+### D-1435 — Read native-dependency reachability from the lock's edges, and fingerprint the edges — 2026-10-02
 
 **The defect (audit findings UC-7, UC-13, ET-rust-only-purity-5).**
 `no_declared_native_dependency_is_compiled_any_more` in
@@ -49739,7 +49739,7 @@ of `docs/06-limits.md` with the function and the bound, and three
 `pull::derive::d_0955_*` tests hold each bullet to the source. That section also corrects §17's "paid once
 per process" for the write path.
 
-**Why the census read is not cached.** D-0953 (W1-api5-1) left the per-window
+**Why the census read is not cached.** D-1446 (W1-api5-1) left the per-window
 read to this crate. A decoded census kept across calls would stop re-verifying
 every committed entry's checksum on each read, so a census that rotted under a
 long-running process would be appended to as if it were sound, which is the
@@ -49760,7 +49760,7 @@ the test runs `/usr/bin/mkfifo`, as `cli`'s checksum-receipt test runs `mkfifo`.
 
 Invariants PIF-01 through PIF-07; `docs/06-limits.md` has the costs.
 
-### D-0953 — API request costs named per route; one index observation per instrument; a page orders only itself; `/store` fresh in every view; the serve lock names one holder — 2026-10-02
+### D-1446 — API request costs named per route; one index observation per instrument; a page orders only itself; `/store` fresh in every view; the serve lock names one holder — 2026-10-02
 
 **What happened.** An audit (cluster B6: W1-api5-0 to W1-api5-11, UC-20,
 R9-api-cx-2, GAP14-63) found eleven paths in `crates/api` whose cost grows
@@ -49799,7 +49799,7 @@ request while a pull lands), W1-api5-3 (`/instruments.json`), W1-api5-5
 (`/calendar.json`), W1-api5-6 (a filtered `/store`), W1-api5-7
 (`/verify.json`), W1-api5-8 (`/bars.json` past the last bar), W1-api5-9
 (`/indexmap.json`) and W1-api5-11 (`spot_targets`, `resolved_master_rows`)
-are in `docs/06-limits.md`'s D-0953 section, which also corrects §34's
+are in `docs/06-limits.md`'s D-1446 section, which also corrects §34's
 "not reachable today". The route docs for `/calendar.json`, `/verify.json`
 and `/indexmap.json` now state those costs. `api::server::cost_limits_tests`
 holds each bullet to the source shape it describes.
@@ -49813,7 +49813,7 @@ covers the `calendar.sessions() > 0` guard on the exchange branch of
 crate. W1-api5-8's whole-month fallback stays because it is what reads a
 header naming zero-filled records correctly. Invariants APIC-01 to APIC-06.
 
-### D-0952 — One audited route list, an owed terminal, and the journal's growth stated — 2026-10-02
+### D-1445 — One audited route list, an owed terminal, and the journal's growth stated — 2026-10-02
 
 **The defects (audit findings GAP14-57, W1-api3-5, W1-api3-0).** (1)
 `operation_audit::audited_route` was a 21-arm `match` and its test named 10 of
@@ -49930,7 +49930,7 @@ failed under the 8-thread full run and passed when run by itself; its
 failure output was not captured. Files written before this decision are not
 rechecked on open.
 
-### D-0950 — Withhold the calendar months the daily rung did not read, derive each series once under concurrency and off the async workers, and state what a derivation reads — 2026-10-02
+### D-1443 — Withhold the calendar months the daily rung did not read, derive each series once under concurrency and off the async workers, and state what a derivation reads — 2026-10-02
 
 **What was wrong.** Five audit findings, all in `crates/api/src/calendar_of.rs`.
 
@@ -50051,7 +50051,7 @@ under `#[cfg(all(test, unix))]` for `emit_sites`; `crates/api/src/isolated.rs`.
 through a child; the counts are expected unchanged because every moved body
 line still runs, in the child.
 
-### D-0951 — JSON renderers: reuse a current catalog on a first page, and state every per-request walk — 2026-10-02
+### D-1444 — JSON renderers: reuse a current catalog on a first page, and state every per-request walk — 2026-10-02
 
 **The defects (audit findings W1-api1-5, W1-api1-6, W1-api1-4, W1-api2-2,
 W1-api2-3, W1-api6-3).** Six JSON routes pay a cost per request that grows
@@ -50086,7 +50086,7 @@ safety argument depends on, and removing one is a design change, not a fix:
 - W1-api2-3: the single trade-reader slot is one bounded allocation.
 - W1-api6-3: `with_verified` deliberately caches no refusal, so a repaired
   ledger is served on the next request.
-Each now has a bullet in `docs/06-limits.md` under D-0951, and a test that
+Each now has a bullet in `docs/06-limits.md` under D-1444, and a test that
 reads the bullet and counts or quotes the source line that pays the cost, so a
 change to either fails until the other follows.
 
@@ -50431,7 +50431,7 @@ digest. **Left open:** `CLAUDE.md` §3 rule 7 still says `cli` and `runner` pass
 (D-0507), which does not read the slice and so does not reopen the look-ahead
 point that sentence makes. That file is the session law and is not edited here.
 
-### D-0946 — The pull does not keep every Muhurat day off disk; the calendar list does, and a 43-bar in-hours stub is now pinned — 2026-10-02
+### D-1442 — The pull does not keep every Muhurat day off disk; the calendar list does, and a 43-bar in-hours stub is now pinned — 2026-10-02
 
 **What was false (cloud audit GAP12-10).** The header of
 `CHARTER_NON_REGULAR_IST_DAYS` in `crates/indicators/src/evaluator.rs` said
@@ -50676,7 +50676,7 @@ Prev5 fill, anchor and warm-up verdict after every step to equal the oracle's.
 The walk counter is a `#[cfg(test)]` thread-local, so the count is
 deterministic and absent from production builds.
 
-### D-0944 — Key the gap family's 3-minute candle by clock span, not by counting three bars — 2026-10-02
+### D-1441 — Key the gap family's 3-minute candle by clock span, not by counting three bars — 2026-10-02
 
 **What was wrong.** `docs/09-design-sources.md` §4 defines `X1` as the
 previous day's **last 3-minute candle** and `X2` as today's **first 3-minute
@@ -50771,7 +50771,7 @@ change the ledger's digest and stated counts in a branch that other lane
 branches also touch; if the operator wants batch-2 findings in that ledger,
 that is its own change.
 
-### D-0957 — Fourteen stale or false written claims corrected against the code, and a test that reads them back — 2026-10-02
+### D-1448 — Fourteen stale or false written claims corrected against the code, and a test that reads them back — 2026-10-02
 
 **What happened.** A lane-3 audit named fourteen sentences in the documents,
 `CLAUDE.md`, `AGENTS.md` and a few source comments that the code contradicts:
@@ -51114,7 +51114,7 @@ unchanged: their fixtures have `r = 0`, which is why none saw this.
 **Not shown.** No stored equity month was re-swept to measure how many
 recorded candidates change; that is a rerun, not part of this fix.
 
-### D-0913 — State the timestamp lookup's bisection cost in the limits register, and stop saying no bench times a syscall — 2026-10-02
+### D-1434 — State the timestamp lookup's bisection cost in the limits register, and stop saying no bench times a syscall — 2026-10-02
 
 **What happened.** An audit (W3-store1-0, W3-store1-1) found
 `store::file::first_at_or_after` and `already_stored` documented only in
@@ -51198,7 +51198,7 @@ here. The aarch64 value is taken from the kernel header above, and libc
 source walk catches the literal, but it cannot catch a site that builds the
 bit some other way, such as `1 << 17`.
 
-### D-0912 — Serve a sealed month's records from the verified block's own bytes, not a fresh read the check never saw — 2026-10-02
+### D-1433 — Serve a sealed month's records from the verified block's own bytes, not a fresh read the check never saw — 2026-10-02
 
 **What was wrong (ET-bars-candles-store-0).** `BarFile::read_row` read the
 record with its own `pread` and then called `verify_block_of`, which returned
@@ -51243,7 +51243,7 @@ when they were read, even if the disk has since changed. It is never an
 unverified byte. A block left and re-entered gets a fresh check against the
 disk as it then stands. Invariants ETBCS-01..03.
 
-### D-0911 — The store's read door opens nonblocking and refuses a non-regular file; the catalog does not hold one — 2026-10-02
+### D-1432 — The store's read door opens nonblocking and refuses a non-regular file; the catalog does not hold one — 2026-10-02
 
 **What was wrong (AC-whp-cx-0).** `BarFile::open_existing` is the read door
 behind every stored sweep, `/bars`, the pull's ingest and scrub, and
@@ -51290,7 +51290,7 @@ updated from seven to eight.
 ### D-0996 — The catalog walk counts a symlink to a directory and does not enter it — 2026-10-02
 
 **What was wrong (probestore-3).** `catalog::walk` decided whether to descend
-by following each entry's symlink (`is_dir`, then `metadata` after D-0911) and
+by following each entry's symlink (`is_dir`, then `metadata` after D-1432) and
 kept no record of the directories it had entered. A link back to its own
 directory was entered again on every visit, so `bars/x/{a,b,c} -> .` made the
 walk re-list the same directory through every path of links: the audit probe
@@ -51300,7 +51300,7 @@ error and no log line. Reproduced on this branch before the fix:
 
 **The change.** For each entry the walk first reads the entry's own type with
 `DirEntry::file_type`, which does not follow a symlink, and then `stat`s it as
-D-0911 does. A symlink whose target is a directory is counted in the new
+D-1432 does. A symlink whose target is a directory is counted in the new
 `Census::symlinked_dir` bucket and never pushed onto the stack, and
 `Census::reconciles` adds that bucket. A plain directory is entered as before,
 and a symlink to a regular file is still followed and classified, so a linked
@@ -51311,7 +51311,7 @@ them is the smaller rule. Each entry still costs one `file_type` and one
 `stat`, so the walk stays O(entries) with no per-entry scan.
 
 **Composition.** This branch is built on `fix/cloud-AC-whp-cx-0` (PR #24,
-D-0911), which first moved the walk to `stat` and added `Census::not_regular`.
+D-1432), which first moved the walk to `stat` and added `Census::not_regular`.
 The two changes touch adjacent lines, so this one was written on top of that
 branch to merge without conflict; it should land after #24.
 
@@ -51429,7 +51429,7 @@ the ledger is append-only and this entry supersedes them. The solver header,
 `MAX_ITERATIONS`' documentation, the bench header, `docs/04-invariants.md`
 G-09, G-31 and C-G-03, and `docs/06-limits.md` §29 are corrected.
 
-### D-0922 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
+### D-1438 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
 
 **What was wrong.** `Ladder::try_next_level_observing` checked
 `pairs_walked + pairs >= pair_budget` once at the start of each outer row of a
@@ -51455,7 +51455,7 @@ the candidate ceiling reaches first (`DEFAULT_PAIR_BUDGET`'s doc).
 Tests: `engine::tests::the_pair_budget_is_exact_at_both_edges`,
 `a_walk_that_needs_exactly_its_pair_budget_completes_and_its_checkpoint_reads_back`.
 
-### D-0923 — A checkpoint resumes under any support-lane count — 2026-10-02
+### D-1439 — A checkpoint resumes under any support-lane count — 2026-10-02
 
 **What was wrong.** `Checkpoint::validate_for` refused a resume whose
 `support_lanes` differed from the checkpoint's (finding
@@ -51511,7 +51511,7 @@ The function is a test and bench reference; the live path is
 **The change.** The body adds `u64::from(b.hits(mask))`. Same answers; the
 existing support tests and C-E-06's agreement check cover it.
 
-### D-0926 — Say that `duplicates` is a structural zero at k>=2, replace the assertions that read it back, and correct the drain and append descriptions — 2026-10-02
+### D-1440 — Say that `duplicates` is a structural zero at k>=2, replace the assertions that read it back, and correct the drain and append descriptions — 2026-10-02
 
 **What was wrong.** Every k>=2 level is built by `joined_frontier`, which
 writes `duplicates: 0` as a literal (finding AC-whp-tb-5). Three engine test
@@ -53059,3 +53059,46 @@ vector's absence through the source.
 
 Invariants AF-1203-a through AF-1203-f; `docs/06-limits.md` has the costs, the
 unrevoked-reservation exposure and the unmeasured decode peak.
+
+### D-1450 — Fold every open fix branch into one combined change, resolve rival fixes once, and renumber eighteen colliding decision numbers — 2026-10-02
+
+**Why.** The operator asked for one combined pull request instead of fifty-odd
+per-finding ones, and for nothing to be lost or applied twice. The lanes had
+each numbered decisions from ranges that overlapped, and several branches fixed
+the same defect independently.
+
+**Rival fixes resolved once, both sides' tests kept.**
+- `api::bars`: D-0733's nearer-end cut and D-1446's (W1-api5-4) bounded page
+  both bounded a window page. `page_of` (D-1446) is kept: it orders no more
+  rows than its own limit, which is never more than D-0733's cut ordered.
+  D-0733's exhaustive equality test now runs against `page_of`.
+- `store::catalog`: probestore-4 (digits-only month stem) and probestore-5
+  (non-UTF-8 component counted) repeat D-0767 and D-0768. The earlier code is
+  kept; the later tests and invariant rows are kept and use its names.
+- `core::price`: probestore-6 repeats D-0786 (half-up without the add-0.5
+  second rounding). D-0786's code is kept, with probestore-6's exactness note
+  and its test beside D-0786's.
+- `lake::reader`: probestore-7 repeats W3-lake1-4 (D-0775). The duplicate
+  `LakeError::SentinelValue` variant is not added; its row test asserts
+  `OpenInterestIsNullSentinel`; its "What is NOT checked" doc is kept.
+- `pull::csv`: D-0721's `fields_of` and D-1203's `split_fields` both moved a
+  row's fields into a fixed array. `fields_of` is kept; D-1203's row-vector
+  reservation, which D-0721 did not make, is added, and the D-0721 limit that
+  said the vector was unreserved is withdrawn.
+
+**Renumbered, never deleted.** Eighteen numbers headed two entries each. Per
+D-0684 the NEWER entry of each pair takes the next free number read from the
+merged tree, and every citation that entry's own branch wrote moves with it
+(each citing line attributed by `git blame` to that branch, not the older one):
+D-0911→D-1432, D-0912→D-1433, D-0913→D-1434, D-0916→D-1435, D-0917→D-1436,
+D-0918→D-1437, D-0922→D-1438, D-0923→D-1439, D-0926→D-1440, D-0944→D-1441,
+D-0946→D-1442, D-0950→D-1443, D-0951→D-1444, D-0952→D-1445, D-0953→D-1446,
+D-0956→D-1447, D-0957→D-1448, D-0961→D-1449. The older entries keep their
+numbers and their citations.
+
+**Rejected.** Merging the branches in PR-number order with "ours" on every doc
+conflict: it silently drops the later branch's rows. A union of both sides on
+every hunk: it duplicated rows and paragraphs that both sides had edited, so
+a mid-file two-sided hunk is resolved by hand and the resolver refuses it.
+
+Invariant C4-API-07 names the surviving page test; Gate 27b holds the numbering.

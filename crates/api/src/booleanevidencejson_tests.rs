@@ -542,7 +542,7 @@ fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not(
 }
 
 /// **A Boolean evidence page's currency checks grow with its linked catalogs,
-/// and that is stated.** W1-api1-6, D-0951.
+/// and that is stated.** W1-api1-6, D-1444.
 ///
 /// The bullet must give the count the source pays: four `require_current`
 /// style calls on an admission page, three on a statistics page, each over

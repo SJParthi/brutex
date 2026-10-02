@@ -679,7 +679,7 @@ fn the_documented_headroom_is_the_table_it_describes() {
 /// level's — `docs/04-invariants.md` CX-04.
 ///
 /// `table::CROSSINGS`' own doc and `indicators::evaluator` both cited this test
-/// by name while it did not exist (D-0957). It catches the off-by-one that doc
+/// by name while it did not exist (D-1448). It catches the off-by-one that doc
 /// warns about: a tuple whose `up` belongs to the next level, or whose state
 /// pair is two halves of different levels, sets the wrong edge and nothing in
 /// the resulting mask looks wrong.

@@ -213,12 +213,12 @@ const _: () = assert!(REGION_LEN_U64 == 32_768);
 /// [`FormatError::OffsetOverflow`] long before a read gets here.
 ///
 /// It still names "nothing cached" inside [`VerifiedBlock`], which since
-/// D-0912 sits behind a lock for a different reason: the lock guards the
+/// D-1433 sits behind a lock for a different reason: the lock guards the
 /// verified BYTES, and a spare bit pattern is still the cheapest way to say
 /// "none of them yet".
 const NO_BLOCK: u64 = u64::MAX;
 
-/// The verified-block buffer's capacity, in bytes — D-0912.
+/// The verified-block buffer's capacity, in bytes — D-1433.
 ///
 /// The format's block lengths are 4,088
 /// (bars), 4,080 (overlay) and 4,080 (greeks), and the assertion below walks
@@ -250,9 +250,9 @@ const _: () = {
 };
 
 /// The one checksum block this handle verified, and the bytes it verified —
-/// D-0912.
+/// D-1433.
 ///
-/// **The bytes, not only the index.** Until D-0912 the handle remembered the
+/// **The bytes, not only the index.** Until D-1433 the handle remembered the
 /// block INDEX and re-read each later record from the disk, so every read after
 /// the first in a block served bytes nobody had checksummed: a record damaged
 /// after its block was verified was served as a plausible wrong price
@@ -425,7 +425,7 @@ pub enum StoreError {
     ///
     /// The read door opens with `O_NONBLOCK` and checks the handle with
     /// `fstat`, so a FIFO is refused at once rather than parking the caller in
-    /// `open(2)` until some writer appears. D-0911, AC-whp-cx-0.
+    /// `open(2)` until some writer appears. D-1432, AC-whp-cx-0.
     NotARegularFile {
         /// The path the store asked for (not a symlink's target).
         path: PathBuf,
@@ -1074,7 +1074,7 @@ pub struct BarFile {
     /// source outright, and rule 7 refuses the `.contains(&…)` that would probe
     /// it — both for the reason this field is sized the way it is.
     ///
-    /// # Records are served FROM these bytes — D-0912
+    /// # Records are served FROM these bytes — D-1433
     ///
     /// This field used to remember only the block index, and a later read in
     /// that block re-read its record from the disk and checked nothing. This
@@ -1103,7 +1103,7 @@ pub struct BarFile {
     /// an interrupted append sealed past the commit it writes one more
     /// `store.block` WARN — once per alternation, not once per handle.
     /// `store::tail_proof` counts those lines; `docs/06-limits.md` (D-0688
-    /// section) states the cost. D-0957.
+    /// section) states the cost. D-1448.
     ///
     /// The cache is what a handle verified, not what the disk holds now: a
     /// warm read serves the bytes that matched the sidecar when they were read,
@@ -1390,7 +1390,7 @@ impl BarFile {
         // NEVER A BLOCKING OPEN. A FIFO at `<month>.bin` parked this call in
         // `open(2)` until a writer appeared — a sweep, an HTTP worker or a pull
         // hung with no refusal and no log line. `open_read` opens nonblocking
-        // and refuses anything `fstat` does not call a regular file. D-0911.
+        // and refuses anything `fstat` does not call a regular file. D-1432.
         let bars = open_read(&bars_path).map_err(|why| why.refusal(&bars_path))?;
 
         // The lock is opened read-only and never created. A bar file with no
@@ -1825,7 +1825,7 @@ impl BarFile {
         // `BarFile::verified` remembers one block and not a set: there is
         // nothing to intersect with, and "forget it" is the whole operation.
         // One uncontended lock and one store, off the read path entirely — this
-        // runs once per commit, never per record. Since D-0912 the cache is
+        // runs once per commit, never per record. Since D-1433 the cache is
         // also keyed by `n_valid`, so a read after the commit misses it either
         // way; this keeps the two keys saying the same thing.
         self.verified
@@ -1915,7 +1915,7 @@ impl BarFile {
                 index: last,
                 n_valid,
             })?;
-        // FORGET FIRST (D-0912's cache): the bytes below overwrite the buffer,
+        // FORGET FIRST (D-1433's cache): the bytes below overwrite the buffer,
         // and a refusal must not leave an older key naming them as verified.
         let mut cache = self.verified.lock().unwrap_or_else(PoisonError::into_inner);
         cache.block = NO_BLOCK;
@@ -2212,7 +2212,7 @@ impl BarFile {
     /// syscall underneath it is not free and its latency is the device's, not
     /// this crate's. This method IS timed, and with it its one `pread`:
     /// C-28 and C-29 time it in `crates/store/benches/ratio.rs` (a sentence
-    /// here said no bench timed a syscall until D-0913 corrected it). What
+    /// here said no bench timed a syscall until D-1434 corrected it). What
     /// they time is a WARM read — one fixed index, so its checksum block is
     /// cached and its page resident after the first call. The cold block
     /// verify a random index pays, and a cold device, are UNVERIFIED. D-0790.
@@ -2257,7 +2257,7 @@ impl BarFile {
     /// Each read may also pay one cold block verify (up to 4,088 bytes read,
     /// a 4-byte sidecar read, a CRC-32C) when its block is not the one
     /// cached. No bench times the lookup, so its wall-clock cost is
-    /// UNVERIFIED. `docs/06-limits.md`, D-0913; `CLAUDE.md` §3 rule 6.
+    /// UNVERIFIED. `docs/06-limits.md`, D-1434; `CLAUDE.md` §3 rule 6.
     ///
     /// # Errors
     ///
@@ -2297,7 +2297,7 @@ impl BarFile {
     ///
     /// # A truncated record is still named as the RECORD
     ///
-    /// Since D-0912 a sealed file reads the whole covered block in one `pread`
+    /// Since D-1433 a sealed file reads the whole covered block in one `pread`
     /// and serves the record out of it, so the record is no longer read on its
     /// own. Only the refusal for a file that is BOTH truncated and checksummed
     /// could change with that, and it does not: when the block read comes up
@@ -2335,7 +2335,7 @@ impl BarFile {
         // `first_at_or_after`'s bisection, `already_stored`'s comparison,
         // `suffix_that_follows`' overlap — so this is the single place the check
         // has to go for none of them to serve an unverified byte. A sealed file
-        // is served from the verified block's own bytes (D-0912); an unsealed
+        // is served from the verified block's own bytes (D-1433); an unsealed
         // one has nothing to verify against and reads its record directly.
         match self.crc_path.as_deref() {
             Some(sidecar) => self.read_verified(sidecar, index, at, image)?,
@@ -2345,7 +2345,7 @@ impl BarFile {
     }
 
     /// Copies record `index`, at file offset `at`, out of its verified block —
-    /// D-0912.
+    /// D-1433.
     ///
     /// Warm (the handle's cached block is this block at this counter): one
     /// uncontended lock and one copy of the record's bytes, no syscall. Cold:
@@ -2379,7 +2379,7 @@ impl BarFile {
     /// Reads `block`'s covered range into the handle's cache and verifies it,
     /// once per run of reads inside it — called by [`Self::read_verified`] on a
     /// cache miss only. On success the cache's `start` and `len` describe the
-    /// verified bytes; the caller sets its key. D-0912.
+    /// verified bytes; the caller sets its key. D-1433.
     ///
     /// # The defect this closes, measured rather than reasoned about
     ///
@@ -2481,7 +2481,7 @@ impl BarFile {
             &self.bars_path,
         )?;
         // INTO THE HANDLE'S OWN FIXED BUFFER, which is what the reads after
-        // this one are served from (D-0912). It used to be a fresh heap buffer
+        // this one are served from (D-1433). It used to be a fresh heap buffer
         // per cold block, checked and then thrown away. `MAX_BLOCK_LEN` is
         // asserted at compile time to hold every geometry a `BarFile` resolves,
         // so the refusal here is for a covered range no `Layout` can produce.
@@ -4035,7 +4035,7 @@ mod tests {
 
     #[test]
     fn first_at_or_after_never_probes_more_than_the_bisection_height() {
-        // W3-store1-0 / D-0913. `docs/06-limits.md` states the lookup as
+        // W3-store1-0 / D-1434. `docs/06-limits.md` states the lookup as
         // `ceil(log2(n_valid + 1))` record reads, each possibly paying one
         // cold block verify; this is that sentence as a number. A scan, a
         // probe that re-reads `mid`, or a loop that runs one step past an
@@ -4387,9 +4387,9 @@ mod tests {
     }
 
     /// A record corrupted AFTER its block was verified is never served as the
-    /// corrupted value — D-0912, ET-bars-candles-store-0.
+    /// corrupted value — D-1433, ET-bars-candles-store-0.
     ///
-    /// Before D-0912 the first read verified block 0 and remembered only its
+    /// Before D-1433 the first read verified block 0 and remembered only its
     /// INDEX, then every later read in that block re-read the record from disk
     /// and checked nothing: the bytes served were never the bytes summed. Now
     /// the verified block's own bytes are what later reads are served from.
@@ -4468,7 +4468,7 @@ mod tests {
         scrub_month(&path);
     }
 
-    /// Two handles on one month each serve the bytes they verified — D-0912.
+    /// Two handles on one month each serve the bytes they verified — D-1433.
     #[test]
     fn two_handles_each_serve_the_bytes_they_verified_d0912() {
         let _sink_is_mine = crate::emits::hold_the_sink();
@@ -4499,7 +4499,7 @@ mod tests {
     }
 
     /// The tail block grows on append, and the cache follows the counter —
-    /// D-0912.
+    /// D-1433.
     ///
     /// A cache of the tail block taken at three records holds no fourth; a
     /// read of record 3 after an append must neither slice past what was
@@ -4533,7 +4533,7 @@ mod tests {
 
     /// A block that fills to exactly `records_per_block` and then spills into a
     /// second: the last record of block 0 and the first of block 1 are each
-    /// served from their own verified bytes — D-0912.
+    /// served from their own verified bytes — D-1433.
     #[test]
     fn the_block_edge_is_served_from_each_side_s_own_verified_bytes_d0912() {
         let _sink_is_mine = crate::emits::hold_the_sink();
@@ -4571,7 +4571,7 @@ mod tests {
     }
 
     /// With the sidecar gone, a record that is ALSO truncated away is still
-    /// named as the record — the order the reads had before D-0912 kept them.
+    /// named as the record — the order the reads had before D-1433 kept them.
     #[test]
     fn a_missing_record_is_named_before_a_missing_sidecar_d0912() {
         let _sink_is_mine = crate::emits::hold_the_sink();
@@ -5984,7 +5984,7 @@ mod tests {
 /// carries `create(true)`: any door that used it turned a read into a write the
 /// moment its target was absent.
 ///
-/// # Never a blocking open, never a non-regular file (D-0911, AC-whp-cx-0)
+/// # Never a blocking open, never a non-regular file (D-1432, AC-whp-cx-0)
 ///
 /// A plain `open(2)` of a FIFO for reading blocks until a writer opens the
 /// other end, so a FIFO (or a symlink to one) at a month's `.bin`, `.lock` or

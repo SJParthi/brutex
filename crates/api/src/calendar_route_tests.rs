@@ -177,7 +177,7 @@ async fn calendar_reads_current_feed_and_cash_identity_after_startup() {
 }
 
 /// **A symbol this feed holds no file for is not a voter, and is not named in
-/// `derivedFrom`.** GAP14-63, D-0953.
+/// `derivedFrom`.** GAP14-63, D-1446.
 ///
 /// The exchange branch of `/calendar.json` keeps a reading only when its
 /// calendar has a session (`calendar.sessions() > 0`). Nothing tested that
@@ -256,7 +256,7 @@ async fn calendar_refuses_a_symbol_held_under_multiple_identities() {
 }
 
 /// **THE CALENDAR ROUTES DERIVE OFF THE ASYNC WORKERS, BEHIND ADMISSION.**
-/// W1-api2-11, D-0950.
+/// W1-api2-11, D-1443.
 ///
 /// `calendar_json` held no `.await`: a cache miss derived every spot series on
 /// a Tokio worker, and `gaps_json` derived its peer vote the same way. Read off
@@ -290,7 +290,7 @@ fn the_calendar_routes_derive_on_the_blocking_pool_behind_admission() {
 }
 
 /// **A REFUSED ADMISSION IS ANSWERED, NAMED AND RETRYABLE.** Saturation is
-/// 429, a join failure 503, and both say why. W1-api2-11, D-0950.
+/// 429, a join failure 503, and both say why. W1-api2-11, D-1443.
 #[test]
 fn a_refused_calendar_admission_names_why_and_the_bound() {
     let (status, _, body) = calendar_admission_refused(&crate::detail::RunError::Saturated);

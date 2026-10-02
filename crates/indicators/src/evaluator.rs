@@ -547,7 +547,7 @@ enum Side {
 // a per-bar collection. The bound is still a CONSTANT and the assertion is still
 // what catches a module that starts accumulating; it moved because one more
 // fixed-size field was added, which is the only reason it is ever allowed to
-// move. D-0944 then took 64 bytes OUT: `GapFib`'s three-slot ring and bar count
+// move. D-1441 then took 64 bytes OUT: `GapFib`'s three-slot ring and bar count
 // became one running 3-minute candle, 160 bytes to 96, so the evaluator measures
 // 1728 and the ceiling came down from 1824 to keep the same 32 bytes of slack.
 const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1760);
@@ -766,7 +766,7 @@ impl Evaluator {
             known = known.union(&self.curday.known(self.widths.fib));
             // `next`, not `self`: the gap leg is settled BEFORE its emit, when a bar
             // of a later 3-minute span closes the opening candle, and its fold never
-            // moves it (D-0944). So the post-step leg is exactly the one this bar's
+            // moves it (D-1441). So the post-step leg is exactly the one this bar's
             // truth read, and the pre-step one is a bar stale on the bar that closes
             // the candle.
             known = known.union(&next.gap.known(self.widths.fib));
@@ -2700,7 +2700,7 @@ mod tests {
 
     /// **A Muhurat day whose bars land INSIDE the pull's window is still not yesterday.**
     ///
-    /// # Why this exists (D-0946, cloud audit GAP12-10)
+    /// # Why this exists (D-1442, cloud audit GAP12-10)
     ///
     /// This module's header used to say five of the six Muhurats "never reach disk"
     /// because the pull drops everything outside 09:15–15:30, so the list only mattered

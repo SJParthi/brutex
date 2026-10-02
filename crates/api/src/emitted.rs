@@ -218,7 +218,7 @@ struct Case {
 /// all three browser engine entry points. The marker is driven directly here;
 /// proving an audit site must not require launching the expensive sweep it
 /// brackets.
-/// 30 -> 31 at D-0950: `api.calendar withheld`, a calendar month inside the
+/// 30 -> 31 at D-1443: `api.calendar withheld`, a calendar month inside the
 /// span whose daily rung was not read, driven over two daily bars on disk.
 const ROWS: usize = 31;
 
@@ -288,7 +288,7 @@ fn cases() -> Vec<Case> {
     }
 
     // crates/api/src/calendar_of.rs — a month inside the span whose daily
-    // rung was not read is withheld, and said so once per derivation. D-0950.
+    // rung was not read is withheld, and said so once per derivation. D-1443.
     {
         let root = fixture("emit-calendar-withheld");
         cases.push(Case {
@@ -1681,7 +1681,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 58 -> 59 at D-0948: the credential re-read in `credential_law::note`.
     //
-    // 59 -> 60 at D-0950: `api.calendar withheld`, driven in the table above.
+    // 59 -> 60 at D-1443: `api.calendar withheld`, driven in the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
         lib_sites, 60,

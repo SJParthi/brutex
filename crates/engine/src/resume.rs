@@ -162,7 +162,7 @@ impl Checkpoint {
     /// same at every lane count. Comparing it refused an interrupted
     /// `sweep-stored` resume on any machine or container with a different core
     /// count, because `cli` derives lanes from `available_parallelism`. The
-    /// resumed walk schedules with the CALLER's lanes. D-0923.
+    /// resumed walk schedules with the CALLER's lanes. D-1439.
     pub fn validate_for(
         &self,
         ladder: Ladder,

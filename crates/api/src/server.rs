@@ -2522,7 +2522,7 @@ async fn gaps_json(
         }
     } else {
         // OFF THE ASYNC WORKERS, AND ADMITTED: the peer vote derives one
-        // calendar per peer series on a miss. W1-api2-11, D-0950.
+        // calendar per peer series on a miss. W1-api2-11, D-1443.
         let peers_site = std::sync::Arc::clone(&site);
         match crate::detail::run_calendar(move || {
             let peers = peer_calendar(&peers_site, &asked);
@@ -4574,8 +4574,8 @@ fn store_body(
 /// claims. Nothing is sorted. The walk itself is `Manifest::newest`, which
 /// builds a set over the manifest's whole append log, so a request is
 /// `O(log length)` in memory plus `O(E_v)` file opens. This said "O(1) per entry
-/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-0953;
-/// `docs/06-limits.md`'s D-0953 section.
+/// ... nothing is read whole" and left the log walk out. W1-api5-7, D-1446;
+/// `docs/06-limits.md`'s D-1446 section.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -5198,7 +5198,7 @@ pub struct Site {
     /// **No request draws from it.** `/store?show=gaps` built its axis here,
     /// so a series first pulled after boot had no row until a restart. It now
     /// takes `census::held_series` over the request's own fresh census. UC-20,
-    /// D-0953.
+    /// D-1446.
     pub series: Vec<census::Series>,
     /// Folders holding CSVs, walked once at startup rather than per render.
     pub folders: Vec<String>,
@@ -5253,7 +5253,7 @@ pub struct Site {
     ///
     /// [`store_html`] compared this against the newest audit record and warned
     /// that its counters were this process's startup read. Every half of that
-    /// page now reads the census fresh (D-0352, and D-0953 for the gaps view
+    /// page now reads the census fresh (D-0352, and D-1446 for the gaps view
     /// and the census notes), so the warning had become false and is gone.
     /// UC-20. This stays the time the boot snapshot above was taken.
     pub loaded_at: i64,
@@ -6261,14 +6261,14 @@ fn land_bodies_scheduled(
 /// census cache, read every vendor manifest whole, sorted and deduplicated
 /// every entry, and then missed the calendar cache and derived the index
 /// calendar again over the same months. On a first fill that is every body.
-/// W1-api5-0, D-0953.
+/// W1-api5-0, D-1446.
 ///
 /// `land_spot` now takes the observation ONCE per instrument, before its first
 /// body appends, and hands it to every body. That is still a snapshot before
 /// any source append, which is what the observation must be. A body's own
 /// window never needs an earlier body's bars: bodies are disjoint windows, and
 /// the observation is diagnostic, never schedule authority. The cost that
-/// remains per instrument is written in `docs/06-limits.md`'s D-0953 section.
+/// remains per instrument is written in `docs/06-limits.md`'s D-1446 section.
 fn land_bodies_observed(
     landed: &BrokerWindow,
     site: &Site,
@@ -7449,7 +7449,7 @@ async fn land_spot(
     // moves the manifest stamp, so a per-body observation re-read every vendor
     // manifest and re-derived the index calendar once per body. Taken here,
     // before the first append, it is the same snapshot-before-append the
-    // observation has always been. See `land_bodies_observed`. W1-api5-0, D-0953.
+    // observation has always been. See `land_bodies_observed`. W1-api5-0, D-1446.
     let observed_calendar = ingestion_observations(landed, site);
     for bodies in landed.bodies.chunks(1) {
         match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
@@ -15074,9 +15074,9 @@ pub fn store_html(
         // both filled once in `Site::new`, so after a pull by this process the
         // gaps view still drew the startup store: a series first pulled since
         // boot had no row, and a month landed since boot was a hollow cell
-        // beside a vendor card counting it. UC-20, D-0953. The axis is
+        // beside a vendor card counting it. UC-20, D-1446. The axis is
         // `held_series` over this request's censuses: O(keys log keys) per
-        // `show=gaps` request, written in `docs/06-limits.md`'s D-0953 section.
+        // `show=gaps` request, written in `docs/06-limits.md`'s D-1446 section.
         let series = census::held_series(&censuses);
         let total = census::grid_rows(series.len());
         let last = total.saturating_sub(1) / PAGE_ROWS;
@@ -15102,7 +15102,7 @@ pub fn store_html(
     // NO "STARTUP READ" WARNING ANY MORE, BECAUSE THERE IS NO STARTUP READ ON
     // THIS PAGE. Two notes said a pull had run since the manifests were read
     // and that the counters were this process's startup read. D-0352 made the
-    // rows and the vendor cards fresh, and D-0953 made the gaps view and the
+    // rows and the vendor cards fresh, and D-1446 made the gaps view and the
     // census notes fresh, so both notes had become false: they told the
     // operator to restart to see what the page was already showing. UC-20.
     let journal = site.journal();
@@ -15113,7 +15113,7 @@ pub fn store_html(
     }
     // THE NOTES FROM THIS REQUEST'S CENSUSES, not `site.censuses`. The boot
     // snapshot printed "UNAVAILABLE — no manifest" beside a fresh vendor card
-    // counting months, on every view of this page. UC-20, D-0953.
+    // counting months, on every view of this page. UC-20, D-1446.
     notes.extend(censuses.iter().map(census::VendorCensus::note));
     let mut notes = render::Notes::build(&notes);
     // The master notes ride along, because an `UNAVAILABLE` master is why the
@@ -17403,7 +17403,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             // build that did not cut it to its own stamp can still carry an
             // older, longer holder's tail after that line, and quoting the whole
             // file showed the operator a second, stale pid as though it held the
-            // store. R9-api-cx-2, D-0953.
+            // store. R9-api-cx-2, D-1446.
             let held_by = std::fs::read_to_string(&path).unwrap_or_default();
             let held_by = held_by.lines().next().unwrap_or_default().trim();
             release_root(&key);
@@ -17432,7 +17432,7 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // stamp. So a previous holder whose stamp was longer left its tail after
     // this one, and the file named two pids. The length is set after the write,
     // so a refused reader sees this stamp's line first at every moment, and the
-    // reader quotes only that line. R9-api-cx-2, D-0953.
+    // reader quotes only that line. R9-api-cx-2, D-1446.
     let stamp = format!("addr={addr} pid={}\n", std::process::id());
     let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes())
         .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)));
@@ -19517,7 +19517,7 @@ mod tests {
 
     /// **One instrument's bodies land on ONE index observation, so landing
     /// them reads no vendor manifest when the census is warm.** W1-api5-0,
-    /// D-0953.
+    /// D-1446.
     ///
     /// `land_spot` landed each body through `land_bodies_scheduled`, which
     /// took the observation itself. Each body's append rewrote Zerodha's
@@ -20573,7 +20573,7 @@ mod tests {
     }
 
     /// **The serve lock names exactly one holder: the one that holds it.**
-    /// R9-api-cx-2, D-0953.
+    /// R9-api-cx-2, D-1446.
     ///
     /// `serve.lock` is opened without truncation, so a holder whose stamp was
     /// shorter than the last one left that one's tail in the file, and a
@@ -22931,7 +22931,7 @@ mod tests {
         //
         // EIGHT HELD SERIES ON DISK, PLUS THE TWO SWEPT ONES THE AXIS ALWAYS
         // NAMES, is ten. This set `site.series` by hand; the gaps view now draws
-        // its axis from the request's own census (UC-20, D-0953), so the ten
+        // its axis from the request's own census (UC-20, D-1446), so the ten
         // rows have to be in a manifest to be on the page.
         let dir = agreeing("storepager");
         let site = site("storepager", &dir);
@@ -29188,7 +29188,7 @@ mod tests {
     }
 
     /// The store page no longer calls its counters a startup read after a pull,
-    /// because they are not one. UC-20, D-0953.
+    /// because they are not one. UC-20, D-1446.
     ///
     /// This test pinned two notes: "UNCHECKED — a pull ran at …; these
     /// manifests were read at …" and "the counters below are this process's
@@ -29222,7 +29222,7 @@ mod tests {
     }
 
     /// **`/store?show=gaps` draws its axis, its cells and its census notes from
-    /// the census as it is now, not as it was at boot.** UC-20, D-0953.
+    /// the census as it is now, not as it was at boot.** UC-20, D-1446.
     ///
     /// The site loads over an empty store. A pull then publishes a manifest
     /// holding NIFTY and a series nobody held at boot, and a second pull grows
@@ -32208,8 +32208,8 @@ pub(crate) fn hex32(bytes: [u8; 32]) -> String {
 /// measurement §3 rule 6 forbids inventing. The join walks the index symbols
 /// the feed lists, not the master's several hundred thousand rows. Finding
 /// those symbols is a filter over every key of the merged universe, so a
-/// request is O(catalogue bytes + U). W1-api5-9, D-0953; `docs/06-limits.md`'s
-/// D-0953 section.
+/// request is O(catalogue bytes + U). W1-api5-9, D-1446; `docs/06-limits.md`'s
+/// D-1446 section.
 async fn indexmap_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -32289,7 +32289,7 @@ async fn indexmap_json(
 /// asked feed's census entries (`held_entries`, `O(E_v log E_v)`) on every
 /// request, and the exchange branch adds three key `String`s and a deep clone
 /// of each spot series' calendar, then `agree` over every day. W1-api5-5,
-/// D-0953; `docs/06-limits.md`'s D-0953 section, which
+/// D-1446; `docs/06-limits.md`'s D-1446 section, which
 /// `api::server::cost_limits_tests` pins to this source.
 /// The condition vocabulary, so a stored mask can be read as names.
 ///
@@ -32586,7 +32586,7 @@ async fn calendar_json(
     // blocked them all. It now runs on the blocking pool behind its own
     // bounded admission, and concurrent misses on one series share one
     // derivation (`calendar_of::Cache`). Saturation answers 429 with a reason
-    // rather than queueing without bound. W1-api2-11, D-0950.
+    // rather than queueing without bound. W1-api2-11, D-1443.
     match crate::detail::run_calendar(move || {
         calendar_json_reading(&site, &uri, census_now_stamped)
     })
@@ -32598,7 +32598,7 @@ async fn calendar_json(
 }
 
 /// The answer a calendar-deriving route gives when its blocking work was not
-/// admitted or could not be joined. W1-api2-11, D-0950.
+/// admitted or could not be joined. W1-api2-11, D-1443.
 fn calendar_admission_refused(why: &crate::detail::RunError) -> CalendarAnswer {
     let status = if matches!(why, crate::detail::RunError::Saturated) {
         axum::http::StatusCode::TOO_MANY_REQUESTS

@@ -38,7 +38,7 @@
 //!
 //! The source specifies **3-minute** candles at both ends, and the engine's own rung
 //! is one minute. Rather than require a folded feed, this module folds the candle
-//! itself — and **a candle is a clock span, not a bar count** (D-0944). The span is
+//! itself — and **a candle is a clock span, not a bar count** (D-1441). The span is
 //! the bar's bucket on the 3-minute grid anchored at IST midnight
 //! (`docs/09-design-sources.md` §4: the open, 555 minutes past midnight, sits on that
 //! grid, so 09:15-09:17 and 15:27-15:29 are each one bucket). A bar belongs to the
@@ -52,7 +52,7 @@
 //!   emitted, exactly as [`crate::orb::Orb`] closes a window before the bar that
 //!   reaches its end is measured.
 //!
-//! Until D-0944 the fold counted three BARS and never read the timestamp. With a
+//! Until D-1441 the fold counted three BARS and never read the timestamp. With a
 //! minute missing (about 1.32% of the store) a bar of the NEXT candle entered `X1` or
 //! `X2` — with 09:16 missing, 09:18's high became today's far end — and on a rung of
 //! three minutes or more the "candle" was three rung bars, 9 to 180 minutes wide. On a
@@ -559,7 +559,7 @@ mod tests {
     }
 
     /// Step 09:18, the first bar of the NEXT candle, which is what closes today's
-    /// opening candle (D-0944): the leg is final only once a later span has traded.
+    /// opening candle (D-1441): the leg is final only once a later span has traded.
     fn close_opening(g: &mut GapFib, day: i64, high: i64, low: i64) {
         let _ = ok(g, &at(day, 3, high, low, high.midpoint(low)));
     }
@@ -858,7 +858,7 @@ mod tests {
     ///
     /// The leg is an anchor: it cannot exist until the candle defining it is complete,
     /// and a partial candle would make the level move under the bits. Complete means a
-    /// bar of the NEXT span has traded (D-0944), not that three bars have arrived.
+    /// bar of the NEXT span has traded (D-1441), not that three bars have arrived.
     #[test]
     fn no_bits_until_the_opening_candle_is_complete() {
         let mut g = GapFib::new();
@@ -1002,7 +1002,7 @@ mod tests {
     /// because every other fixture gave each session at least three bars, which
     /// overwrote the whole ring and hid the staleness. A single-bar session is the
     /// shortest input that can see it, and it still pins the reset of the clock-keyed
-    /// candle that replaced the ring (D-0944).
+    /// candle that replaced the ring (D-1441).
     #[test]
     fn a_one_bar_session_hands_forward_only_its_own_bar() {
         let mut g = GapFib::new();
@@ -1136,7 +1136,7 @@ mod tests {
     /// same, so a candle that never restarted at a new span, or kept only the newest
     /// bar, passed all of them. Either mistake anchors all eleven rungs on a candle the
     /// source does not name, and [`GapFib::fold`] restarts the candle at every new
-    /// 3-minute span to prevent exactly that (D-0944; it was a three-slot ring).
+    /// 3-minute span to prevent exactly that (D-1441; it was a three-slot ring).
     ///
     /// Both fixtures below are chosen so the three answers differ. Yesterday's last
     /// span, 09:18-09:20, is m3, m4 and m5: its high, 2,500,000, comes from the
@@ -1211,7 +1211,7 @@ mod tests {
         assert_eq!(leg.length(), Some(25_000));
     }
 
-    // ── D-0944: the candle is a clock span on the 3-minute grid, not three bars ──
+    // ── D-1441: the candle is a clock span on the 3-minute grid, not three bars ──
 
     /// Feed `(day, minute-since-open, high, low)` bars, closes inside each bar.
     fn feed(g: &mut GapFib, bars: &[(i64, i64, i64, i64)]) -> Vec<ConditionMask> {
@@ -1467,7 +1467,7 @@ mod tests {
 
     /// The regression guard: on complete sessions the clock-keyed candle is the same
     /// three bars the count took, so every emitted truth and availability mask is
-    /// byte-identical to the pre-D-0944 fold. The digest was taken by running this
+    /// byte-identical to the pre-D-1441 fold. The digest was taken by running this
     /// exact fixture on `origin/main` at `bc531631` before the change.
     #[test]
     fn complete_sessions_emit_exactly_what_the_three_bar_fold_emitted() {
@@ -1500,7 +1500,7 @@ mod tests {
 
     /// The same guard through the whole [`crate::evaluator::Evaluator`], all 384
     /// positions, truth and availability: the evaluator now reads the gap family's
-    /// availability from the POST-step leg (D-0944), and on a complete session that
+    /// availability from the POST-step leg (D-1441), and on a complete session that
     /// must be the same answer the pre-step read gave. Digest taken on `origin/main`
     /// at `bc531631`.
     #[test]

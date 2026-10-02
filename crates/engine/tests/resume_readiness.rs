@@ -223,7 +223,7 @@ fn truncated_trailing_foreign_and_malformed_payloads_are_refused() {
         (64, 0),
         (64, 27),
         (72, 0),
-        (72, 27), // pairs past the budget with no named halt (exact budget completes, D-0922)
+        (72, 27), // pairs past the budget with no named halt (exact budget completes, D-1438)
         (96, u64::MAX),
         (104, 0),
         (104, u64::MAX),
@@ -341,7 +341,7 @@ fn real_resource_halts_keep_exact_cumulative_budgets_and_never_advance() {
                 halt.pairs,
                 ladder.pair_budget(),
                 "the join checks its budget before every pair, so a pairs halt \
-                 stops at the budget and never past it (D-0922)"
+                 stops at the budget and never past it (D-1438)"
             );
         }
         if ladder.ceiling() == 2 {
@@ -945,7 +945,7 @@ fn serialized_resource_tags_preserve_terminal_refusal_and_reject_contradictions(
 /// checkpoint written with one lane must resume with any other and reach the
 /// answer an uninterrupted walk reaches. It used to be refused as a
 /// configuration mismatch, which made every interrupted `sweep-stored` run
-/// unresumable on a host with a different core count. D-0923.
+/// unresumable on a host with a different core count. D-1439.
 #[test]
 fn a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer() {
     let (ladder, column, bytes) = fixture_at_second_level();
@@ -965,7 +965,7 @@ fn a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer() {
 
 /// A walk whose pair need equals its budget exactly completes, and the
 /// checkpoint it leaves -- no named halt, `pairs == pair_budget` -- must read
-/// back and resume. Before D-0922 the join halted such a walk on the final
+/// back and resume. Before D-1438 the join halted such a walk on the final
 /// empty row, and the reader refused `pairs >= pair_budget` without a halt.
 #[test]
 fn a_walk_that_needs_exactly_its_pair_budget_completes_and_its_checkpoint_reads_back() {

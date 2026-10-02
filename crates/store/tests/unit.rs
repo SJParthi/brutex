@@ -2793,7 +2793,7 @@ fn an_unlisted_length_is_refused_and_not_invented() {
 /// The alignment split: a grid counted from IST midnight lands on the 09:15
 /// open exactly when the rung's length divides 555. This is arithmetic, not a
 /// convention. It no longer describes `pull::fold`, which counts every
-/// intraday rung from the open (D-0956): "on time" here means "a midnight-
+/// intraday rung from the open (D-1447): "on time" here means "a midnight-
 /// counted grid would be on time", which is what decides whether a vendor's
 /// bar at the rung is unambiguous.
 #[test]

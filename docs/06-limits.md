@@ -74,7 +74,7 @@ a real sweep completes with its hardware recorded.
 `C(74, k)` — the predecessor repository's 74-condition vocabulary — at "32 bytes
 each", which was that repository's mask width. The vocabulary here has **328 live
 positions** (`vocab::table::LIVE`, pinned by `table.rs`'s own popcount assertion;
-this said 238 until D-0957) and an `Itemset` is **56 bytes**: a 48-byte `ConditionMask` plus a
+this said 238 until D-1448) and an `Itemset` is **56 bytes**: a 48-byte `ConditionMask` plus a
 `u64` hit count, asserted at compile time in `crates/engine` so this arithmetic
 cannot drift again. A mask widening now fails the build rather than quietly
 falsifying the table below.
@@ -103,7 +103,7 @@ overhead, the previous frontier, batches or ranking. At k=5 the join itself
 dominates everything: `|F|²/2` pair-unions over a whole k=4 frontier is
 1.12 × 10¹⁷ six-word ORs, independent of the bars. (An earlier version of
 this paragraph priced a `seen` duplicate set as well; the prefix join is
-injective and that set was deleted, so it no longer exists to price. D-0926.)
+injective and that set was deleted, so it no longer exists to price. D-1440.)
 
 What the design does about it: it never enumerates those levels. Apriori pruning
 generates level k only from level k−1's survivors, and the ladder stops at
@@ -127,7 +127,7 @@ be the other.
 `Ladder::exhausted` asks both as one question. The allocator half is
 `Vec::try_reserve` on the level's result vector, sized for every pending batch
 candidate (it was `HashSet::try_reserve` on the deleted `seen` set until
-D-0926 corrected this sentence), which returns rather than aborts, so the walk halts
+D-1440 corrected this sentence), which returns rather than aborts, so the walk halts
 naming memory instead of dying. It takes what a 4 GB machine has and what a
 48 GB machine has and works out which at runtime.
 
@@ -159,7 +159,7 @@ and `sweep-audited-stored` both run `stored_month_kernel`, which calls
 `runner::rank_checkpointed_sweep` ranks the complete retained `Sweep` after the
 walk ends. On those two doors retention is O(total frequent combinations), as
 it was before streaming, and everything below about the streamed result is
-about the other path. D-0957.
+about the other path. D-1448.
 
 Both retained and streamed entry points execute the same `Ladder::walk_into`; the streamed sink
 reduces every retired frontier to one fixed-size `Tally`. Its engine result is
@@ -282,7 +282,7 @@ Four things it still does not prove.
 
 **Absolute speed.** When this was written every row but C-08 was a *ratio*,
 and a change that made every operation uniformly ten times slower would have
-passed all of them. **That is no longer the whole picture (D-0957):** floor-budget
+passed all of them. **That is no longer the whole picture (D-1448):** floor-budget
 rows now exist beside the ratios — `C-29`, `C-09b`, `C-G-05`, `C-K-13`, `C-L-04`
 and `C-T-04` each divide one operation by a floor timed in the same run, which is
 the row a uniform slowdown cannot pass. A crate with only ratio rows still has
@@ -294,7 +294,7 @@ repository has never run on.
 
 **Bar read cost.** C-01 used to claim it and name `store::bench::read_ratio`,
 which did not exist, and this paragraph said there was no bar reader at all.
-**Both are stale (D-0957):** `BarFile::read_record` exists, and `C-28` times it
+**Both are stale (D-1448):** `BarFile::read_record` exists, and `C-28` times it
 at index 0 and the last index across 1×, 10× and 100× files while `C-29` budgets
 it against its address arithmetic. Those benches call the real reader, so each
 measurement includes one `pread`. What is still not separated is the device's
@@ -312,7 +312,7 @@ just as loudly as one measuring the right thing. These measure what two
 specific defects did; they are not a general proof of constancy.
 
 **The instruments page.** *Superseded by §24 (D-0042), kept as written below
-for the record (D-0957):* the orderings and filters now come from one build at
+for the record (D-1448):* the orderings and filters now come from one build at
 load time, and only search stays linear. C-11 covers `/` and nothing else. `/instruments`
 filters, sorts and pages the merged map per request, which is O(matched · log
 matched) and **cannot** be made constant: a substring search over n rows is
@@ -2925,7 +2925,7 @@ included, but only warm — one fixed index, its page resident and its checksum
 block cached — so they bound neither a cold device nor this path's two reads on
 a freshly opened handle; `C-T-01` times `emit`, which writes the log file. None
 of them separates the device's latency from the code's. (This paragraph said no
-bench timed a syscall at all; D-0790, D-0913 and D-0957 each corrected it.) §14
+bench timed a syscall at all; D-0790, D-1434 and D-1448 each corrected it.) §14
 carries what *is* measured.
 
 ### 40.3 The 43,422 entries already on disk have no closes, and get none for free
@@ -3136,7 +3136,7 @@ checkable.
   and `js-sys`/`web-sys`, which resolve solely because `deny.toml` lists
   `wasm32-unknown-unknown` as a graph target and are in no native build. This
   said the one non-Rust file left in the graph was `libc`'s `etc/libc-util.py`.
-  **That was false (D-0957).** Measured over the 140 registry packages
+  **That was false (D-1448).** Measured over the 140 registry packages
   `cargo tree --workspace -e normal,build,dev` names on `x86_64-unknown-linux-gnu`:
   no package ships a `.c`, `.h`, `.S`, `.asm` or `.js` file, but sixteen scripts
   ship in six crates — `libc` (1 `.py`), `parquet` (2 `.py`),
@@ -4584,7 +4584,7 @@ ratio. Gate 18 is the gate that should refuse them.
 **`grid::peak` is a loop, and this paragraph overstated where it runs.** It
 said `peak_adverse` and `peak_favourable` are called for every profitable
 candidate in every cell, carrying a `2 × variants × winners × span` term.
-**Stale, in the pessimistic direction (D-0957).** Their only non-test call
+**Stale, in the pessimistic direction (D-1448).** Their only non-test call
 sites are in pass two of `grid::evaluate_timed`, inside `for t in
 &timed.trades`: two walks of `entry_bar..=exit_bar` per trade of the candidate,
 once, not once per cell. The per-cell figures are indexed — `Crossings` records
@@ -5335,7 +5335,7 @@ is a gap. **They are not to be chased.**
 | `lib.rs` | `CurDayFib::bits` `\|\| → &&` | `!live` with `r > 0` is unreachable — `range()` returns 0 whenever the state is not live — and live with `r <= 0` falls through to a loop where `covers` refuses every rung outright |
 | `evaluator.rs` | `stepped` ×2 | assignment at equality writes the value already held |
 | `fib.rs` | `Prev5::extremes` ×2 | the same, in a fold-max and a fold-min |
-| `gap.rs` | `fold` ×2 | the same, in the running 3-minute candle (D-0944; this row read `close_the_session` ×2 and `fold` ×2 while the candle was a three-slot ring reduced at the bell and a three-bar opening count) |
+| `gap.rs` | `fold` ×2 | the same, in the running 3-minute candle (D-1441; this row read `close_the_session` ×2 and `fold` ×2 while the candle was a three-slot ring reduced at the bell and a three-bar opening count) |
 | `orb.rs` | `Orb::fold` ×2 | the same, in the window fold |
 
 **One is equivalent for a reason worth stating separately.** `gap.rs:328:28`
@@ -5344,7 +5344,7 @@ block, which is a real behaviour change — but `today_high`/`today_low` are rea
 only by `establish`, which runs on the bar where the count REACHES
 `CANDLE_MINUTES` and never again before the session resets. The extra bar writes
 fields nothing goes on to read. Equivalent by reachability, not by symmetry.
-**Superseded by D-0944:** the count, `today_bars` and that site are gone; the
+**Superseded by D-1441:** the count, `today_bars` and that site are gone; the
 opening candle is now the running candle of the session's first 3-minute span,
 closed by the first bar of a later span, so there is no count to mutate.
 
@@ -9095,7 +9095,7 @@ it was written.
 ## A tail block sealed past the commit is admitted on proof, at a stated cost — D-0688
 
 - **Every verification of the tail block adds one `fstat`, not only the first
-  per handle (D-0957 corrects "first").** It is how the reader learns whether
+  per handle (D-1448 corrects "first").** It is how the reader learns whether
   the file holds whole records past the commit. A handle remembers ONE verified
   block, so each touch of the tail after a touch of another block verifies it
   again: one `fstat`, two heap buffers, a `pread` of the covered bytes (at most
@@ -9134,7 +9134,7 @@ it was written.
   records, was refused, so the damage surfaced as a refusal. Now the reader
   serves the previous commit's bars. It warns `store.header` for the fallback
   and `store.block` for the interrupted append — the latter once per
-  re-verification of the tail, so alternating reads repeat it (D-0957), and the run records
+  re-verification of the tail, so alternating reads repeat it (D-1448), and the run records
   under that smaller sample's own identity. In the `cli` fixture that is 525
   of 600 bars (AF-12). Nothing marks the report itself: the fallback is visible
   in `/logs` and in the bar count, not as a line in the screen or the audit.
@@ -10073,7 +10073,7 @@ ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
   them.
 * `page_of` then partitions over them at `offset` and again at `limit`
   (`page.select_nth_unstable_by(limit - 1, &mut order);`) and orders only the
-  page (`page.sort_by(&mut order);`). D-0953 replaced D-0733's `ordered_page`.
+  page (`page.sort_by(&mut order);`). D-1446 replaced D-0733's `ordered_page`.
 
 The range is capped at `MAX_WINDOW_MONTHS` (`pub const MAX_WINDOW_MONTHS: usize
 = 240;`) and the page at `MAX_WINDOW_LIMIT` (`pub const MAX_WINDOW_LIMIT: usize
@@ -10089,7 +10089,7 @@ row. `page_side` now keeps the fewer of the first `offset + limit` and the last
 reversed order and reverses it. No page orders more than half the rows plus
 its limit: asserted for every row count up to 40 and every offset and limit
 up to 45, and at 2,000,000 rows for one deep page.
-**Superseded by D-0953 when both landed together (D-FOLD1):** `page_of` orders
+**Superseded by D-1446 when both landed together (D-1450):** `page_of` orders
 only the page itself, which is never more rows than the nearer-end cut kept, so
 `page_side` and `ordered_page` are gone and
 `the_page_orders_only_itself_wherever_the_offset_lands` counts the
@@ -11339,11 +11339,11 @@ the counts the tests assert: no bench times the fold.
   Stated from the code's shape; not timed. Proved by
   `vocab::expression::invariant_tests::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
 
-## Rupee text is read at most 64 bytes at a time (D-0918)
+## Rupee text is read at most 64 bytes at a time (D-1437)
 
 - **`Paisa::from_rupee_text_half_up` costs at most a few passes over
   `MAX_PRICE_TEXT` (64) bytes.** Text longer than that, padding included, is
-  refused with `PriceError::TooLong` before a byte is read. Until D-0918 the
+  refused with `PriceError::TooLong` before a byte is read. Until D-1437 the
   cost was the caller's input length, and two `pull` callers pass text nothing
   upstream bounds. Proved by
   `core::price::tests::text_longer_than_the_bound_is_refused_before_it_is_read`
@@ -11439,7 +11439,7 @@ would close this.
   x86_64/aarch64 and macOS the open carries no `O_NONBLOCK` and a FIFO there
   can still hold the read; no such target is built or tested here.
 
-## C-V-02 cannot see an early-exit `hits`; the source-shape test is the guard — D-0917, 2 October 2026
+## C-V-02 cannot see an early-exit `hits`; the source-shape test is the guard — D-1436, 2 October 2026
 
 - **The clock does not separate an early-exit word loop from the branchless
   body.** Audit findings ET-o1-proof-coverage-3 and -13 replaced `hits` with a
@@ -11458,7 +11458,7 @@ would close this.
   C-V-02 stays as evidence that the compiled function agrees, and its ratio now
   breaches in both directions.
 
-## The native-dependency gate reads the lock, not the target's `cfg` — D-0916, 2 October 2026
+## The native-dependency gate reads the lock, not the target's `cfg` — D-1435, 2 October 2026
 
 - **Target `cfg` expressions and weak features are not evaluated.**
   `Cargo.lock` records every target's dependencies and the optional
@@ -11533,7 +11533,7 @@ read from the source.
   whole manifest and a decode and CRC-32C check of every committed entry:
   O(manifest bytes + E_v) per call, up to `MAX_ENTRIES` (2,097,152 entries,
   268,468,224 bytes). `from_window` hands `from_members` one member, so the
-  read is paid per window. This is the read half D-0953 (W1-api5-1) left to
+  read is paid per window. This is the read half D-1446 (W1-api5-1) left to
   this crate. **It is left here too, and on purpose:** a decoded census kept
   across calls would stop re-verifying every committed entry on each read, and
   a census that rotted under a long-running process would then be appended to
@@ -11567,7 +11567,7 @@ read from the source.
   `record_held` call (W1-pull2-0, W1-pull2-6 above). The api's read path pays
   it once per manifest change (D-0686).
 
-## API request and pull costs that still grow with the store — D-0953, 2 October 2026
+## API request and pull costs that still grow with the store — D-1446, 2 October 2026
 
 An audit (cluster B6) found eleven paths in `crates/api` whose cost grows with
 the store or the universe and which this register did not name. Three were
@@ -11674,7 +11674,7 @@ rule 6); every bound is read from the source.
   the write amplification §34 measures is gone. The per-window **read** above
   (W1-api5-1) is what remains of §34's finding.
 
-## The invocation journal grows by one file per audited request, and its terminal is owed — D-0952, 2 October 2026
+## The invocation journal grows by one file per audited request, and its terminal is owed — D-1445, 2 October 2026
 
 - **One new file per audited request, in one flat directory, with no
   retention, rotation or sharding.** Every request to a route in
@@ -11712,7 +11712,7 @@ rule 6); every bound is read from the source.
   connections and by Tokio's blocking pool (its default thread cap, with
   excess tasks queued), not by this crate. Each owed task still counts against
   new detail work while it runs, so the pool refuses reads sooner under that
-  load rather than later. Before D-0952 the terminal was refused, the dropped
+  load rather than later. Before D-1445 the terminal was refused, the dropped
   attempt wrote `Cancelled` with status 0 synchronously on a Tokio worker, and
   the handler's real answer was replaced by a 503.
 
@@ -11747,7 +11747,7 @@ rule 6); every bound is read from the source.
   `api::server::tests::committed_off_grid_minutes_do_not_certify_the_gap_page`)
   keep their own checks.
 
-## The calendar derivation reads records, one positional read each — D-0950
+## The calendar derivation reads records, one positional read each — D-1443
 
 W1-api2-1, W1-api2-0 and W1-api2-11 asked what `calendar_of::derive` costs and
 where it runs. Answered here, read from the code and counted by tests; nothing
@@ -11793,7 +11793,7 @@ below is timed.
   the page shows those days as "NSE holiday" until `web/` reads the field and
   `web/build` is rebuilt (Gate W1). That rebuild was not done in this change.
 
-## JSON renderers: cold admissions and per-request walks — D-0951, 2 October 2026
+## JSON renderers: cold admissions and per-request walks — D-1444, 2 October 2026
 
 Six audit findings (W1-api1-4, W1-api1-5, W1-api1-6, W1-api2-2, W1-api2-3,
 W1-api6-3) named a JSON route whose per-request cost grows with saved evidence
@@ -11806,7 +11806,7 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   `booleanjson::render_with_budget` and `booleanevidencejson::render_with_budget`
   dropped the cached reader on every request without `completion`, so every
   first page hashed and decoded the whole saved body (for the evidence routes,
-  every linked catalog body too) under the one process-wide mutex. Since D-0951
+  every linked catalog body too) under the one process-wide mutex. Since D-1444
   the decision is `detail::must_admit`: a request whose root, identity, model
   and budget match the held reader reuses it when it is pinned, or when it is
   unpinned and the reader's `require_current` passes (the same generation and
@@ -11970,7 +11970,7 @@ rung each owe the month their own file.
   code walked 6,000,000). No timing was taken; the bound is UNVERIFIED as a
   bench until the indicators ratio bench gains an anchored row.
 
-## The gap candle is a clock span, and a wholly missing one reads as a late open — D-0944, 2 October 2026
+## The gap candle is a clock span, and a wholly missing one reads as a late open — D-1441, 2 October 2026
 
 `indicators::gap::GapFib` keys the source's 3-minute candle by the bar's span on
 the 3-minute grid anchored at IST midnight, not by counting three bars. Cost per
@@ -12006,7 +12006,7 @@ What it still cannot know, stated rather than implied (§3 rule 6):
   closes on the next bar that trades. A bar never reads a leg built from
   itself.
 
-## Timestamp lookup is a bisection, not O(1) — D-0913
+## Timestamp lookup is a bisection, not O(1) — D-1434
 
 Findings W3-store1-0, W3-store1-1 and ET-bars-candles-store-12. Two store
 functions locate a timestamp in a month, and neither is a constant-time
@@ -12067,12 +12067,12 @@ available without new behaviour. A per-month index or a multi-block cache
 could reduce the cold verifies, but either would be a format or memory
 decision, and neither is made here.
 
-## Engine join costs that are not O(1) — D-0922 to D-0926, 2 October 2026
+## Engine join costs that are not O(1) — D-1438 to D-1440, 2 October 2026
 
 Three per-level and per-candidate costs of the prefix join were stated
 nowhere, or stated wrongly. Each is named here with its bound.
 
-**The pair budget is exact (D-0922).** It is checked before every pair, so a
+**The pair budget is exact (D-1438).** It is checked before every pair, so a
 `Breach::Pairs` halt records exactly `pair_budget` pairs, and a walk that needs
 exactly its budget completes. It was checked once per outer row: a halt could
 report up to one block width minus one pair past the budget, and a level whose
@@ -12103,7 +12103,7 @@ refuses in one root comparison and admits with a binary-heap sift of at most
 `floor(log2(cap))` levels. It has no production caller today; the bound is
 stated so one does not inherit an unstated cost (audit finding o1engine-20).
 
-**Duplicate rejection at k>=2 is absent, not measured (D-0926).** The prefix
+**Duplicate rejection at k>=2 is absent, not measured (D-1440).** The prefix
 join is injective, so `duplicates` is written as a literal zero at k>=2 and no
 operation counts it. Its tests witness injectivity through `generated` and
 distinct survivors, not by reading that literal back.

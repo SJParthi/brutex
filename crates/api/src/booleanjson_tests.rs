@@ -382,9 +382,9 @@ fn cold() -> usize {
 
 /// **A first page with no completion pin reuses a held catalog that is still
 /// current, and authenticates afresh only when the key differs or the held
-/// files changed.** W1-api1-5, D-0951.
+/// files changed.** W1-api1-5, D-1444.
 ///
-/// Until D-0951 every request without `completion` -- every first page --
+/// Until D-1444 every request without `completion` -- every first page --
 /// dropped the cached reader and hashed and decoded the whole body again,
 /// under the one process-wide mutex. Here 64 first pages in a row cost one
 /// cold authentication and are byte-identical. Then each way the held reader
@@ -478,22 +478,22 @@ fn an_unpinned_first_page_reuses_a_current_catalog_and_reopens_only_on_change() 
     fs::remove_dir_all(other).unwrap();
 }
 
-/// `docs/06-limits.md`'s D-0951 section, which states the JSON renderers'
+/// `docs/06-limits.md`'s D-1444 section, which states the JSON renderers'
 /// cold and per-request costs, with its line wrapping collapsed to single
 /// spaces so a phrase is found wherever the paragraph happens to break.
 pub(crate) fn d0951_limits() -> String {
     let limits = include_str!("../../../docs/06-limits.md");
-    let start = limits.find("\n## JSON renderers: cold admissions and per-request walks — D-0951");
+    let start = limits.find("\n## JSON renderers: cold admissions and per-request walks — D-1444");
     assert!(
         start.is_some(),
-        "docs/06-limits.md carries the D-0951 section"
+        "docs/06-limits.md carries the D-1444 section"
     );
     let rest = &limits[start.unwrap_or(limits.len()) + 1..];
     let section = rest.find("\n## ").map_or(rest, |end| &rest[..end]);
     section.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The bullet of the D-0951 section that names `id`, collapsed as
+/// The bullet of the D-1444 section that names `id`, collapsed as
 /// [`d0951_limits`] is.
 pub(crate) fn d0951_bullet(id: &str) -> String {
     let section = d0951_limits();
@@ -503,13 +503,13 @@ pub(crate) fn d0951_bullet(id: &str) -> String {
         .find(|bullet| bullet.contains(&format!("({id})")));
     assert!(
         bullet.is_some(),
-        "the D-0951 section has a bullet for {id}: {section}"
+        "the D-1444 section has a bullet for {id}: {section}"
     );
     bullet.unwrap_or_default().to_owned()
 }
 
 /// **What an unpinned first page still costs is written where the limits
-/// live, and the code it describes is the code that runs.** W1-api1-5, D-0951.
+/// live, and the code it describes is the code that runs.** W1-api1-5, D-1444.
 #[test]
 fn the_cold_admission_bound_is_stated_and_both_renderers_take_the_shared_decision() {
     let bullet = d0951_bullet("W1-api1-5");

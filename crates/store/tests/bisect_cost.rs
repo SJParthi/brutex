@@ -1,5 +1,5 @@
 //! The timestamp lookup's cost is stated where the limits live — W3-store1-0,
-//! W3-store1-1, ET-bars-candles-store-12, D-0913.
+//! W3-store1-1, ET-bars-candles-store-12, D-1434.
 //!
 //! `store::file::first_at_or_after` is a bisection and `already_stored` is
 //! that bisection plus a batch-long comparison. Neither is O(1) and both said
@@ -34,9 +34,9 @@ fn flat(text: &str) -> String {
         .join(" ")
 }
 
-/// The register's D-0913 section, from its heading to the next `## `.
+/// The register's D-1434 section, from its heading to the next `## `.
 fn section() -> String {
-    let start = "## Timestamp lookup is a bisection, not O(1) — D-0913";
+    let start = "## Timestamp lookup is a bisection, not O(1) — D-1434";
     let from = LIMITS
         .find(start)
         .unwrap_or_else(|| panic!("docs/06-limits.md has no `{start}` section"));
@@ -70,7 +70,7 @@ fn the_limits_register_states_both_lookup_bounds_and_their_callers() {
     ] {
         assert!(
             body.contains(needle),
-            "docs/06-limits.md D-0913 section does not say `{needle}`"
+            "docs/06-limits.md D-1434 section does not say `{needle}`"
         );
     }
 }

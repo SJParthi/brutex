@@ -3966,7 +3966,7 @@ fn require_exact_execution_subspan(
 /// min) ends the day with a SHORT bar: the 60-minute bar stamped 15:15 holds
 /// only 15:15-15:29. Its close is therefore the last minute of the bucket that
 /// the measured session actually traded, not `ts + rung - 1min` (16:14), which
-/// no minute context can hold. D-0961.
+/// no minute context can hold. D-1449.
 ///
 /// The session comes from [`pull::calendar::kind_of`], the same authority the
 /// stored calendar receipt and bucket geometry use, never from a literal. The
@@ -8306,7 +8306,7 @@ mod tests {
         (prior, day)
     }
 
-    /// D-0961. A Search V4 prefix ending on the store's short final bar of a
+    /// D-1449. A Search V4 prefix ending on the store's short final bar of a
     /// session (rungs 2, 10, 30 and 60 min) demands its close at the session's
     /// last minute, 15:29, not at `ts + rung - 1min`, which lies after the close.
     #[test]
@@ -8400,7 +8400,7 @@ mod tests {
         day * DAY_MICROS - indicators::IST_OFFSET_MICROS + minute * MINUTE_MICROS
     }
 
-    /// D-0961: the close is the latest minute of the open-anchored bucket that
+    /// D-1449: the close is the latest minute of the open-anchored bucket that
     /// the measured session traded, on standard, irregular and Muhurat days.
     #[test]
     fn session_close_minute_clamps_to_every_measured_window_end() {
