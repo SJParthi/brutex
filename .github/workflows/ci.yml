@@ -8595,11 +8595,47 @@ jobs:
           if [ -z "$base" ]; then
             base=$(git rev-parse --verify HEAD~1 2>/dev/null || true)
           fi
+          # ── D-1119: EVERY FILE CARGO-MUTANTS WALKS, UNDER THE NAME IT USES ──
+          #
+          # The pathspec was `crates/*/src/*.rs`, so a change to a file mounted
+          # from outside `src/` by `#[path]` -- `crates/cli/build_provenance.rs`,
+          # `crates/cli/commit_stamp.rs` -- never reached the plan. Widening it
+          # was not enough: cargo-mutants names such a file by the path its
+          # mount spells (`crates/cli/src/../commit_stamp.rs`), so `--in-diff`
+          # matched none of git's `crates/cli/commit_stamp.rs` (GAP14-56).
+          # `mutation_gate respell` re-heads each diff section under every
+          # spelling cargo-mutants walks. Files it does not walk (tests,
+          # benches, build scripts) stay in the diff and match nothing.
           if [ -n "$base" ]; then
-            git diff "$base"...HEAD -- 'crates/*/src/*.rs' > /tmp/mutation-plan/changed.diff
+            git diff "$base"...HEAD -- 'crates/*.rs' > /tmp/mutation-plan/raw.diff
           else
-            git diff-tree --no-commit-id --root -p HEAD -- 'crates/*/src/*.rs' > /tmp/mutation-plan/changed.diff
+            git diff-tree --no-commit-id --root -p HEAD -- 'crates/*.rs' > /tmp/mutation-plan/raw.diff
           fi
+          cargo mutants --list-files --colors never > /tmp/mutation-plan/walked.txt
+          [ -s /tmp/mutation-plan/walked.txt ] || { echo "GATE 18: cargo-mutants walked no file"; exit 1; }
+          /tmp/mutation-gate respell /tmp/mutation-plan/raw.diff /tmp/mutation-plan/walked.txt \
+            > /tmp/mutation-plan/changed.diff
+
+          # SELF-TEST: a change inside the build-time verifier must plan a
+          # mutant. Before D-1119 this list was empty, and nothing said so.
+          probe=crates/cli/build_provenance.rs
+          at=$(awk '/^fn delta_varint\(/ { print NR + 1; exit }' "$probe")
+          [ -n "$at" ] || { echo "GATE 18 SELF-TEST: no delta_varint in $probe"; exit 1; }
+          sed -i "${at}s|\$| // gate 18 self-test|" "$probe"
+          git diff -- "$probe" > /tmp/mutation-plan/probe.diff
+          /tmp/mutation-gate respell /tmp/mutation-plan/probe.diff /tmp/mutation-plan/walked.txt \
+            > /tmp/mutation-plan/probe-spelled.diff
+          cargo mutants --list --in-diff /tmp/mutation-plan/probe-spelled.diff --colors never -p cli \
+            > /tmp/mutation-plan/probe.txt
+          git checkout -- "$probe"
+          if ! grep -q 'build_provenance\.rs:' /tmp/mutation-plan/probe.txt; then
+            echo "GATE 18 SELF-TEST: a change to $probe plans no mutant."
+            echo "cargo-mutants no longer walks it, or names it in a way respell"
+            echo "does not reach. Either way the plan below would be blind to it."
+            exit 1
+          fi
+          echo "self-test: $(grep -c . /tmp/mutation-plan/probe.txt) mutant(s) planned for a one-line change in $probe"
+
           cargo mutants --list --in-diff /tmp/mutation-plan/changed.diff --colors never > /tmp/mutation-plan/all.txt
           matrix=$(/tmp/mutation-gate plan /tmp/mutation-plan/all.txt)
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"

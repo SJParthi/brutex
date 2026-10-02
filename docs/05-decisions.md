@@ -44323,3 +44323,50 @@ status`. On the real script all three tests pass.
 that reaches the network through something the stub lacks, such as
 `XMLHttpRequest`, `navigator.sendBeacon` or an `<img>` source, would throw
 or go unrecorded rather than be counted. Invariant CIG-22.
+
+### D-1119 — Gate 18 plans mutants in every file cargo-mutants walks, under the name it uses — 2026-10-02
+
+**What was wrong.** Finding GAP14-56. Gate 18 diffed only
+`crates/*/src/*.rs`, so `crates/cli/build_provenance.rs` and
+`crates/cli/commit_stamp.rs`, both mounted by `#[path]` from outside `src/`,
+never reached the plan. Widening the pathspec alone changed nothing, for two
+measured reasons:
+- The verifier was compiled only into `build.rs` and an integration test.
+  cargo-mutants walks neither.
+- cargo-mutants names a `#[path]`-mounted file by its spelled path,
+  `crates/cli/src/../commit_stamp.rs`. The diff names it
+  `crates/cli/commit_stamp.rs`, so `--in-diff` matched nothing even for
+  `commit_stamp.rs`, which the library already mounts.
+
+**The choice.**
+- `cli`'s library mounts `build_provenance.rs` under `#[cfg(all(test))]`, in
+  place of `tests/build_provenance.rs`.
+  - Its 18 tests now run in the library's test build, as they ran in the
+    integration test.
+  - It stays out of the binary, because `sha1` and `flate2` remain
+    dev- and build-dependencies only.
+  - It is written `all(test)` because cargo-mutants skips a module marked
+    exactly `cfg(test)`. With `cfg(test)`, `--list` gave 0 mutants in the
+    file; with `all(test)` it gave 352.
+- Gate 18 diffs `crates/*.rs`.
+- `mutation_gate respell` re-heads each diff section under every spelling
+  `cargo mutants --list-files` walks for it. The respelt diff becomes the
+  `changed.diff` every shard reads.
+- A self-test appends a comment inside `delta_varint` and requires a non-empty
+  plan naming the file. It runs before the real plan, so a future cargo-mutants
+  that skips the module, or names it another way, fails the gate rather than
+  shrinking it.
+
+**Measured.** For a one-line change in `delta_varint`:
+- Before this change, the plan was empty with both pathspecs.
+- After it, the raw diff still plans 0 mutants and the respelt diff plans 5,
+  all in `build_provenance.rs`.
+- `cargo test -p cli --lib build_provenance` runs the same 18 tests and passes.
+
+**Limits.**
+- The `all(test)` spelling relies on cargo-mutants' literal match, which is
+  why the self-test exists.
+- `build.rs` itself is still not walked by cargo-mutants. Its `main` is a few
+  lines that call `verify`.
+
+Invariant CIG-23.

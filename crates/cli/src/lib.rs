@@ -47,6 +47,21 @@ pub mod audited_range_command;
 mod audited_stored;
 /// Independent full-file checksum audit and retained historical admission receipts.
 pub mod checksum_receipts;
+// THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
+// compiled only into `build.rs` and an integration test, and cargo-mutants
+// mutates neither, so gate 18 could never mutate it. It is test-only here for
+// the reason `Cargo.toml` gives: its readers are dev-dependencies, not the
+// binary's. `all(test)` is `test` -- but cargo-mutants skips a module marked
+// exactly `cfg(test)`, and gate 18's self-test fails if it ever skips this one.
+#[cfg(all(test))]
+#[allow(
+    clippy::non_minimal_cfg,
+    dead_code,
+    reason = "`cfg(test)` spelled so cargo-mutants walks the module, and the \
+              watch lists are read only by `build.rs`; see above"
+)]
+#[path = "../build_provenance.rs"]
+mod build_provenance;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
 #[cfg(test)]
