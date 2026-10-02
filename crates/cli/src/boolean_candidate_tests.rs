@@ -551,7 +551,7 @@ fn complete_generated_months_measure_actual_accepted_periods_before_stats_fixtur
 #[test]
 fn produce_side_hashes_no_slice() {
     let source = include_str!("boolean_candidate_v1.rs");
-    let at = source.find("fn produce_side(");
+    let at = source.find("fn produce_side<");
     assert!(at.is_some(), "produce_side must exist");
     let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
     let body = rest
@@ -568,4 +568,24 @@ fn produce_side_hashes_no_slice() {
             "produce_side must not call {hashing}"
         );
     }
+}
+
+/// o1runner-1 / D-0928: a catalogue attests its training slice once per
+/// resolution, not once per program x side. Three programs over two sides
+/// re-attested six times before the fix; they must attest exactly twice.
+#[test]
+fn a_catalogue_attests_its_training_slice_once_per_side() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let programs = programs()?;
+    assert_eq!(programs.len(), 3);
+    let before = super::ATTESTATIONS.with(std::cell::Cell::get);
+    let first = fixture.produce("NIFTY", &programs)?;
+    let after = super::ATTESTATIONS.with(std::cell::Cell::get);
+    assert_eq!(first.programs(), programs);
+    assert_eq!(
+        after - before,
+        2,
+        "one attestation per side, not per program"
+    );
+    Ok(())
 }

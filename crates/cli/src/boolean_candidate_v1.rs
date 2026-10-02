@@ -14,8 +14,8 @@ use runner::exit_grid_policy::expression_execution::{
 };
 use runner::exit_grid_policy::research_resolution::ResearchResolvedExitGridV1;
 use runner::exit_grid_policy::{
-    ExecutionDigestsV1, ExecutionRefusalBitsV1, ExecutionSeriesV1, ExitGridErrorV1,
-    ExitGridPolicyV1,
+    AttestedTrainingV1, ExecutionDigestsV1, ExecutionRefusalBitsV1, ExecutionSeriesV1,
+    ExitGridErrorV1, ExitGridPolicyV1,
 };
 use runner::expression::Expression;
 use runner::grid::{Cell, Chosen, TradeRow};
@@ -674,8 +674,14 @@ fn compute(
         )
         .map_err(display)?;
     let mut hoisted: Option<ExecutionDigestsV1> = None;
+    // One training attestation per resolution, not per program x side
+    // (o1runner-1, D-0928). Built on first use inside that side's first
+    // evidence attempt, so a refusal surfaces exactly where it did when every
+    // program re-attested; the first refusal ends `compute`, so a later
+    // program can never see a cached one.
+    let mut attested: [Option<AttestedTrainingV1<'_>>; 2] = [None, None];
     for (program_index, program) in request.programs.iter().enumerate() {
-        for resolved in &resolutions {
+        for (resolved, attested) in resolutions.iter().zip(attested.iter_mut()) {
             let digests = slice_digests(&mut hoisted, source, series)?;
             let (mut produced, anchor) = produce_side(
                 request,
@@ -690,6 +696,7 @@ fn compute(
                 &session_index,
                 &mut remaining,
                 &digests,
+                attested,
             )?;
             rows.append(&mut produced);
             anchors.push(anchor);
@@ -711,7 +718,7 @@ fn compute(
     clippy::too_many_arguments,
     reason = "one exact program/side transaction retains all source and physical authorities"
 )]
-fn produce_side(
+fn produce_side<'a>(
     request: &Request<'_>,
     source: &Source,
     catalog: [u8; 32],
@@ -719,11 +726,12 @@ fn produce_side(
     program_index: usize,
     program: &Expression,
     resolved: &ResearchResolvedExitGridV1,
-    column: &Column,
-    series: ExecutionSeriesV1<'_>,
+    column: &'a Column,
+    series: ExecutionSeriesV1<'a>,
     sessions: &Sessions,
     remaining: &mut Remaining,
     digests: &ExecutionDigestsV1,
+    attested: &mut Option<AttestedTrainingV1<'a>>,
 ) -> Result<(Vec<BooleanCoordinateV1>, ExpressionTrainingAnchorV1), String> {
     let data_digest = digests.data_digest();
     let run = Run {
@@ -749,10 +757,18 @@ fn produce_side(
     let attempt =
         crate::sweep_evidence::begin(request.output, run.run_id().bytes(), Operation::Expression)?;
     let produced = (|| {
-        let attested = resolved
-            .attest_training(series, column, request.horizon)
-            .map_err(display)?;
-        let evaluated = resolved.evaluate_expression_with_attested(&attested, &run)?;
+        let attested = if let Some(attested) = attested {
+            &*attested
+        } else {
+            #[cfg(test)]
+            ATTESTATIONS.with(|n| n.set(n.get() + 1));
+            attested.insert(
+                resolved
+                    .attest_training(series, column, request.horizon)
+                    .map_err(display)?,
+            )
+        };
+        let evaluated = resolved.evaluate_expression_with_attested(attested, &run)?;
         let valid = resolved.validate_expression_evaluation(&evaluated)?;
         let mut rows = Vec::new();
         rows.try_reserve_exact(evaluated.grid().cells.len())
@@ -770,7 +786,7 @@ fn produce_side(
             }
             let disposition =
                 resolved.classify_expression_coordinate(&valid, Chosen::from_cell(cell))?;
-            let trades = resolved.materialize_expression_coordinate(&attested, &valid, ordinal)?;
+            let trades = resolved.materialize_expression_coordinate(attested, &valid, ordinal)?;
             if trades.len() as u64 != cell.trades {
                 return Err("Boolean materialized trade count changed".to_owned());
             }
@@ -983,6 +999,12 @@ fn slice_digests(
     })?;
     *hoisted = Some(digests);
     Ok(digests)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Training attestations `produce_side` built on this thread (D-0928).
+    pub(crate) static ATTESTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn display(why: impl std::fmt::Display) -> String {

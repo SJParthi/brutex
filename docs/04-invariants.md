@@ -5412,3 +5412,9 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | `fills_at(.., Anchor::PrintedExtreme)` refuses a sell anchor (the long's exit low, the short's entry low) below one tick — including 0, negatives and `i64::MIN` — with `BelowTick { quantity: "sell printed-extreme fill" }`; the non-fill bar's low never refuses; exactly one tick prices unchanged. | `costs::fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name` | ✓ |
 | No anchor, direction or quantity lets a degenerate low produce a `Fills` with a sub-tick leg, and `charge_stack` over any such `Fills` answers `Ok` or a named `Err` without panicking. | `costs::trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill` | ✓ |
+
+### Boolean catalogue attestation — o1runner-1 (D-0928)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| A Boolean candidate request attests its training slice once per resolution side (2 per request), not once per program × side; a three-program catalogue attests exactly twice. | `cli::candidate_universe::boolean_candidate_v1::tests::a_catalogue_attests_its_training_slice_once_per_side` | ✓ |

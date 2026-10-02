@@ -44059,3 +44059,25 @@ reports such a bar as unfillable rather than fillable.
 Proved by `costs::fill::tests::a_printed_extreme_sell_below_one_tick_refuses_by_name`
 and `costs::trip::tests::no_anchor_lets_a_degenerate_low_panic_or_price_a_negative_fill`;
 both fail with the refusal removed.
+
+### D-0928 — A Boolean catalogue attests its training slice once per side — 2026-10-02
+
+**Finding:** o1runner-1 (audit 2026-10-02). `boolean_candidate_v1::produce_side`
+called `ResearchResolvedExitGridV1::attest_training` once for every program ×
+side. Attestation validates the execution series, hashes it, accepts the
+column, checks the arithmetic envelope and hashes the column; none of it reads
+the program, and `exit_grid_policy`'s own doc says to attest once.
+
+**Decision:** `compute` holds one `Option<AttestedTrainingV1>` per resolution
+(two per request) and `produce_side` builds it on first use, inside that side's
+first evidence attempt, then reuses the token for every later program. The
+first refusal still surfaces in the first program's attempt exactly as before,
+and it ends `compute`, so no later program can observe a cached refusal. The
+three-stream data digest was already hoisted by D-1143.
+
+**Effect:** attestations per request fall from 2·P to 2. No output byte changes:
+the token is a pure function of the resolution, series, column and horizon.
+
+**Proof:** `cli::candidate_universe::boolean_candidate_v1::tests::a_catalogue_attests_its_training_slice_once_per_side`
+counts attestations for a three-program catalogue: 2 after, 6 with the cache
+disabled.
