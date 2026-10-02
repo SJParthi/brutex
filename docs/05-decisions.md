@@ -43726,6 +43726,12 @@ order of checks are the same. It takes the three coordinates and one
 accepts the equal case and requires the refusal for each coordinate differing
 alone. A full-page render test through a saved qualification is still absent;
 it needs `cli`'s fixture exposed to `api`, which this batch does not do.
+Until then the call itself is pinned in the source:
+`project_cross_checks_each_row_before_rendering_it` finds
+`same_coordinate(row.original, row.family, row.coordinate, original)?;` inside
+`project`'s row loop ahead of `admission_projection::row(`, and fails on
+origin/main, where that call does not exist. It reads source text and does not
+run `project`.
 
 ### D-0732 — `/audit.json` counts the asked feed's months from its own manifest, once per census snapshot — 2026-09-29
 

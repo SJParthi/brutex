@@ -81,3 +81,21 @@ fn a_qualification_row_is_refused_unless_identity_family_and_coordinate_all_matc
         );
     }
 }
+
+/// **`project` RUNS THE CROSS-CHECK ON EVERY ROW, BEFORE IT RENDERS IT.** No
+/// api test can build a saved qualification (the fixture is `cli`'s own
+/// `#[cfg(test)]` code), so the call is pinned in the source: inside `project`'s
+/// row loop, `same_coordinate` is called with the row's three coordinates and
+/// `?`, ahead of the first rendered field (GAP14-58, D-0731).
+#[test]
+fn project_cross_checks_each_row_before_rendering_it() {
+    let source = include_str!("booleanqualification_projection.rs");
+    let from = source.find("pub(super) fn project(").unwrap();
+    let body = &source[from..from + source[from..].find("\n}\n").unwrap()];
+    let row_loop = &body[body.find("for (n, (row, original)) in").unwrap()..];
+    let check = row_loop
+        .find("same_coordinate(row.original, row.family, row.coordinate, original)?;")
+        .unwrap();
+    let render = row_loop.find("admission_projection::row(").unwrap();
+    assert!(check < render, "the check runs before the row is rendered");
+}

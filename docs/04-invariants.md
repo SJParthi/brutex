@@ -5383,3 +5383,9 @@ the guard. The existing emits test pins the warning's message and level.
 | Id | Invariant | Test that proves it |
 |---|---|---|
 | C4-API-09 | The `api.bars` `records unreadable` line for a page counts in `rows` the records that read and in `faults` the ones that did not: a page over 200 records with one 73-record block damaged writes one line saying 127 and 73 | `the_unreadable_records_line_counts_the_rows_that_read` in `crates/api/src/bars.rs` |
+
+### `project` runs the qualification cross-check — GAP14-58 (D-0731)
+
+| Id | Invariant | Test that proves it |
+|---|---|---|
+| C4-API-10 | Inside `project`'s row loop, `same_coordinate(row.original, row.family, row.coordinate, original)?;` appears before the row is rendered with `admission_projection::row(`. This is a check of the source text: no api test renders a saved qualification | `project_cross_checks_each_row_before_rendering_it` in `crates/api/src/booleanqualification_projection_tests.rs` |
