@@ -43718,3 +43718,50 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0995 — Re-run permission-refusal tests as an unprivileged uid when the suite runs as root — 2026-10-02
+
+**What happened.** On a cloud container the suite runs as root, and every test
+that closes a fixture with `chmod` (mode `000`, `0o300`, `0o444`, `0o555`,
+`0o222`) and expects the host to refuse failed there: root bypasses the mode
+bits (`CAP_DAC_OVERRIDE`), so the open, list, rename or write the test expects
+to be refused succeeds, and the refusal under test never runs. Several of these
+tests already said so in their own comments ("assumes this process is not
+root") and stopped there.
+
+**The change.** Test-only. Each such test is now a thin `#[test]` that calls
+`where_permission_binds(<harness name>, <body>)`, and its original body moved
+unchanged into `<name>_body`. The helper re-runs the named test alone in a child
+of the same test binary: as uid 65534 (`nobody`) when this process is root,
+since `setuid` away from root drops every capability and the mode bits decide
+again, and as the parent's own uid otherwise. The child sees a marker variable
+and runs the body; the parent asserts the child exited zero AND that the harness
+printed `1 passed`, because `--exact` with a name that matches nothing exits
+zero having run nothing. The SAME production refusal runs under the SAME
+assertions on every host. Nothing is skipped and nothing returns early.
+
+**Why not the alternatives.** Skipping as root leaves the refusal untested on
+exactly that host and is the test that asserts nothing `CLAUDE.md` §4 bans.
+Root-proof path fixtures (a directory where a file belongs, a file where a
+directory belongs) reach `IsADirectory`/`NotADirectory`, not
+`PermissionDenied`, and several tests assert the `Denied` mapping itself; for
+the telemetry rename-isolation case no path shape can make the rename refuse
+while the preceding unlink succeeds. The immutable flag needs an `ioctl`, which
+needs `unsafe`, which every crate denies. Reading the uid needs no `libc`
+either: it is the owner of a file the process has just created.
+
+**Why the child is spawned for non-root too.** A branch taken only as root
+would be lines a non-root coverage profile never reaches, and gate 20 compares
+`crates/telemetry`'s uncovered lines exactly. Always spawning means the same
+lines run on every host; the inherited `LLVM_PROFILE_FILE` carries the child's
+counts into the profile, as `crates/api/src/isolated.rs` already relies on. The
+failure message is formatted before the `assert!` for the same reason.
+
+**Where.** `crates/telemetry/src/lib.rs` (`tests::where_permission_binds`, kept
+inside the `#[cfg(test)]` block so gate 21's production-site counts are
+unchanged); `crates/store/tests/support/mod.rs`;
+`crates/pull/tests/support/mod.rs`, which `crates/pull/src/lib.rs` also mounts
+under `#[cfg(all(test, unix))]` for `emit_sites`; `crates/api/src/isolated.rs`.
+**Not yet shown:** gate 20's workspace profile in CI with these tests running
+through a child; the counts are expected unchanged because every moved body
+line still runs, in the child.

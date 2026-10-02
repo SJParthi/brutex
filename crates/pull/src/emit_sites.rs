@@ -1457,6 +1457,14 @@ fn newer(dir: &Path, sink: &Sink, since: u64, target: &str) -> Vec<Record> {
 /// until this test nothing read it.
 #[test]
 fn every_emit_site_in_this_crate_reaches_a_file() {
+    crate::support::where_permission_binds(
+        "emit_sites::every_emit_site_in_this_crate_reaches_a_file",
+        every_emit_site_in_this_crate_reaches_a_file_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn every_emit_site_in_this_crate_reaches_a_file_body() {
     // Declared first so it is dropped LAST, and a [`Scratch`] rather than a
     // bare path so a row that fails still takes its sink's directory with it —
     // a panicking test must not leave the log it was reading behind.
