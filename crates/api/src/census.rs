@@ -401,26 +401,103 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
 /// hold is not an error it can report — it is an allocator failure or an OOM
 /// kill, and neither reaches the operator as "that manifest is too big".
 ///
-/// The size is the length `stat` gives, which for a character device is 0
-/// whatever a read of it returns, so such a path is read, not refused, and
-/// nothing here bounds that read. Pinned as it stands by
-/// `a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read`,
-/// and recorded as not done in D-0695, with the FIFO its tenth repair found.
+/// ONE OPEN, NONBLOCKING, AND THE TYPE AND SIZE ARE THAT DESCRIPTOR'S.
+/// It used to `stat` the path and then `std::fs::read` it: a second, blocking
+/// open with no type check and no bound of its own. A FIFO at a manifest path
+/// held that open until some writer appeared, at boot (`Site::load` reads every
+/// manifest) and on every request whose census key missed, one Tokio worker
+/// at a time. A character device has a `stat` length of 0, passed the bound
+/// and was read to its end, `/dev/zero` without one. And a file swapped in
+/// between the two calls was read whole whatever its size. Now the path is
+/// opened once with `O_NONBLOCK`, so a FIFO with no writer opens at once
+/// rather than waiting; anything that descriptor's `fstat` does not call a
+/// regular file is refused by name, unread; the size bound is that same
+/// descriptor's length; and the read itself is capped at one byte past the
+/// bound, so a file that grows under the read is refused rather than held.
+/// R9-api-cx-1, D-0954. O(1) calls; the read is O(manifest bytes), bounded;
+/// `api::census::a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`.
 fn sized(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
-    let size = std::fs::metadata(path)?.len();
+    use std::io::Read as _;
+    let file = open_without_waiting(path)?;
+    let meta = file.metadata()?;
+    // A directory stays the file system's answer, `IsADirectory`, as the
+    // read it replaces gave and as the stamp check keeps it (D-0695).
+    if meta.is_dir() {
+        return Err(std::io::ErrorKind::IsADirectory.into());
+    }
+    if !meta.is_file() {
+        return Ok(Err(format!(
+            "not a regular file (a {}); a manifest is one, and this reader neither waits on a FIFO nor reads a device",
+            kind_of(meta.file_type())
+        )));
+    }
+    let size = meta.len();
     if size > MAX_MANIFEST_BYTES {
         return Ok(Err(format!(
             "{size} bytes; the largest manifest this build can write is \
              {MAX_MANIFEST_BYTES} and this reader refuses more"
         )));
     }
-    let bytes = std::fs::read(path)?;
+    let mut bytes = Vec::new();
+    let _ = file
+        .take(MAX_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+        return Ok(Err(format!(
+            "grew past {MAX_MANIFEST_BYTES} bytes while it was read ({size} when opened); this reader refuses more"
+        )));
+    }
     // COUNTED IN TEST BUILDS ONLY, so a request path can be shown not to read
     // manifest bytes it already holds. The ledger is keyed by path, because
     // tests run concurrently and each owns its own scratch root. D-0686.
     #[cfg(test)]
     manifest_reads::note(path);
     Ok(Ok(bytes))
+}
+
+/// `O_NONBLOCK`, from each platform's own `fcntl.h`, the values
+/// `cli::readonly_file` uses: Linux UAPI `asm-generic/fcntl.h` (`x86_64` and
+/// aarch64) gives `0x800`, the macOS SDK gives `0x4`. On any other target the
+/// open is an ordinary one, and a FIFO there can still hold it.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const NONBLOCK: Option<i32> = Some(0x800);
+#[cfg(target_os = "macos")]
+const NONBLOCK: Option<i32> = Some(0x4);
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
+const NONBLOCK: Option<i32> = None;
+
+/// Opens `path` for reading without waiting for a FIFO's writer.
+fn open_without_waiting(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    if let Some(flags) = NONBLOCK {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(flags);
+    }
+    options.open(path)
+}
+
+/// What a path that is not a regular file is, in the refusal's words.
+fn kind_of(kind: std::fs::FileType) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        if kind.is_fifo() {
+            return "FIFO";
+        }
+    }
+    let _ = kind;
+    "device or other special file"
 }
 
 /// Every vendor's manifest, read off disk once.
@@ -1225,50 +1302,96 @@ mod tests {
         std::fs::remove_file(&p).expect("cleanup");
     }
 
-    /// THE SIZE BOUND IS THE LENGTH `stat` GIVES, SO A CHARACTER DEVICE PASSES
-    /// IT AND IS READ, pinned as it stands. D-0695.
+    /// **A manifest path that is not a regular file is refused by name and
+    /// never read, and a FIFO there cannot hold the census.** R9-api-cx-1,
+    /// D-0954; this was pinned as it stood, read and not refused, by D-0695.
     ///
-    /// `sized` takes the size from `std::fs::metadata(path)?.len()` and then
-    /// calls `std::fs::read`, which reads to the end. A character device's
-    /// length is 0 whatever a read of it returns, so a manifest path linked to
-    /// one passes the bound. `/dev/null` is what is read here, because its
-    /// read ends at once. `/dev/zero` has the same length of 0 and gives a
-    /// read a mebibyte of bytes here when asked for one, so nothing `sized`
-    /// checks bounds a read of it. D-0695's eleventh repair records this as
-    /// not done, beside the FIFO its tenth repair recorded: both are paths
-    /// that are not a regular file.
+    /// `sized` used to `stat` the path and then `std::fs::read` it. A
+    /// character device's length is 0 whatever a read gives, so a link to
+    /// `/dev/zero` passed the bound and was read to no end; a FIFO held the
+    /// blocking open until a writer came. Each is now a refusal naming the
+    /// kind, through `sized` and through `read_vendor`, which reports it
+    /// unreadable and loud, never absent and never held.
+    ///
+    /// The FIFO is driven on another thread with a two-second deadline, so a
+    /// regression fails here instead of hanging the suite: past the deadline
+    /// the test opens the FIFO's write end itself, which releases the stuck
+    /// read, and then fails. A regular file beside it is still read whole, and
+    /// a directory is still the file system's `IsADirectory`.
     #[cfg(unix)]
     #[test]
-    fn a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read() {
-        use std::io::Read as _;
+    fn a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits() {
         use std::os::unix::fs::FileTypeExt as _;
         for device in ["/dev/null", "/dev/zero"] {
             let meta = std::fs::metadata(device).expect("the device");
-            assert!(
-                meta.file_type().is_char_device() && !meta.is_file(),
-                "{device} is a character device"
-            );
+            assert!(meta.file_type().is_char_device(), "{device}");
             assert_eq!(meta.len(), 0, "{device}: the length `stat` gives");
         }
-        let mut zeros = Vec::new();
-        std::fs::File::open("/dev/zero")
-            .expect("open /dev/zero")
-            .take(1 << 20)
-            .read_to_end(&mut zeros)
-            .expect("a bounded read of /dev/zero");
-        assert_eq!(zeros.len(), 1 << 20, "bytes past the length of 0");
-
-        let dir = root("character-device");
-        let path = manifest_path(&dir, Vendor::Dhan);
-        std::os::unix::fs::symlink("/dev/null", &path).expect("a link to a character device");
-        assert_eq!(
-            sized(&path)
+        let dir = root("not-a-regular-file");
+        for (vendor, device) in [(Vendor::Dhan, "/dev/null"), (Vendor::Zerodha, "/dev/zero")] {
+            let path = manifest_path(&dir, vendor);
+            std::os::unix::fs::symlink(device, &path).expect("a link to a character device");
+            let why = sized(&path)
                 .expect("the file system answers")
-                .expect("under the bound"),
-            Vec::<u8>::new(),
-            "passes the size bound and is read, not refused as no regular file"
+                .expect_err("refused, not read");
+            assert!(
+                why.contains("not a regular file (a device or other special file)"),
+                "{why}"
+            );
+            let census = read_vendor(&dir, vendor);
+            assert_eq!(census.state.name(), "unreadable", "{device}");
+            assert!(census.is_loud() && census.note().contains("not a regular file"));
+            std::fs::remove_file(&path).expect("cleanup");
+        }
+
+        let fifo = manifest_path(&dir, Vendor::Groww);
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success(),
+            "the Unix test host creates its FIFO fixture"
         );
-        std::fs::remove_file(&path).expect("cleanup");
+        assert!(
+            std::fs::metadata(&fifo)
+                .expect("stat")
+                .file_type()
+                .is_fifo()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(sized(&fifo).map(|read| read.map(|bytes| bytes.len())));
+            })
+        };
+        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if read.is_err() {
+            // Release the stuck open so the suite does not hang, then fail.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        reader.join().expect("the reader thread ends");
+        let why = read
+            .expect("a FIFO with no writer is answered at once, not waited on")
+            .expect("the file system answers")
+            .expect_err("refused, not read");
+        assert!(why.contains("not a regular file (a FIFO)"), "{why}");
+        let census = read_vendor(&dir, Vendor::Groww);
+        assert_eq!(census.state.name(), "unreadable");
+        assert!(census.note().contains("FIFO"), "{}", census.note());
+        std::fs::remove_file(&fifo).expect("cleanup");
+
+        let plain = manifest_path(&dir, Vendor::TrueData);
+        std::fs::write(&plain, [7_u8; 40]).expect("a regular file");
+        assert_eq!(sized(&plain).expect("read").expect("held"), vec![7_u8; 40]);
+        std::fs::remove_file(&plain).expect("cleanup");
+        std::fs::create_dir(&plain).expect("a directory");
+        assert_eq!(
+            sized(&plain).expect_err("the file system's answer").kind(),
+            std::io::ErrorKind::IsADirectory
+        );
+        std::fs::remove_dir(&plain).expect("cleanup");
     }
 
     #[test]

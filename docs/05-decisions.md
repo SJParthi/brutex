@@ -48538,6 +48538,110 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0954 — Sweep-run, sweep-evidence, audit-journal and census reads: six api findings (cluster B7) — 2 October 2026
+
+Six audit findings in `crates/api`, fixed together because four of them are
+in the sweep slot and its two readers, and two are file opens that took more
+than they were asked for. Each has a test that fails on the tree before this
+entry and passes after it.
+
+**W1-api6-5 (bug) — ranked audit evidence above 4,096 rows was unreadable.**
+`sweepevidence::render` sized its page with `detail::window`, which refuses
+any total above `MAX_RESULT_ROWS` before it looks at the page. An audit keeps
+`audit_keep()` ranked rows, `screen_cap().max(250)`, 10,000 by default, so
+every ranked page of a default audit, page 0 included, answered 503. That cap
+bounds what a request HOLDS; `sweep_evidence::ranked_page` and `depth_page`
+seek to the page's offset and read at most `limit` rows, so they hold one page
+whatever the total. **The choice:** `detail::seek_window`, `window` without the
+hold cap, for those two readers only; `window` itself and its other callers
+(`/trades.json`, `/frontier.json`, which load every row) are unchanged. One
+refusal is added in its place, because `Page::parse` still caps the page
+NUMBER at `MAX_PAGE` (4,095): a result larger than `(MAX_PAGE + 1) × limit` is
+refused on every page with the smallest limit that reaches its end, rather
+than served with a `next_page` the parser would then refuse. At the default
+256 that is 1,048,576 rows; a 64 MiB evidence file holds at most 524,287 depth
+rows (128 bytes) or 335,544 ranked rows (200 bytes), so every row is reachable
+at the default. **Rejected:** raising `MAX_RESULT_ROWS` (it is the hold bound
+the loading routes need) and raising `MAX_PAGE` (a pinned contract other
+routes and tests name).
+
+**W1-api6-1 (cost) — every `/backtest/run.json` poll copied the whole report
+under the slot lock.** `run_json` clones the `Progress` while holding the
+slot's std mutex on an async worker, and `report` was a `String` that grows by
+a line per instrument-month of a `sweep-all`. **The choice:** `report` and
+`refusal` are `Option<Arc<str>>`, so the clone under the lock is a reference
+count per field whatever the report's length. Escaping and sending the report
+still cost its bytes per poll; `docs/06-limits.md` says so. **Rejected:**
+`Arc<Progress>` in the slot, which would change the slot's type in
+`server.rs`, rewrite every in-place update the launch modules make, and
+collide with other open branches on that file.
+
+**W1-api6-4 (bug) — a large healthy CLI log refused every browser launch.**
+`observe_elsewhere` asks the lifecycle tail for 256 records under the 4 MiB
+scan cap, and `tail_fault` read `hit_scan_cap` as damage. A log whose newest
+4 MiB held fewer than 256 lifecycle records therefore made the status
+`unknown` and `claim_execution` refuse every run, descent and command, with
+the newest sweep's own terminal marker in hand. **The choice:** the cap is a
+fault only when the record searched for was not found
+(`tail_fault_unless_answered`). The walk is newest first, so a found marker is
+the newest one whatever lies past the cap. For the activity walk the marker is
+the answer: a run's activity follows its `command started`, so any activity
+newer than the marker lies inside the window, and reaching the cap with none
+leaves `last` at the marker. Every other fault (unreadable file, malformed or
+clipped record, partial tail) still counts with the marker found, because each
+can hide a newer marker. **Still refused, stated:** a sweep whose marker lies
+past the newest 4 MiB is `unknown` and blocks launch, which is the honest
+answer when the log cannot say whether it ended.
+
+**W1-api6-2 (cost) — admission I/O held the slot lock that every poll takes.**
+`run_with`, `descend_with` and `command_with_configuration` each held
+`site.sweep` through two canonicalizations, the lease, an up-to-8 MiB log
+walk, launch preparation, the audit `begin` with its syncs and a telemetry
+marker; `run_json` takes that mutex on an async worker, so a poll could block
+a Tokio worker for the whole admission. **The choice:** `sweeprun::admit`.
+A process-wide `ADMISSION` mutex serialises admissions (which is what the slot
+lock was doing there); the slot is locked once to check for a run in flight,
+released for every I/O step, and locked again only to install the accepted
+run. Nothing else installs between the two: admissions exclude each other,
+and `TaskFinisher` and the launch modules write only a slot whose run is in
+flight, which the check just ruled out. A `prepare` refusal leaves the slot as
+it was. **Rejected:** a per-`Site` admission mutex, which needs a `Site` field
+in `server.rs`; a process serves one `Site`, and two test sites admitting at
+once only wait for each other.
+
+**W1-api1-9 (bug) — the pull journal recreated a missing store root.**
+`Journal::appended` ran `create_dir_all(root/audit)`, which creates every
+missing ancestor, so a store root that vanished (an unmounted volume whose
+mountpoint path is writable) was recreated and the append-only journal split
+onto another device, the case `autopilot`'s "NEVER RECREATE A MISSING STORE
+ROOT" refuses for its own probe. **The choice:** one `create_dir` of `audit/`
+itself. An existing `audit/`, or a link to a directory, is reused; a missing
+parent is refused by name with nothing created at any level; anything else at
+that path keeps the existing "cannot create the audit directory" refusal.
+
+**R9-api-cx-1 (bug) — a manifest path that is not a regular file hung or was
+read without bound.** `census::sized` ran `metadata(path)` and then
+`std::fs::read(path)`: a second, blocking open with no type check and no read
+bound. A FIFO held boot (`Site::load` reads every manifest) and every request
+whose census key missed; a character device has a `stat` length of 0, so a
+link to `/dev/zero` passed the bound and was read to no end; a file swapped in
+between the calls was read whole. D-0695's tenth and eleventh repairs recorded
+both as not done and pinned the device case as it stood. **The choice:** one
+open with `O_NONBLOCK` (Linux x86_64/aarch64 `0x800`, macOS `0x4`, the values
+`cli::readonly_file` uses), the type and size taken from that descriptor's
+`fstat`, anything not a regular file refused by name and unread (a directory
+stays the file system's `IsADirectory`, which the D-0695 stamp check keeps),
+and the read capped at one byte past `MAX_MANIFEST_BYTES` so a file that grows
+under the read is refused. `a_character_device_at_a_manifest_path_passes_the_size_bound_and_is_read`
+is replaced by
+`a_manifest_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits`,
+which turns D-0695's pinned behaviour into a refusal. **Not covered:** on any
+other target the open is an ordinary one and a FIFO there can still hold it.
+
+Invariants AF-W1A65-a, AF-W1A65-b, AF-W1A61-a, AF-W1A64-a, AF-W1A62-a,
+AF-W1A62-b, AF-W1A19-a and AF-R9CX1-a; `docs/06-limits.md` has the costs and
+what stays unbounded.
+
 ### D-0956 — Say why a vendor's 30min and 60min bars are refused, state rung raggedness per venue, and correct four pull comments that described code that is not there — 2026-10-02
 
 **Cloud audit GAP12-8, GAP12-11, GAP2-43, W1-pull4-2 and W1-pull4-3. All five

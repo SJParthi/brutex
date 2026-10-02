@@ -1162,9 +1162,25 @@ impl Journal {
     fn appended(&self, record: &Record) -> Result<(), String> {
         let named =
             |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", self.path.display());
+        // ONE LEVEL, NEVER THE ROOT. `create_dir_all` made every missing
+        // ancestor, the store root included, so a root that vanished (an
+        // unmounted volume whose mountpoint path is still writable) was
+        // recreated on the wrong device and this run's record began a second,
+        // split journal there, the case `autopilot`'s "NEVER RECREATE A MISSING
+        // STORE ROOT" refuses. Only `audit/` itself is made; a missing parent
+        // is refused by name, nothing created. One `mkdir`. W1-api1-9, D-0954.
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| named("cannot create the audit directory", &e))?;
+            match std::fs::create_dir(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(named(
+                        "the store root is missing, so the audit directory was not created; a missing store root is never recreated, because an unmounted volume would split this append-only journal onto another device",
+                        &e,
+                    ));
+                }
+                Err(e) => return Err(named("cannot create the audit directory", &e)),
+            }
         }
         // Every path below releases the append lock through the guard's
         // explicit unlock in its `Drop`, a refusal by returning and the
@@ -2147,6 +2163,58 @@ mod tests {
             "{:?}",
             journal.path
         );
+    }
+
+    /// **A missing store root is refused, never recreated.** W1-api1-9, D-0954.
+    ///
+    /// `create_dir_all(root/audit)` made every missing ancestor, so a store
+    /// root that vanished (an unmounted volume whose mountpoint path is still
+    /// writable) was recreated and the journal split onto another device. A
+    /// root that is gone, a root two levels gone, and a root that is a dangling
+    /// symlink are each refused by name with nothing created at any level; an
+    /// existing root with no `audit/` still gets it (the first append of a
+    /// fresh store), an existing `audit/` is reused, and a symlinked `audit/`
+    /// that resolves to a directory is accepted as before.
+    #[test]
+    fn a_missing_store_root_is_refused_and_never_recreated() {
+        let base = scratch("audit-missing-root");
+        let record = Record::refused(Scope::Spot, Outcome::Stored, at(1), "x", "");
+        let gone = base.join("volume");
+        let deeper = base.join("mnt").join("volume");
+        let dangling = base.join("link");
+        std::os::unix::fs::symlink(base.join("nowhere"), &dangling).expect("a dangling link");
+        for root in [&gone, &deeper, &dangling] {
+            let why = Journal::at(root).append(&record).expect_err("refused");
+            assert!(why.contains("store root is missing"), "{why}");
+            assert!(why.contains("pull.journal"), "names the path: {why}");
+            assert!(!root.exists(), "{} was recreated", root.display());
+        }
+        assert!(!base.join("mnt").exists(), "no ancestor was created");
+        assert!(
+            !base.join("nowhere").exists(),
+            "a dangling link's target was not created"
+        );
+
+        let fresh = base.join("fresh");
+        std::fs::create_dir(&fresh).expect("an existing root");
+        Journal::at(&fresh)
+            .append(&record)
+            .expect("creates audit/ beneath it");
+        Journal::at(&fresh).append(&record).expect("reuses audit/");
+        assert!(matches!(
+            Journal::at(&fresh).look(),
+            Log::Held { records: 2, .. }
+        ));
+
+        let linked = base.join("linked");
+        std::fs::create_dir_all(base.join("elsewhere")).expect("a real audit directory");
+        std::fs::create_dir(&linked).expect("an existing root");
+        std::os::unix::fs::symlink(base.join("elsewhere"), linked.join("audit"))
+            .expect("a symlinked audit directory");
+        Journal::at(&linked)
+            .append(&record)
+            .expect("a symlinked audit dir is a directory");
+        assert!(base.join("elsewhere").join("pull.journal").is_file());
     }
 
     #[test]

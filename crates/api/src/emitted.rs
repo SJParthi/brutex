@@ -812,7 +812,7 @@ fn cases() -> Vec<Case> {
                 2,
             );
             progress.finished_micros = Some(2);
-            progress.refusal = Some("no result was recorded".to_owned());
+            progress.refusal = Some("no result was recorded".into());
             crate::sweeprun::emit_completion(&progress, "sweep", 1);
         }),
         mine: Box::new(|record| {
