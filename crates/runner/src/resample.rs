@@ -34,9 +34,10 @@
 //! where the slice happens to start: the same market data sliced from 09:16
 //! instead of 09:15 would produce different bars with the same identity, and
 //! §3 rule 5's byte-for-byte reproducibility would be false. The bucket is
-//! `(ts_micros + IST offset) / period`, floored -- so a bar's bucket is a
-//! property of the bar, on the same IST grid `crates/pull/src/fold.rs` and
-//! `crates/store` use. Anchoring on the bare epoch puts every edge at UTC
+//! `(ts_micros + anchor) / period`, floored, where the anchor is the 09:15 IST
+//! open for an intraday period and IST midnight for whole days (D-0929) -- so a
+//! bar's bucket is a property of the bar, on the same grid `crates/pull/src/fold.rs`
+//! and `crates/store` use. Anchoring on the bare epoch puts every edge at UTC
 //! midnight; fold.rs shipped that once and the store held 20 records stamped on
 //! a SUNDAY.
 //!
@@ -52,23 +53,42 @@ use indicators::{Candle, IST_OFFSET_MICROS, OI_NULL};
 /// Microseconds in one minute — the resolution every stored bar is at.
 const MINUTE_MICROS: i64 = 60_000_000;
 
+/// Minutes in one IST day.
+const DAY_MINUTES: u32 = 1_440;
+
+/// The NSE open, 09:15 IST, as minutes past IST midnight. The same figure as
+/// `store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT`, which `pull::fold`
+/// anchors on; `runner` may not name `store`, so the test
+/// `the_hourly_grid_starts_at_the_open_like_pull_fold` pins 09:15 instead.
+const OPEN_MINUTES_PAST_IST_MIDNIGHT: i64 = 555;
+
 /// A coarser timeframe, expressed in whole minutes.
 ///
 /// A newtype rather than a bare `u32` so a caller cannot pass a bar count where
 /// a period belongs. Zero and one are refused at construction: one is the input
 /// resolution and folding it is a copy, zero is not a duration.
+///
+/// An intraday period must also divide the 1,440-minute day, and a period of a
+/// day or more must be whole days (D-0929, probeengine-2). Otherwise the
+/// open-anchored grid drifts from one session to the next: a 7-minute grid
+/// opened 09:14 on one day and 09:09 on the next, so the same clock minute was
+/// a different bar on different days.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Period(u32);
 
 impl Period {
-    /// A period of `minutes`, or `None` for zero and one.
+    /// A period of `minutes`, or `None` for zero, one, an intraday period that
+    /// does not divide the day, or a longer one that is not whole days.
     ///
     /// One is refused rather than treated as identity because a caller asking to
     /// resample to the resolution the data is already at has made a mistake, and
     /// silently returning a copy would hide it.
     #[must_use]
     pub const fn minutes(minutes: u32) -> Option<Self> {
-        if minutes < 2 {
+        if minutes < 2
+            || (minutes < DAY_MINUTES && !DAY_MINUTES.is_multiple_of(minutes))
+            || (minutes >= DAY_MINUTES && !minutes.is_multiple_of(DAY_MINUTES))
+        {
             None
         } else {
             Some(Self(minutes))
@@ -93,6 +113,23 @@ impl Period {
     /// The period in microseconds.
     const fn micros(self) -> i64 {
         (self.0 as i64).saturating_mul(MINUTE_MICROS)
+    }
+
+    /// The grid's anchor: the session OPEN for an intraday period, IST midnight
+    /// for a period of whole days -- exactly `pull::fold`'s choice (D-0929).
+    ///
+    /// Anchored at IST midnight, a period that does not divide 555 (10, 30,
+    /// 60) opened each session with a bar stamped BEFORE 09:15 holding only
+    /// part of its period: the hourly bar was stamped 09:00 and held 45
+    /// minutes, contradicting this module's own claim to share the store's
+    /// grid. Anchored at the open, the first bar of every session begins at
+    /// 09:15 and any remainder is a short LAST bar, stamped correctly.
+    const fn anchor(self) -> i64 {
+        if self.0 >= DAY_MINUTES {
+            IST_OFFSET_MICROS
+        } else {
+            IST_OFFSET_MICROS - OPEN_MINUTES_PAST_IST_MIDNIGHT * MINUTE_MICROS
+        }
     }
 }
 
@@ -121,9 +158,14 @@ impl Period {
 ///
 /// [`indicators::IST_OFFSET_MICROS`] is used rather than a second copy of
 /// 19,800: one definition across three crates is what stops them drifting.
+///
+/// IST midnight was still the wrong anchor for an intraday period: the store's
+/// fold starts its intraday grid at the 09:15 OPEN, and an hourly bucket here
+/// began at 09:00 with 45 minutes in it. [`Period::anchor`] now carries the
+/// fold's own choice (D-0929, probeengine-2).
 const fn bucket_of(ts_micros: i64, period: Period) -> i64 {
     ts_micros
-        .saturating_add(IST_OFFSET_MICROS)
+        .saturating_add(period.anchor())
         .div_euclid(period.micros())
 }
 
@@ -134,7 +176,7 @@ const fn bucket_of(ts_micros: i64, period: Period) -> i64 {
 const fn bucket_start(bucket: i64, period: Period) -> i64 {
     bucket
         .saturating_mul(period.micros())
-        .saturating_sub(IST_OFFSET_MICROS)
+        .saturating_sub(period.anchor())
 }
 
 /// Folds one-minute `bars` into `period` bars.
@@ -275,6 +317,61 @@ mod tests {
         assert_eq!(five().label(), "5min");
     }
 
+    /// D-0929: a period whose grid would drift between sessions is refused.
+    /// Every intraday period that divides the day is admitted, including every
+    /// `Timeframe::KNOWN` rung, and so is every whole number of days.
+    #[test]
+    fn a_period_whose_grid_would_drift_between_days_is_refused() {
+        for minutes in 2..1_440_u32 {
+            assert_eq!(
+                Period::minutes(minutes).is_some(),
+                1_440_u32.is_multiple_of(minutes),
+                "{minutes} minutes"
+            );
+        }
+        for rung in [2, 3, 5, 10, 15, 30, 60, 1_440, 2_880] {
+            assert!(Period::minutes(rung).is_some(), "{rung} minutes");
+        }
+        for odd in [7, 1_441, 2_000, 2_879, u32::MAX] {
+            assert_eq!(Period::minutes(odd), None, "{odd} minutes");
+        }
+    }
+
+    /// D-0929: the first bar of EVERY session starts at 09:15 and covers whole
+    /// periods from the open, for every admitted intraday period, on two
+    /// consecutive days. Under the IST-midnight anchor a 60-minute first bar
+    /// was stamped 09:00, and the refused 7-minute grid opened 09:14 then 09:09.
+    #[test]
+    fn every_session_opens_with_a_bar_stamped_at_the_open() {
+        let open = |day: i64| (day * 1_440 + 555) * MINUTE_MICROS - IST_OFFSET_MICROS;
+        for minutes in [
+            2_u32, 3, 4, 5, 6, 8, 10, 15, 20, 30, 45, 60, 90, 120, 180, 360, 720,
+        ] {
+            let period = Period::minutes(minutes).expect("divides the day");
+            for day in [19_723_i64, 19_724] {
+                let session: Vec<Candle> = (0..375)
+                    .map(|m| Candle {
+                        ts_micros: open(day) + m * MINUTE_MICROS,
+                        ..bar(0, 10, 10, 10, 10, 1)
+                    })
+                    .collect();
+                let out = resample(&session, period);
+                assert_eq!(
+                    out.first().map(|c| c.ts_micros),
+                    Some(open(day)),
+                    "{minutes}-minute first bar on day {day}"
+                );
+                let per = i64::from(minutes);
+                assert_eq!(
+                    out.first().map(|c| c.volume),
+                    Some(per.min(375)),
+                    "{minutes}-minute first bar holds a whole period"
+                );
+                assert_eq!(out.len(), 375_usize.div_ceil(minutes as usize));
+            }
+        }
+    }
+
     #[test]
     fn ohlc_takes_first_last_max_min_and_volume_sums() {
         // Five minutes, deliberately not monotone, so first/last cannot be
@@ -402,24 +499,19 @@ mod tests {
         // Anchored, not bare: a timestamp is negative on the IST grid only below
         // -19,800 s. There, `div_euclid` must floor DOWNWARD rather than toward
         // zero, or the two buckets either side of IST midnight 1970 merge.
+        let zero = -five().anchor();
         assert_eq!(
-            bucket_of(-IST_OFFSET_MICROS, five()),
+            bucket_of(zero, five()),
             0,
-            "IST midnight on 1 Jan 1970 is bucket zero"
+            "the anchor itself is bucket zero"
         );
         assert_eq!(
-            bucket_of(-IST_OFFSET_MICROS - 1, five()),
+            bucket_of(zero - 1, five()),
             -1,
             "one microsecond earlier floors DOWN, not toward zero"
         );
-        assert_eq!(
-            bucket_of(-IST_OFFSET_MICROS - 5 * MINUTE_MICROS, five()),
-            -1
-        );
-        assert_eq!(
-            bucket_of(-IST_OFFSET_MICROS - 6 * MINUTE_MICROS, five()),
-            -2
-        );
+        assert_eq!(bucket_of(zero - 5 * MINUTE_MICROS, five()), -1);
+        assert_eq!(bucket_of(zero - 6 * MINUTE_MICROS, five()), -2);
     }
 
     /// The grid is IST's, and an hourly fold is where that starts to matter.
@@ -429,23 +521,29 @@ mod tests {
     /// fixture in this file passed while the anchor was wrong. **60 does not**,
     /// and 60 is a `Timeframe::KNOWN` store rung, so an hourly resample on the
     /// bare epoch would have disagreed with `pull::fold` on the same bars.
+    ///
+    /// D-0929 moved the intraday anchor from IST midnight to the 09:15 open,
+    /// `pull::fold`'s anchor: the hourly bucket holding 09:15 used to begin at
+    /// 09:00 IST with 45 of its 60 minutes, a bar stamped before the open.
     #[test]
-    fn the_hourly_grid_is_anchored_on_ist_and_not_on_utc() {
+    fn the_hourly_grid_starts_at_the_open_like_pull_fold() {
         let hour = Period::minutes(60).expect("sixty is a valid period");
         // 09:15 IST on day zero, expressed in UTC micros.
         let open_ist = 555 * MINUTE_MICROS - IST_OFFSET_MICROS;
         let start = bucket_start(bucket_of(open_ist, hour), hour);
 
-        // On the IST grid an hourly bucket begins on the IST hour: 09:00 IST.
         let ist_minutes_into_day = (start + IST_OFFSET_MICROS)
             .div_euclid(MINUTE_MICROS)
             .rem_euclid(1_440);
         assert_eq!(
-            ist_minutes_into_day, 540,
-            "an hourly bucket containing 09:15 IST must begin at 09:00 IST \
-             (540 minutes), not at an offset thirty minutes away -- which is \
-             exactly what a UTC-anchored grid produces, because 330 is not a \
-             multiple of 60"
+            ist_minutes_into_day, 555,
+            "the hourly bucket holding 09:15 IST must begin AT 09:15, not at \
+             09:00 (540) with a quarter of its hour before the open"
+        );
+        assert_eq!(
+            bucket_of(open_ist - 1, hour),
+            bucket_of(open_ist, hour) - 1,
+            "09:14:59.999999 belongs to the previous bucket"
         );
 
         // And the five-minute grid is unaffected, because 5 divides 330 -- the
@@ -471,7 +569,7 @@ mod tests {
     fn extreme_values_saturate_rather_than_panicking() {
         // A period so long its microsecond span overflows i64. u32::MAX minutes
         // is roughly 8,000 years; the multiply saturates instead of wrapping.
-        let huge = Period::minutes(u32::MAX).expect("u32::MAX is above two");
+        let huge = Period::minutes(u32::MAX / 1_440 * 1_440).expect("the largest whole-day period");
         assert_eq!(
             bucket_of(i64::MAX, huge),
             i64::MAX / huge.micros().max(1),

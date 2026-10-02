@@ -5418,3 +5418,10 @@ the guard. The existing emits test pins the warning's message and level.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | A Boolean candidate request attests its training slice once per resolution side (2 per request), not once per program × side; a three-program catalogue attests exactly twice. | `cli::candidate_universe::boolean_candidate_v1::tests::a_catalogue_attests_its_training_slice_once_per_side` | ✓ |
+
+### Resampler grid — probeengine-2 (D-0929)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| For every intraday period that divides the day, every session's first resampled bar is stamped 09:15 IST and holds a whole period, on consecutive days; the hourly bucket holding 09:15 begins at 09:15. | `runner::resample::tests::every_session_opens_with_a_bar_stamped_at_the_open` · `runner::resample::tests::the_hourly_grid_starts_at_the_open_like_pull_fold` | ✓ |
+| `Period::minutes` admits an intraday period iff it divides 1,440 and a longer period iff it is whole days; 7, 1,441 and `u32::MAX` are refused. | `runner::resample::tests::a_period_whose_grid_would_drift_between_days_is_refused` | ✓ |

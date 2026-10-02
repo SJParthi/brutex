@@ -44081,3 +44081,30 @@ the token is a pure function of the resolution, series, column and horizon.
 **Proof:** `cli::candidate_universe::boolean_candidate_v1::tests::a_catalogue_attests_its_training_slice_once_per_side`
 counts attestations for a three-program catalogue: 2 after, 6 with the cache
 disabled.
+
+### D-0929 — The runner's resampler anchors intraday bars at the 09:15 open — 2026-10-02
+
+**Finding:** probeengine-2 (audit 2026-10-02). `runner::resample` keyed buckets
+on IST midnight. A period that does not divide 555 minutes therefore opened
+every session with a bar stamped before the open holding part of its period:
+the 60-minute first bar was stamped 09:00 and held 45 minutes. A period that
+does not divide the day drifted between sessions: 7 minutes opened 09:14 on
+IST day 19723 and 09:09 on day 19724. The module's doc claimed the store's own
+grid, and `pull::fold` anchors intraday rungs at the open.
+
+**Decision:** `Period::anchor` is the 09:15 open for an intraday period and IST
+midnight for whole days, which is `pull::fold`'s rule. `Period::minutes` now
+also refuses an intraday period that does not divide 1,440 minutes and a longer
+one that is not whole days, because their grids cannot repeat from day to day.
+`runner` may not name `store`, so 555 is a local constant and a test pins it.
+
+**Output change:** intraday periods that divide 555 (3, 5, 15, ...) keep every
+edge. Others (2, 10, 30, 60, ...) move to the open grid. The only callers are
+tests; no production path calls `runner::resample`. Two `signal_candle_stop`
+fixtures encoded the midnight grid (a 10:00 signal and the last-bucket table)
+and now use the open grid that stored rungs are on.
+
+**Proof:** `runner::resample::tests::the_hourly_grid_starts_at_the_open_like_pull_fold`,
+`every_session_opens_with_a_bar_stamped_at_the_open`,
+`a_period_whose_grid_would_drift_between_days_is_refused`. All three fail on
+the old anchor and admission rule.
