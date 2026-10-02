@@ -4084,7 +4084,24 @@ fn row_of(
 /// it sooner, and without the bar that could not be read there is no way to know
 /// which. Blocking to the time exit can only ever refuse a later signal, never
 /// invent one — the direction an unmeasurable case has to err in.
-fn blocks_without_pricing(c: &Candidate, open_until: &mut Option<usize>) -> bool {
+///
+/// # Only a hole AT OR BEFORE this variant's exit un-prices it (D-1183)
+///
+/// `exit_offset` is the variant's pessimistic exit offset from `c.entry`, the
+/// `pess_off` `one_variant` prices. This used to read `c.cross.refused() > 0`,
+/// a count, so a refused bar AFTER a stop, target or trail had already closed
+/// the position still un-priced the trade and blocked to the time exit: a bar
+/// after the exit decided whether the exit counted (audit W3-runner2-7).
+/// [`crate::excursion::Crossings::first_refused`] locates the first hole, and
+/// every crossing strictly before it was read off accepted bars only, so an
+/// order that fired there is the first order that fired. A hole at the exit
+/// offset itself still refuses: the exit bar is the one that cannot be read.
+/// `block_only` is unchanged -- such a path never had a priceable exit.
+fn blocks_without_pricing(
+    c: &Candidate,
+    exit_offset: usize,
+    open_until: &mut Option<usize>,
+) -> bool {
     // Compare the actual fill against the prior exit. The signal can legally be
     // on that exit bar when its fill is the following minute, but the fill
     // itself must be strictly later: one minute cannot close and reopen the
@@ -4092,7 +4109,13 @@ fn blocks_without_pricing(c: &Candidate, open_until: &mut Option<usize>) -> bool
     if open_until.is_some_and(|until| c.entry <= until) {
         return true;
     }
-    if c.block_only || c.cross.refused() > 0 {
+    // A count with no location cannot be placed against the exit, so it keeps
+    // the conservative answer. `crossings_with` locates every hole it counts.
+    let hole_reaches_exit = c
+        .cross
+        .first_refused()
+        .map_or(c.cross.refused() > 0, |hole| hole <= exit_offset);
+    if c.block_only || hole_reaches_exit {
         *open_until = Some(c.time_exit);
         return true;
     }
@@ -4136,11 +4159,6 @@ fn one_variant(
     let mut gain_on_winners: i64 = 0;
 
     for c in candidates {
-        // TWO REASONS TO SKIP AND THEY ARE DIFFERENT, which is why the decision
-        // is named rather than inlined. See [`blocks_without_pricing`].
-        if blocks_without_pricing(c, &mut open_until) {
-            continue;
-        }
         let span = c.time_exit.saturating_sub(c.entry);
         let stop_at = stop.map_or(NEVER, |r| c.cross.stop_at(r));
         let target_at = target.map_or(NEVER, |r| c.cross.target_at(r));
@@ -4176,6 +4194,13 @@ fn one_variant(
         // an order that never fires is `NEVER`, so it drops out of the `min`
         // without a branch.
         let pess_off = span.min(stop_at).min(target_at).min(live.at).min(armed.at);
+        // TWO REASONS TO SKIP AND THEY ARE DIFFERENT, which is why the decision
+        // is named rather than inlined. See [`blocks_without_pricing`]. It is
+        // asked AFTER `pess_off` because a refused bar only un-prices a variant
+        // whose exit is at or after it (D-1183); every read above is O(1).
+        if blocks_without_pricing(c, pess_off, &mut open_until) {
+            continue;
+        }
         let firing = Firing {
             stop_at,
             target_at,
@@ -7089,6 +7114,7 @@ mod tests {
                     entry_pess: 2_500_100,
                     entry_opt: 2_500_000,
                 },
+                2,
                 &mut open_until,
             );
             assert!(
@@ -7096,6 +7122,75 @@ mod tests {
                 "{side:?}: a path with a refused bar must never reach a cell"
             );
         }
+    }
+
+    /// A refused bar AFTER a level exit does not un-price that exit -- D-1183.
+    ///
+    /// Audit W3-runner2-7: `blocks_without_pricing` read `refused() > 0`, so a
+    /// hole at offset 3 refused a stop that had already closed the position at
+    /// offset 1, and blocked the next signal to the time exit. Each variant now
+    /// compares its own exit offset with `first_refused`. The time-exit
+    /// variant, whose exit IS the hole, and a path whose hole sits on the stop
+    /// bar itself, still refuse.
+    #[test]
+    fn a_hole_after_a_level_exit_leaves_that_exit_priced() {
+        let bars = vec![
+            candle(0, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+            candle(1, 2_500_000, 2_500_100, 2_450_000, 2_460_000),
+            candle(2, 2_460_000, 2_460_100, 2_459_900, 2_460_000),
+            candle(3, 2_460_000, 2_460_100, 2_459_900, 2_460_000),
+        ];
+        let stops = probe_ladder(&[10_000]);
+        let targets = probe_ladder(&[900_000]);
+        let trails = probe_ladder(&[900_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &targets,
+            trails: &trails,
+        };
+        let priced = |accepted: &[bool], stop: Option<usize>| {
+            let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+            let candidate = super::Candidate {
+                signal: 0,
+                entry: 0,
+                time_exit: 3,
+                block_only: false,
+                cross: crossings_checked(&bars, 0, 3, entry_opt, Side::Long, ladders, accepted),
+                entry_pess,
+                entry_opt,
+            };
+            super::one_variant(
+                &bars,
+                &[candidate],
+                (stops.rungs(), targets.rungs(), trails.rungs()),
+                super::Variant {
+                    stop,
+                    target: None,
+                    tsl: None,
+                    ttp: None,
+                },
+                Side::Long,
+                None,
+            )
+            .trades
+        };
+        let hole_after = [true, true, true, false];
+        assert_eq!(
+            priced(&hole_after, Some(0)),
+            1,
+            "the stop closed the position at offset 1; the hole at 3 is after it"
+        );
+        assert_eq!(
+            priced(&hole_after, None),
+            0,
+            "the time exit IS the refused bar, so it cannot be priced"
+        );
+        let hole_on_stop = [true, false, true, true];
+        assert_eq!(
+            priced(&hole_on_stop, Some(0)),
+            0,
+            "a hole at or before the exit leaves the exit unknowable"
+        );
     }
 
     /// FNV-1a over a rendering, so no field can be left out of a fingerprint.
@@ -8515,11 +8610,11 @@ mod tests {
         let following_minute = candidate(3, 5);
         let mut blocked_until = Some(2);
         assert!(
-            super::blocks_without_pricing(&same_minute, &mut blocked_until),
+            super::blocks_without_pricing(&same_minute, 3, &mut blocked_until),
             "entry bar 2 is the previous exit bar and must be blocked"
         );
         assert!(
-            !super::blocks_without_pricing(&following_minute, &mut blocked_until),
+            !super::blocks_without_pricing(&following_minute, 2, &mut blocked_until),
             "entry bar 3 is strictly after exit bar 2 and must remain eligible"
         );
     }

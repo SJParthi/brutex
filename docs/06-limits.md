@@ -10008,3 +10008,16 @@ not:
   re-check every caller. The fix needs a cadence supplied by the caller (or
   read from the rung's declared timeframe), which changes the `grid` and `cli`
   call sites. It is deferred, and the direction of the error is not one-sided.
+
+## Runner lane-2b follow-ups — D-1183 onward, 2 October 2026
+
+- **A hole after a level exit still blocks the path in the walk (D-1183).** The
+  grid now prices a variant whose exit precedes `first_refused`. But
+  `trade::walk_core` marks a whole path block-only when `path_accepts(entry,
+  time_exit)` fails, so shipping grids never see such a candidate as priceable.
+  A refused bar or missing minute after a stop therefore still removes that
+  trade from every cell and blocks to the time exit. The direction is
+  conservative (a trade is refused, none is invented). Fixing it needs
+  `Occupancy` to carry the first refused offset and the first missing-minute
+  offset, which changes the walk's output.
+

@@ -44457,3 +44457,38 @@ median. The comments in `walk_core` say shipping one-minute paths are
 reprojected to `Fill`. This lane did not re-check every caller to confirm that,
 so the exposure of shipping runs is UNVERIFIED. No output changes.
 
+### D-1183 — A grid variant is un-priced only by a hole at or before its own exit — 2026-10-02
+
+**Finding.** W3-runner2-7, the grid half D-1179 handed over.
+`grid::blocks_without_pricing` refused a candidate when
+`c.cross.refused() > 0`, a count. A refused bar after a stop, target or trail
+had already closed the position therefore un-priced that variant's trade and
+blocked the next signal to the time exit. A bar after the exit decided whether
+the exit counted.
+
+**The change.** `one_variant` computes the variant's pessimistic exit offset
+`pess_off` first, then asks `blocks_without_pricing(c, pess_off, ..)`. The
+candidate is refused when it is `block_only`, or when `first_refused` is at or
+before `pess_off`. Every crossing strictly before the first hole was read off
+accepted bars only, so the order that fired there is the first that fired. A
+count with no location keeps the conservative refusal. All reads are O(1), and
+the `open_until` test still comes first.
+
+**Output change, and where it reaches.** A variant whose exit precedes a
+refused bar on its path is now priced, and the next signal may open after that
+exit instead of after the time exit. This reaches only a candidate built with
+`block_only: false` and a refused bar on its path. **Every shipping grid builds
+its candidates from `trade::walk_over`'s `occupancy`, and that walk marks a path
+`priceable: false` (so `block_only`) whenever `SliceFacts::path_accepts(entry,
+time_exit)` fails, which any refused bar or missing minute on the path makes it
+do.** So no shipping cell changes. The look-ahead the audit describes is still
+live one step upstream: the walk blocks the whole path for a hole after a level
+exit. Closing that needs `Occupancy` to carry where the hole is, and a
+missing-minute location as well, because `crossings_with` cannot see a missing
+minute. That is a change to the walk's output and to every grid built on it. It
+is recorded in `docs/06-limits.md` and not made here.
+
+**Test.** `a_hole_after_a_level_exit_leaves_that_exit_priced`: a stop at offset
+1 with a refused bar at 3 is priced; the time-exit variant and a hole on the
+stop bar are not. With the old count test the first assertion fails.
+
