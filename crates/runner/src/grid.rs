@@ -2765,6 +2765,14 @@ pub fn materialize_best(
 /// # Errors
 ///
 /// The same reconciliation refusals as [`materialize_best`].
+///
+/// # Cost
+///
+/// This one-off door derives [`crate::trade::SliceFacts`] (Θ(bars)) and walks
+/// the column (Θ(rows)) on every call. A loop over the cells of one grid must
+/// build one [`CellReplay`] with [`CellReplay::prepare`] and call
+/// [`CellReplay::materialize`] per cell instead; a loop over several grids of one slice must also hoist the
+/// facts and use [`materialize_cell_over`]. D-0990.
 pub fn materialize_cell(
     bars: &[Candle],
     column: &Column,
@@ -2783,7 +2791,10 @@ pub fn materialize_cell(
 /// `materialize_cell` builds [`crate::trade::SliceFacts`] per call, an O(B)
 /// value. A caller that materialises one cell for each of many candidates on
 /// one slice builds the facts once and passes them here. `facts` must be
-/// [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
+/// [`crate::trade::SliceFacts::of`] the same `bars` and `column`, the same
+/// contract [`with_levels_over`] states. This door still walks the column once
+/// per call; replaying many cells of ONE grid belongs on [`CellReplay`], which
+/// walks once for all of them.
 ///
 /// # Errors
 ///

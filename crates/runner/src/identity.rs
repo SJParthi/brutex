@@ -522,6 +522,15 @@ pub enum DailyBindingRefusal {
     },
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`data_digest_with_daily_reference`] calls on this
+    /// thread, so a test can prove a sealed
+    /// [`crate::exit_grid_policy::DailyReferenceRunSourceV1`] is minted once and
+    /// reused rather than re-hashing every stream per run. D-0990.
+    pub(crate) static DAILY_REFERENCE_DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Bind the signal rung, exact one-minute path, stored one-day references,
 /// calendar/eligibility policy, and integrity evidence into one data term.
 ///
@@ -555,6 +564,8 @@ pub fn data_digest_with_daily_reference(
     const SWEPT_SERIES_CALENDAR_POLICY: u8 = 11;
     const DAILY_CHECKSUM_RECEIPT_V1: u8 = 12;
     const MINUTE_CHECKSUM_RECEIPT_V1: u8 = 13;
+    #[cfg(test)]
+    DAILY_REFERENCE_DIGESTS.with(|count| count.set(count.get().saturating_add(1)));
 
     if reference.daily_bars.len() != reference.eligibility.len() {
         return Err(DailyBindingRefusal::EligibilityLengthMismatch {

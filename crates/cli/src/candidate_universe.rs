@@ -69,10 +69,10 @@ use indicators::vwap::Availability;
 use pull::session::Day;
 use runner::excursion::Side;
 use runner::exit_grid_policy::{
-    ExecutionDispositionV1, ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1,
-    ExitGridSelectorV1, ForcedStopV1, GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1,
-    RangeResolutionV1, RationalPercentileV1, ResolvedExitGridV1, ValidatedExitGridV1,
-    column_digest_v1, instrument_digest_v1,
+    AttestedTrainingV1, ExecutionDigestsV1, ExecutionDispositionV1, ExecutionResolutionV1,
+    ExecutionRunV1, ExecutionSeriesV1, ExitGridSelectorV1, ForcedStopV1,
+    GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1, RangeResolutionV1, RationalPercentileV1,
+    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v1, instrument_digest_v1,
 };
 use runner::grid::{Cell, CellReplay, Chosen, Ttp};
 use runner::identity::{DailyReferenceBinding, Direction, Params, Run};
@@ -2710,12 +2710,21 @@ pub(crate) fn pair_candidate_base_evidence_v2(
 /// # Cost
 ///
 /// The total is input-dependent: one naturally-extinct sweep plus one complete
-/// grid evaluation and validation per `(closed mask, direction)`. Every grid
-/// cell is then replayed over its exact execution series through one
-/// `runner::grid::CellReplay` per `(closed mask, direction)` -- the walk and
-/// crossing table once, then O(candidate paths) per cell (D-1141);
-/// its resulting `TradeRow` sequence is folded once for Base Evidence and once
-/// for accepted-session observations before the rows are dropped. Only the
+/// grid evaluation and validation per `(closed mask, direction)`.
+///
+/// Everything that no mask can change is sealed ONCE, on the first closed
+/// mask, by `hoist_execution_series`: the three-stream data digest and the
+/// evaluated slice's digest (`ExecutionDigestsV1`, Θ(S + M + D + E)),
+/// and one attestation plus one `SliceFacts` derivation per resolved side
+/// (`AttestedTrainingV1`, Θ(E) each). Per `(closed mask, direction)` what remains
+/// is the O(1) run seal, two level-less column walks (one prices the grid, one
+/// is held by `runner::grid::CellReplay` with its crossing table for the
+/// cells), Θ(rows) each, and the grid's own work. Each grid cell is then
+/// replayed from that held walk, O(candidate paths) per cell (D-1141) and
+/// independent of the slice length; its resulting `TradeRow`
+/// sequence is folded once for Base Evidence and once for accepted-session
+/// observations before the rows are dropped. Retained rows grow geometrically
+/// (amortised O(1) per row). D-0990; `docs/06-limits.md` §147. Only the
 /// final Candidate/Base record projections are fixed-cost. Retained Candidate
 /// rows and fixed Base records are linear in the complete
 /// closed-frontier-by-grid population, observation space also depends on its
@@ -2807,20 +2816,25 @@ pub(crate) fn produce_candidate_universe_v1<'a>(
         .map_err(|why| why.to_string())?;
     let mut base_builder = BaseEvidenceBuilderV2::new(base_bounds);
     let mut rows = Vec::new();
+    let inputs = CandidateExecutionInputsV1 {
+        signal_bars,
+        reference_minute_context,
+        daily_reference,
+        execution_series,
+        execution_column: &execution_column,
+        long_exit_grid,
+        short_exit_grid,
+        horizon,
+    };
+    let mut hoisted = None;
     let population_run =
         sweeper.run_prepared_population_by_reporting(signal_column, on_level, |member| {
             expand_population_member(
                 member,
                 &descriptor,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                &execution_column,
-                long_exit_grid,
-                short_exit_grid,
-                horizon,
+                &inputs,
+                &mut hoisted,
                 rung_seconds,
                 bounds,
                 &mut rows,
@@ -4421,11 +4435,25 @@ fn build_execution_v3_replay_authority(
                 authenticated.len()
             )
         })?;
+    let inputs = CandidateExecutionInputsV1 {
+        signal_bars: source.signal_bars,
+        reference_minute_context: source.reference_minute_context,
+        daily_reference: source.daily_reference,
+        execution_series: source.execution_series,
+        execution_column: &source.execution_column,
+        long_exit_grid: source.long_exit_grid,
+        short_exit_grid: source.short_exit_grid,
+        horizon: source.horizon,
+    };
+    let mut hoisted = None;
     let mut group_start = 0_usize;
     while group_start < rows.len() {
+        let series = hoisted_execution_series(&mut hoisted, &inputs)?;
         replay_execution_side(
             source,
             params,
+            &series.run_source,
+            &series.long,
             &rows,
             authenticated,
             group_start,
@@ -4441,6 +4469,8 @@ fn build_execution_v3_replay_authority(
         replay_execution_side(
             source,
             params,
+            &series.run_source,
+            &series.short,
             &rows,
             authenticated,
             short_start,
@@ -4575,13 +4605,11 @@ fn try_clone_percentiles(
     clippy::too_many_arguments,
     reason = "one exact directional replay keeps the authenticated row slice, side resolution and append target explicit"
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one directional fold keeps row identity, exact evaluation and disposition append in a single fail-closed sequence"
-)]
 fn replay_execution_side(
     source: &CandidateUniverseProductionSourceV1<'_>,
     params: Params,
+    run_source: &ExecutionDigestsV1,
+    attested: &AttestedTrainingV1<'_>,
     rows: &[CandidateUniverseRowV1],
     authenticated: &[AuthenticatedCandidatePopulationRowV1],
     start: usize,
@@ -4618,21 +4646,10 @@ fn replay_execution_side(
         commit: source.execution_series.commit(),
         feed: source.execution_series.feed(),
     };
-    let execution_run = ExecutionRunV1::new_with_daily_reference(
-        &run,
-        source.signal_bars,
-        source.reference_minute_context,
-        source.execution_series.bars(),
-        source.daily_reference,
-    )
-    .map_err(|why| format!("Candidate Execution V3 exact run refused: {why:?}"))?;
+    let execution_run = ExecutionRunV1::with_digests(&run, run_source)
+        .map_err(|why| format!("Candidate Execution V3 exact run refused: {why:?}"))?;
     let evaluated = resolved
-        .evaluate_training_grid_attested(
-            source.execution_series,
-            &source.execution_column,
-            source.horizon,
-            execution_run,
-        )
+        .evaluate_with_attested(attested, execution_run)
         .map_err(|why| format!("Candidate Execution V3 complete grid refused: {why:?}"))?;
     let validated = resolved
         .validate_evaluation(&evaluated)
@@ -4719,22 +4736,118 @@ fn rung_label(rung_seconds: u32) -> Result<&'static str, CandidateUniverseRefusa
     }
 }
 
+/// The exact streams, slice and resolutions every `(closed mask, side)` grid
+/// of one Candidate block is priced against. No mask can change any of them.
+#[derive(Clone, Copy)]
+struct CandidateExecutionInputsV1<'s> {
+    signal_bars: &'s [Candle],
+    reference_minute_context: &'s [Candle],
+    daily_reference: DailyReferenceBinding<'s>,
+    execution_series: ExecutionSeriesV1<'s>,
+    execution_column: &'s Column,
+    long_exit_grid: &'s ResolvedExitGridV1,
+    short_exit_grid: &'s ResolvedExitGridV1,
+    horizon: Horizon,
+}
+
+/// The series-invariant execution authority, sealed once per Candidate block.
+///
+/// Before D-0990 every `(closed mask, side)` re-hashed the signal, minute
+/// context and daily streams (`ExecutionRunV1::new_with_daily_reference`),
+/// re-attested the execution slice (`evaluate_training_grid_attested`) and
+/// rebuilt the slice facts once for the grid and once more for every cell
+/// (`materialize_cell`). All of that is a function of the streams alone.
+struct HoistedExecutionV1<'s> {
+    run_source: ExecutionDigestsV1,
+    long: AttestedTrainingV1<'s>,
+    short: AttestedTrainingV1<'s>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`hoist_execution_series`] calls on this thread.
+    static SERIES_HOISTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Θ(S + M + D + E) for the sealed run source plus, per side, one attestation
+/// and one `SliceFacts` derivation. Called once per Candidate block.
+fn hoist_execution_series<'s>(
+    inputs: &CandidateExecutionInputsV1<'s>,
+) -> Result<HoistedExecutionV1<'s>, CandidateUniverseRefusal> {
+    #[cfg(test)]
+    SERIES_HOISTS.with(|count| count.set(count.get().saturating_add(1)));
+    let run_source = ExecutionDigestsV1::of_daily_reference(
+        inputs.signal_bars,
+        inputs.reference_minute_context,
+        inputs.execution_series.bars(),
+        inputs.daily_reference,
+    )
+    .map_err(|why| format!("candidate execution run sources refused: {why:?}"))?;
+    let long = inputs
+        .long_exit_grid
+        .attest_training(
+            inputs.execution_series,
+            inputs.execution_column,
+            inputs.horizon,
+        )
+        .map_err(|why| format!("candidate Long execution slice attestation refused: {why:?}"))?;
+    let short = inputs
+        .short_exit_grid
+        .attest_training(
+            inputs.execution_series,
+            inputs.execution_column,
+            inputs.horizon,
+        )
+        .map_err(|why| format!("candidate Short execution slice attestation refused: {why:?}"))?;
+    Ok(HoistedExecutionV1 {
+        run_source,
+        long,
+        short,
+    })
+}
+
+/// The hoisted authority, sealed on first use so a block that retires no
+/// closed mask (or replays no row) refuses exactly what it refused before.
+fn hoisted_execution_series<'h, 's>(
+    slot: &'h mut Option<HoistedExecutionV1<'s>>,
+    inputs: &CandidateExecutionInputsV1<'s>,
+) -> Result<&'h HoistedExecutionV1<'s>, CandidateUniverseRefusal> {
+    let hoisted = match slot.take() {
+        Some(hoisted) => hoisted,
+        None => hoist_execution_series(inputs)?,
+    };
+    Ok(slot.insert(hoisted))
+}
+
+/// Reserves one directional grid's rows with geometric growth.
+///
+/// `try_reserve_exact` grew the retained buffer by exactly one grid width per
+/// `(closed mask, side)`, so every grid moved the whole buffer. `try_reserve`
+/// keeps `Vec`'s amortised-O(1) append (`CLAUDE.md` §3 rule 4); the configured
+/// `max_rows` bound is checked by the caller before this runs. D-0990, proven by
+/// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`
+/// (CUH-04).
+fn reserve_directional_grid_rows<T>(
+    rows: &mut Vec<T>,
+    additional: usize,
+) -> Result<(), CandidateUniverseRefusal> {
+    rows.try_reserve(additional).map_err(|why| {
+        format!(
+            "candidate could not reserve {additional} rows for one complete directional grid: {why}"
+        )
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
-    reason = "both complete side resolutions and all canonical execution-run identity sources remain explicit"
+    reason = "the hoisted series authority and every append target remain explicit"
 )]
-fn expand_population_member(
+fn expand_population_member<'s>(
     member: PopulationMember,
     descriptor: &CandidateUniverseDescriptorV1,
     params: Params,
-    signal_bars: &[Candle],
-    reference_minute_context: &[Candle],
-    daily_reference: DailyReferenceBinding<'_>,
-    execution_series: ExecutionSeriesV1<'_>,
-    execution_column: &Column,
-    long_exit_grid: &ResolvedExitGridV1,
-    short_exit_grid: &ResolvedExitGridV1,
-    horizon: Horizon,
+    inputs: &CandidateExecutionInputsV1<'s>,
+    hoisted: &mut Option<HoistedExecutionV1<'s>>,
     rung_seconds: u32,
     bounds: CandidateUniverseBoundsV1,
     rows: &mut Vec<CandidateUniverseRowV1>,
@@ -4753,24 +4866,23 @@ fn expand_population_member(
             let support = measure_mask_support_v2(
                 runner::replay_mask::stored_words(&member.item.mask),
                 member.item.hits,
-                signal_bars,
+                inputs.signal_bars,
                 support_signal_column,
                 base_bounds,
             )
             .map_err(|why| why.to_string())?;
+            let series = hoisted_execution_series(hoisted, inputs)?;
             expand_population_side(
                 member,
                 descriptor,
                 TradeDirectionV1::Long,
                 Direction::Long,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                execution_column,
-                long_exit_grid,
-                horizon,
+                &series.run_source,
+                inputs.execution_series,
+                &series.long,
+                inputs.long_exit_grid,
+                inputs.horizon,
                 rung_seconds,
                 bounds,
                 rows,
@@ -4784,13 +4896,11 @@ fn expand_population_member(
                 TradeDirectionV1::Short,
                 Direction::Short,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                execution_column,
-                short_exit_grid,
-                horizon,
+                &series.run_source,
+                inputs.execution_series,
+                &series.short,
+                inputs.short_exit_grid,
+                inputs.horizon,
                 rung_seconds,
                 bounds,
                 rows,
@@ -4812,11 +4922,9 @@ fn expand_population_side(
     trade_direction: TradeDirectionV1,
     run_direction: Direction,
     params: Params,
-    signal_bars: &[Candle],
-    reference_minute_context: &[Candle],
-    daily_reference: DailyReferenceBinding<'_>,
+    run_source: &ExecutionDigestsV1,
     execution_series: ExecutionSeriesV1<'_>,
-    execution_column: &Column,
+    attested: &AttestedTrainingV1<'_>,
     resolved: &ResolvedExitGridV1,
     horizon: Horizon,
     rung_seconds: u32,
@@ -4839,11 +4947,7 @@ fn expand_population_side(
     }
     let additional = usize::try_from(resolved.cell_count())
         .map_err(|_| "candidate resolved grid width does not fit usize".to_owned())?;
-    rows.try_reserve_exact(additional).map_err(|why| {
-        format!(
-            "candidate could not reserve {additional} rows for one complete directional grid: {why}"
-        )
-    })?;
+    reserve_directional_grid_rows(rows, additional)?;
 
     let run = Run {
         mask: member.item.mask,
@@ -4855,14 +4959,7 @@ fn expand_population_side(
         commit: execution_series.commit(),
         feed: execution_series.feed(),
     };
-    let execution_run = ExecutionRunV1::new_with_daily_reference(
-        &run,
-        signal_bars,
-        reference_minute_context,
-        execution_series.bars(),
-        daily_reference,
-    )
-    .map_err(|why| {
+    let execution_run = ExecutionRunV1::with_digests(&run, run_source).map_err(|why| {
         format!(
             "candidate {:?} execution run refused mask {:?}: {why:?}",
             trade_direction,
@@ -4870,7 +4967,7 @@ fn expand_population_side(
         )
     })?;
     let evaluated = resolved
-        .evaluate_training_grid_attested(execution_series, execution_column, horizon, execution_run)
+        .evaluate_with_attested(attested, execution_run)
         .map_err(|why| {
             format!(
                 "candidate {:?} complete grid evaluation refused mask {:?}: {why:?}",
@@ -4899,6 +4996,9 @@ fn expand_population_side(
     let validated = resolved.validate_evaluation(&evaluated).map_err(|why| {
         format!("candidate {trade_direction:?} complete grid integrity refused: {why:?}")
     })?;
+    let cells = attested
+        .cell_replay(&evaluated)
+        .map_err(|why| format!("candidate {trade_direction:?} cell replay refused: {why:?}"))?;
     append_validated_grid_rows(
         member,
         descriptor,
@@ -4906,7 +5006,7 @@ fn expand_population_side(
         &evaluated,
         &validated,
         execution_series.bars(),
-        execution_column,
+        &cells,
         rows,
         observations,
         support,
@@ -4925,25 +5025,17 @@ fn append_validated_grid_rows(
     evaluated: &runner::exit_grid_policy::EvaluatedExitGridV1,
     validated: &ValidatedExitGridV1<'_>,
     execution_bars: &[Candle],
-    execution_column: &Column,
+    cells: &CellReplay<'_>,
     rows: &mut Vec<CandidateUniverseRowV1>,
     observations: &mut CandidateObservationBuilderV1,
     support: MaskSupportEvidenceV2,
     base_builder: &mut BaseEvidenceBuilderV2,
 ) -> Result<(), CandidateUniverseRefusal> {
-    // One walk and one crossing table for the whole grid, then O(C) per cell
-    // (D-1141). `materialize_cell` per cell rebuilt the slice facts, the walk
-    // and the crossings for every cell: O(cells x B) per member-side.
-    let facts = runner::trade::SliceFacts::of(execution_bars, execution_column);
-    let replay = CellReplay::prepare(
-        execution_bars,
-        execution_column,
-        &member.item.mask,
-        evaluated.horizon(),
-        evaluated.side(),
-        evaluated.grid(),
-        &facts,
-    );
+    // `cells` holds one walk and one crossing table for the whole grid, over
+    // the slice facts the block's attestation derived once, so each cell is
+    // O(C) (D-1141, D-0990). `materialize_cell` per cell rebuilt the slice
+    // facts, the walk and the crossings for every cell: O(cells x B) per
+    // member-side.
     for ordinal in 0..evaluated.grid().cells.len() {
         let cell = validated.cell(ordinal).ok_or_else(|| {
             format!(
@@ -4973,7 +5065,7 @@ fn append_validated_grid_rows(
         };
         row.candidate_semantic_digest = candidate_semantic_digest(descriptor, &row);
         row.validate(Some(descriptor))?;
-        let trades = replay.materialize(cell).map_err(|why| {
+        let trades = cells.materialize(cell).map_err(|why| {
             format!("candidate {direction:?} cell {ordinal} exact trade replay refused: {why}")
         })?;
         base_builder
@@ -7762,18 +7854,22 @@ mod tests {
         )
         .expect("fixture Base Evidence bounds are explicit");
         let mut expanded_base_builder = BaseEvidenceBuilderV2::new(expanded_base_bounds);
+        let inputs = CandidateExecutionInputsV1 {
+            signal_bars: source.signal_bars,
+            reference_minute_context: source.reference_minute_context,
+            daily_reference: source.daily_reference,
+            execution_series: source.execution_series,
+            execution_column: &source.execution_column,
+            long_exit_grid: source.long_exit_grid,
+            short_exit_grid: source.short_exit_grid,
+            horizon: source.horizon,
+        };
         expand_population_member(
             member,
             &descriptor,
             execution_run_params(&sweeper, &source),
-            source.signal_bars,
-            source.reference_minute_context,
-            source.daily_reference,
-            source.execution_series,
-            &source.execution_column,
-            source.long_exit_grid,
-            source.short_exit_grid,
-            source.horizon,
+            &inputs,
+            &mut None,
             source.rung_seconds,
             bounds,
             &mut expanded,
@@ -8863,5 +8959,267 @@ mod tests {
                 "replacement of {name} did not fail closed"
             );
         }
+    }
+
+    fn production_body(name: &str) -> &'static str {
+        let source = include_str!("candidate_universe.rs");
+        let tests_start = source
+            .find("\nmod tests {")
+            .expect("the test module exists");
+        let production = &source[..tests_start];
+        let start = production
+            .find(&format!("\nfn {name}("))
+            .or_else(|| production.find(&format!("\nfn {name}<")))
+            .or_else(|| production.find(&format!("\npub(crate) fn {name}<")))
+            .unwrap_or_else(|| panic!("{name} exists"));
+        let rest = &production[start + 1..];
+        let end = rest.find("\n}\n").expect("the function closes");
+        &rest[..end]
+    }
+
+    /// D-0990: every series-invariant term on the per-(closed mask, side) path
+    /// is hoisted. The per-mask bodies may not re-hash the streams, re-attest
+    /// the slice, rebuild the slice facts through the one-off replay door, or
+    /// grow the retained row vector by an exact increment.
+    #[test]
+    fn candidate_grid_paths_hoist_every_series_invariant_out_of_the_mask_loop() {
+        for name in [
+            "expand_population_side",
+            "append_validated_grid_rows",
+            "replay_execution_side",
+        ] {
+            let body = production_body(name);
+            for banned in [
+                "new_with_daily_reference(",
+                "evaluate_training_grid_attested(",
+                "attest_training",
+                "ExecutionDigestsV1::of_daily_reference(",
+                "= materialize_cell(",
+                "SliceFacts::of(",
+                "try_reserve_exact(",
+            ] {
+                assert!(
+                    !body.contains(banned),
+                    "{name} repeats a series-invariant term per mask: {banned}"
+                );
+            }
+        }
+        for (name, required) in [
+            ("expand_population_side", "with_digests("),
+            ("expand_population_side", "evaluate_with_attested("),
+            ("expand_population_side", ".cell_replay("),
+            ("append_validated_grid_rows", "cells.materialize("),
+            ("replay_execution_side", "with_digests("),
+            ("replay_execution_side", "evaluate_with_attested("),
+        ] {
+            assert!(
+                production_body(name).contains(required),
+                "{name} must use the hoisted door {required}"
+            );
+        }
+        let hoist = production_body("hoist_execution_series");
+        assert!(hoist.contains("ExecutionDigestsV1::of_daily_reference("));
+        assert_eq!(hoist.matches("attest_training(").count(), 2);
+    }
+
+    /// D-0990: one directional grid's rows are reserved with GEOMETRIC growth.
+    ///
+    /// `try_reserve_exact` grew the retained buffer by exactly one grid width
+    /// per `(closed mask, side)`, so every append of a new grid moved the whole
+    /// buffer: Θ(rows retained) per grid, the amortised-O(1) guarantee of
+    /// `CLAUDE.md` §3 rule 4 lost. Sixty-four one-row grids must therefore
+    /// change capacity at most ⌈log2 64⌉ + 1 times, never sixty-four; it is
+    /// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`,
+    /// invariant
+    /// row CUH-04.
+    #[test]
+    fn retained_candidate_rows_grow_geometrically_per_directional_grid() {
+        let mut rows: Vec<u64> = Vec::new();
+        let mut reallocations = 0_u32;
+        let mut capacity = rows.capacity();
+        for value in 0..64_u64 {
+            reserve_directional_grid_rows(&mut rows, 1).expect("one row reserves");
+            if rows.capacity() != capacity {
+                reallocations += 1;
+                capacity = rows.capacity();
+            }
+            rows.push(value);
+        }
+        assert_eq!(rows.len(), 64);
+        assert!(
+            reallocations <= 7,
+            "{reallocations} reallocations for 64 one-row grids is exact, not geometric, growth"
+        );
+        // A grid wider than the spare capacity still reserves all of it.
+        reserve_directional_grid_rows(&mut rows, 1_000).expect("a wide grid reserves");
+        assert!(rows.capacity() - rows.len() >= 1_000);
+        // An impossible reservation is a named refusal, not an abort.
+        let refused = reserve_directional_grid_rows(&mut rows, usize::MAX)
+            .expect_err("usize::MAX rows cannot be reserved");
+        assert!(refused.contains("could not reserve"), "{refused}");
+    }
+
+    /// D-0990: the series-invariant execution authority is sealed exactly once
+    /// per Candidate block, however many closed masks are expanded through it,
+    /// for production and for Execution V3 replay; a rerun is byte-identical.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture proves the per-member reuse, the production count, the rerun and the replay count together"
+    )]
+    #[test]
+    fn candidate_production_seals_the_execution_series_once_for_every_closed_mask() {
+        let fixture = ProductionFixture::new();
+        let source = fixture.source();
+        let (frequent_bit, max_singleton_support, _) =
+            maximum_nontrivial_live_singleton_support(&source.signal_column);
+        let ladder = engine::Ladder::with_min_hits(max_singleton_support);
+        let sweeper = Sweeper::new(ladder);
+        let bounds = CandidateUniverseBoundsV1::new(1_000_000, 4)
+            .expect("production fixture bounds are explicit");
+
+        // Several closed members through ONE hoisted slot: one seal in total,
+        // and every member's rows identical to the first's.
+        let identities = production_identities(&source, &sweeper).expect("typed identities");
+        let descriptor = CandidateUniverseDescriptorV1::new(
+            source.family,
+            source.rung_seconds,
+            source.horizon,
+            source.requested_span,
+            &identities,
+            source.signal_calendar,
+            source.execution_calendar,
+            source.signal_bars,
+            &source.signal_column,
+            source.execution_series,
+            &source.execution_column,
+        )
+        .expect("production descriptor");
+        let member = PopulationMember {
+            item: engine::Itemset {
+                mask: vocab::ConditionMask::ZERO.with_bit(frequent_bit),
+                hits: max_singleton_support,
+            },
+            closure: ClosureVerdict::Closed,
+        };
+        let inputs = CandidateExecutionInputsV1 {
+            signal_bars: source.signal_bars,
+            reference_minute_context: source.reference_minute_context,
+            daily_reference: source.daily_reference,
+            execution_series: source.execution_series,
+            execution_column: &source.execution_column,
+            long_exit_grid: source.long_exit_grid,
+            short_exit_grid: source.short_exit_grid,
+            horizon: source.horizon,
+        };
+        let base_bounds = BaseEvidenceBoundsV2::new(
+            bounds.max_rows(),
+            source.minute_load_bound.max_records(),
+            source.signal_load_bound.max_records(),
+            source.signal_load_bound.max_records(),
+        )
+        .expect("fixture Base Evidence bounds");
+        SERIES_HOISTS.with(|count| count.set(0));
+        let mut hoisted = None;
+        let mut expansions = Vec::new();
+        for _ in 0..4 {
+            let mut rows = Vec::new();
+            let mut observations = CandidateObservationBuilderV1::from_exact_execution(
+                source.execution_calendar,
+                source.execution_series.bars(),
+                &source.execution_column,
+            )
+            .expect("fixture observations");
+            let mut base_builder = BaseEvidenceBuilderV2::new(base_bounds);
+            expand_population_member(
+                member,
+                &descriptor,
+                execution_run_params(&sweeper, &source),
+                &inputs,
+                &mut hoisted,
+                source.rung_seconds,
+                bounds,
+                &mut rows,
+                &mut observations,
+                &source.signal_column,
+                base_bounds,
+                &mut base_builder,
+            )
+            .expect("a closed member expands through the hoisted authority");
+            expansions.push(rows);
+        }
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "four closed members on two sides seal the streams and attest each side once"
+        );
+        let first = expansions.first().expect("one expansion");
+        assert!(!first.is_empty());
+        assert!(expansions.iter().all(|rows| rows == first));
+        // A redundant member never seals anything.
+        SERIES_HOISTS.with(|count| count.set(0));
+        let mut untouched = None;
+        expand_population_member(
+            PopulationMember {
+                closure: ClosureVerdict::Redundant,
+                ..member
+            },
+            &descriptor,
+            execution_run_params(&sweeper, &source),
+            &inputs,
+            &mut untouched,
+            source.rung_seconds,
+            bounds,
+            &mut Vec::new(),
+            &mut CandidateObservationBuilderV1::from_exact_execution(
+                source.execution_calendar,
+                source.execution_series.bars(),
+                &source.execution_column,
+            )
+            .expect("fixture observations"),
+            &source.signal_column,
+            base_bounds,
+            &mut BaseEvidenceBuilderV2::new(base_bounds),
+        )
+        .expect("a redundant member is skipped");
+        assert!(untouched.is_none());
+        assert_eq!(SERIES_HOISTS.with(std::cell::Cell::get), 0);
+
+        SERIES_HOISTS.with(|count| count.set(0));
+        let produced = produce_candidate_universe_v1(&sweeper, source, bounds, &|_, _, _| {})
+            .expect("an uncapped naturally-extinct production walk completes");
+        assert!(produced.population_run().closed >= 1);
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "production seals the series once"
+        );
+        let rerun =
+            produce_candidate_universe_v1(&sweeper, fixture.source(), bounds, &|_, _, _| {})
+                .expect("the exact rerun completes");
+        assert_eq!(
+            rerun.receipt(),
+            produced.receipt(),
+            "a rerun is byte-identical"
+        );
+
+        let root = test_dir();
+        let written = produced
+            .append_and_reopen(root.path(), bounds)
+            .expect("typed production writes rows then receipt and reopens");
+        let ledger = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+            .expect("the completed Candidate ledger reopens read-only");
+        let authenticated = ledger
+            .complete_population_rows(&written.audit())
+            .expect("the completed Candidate rows authenticate");
+        SERIES_HOISTS.with(|count| count.set(0));
+        fixture
+            .source()
+            .execution_v3_replay_authority(ladder, written.audit().receipt(), &authenticated)
+            .expect("the retained source reproduces exact Runner terminal dispositions");
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "Execution V3 replay seals the series once for every authenticated group"
+        );
     }
 }

@@ -7725,6 +7725,23 @@ families do not establish one cross-rung FWER guarantee. No latency, capacity,
 profit, fill quality, O(1)-space, million-customer or real-sweep claim is
 measured by the architecture decision or by a controlled fixture.
 
+**D-0990 — what one closed mask costs on the Candidate grid path.** Work
+that no mask can change is sealed once per Candidate block: the three-stream
+data digest and evaluated-slice digest, Θ(S + M + D + E), and per resolved
+side one attestation plus one `SliceFacts` derivation, Θ(E). Each
+`(closed mask, side)` then costs an O(1) run seal, **two Θ(rows) column
+walks** (one prices the grid, one is held with its crossing table by
+`runner::grid::CellReplay` for its cells) and the grid's own crossing work;
+neither walk is O(1), because the mask is tested on every row. Each of the
+grid's cells then replays from the held walk and crossing table in
+O(candidate paths) (D-1141), independent of the slice length, and its rows fold
+into Base Evidence and observations in O(trades). Retained rows grow
+geometrically, amortised O(1) per row; one grid larger than the spare
+capacity still moves the buffer once. Execution V3 replay pays the same
+per-block seal once and one walk per group. **UNVERIFIED as measured
+bounds:** no bench times any of these; the counts are proved by test-only
+counters, not by a clock.
+
 ### §148 — exact White/SPA counts preserve evidence; they do not make resampling O(1)
 
 The D-0465 receipts preserve the exact `matched_or_exceeded + 1` numerator,
@@ -12302,6 +12319,34 @@ not:
   `Occupancy` doubles to 64 bytes per held path. The grid still blocks a
   whole path for a hole after a level exit. Reading the locations there changes
   shipping cells, so it waits for its own decision. Not timed.
+
+### §172 — candidate-trade pages pin the catalog in O(1); recording a candidate is not O(1) — D-0991
+
+* **A page after the first.** `tier`, `candidates_page` and
+  `TradeReader::open` verify the catalog cold once per `Summary` (read and
+  BLAKE3 over the whole file, O(C) in captured candidate sides) and then pin
+  it by filesystem generation: one shared-lock open, an `fstat`/`stat` pair
+  and the start descriptor, which is at most `120 + ENCODED_LEN` bytes. The
+  page itself is O(page). The generation is metadata, not a content hash: it
+  detects ordinary rewrites and replacements (device, inode, length, and
+  nanosecond modification and change times on Unix), not an actor able to
+  forge filesystem metadata. Windows has a real identity (volume serial,
+  file index, length, creation and last-write times) and pins as Unix does.
+  On a target with no file identity at all the cold read already refuses (its
+  own `require_generation_unchanged` check), so no generation is ever
+  pinned, and the warm comparison goes through that same function, which
+  refuses there too.
+* **Cold reads stay linear.** The first pin of a `Summary` built by
+  `Capture::finish` is O(C); a cold `TradeReader::open` reads and checks
+  every trade row of its file; retained history grows with every capture.
+* **Recording one candidate side.** The independent `shown_cell` recheck is
+  O(cells). The selected cell's replay is one Θ(rows) column walk plus
+  O(trades × holding) over slice facts derived once per capture. Publication
+  is two immutable files, each written, `fsync`ed, read back in full and
+  followed by a directory `fsync`: **four `fsync`s per candidate side**,
+  counted by
+  `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side`.
+  Their latency is the filesystem's and is not measured here.
 
 ## Slow clients, the connection cap and gap-address refusal — D-1200, 2 October 2026
 
