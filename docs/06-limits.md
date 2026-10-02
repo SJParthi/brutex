@@ -101,16 +101,9 @@ Its 473,490,550 rows are 3.53× `DEFAULT_CEILING = 2^27`, so a whole-vocabulary 
 level trips the ceiling's halt before it can be held; `out` alone would be 24.69 GiB before allocator
 overhead, the previous frontier, batches or ranking. At k=5 the join itself
 dominates everything: `|F|²/2` pair-unions over a whole k=4 frontier is
-1.12 × 10¹⁷ six-word ORs, independent of the bars.
-
-**k=4 is the first whole-vocabulary level at the shipped candidate ceiling.**
-Its 130,344,865 rows nearly fill `DEFAULT_CEILING = 2^27`; `out` alone is
-6.80 GiB before allocator overhead, the previous frontier's membership set and
-keyed copy, batches or ranking. (This sentence priced a `seen` duplicate set at
-another 5.83 GiB; the prefix join is injective and that set was deleted, so it
-no longer exists to price. D-0926.) At k=5 the join itself dominates everything:
-`|F|²/2` pair-unions is 8.49 × 10¹⁵ six-word ORs, months of work independent
-of the bars.
+1.12 × 10¹⁷ six-word ORs, independent of the bars. (An earlier version of
+this paragraph priced a `seen` duplicate set as well; the prefix join is
+injective and that set was deleted, so it no longer exists to price. D-0926.)
 
 What the design does about it: it never enumerates those levels. Apriori pruning
 generates level k only from level k−1's survivors, and the ladder stops at
@@ -2928,22 +2921,12 @@ calls on an already-open handle. Against the groww census's own numbers that is
 `store::file::BarFile::read_record` states the same limit for the same reason:
 the operation is constant and the read underneath it is the device's. C-28 and
 C-29 in `crates/store/benches/ratio.rs` do time `read_record`, its `pread`
-included, but on a page the host already holds, so a cold read's latency stays
-unmeasured. This sentence used to say no bench timed a syscall at all. D-0790.
-§14 carries what *is* measured.
-
-the operation is constant and the read underneath it is the device's. *(This
-said no bench timed a syscall at all. That is false: `C-28` and
-`C-29` time `read_record`, one `pread` each, and `C-T-01` times `emit`, which
-writes the log file. None of them separates the device's latency from the
-code's — D-0957.)* §14 carries what *is* measured.
-
-the operation is constant and the read underneath it is the device's. C-28 and
-C-29 do time `read_record`, `pread` included, but only warm — one fixed index,
-its page resident and its checksum block cached — so they bound neither a cold
-device nor this path's two reads on a freshly opened handle. (This paragraph
-said no bench timed a syscall at all; D-0913 corrected it.) §14 carries what
-*is* measured.
+included, but only warm — one fixed index, its page resident and its checksum
+block cached — so they bound neither a cold device nor this path's two reads on
+a freshly opened handle; `C-T-01` times `emit`, which writes the log file. None
+of them separates the device's latency from the code's. (This paragraph said no
+bench timed a syscall at all; D-0790, D-0913 and D-0957 each corrected it.) §14
+carries what *is* measured.
 
 ### 40.3 The 43,422 entries already on disk have no closes, and get none for free
 
@@ -11192,6 +11175,25 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## C-V-02 cannot see an early-exit `hits`; the source-shape test is the guard — D-0917, 2 October 2026
+
+- **The clock does not separate an early-exit word loop from the branchless
+  body.** Audit findings ET-o1-proof-coverage-3 and -13 replaced `hits` with a
+  loop returning on the first word that fails and measured C-V-02 at 1.093×,
+  1.275×, 1.560×, 1.895× and 2.056× for words 1 to 5 (2.055× to 2.211× on
+  repeats, scratch timings under load, not Gate 8). The 3.0× ceiling passes all
+  of them. Engine C-E-03 passed the same mutant at 0.558× (1.78× inverted).
+  Not re-measured for this entry.
+- **Why the ceiling is not lowered.** The whole call is about 0.8 ns, so the
+  exit saves at most a few word operations. A ceiling under 2.0× would sit
+  inside a shared runner's noise and make Gate 8 flaky, which is worse than a
+  row that states what it does not catch.
+- **What guards it.** `vocab::mask::hits_does_the_same_work_for_every_input`
+  refuses `for`, `while`, `loop`, `return`, `if`, `match`, `&&` and `||` in the
+  body of `hits` and counts its operators against `WORDS`. The mutant fails it.
+  C-V-02 stays as evidence that the compiled function agrees, and its ratio now
+  breaches in both directions.
 
 ## The native-dependency gate reads the lock, not the target's `cfg` — D-0916, 2 October 2026
 

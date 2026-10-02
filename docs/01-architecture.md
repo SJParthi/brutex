@@ -402,7 +402,7 @@ made seventeen cost claims between them and measured none. D-0103 is the entry;
 | Locate a slice | O(1) | path join | — |
 | Read bar *i* | O(1) | `base + 32768 + i·56` — see `docs/02-store-format.md` §1 | `C-01` |
 | Read condition bits for bar *i* | O(1) | index into a slice of `ConditionMask`, each `[u64; 6]` = 384 bits | `C-E-01` |
-| Test one candidate against one bar | O(1) | `(bits & mask) == mask`: six ANDs, six XORs, five ORs, one compare — branchless, no early exit | `C-V-01`, `C-V-02`, `C-V-03` |
+| Test one candidate against one bar | O(1) | `(bits & mask) == mask`: six ANDs, six XORs, five ORs, one compare — branchless, no early exit | `C-V-01`, `C-V-02`, `C-V-03`; no early exit is guarded by `vocab::mask::hits_does_the_same_work_for_every_input`, not by a ratio (D-0917) |
 | Reject a duplicate candidate | O(1) expected for the remaining k=1 probe; no probe at k≥2 | one `HashSet` insertion at k=1; the injective prefix join cannot emit duplicates at k≥2. Rust's hash table supplies no adversarial worst-case O(1) guarantee | `C-E-10` measures the historical isolated hit/miss probe; the injectivity tests prove its removal at k≥2 |
 | Append one result | O(1) amortised | `Vec::push`; an individual growth can move the existing allocation, so this is not worst-case O(1) | `C-E-11`, retained as `C-04` |
 | Fold one candle into every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` asserted at compile time | `C-I-01`, `C-I-02`, `C-I-04` |
