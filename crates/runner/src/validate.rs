@@ -4623,7 +4623,10 @@ fn walk_forward_core(
         //
         // Hoisted beside `facts` because it too is a fact about `train` and
         // does not vary by candidate. One pass, shared by every thread.
-        let forward = crate::outcome::forward(trade_train, train_column, horizon);
+        //
+        // Over `facts` (D-1185): `forward` built a second, identical
+        // `SliceFacts::of(trade_train, train_column)` on entry.
+        let forward = crate::outcome::forward_over(trade_train, horizon, &facts);
         // THE RUNG COUNT WAS RESOLVED BY THE CALLER, ONCE. It is the same
         // already-clamped value the caller records in run identity; no lane
         // reads `std::env`, and no fold can reinterpret the memory bound.
@@ -7618,6 +7621,21 @@ mod tests {
     /// D-1143: the V4 OOS replay loop seals each pending candidate's run
     /// against digests built once per fold, not by hashing both slices three
     /// times per candidate.
+    #[test]
+    fn the_training_fold_builds_its_slice_facts_once() {
+        // D-1185 (o1runner-5): the fold's `forward` reads the facts the
+        // candidate loop already shares, instead of building a second copy.
+        let source = include_str!("validate.rs");
+        let anchor = "let facts = crate::trade::SliceFacts::of(trade_train, train_column);";
+        let rest = source
+            .split_once(anchor)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let fold = rest.split_once(".par_iter()").map_or("", |(head, _)| head);
+        assert!(fold.contains("crate::outcome::forward_over(trade_train, horizon, &facts)"));
+        assert!(!fold.contains("crate::outcome::forward(trade_train"));
+    }
+
     #[test]
     fn the_oos_replay_loop_hashes_its_slices_once_per_fold() {
         let source = include_str!("validate.rs");

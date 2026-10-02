@@ -728,8 +728,27 @@ impl Lanes {
 /// measurement.
 #[must_use]
 pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
+    forward_over(bars, horizon, &crate::trade::SliceFacts::of(bars, column))
+}
+
+/// [`forward`] over slice facts the caller already built (D-1185).
+///
+/// `forward` builds [`crate::trade::SliceFacts`] on entry, an O(B) value. A
+/// caller that also walks trades on the same slice -- `crate::validate`'s
+/// training fold builds one for its candidate loop -- builds them once and
+/// passes them here, rather than paying for a second copy of the same facts
+/// (audit o1runner-5). `facts` must be [`crate::trade::SliceFacts::of`] the
+/// same `bars` and the column the outcomes are for. Facts whose verdict does
+/// not cover `bars` price nothing: every outcome is absent and refused, never
+/// read through another slice's verdict.
+#[must_use]
+pub fn forward_over(
+    bars: &[Candle],
+    horizon: Horizon,
+    facts: &crate::trade::SliceFacts,
+) -> Forward {
     let h = horizon.as_bars() as usize;
-    let facts = crate::trade::SliceFacts::of(bars, column);
+    let covered = facts.covers(bars);
     // EXCURSIONS, SLID ONCE. See `WindowExtremes` for why two deques that only
     // advance answer this window, and `Forward::adverse` for why the ranking
     // stage needed it at all.
@@ -741,7 +760,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
     // path to be sized once rather than grown. See `Lanes`.
     let mut lanes = Lanes::with_capacity(bars.len());
     for i in 0..bars.len() {
-        if !facts.accepts(i) {
+        if !covered || !facts.accepts(i) {
             lanes.absent(Unpriced::Refused);
             continue;
         }
@@ -787,7 +806,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
                 // No accepted record at the deadline. A refused record within
                 // the `h` records after the entry is the store's fault; with
                 // none there, the minute has no record at all -- D-1176.
-                lanes.absent(Unpriced::of(&facts, i, i.saturating_add(h)));
+                lanes.absent(Unpriced::of(facts, i, i.saturating_add(h)));
                 continue;
             };
             want
@@ -839,7 +858,7 @@ pub fn forward(bars: &[Candle], column: &Column, horizon: Horizon) -> Forward {
         // runs and nothing said why. A silent smaller sample is a quieter version
         // of the same §4 failure.
         if !facts.path_accepts(i, exit) {
-            lanes.absent(Unpriced::of(&facts, i, exit));
+            lanes.absent(Unpriced::of(facts, i, exit));
             continue;
         }
         let Some((later, now)) = bars
@@ -2180,6 +2199,27 @@ mod tests {
 
     fn h(n: u32) -> Horizon {
         Horizon::bars(n).expect("a positive horizon")
+    }
+
+    /// D-1185 (o1runner-5): `forward_over` over the caller's facts is
+    /// `forward`, field for field, and facts that do not cover the bars price
+    /// nothing rather than reading another slice's verdict.
+    #[test]
+    fn forward_over_hoisted_facts_is_forward() {
+        let bars = crate::synthetic::sessions(4);
+        let column = Column::build(&bars, &mut evaluator());
+        let facts = crate::trade::SliceFacts::of(&bars, &column);
+        for horizon in [h(1), h(5), h(30)] {
+            assert_eq!(
+                super::forward_over(&bars, horizon, &facts),
+                forward(&bars, &column, horizon)
+            );
+        }
+        let shorter = bars.get(..bars.len() / 2).expect("a prefix");
+        let short_column = Column::build(shorter, &mut evaluator());
+        let foreign = crate::trade::SliceFacts::of(shorter, &short_column);
+        let refused = super::forward_over(&bars, h(5), &foreign);
+        assert!((0..bars.len()).all(|i| refused.at(i).is_none() && refused.was_refused(i)));
     }
 
     /// Build the evaluator-produced acceptance map beside a test forward.

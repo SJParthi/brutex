@@ -44533,3 +44533,22 @@ with the old ones. `the_per_candidate_replays_reuse_one_slice_facts_per_slice`
 and `cli::candidate_trades::tests::materialisation_reuses_one_slice_facts_per_capture`
 are source-shape tests and fail on the previous tree.
 
+### D-1185 — A training fold's forward returns read the facts its candidate loop shares — 2026-10-02
+
+**Finding.** o1runner-5 (`docs` audit of 2 October 2026). `walk_forward_core`
+builds `SliceFacts::of(trade_train, train_column)` once per fold for its
+candidate loop, then called `outcome::forward(trade_train, train_column,
+horizon)`, which built the same facts again on entry. That is one extra O(B)
+build per fold: the acceptance copy, two prefix tables, the timestamp map, the
+square-off table and the cadence pass.
+
+**The change.** New `outcome::forward_over(bars, horizon, &facts)`. `forward`
+is now `forward_over` over facts it builds, and the fold passes its own. Facts
+whose verdict does not cover `bars` price nothing: every outcome is absent and
+refused.
+
+**No output changes.** `forward_over_hoisted_facts_is_forward` compares the two
+`Forward`s field for field at three horizons and checks the non-covering case.
+`the_training_fold_builds_its_slice_facts_once` is a source-shape test and fails
+on the previous tree.
+
