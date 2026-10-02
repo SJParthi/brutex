@@ -6025,3 +6025,10 @@ old line regex the same input and watched it pass.
 | Invariant | Test that proves it | Status |
 |---|---|---|
 | AU-PROBESTORE-6 — **`Paisa::from_rupees_half_up` rounds the scaled product half-up by comparing its exact remainder with a half, never by adding 0.5 and flooring.** `0.004999999999999999` (scaled `0.49999999999999994`) and its negative give 0; `45035996273704.97` gives `4503599627370497` and its negative `-4503599627370497`; `45035996273704.99` and `90071992547409.9` give their exact odd scaled integers; ties still round toward positive infinity (`0.005` → 1, `-0.005` → 0, `45035996273704.95` → `...496`); `f64::MAX` and `f64::MIN` are refused `OutOfRange`. Before the fix the first gave 1 paisa and the odd integers from 2^52 came out one paisa off | `core::price::tests::a_scaled_value_is_rounded_half_up_without_a_second_rounding` | ✓ |
+
+### A stored open-interest sentinel is refused; unjudged values are stated — audit 2026-10-02 probestore-7
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| AU-PROBESTORE-7a — **`LakeFile::read_row_group` refuses an `open_interest` that stores `i64::MIN` with `LakeError::OpenInterestIsNullSentinel` (W3-lake1-4, D-0775; found again as probestore-7) naming the row, at the first, a middle and the last row.** `i64::MIN + 1`, zero, `-1` and `i64::MAX` read as themselves and a real null reads as `None`. Before the fix the stored sentinel read back as "none reported", a null the file never held | `a_stored_open_interest_sentinel_is_refused_by_row` in `crates/lake/tests/refusals.rs` | ✓ |
+| AU-PROBESTORE-7b — **What the lake reader does not judge decodes as written, and its crate header and `read_row_group` doc say so.** A row with timestamp `i64::MIN`, a `low` above the `high`, an `open` outside the range, a negative close, volume and open interest reads back exactly as stored; the header's "Everything is refused by name" now limits itself to malformations of the file | `values_the_reader_does_not_judge_decode_as_written` in `crates/lake/tests/refusals.rs` | ✓ |

@@ -52,9 +52,15 @@
 //!
 //! A file that is not Parquet, a truncated one, a codec this reader does not
 //! implement, a missing column, a wrongly-typed column, an unrecognised
-//! schema, a null where a null has no meaning, and a price that will not
-//! become paisa are eight *different* refusals in [`error::LakeError`]. None
-//! of them is a skip and none returns a substitute value — `CLAUDE.md` §4.
+//! schema, a null where a null has no meaning, a price that will not become
+//! paisa, and an open interest that stores the null sentinel itself are
+//! *different* refusals in [`error::LakeError`]. None of them is a skip and
+//! none returns a substitute value — `CLAUDE.md` §4.
+//!
+//! **"Everything" means every malformation of the file, not every implausible
+//! value in it.** A negative price or volume, a `low` above a `high`, or a
+//! timestamp at the edge of `i64` decodes as written; see
+//! [`reader::LakeFile::read_row_group`]. Judging a bar is the consumer's job.
 //!
 //! # Where this sits in the crate graph
 //!

@@ -207,6 +207,14 @@ impl LakeFile {
     /// [`LakeError::OpenInterestIsNullSentinel`] if a present open interest
     /// equals the null sentinel;
     /// [`LakeError::NotRepresentable`] if a price will not become paisa.
+    ///
+    /// # What is NOT checked
+    ///
+    /// Values are typed and converted, not judged. A negative price or
+    /// volume, a `low` above a `high`, an `open` or `close` outside the bar's
+    /// range, a negative open interest, and a timestamp at either end of
+    /// `i64` all decode as written. A consumer that needs a sane bar must check
+    /// it; this reader states that it does not.
     pub fn read_row_group(&self, index: usize) -> Result<Batch, LakeError> {
         let held = self.row_groups();
         if index >= held {
@@ -293,7 +301,8 @@ impl LakeFile {
         // Open interest is the one column whose null is meaningful, and
         // CLAUDE.md section 7 fixes its representation: i64::MIN, distinct
         // from a real zero. A PRESENT value equal to the sentinel would read
-        // back as absent, so it is refused by name. W3-lake1-4.
+        // back as absent, so it is refused by name. W3-lake1-4. (found again as
+        // probestore-7)
         let open_interest = cols
             .int64("open_interest")?
             .into_iter()
