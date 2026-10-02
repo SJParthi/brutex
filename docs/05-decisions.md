@@ -43719,6 +43719,49 @@ coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
 
+### D-0920 — Refuse an overflowing discount factor in `Contract::check`, on the way in, so the solver cannot report an infinite intrinsic value — 2026-10-02
+
+**What happened.** Audit finding W1-greeks1-0. `Contract::check` took
+`carry_discount = e^-qT`, `forward = S·e^-qT` and `discounted_strike = K·e^-rT`
+unguarded. `MAX_RATE * MAX_YEARS` is 1000 against `ln(f64::MAX)` = 709.78, so
+`rate = -7.1` or `carry = -7.1` at `years_to_expiry = 100`, every value inside
+every accepted bound, makes a factor infinite. `MAX_RATE`'s documentation said
+the overflow was contained "on the way OUT", by `Contract::greeks` checking its
+own result. That held for `price` and `greeks` and not for the solver:
+`implied_volatility` reads `no_arbitrage_bounds` before it evaluates the model.
+Measured before the fix: at `S = K = 100, T = 100, r = -7.1` a put quoted at 10
+returned `PriceBelowIntrinsic { price: 10.0, intrinsic: inf }` rather than
+`NotRepresentable`. A named refusal that carries an infinity reads like a real
+arbitrage violation.
+
+**The product overflows on its own too.** With the factor finite the leg can
+still be infinite: `e^700` is 1.01e304 and `MAX_UNDERLYING` (1e12) times it is
+past `f64::MAX`. So `spot = 1e12, carry = -7.0, T = 100` overflows `forward`
+with `carry_discount` finite, and `strike = 1e12, rate = -7.0` does the same to
+`discounted_strike`. Both are reachable and both are tested.
+
+**Decision.** `Contract::check` returns `GreeksError::NotRepresentable` when
+`carry_discount`, `forward` or `discounted_strike` is not finite. Every public
+path goes through `check` first, so `price`, `greeks` and `implied_volatility`
+(call and put) refuse in the same way. `Contract::greeks` keeps its output
+check for overflows that no input check sees. The input bounds are unchanged:
+`MAX_RATE` still only keeps an input plausible, and its documentation now says
+the containment is on the way in. The test
+`a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out` is
+replaced by
+`greeks::bsm::a_discount_factor_that_overflows_inside_the_bounds_is_refused_on_the_way_in`.
+It asserts `check`, `price`, `greeks` and `implied_volatility` for both kinds on
+all four overflowing witnesses (rate, carry, `S·e^-qT`, `K·e^-rT`). It also
+asserts that at `-7.0` the rate alone and the carry alone still price, and that
+rate and carry together at `-7.0` still solve a call and a put back to 0.2 to
+1e-9 relative. It failed before the change on the assertion above. Invariant
+G-38.
+
+**Not changed, stated so it is not assumed.** The other direction, a factor that
+underflows to zero (`carry = +10, T = 100` gives `e^-1000 = 0`), stays finite
+and is not refused here. This finding did not cover it and no measurement of
+its effect on the solver was taken.
+
 ### D-0922 — Check the pair budget before every pair, so a halt stops at the budget and an exact need completes — 2026-10-02
 
 **What was wrong.** `Ladder::try_next_level_observing` checked
