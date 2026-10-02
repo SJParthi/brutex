@@ -2950,10 +2950,12 @@ pub fn install_log() -> String {
 
 /// One structural event about a run. **Never called per bar or per candidate.**
 ///
-/// Gate 17's rule is that the innermost loop calls nothing at all; this crate
-/// holds no loop over bars and none over candidates, so every call site here is
-/// a boundary — one per run, or one per instrument-month in a batch. That is the
-/// granularity gate 17's own comment prescribes as the affordable one.
+/// Gate 17's rule is that the innermost loop calls nothing at all. This crate
+/// is not on its list and does hold loops over bars and over candidates —
+/// `screen`'s `by_evidence.par_iter()` among them (see [`note_grid_progress`]) —
+/// but every call site of this function is a boundary: one per run, or one per
+/// instrument-month in a batch. That is the granularity gate 17's own comment
+/// prescribes as the affordable one. D-0957 corrected "holds no loop".
 /// The token a log record is bound to when no browser attempt supplied one.
 ///
 /// # Why the telemetry run id and not a fresh number

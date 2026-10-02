@@ -869,7 +869,13 @@ pub struct BarFile {
     /// blocks re-verifies on each alternation — the bisection in
     /// [`first_at_or_after`] is the one that can, at fourteen probes for a
     /// one-minute month. That is bounded per read and it is a cost, not a
-    /// correctness hole: a re-verification reaches the same verdict.
+    /// correctness hole: a re-verification reaches the same verdict. For the
+    /// TAIL block the cost is not only the CRC: each re-verification pays
+    /// [`Self::past_the_commit`]'s `fstat` and reads again, and for a tail an
+    /// interrupted append sealed past the commit it writes one more
+    /// `store.block` WARN — once per alternation, not once per handle.
+    /// `store::tail_proof` counts those lines; `docs/06-limits.md` (D-0688
+    /// section) states the cost. D-0957.
     ///
     /// `AtomicU64` rather than a `Cell`, because it is the only shape that keeps
     /// `BarFile` `Sync` — a reader shared across threads must not become a

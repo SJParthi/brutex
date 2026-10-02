@@ -674,3 +674,56 @@ fn the_documented_headroom_is_the_table_it_describes() {
         "the table has outgrown the mask; widen `WORDS` in the same change"
     );
 }
+
+/// `CROSSINGS` names only live, two-sided levels, and each tuple is one
+/// level's — `docs/04-invariants.md` CX-04.
+///
+/// `table::CROSSINGS`' own doc and `indicators::evaluator` both cited this test
+/// by name while it did not exist (D-0957). It catches the off-by-one that doc
+/// warns about: a tuple whose `up` belongs to the next level, or whose state
+/// pair is two halves of different levels, sets the wrong edge and nothing in
+/// the resulting mask looks wrong.
+#[test]
+fn the_crossing_map_names_only_live_two_sided_levels() {
+    assert_eq!(table::CROSSINGS.len(), 17, "seventeen two-sided levels");
+    let mut seen = BTreeSet::new();
+    for level in &table::CROSSINGS {
+        let positions = [
+            level.above,
+            level.below,
+            level.up,
+            level.down,
+            level.first,
+            level.second,
+            level.later,
+        ];
+        for position in positions {
+            assert!(table::is_live(position), "position {position} is not live");
+            assert!(
+                seen.insert(position),
+                "position {position} appears twice in the crossing map"
+            );
+        }
+        let name = |position: u16| table::name(position).unwrap();
+        let above = name(level.above);
+        let subject = above
+            .strip_prefix("close_above_")
+            .unwrap_or_else(|| panic!("{above} is not a close_above_ state"));
+        assert!(!subject.is_empty(), "{above} names no level");
+        for (position, prefix) in [
+            (level.below, "close_below_"),
+            (level.up, "crossed_up_"),
+            (level.down, "crossed_down_"),
+            (level.first, "first_cross_"),
+            (level.second, "second_cross_"),
+            (level.later, "third_plus_cross_"),
+        ] {
+            assert_eq!(
+                name(position),
+                format!("{prefix}{subject}"),
+                "position {position} belongs to another level than {above}"
+            );
+        }
+    }
+    assert_eq!(seen.len(), 17 * 7, "every position is distinct");
+}
