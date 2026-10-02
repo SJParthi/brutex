@@ -2896,8 +2896,12 @@ calls on an already-open handle. Against the groww census's own numbers that is
 
 **The syscall latency is not measured and is not claimed.**
 `store::file::BarFile::read_record` states the same limit for the same reason:
-the operation is constant, the read underneath it is the device's, and no bench
-in this repository times a syscall. §14 carries what *is* measured.
+the operation is constant and the read underneath it is the device's. C-28 and
+C-29 do time `read_record`, `pread` included, but only warm — one fixed index,
+its page resident and its checksum block cached — so they bound neither a cold
+device nor this path's two reads on a freshly opened handle. (This paragraph
+said no bench timed a syscall at all; D-0913 corrected it.) §14 carries what
+*is* measured.
 
 ### 40.3 The 43,422 entries already on disk have no closes, and get none for free
 
@@ -9932,6 +9936,67 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Timestamp lookup is a bisection, not O(1) — D-0913
+
+Findings W3-store1-0, W3-store1-1 and ET-bars-candles-store-12. Two store
+functions locate a timestamp in a month, and neither is a constant-time
+operation. Both said so only in source comments, and this register had no
+entry for either until now.
+
+* **`first_at_or_after`** (`crates/store/src/file.rs`, behind
+  `BarFile::first_at_or_after` and `RevisionReader::first_at_or_after`) is a
+  bisection over the committed records. It makes at most
+  `ceil(log2(n_valid + 1))` record reads. A one-minute month holds at most
+  31 × 375 = 11,625 records, so the bound is fourteen reads.
+  `store::file::first_at_or_after_never_probes_more_than_the_bisection_height`
+  proves the count with a counting reader. For every month of 0 to 150 records
+  it checks every insertion point, so it crosses the block edges at 73 and
+  146, and shows the bound is reached, not just respected. It also checks the
+  ceiling month at its ends and block edges, and counters up to 2^62.
+* **`already_stored`** is that bisection followed by a read of each record in
+  the offered batch. That makes at most `ceil(log2(n_valid + 1)) + batch`
+  reads. It stops at the first record that differs, and makes no comparison
+  at all when the batch would run past the commit counter.
+
+**What one read can cost.** A record read is one 56-byte positional read. A
+handle caches one verified checksum block. When a read lands in a different
+block it also pays a cold block verify first: a read of that block's covered
+bytes (up to 4,088), a 4-byte read of the `.crc` sidecar, a heap buffer of the
+same size, and a CRC-32C over it. If the block is the tail block, the verify
+also queries the file length and reads any records past the commit. Since
+there is one cache slot, a bisection can alternate between two adjacent
+blocks near its end. In a simulation of the lookup with one cached block
+(computed, not timed), the 11,625-record month paid up to fourteen cold
+verifies, one per read, and 8.2 on average across all its timestamps. The
+test above asserts the per-read ceiling (cold verifies ≤ reads ≤ fourteen),
+not the average.
+
+**Callers.**
+
+* `api` `/bars.json` calls `BarFile::first_at_or_after` **twice per request**,
+  once for each end of the day window (`crates/api/src/server.rs`). That is
+  up to 28 record reads and 28 cold verifies for a ceiling month, and it
+  replaced a full-month read of about 8,250 records.
+* `BarFile::append` calls `already_stored` only on its duplicate path: after
+  `Header::advance` refuses a batch with `TimestampsOutOfOrder`, it checks
+  whether the batch is already held, which answers `AlreadyPresent`. A batch
+  that extends the month never reaches it. This is the ingest boundary. It
+  runs once per re-offered batch and never inside the sweep.
+
+**UNVERIFIED.** The wall-clock cost of either lookup has not been measured.
+C-28 and C-29 time `read_record`, including its `pread`, but only warm: one
+fixed index, so the page is resident and the block cached after the first
+call. They do not measure a cold block verify or a cold device. Neither does
+anything else in the workspace, and ET-bars-candles-store-9 tracks that gap.
+The probe and verify counts above are proven or computed. The time per probe
+is not.
+
+**Not changed.** The bisection already uses the fewest reads a comparison
+search over `n_valid` sorted records can use, so no cheaper probe order was
+available without new behaviour. A per-month index or a multi-block cache
+could reduce the cold verifies, but either would be a format or memory
+decision, and neither is made here.
 
 ## Engine join costs that are not O(1) — D-0922 to D-0926, 2 October 2026
 
