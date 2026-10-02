@@ -5435,6 +5435,18 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | The batch renderer reports a candidate-ceiling breach as a floor when its tally has one incomplete month, and emits no `month(s) stopped on the candidate ceiling` paragraph when the same one-swept-month tally has zero incomplete months. The zero boundary closes the observed `>` to `>=` survivor without changing the production condition. | `cli::batch::tests::a_ceiling_breach_is_reported_as_a_floor_and_not_as_a_depth` | ✓ |
 
+## JSON renderer admissions and per-request walks — D-0951
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| JR-01 | **An unpinned first page reuses a held Boolean catalog that is still current.** 64 identical first pages cost one cold authentication and are byte-identical. A busy publisher refuses rather than serving the held copy. A body renamed over with the same bytes is authenticated again and served. A smaller budget, or an emptied receipt (pinned or not), is refused. Two roots alternating make every request cold, the single slot's stated cost. W1-api1-5, D-0951 | `api::booleanjson::tests::an_unpinned_first_page_reuses_a_current_catalog_and_reopens_only_on_change` | ✓ |
+| JR-02 | **The admission decision.** With nothing held it admits and never asks about currency. Held and pinned, it reuses without asking. Held and unpinned, it reuses exactly when the reader is current. Both Boolean renderers decide through it, and neither tests `completion.is_none()` any more. D-0951 | `api::detail::tests::a_held_reader_is_reused_when_pinned_or_current_and_admitted_again_otherwise`, `api::booleanjson::tests::the_cold_admission_bound_is_stated_and_both_renderers_take_the_shared_decision` | ✓ |
+| JR-03 | **A Boolean evidence page's O(C) currency cost is stated**, and each projection still checks currency before and after its page. W1-api1-6, D-0951 | `api::booleanevidencejson::tests::an_evidence_pages_currency_cost_per_linked_catalog_is_stated` | ✓ |
+| JR-04 | **The qualified campaign route's uncached O(H) history walk is stated.** W1-api1-4, D-0951 | `api::booleancampaignjson::tests::the_qualified_campaign_history_walk_per_request_is_stated` | ✓ |
+| JR-05 | **A candidate page's five whole-catalog reads are counted off the source and stated.** W1-api2-2, D-0951 | `api::candidatejson::tests::a_candidate_pages_catalog_reads_are_counted_and_stated` | ✓ |
+| JR-06 | **The trade page's single slot and O(trades) cold re-read are stated.** W1-api2-3, D-0951 | `api::candidatejson::tests::a_trade_pages_single_slot_and_cold_reread_are_stated` | ✓ |
+| JR-07 | **A persistent refusal in `/engine/top.json` costs one cold open per request (100 of 100), and the first request after a repair is served.** W1-api6-3, D-0951 | `api::topjson::tests::a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated` | ✓ |
+
 ### Execution V3 replay memo — D-0994
 
 | ID | Invariant | Named proof | Status |

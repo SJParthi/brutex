@@ -11178,6 +11178,70 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
+## JSON renderers: cold admissions and per-request walks — D-0951, 2 October 2026
+
+Six audit findings (W1-api1-4, W1-api1-5, W1-api1-6, W1-api2-2, W1-api2-3,
+W1-api6-3) named a JSON route whose per-request cost grows with saved evidence
+and was stated nowhere here. One of them is narrowed in code; the rest are
+stated as they are. Every bound below is read off the source. None is timed:
+no bench row covers these routes, so each is UNVERIFIED as a measurement.
+
+- **`/boolean-candidates.json` and the Boolean evidence routes: an unpinned
+  first page reuses a held reader that is still current (W1-api1-5).**
+  `booleanjson::render_with_budget` and `booleanevidencejson::render_with_budget`
+  dropped the cached reader on every request without `completion`, so every
+  first page hashed and decoded the whole saved body (for the evidence routes,
+  every linked catalog body too) under the one process-wide mutex. Since D-0951
+  the decision is `detail::must_admit`: a request whose root, identity, model
+  and budget match the held reader reuses it when it is pinned, or when it is
+  unpinned and the reader's `require_current` passes (the same generation and
+  lease check every warm page already makes). **What stays O(saved body bytes)
+  per request:** the first request for a key, any key change (each slot holds
+  ONE identity, so two clients alternating identities, models, roots or
+  budgets make every request cold), and any request after a held file's
+  generation moved or its lease was busy. The cold hash and decode run under
+  the slot's mutex, so a concurrent request to the same route waits for it.
+  `booleanoosjson` and `indexstopjson` keep the old shape (every unpinned first
+  page is cold); they were not in the finding and are unchanged.
+- **The Boolean evidence pages check currency once per linked catalog, several
+  times a page (W1-api1-6).** `booleanevidencejson::admission` makes four
+  currency calls per page and `statistics` three; each walks the statistics
+  artifact's C linked source catalogs, and each check is a shared `flock`,
+  an unlock and six `metadata` calls, before and after the work. So a warm
+  page costs O(C) system calls, independent of its 1..=256 rows: the audit's
+  reading is about 112·C for an admission page. It is bounded by C, which the
+  statistics artifact fixes when it is written; nothing in the request widens it.
+- **`/boolean-qualified-campaign.json` has no cache (W1-api1-4).**
+  `booleancampaignjson::render_qualified` opens
+  `QualifiedCampaign` on every GET: O(H) snapshot reads and 2H decodes over the
+  campaign's H acknowledged checkpoints, then H more reads in
+  `require_current`. The reservation walk underneath is bounded by
+  `DIRECTORY_LIMIT` (1,000,000 directories) and every read by
+  `detail::MAX_SCAN_BYTES`. A poll of this route pays the whole history each
+  time.
+- **`/candidate-trades.json` reads the whole sealed catalog five times a page
+  (W1-api2-2).** `candidatejson::render` calls
+  `candidate_trades::read_model` twice itself (open, and the "changed during
+  read" re-check), and `candidate_trades::tier` and `candidates_page` call it
+  three more times through `pinned`. Each read hashes and decodes all of
+  `catalog.bin` (32 bytes per candidate side plus 40 per tier), bounded by
+  `MAX_SCAN_BYTES`. So one page of at most 256 rows costs about five times
+  O(catalog bytes). A trade page pays three, or five when its reader is cold.
+- **The exact candidate trade page keeps one reader (W1-api2-3).**
+  `candidatejson::trade_page` holds a single slot; a change of key re-runs
+  `TradeReader::open`, which re-reads, re-hashes and re-sums every trade row of
+  the selected candidate: O(trades of that candidate), bounded by
+  `MAX_SCAN_BYTES`. Alternating between two candidates makes every request
+  cold. A warm page is O(page).
+- **`/engine/top.json` repeats its cold walk on every request while a refusal
+  persists (W1-api6-3).** `topjson::report` uses `SELECTION.with_verified`,
+  which drops the handle when a refresh refuses and does not cache the
+  refusal. The next request runs `Selection::open` again: the cold index walk
+  of the results ledger and the seal-verified re-reads up to the bad record,
+  O(history) bounded by `MAX_SCAN_BYTES`, then the same 503. Nothing is cached
+  across the damage on purpose: a cached refusal would keep refusing after the
+  operator repaired the file.
+
 ## The cold bar lookup is measured, and it has its own budget — D-0914, 2 October 2026
 
 **What was unmeasured.** C-28 and C-29 re-read one fixed index. `BarFile`

@@ -48538,6 +48538,56 @@ refuses it.
 Invariants AF-42 (updated) and AF-W3S13-a through AF-W3S13-e;
 `docs/06-limits.md` has the cost and the widened false refusal.
 
+### D-0951 — JSON renderers: reuse a current catalog on a first page, and state every per-request walk — 2026-10-02
+
+**The defects (audit findings W1-api1-5, W1-api1-6, W1-api1-4, W1-api2-2,
+W1-api2-3, W1-api6-3).** Six JSON routes pay a cost per request that grows
+with saved evidence, and `docs/06-limits.md` stated none of them. The worst
+was W1-api1-5: `booleanjson::render_with_budget` and
+`booleanevidencejson::render_with_budget` dropped their cached reader on every
+request without a `completion` pin, so every first page hashed and decoded the
+whole saved body again (for the evidence routes, every linked catalog body as
+well) under the one process-wide mutex, even when nothing had changed.
+
+**The choice for W1-api1-5.** Both renderers now decide through one function,
+`detail::must_admit(held, pinned, current)`. A request whose root, identity,
+model and budget match the held reader reuses it when it is pinned (unchanged:
+the projection's own check refuses a changed generation), or when it is
+unpinned and the reader's `require_current` passes. That is the generation and
+lease check every warm page already trusts, so an unpinned page served warm is
+the page a fresh admission would have served. A changed generation, a busy
+publisher or a corrupt receipt still reaches a fresh admission, which serves
+the replacement or refuses; none of them is served from memory.
+`booleanjson::tests::an_unpinned_first_page_reuses_a_current_catalog_and_reopens_only_on_change`
+was run before the change and failed (65 cold admissions for 65 identical
+first pages, against 1 expected).
+
+**The choice for the other five: state them.** Each is a walk the route's
+safety argument depends on, and removing one is a design change, not a fix:
+- W1-api1-6: the currency checks per linked catalog are what make a page over
+  C catalogs safe against any of them changing.
+- W1-api1-4: the qualified campaign route serves a mutable latest snapshot, so
+  a cache would need its own currency argument.
+- W1-api2-2: the five catalog reads are the "catalog changed between pages"
+  guard, and three of them live in `cli::candidate_trades`.
+- W1-api2-3: the single trade-reader slot is one bounded allocation.
+- W1-api6-3: `with_verified` deliberately caches no refusal, so a repaired
+  ledger is served on the next request.
+Each now has a bullet in `docs/06-limits.md` under D-0951, and a test that
+reads the bullet and counts or quotes the source line that pays the cost, so a
+change to either fails until the other follows.
+
+**Rejected.** (1) Caching a refusal in `/engine/top.json`: it would keep
+refusing after the operator repaired the file, the hidden failure CLAUDE.md §4
+bans in reverse. (2) Several slots per Boolean route: it bounds nothing more
+than one slot does, and it multiplies the memory a slot may hold by the slot
+count. (3) Changing `booleanoosjson` and `indexstopjson`, which have the same
+unpinned-first-page shape: they were not in the findings, and
+`docs/06-limits.md` says they are unchanged.
+
+Invariants JR-01 to JR-07; `docs/06-limits.md`, "JSON renderers: cold
+admissions and per-request walks".
+
 ### D-0914 — Measure the cold bar lookup, give it its own 10,000-floor budget, and read its block into the stack — 2026-10-02
 
 **What was wrong.** Two audit findings, one defect. C-28 and C-29
