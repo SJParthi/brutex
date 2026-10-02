@@ -10794,3 +10794,41 @@ fraction is above it is refused by the three projection doors
 a V2/V3 verdict, re-derived from the floor ppm slots, cannot carry the
 correct failure. The cli V1 builders
 that fill the same fields with `.ppm()` are not changed by D-0743.
+## Grammar search: what a node budget bounds, and what display cannot re-run — D-0751 to D-0753, 29 September 2026
+
+* **A node budget bounds choices, not progress (D-0752).** `Cursor::advance`
+  tries every alphabet rank and all three operators at every position. A leaf
+  that leaves too many reductions, and a reversed sibling pair, are each
+  refused only after they are tried, so nodes per emitted candidate grow with
+  the alphabet. Counted over every program of one to three instructions: 78
+  nodes for 12 candidates with 2 live bits, 1,092 for 96 with 8, and 40,428 for
+  1,152 with 32. With 2 live bits, 6,577 nodes pass between candidate 7,115 and
+  candidate 7,116, more than the 4,096 nodes one checkpoint transition replays.
+  `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+  counts all of these. Counted, not timed. **Not changed**: skipping a refused
+  leaf's remaining ranks would change every saved search's node accounting and
+  pause points, and is left for a decision of its own.
+* **One node is not O(1) (D-0753).** Each choice calls `valid_prefix` on the
+  whole prefix, which walks it from its first instruction
+  (`for (index, op) in code.iter().enumerate()`) over a fresh stack
+  (`let mut starts = [0_usize; MAX_INSTRUCTIONS];`, 9,208 bytes on a 64-bit
+  target) and compares sibling subtrees at every AND and OR. Its cost grows
+  with the prefix and is bounded only by the fixed 1,151-instruction capacity.
+  `prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+  pins both edges of the stack width (`MAX_INSTRUCTIONS` operands accepted,
+  one more refused), an invalid first instruction refusing a prefix whose tail
+  alone is valid, and by source shape the inline array and `advance`'s one
+  whole-prefix call per choice (D-0754). **UNMEASURED**: the time per node; no
+  bench covers it.
+* **Display is not a parser round trip (D-0751).** A program `Expression::parse`
+  accepted can render past its limits: 16 NOTs over one bit render to 49 bytes
+  and are refused `NestingCapacity`; a 576-leaf AND chain of bit 0 renders to
+  3,451 bytes and is refused `NestingCapacity`; the same chain of bit 369
+  renders to 4,603 bytes and is refused `SourceCapacity`. Each still survives
+  `encode` and `decode` exactly.
+  `display_can_exceed_the_parser_limits_for_programs_the_parser_accepted` pins
+  all three. `cli expression-stored` reads its EXPRESSION through
+  `Expression::parse(source)`, and the explicit program catalog reads each line
+  through `Expression::parse(line)` (`parse_catalog` in
+  `crates/cli/src/boolean_catalog_command.rs`), so a candidate's displayed text
+  cannot always be re-run through either (D-0754).

@@ -14,6 +14,9 @@ the data digest. Neither variant supplies institutional admission policy.
 `BITS` is `all`, or sorted unique live condition IDs separated by commas.
 The two final positive numbers are per-invocation work budgets. They pause the
 same search; they neither restrict expression depth nor certify exhaustion.
+NODES bounds grammar choices, not candidates reached: every rank is tried at
+every position, so nodes per candidate grow with the alphabet and more than
+4,096 nodes can pass between two candidates (D-0752, `docs/06-limits.md`).
 Repeating the command with the same data and policy resumes saved progress.
 
 | Question | Exact answer |

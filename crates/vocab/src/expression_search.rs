@@ -46,7 +46,15 @@ pub enum Step {
 }
 
 /// A fixed-memory DFS cursor. No candidate set or historical bar is retained.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Equality is the encoded state (D-0750): two cursors are equal exactly when
+/// [`Self::encode`] writes the same bytes. The instruction scratch is not
+/// state: every slot is rewritten before it is read, and [`Self::decode`]
+/// rebuilds only the slots below `at`. A derived equality compared that scratch
+/// and made a reopened checkpoint unequal to the cursor it was saved from.
+/// `Debug` prints the same encoded fields and omits the scratch, so a reopened
+/// checkpoint prints as its source does (D-0754).
+#[derive(Clone)]
 pub struct Cursor {
     offered: [u16; BITS],
     count: u16,
@@ -57,6 +65,40 @@ pub struct Cursor {
     // is the next rank to try. All later slots are zero.
     digits: [u16; MAX_INSTRUCTIONS],
     code: [Instruction; MAX_INSTRUCTIONS],
+}
+
+impl PartialEq for Cursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.encode() == other.encode()
+    }
+}
+
+impl Eq for Cursor {}
+
+impl std::fmt::Debug for Cursor {
+    /// The encoded fields only: the alphabet up to `count` and the digits up
+    /// to `length`. `decode` refuses a nonzero slot past either.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cursor")
+            .field(
+                "offered",
+                &self
+                    .offered
+                    .get(..usize::from(self.count))
+                    .unwrap_or_default(),
+            )
+            .field("length", &self.length)
+            .field("at", &self.at)
+            .field("finished", &self.finished)
+            .field(
+                "digits",
+                &self
+                    .digits
+                    .get(..usize::from(self.length))
+                    .unwrap_or_default(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl Cursor {
@@ -100,6 +142,20 @@ impl Cursor {
 
     /// Try at most `nodes` grammar choices. Zero pauses without advancing.
     /// `work` is incremented once per choice, including pruned invalid prefixes.
+    ///
+    /// A node budget bounds choices, not progress (D-0752): every rank is
+    /// tried at every position, so nodes per emitted candidate grow with the
+    /// alphabet, and more than 4,096 nodes can pass between two candidates.
+    /// One choice is not O(1) either (D-0753): it revalidates the whole prefix
+    /// from its first instruction over a fresh `MAX_INSTRUCTIONS`-slot stack,
+    /// bounded by the fixed 1,151-instruction capacity. The node counts are
+    /// counted by `grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay`
+    /// in `crates/vocab/tests/expression_search.rs`; this loop's one whole-prefix
+    /// call per choice, the inline stack and both edges of its width are
+    /// pinned by
+    /// `invariant_tests::prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack`
+    /// in this module. The time per node is unmeasured, UNVERIFIED
+    /// (`docs/06-limits.md`, D-0753).
     ///
     /// # Errors
     /// An impossible cursor invariant or exhausted cumulative counter.
@@ -350,6 +406,106 @@ mod invariant_tests {
             &[Instruction::Bit(63), Instruction::Bit(0), Instruction::And],
             3
         ));
+    }
+
+    /// ET-o1-proof-coverage-5 (D-0753): every grammar choice in `advance`
+    /// revalidates its whole prefix from index 0 over a fresh stack of exactly
+    /// `MAX_INSTRUCTIONS` `usize` slots. Behaviour pins both stack edges and
+    /// the scan's start; the source shape pins that the stack is that inline
+    /// array and that `advance` calls this whole-prefix validator once per
+    /// choice rather than keeping an incremental one.
+    #[test]
+    fn prefix_validation_rescans_from_the_first_instruction_over_a_fixed_stack() {
+        // A full stack of MAX_INSTRUCTIONS operands fits; one more does not,
+        // although the length leaves room to reduce it. A narrower stack
+        // refuses the first, a wider (or length-sized) one admits the second.
+        assert!(valid_prefix(
+            &[Instruction::Bit(0); MAX_INSTRUCTIONS],
+            2 * MAX_INSTRUCTIONS - 1
+        ));
+        assert!(!valid_prefix(
+            &[Instruction::Bit(0); MAX_INSTRUCTIONS + 1],
+            2 * MAX_INSTRUCTIONS + 1
+        ));
+        // An invalid first instruction refuses a prefix whose tail alone would
+        // fit, so the scan cannot have started later.
+        let mut code = [Instruction::Bit(0); 5];
+        assert!(valid_prefix(&code[..1], 9));
+        code[0] = Instruction::Not;
+        assert!(valid_prefix(&code[4..], 9));
+        assert!(!valid_prefix(&code, 9));
+
+        let source = include_str!("expression_search.rs");
+        let body = |head: &str, tail: &str| {
+            let start = source.find(head).expect("function present");
+            let len = source[start..].find(tail).expect("function ends");
+            &source[start..start + len]
+        };
+        let validator = body("fn valid_prefix(", "\n}\n");
+        let stack = "let mut starts = [0_usize; MAX_INSTRUCTIONS];";
+        let scan = "for (index, op) in code.iter().enumerate() {";
+        assert_eq!(validator.matches(stack).count(), 1, "one inline stack");
+        assert!(validator.find(stack) < validator.find(scan));
+        assert_eq!(validator.matches("starts =").count(), 1);
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(std::mem::size_of::<[usize; MAX_INSTRUCTIONS]>(), 9_208);
+
+        let step = body("pub fn advance(", "\n    fn instruction(");
+        let choice = step.find("for _ in 0..nodes {").expect("one choice loop");
+        let prefix = step
+            .find("let prefix = self.code.get(..=at).ok_or(Refusal::Cursor)?;")
+            .expect("the whole prefix up to at");
+        let call = step
+            .find("if !valid_prefix(prefix, usize::from(self.length)) {")
+            .expect("the whole-prefix validator");
+        let paused = step.find("Ok(Step::Paused)").expect("loop end");
+        assert!(choice < prefix && prefix < call && call < paused);
+        assert_eq!(
+            step.matches("valid_prefix").count(),
+            1,
+            "no second validator"
+        );
+    }
+
+    /// ET-expressions-3 (D-0750): after a candidate the scratch slot at `at`
+    /// still holds that candidate's last instruction, which `decode` leaves
+    /// `Pad`. Equality ignores it; one more node step is a different state.
+    #[test]
+    fn a_reopened_candidate_checkpoint_equals_its_source_and_a_step_does_not() {
+        let mut cursor = Cursor::new(&[0]).expect("live alphabet");
+        let mut work = 0;
+        assert_eq!(
+            cursor.advance(1, &mut work),
+            Ok(Step::Candidate(Expression::parse("0").expect("one leaf")))
+        );
+        let reopened = Cursor::decode(&cursor.encode()).expect("own checkpoint");
+        assert_ne!(reopened.code, cursor.code, "the scratch really differs");
+        assert!(
+            reopened.eq(&cursor),
+            "a reopened checkpoint equals its source"
+        );
+        assert!(cursor.eq(&reopened), "equality is symmetric");
+        // D-0754: `Debug` is the encoded state too, so the differing scratch
+        // does not print and a real step does.
+        assert_eq!(format!("{reopened:?}"), format!("{cursor:?}"));
+        assert_eq!(
+            format!("{cursor:?}"),
+            "Cursor { offered: [0], length: 1, at: 0, finished: false, digits: [1], .. }"
+        );
+        let before = cursor.clone();
+        assert_eq!(cursor.advance(1, &mut work), Ok(Step::Paused));
+        assert!(!before.eq(&cursor), "one node step is a different state");
+        assert!(!cursor.eq(&before), "inequality is symmetric");
+        assert_eq!(
+            format!("{cursor:?}"),
+            "Cursor { offered: [0], length: 1, at: 0, finished: false, digits: [2], .. }"
+        );
+        // A corrupted count or length past its array prints nothing, no panic.
+        let mut corrupt = cursor.clone();
+        corrupt.count = u16::MAX;
+        corrupt.length = u16::MAX;
+        let printed = format!("{corrupt:?}");
+        assert!(printed.contains("offered: [], ") && printed.contains("digits: [], "));
     }
 
     #[test]
