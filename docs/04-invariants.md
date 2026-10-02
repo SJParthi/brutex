@@ -5725,3 +5725,11 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|---|
 | PD-01 | **A shape that declares a header has its line one compared with that header, never skipped unread.** A GDFL body without its header, with a reordered header, or with a blank line one is refused whole as `CsvError::HeaderMismatch`. The declared header (CRLF and surrounding whitespace trimmed) decodes every data row. D-1360 | `pull::csv::tests::a_gdfl_header_that_is_not_the_declared_one_refuses_the_file` | ✓ |
 | PD-02 | **No archive member larger than `MAX_MEMBER_BYTES` is read.** It is refused as `MemberTooLarge` from its length, before its bytes are read, on the ingest and the census walk alike. D-1362 | `pull::archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read` | ✓ |
+### Recovery seeding and plan ordering cost — api-06 (D-1380, D-1381)
+
+| Invariant | Test that proves it | Status |
+|---|---|---|
+| Seeding a recovery plan costs the same number of record syncs whatever its window count (3 for 2 windows and for 40), and a rerun adds nothing. | `api::recovery::tests::seeding_a_plan_costs_the_same_record_syncs_for_two_windows_as_for_forty` | ✓ |
+| Preparing a successor costs the same number of record syncs whatever its scope (2 for 2 windows and for 40), and a repeat writes and syncs nothing. | `api::recovery::tests::preparing_a_successor_costs_the_same_record_syncs_for_two_windows_as_for_forty` | ✓ |
+| A seed batch is one sync whatever its size, replays exactly as single appends would, refuses a known, repeated or invalid key whole and before any I/O without poisoning, and on a failed sync publishes nothing and poisons. | `api::recovery_journal::tests::a_seed_batch_syncs_once_whatever_its_size_and_replays_as_single_appends`; `a_seed_batch_naming_a_known_or_repeated_key_refuses_whole_and_unpoisoned`; `a_failed_seed_batch_sync_publishes_nothing_and_poisons` | ✓ |
+| Ordering a plan computes each window's rank exactly once and yields the same order and plan identity as before. | `api::recovery::tests::ordering_a_plan_ranks_each_window_exactly_once_at_any_size` | ✓ |
