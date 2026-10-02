@@ -798,7 +798,9 @@ pub fn walk_with(
 
 /// One occupancy record, with where its path's first refused record and first
 /// missing minute are (D-1191). Two O(1) reads of `facts`; the walk's decisions
-/// do not depend on either.
+/// do not depend on either. The reads are checked against a brute-force scan by
+/// `runner::trade::slice_facts_locate_the_first_refused_record_and_missing_minute`;
+/// their time is UNVERIFIED as a measurement.
 fn held(
     signal_bar: usize,
     entry_bar: usize,

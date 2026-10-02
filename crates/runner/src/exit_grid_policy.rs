@@ -239,7 +239,9 @@ impl<'a> ExecutionSeriesV1<'a> {
 ///
 /// The fields are private and the only constructors hash real bars in this
 /// process, so a holder cannot forge a digest: [`ExecutionRunV1::with_digests`]
-/// checks a run against bytes exactly as `new` did, at O(1) per run.
+/// checks a run against bytes exactly as `new` did, at O(1) per run. Proven
+/// equal by `runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`;
+/// the per-run time is UNVERIFIED as a measurement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionDigestsV1 {
     expected_data_digest: [u8; 32],
@@ -349,6 +351,8 @@ impl ExecutionRunV1 {
     /// Seals `run` against slice digests computed once by
     /// [`ExecutionDigestsV1`]: O(1) per run, and the same checks, in the same
     /// order, with the same answer as the constructor that built `digests`.
+    /// Equality with per-run hashing:
+    /// `runner::exit_grid_policy::sealing_against_hoisted_digests_equals_hashing_per_run`.
     ///
     /// # Errors
     ///
@@ -502,6 +506,7 @@ impl ExecutionRunV1 {
 /// window. O(1), no bar read. Only an equal slice held in separate memory
 /// takes the linear search and element-wise compare, and it accepts and
 /// refuses exactly what the fast path would have accepted or refused.
+/// Proven by `runner::exit_grid_policy::a_view_into_the_context_is_located_without_a_search`.
 fn require_exact_execution_subslice(
     reference_minute_context: &[Candle],
     evaluated_execution_1m: &[Candle],

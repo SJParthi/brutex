@@ -205,7 +205,10 @@ impl Ladder {
     ///
     /// Positions past the 64th halving are all zero, so only the last 65 rungs
     /// can differ. The loop visits at most 65 positions, and neither the time
-    /// nor the reservation grows with a larger `count`.
+    /// nor the reservation grows with a larger `count`. Proven identical by
+    /// `runner::excursion::the_selected_ladder_is_the_sorted_ladder_rung_for_rung`
+    /// and unsorted by `runner::excursion::from_excursions_does_not_sort_the_sample`;
+    /// the expected-O(n) figure itself is UNVERIFIED as a measurement.
     #[must_use]
     pub fn from_excursions(observed: &mut [Ppm], count: usize) -> Option<Self> {
         if observed.is_empty() || count == 0 {
