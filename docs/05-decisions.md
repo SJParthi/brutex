@@ -44782,3 +44782,72 @@ number of rows) is still refused as ragged by `checked_record_count`, and
 Finalization V3 `append_raw` has no rollback; see `docs/06-limits.md`.
 
 Test: `every_exact_partial_row_prefix_without_completion_recovers_on_exact_retry`.
+### D-0918 — Let a Population V6 writer initialise a zero-length data file, and state what a Selection V6 read replays — 2026-09-29
+
+**GAP11-2.** `PopulationV6Ledger::open` wrote the header only when `open_child`
+reported that this call created `population-v6.bin`. A writer stopped between
+the create and the header write left a 0-byte file, and every later writer and
+reader refused it with "cannot read Population V6 header: failed to fill whole
+buffer". The choice: under the exclusive writer lock, a data file whose length
+is zero is uninitialised whoever created it, and the writer writes and syncs
+the header and syncs the root, the same steps as a fresh create. The
+observation authority already initialises its own file on length alone
+(`population_observations_v1.rs`:
+`if writable && file.metadata().map_err(|why| why.to_string())?.len() == 0 {`).
+A reader still never initialises, and a non-empty file still goes through
+`verify_header`: the test shows a one-byte file refused and left unchanged. Pinned by
+`cli::population_v6::tests::a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`.
+The same window in Admission V4 and Finalization V4 (W2-cli10-4, W2-cli11-5)
+is not changed by this entry.
+
+A zero-length file is also what committed history truncated to nothing looks
+like, and no byte left in it tells the two causes apart, so this choice
+reinitialises a truncated ledger as well. It does so loudly: a writer that
+initialises a zero-length file it did not create first emits a `Warn` event,
+target `cli.population_v6`, message "Population V6 zero-length data file
+reinitialised", naming the path and both causes. Pinned by
+`cli::population_v6::tests::a_writer_names_an_empty_data_file_it_did_not_create_before_initialising_it`.
+Whether a downstream authority detects the lost history is UNVERIFIED, and a
+header write that fails after 1 to 63 bytes still wedges; both are stated in
+`docs/06-limits.md`.
+
+**W2-cli15-0.** A Selection V6 winner read re-derives its source through
+Execution V4 and Population V6, and each layer re-reads before and after so
+that a source changing mid-read is refused. That re-reading is kept, because
+removing it would drop the mid-read change check; what was missing was any
+statement of its cost. `docs/06-limits.md` now states it call by call, and
+`cli::selection_v6::source::tests::a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts each call site in the source and requires the section to quote it,
+including the full reads each layer repeats besides the Population replays
+(the Execution V4 disposition read, the Selection V6 committed-block scan and
+the Population V6 projection). No timing is claimed.
+
+### D-0919 — A `Trades` refresh records a damaged row and keeps indexing; only writers refuse — 2026-09-29
+
+**W2-cli16-0 and W2-cli16-6.** `Trades::refresh` was `absorb_new_rows`, which
+first refused on any recorded integrity failure. A read handle opened over one
+bad-seal, schema-invalid or non-contiguous row records that failure and opens,
+so the cached `/trades.json` handle refused its next refresh, was dropped, was
+reopened by a full walk on the following request, and refused again on the
+one after. The choice: `refresh` indexes each new row through `index_row`, the
+per-row step `index_of` now also calls, so a refreshed handle holds the same
+blocks and the same first failure as a cold open, and it reads only rows at
+or past `scanned`. It never refuses on a recorded failure. `append_all` and
+`confirm_durable` still call `absorb_new_rows`, which does, so no row is
+appended and nothing is promoted past damage. Pinned by
+`cli::trades::tests::a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows`
+and, through `/trades.json`, by
+`api::trades::tests::a_damaged_row_of_another_run_does_not_refuse_a_healthy_run_on_later_requests`.
+
+Removing the refusal on recorded damage removed the only thing that made the
+cached handle let go of a file replaced under its path, which is how a reviewed
+repair is installed: the held descriptor went on indexing the unlinked file and
+refused every run the repair added. So `refresh` now compares the held file's
+device and inode with what the path names and refuses by name on a mismatch or
+a missing path; the cache drops the handle and the next request opens the
+replacement. And because a row once indexed is never read again, `refresh`
+takes the shared lock `append_all`'s exclusive lock excludes, so it never
+indexes a row still being written. Pinned by
+`cli::trades::tests::a_refresh_refuses_a_file_replaced_or_removed_under_its_path`,
+`cli::trades::tests::a_refresh_waits_for_a_writer_holding_the_exclusive_lock` and
+`api::trades::tests::a_repair_renamed_into_place_is_served_after_one_named_refusal`.

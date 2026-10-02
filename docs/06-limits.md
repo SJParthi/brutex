@@ -10287,3 +10287,127 @@ proof is a design change this entry does not make.
 * **Not measured.** The failures are injected by a write closure that writes
   half a record and returns an error, and by files written by hand. No test
   physically injects ENOSPC, EIO, a kill or a power loss.
+## A Selection V6 read replays its Population source four times — D-0918
+
+W2-cli15-0. Before this section, this document stated Selection V6's record
+size ("Selection V6 uses fixed 16 KiB records and a CLI ceiling of 64 GiB per
+file") and did not say that reading its winners re-runs the Population V6
+source and its Execution V3 exit-grid replay. It does, by design: each layer re-reads its
+source before and after, so a source that changes mid-read is refused rather
+than served. That re-reading is the cost, and it is stated here rather than
+removed.
+
+The chain, each factor a call site that
+`a_selection_v6_read_counts_its_population_replays_and_the_limits_say_so`
+counts in the source:
+
+* `top_twenty_five` calls
+  `Prepared::from_execution(&mut self.source, self.policy)?` twice, once
+  before and once after `require_committed` checks the committed block.
+  `top_ten` calls `top_twenty_five` once. `snapshot` calls `top_twenty_five` once and
+  `Prepared::from_execution` once more, so three. `commit_stored_selection_v6`
+  calls it twice.
+* `Prepared::from_execution` is
+  `Self::from_source(&source.selection_v6_source()?, policy)`: one Execution V4
+  `selection_v6_source` per call.
+* `selection_v6_source` calls
+  `let source_before = self.population_execution_source()?;` and
+  `let source_after = self.population_execution_source()?;`, and each of those
+  is one Population V6 `execution_v4_source`.
+* `execution_v4_source` calls `let before = self.upstream.authenticate()?;`
+  and `let after = self.upstream.authenticate()?;`, and between them
+  `let replay = candidate_source.execution_v3_replay_authority()?;` once for
+  each retained Candidate family.
+* `authenticate` calls
+  `authenticate_candidate_authorities(&self.candidates)?` twice and reads the
+  Finalization source twice.
+
+So one `top_twenty_five` or `top_ten` read is 2 × 2 = four Population V6
+`execution_v4_source` calls: four Execution V3 exit-grid replays for each
+retained Candidate family, and eight upstream authentications, each reading
+every retained Candidate authority's population rows twice. A `snapshot` is
+six `execution_v4_source` calls, and `stored_oos_witnesses` takes two
+snapshots around its own replay.
+
+The Population replays are not the whole cost. Each layer also repeats full
+reads of its own durable file, and the same test counts each call:
+
+* `selection_v6_source` calls
+  `.ordered_authenticated_dispositions()?;` once, reading every durable
+  Execution V4 disposition, so a `top_twenty_five` reads them twice.
+* `top_twenty_five` calls
+  `require_committed(&self.root, self.bounds, &before.block()?)?;` once, and
+  `require_committed` calls `scan(&mut file, &path, bounds, expected)` over
+  the Selection V6 file under a shared lock.
+* `execution_v4_source` calls
+  `let (source, families, population_rows) = self.population.projection()?;`
+  once, reading the Population V6 rows, so four times per `top_twenty_five`.
+
+None of this is O(1). What one Execution V3 replay authority, one upstream
+authentication or any of these full reads costs is not measured here, and no
+latency is claimed; the products above are call counts read from the source,
+not timings.
+
+## A zero-length Population V6 data file is initialised by the next writer — D-0918
+
+GAP11-2. `PopulationV6Ledger::open` wrote the 64-byte header only when that
+call created `population-v6.bin`. A writer killed or refused between creating
+the file and writing its header left a 0-byte file, and every later open
+refused it with "cannot read Population V6 header". A writer now initialises a
+data file whose length is zero whoever created it, under the exclusive writer
+lock; a reader never initialises, and a 1-byte header still refuses unchanged.
+`a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer`
+pins all three. The same header window in Admission V4 and Finalization V4 is
+tracked by other ledger rows and is not changed here.
+
+**A committed ledger truncated to zero bytes is reinitialised too.** A zero-length
+file carries no byte that tells a writer stopped before its header from committed
+history truncated to nothing, so both are given a header and the writer reports
+`record_count` 0. The loss is not silent: a writer that initialises a
+zero-length file it did not create first emits a `Warn` event on target
+`cli.population_v6`, message "Population V6 zero-length data file reinitialised",
+naming the path and both causes;
+`a_writer_names_an_empty_data_file_it_did_not_create_before_initialising_it`
+pins that one event is emitted there and none for a file the writer created.
+Whether a downstream authority that named a record of the lost history detects
+the truncation is UNVERIFIED: no test here exercises one.
+
+**A header write that fails part-way still wedges.** The header write has no
+rollback: `data_file.write_all(&header())` that puts down 1 to 63 bytes and then
+fails (a short write under a small `RLIMIT_FSIZE`, or a full disk) leaves those
+bytes, and every later open refuses them as a short header, the same wedge by a
+different injection. This is a residual, found by reading the source; it was not
+reproduced, and no test pins it.
+
+## `/trades.json` refreshes past a damaged row in O(new rows) — D-0919
+
+W2-cli16-0 and W2-cli16-6. `Trades::refresh` refused as soon as the handle had
+recorded any integrity failure, before reading the file, so one damaged,
+schema-invalid or non-contiguous row anywhere in `chosen-trades.bin` made the
+cached `/trades.json` handle drop on every other request and re-walk every row
+on the one between. A refresh now indexes each new row as the cold walk does,
+through the one `index_row` both call, resuming at `scanned`: a row already
+indexed is not read again, and
+`a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows` rewrites
+row 0 behind `scanned` with a validly sealed row of a new identity and shows
+the refresh neither indexes it nor changes the index. Writers
+still refuse: `append_all` and `confirm_durable` go through `absorb_new_rows`,
+which refuses on the recorded failure first. The refresh is O(rows appended
+since the last refresh) row reads, plus one shared lock, one unlock, one
+descriptor `metadata` and one `symlink_metadata`; it is not timed.
+
+**Two consequences of never re-reading a row.** A refresh takes the shared lock
+before it reads, because `append_all` writes under the exclusive one, so it
+never indexes a row a writer is still putting down;
+`a_refresh_waits_for_a_writer_holding_the_exclusive_lock` holds that lock,
+writes a row in two halves, and shows the refresh waits and then records no
+damage. A request therefore waits for any append in progress. And a file
+replaced under its path, which is how a reviewed repair is installed, is refused
+by name (`was replaced since this handle opened`) rather than refreshed, since
+the held descriptor would otherwise go on indexing the unlinked file:
+`a_refresh_refuses_a_file_replaced_or_removed_under_its_path` pins the refusal
+and a removed path, and
+`a_repair_renamed_into_place_is_served_after_one_named_refusal` shows
+`/trades.json` answers 400 naming the replacement once, then 200 for the
+repaired run. A row rewritten IN PLACE behind `scanned` keeps the same file and
+is still not seen by a held handle until it is reopened.
