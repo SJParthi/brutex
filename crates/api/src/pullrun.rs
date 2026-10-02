@@ -478,8 +478,16 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 ///
 /// # Cost
 ///
-/// One manifest read per vendor per pass — four reads, not four per leg. It is
-/// deliberately outside the per-leg path.
+/// NOT O(1) on a miss. On a cache hit, five `stat`s (six when no manifest
+/// answered) and no manifest read. On the first call after any vendor's
+/// manifest moved, a whole `census::read_all` of all five vendors and a sort
+/// of every held entry: O(manifest bytes + E log E), growing with the store.
+/// During a pull every committed leg moves a manifest, so the conductor's
+/// calls (start, before and after each pass, every [`ROWS_TICK`], end) and
+/// recovery's call after each attempt miss. Outside the per-leg path; the
+/// census a miss builds is shared with every other `census_now` caller.
+/// `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)" says why a
+/// header-only read is not used. UNMEASURED.
 pub(crate) fn rows_now(site: &Site) -> u64 {
     let (censuses, _) = crate::server::census_now(site);
     censuses

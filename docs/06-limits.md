@@ -9879,3 +9879,41 @@ The text above is kept as it was written.
   doc to its body, read off the source, and
   `what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source`
   finds each part named here and in that doc in the source that pays it.
+
+## Recovery seeding and plan ordering (D-1380, D-1381)
+
+- **Seeding syncs once.** `seeded` and `prepare_successor` write a plan's new
+  windows with `Journal::append_new`: one record sync for the batch, where it
+  was one per window. Counted on this thread: 3 record syncs to seed 2 or 40
+  windows (before: 4 and 42), 2 to prepare 2 or 40 (before: 3 and 41). Bytes
+  written still grow with the plan, 1,024 per window, and the sync's own
+  latency grows with what it flushes; neither is claimed O(1). Not timed.
+- **Plan ordering ranks once.** `plan` and `validate_seal` order `n` windows
+  with `n` rank computations (a body parse and clone each) and O(n log n)
+  comparisons of those ranks. Before D-1381 an unsorted 80-window plan took
+  1,032 rank computations. Counted, not timed.
+
+## Pull-run and recovery row counts (D-1382)
+
+Not O(1) on a miss, and not bounded by the run. `pullrun::rows_now` is
+`census_now`:
+
+- **Hit** (no manifest's stamp moved since the cached read): five `stat`s, or
+  six when no manifest answered, and no manifest read.
+- **Miss** (the first call after any manifest moved): `census::read_all` reads
+  every vendor's whole manifest, up to `MAX_MANIFEST_BYTES` (268,468,224) each,
+  and `held_entries` sorts every held entry: O(manifest bytes + E log E), E the
+  store's held entries. It grows with the store, not with the run.
+- **Callers.** `conduct_with` calls it at start, before and after every pass,
+  at the end, and on its ticker every `ROWS_TICK` (5 s); during a pull every
+  committed leg rewrites its vendor's manifest, so those calls miss. At most one
+  miss per tick plus two per pass come from the conductor. `recovery::execute`
+  calls it once and `retry_day` once per attempt, after the attempt's own
+  `recovery_spot`, which already makes one `census::read_all`; so recovery adds
+  at most one more rebuild per attempt.
+- **Why it stays.** A header-only read of `total_rows` would be O(vendors) and
+  would count a generation `Manifest::load` steps over as damaged. The census
+  a miss builds is shared with every other `census_now` caller until a stamp
+  moves.
+
+UNMEASURED: no count or timing of rebuilds during a run was taken.

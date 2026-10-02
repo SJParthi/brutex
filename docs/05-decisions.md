@@ -43718,3 +43718,93 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-1380 — Seed a recovery plan's windows under one journal sync — 2026-10-02
+
+**What happened.** api-06. `recovery::seeded` wrote each queued window of a new
+plan with its own `journal.append(item)`, and `Journal::append` ends in
+`durable_sync`, one `sync_all` per record. `POST /pull/recovery` waits for
+`seeded` (`activate_durable` is awaited before the 202), so a plan of `n`
+windows cost `n` record syncs on the request, up to the 100,000-window bound.
+`prepare_successor` did the same for a successor's scope. Counted, before the
+change, on this thread by a test-only counter in `recovery_journal::counted`:
+seeding 2 windows cost 4 record syncs and 40 windows cost 42 (`n + 2`: the
+windows, the seal, the activation pointer); preparing 2 cost 3 and 40 cost 41
+(`n + 1`).
+
+**The change.** `Journal::append_new` writes a batch of records that are all
+new and distinct keys, as fixed-stride images, then syncs once and checks the
+filename once, then publishes them. Any invalid body, known key or repeated key
+refuses the whole batch before any I/O without poisoning the handle; any I/O
+uncertainty poisons it and publishes nothing, the same contract `append` has.
+Complete records written before a failure can survive on disk; they are new
+`Queued` windows, which the next seed skips and a reopen replays, exactly as a
+single append whose sync failed. `seeded` and `prepare_successor` hand it the
+windows not already in the journal. `prepare_successor` now checks every
+existing window against the request before writing any, where it used to append
+as it went. State transitions still go through `append`, one sync each.
+
+**Proof.** `recovery::tests::seeding_a_plan_costs_the_same_record_syncs_for_two_windows_as_for_forty`
+and `recovery::tests::preparing_a_successor_costs_the_same_record_syncs_for_two_windows_as_for_forty`
+require 3 and 2 record syncs at both sizes (they failed before with
+`[(2, 4), (40, 42)]` and `[(2, 3), (40, 41)]`), and a rerun that adds nothing.
+`recovery_journal::tests::a_seed_batch_syncs_once_whatever_its_size_and_replays_as_single_appends`,
+`a_seed_batch_naming_a_known_or_repeated_key_refuses_whole_and_unpoisoned` and
+`a_failed_seed_batch_sync_publishes_nothing_and_poisons` pin the journal
+contract on the fault-injection fixture. The bytes written still grow with the
+plan (1,024 per window); only the sync count is now constant. Not timed.
+
+### D-1381 — Rank each recovery window once when ordering a plan — 2026-10-02
+
+**What happened.** api-06. `recovery::plan` (on every `POST /pull/recovery`)
+and `recovery::validate_seal` (on every preflight, seed and boot resume)
+ordered windows with `sort_by_key(|row| (server::param(&row.body,
+"granularity") != "1day", row.body.clone()))`. `sort_by_key` recomputes the key
+for both sides of each comparison, so each comparison parsed a body for its
+granularity and cloned two bodies. Counted before the change by
+`ordering_a_plan_ranks_each_window_exactly_once_at_any_size`, on the order a
+seal check meets (rows from a `HashMap`, modelled by ordering on the blake3
+work key): 80 windows took 1,032 key computations, about 12.9 per window,
+against 2 log2 80 ≈ 12.6. A reversed input took 158 for 80, because the
+standard sort finds runs; the cost is input-order dependent.
+
+**The change.** Both call `scope_order(rows, scope_rank)`, which is
+`sort_by_cached_key`: `n` ranks, then a sort of those. It is stable like
+`sort_by_key`, so the order and every plan identity derived from it are
+unchanged. The comparisons remain O(n log n); the parse-and-clone per
+comparison is gone.
+
+**Proof.** The test requires exactly one rank per window at 4 and 80 windows,
+the same order as `plan` produced and the same `scope_identity`, the daily
+windows first, and an empty plan ranking nothing.
+
+### D-1382 — State the census rebuild behind `pullrun::rows_now`, on the pull run's tick and passes and on each recovery attempt — 2026-10-02
+
+**What happened.** api-05. `pullrun::rows_now` is `census_now`, summed. Its
+doc said "One manifest read per vendor per pass — four reads, not four per
+leg." That was wrong three ways: there are five vendors (`Vendor::ALL`), the
+conductor's ticker also calls it every `ROWS_TICK` (5 s), and on a cache hit it
+reads no manifest at all, only five `stat`s. On a miss, which is the first call
+after any vendor's manifest moved, `census_now` runs `census::read_all` (every
+vendor's whole manifest, up to `MAX_MANIFEST_BYTES` each, every entry
+checksum-verified) and `held_entries` (a sort of every held entry), so that
+call costs O(manifest bytes + E log E), E the store's held entries. During a
+pull every committed leg rewrites its vendor's manifest, so the tick, and the
+reads around each pass, miss. `recovery::retry_day` calls `rows_now` after
+each attempt, which is again a miss whenever the attempt committed bars.
+
+**Why stated, not fixed.** The manifest header carries `total_rows`, so a
+header-only read would be O(vendors). It would skip the walk that decides
+which generation answers: a damaged newest generation is stepped over by
+`Manifest::load`, and a header read would count rows the census itself
+refuses, the "receipt says" reading `rows_now` exists to avoid. The cache that
+would have to change lives in `server.rs`, outside this item. The rebuild is
+also shared: the census it builds serves `/store.json` and the other
+`census_now` callers until a stamp moves again. In recovery, each attempt
+already makes `recovery_spot`'s own `census::read_all` (D-0686's section in
+`docs/06-limits.md`), so `rows_now` adds at most one more rebuild per attempt,
+not a new growth class.
+
+**Stated.** `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)",
+and the corrected `rows_now` doc. UNMEASURED: no count or timing of rebuilds in
+a run was taken.
