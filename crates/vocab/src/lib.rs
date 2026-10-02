@@ -173,13 +173,14 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let law = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../CLAUDE.md"))
-            .unwrap_or_default();
+        // A compile-time read: gate 22 keeps the run-time filesystem out of
+        // this crate, and `include_str!` is the read it exempts.
+        let law = include_str!("../../../CLAUDE.md");
         let ours = flatten(source, "///");
         assert!(ours.contains("feed"), "{ours}");
         assert_eq!(
             ours,
-            flatten(&law, ""),
+            flatten(law, ""),
             "the identity quoted here is CLAUDE.md §3 rule 3's"
         );
     }
