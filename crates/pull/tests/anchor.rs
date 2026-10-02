@@ -424,3 +424,161 @@ fn venue_hours_do_not_override_an_exceptional_calendar_session() {
         assert!(!diagnostics.is_empty());
     }
 }
+
+/// IST midnight of `day`, as a UTC epoch second.
+fn midnight_of(day: pull::session::Day) -> i64 {
+    i64::from(day.days_from_epoch()) * 86_400 - pull::session::IST_OFFSET_SECS
+}
+
+/// **A DAY WHOSE SESSION LENGTH IS UNMEASURED IS WITHHELD ONCE, FOR ITS OWN
+/// REASON.** GAP12-12, D-0955.
+///
+/// A pre-2025 Muhurat is `OpenLengthUnmeasured`: the exchange traded and the
+/// calendar does not state for how long, so no minute count can complete a
+/// bucket. Each bucket used to be reported as "incomplete or invalid minute
+/// coverage ... historical gap refill requires a versioned store repair", which
+/// `ingest::derive` rewrites into "restore complete minute source" — a repair
+/// that does not exist, once per bucket. Checked at every width from one minute
+/// to an hour, with a regular day after it whose buckets must still complete.
+#[test]
+fn an_unmeasured_length_day_is_withheld_once_with_its_own_reason() {
+    use pull::calendar::DayKind;
+    use pull::session::Day;
+    let muhurat = Day::new(2020, 11, 14).unwrap();
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(muhurat.days_from_epoch())),
+        DayKind::OpenLengthUnmeasured,
+        "the premise: the calendar withholds this day's length"
+    );
+    // Sixty minutes from 18:15 IST, which is the shape the 2025 Muhurat had.
+    let evening = midnight_of(muhurat) + (18 * 60 + 15) * 60;
+    let mut bars: Vec<_> = (0..60).map(|m| minute(evening + m * 60)).collect();
+    // A regular session after it: 2020-11-17, a Tuesday.
+    let regular = midnight_of(Day::new(2020, 11, 17).unwrap()) + 555 * 60;
+    bars.extend((0..SESSION_MINUTES).map(|m| minute(regular + m * 60)));
+    for secs in [60_u32, 300, 900, 3600] {
+        let (complete, diagnostics) =
+            pull::fold::complete_minutes(&bars, Bucket::of_secs(secs).unwrap()).unwrap();
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "{secs}s: one sentence for the day, not one per bucket: {diagnostics:?}"
+        );
+        let why = &diagnostics[0];
+        assert!(why.contains("unmeasured"), "{secs}s: {why}");
+        assert!(
+            !why.contains("incomplete") && !why.contains("historical gap refill"),
+            "{secs}s: not a coverage fault, so nothing for derive to rewrite into a repair: {why}"
+        );
+        assert!(
+            complete
+                .iter()
+                .all(|bar| bar.ts_micros >= regular * 1_000_000),
+            "{secs}s: nothing from the unmeasured day is certified"
+        );
+        assert_eq!(
+            complete.iter().map(|bar| bar.volume).sum::<i64>(),
+            SESSION_MINUTES,
+            "{secs}s: and the regular day after it still completes whole"
+        );
+    }
+    // A single bar on that day is still one sentence; no bars is none.
+    let (_, one) = pull::fold::complete_minutes(&bars[..1], Bucket::of_secs(300).unwrap()).unwrap();
+    assert_eq!(one.len(), 1, "{one:?}");
+    let (none, nothing) = pull::fold::complete_minutes(&[], Bucket::of_secs(300).unwrap()).unwrap();
+    assert!(none.is_empty() && nothing.is_empty());
+}
+
+/// **BARS ON A MEASURED CLOSED DAY ARE A STORE DEFECT, NAMED ONCE.** GAP12-12.
+///
+/// A Sunday with a whole session's minutes on it: the calendar says the
+/// exchange did not trade, so the bars are a defect in what was stored, not a
+/// hole a refill could close.
+#[test]
+fn bars_on_a_closed_day_are_named_once_as_a_store_defect() {
+    use pull::calendar::DayKind;
+    use pull::session::Day;
+    let sunday = Day::new(2025, 7, 6).unwrap();
+    assert_eq!(
+        pull::calendar::kind_of(i64::from(sunday.days_from_epoch())),
+        DayKind::Closed,
+        "the premise: a measured weekend"
+    );
+    let open = midnight_of(sunday) + 555 * 60;
+    let bars: Vec<_> = (0..SESSION_MINUTES)
+        .map(|m| minute(open + m * 60))
+        .collect();
+    for secs in [60_u32, 300, 3600] {
+        let (complete, diagnostics) =
+            pull::fold::complete_minutes(&bars, Bucket::of_secs(secs).unwrap()).unwrap();
+        assert!(complete.is_empty(), "{secs}s: nothing certified");
+        assert_eq!(diagnostics.len(), 1, "{secs}s: {diagnostics:?}");
+        assert!(
+            diagnostics[0].contains("closed") && diagnostics[0].contains("store defect"),
+            "{secs}s: {}",
+            diagnostics[0]
+        );
+        assert!(!diagnostics[0].contains("historical gap refill"));
+    }
+}
+
+/// **A BUCKET'S VOLUME THAT LEAVES `i64` IS REFUSED, NOT CAPPED.**
+/// ET-bars-candles-store-4, D-0955.
+///
+/// The fold refused a timestamp it could not shift, on the stated ground that
+/// saturating files a wrong bar, and then saturated the volume sum. Both ends of
+/// the range, the exact boundary, and two full buckets that must not interact.
+#[test]
+fn a_bucket_whose_volume_leaves_i64_is_refused_not_capped() {
+    let five = Bucket::of_secs(300).unwrap();
+    let pair = |first: i64, second: i64| {
+        let mut a = minute(OPEN_UTC);
+        a.volume = first;
+        let mut b = minute(OPEN_UTC + 60);
+        b.volume = second;
+        vec![a, b]
+    };
+    for (first, second) in [(i64::MAX, 1), (1, i64::MAX), (i64::MIN, -1), (-1, i64::MIN)] {
+        assert_eq!(
+            fold(&pair(first, second), five),
+            Err(pull::fold::FoldError::VolumeOverflow {
+                at: 1,
+                bucket: OPEN_UTC * 1_000_000
+            }),
+            "{first} + {second}"
+        );
+        assert!(
+            pull::fold::fold_from_bars(&pair(first, second), five, Bucket::MINUTE).is_err(),
+            "the minute path refuses too"
+        );
+        assert!(
+            matches!(
+                pull::fold::complete_minutes(&pair(first, second), five),
+                Err(pull::fold::FoldError::VolumeOverflow { .. })
+            ),
+            "and so does derivation's completeness fold"
+        );
+    }
+    let rendered = pull::fold::FoldError::VolumeOverflow { at: 1, bucket: 7 }.to_string();
+    assert!(
+        rendered.contains("Refused rather than saturated") && rendered.contains("an i64"),
+        "{rendered}"
+    );
+    // Exactly at either end is a legal sum, and stays exact.
+    assert_eq!(
+        fold(&pair(i64::MAX - 1, 1), five).unwrap()[0].volume,
+        i64::MAX
+    );
+    assert_eq!(
+        fold(&pair(i64::MIN + 1, -1), five).unwrap()[0].volume,
+        i64::MIN
+    );
+    // Two buckets each holding i64::MAX never meet.
+    let mut apart = pair(i64::MAX, i64::MAX);
+    apart[1].ts_micros = (OPEN_UTC + 300) * 1_000_000;
+    let out = fold(&apart, five).unwrap();
+    assert_eq!(
+        out.iter().map(|bar| bar.volume).collect::<Vec<_>>(),
+        [i64::MAX; 2]
+    );
+}
