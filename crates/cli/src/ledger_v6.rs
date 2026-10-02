@@ -391,13 +391,6 @@ fn run_route(
             })?;
         sizing_inputs.require_current()?;
         committed.push(selection);
-        if committed.len() == 1 {
-            let _ = writeln!(
-                out,
-                "\n  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>9}  {:>9}",
-                "rung", "decisions", "cands", "NIFTY", "BANKNIFTY", "draws/seed", "block"
-            );
-        }
         render_route_summary(rung, &summary, out);
     }
     Ok(committed)
@@ -420,23 +413,51 @@ fn render_route_summary(
     summary: &crate::step3_orchestrator::StoredPopulationV6SummaryV1,
     out: &mut String,
 ) {
+    use crate::columns::{left, right};
     // HOISTED SO IT IS COMPUTED ONCE AND USED TWICE -- the terminal row
     // below and the event beneath it name the same block. A second
     // `short_id` call solely to fill a log field would be the value
     // computed only to be logged that this file refuses.
     let admission_short = short_id(&summary.admission_block);
+    // ITS OWN HEADER, LAID OUT WITH IT (D-1420). The header was printed once,
+    // above the first rung, while every rung's selection report is written
+    // between its rows -- so the columns could only line up by fixed widths,
+    // and they did not: `draws/seed` is ten characters over a nine-character
+    // column, and any count past its width pushed the rest off the header.
+    let lines = crate::columns::with_header(
+        &[
+            left(6),
+            right(9).after(2),
+            right(7).after(2),
+            right(9).after(2),
+            right(9).after(2),
+            right(9).after(2),
+            right(9).after(2),
+        ],
+        &[
+            "rung",
+            "decisions",
+            "cands",
+            "NIFTY",
+            "BANKNIFTY",
+            "draws/seed",
+            "block",
+        ],
+        vec![vec![
+            rung.to_owned(),
+            summary.decisions.to_string(),
+            summary.candidate_count.to_string(),
+            summary.nifty_candidates.to_string(),
+            summary.banknifty_candidates.to_string(),
+            format!("{}/{}", summary.draws, summary.seed),
+            summary.block_length.to_string(),
+        ]],
+    );
     let _ = writeln!(
         out,
-        "  {:<6}  {:>9}  {:>7}  {:>9}  {:>9}  {:>4}/{:<4}  {:>9}\n         \
-             NIFTY {} · BANKNIFTY {}",
-        rung,
-        summary.decisions,
-        summary.candidate_count,
-        summary.nifty_candidates,
-        summary.banknifty_candidates,
-        summary.draws,
-        summary.seed,
-        summary.block_length,
+        "\n  {}\n  {}\n         NIFTY {} · BANKNIFTY {}",
+        lines.header,
+        lines.rows.concat(),
         summary.nifty_terminal,
         summary.banknifty_terminal,
     );
@@ -1102,6 +1123,33 @@ mod tests {
                     ("top10", telemetry::Value::Uint(top10 as u64)),
                 ]
             );
+        }
+    }
+
+    /// D-1420: a route row at `u64::MAX` in every count. The header's
+    /// `draws/seed` is ten characters over a nine-character column, so it sat
+    /// one character right of its own figures even at ordinary values, and a
+    /// count past nine digits pushed every column after it off its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_route_row_keeps_extreme_counts_apart_and_under_its_header() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let extreme = crate::step3_orchestrator::StoredPopulationV6SummaryV1 {
+            draws: u64::MAX,
+            seed: u64::MAX,
+            block_length: u64::MAX,
+            candidate_count: u64::MAX,
+            nifty_candidates: u64::MAX,
+            banknifty_candidates: u64::MAX,
+            decisions: u64::MAX,
+            ..sample_summary()
+        };
+        for (rung, summary) in [("3600s", extreme), ("60s", sample_summary())] {
+            let mut out = String::new();
+            super::render_route_summary(rung, &summary, &mut out);
+            let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+            crate::columns::assert_under(lines[0], lines[1], &[L, R, R, R, R, R, R])
+                .expect("separated and aligned");
         }
     }
 }

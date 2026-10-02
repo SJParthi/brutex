@@ -62,7 +62,7 @@
 //! no input-dependent cost. [`solver`] is a root find. `CLAUDE.md` §3 rule 4
 //! is about per-operation cost, and inverting a transcendental function is not
 //! one operation. What the solver has instead is a **hard bound that is
-//! arithmetic rather than hopeful** — 75 model evaluations, counted at the one
+//! arithmetic rather than hopeful** — 86 model evaluations, counted at the one
 //! function every evaluation passes through, by
 //! `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound` and
 //! `greeks::solver::the_reported_cost_is_every_model_evaluation`. See

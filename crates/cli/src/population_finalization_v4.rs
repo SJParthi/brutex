@@ -84,10 +84,8 @@ const RUNNER_HEADER_BYTES: usize = 12;
 const RUNNER_POLICY_END: usize = RUNNER_HEADER_BYTES + RUNNER_POLICY_BYTES;
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 
@@ -1348,6 +1346,30 @@ fn header() -> [u8; HEADER_BYTES] {
     raw
 }
 
+/// True when the held file is shorter than the header and every byte it holds
+/// equals the constant header's byte at that offset: the residue of a crash
+/// before the header write reached disk, and nothing else.
+fn holds_torn_header(file: &mut File) -> Result<bool, PopulationFinalizationV4Refusal> {
+    let len = file
+        .metadata()
+        .map_err(|why| format!("cannot stat Finalization V4 data: {why}"))?
+        .len();
+    let Some(kept) = usize::try_from(len)
+        .ok()
+        .filter(|kept| *kept < HEADER_BYTES)
+    else {
+        return Ok(false);
+    };
+    let mut raw = [0_u8; HEADER_BYTES];
+    let prefix = raw
+        .get_mut(..kept)
+        .ok_or_else(|| "Finalization V4 torn header range is invalid".to_owned())?;
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(prefix))
+        .map_err(|why| format!("cannot read Finalization V4 torn header: {why}"))?;
+    Ok(header().get(..kept) == Some(&*prefix))
+}
+
 fn verify_header(file: &mut File) -> Result<(), PopulationFinalizationV4Refusal> {
     let mut raw = [0_u8; HEADER_BYTES];
     file.seek(SeekFrom::Start(0))
@@ -2150,10 +2172,16 @@ impl PopulationFinalizationV4Ledger {
                 .map_err(|why| format!("cannot shared-lock Finalization V4 reader: {why}"))?;
         }
         let opened = (|| {
-            let (mut data_file, data_created) = open_child(&data_path, writable)?;
+            let (mut data_file, created) = open_child(&data_path, writable)?;
+            // A crash between creating the file and syncing its header leaves
+            // an empty file or a strict prefix of the constant header. Only
+            // the writer, under the exclusive lock, rewrites that; a reader
+            // and any other short content still refuse in `verify_header`.
+            let data_created = created || (writable && holds_torn_header(&mut data_file)?);
             if data_created {
                 data_file
-                    .write_all(&header())
+                    .seek(SeekFrom::Start(0))
+                    .and_then(|_| data_file.write_all(&header()))
                     .and_then(|()| data_file.sync_all())
                     .map_err(|why| format!("cannot initialize Finalization V4 data: {why}"))?;
             }
@@ -2274,6 +2302,25 @@ impl PopulationFinalizationV4Ledger {
         combine(result, unlocked)
     }
 
+    /// Appends one authority under the held exclusive lock.
+    ///
+    /// # Cost
+    ///
+    /// The append opens with a generation check that hashes the whole data
+    /// file, and an exact reuse runs another before it returns, so a reused
+    /// append that writes nothing is O(F) as well.
+    /// After the Completion is synced, the append hashes the whole data file
+    /// and then rescans the whole ledger: `scan` decodes every record,
+    /// validates every complete block, and ends with a generation check that
+    /// hashes the data file whole again. One append is therefore O(F) in the
+    /// ledger's file bytes F, not O(D) in its own decisions, and the appends
+    /// into one ledger cost quadratically in its length over its life.
+    /// Block validation inserts every decision into hash sets, so the bound
+    /// is expected, not worst case.
+    /// `docs/06-limits.md`, "Four ledger calls that rehash or rescan whole
+    /// files per call".
+    /// `crates/cli/tests/ledger_scan_costs.rs` counts the calls that make this
+    /// cost.
     #[expect(
         clippy::too_many_lines,
         reason = "one receipt-last append keeps exact-prefix retry, evidence sync, Completion sync and held-generation checks adjacent"
@@ -3408,5 +3455,92 @@ mod tests {
             .sync_all()
             .expect("sync replacement Finalization bytes");
         assert!(replacement.population_source().is_err());
+    }
+
+    #[test]
+    fn empty_or_torn_header_prefix_is_reinitialized_by_the_writer_only() {
+        let terminal = AdmissionV4FamilyTerminal::Evaluated;
+        let extinct = AdmissionV4FamilyTerminal::NaturallyExtinct;
+        let reference_admission = TestRoot::new("header-reference-admission");
+        let reference = TestRoot::new("header-reference");
+        commit_population_finalization_v4(
+            reference.path(),
+            bounds(),
+            admission(reference_admission.path(), terminal, extinct, 71),
+        )
+        .expect("write uncrashed reference");
+        let expected = std::fs::read(reference.path().join(DATA_FILE)).expect("read reference");
+        for kept in [0, 1, HEADER_BYTES / 2, HEADER_BYTES - 1] {
+            let admission_root = TestRoot::new("torn-header-admission");
+            let root = TestRoot::new("torn-header");
+            File::create(root.path().join(LOCK_FILE)).expect("create crashed lock");
+            std::fs::write(root.path().join(DATA_FILE), &header()[..kept])
+                .expect("write crashed header prefix");
+            assert!(PopulationFinalizationV4Ledger::open_read(root.path(), bounds()).is_err());
+            assert_eq!(
+                std::fs::read(root.path().join(DATA_FILE)).expect("reread after reader"),
+                &header()[..kept],
+                "a reader must not repair the file"
+            );
+            let committed = commit_population_finalization_v4(
+                root.path(),
+                bounds(),
+                admission(admission_root.path(), terminal, extinct, 71),
+            )
+            .unwrap_or_else(|why| panic!("writer must recover {kept} header bytes: {why}"));
+            assert!(matches!(
+                &committed,
+                PopulationFinalizationV4Commit::Written(_)
+            ));
+            assert_eq!(
+                std::fs::read(root.path().join(DATA_FILE)).expect("reread recovered"),
+                expected
+            );
+            PopulationFinalizationV4Ledger::open_read(root.path(), bounds())
+                .expect("reader opens recovered ledger");
+        }
+
+        let foreign_admission = TestRoot::new("foreign-short-header-admission");
+        let foreign = TestRoot::new("foreign-short-header");
+        let mut garbage = header()[..HEADER_BYTES / 2].to_vec();
+        garbage[0] ^= 1;
+        std::fs::write(foreign.path().join(DATA_FILE), &garbage).expect("write foreign bytes");
+        assert!(
+            commit_population_finalization_v4(
+                foreign.path(),
+                bounds(),
+                admission(foreign_admission.path(), terminal, extinct, 71),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(foreign.path().join(DATA_FILE)).expect("reread foreign bytes"),
+            garbage
+        );
+    }
+
+    #[test]
+    fn a_whole_header_is_not_rewritten_by_the_writer() {
+        let root = TestRoot::new("whole-header");
+        let path = root.path().join(DATA_FILE);
+        std::fs::write(&path, header()).expect("write whole header");
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("open whole header")
+            .set_modified(stamp)
+            .expect("stamp whole header");
+        drop(
+            PopulationFinalizationV4Ledger::open_write(root.path(), bounds())
+                .expect("writer opens whole header"),
+        );
+        let metadata = std::fs::metadata(&path).expect("stat whole header");
+        assert_eq!(metadata.len(), HEADER_BYTES as u64);
+        assert_eq!(
+            metadata.modified().expect("read modified time"),
+            stamp,
+            "a writer must not rewrite a header that is already whole"
+        );
     }
 }

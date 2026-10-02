@@ -25,25 +25,49 @@ pub const MAX_QUERY_BYTES: usize = 512;
 /// Maximum JSON bytes returned by a successful or partial detail response.
 pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Calendar derivations (`/calendar.json`, `/gaps.json`'s peer vote) that may
+/// be queued or running at once on the blocking pool.
+///
+/// A pool of its own, not [`MAX_CONCURRENT`]'s: a page polling the calendar
+/// must not be refused because sweep detail reads are busy, nor the reverse.
+/// Concurrent misses on one series share one derivation
+/// (`calendar_of::Cache`), so this bounds blocking threads, not derivations
+/// per key. W1-api2-11, D-0950.
+pub const MAX_CALENDAR_CONCURRENT: usize = 8;
 
-/// One admitted detail request.  Dropping it always returns the slot.
-pub(crate) struct Permit;
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// One admitted request in one pool.  Dropping it always returns the slot.
+pub(crate) struct Permit(&'static AtomicUsize);
 
 impl Permit {
     fn try_take() -> Option<Self> {
-        ACTIVE
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_CONCURRENT).then_some(active.saturating_add(1))
-            })
-            .ok()
-            .map(|_| Self)
+        Self::try_take_from(&ACTIVE, MAX_CONCURRENT)
+    }
+
+    fn try_take_from(pool: &'static AtomicUsize, max: usize) -> Option<Self> {
+        pool.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < max).then_some(active.saturating_add(1))
+        })
+        .ok()
+        .map(|_| Self(pool))
+    }
+
+    /// A slot for work an already-admitted request owes, taken past the cap.
+    ///
+    /// It is never refused, and it still counts: while it is held,
+    /// [`Permit::try_take`] sees one more active task and refuses new work
+    /// sooner. D-0952.
+    fn owed() -> Self {
+        ACTIVE.fetch_add(1, Ordering::AcqRel);
+        Self(&ACTIVE)
     }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let previous = ACTIVE.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "a detail permit is released exactly once");
     }
 }
@@ -69,6 +93,60 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     let permit = Permit::try_take().ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// Runs a calendar derivation outside Tokio's worker pool, in the calendar
+/// pool of [`MAX_CALENDAR_CONCURRENT`] slots. W1-api2-11, D-0950.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every calendar slot is
+/// occupied, or [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_calendar<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&CALENDAR_ACTIVE, MAX_CALENDAR_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+async fn admitted<T, F>(permit: Permit, work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|why| RunError::Join(why.to_string()))
+}
+
+/// Runs blocking work an already-admitted request OWES, outside Tokio's
+/// worker pool, without refusing it when every slot is taken.
+///
+/// For the invocation journal's terminal record only: the handler has already
+/// run, so refusing the write that records its outcome cannot undo it and
+/// used to leave a false `Cancelled`. The slot it takes is counted against
+/// [`run`]'s admission but bypasses its cap, so at most one owed task exists
+/// per audited request whose handler has returned; `docs/06-limits.md`
+/// (D-0952) states that this count is bounded by in-flight requests, not by
+/// [`MAX_CONCURRENT`]. UNVERIFIED: no bench times this path.
+///
+/// # Errors
+///
+/// Returns [`RunError::Join`] when Tokio cannot join the blocking task. It
+/// never returns [`RunError::Saturated`].
+pub(crate) async fn run_owed<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::owed();
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         work()
@@ -291,6 +369,17 @@ pub(crate) async fn apart_from_slot_owners() -> tokio::sync::MutexGuard<'static,
     TEST_SERIAL.lock().await
 }
 
+/// Takes every slot that is free right now, for a test that must saturate the
+/// pool from inside a request it is already running.
+///
+/// Asks for the serial guard so it cannot race [`hold_every_slot`]. Other
+/// tests that use a slot without that guard may still hold some, which is why
+/// this takes what is free rather than exactly [`MAX_CONCURRENT`].
+#[cfg(test)]
+pub(crate) fn take_every_free_slot(_apart: &tokio::sync::MutexGuard<'static, ()>) -> Vec<Permit> {
+    std::iter::from_fn(Permit::try_take).collect()
+}
+
 #[cfg(test)]
 pub(crate) struct HeldSlots {
     _serial: tokio::sync::MutexGuard<'static, ()>,
@@ -337,11 +426,18 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 ///
 /// # Any refusal from `refresh` drops the handle
 ///
-/// A shrunken file, a torn tail, a duplicate identity, a file moved aside on a
-/// format-version bump -- each is a reason the handle no longer describes what
-/// is on disk. The answer is one fresh `open`, which is the single O(rows) path
-/// a cache should ever take, and the refusal that caused it is never swallowed:
-/// if the reopen also fails, that error is the response.
+/// A shrunken file, a torn tail, a file replaced or moved aside under its path
+/// -- each is a reason the handle no longer describes what is on disk. The
+/// answer is one fresh `open`, which is the single O(rows) path a cache should
+/// ever take, and the refusal that caused it is never swallowed: if the reopen
+/// also fails, that error is the response.
+///
+/// A recorded integrity failure (a bad seal, an invalid schema, a
+/// non-contiguous duplicate identity) is a refusal for `Frontier::refresh`,
+/// which still refuses on it first. It is NOT one for `Trades::refresh` since
+/// D-0919: that refresh records the damage the way a cold open does and keeps
+/// its handle, and it refuses instead when the path names a file other than the
+/// one it holds, so a reviewed repair renamed into place is reopened.
 ///
 /// A root that differs from the cached one is treated the same way. There is
 /// one store root per process, so this is a guard against a future caller
@@ -548,6 +644,22 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
     Ok(())
 }
 
+/// Whether a Boolean observation route must authenticate its saved body again
+/// rather than project from the reader its single slot holds. W1-api1-5, D-0951.
+///
+/// `held` is whether the slot holds a reader for exactly this root, identity,
+/// model and budget. A pinned request (`pinned`) over a held reader reuses it
+/// and lets the projection refuse a changed generation, as it always did. An
+/// unpinned request -- every first page -- used to authenticate afresh every
+/// time; it now reuses a held reader whose `current` check passes (the same
+/// generation and lease check a warm page makes) and authenticates again only
+/// when that check refuses. `current` is not called when nothing is held or the
+/// request is pinned. What a cold admission still costs is stated in
+/// `docs/06-limits.md` under D-0951 and is UNVERIFIED as a measurement.
+pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> bool) -> bool {
+    !held || (!pinned && !current())
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -558,8 +670,88 @@ pub fn put_equity_note(body: &mut serde_json::Value, note: String) -> Result<(),
 mod tests {
     use super::{
         Cached, IDENTITY_REFUSAL, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_SCAN_BYTES, Page, Selector,
-        preflight, run, window,
+        must_admit, preflight, run, window,
     };
+
+    /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-0951.
+    ///
+    /// Nothing held: admit, and the currency check is never asked (there is
+    /// no reader to ask). Held and pinned: reuse without asking, so the
+    /// projection's own check is what refuses a changed generation. Held and
+    /// unpinned: reuse exactly when the reader is current.
+    #[test]
+    fn a_held_reader_is_reused_when_pinned_or_current_and_admitted_again_otherwise() {
+        for pinned in [false, true] {
+            for current in [false, true] {
+                let mut asked = 0;
+                assert!(
+                    must_admit(false, pinned, || {
+                        asked += 1;
+                        current
+                    }),
+                    "nothing held: pinned={pinned} current={current}"
+                );
+                assert_eq!(asked, 0, "nothing held is never asked about currency");
+                let mut asked = 0;
+                let admit = must_admit(true, pinned, || {
+                    asked += 1;
+                    current
+                });
+                assert_eq!(
+                    admit,
+                    !pinned && !current,
+                    "pinned={pinned} current={current}"
+                );
+                assert_eq!(
+                    asked,
+                    usize::from(!pinned),
+                    "pinned={pinned}: asked once if unpinned"
+                );
+            }
+        }
+    }
+
+    /// **A POOL ADMITS EXACTLY ITS BOUND, AND A DROPPED PERMIT RETURNS ITS
+    /// SLOT.** W1-api2-11, D-0950. Driven on a pool of the test's own, so no
+    /// route test sharing the real pools can see it.
+    #[test]
+    fn a_pool_admits_its_bound_and_a_dropped_permit_frees_its_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static POOL: AtomicUsize = AtomicUsize::new(0);
+        let first = super::Permit::try_take_from(&POOL, 2).expect("one of two");
+        let second = super::Permit::try_take_from(&POOL, 2).expect("two of two");
+        assert!(
+            super::Permit::try_take_from(&POOL, 2).is_none(),
+            "a third is refused"
+        );
+        assert_eq!(POOL.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(POOL.load(Ordering::Acquire), 1);
+        let third = super::Permit::try_take_from(&POOL, 2).expect("the freed slot");
+        drop((second, third));
+        assert_eq!(POOL.load(Ordering::Acquire), 0, "every slot returned");
+        assert!(
+            super::Permit::try_take_from(&POOL, 0).is_none(),
+            "a zero bound admits nothing"
+        );
+        assert_eq!(
+            POOL.load(Ordering::Acquire),
+            0,
+            "and a refusal takes nothing"
+        );
+    }
+
+    /// **A CALENDAR DERIVATION RUNS OFF THE ASYNC WORKER.** W1-api2-11,
+    /// D-0950. On a current-thread runtime the worker is the test's own
+    /// thread, so work that reports another thread ran on the blocking pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_calendar_derivation_runs_off_the_async_worker() {
+        let worker = std::thread::current().id();
+        let ran_on = super::run_calendar(|| std::thread::current().id())
+            .await
+            .expect("admitted");
+        assert_ne!(ran_on, worker, "the blocking pool, not the async worker");
+    }
 
     /// ONLY AN ABSENT LEDGER IS AN ABSENCE.
     ///

@@ -540,3 +540,41 @@ fn a_page_over_a_stock_source_states_the_equity_note_and_an_index_page_does_not(
         assert!(note_of.contains(arm), "{arm}: each model's own sources");
     }
 }
+
+/// **A Boolean evidence page's currency checks grow with its linked catalogs,
+/// and that is stated.** W1-api1-6, D-0951.
+///
+/// The bullet must give the count the source pays: four `require_current`
+/// style calls on an admission page, three on a statistics page, each over
+/// the C linked catalogs. The source is read for the two outer calls each
+/// projection makes, so a projection that adds or drops one fails here and
+/// the bullet is revisited.
+#[test]
+fn an_evidence_pages_currency_cost_per_linked_catalog_is_stated() {
+    let bullet = crate::booleanjson::tests::d0951_bullet("W1-api1-6");
+    for word in [
+        "booleanevidencejson::admission",
+        "`statistics`",
+        "four currency calls",
+        "three",
+        "C linked",
+        "`flock`",
+        "six `metadata` calls",
+        "O(C)",
+        "independent of its 1..=256 rows",
+    ] {
+        assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+    }
+    let source = include_str!("booleanevidencejson.rs");
+    for function in ["admission", "statistics"] {
+        let found = source.split_once(&format!("\nfn {function}("));
+        assert!(found.is_some(), "{function} exists");
+        let body = found.unwrap_or_default().1;
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert_eq!(
+            body.matches("reader.require_current()?").count(),
+            2,
+            "{function} checks currency before and after its page: {body}"
+        );
+    }
+}

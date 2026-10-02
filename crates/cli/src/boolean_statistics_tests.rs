@@ -366,3 +366,120 @@ fn actual_source_odd_calendar_and_foreign_catalog_refuse_without_statistics_comp
     assert!(!fixture.output.join("boolean-statistics-v1").exists());
     Ok(())
 }
+
+/// The body of the first `require_current` method that follows `after` in
+/// `source`, up to its closing brace at method indentation.
+fn require_current_body<'a>(source: &'a str, after: &str) -> Result<&'a str, String> {
+    let from = source
+        .find(after)
+        .ok_or_else(|| format!("`{after}` is not in the source"))?;
+    let rest = source.get(from..).ok_or("source boundary")?;
+    let open = rest
+        .find("fn require_current(&self) -> Result<(), String> {")
+        .ok_or_else(|| format!("no require_current after `{after}`"))?;
+    let body = rest.get(open..).ok_or("method boundary")?;
+    let close = body
+        .find("\n    }\n")
+        .ok_or("method has no closing brace")?;
+    body.get(..close)
+        .ok_or_else(|| "method body boundary".to_owned())
+}
+
+/// W2-cli2-4: `docs/06-limits.md` states that every Boolean integrity check
+/// re-reads and re-hashes its whole body and checks its parent before and
+/// after, so a family body's reads double with each level above it. Each
+/// line the entry quotes is found in the entry and in the source that pays
+/// it, and each level's bracketing is counted in its own method: two parent
+/// checks around exactly one `persistence::verify`.
+#[test]
+fn the_boolean_integrity_cost_entry_is_read_off_the_source() -> Result<(), String> {
+    let limits = include_str!("../../../docs/06-limits.md");
+    let start = limits
+        .find("## Boolean integrity checks re-read whole bodies, and nesting doubles them")
+        .ok_or("the W2-cli2-4 limits entry is missing")?;
+    let entry = limits.get(start..).ok_or("entry boundary")?;
+    let entry = entry
+        .get(3..)
+        .and_then(|tail| tail.find("\n## "))
+        .and_then(|end| entry.get(..end.saturating_add(3)))
+        .unwrap_or(entry);
+    assert!(entry.contains("W2-cli2-4"), "{entry}");
+    assert!(
+        entry.contains("**Not O(1), and not fixed here.**"),
+        "{entry}"
+    );
+
+    let persistence = include_str!("boolean_candidate_persistence.rs");
+    for quote in [
+        "let body = read_exact(&directory.join(\"body.bin\"), bytes)?;",
+        "hash(&body) != payload",
+    ] {
+        assert!(entry.contains(quote), "the entry quotes `{quote}`");
+        assert!(persistence.contains(quote), "the source pays `{quote}`");
+    }
+
+    let statistics = include_str!("boolean_statistics_v1.rs");
+    let admission = include_str!("boolean_admission_v1.rs");
+    let oos = include_str!("boolean_oos_v1.rs");
+    let qualification = include_str!("boolean_qualification_v1.rs");
+    for (source, owner, parent) in [
+        (
+            statistics,
+            "impl CommittedBooleanStatisticsV1",
+            "self.group.require_current()",
+        ),
+        (
+            admission,
+            "impl CommittedBooleanAdmissionV1",
+            "self.statistics.require_current()",
+        ),
+        (
+            oos,
+            "impl CommittedBooleanOosV1<'_>",
+            "self.training.require_current()",
+        ),
+        (
+            qualification,
+            "impl Committed<'_> {",
+            "current(self.training, self.later)",
+        ),
+    ] {
+        assert!(entry.contains(parent), "the entry names `{parent}`");
+        let body = require_current_body(source, owner)?;
+        assert_eq!(
+            body.matches(parent).count(),
+            2,
+            "{owner} checks its parent before and after: {body}"
+        );
+        assert_eq!(
+            body.matches("persistence::verify(").count(),
+            1,
+            "{owner} re-reads its own body once: {body}"
+        );
+    }
+    // The fan-out below each bracket: the statistics group checks every
+    // source family, and qualification's `current` checks the admission and
+    // every out-of-sample source.
+    let group = require_current_body(statistics, "impl Group")?;
+    assert!(group.contains("for source in &self.sources"), "{group}");
+    assert!(group.contains("source.require_current()?;"), "{group}");
+    let current = qualification
+        .find("\nfn current(")
+        .and_then(|at| qualification.get(at..))
+        .and_then(|tail| tail.find("\n}\n").and_then(|end| tail.get(..end)))
+        .ok_or("qualification's `current` is missing")?;
+    assert!(
+        current.contains("training.require_current()?;"),
+        "{current}"
+    );
+    assert!(current.contains("for source in later"), "{current}");
+    assert!(current.contains("source.require_current()?;"), "{current}");
+    let family = include_str!("boolean_candidate_v1.rs");
+    let family = require_current_body(family, "impl CommittedBooleanFamilyV1")?;
+    assert_eq!(
+        family.matches("persistence::verify(").count(),
+        1,
+        "a family check re-reads the family body: {family}"
+    );
+    Ok(())
+}

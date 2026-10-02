@@ -307,8 +307,11 @@ impl Expression {
 
 impl std::fmt::Display for Expression {
     /// Canonical fully parenthesized numeric infix, rendered iteratively.
-    /// The fixed wire grammar can exceed the source parser's nesting/byte
-    /// limits; display is lossless human text, not a promise to bypass them.
+    /// Display is lossless human text, not a parser round trip (D-0751): each
+    /// NOT renders as `!(`, two parser nesting levels, and each binary node
+    /// adds one level and five bytes, so even a program [`Self::parse`]
+    /// accepted can render past its nesting or byte limit. The exact round
+    /// trip is [`Self::encode`] and [`Self::decode`].
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         render_program(self, &render_children(self)?, f)
     }

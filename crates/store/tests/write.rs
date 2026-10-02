@@ -25,6 +25,8 @@
     clippy::indexing_slicing
 )]
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -674,6 +676,14 @@ fn a_file_where_a_directory_belongs_is_named() {
 
 #[test]
 fn a_directory_that_refuses_a_write_is_named() {
+    support::where_permission_binds(
+        "a_directory_that_refuses_a_write_is_named",
+        a_directory_that_refuses_a_write_is_named_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+fn a_directory_that_refuses_a_write_is_named_body() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = Scratch::new("denied");
@@ -1005,9 +1015,10 @@ fn a_truncation_under_an_open_handle_is_a_short_read() {
         "a block that cannot be verified is not served, even where its bytes survive"
     );
     // AND A RECORD THAT IS GONE REFUSES EARLIER, at its own offset rather than
-    // the block's. Reads verify AFTER fetching the record, deliberately, to
-    // keep the blast radius small — so record 9's bytes are missed first and
-    // the block seal is never reached. Two different refusals for two different
+    // the block's. Since D-0912 a read fetches the whole block in one `pread`
+    // and, when that comes up short, re-reads the record alone to name it —
+    // so record 9's own missing bytes are what is reported, and the block seal
+    // is never reached. Two different refusals for two different
     // facts: "this record is not there" and "this block cannot be checked".
     assert_eq!(
         file.read_record(9),
@@ -1442,21 +1453,21 @@ fn an_overlay_is_written_and_read_back_through_the_bar_writer() {
 
     let rows = [
         Overlay {
-            ts_micros: 1_700_000_000_000_000,
+            ts_micros: T0, // inside the 2024-06 the path names (D-0915)
             spot: 2_465_005,
             iv_micros: 125_000,
         },
         // ONE OF EACH SENTINEL, because a vendor answering a spot without a
         // volatility is ordinary and the record must survive it.
         Overlay {
-            ts_micros: 1_700_000_060_000_000,
+            ts_micros: T0 + MINUTE,
             spot: 2_465_100,
             iv_micros: OI_NULL,
         },
         // AND A GENUINE ZERO, which must NOT come back as absent. A deep
         // out-of-the-money option prints exactly this late in its life.
         Overlay {
-            ts_micros: 1_700_000_120_000_000,
+            ts_micros: T0 + 2 * MINUTE,
             spot: 0,
             iv_micros: 0,
         },

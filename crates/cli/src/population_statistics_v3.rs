@@ -85,10 +85,8 @@ const ADMISSION_V4_CSCV_POLICY_DOMAIN: &[u8] =
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 const LOCK_FILE_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 

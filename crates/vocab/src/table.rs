@@ -1,4 +1,4 @@
-//! The bit table. 280 positions, and the index **is** the identity.
+//! The bit table. 370 positions, and the index **is** the identity.
 //!
 //! # The rule that outranks every other rule in this file
 //!
@@ -58,7 +58,7 @@
 //!
 //! A tombstone **keeps its index forever** and always evaluates false.
 //! Retiring frees nothing: position 6 is still position 6, and the next
-//! condition appends at [`NEXT_FREE`], which is 280 today and only ever grows.
+//! condition appends at [`NEXT_FREE`], which is 370 today and only ever grows.
 //! That is modelled in the type -- [`BitStatus`] --
 //! rather than in a comment, and [`set_exact`] refuses a retired index instead
 //! of setting it.
@@ -1087,7 +1087,7 @@ pub const TABLE: [BitDef; 370] = [
     // crossing bars: exactly one on a bar that crosses, none on a bar that does
     // not, which is what makes them safe to AND with anything else.
     //
-    // Per SESSION, reset in the rollover beside `previous_mask` -- an overnight
+    // Per SESSION, reset in the rollover beside `last_side` -- an overnight
     // change of side is a gap and not a test of the level.
     plain(314, "first_cross_ema20"),
     plain(315, "second_cross_ema20"),
@@ -1258,7 +1258,7 @@ pub struct LevelCrossing {
 /// # Reset at the session boundary, like the crossing itself
 ///
 /// The count is per SESSION. `indicators::Evaluator` clears it in the rollover
-/// beside `previous_mask`, for the same reason: an overnight change of side is a
+/// beside `last_side`, for the same reason: an overnight change of side is a
 /// gap, not a test of the level, and this engine is intraday-only by
 /// `CLAUDE.md` §1.
 pub const CROSSINGS: [LevelCrossing; 17] = [
@@ -1418,12 +1418,14 @@ pub const CROSSINGS: [LevelCrossing; 17] = [
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
-/// [`ConditionMask::BITS`] is 384, and the **19** positions between are
+/// [`ConditionMask::BITS`] is 384, and the **14** positions between are
 /// unallocated headroom, not free-for-all space.
 ///
 /// It read 104 until the crossing family took the table from 280 to 314. The
-/// number is pinned in `vocab::tests::the_version_is_the_widened_table` so this
-/// sentence cannot drift again without a red test.
+/// number is pinned in `vocab::tests::the_version_is_the_widened_table`, and
+/// this sentence still drifted to 19 because that test never read it.
+/// `the_present_tense_position_counts_in_this_crates_prose_match_the_table`
+/// does.
 pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition

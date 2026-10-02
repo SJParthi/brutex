@@ -3308,19 +3308,66 @@ fn scan_records<const STRIDE: usize, T>(
     Ok(records)
 }
 
+/// A file a global replay append writes to and, on failure, cuts back.
+///
+/// A trait rather than `File` alone so a test can make a write fail after part
+/// of a record reached the file, which a real disk only does when it fills.
+pub(crate) trait AppendTarget: Write + Seek {
+    /// Truncate to `len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// The operating system's refusal to truncate.
+    fn cut_to(&mut self, len: u64) -> std::io::Result<()>;
+}
+
+impl AppendTarget for File {
+    fn cut_to(&mut self, len: u64) -> std::io::Result<()> {
+        self.set_len(len)
+    }
+}
+
+/// Append fixed-stride records, or leave the file exactly as long as it was.
+///
+/// `write_all` may extend a file and then fail, and a record that refuses to
+/// encode can follow records already written. Either would leave bytes no
+/// completion names, and a partial record makes `check_record_file` refuse the
+/// whole file for its ragged body on every later open. The starting length is
+/// measured by the seek to the end, under the caller's writer lock, so cutting
+/// back to it removes only this call's bytes. A process killed between two
+/// writes runs no rollback; that tail is still refused on open.
+///
+/// # Errors
+///
+/// The seek, an encode or a write refusal, naming whether the rollback held.
+pub(crate) fn append_encoded_with<T: AppendTarget, const STRIDE: usize>(
+    file: &mut T,
+    path: &Path,
+    records: impl IntoIterator<Item = Result<[u8; STRIDE], String>>,
+) -> Result<(), String> {
+    let start = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("{} could not be seeked for append: {why}", path.display()))?;
+    let attempt = records.into_iter().try_for_each(|record| {
+        file.write_all(&record?)
+            .map_err(|why| format!("{} append failed: {why}", path.display()))
+    });
+    attempt.map_err(|why| match file.cut_to(start) {
+        Ok(()) => format!(
+            "{why}. The append was rolled back to byte {start}, so every earlier whole record remains readable"
+        ),
+        Err(and) => format!(
+            "{why}. Rolling the append back to byte {start} ALSO failed: {and}. The file may now end mid-record and is refused on open until its tail is repaired"
+        ),
+    })
+}
+
 fn append_encoded<const STRIDE: usize>(
     file: &mut File,
     path: &Path,
     records: impl IntoIterator<Item = Result<[u8; STRIDE], GlobalReplayRefusal>>,
 ) -> Result<(), GlobalReplayRefusal> {
-    file.seek(SeekFrom::End(0))
-        .map_err(|why| format!("{} could not be seeked for append: {why}", path.display()))?;
-    for record in records {
-        let raw = record?;
-        file.write_all(&raw)
-            .map_err(|why| format!("{} append failed: {why}", path.display()))?;
-    }
-    Ok(())
+    append_encoded_with(file, path, records)
 }
 
 fn digest_file(file: &mut File, path: &Path) -> Result<[u8; 32], GlobalReplayRefusal> {
@@ -4996,5 +5043,120 @@ mod tests {
         );
         drop(ledger);
         cleanup(&root);
+    }
+
+    /// A file a write lands in only up to `accept` bytes, whose later writes
+    /// fail as a full disk's do, and whose truncation can be made to fail.
+    struct FillingDisk {
+        bytes: Vec<u8>,
+        accept: usize,
+        cut_refused: bool,
+    }
+
+    impl Write for FillingDisk {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let room = self.accept.saturating_sub(self.bytes.len()).min(buf.len());
+            if room == 0 {
+                return Err(std::io::Error::other("injected full disk"));
+            }
+            self.bytes.extend_from_slice(&buf[..room]);
+            Ok(room)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for FillingDisk {
+        fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+            Ok(u64::try_from(self.bytes.len()).expect("test length fits"))
+        }
+    }
+
+    impl AppendTarget for FillingDisk {
+        fn cut_to(&mut self, len: u64) -> std::io::Result<()> {
+            if self.cut_refused {
+                return Err(std::io::Error::other("injected truncate refusal"));
+            }
+            self.bytes
+                .truncate(usize::try_from(len).expect("test length fits"));
+            Ok(())
+        }
+    }
+
+    /// A write that fails after one whole record and three bytes of the next
+    /// leaves the file exactly as long as it was before the call, and says so.
+    /// Without the rollback those eleven bytes stayed, and `check_record_file`
+    /// refused the file for its ragged body on every later open.
+    #[test]
+    fn a_partial_append_write_rolls_back_to_its_starting_length() {
+        let mut disk = FillingDisk {
+            bytes: vec![7; HEADER_BYTES_USIZE],
+            accept: HEADER_BYTES_USIZE + 8 + 3,
+            cut_refused: false,
+        };
+        let path = Path::new("filling-disk");
+        let why = append_encoded_with::<_, 8>(&mut disk, path, [Ok([1; 8]), Ok([2; 8])])
+            .expect_err("the second record does not fit");
+        assert_eq!(disk.bytes, vec![7; HEADER_BYTES_USIZE], "{why}");
+        assert!(why.contains("filling-disk append failed"), "{why}");
+        assert!(why.contains("injected full disk"), "{why}");
+        assert!(why.contains("rolled back to byte 24"), "{why}");
+
+        // A rollback that itself fails is named as that, and leaves the
+        // partial bytes where a later open will refuse them.
+        let mut stuck = FillingDisk {
+            bytes: vec![7; HEADER_BYTES_USIZE],
+            accept: HEADER_BYTES_USIZE + 8 + 3,
+            cut_refused: true,
+        };
+        let why = append_encoded_with::<_, 8>(&mut stuck, path, [Ok([1; 8]), Ok([2; 8])])
+            .expect_err("the second record does not fit");
+        assert_eq!(stuck.bytes.len(), HEADER_BYTES_USIZE + 8 + 3, "{why}");
+        assert!(why.contains("back to byte 24 ALSO failed"), "{why}");
+        assert!(why.contains("injected truncate refusal"), "{why}");
+
+        // Room for both records: nothing is cut and nothing is refused.
+        let mut roomy = FillingDisk {
+            bytes: vec![7; HEADER_BYTES_USIZE],
+            accept: usize::MAX,
+            cut_refused: true,
+        };
+        append_encoded_with::<_, 8>(&mut roomy, path, [Ok([1; 8]), Ok([2; 8])])
+            .expect("both records fit");
+        assert_eq!(roomy.bytes.len(), HEADER_BYTES_USIZE + 16);
+    }
+
+    /// A record that refuses to encode after an earlier record was written
+    /// leaves the real file exactly as long as it was before the call.
+    #[test]
+    fn a_refused_append_leaves_the_file_exactly_as_long_as_it_was() {
+        let dir = root("append-encode-rollback");
+        fs::create_dir_all(&dir).expect("create append-rollback root");
+        let path = dir.join("records");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .expect("open append-rollback file");
+        file.write_all(&[7_u8; HEADER_BYTES_USIZE])
+            .expect("write stand-in header");
+        let why = append_encoded::<8>(
+            &mut file,
+            &path,
+            [Ok([1_u8; 8]), Err("injected encode refusal".to_owned())],
+        )
+        .expect_err("the second record refuses");
+        assert_eq!(
+            file.metadata().expect("rolled-back metadata").len(),
+            HEADER_BYTES,
+            "the first record of the refused append was removed: {why}"
+        );
+        assert!(why.contains("injected encode refusal"), "{why}");
+        assert!(why.contains("rolled back to byte 24"), "{why}");
+        fs::remove_dir_all(&dir).expect("remove append-rollback root");
     }
 }

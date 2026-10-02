@@ -1150,8 +1150,16 @@ impl Pools {
 ///
 /// # Cost
 ///
-/// One `fetch_add` on the wait path and one `load` per status publish. Both are
-/// O(1) and neither allocates. `Relaxed` is correct because no other memory is
+/// One `fetch_update` on the wait path and one `load` per status publish.
+/// Neither allocates. The `load` is one atomic read. The `fetch_update` is
+/// **not** one `fetch_add`: the pinned toolchain's `core` implements it,
+/// through `try_update`, as a `compare_exchange_weak`
+/// loop (`while let Some(next) = f(prev) { match
+/// self.compare_exchange_weak(prev, next, ...)`), so it is lock-free, not
+/// wait-free, and each attempt that loses a race to another thread recording
+/// a wait at the same moment, or fails spuriously, runs the closure again. The
+/// number of attempts is therefore not a constant; it grows with that
+/// contention. D-0961. `Relaxed` is correct because no other memory is
 /// ordered against this: it is a monotonic counter read for display, never a
 /// flag another thread branches on.
 ///
@@ -1168,7 +1176,10 @@ static ABSORBED_MICROS: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 /// and `CLAUDE.md` §3 rule 6 prefers the honest bound.
 pub fn note_absorbed(micros: u64) {
     // `fetch_update` rather than `fetch_add` so the saturation is real. The
-    // closure returns `Some` unconditionally, so this never spins in practice.
+    // closure returns `Some` unconditionally, so the loop ends on the first
+    // compare-exchange that succeeds; it retries when another thread changed
+    // the counter in between, or on a spurious weak failure. See `# Cost` on
+    // `ABSORBED_MICROS`. D-0961.
     let _ = ABSORBED_MICROS.fetch_update(
         core::sync::atomic::Ordering::Relaxed,
         core::sync::atomic::Ordering::Relaxed,

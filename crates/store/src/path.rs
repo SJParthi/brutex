@@ -576,6 +576,64 @@ impl YearMonth {
     pub const fn month(self) -> u8 {
         self.month
     }
+
+    /// The month's IST span, `[from, until)` in epoch microseconds.
+    ///
+    /// # IST, because that is how a bar is assigned to a file
+    ///
+    /// `pull::ingest::months_in` files a bar under
+    /// `IstMoment::from_epoch_secs(ts).day().year_month()`, so the month `2024-06`
+    /// is 2024-06-01 00:00 IST up to, not including, 2024-07-01 00:00 IST. A UTC
+    /// span would move both edges by five and a half hours and refuse the first
+    /// 330 minutes of every month the writer legitimately sends here.
+    /// `pull::session` asserts at compile time that its offset equals
+    /// [`IST_OFFSET_SECS`], so the two cannot drift.
+    ///
+    /// # O(1)
+    ///
+    /// Two civil-to-day conversions, each a fixed handful of integer
+    /// operations; no table, no loop. Every legal month (`1970..=9999`) is
+    /// inside `i64` microseconds with five orders of magnitude to spare, so
+    /// the arithmetic cannot overflow. The constant shape is read from the
+    /// source; no bench times it, so the cost is UNVERIFIED as a measurement
+    /// (`docs/06-limits.md`, D-0915). The values are pinned by
+    /// `store::admission::the_ist_month_bounds_are_the_ones_pull_assigns`.
+    #[must_use]
+    pub const fn ist_bounds_micros(self) -> (i64, i64) {
+        let year = self.year as i64;
+        let month = self.month as i64;
+        let (next_year, next_month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
+        (
+            ist_midnight_micros(year, month),
+            ist_midnight_micros(next_year, next_month),
+        )
+    }
+}
+
+/// The IST offset from UTC, in seconds: +05:30.
+///
+/// A copy of `pull::session::IST_OFFSET_SECS`, which this crate cannot name —
+/// `pull` depends on `store`. `pull::session` pins the two equal with a
+/// compile-time assertion.
+pub const IST_OFFSET_SECS: i64 = 5 * 3_600 + 30 * 60;
+
+/// 00:00 IST on the first of `month` in `year`, in epoch microseconds.
+///
+/// Howard Hinnant's `days_from_civil`, specialised to the first of a month.
+/// Called only with `year` in `1970..=10000` and `month` in `1..=12`.
+const fn ist_midnight_micros(year: i64, month: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let shifted = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * shifted + 2) / 5;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days * 86_400 - IST_OFFSET_SECS) * 1_000_000
 }
 
 impl fmt::Display for YearMonth {

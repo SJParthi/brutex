@@ -1,4 +1,8 @@
 //! Bounded observation-only views of saved Boolean statistics and admission.
+//! An unpinned first page reuses a held model that is still current
+//! (`detail::must_admit`); every page checks currency once per linked catalog,
+//! several times. `docs/06-limits.md`, D-0951, states both costs, which are
+//! UNVERIFIED as measurements.
 use axum::http::{StatusCode, Uri};
 use cli::boolean_evidence::{
     Admission, Qualification, Statistics, StatisticsRow, StatisticsSource, StatisticsSummary,
@@ -228,6 +232,17 @@ enum Reader {
     Admission(Box<Admission>),
     Qualification(Box<Qualification>),
 }
+impl Reader {
+    /// The held model's own currency check, which walks every linked catalog
+    /// it authenticated. D-0951.
+    fn require_current(&self) -> Result<(), String> {
+        match self {
+            Self::Statistics(reader) => reader.require_current(),
+            Self::Admission(reader) => reader.require_current(),
+            Self::Qualification(reader) => reader.require_current(),
+        }
+    }
+}
 struct Cached {
     root: PathBuf,
     model: Model,
@@ -254,14 +269,15 @@ fn render_with_budget(
         .get_or_init(|| Mutex::new(None))
         .lock()
         .map_err(|_| "Boolean evidence cache poisoned")?;
-    if asked.completion.is_none()
-        || !cache.as_ref().is_some_and(|held| {
-            held.root == root
-                && held.identity == asked.identity
-                && held.model == asked.model
-                && held.budget == budget
-        })
-    {
+    let held = cache.as_ref().filter(|held| {
+        held.root == root
+            && held.identity == asked.identity
+            && held.model == asked.model
+            && held.budget == budget
+    });
+    if crate::detail::must_admit(held.is_some(), asked.completion.is_some(), || {
+        held.is_some_and(|held| held.reader.require_current().is_ok())
+    }) {
         *cache = None;
         let reader=match asked.model {
             Model::Statistics=>Statistics::open(root,asked.identity,budget.bytes()).map(Box::new).map(Reader::Statistics),

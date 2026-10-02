@@ -70,11 +70,16 @@ pub const MAX_KEY_BYTES: usize = 32;
 ///
 /// # Why raising it is safe rather than a loosened bound
 ///
-/// The real ceiling is the LINE, not the value: `tail::MAX_LINE_BYTES` is 64 KB
-/// and a reader refuses anything longer. With [`MAX_FIELDS`] of 12, the worst
-/// line is roughly `12 × (32 key + 512 value)` ≈ 6.5 KB — an order of magnitude
-/// inside the bound it has to respect, where 128 was two orders inside it and
-/// paying for the margin in lost reasons.
+/// The real ceiling is the LINE, not the value: `tail::MAX_LINE_BYTES` is 64 KiB
+/// and a reader refuses anything longer. With [`MAX_FIELDS`] of 12 the worst
+/// line's CONTENT is `48 target + 256 message + 12 × (32 key + 512 value)` =
+/// 6,832 bytes — but the caps are on input bytes, and a control character is
+/// escaped to the six bytes of `\u00XX`, so the worst line ON DISK is just over
+/// **41 KB**: inside the bound by about a third, not "an order of magnitude"
+/// as this paragraph used to say by counting the content and forgetting the
+/// escaping. D-1323. Pinned by
+/// `tail::tests::the_widest_line_the_writer_can_produce_fits_the_reader_and_round_trips`;
+/// raising any ceiling again has to keep that test green.
 ///
 /// The cap is not removed and must not be: a value with no ceiling is a line
 /// with no ceiling, and `tail` walks these files under a scan budget. Truncation
