@@ -1834,6 +1834,112 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// What one start of an already-seeded plan replays, COUNTED rather than
+    /// argued. W1-api4-0 and W1-api4-1; D-0907; `docs/06-limits.md`.
+    ///
+    /// `start` runs `preflight_submission` and then `seeded`, the blocking half
+    /// of an activation; `drive` then opens `attempts.bin` once more. This test
+    /// runs the first two exactly as `start` does and records every replay the
+    /// journal module performs on this thread. Each of the three journals is
+    /// replayed three times, and every replay reads every record the file
+    /// holds -- so the cost of one press grows with the history, not with the
+    /// plan. This pins the stated limit: a change that removes a replay fails
+    /// here and has to correct the limit it states.
+    #[test]
+    fn one_start_replays_each_journal_three_times_and_every_record_each_time() {
+        use crate::recovery_journal::REPLAYS;
+        let dir = crate::scratch::path("recovery-replay-count");
+        std::fs::create_dir_all(&dir).unwrap();
+        let site = Site::load(&dir.join("missing-masters"), &dir);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        // The first activation, then history that every later press re-reads.
+        let mut journal = seeded(&site, id, Some(units.clone())).unwrap();
+        let mut row = units[0].clone();
+        for _ in 0..40 {
+            row.unchanged += 1;
+            journal.append(row.clone()).unwrap();
+        }
+        drop(journal);
+        let mut attempts = Journal::open_existing(&root(&site).join("attempts.bin")).unwrap();
+        for n in 0..25 {
+            attempts.append(record(format!("other-plan-{n}"))).unwrap();
+        }
+        drop(attempts);
+        let records = |path: PathBuf| std::fs::metadata(path).unwrap().len() / 1_024;
+        let plan_records = records(plan_path(&site, id));
+        let attempt_records = records(root(&site).join("attempts.bin"));
+        let active_records = records(active_path(&site));
+        assert!(plan_records > 40 && attempt_records == 25 && active_records == 1);
+
+        REPLAYS.with(|seen| seen.borrow_mut().clear());
+        let asked = Submission {
+            id,
+            units: units.clone(),
+            successor: None,
+            prepare_only: false,
+        };
+        preflight_submission(&site, &asked).unwrap();
+        drop(seeded(&site, id, Some(units)).unwrap());
+        let seen = REPLAYS.with(core::cell::RefCell::take);
+
+        let replays_of = |name: &str| -> Vec<u64> {
+            seen.iter()
+                .filter(|(file, _)| file == name)
+                .map(|(_, read)| *read)
+                .collect()
+        };
+        let plan_name = format!("{}.bin", hex(id));
+        assert_eq!(replays_of(&plan_name), vec![plan_records; 3], "{seen:?}");
+        assert_eq!(
+            replays_of("attempts.bin"),
+            vec![attempt_records; 3],
+            "{seen:?}"
+        );
+        assert_eq!(
+            replays_of("active.bin"),
+            vec![active_records; 3],
+            "{seen:?}"
+        );
+        assert_eq!(seen.len(), 9, "no other journal is replayed: {seen:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `preflight_plan`'s replay of `attempts.bin` binds no result, and it is
+    /// still the check that refuses a start once the shared ledger is gone.
+    /// D-0907 keeps that replay rather than dropping it as wasted work.
+    #[test]
+    fn preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing() {
+        let dir = crate::scratch::path("recovery-preflight-ledger");
+        std::fs::create_dir_all(&dir).unwrap();
+        let site = Site::load(&dir.join("missing-masters"), &dir);
+        let units = plan(
+            vec![leg("NIFTY", "1min", date(2026, 8, 27), date(2026, 8, 27))],
+            today(),
+        )
+        .unwrap();
+        let id = scope_identity(&units);
+        drop(seeded(&site, id, Some(units.clone())).unwrap());
+        let asked = Submission {
+            id,
+            units,
+            successor: None,
+            prepare_only: false,
+        };
+        preflight_submission(&site, &asked).unwrap();
+        std::fs::remove_file(root(&site).join("attempts.bin")).unwrap();
+        let why = preflight_submission(&site, &asked).unwrap_err();
+        assert!(
+            why.contains("shared recovery attempt history is unavailable; budgets cannot be reset"),
+            "{why}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn start_acknowledges_a_saved_plan_and_read_only_fixture_finishes() {
         let root = crate::scratch::path("recovery-start-accepted");

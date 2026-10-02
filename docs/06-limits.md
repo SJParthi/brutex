@@ -9990,3 +9990,36 @@ the cached reader already answers. A pinned request skips it.
 
 `an_unpinned_ranking_request_walks_the_checkpoint_directory_before_its_cache`
 reads each quoted line above off its source and requires this section.
+## Per-press recovery journal replays (D-0907)
+
+Not O(1), and not bounded by the plan pressed. Every open of a recovery journal
+replays the whole file (`recovery_journal::replay`, `for ordinal in 0..count`,
+called by both `snapshot` and `Journal::open_at`), and nothing compacts one.
+
+- **One start** (`POST /pull/recovery`) runs `preflight_submission` and then
+  `seeded`. Together they replay this plan's journal, the shared
+  `attempts.bin` and `active.bin` three times each, and every replay reads
+  every record the file holds. Counted by
+  `recovery::tests::one_start_replays_each_journal_three_times_and_every_record_each_time`.
+  `drive` then opens `attempts.bin` once more
+  (`Journal::open_existing(&root(&worker_site).join("attempts.bin"))`); that
+  open is not counted by the test. `preflight_plan`'s snapshot of
+  `attempts.bin` is a validation only; its result is not bound, and it is
+  what refuses a start whose shared ledger is missing
+  (`recovery::tests::preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing`).
+- **Growth.** The plan journal grows with every run of that plan, and
+  `attempts.bin` with every attempt of every plan: the cost of a press grows
+  with the recovery history on this store, not with the plan.
+- **Each run's reconcile** (`reconcile_pending`) walks every row of the shared
+  ledger (`attempts`, `.latest`, `.values()`, one chain rustfmt splits over
+  three lines), keeps those `Queued | InFlight |
+  Unverified` (and `Blocked` on an explicit run), and parses each with
+  `checked(&item.body, today)?` before the plan's scope check drops the ones
+  outside it. Each in-scope item gets `assess(site, &item.body, lifecycle)`,
+  which reads the item's month of source records
+  (`read_sources(&source, &read_name, month, window, is_daily)`), and is
+  appended again (`append_attempt(journal, attempts, item)?`), so an item
+  that stays Unverified is re-assessed and re-appended on every run. Not
+  counted by any test.
+
+Not timed. W1-api4-0, W1-api4-1, W1-api4-2.

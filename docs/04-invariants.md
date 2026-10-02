@@ -5414,3 +5414,10 @@ the guard. The existing emits test pins the warning's message and level.
 | C4-API-04-03 | `parse_day` refuses a date whose pieces carry a `+` sign, even at the right widths, as `DateNotIso`. | `api::ingest::tests::a_date_field_is_refused_by_name_whichever_way_it_is_wrong` | ✓ |
 | C4-API-04-04 | The saved-VIX reader cached for one store root never answers a request for another root. | `api::indexstopvixjson::projection_tests::a_cached_saved_vix_reader_for_one_root_never_answers_for_another` | ✓ |
 | C4-API-04-05 | On a root holding no saved search, an unpinned `/index-stop-ranking.json` render is refused with `latest_checkpoint`'s own unwrapped words, and a pinned render is refused by `Reader::open` under the `Cumulative saved comparison:` context instead. | `api::indexstoprankingjson::tests::an_unpinned_request_discovers_its_checkpoint_and_a_pinned_one_does_not` | ✓ |
+### `/pull/run` vendors and recovery replays — W1-api3-3, W1-api4-0/1 (D-0906, D-0907)
+
+| Id | Invariant | Test that proves it | Status |
+|---|---|---|---|
+| C4-API-05-01 | `pullrun::legs_from` refuses the whole run when any leg's vendor is not the exact wire name of a feed in `pull::vendor::Feed::ALL`, so the legs it admits group into at most `pull::vendor::FEED_COUNT` groups. | `api::pullrun::tests::a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds` | ✓ |
+| C4-API-05-02 | One recovery start (`preflight_submission` then `seeded`) of a plan with history replays the plan journal, `attempts.bin` and `active.bin` three times each, every replay reading every record, and replays no other journal. This pins a stated cost, not a bound. | `api::recovery::tests::one_start_replays_each_journal_three_times_and_every_record_each_time` | ✓ |
+| C4-API-05-03 | `recovery::preflight_submission` refuses a start of a seeded plan with "shared recovery attempt history is unavailable; budgets cannot be reset" once `attempts.bin` is missing, though the same preflight passed with it present. | `api::recovery::tests::preflight_refuses_a_start_whose_shared_attempt_ledger_is_missing` | ✓ |

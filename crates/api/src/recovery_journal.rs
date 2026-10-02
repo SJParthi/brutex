@@ -60,6 +60,26 @@ const UNVERIFIED_OFFSET: usize = 856;
 const RESERVED_OFFSET: usize = 864;
 const CRC_OFFSET: usize = 1_020;
 const REPLAY_BUFFER_BYTES: usize = RECORD_LEN * 64;
+
+#[cfg(test)]
+std::thread_local! {
+    /// Every replay this thread ran, as (journal file name, records read).
+    ///
+    /// Test-only. It lets a test COUNT the per-request replays that
+    /// `docs/06-limits.md` states, rather than argue them from the source. D-0907.
+    pub(crate) static REPLAYS: core::cell::RefCell<Vec<(String, u64)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Notes one completed replay of `path`, `bytes` long, in [`REPLAYS`].
+#[cfg(test)]
+fn trace(path: &Path, bytes: u64) {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    REPLAYS.with(|seen| seen.borrow_mut().push((name, bytes / RECORD_LEN_U64)));
+}
 /// Maximum events a read-only status poll may request; larger limits refuse.
 pub(crate) const MAX_TAIL_RECORDS: usize = 256;
 const _: () = assert!(BODY_OFFSET + MAX_BODY_BYTES == MISSING_OFFSET);
@@ -310,6 +330,8 @@ impl Journal {
             &mut BufReader::with_capacity(REPLAY_BUFFER_BYTES, &mut file),
             bytes,
         )?;
+        #[cfg(test)]
+        trace(path, bytes);
         if file.metadata()?.len() != bytes {
             return Err(invalid_data(
                 "recovery journal length changed during locked replay",
@@ -536,6 +558,8 @@ pub(crate) fn snapshot(path: &Path) -> io::Result<Index> {
         &mut BufReader::with_capacity(REPLAY_BUFFER_BYTES, &mut *file),
         metadata.len(),
     )?;
+    #[cfg(test)]
+    trace(path, metadata.len());
     unchanged_snapshot(metadata.len(), file.metadata()?.len())?;
     file.release()?;
     Ok(index)
