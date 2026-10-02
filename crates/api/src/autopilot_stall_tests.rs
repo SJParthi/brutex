@@ -1,9 +1,17 @@
+#![cfg(test)]
 //! The stall list's bound, its idempotence and its exit (D-0949).
 //!
 //! Split from `autopilot.rs`'s own test module so these can be read as one
 //! argument: a stalled month is ONE entry however often it fails, its retry
 //! allowance is spent once and never renewed, and it leaves the list when the
 //! month completes.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a whole-file test module; fixtures are bounded and a failed assertion is the test failing"
+)]
 
 use super::*;
 

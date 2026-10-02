@@ -2326,10 +2326,11 @@ pub fn tracked_series(site: &Site, timeframe: Timeframe) -> Vec<Series> {
 /// Proven by `api::stall_tests::the_rung_work_lists_are_built_once_per_masters_parse`.
 #[derive(Debug, Default)]
 pub struct SeriesCache {
-    /// One list per rung timeframe: `(timeframe, generation, list)`. At most
-    /// [`RUNGS`]`.len()` entries, so the lookup is O(1). Proven by
+    /// One list per rung timeframe: `(timeframe, generation, list)`. Two
+    /// fixed slots, one per entry of [`RUNGS`], so the lookup is two
+    /// comparisons and never a search. Proven by
     /// `api::stall_tests::the_rung_work_lists_are_built_once_per_masters_parse`.
-    held: Vec<(Timeframe, u64, Vec<Series>)>,
+    held: [Option<(Timeframe, u64, Vec<Series>)>; RUNGS.len()],
     /// How many times [`tracked_series`] has been called through this cache.
     /// The operation count the cost test reads.
     pub builds: u64,
@@ -2340,22 +2341,30 @@ impl SeriesCache {
     /// re-parsed since it was last built.
     pub fn get(&mut self, site: &Site, timeframe: Timeframe) -> &[Series] {
         let generation = site.universe().generation;
-        let slot = self.held.iter().position(|(held, _, _)| *held == timeframe);
+        // The slot already holding `timeframe`, else the first empty one.
+        // Slots fill in order, so an empty first slot means nothing is held.
+        // A third timeframe (none is passed today) reuses the first slot
+        // rather than growing, which costs a rebuild, never a wrong list.
+        let [first, second] = &mut self.held;
+        let holds = |slot: &Option<(Timeframe, u64, Vec<Series>)>| {
+            slot.as_ref().is_some_and(|(held, _, _)| *held == timeframe)
+        };
+        let slot = if holds(first) || first.is_none() {
+            first
+        } else if holds(second) || second.is_none() {
+            second
+        } else {
+            first
+        };
         let fresh = slot
-            .and_then(|at| self.held.get(at))
-            .is_some_and(|(_, at, _)| *at == generation);
+            .as_ref()
+            .is_some_and(|(held, at, _)| *held == timeframe && *at == generation);
         if !fresh {
             let list = tracked_series(site, timeframe);
             self.builds = self.builds.saturating_add(1);
-            match slot.and_then(|at| self.held.get_mut(at)) {
-                Some(entry) => *entry = (timeframe, generation, list),
-                None => self.held.push((timeframe, generation, list)),
-            }
+            *slot = Some((timeframe, generation, list));
         }
-        self.held
-            .iter()
-            .find(|(held, _, _)| *held == timeframe)
-            .map_or(&[], |(_, _, list)| list.as_slice())
+        slot.as_ref().map_or(&[], |(_, _, list)| list.as_slice())
     }
 }
 
@@ -3944,12 +3953,6 @@ fn start(control: &Control, halted: &[String]) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::indexing_slicing,
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic
-)]
 #[path = "autopilot_stall_tests.rs"]
 mod stall_tests;
 
