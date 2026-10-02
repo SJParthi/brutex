@@ -45711,3 +45711,372 @@ should-fix and three nits on W3-lake1-2.
 **Cost.** Unchanged: the step already called `rest.get(len..)`, and only what
 follows a `None` from it changes. No run identity moves: no workspace crate depends on
 `lake`, and no stored byte changes.
+### D-0720 — A folder walk holds every decoded row of the folder, and `archive.rs` now says so — 2026-09-26
+
+`crates/pull/src/archive.rs` said twice that a folder walk holds one file at a
+time. The module doc said "Peak memory is one file, not one archive", and
+`read_dir`'s `# Cost` said "peak memory is one file's rows, not the
+directory's". Both were false. `descend` runs
+`out.push(Member { path, instrument, rows, });` onto the one vector the whole
+walk shares, and `read_dir` returns that vector. `docs/12-ingest-audit.md` had
+already recorded the contradiction as open. Ledger row W1-pull1-1.
+
+**Decision: correct the claim and keep the accumulation.** The ingest path
+relies on it. `ingest::from_dir` is `let members = archive::read_dir(dir,
+columns)?;` followed by `from_members`, so a member that will not decode
+refuses the folder before anything is written, wherever the member sorts.
+Handing members on one at a time would write the members that sort ahead of a
+malformed one, or would need a second decoding pass over every file. Neither
+trade was asked for, so neither is made here. The census walk,
+`read_dir_reporting` behind `GET /folder.json`, writes nothing and holds the
+same rows only because it shares the walk. Its doc now says so.
+
+**Proof.** `every_decoded_member_is_held_until_the_walk_returns` walks seven
+members, six of one row and one of three, and finds all 9 rows in the vector
+`read_dir` returns and in the one `read_dir_reporting` returns.
+`a_malformed_member_that_sorts_last_refuses_the_run_before_any_bar_is_written`
+puts a complete 375-minute member first and a three-field member last.
+`from_dir` refuses, naming the last one, and the store root stays empty. With
+the malformed member removed, the same folder stores 375 bars.
+`the_walk_does_not_claim_one_file_of_peak_memory` fails while either false
+sentence is in `archive.rs`. It failed on origin/main, passes with the
+correction, and fails again with only the correction reverted. C4-PULL-01.
+`docs/06-limits.md` records the bound.
+
+### D-0721 — Hold a CSV row's fields in a fixed array, and say what a row really costs — 2026-09-26
+
+`crates/pull/src/csv.rs` said, under `# Cost`, "No allocation per row" and that
+the row vector "is reserved from a caller-supplied bound". Neither was true.
+`decode_rows` ran `let fields: Vec<&str> = line.split(',').collect();` for every
+row, one heap allocation sized to every comma in the line, made before the
+field count was checked. It began from `let mut rows: Vec<RawRow> =
+Vec::new();`, and `pub fn decode(body: &str, columns: Columns)` takes no bound,
+so no caller supplies one. Ledger row W1-pull1-3.
+
+**Decision: make the per-row claim true, and correct the other two.**
+
+- A row's fields are borrowed into a `[&str; MAX_FIELDS]` array by `fields_of`.
+  `MAX_FIELDS` is 10, the widest layout's count, and
+  `every_layout_fits_the_fixed_field_array` pins every layout it walks
+  inside it. It walks the layouts through `after`, a match on `Columns` with
+  no wildcard arm, so a layout added to the enum does not compile until the
+  test names it. Its first version listed the four by hand, and review
+  found that a fifth layout of 11 fields would have passed it while
+  `fields_of` refused every row as `FieldCount` with `got` equal to `want`.
+  With such a layout appended, the old test passed and the new one did not
+  compile until `after` named it. Named as `TrueDataFno`'s successor, it
+  failed at "Wide has 11 fields and the array holds 10". **Named with an arm
+  of its own returning `None`, while `TrueDataFno`'s arm still returned
+  `None`, it was never walked and the test passed**, as the test's own doc
+  says. That gap is open: a match can make a new layout be named, not be
+  walked. Such a layout's rows would be refused as `FieldCount`, not dropped,
+  because `fields_of` refuses a `want` wider than the array. Every field is still counted, so `CsvError::FieldCount` reports the line's
+  true width as before, but only the first ten are kept, and nothing is
+  allocated for the rest. A `want` wider than the array is refused rather
+  than read short.
+- The row vector is not reserved. The doc now says an append is amortised
+  O(1), not worst-case O(1). Reserving from the body's line count was not
+  chosen: blank and skipped lines would reserve rows that never arrive.
+- A row costs time linear in its line's bytes, and no line-length cap
+  exists. `archive` reads a member whole with `fs::read`, with no byte cap.
+  `docs/06-limits.md` records both. No real line or member length has been
+  measured here, so neither cap is set.
+
+**Proof.** The allocator's calls are counted, in
+`crates/pull/tests/allocation.rs` (D-0724).
+`twice_the_rows_cost_no_allocation_per_row` decodes 4,096 rows and then 8,192
+and allows the second at most four more allocating calls.
+`a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`
+requires the refusal `FieldCount { line: 1, got: 1_000_001, want: 5 }` and
+fewer bytes allocated on the way to it than the line's 1,000,000. On
+origin/main they failed at "4,096 more rows made 8193 more allocating calls
+(8203 for 4,096 rows, 16396 for 8,192): a row allocates" and "refusing a
+1000000-byte line allocated 33554666 bytes: its fields were held". They pass
+here and fail again, with the same two messages, with only the fixed array
+reverted, and under each of the two review breaks that put a per-row collect
+back: a `Vec` collected inside `fields_of`, and a turbofish collect in
+`decode_rows`.
+
+That proof replaced `decode_rows_collects_nothing_per_row`, which read
+`decode_rows`'s own text for `.collect(`. Both review breaks left it and every
+other CSV test green. Its stated reason for not counting, that a counting
+allocator needs `unsafe` and every crate root forbids it, was wrong: an
+integration test is its own crate, and Gate 16 reads only `src/lib.rs` and
+`src/main.rs`.
+
+`a_lines_fields_land_in_a_fixed_array_and_are_counted_whole` holds `fields_of`:
+exact counts accepted, short and long lines refused with their true count, a
+line of 1,000,000 commas counted as 1,000,001 fields, and a width past the
+array refused. The existing field-count tests still pass unchanged. C4-PULL-02.
+
+### D-0722 — Read a contract's underlying from both ends, so `BAJAJ-AUTO` and `NAM-INDIA` are discoverable — 2026-09-26
+
+`fno::read_contract` split a discovered contract name on every `-` and took
+the second piece as the underlying: `let mut parts = name.split('-');` then
+`let underlying = parts.next()?;`. `core::universe::FNO_UNDERLYINGS` holds two
+underlyings with a hyphen, `BAJAJ-AUTO` and `NAM-INDIA`. A name such as
+`NSE-BAJAJ-AUTO-27Mar25-FUT` read as the underlying `BAJAJ` with `AUTO` where
+the expiry belongs, `expiry_token_agrees` refused `AUTO`, and the name went to
+`Chain::unreadable`. So no expired contract of either underlying could be
+discovered, and neither's month could report itself whole. Ledger row
+W1-pull1-5.
+
+**Decision: the grammar is fixed at both ends, so the underlying is what lies
+between.** The exchange is the first piece. A name ends `-FUT`, or a strike
+and a side. The expiry token is the piece before that tail. The underlying is
+everything between the exchange and the expiry token, hyphens included.
+Every name the reader's existing refusal test refuses is still refused, and
+the same malformed tails are refused for hyphenated names. One thing is
+looser, and the next paragraph names it.
+
+**What stands behind the looser middle.** A name with an extra piece in its
+middle, `NSE-BAJAJ-AUTO-X-25Jan24-FUT`, now reads as the underlying
+`BAJAJ-AUTO-X` rather than failing the expiry check. `chain::month` compares
+every read underlying with the ask and refuses a mismatch by name, so that name
+is still not filed.
+
+**UNVERIFIED.** No Groww contract name for either underlying has been
+observed. That the vendor writes `NSE-BAJAJ-AUTO-…` rather than dropping the
+hyphen is not established. This entry holds only that a name spelled with the
+hyphen reads as the underlying it names. A name spelled without it would read
+as `BAJAJAUTO` and be refused by the ask check, as before.
+
+**Proof.** `every_fno_underlying_reads_back_whole_hyphen_and_all` reads a
+weekly future, a monthly future and an option for every underlying in
+`FNO_UNDERLYINGS` and gets each underlying back whole. It also asserts that
+the hyphenated ones are exactly `BAJAJ-AUTO` and `NAM-INDIA`. It failed on
+origin/main at `NSE-BAJAJ-AUTO-27Mar25-FUT must read`, and fails again with
+only the reader reverted.
+`a_hyphenated_underlyings_contracts_are_filed_and_an_off_key_one_is_refused`
+drives `chain::month` for `BAJAJ-AUTO`: both of its contracts are filed, and
+`NSE-BAJAJ-AUTO-X-25Jan24-FUT` is refused naming `BAJAJ-AUTO-X`, as is
+`NSE-BAJAJAUTO-25Jan24-FUT` naming `BAJAJAUTO`. On origin/main it filed
+nothing, and it fails again with only the reader reverted.
+`a_hyphenated_name_with_a_malformed_tail_is_still_refused` holds malformed
+hyphenated names refused as their plain twins are. C4-PULL-03.
+
+### D-0723 — Bound the rolling answer's body read at `MAX_RESPONSE_BYTES`, and keep its bytes exact — 2026-09-27
+
+`HttpSource::post_json`, the rolling (Dhan expired-options) POST, read its
+success body with `let body = answer.text().await…`. That holds the whole
+answer before anything can look at its size, and nothing looked afterwards.
+The bars path (`window_async`) checks the declared length against
+`MAX_RESPONSE_BYTES` and reads under that cap, and discovery
+(`Discovery::get`) reads through `strict_discovery_body` under
+`masters::MAX_BODY_BYTES`. The rolling path had no cap at all, and its
+`# Cost` said "One request, one permit. O(1)." Ledger row W1-pull2-2.
+
+**Decision.** `post_json` reads through `strict_discovery_body` with
+`MAX_RESPONSE_BYTES` (`pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
+1024;`), the cap the bars window uses, because a rolling answer is a window
+of bars. An answer declaring more is refused before its body is read. One
+that declares nothing is abandoned once the bytes held would pass the cap:
+`if held.len().saturating_add(chunk.len()) > cap` refuses before the chunk
+that would cross it is kept. Both
+refusals carry the vendor's status, so `api::server::step` reads them through
+`Some(_) => Step::Answered` and does not re-ask. The bars window files the
+same overrun as a transport failure instead; the rolling path takes
+discovery's classification because it shares discovery's reader and its
+`chain::Refusal` type.
+
+**One behaviour change beyond the cap, and it is deliberate.** `text()`
+decoded lossily: an invalid byte became U+FFFD and the body was returned as
+if the vendor had sent that character. The shared reader keeps the bytes
+exact or refuses them as "body is not UTF-8", which is the loud refusal
+`CLAUDE.md` §4 asks for in place of a silent repair.
+
+**Proof.**
+`a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap` offers
+64 MiB more than the cap, in 64 KiB frames, with no `Content-Length`, and the
+server counts every body byte its socket accepts. It asserts that the client
+hangs up before the flood ends, with fewer than 32 MiB past the cap sent, and
+then that the answer is refused under status 200 naming the cap. The refusal
+alone did not hold where the read stopped. A review break that read the whole
+body and checked its size after the loop refused in the same words and left
+every `http::` test green. It now fails at "the client hangs up before the
+flood ends: 134217728 of 134217728 bytes went out". So does origin/main's
+`text()`, and so does this tree with only the bounded read reverted.
+`a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading`
+sends a `Content-Length` one past the cap. On origin/main that came back as a
+transport refusal with no status (`left: None`, `right: Some(200)`). Now it
+is refused under 200 before the body is read.
+`a_rolling_answer_that_is_not_utf8_is_refused_not_repaired` returned
+`"{\u{fffd}}"` on origin/main and is now refused naming UTF-8.
+`a_rolling_answer_under_the_cap_is_returned_exactly` holds the success path
+byte for byte. The three refusal tests failed on origin/main, pass here, and
+fail again with only the read reverted. C4-PULL-04. `docs/06-limits.md`
+records the bound.
+
+### D-0724 — Count the allocator from one integration test crate, the workspace's first unsafe exception — 2026-09-27
+
+D-0721 made `crates/pull/src/csv.rs`'s "No allocation per row" true and proved
+it with `decode_rows_collects_nothing_per_row`, which read `decode_rows`'s own
+text for `.collect(`. Review put a per-row allocation back twice. One was
+`let all: Vec<&str> = line.split(',').collect();` inside `fields_of`, whose
+text no test read. The other was
+`let _per_row = line.split(',').collect::<Vec<&str>>();` in `decode_rows`,
+which the needle did not match. Under each, every test in `csv::tests` passed,
+`decode_rows_collects_nothing_per_row` among them. A text search finds the
+spellings it knows, and the claim is about an allocation.
+
+The test's reason for not counting allocations was that a counting allocator
+"needs `unsafe` and every crate root forbids it". Only the first half holds.
+Implementing `GlobalAlloc` is `unsafe`. But Gate 16 reads
+`f="crates/${c}/src/${base}.rs"` for `base` in `lib main`, and an integration
+test under `crates/<c>/tests/` is compiled as a crate of its own. The workspace
+lint is `unsafe_code = "deny"`, a level an allow overrides. Gate 5 counts
+`allow(unsafe_code)` over tracked `.rs` files and fails
+`if [ "$n" -gt 3 ]; then`, and before this entry
+`git ls-files '*.rs' | xargs grep -oh 'allow(unsafe_code)'` found none.
+
+**Decision: count allocations directly, in `crates/pull/tests/allocation.rs`,
+with the exception at that crate's root and nowhere else.**
+
+- The file sets `#![allow(unsafe_code)]` on one line, so Gate 5 counts it: one
+  exception of the three it permits.
+- `Counting` implements `GlobalAlloc` by forwarding every method to `System`
+  with the arguments it was given. Before forwarding, `alloc`, `alloc_zeroed`
+  and `realloc` add one call and the bytes asked for to two thread-local
+  `Cell<usize>` counts with `const` initialisers, so tests on other threads of
+  that binary cannot move them.
+- `crates/pull/src/lib.rs` still carries `#![forbid(unsafe_code)]`, as every
+  crate root Gate 16 reads does. The unsafe code is in a test crate that links
+  the library, and no library or binary target contains it.
+- `decode_rows_collects_nothing_per_row` is removed. The two allocation tests
+  hold what it was written to hold, and both review breaks fail them.
+
+**Not chosen.** A counting-allocator crate would put a package in `Cargo.lock`,
+which this batch keeps byte-identical, and it would hold the same `unsafe`
+inside a dependency. A wider text search stays a list of spellings.
+
+**What it cannot see.** It counts only the calling thread's allocations.
+It counts calls and bytes asked for, not bytes live at any moment.
+
+**Proof.** `twice_the_rows_cost_no_allocation_per_row` and
+`a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`, in
+`crates/pull/tests/allocation.rs`. On origin/main, with only the fixed array
+reverted, and under each review break, they fail at "4,096 more rows made 8193
+more allocating calls (8203 for 4,096 rows, 16396 for 8,192): a row allocates"
+and "refusing a 1000000-byte line allocated 33554666 bytes: its fields were
+held". Here both pass. C4-PULL-02.
+
+### D-0725 — A census counts the members it rejects against `MAX_MEMBERS`, and keeps a bounded part of each refusal — 2026-09-28
+
+Review of D-0720 found its replacement cost sentences stating a bound the
+census walk does not have. `read_dir_reporting`'s `# Cost` said "[`read_dir`]'s,
+memory included", the D-0720 limits entry said "The only ceilings are counts.
+`MAX_MEMBERS` members …", and the module doc kept "[`MAX_MEMBERS`] caps the
+walk". `descend` checked `if out.len() >= MAX_MEMBERS {`, and a census
+(`Malformed::Collect`) pushes a malformed member with
+`rejected.push(Rejected { why: why.to_string(), path });` and `continue;`,
+never onto `out`. So a census read every malformed member of a folder, past
+the cap, and kept a finding for each. `CsvError`'s `Display` quotes the bad
+field whole (`"line {line}: date {got:?} is not {format:?}"`), so a finding's
+length was bounded only by its file. The review's probe found a census past
+the cap returning `Ok` with no `TooManyMembers`, and a finding holding a
+million-byte date field whole; the proof below repeats both on origin/main.
+
+**Decision: bound both, rather than describe them as unbounded.**
+
+- `descend` compares `out.len().saturating_add(rejected.len())` with
+  `MAX_MEMBERS` and reports that sum as `TooManyMembers::members`. A census
+  now visits at most `MAX_MEMBERS` members, decoded and rejected together.
+  An ingest walk (`Malformed::Refuse`) never pushes onto `rejected`, so its
+  bound and its refusal are unchanged.
+- A finding keeps at most `MAX_FINDING_BYTES`
+  (`pub const MAX_FINDING_BYTES: usize = 1024;`) of the decoder's sentence.
+  A longer one keeps its first bytes up to that bound, cut back to a
+  character boundary with `floor_char_boundary`, followed by
+  ` [trimmed: N of M bytes not kept]`, so a trimmed finding says it was
+  trimmed. The copy is allocated to its own length. A sentence that fits is
+  kept whole.
+- The bound is chosen, not measured. No real refusal's length has been
+  measured here. Every refusal the sizing test walks, rendered around an
+  empty field, is shorter than it, so an ordinary field fits. The walk goes
+  through a match on `CsvError` and on `DateFormat` with no wildcard arm, so
+  a variant added later must be named there; as with D-0721's layout walk,
+  one appended with an arm of its own returning `None`, while the last
+  variant's arm still returns `None`, is named but not walked.
+
+**Not chosen.** Stating the census as unbounded and leaving it so. The route
+behind it, `GET /folder.json`, reads a folder an operator points at, and
+`MAX_MEMBERS` already said "The most members one walk will visit".
+
+**What stays unbounded.** A member is read whole with `fs::read(&path)`
+before it is decoded or rejected, which the D-0721 limits entry records, and
+the sentence is rendered whole with `let whole = why.to_string();` before it
+is cut. Both are one member's locals, gone before the next member is read.
+The census still holds every decoded row, as D-0720 records.
+
+**Proof.**
+`a_census_past_the_member_cap_is_refused_at_the_cap_counting_its_rejects`
+walks `MAX_MEMBERS + 1` members, the even-numbered ones empty and the odd
+ones one field where five are declared, so neither kind alone reaches the cap,
+and requires `TooManyMembers { members: MAX_MEMBERS, cap: MAX_MEMBERS }`.
+`a_census_finding_keeps_at_most_the_finding_cap_of_its_refusal` requires the
+1,000,000-byte field's finding to be exactly the sentence's first
+`MAX_FINDING_BYTES` bytes and its note, with a capacity under twice the cap,
+and a three-field member's finding to equal its refusal whole. On origin/main
+(with only the constant added so the tests compile), and again with only the
+two fixed lines reverted, they fail at "the census walked past the cap: 25001
+decoded and 25000 rejected, 50001 members against a cap of 50000" and "the
+first 1024 bytes of the sentence and a note of the rest; got 1000033 bytes".
+Both pass here. `a_finding_is_whole_up_to_the_cap_and_trimmed_past_it` holds
+the boundary: a sentence exactly at the cap is whole, one a byte past it notes
+one byte, and a cap inside a three-byte character is cut back to the last
+whole one. `every_refusal_sentence_fits_the_finding_cap_before_its_field`
+holds the sizing. It walked a hand list at first, which review found left a
+later `CsvError` variant unchecked. With a variant appended whose sentence
+runs past the cap, that list still passed; the walk does not compile
+(E0004, the variant not covered) until the variant is named in `after`, and
+named as the last variant's successor it fails at "2027 bytes before any
+field". C4-PULL-05. `docs/06-limits.md` records the bounds.
+
+### D-0726 — Credit a rolling answer to the governor only after its body is accepted — 2026-09-28
+
+Review of D-0723 found that `HttpSource::post_json` still credited the
+governor on any 2xx status before its body was read: the block
+`else if status.is_success() { g.record_success(); }` ran before
+`let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;`.
+D-0723 added two refusals after that point, a body past the cap and one that
+is not UTF-8, so the additive increase was also credited for answers this build
+refuses. A body the socket cuts short was already refused after the credit on
+origin/main, whose read was `.text()` then
+`.map_err(|why| Refusal::transport(format!("{why}")))?`. Ledger row
+W1-pull2-11 records the credit-before-read, and it is open.
+
+**Decision: move the success credit on this path to after the body is
+accepted.** A 429 is still recorded as a throttle as soon as its status is
+seen, by the branch `if status.as_u16() == 429` that runs before the
+non-success return. The success credit now runs after `strict_discovery_body` returns the
+body, so every refusal that function makes, and every failed body read,
+leaves the allowance and the successes banked toward its next step where they
+were.
+
+**What this does not close.** W1-pull2-11 stays open for the rest of it.
+`post_json` calls no `weigh_answered_body`, so a 2xx answer whose body carries
+a vendor refusal is still returned and still credited. `Discovery::get` still
+credits before it reads its body. Both are that row's.
+
+**Proof.** `a_rolling_answer_this_build_refuses_earns_the_governor_nothing`
+gives each answer a governor of its own, shared with its source, throttled
+once and banked `SUCCESSES_PER_STEP` minus one successes, so one more credit
+steps the allowance up. It sends a body cut short of its `Content-Length`, a
+`Content-Length` one past `MAX_RESPONSE_BYTES`, and a body that is not UTF-8,
+tries all three before asserting, and requires each allowance unmoved. A clean
+answer must then step its allowance up. On origin/main, on this branch before
+the change, and again with only the change reverted, it fails at "a refused
+answer earned the governor a success it did not deliver: a body the socket
+cuts short (4 to 5); a body declaring more than the cap (4 to 5); a body that
+is not UTF-8 (4 to 5)". On origin/main the last of the three was not refused
+at all, the lossy read D-0723 replaced. It passes here. C4-PULL-06.
+
+**The throttle half is held too.** Review found that no test drove
+`post_json` with a 429 and then read the governor, so the sentence above had
+nothing behind it: with that branch matching 430 instead of 429, every test in
+`cargo test -p pull --lib` passed. `a_rolling_429_backs_the_governor_off_before_its_refusal_returns`
+answers `post_json` with a 429 from a governor one success short of a step,
+requires the allowance to fall below where it stood, and requires the refusal
+to carry status 429. With the branch matching 430 it fails at "a 429 on the
+rolling path backs the governor off: 4 !< 4", and with `record_success` in
+place of `record_throttled` at "5 !< 4". It passes here.

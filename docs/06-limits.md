@@ -10605,3 +10605,100 @@ The D-0776 section above gives the refusal and not its cost. When a page walk
 stops, stepping over the leftover rowless pages costs one header parse for each
 such page, so it is linear in those pages for that chunk, not constant, and
 bounded by the chunk's bytes. No body is decompressed there.
+## A folder walk holds every decoded row of the folder — D-0720, 26 September 2026
+
+`archive::read_dir` and `archive::read_dir_reporting` each return one
+`Vec<Member>` holding every member's rows (C4-PULL-01). A folder walk's peak
+memory therefore grows with every decoded row of the folder, not with one
+file, whether the walk is an ingest (`ingest::from_dir`) or a census
+(`folder::read_census` and `folder::read_reach`). Until D-0720 `archive.rs`
+claimed the opposite.
+
+- **The ceilings on rows are counts.** `MAX_MEMBERS` members
+  (`pub const MAX_MEMBERS: usize = 50_000;`), each refused by `csv::decode`
+  past `fetch::MAX_ROWS` rows. No byte figure for a real folder has been
+  measured. A census also keeps a finding per member it rejects, and until
+  D-0725 neither their number nor their length was capped; the D-0725 entry
+  below records both bounds.
+- **The ingest path needs the rows held.** It writes nothing until the walk
+  returns, which is what makes a malformed member refuse the folder before
+  any bar is written. Closing the limit there needs a decision between a
+  second decoding pass and giving that up.
+- **The census path does not need them.** What it returns holds no row.
+  `folder::read_census` returns a `Census`, whose fields are
+  `pub reach: Reach`, `pub instruments: Vec<String>`,
+  `pub collisions: usize` and `pub rejected: Vec<Rejected>`. A `Rejected` is
+  `pub path: PathBuf` and `pub why: String`, and `Reach` is an enum deriving
+  `Copy`. `folder::read_reach` returns `Result<Reach, FolderError>`. Both hold every row while they walk, because
+  `read_census` walks through `archive::read_dir_reporting` and `read_reach`
+  through `archive::read_dir`. Closing it there would be a walk that folds
+  each member into the census and drops its rows before decoding the next.
+
+## A CSV row costs time linear in its line, and neither a line nor a member is capped — D-0721, 26 September 2026
+
+`csv::decode_rows` borrows a row's fields into a fixed ten-slot array
+(C4-PULL-02), so a row allocates nothing whatever its line holds. Until D-0721
+it collected them into a vector sized to the line's commas.
+
+- **A row's time is linear in its line's bytes.** `body.lines()` finds the
+  line's end and `fields_of` counts every comma, so both read the whole line.
+- **No line-length cap exists, and no member-size cap either.**
+  `archive::descend` reads a member with `fs::read(&path)` and decodes it
+  whole, so one line can be as long as its member and one member as large as
+  its file. No real line or member length has been measured here, so no cap
+  is set. Setting one needs the longest real row measured first.
+- **The row vector is not reserved.** `decode_rows` starts from
+  `let mut rows: Vec<RawRow> = Vec::new();` and `decode` takes no bound, so an
+  append is amortised O(1), not worst-case O(1). The module doc used to say
+  otherwise.
+
+## A rolling answer is read under `MAX_RESPONSE_BYTES` — D-0723, 27 September 2026
+
+`HttpSource::post_json`, the rolling (Dhan expired-options) POST, now reads its
+success body through `strict_discovery_body` with `MAX_RESPONSE_BYTES`
+(C4-PULL-04). Until D-0723 it read the whole answer with `text()` and no cap,
+while its `# Cost` said O(1).
+
+- **One request costs time linear in the answer's bytes, and the bytes held
+  never pass the cap.** `pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 *
+  1024;`. An answer declaring more is refused before its body is read, and one
+  declaring nothing is abandoned once the bytes held would pass the cap:
+  `if held.len().saturating_add(chunk.len()) > cap` refuses before that chunk
+  is kept. C4-PULL-04's flood test offers 64 MiB past the cap and asserts the
+  client hangs up with fewer than 32 MiB past it sent.
+- **The buffer's allocation is not held to the cap the way its bytes are.**
+  `strict_discovery_body` starts from `let mut held = Vec::new();` and grows
+  it with `held.extend_from_slice(&chunk);`, and no `reserve` or
+  `with_capacity` bounds its capacity. So the allocation is whatever `Vec`'s
+  growth gives on the way to the cap, and it can be larger than the bytes
+  held. How large it grows has not been measured.
+- **The cap is the bars window's, not a measured rolling size.** No real
+  rolling answer's size has been measured here, so how far below the cap a
+  real answer sits is unmeasured.
+- **Nothing here bounds how many rolling requests one run sends.** That is
+  the `api` cross product's count, and this entry does not change it.
+
+## A census visits at most `MAX_MEMBERS` members and keeps a bounded part of each refusal — D-0725, 28 September 2026
+
+`archive::read_dir_reporting`, the census walk `folder::read_census` goes
+through, keeps a member that will not decode as a `Rejected` finding and walks
+on. Until D-0725 its cap compared only the members that decoded
+(`if out.len() >= MAX_MEMBERS {`), and each finding kept the decoder's
+sentence whole, so neither the number of findings nor their length had a
+ceiling (C4-PULL-05).
+
+- **Decoded and rejected members count together.** `descend` compares
+  `out.len().saturating_add(rejected.len())` with `MAX_MEMBERS`, so a census
+  visits at most `MAX_MEMBERS` members whatever they hold. An ingest walk
+  never pushes onto `rejected`, so its bound is unchanged.
+- **A finding keeps at most `MAX_FINDING_BYTES` of its refusal.**
+  `pub const MAX_FINDING_BYTES: usize = 1024;`. A longer sentence keeps its
+  first bytes up to that bound, cut back to a character boundary, and
+  ` [trimmed: N of M bytes not kept]`. Each finding also keeps its member's
+  path. The bound is chosen, not measured: no real refusal's length has been
+  measured here.
+- **What a rejected member costs on the way is not capped.** It is read whole
+  with `fs::read(&path)`, as every member is (the D-0721 entry above), and
+  `finding` renders its sentence whole with `let whole = why.to_string();`
+  before cutting it. Both are that member's locals, gone before the next
+  member is read. What the census keeps is the cut copy.

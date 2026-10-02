@@ -537,8 +537,9 @@ impl HttpSource {
         // it surfaced as a 502.
         //
         // THE FEEDBACK IS NOT SKIPPED. `record_success` and `record_throttled`
-        // still run on every answer below, because a shared governor must learn
-        // from every path whether or not that path is the one that pays.
+        // still run below on every answer that earns one, because a shared
+        // governor must learn from every path whether or not that path is the
+        // one that pays.
         if self.charged_by_caller {
             return;
         }
@@ -2313,8 +2314,11 @@ impl HttpSource {
     ///
     /// # Cost
     ///
-    /// One request, one permit. O(1). Unchanged — the type carries a number the
-    /// function had already computed.
+    /// One request and one permit, and a body read linear in the answer's
+    /// bytes, held to [`MAX_RESPONSE_BYTES`]. An answer declaring more is
+    /// refused before the read and one that runs past the cap is abandoned
+    /// there. Until D-0723 this said O(1) while `text()` held the whole answer
+    /// with no cap at all.
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.
@@ -2336,7 +2340,7 @@ impl HttpSource {
         // NOTHING ANSWERED, SO THERE IS NO STATUS TO CARRY — a dropped socket, a
         // DNS failure or a timeout. The caller's ladder sizes a blip differently
         // from a backend that answered 500, and only this arm can say which.
-        let answer = builder
+        let mut answer = builder
             .header(name, value)
             .header("content-type", "application/json")
             .body(body)
@@ -2345,15 +2349,14 @@ impl HttpSource {
             .map_err(|why| Refusal::transport(format!("{why}")))?;
 
         let status = answer.status();
-        if let Some(lock) = self.governor.as_ref() {
-            let mut g = lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status.as_u16() == 429 {
-                g.record_throttled();
-            } else if status.is_success() {
-                g.record_success();
-            }
+        // A THROTTLE IS RECORDED AS SOON AS IT IS SEEN. A SUCCESS IS NOT: it is
+        // credited below, once the body has been accepted. D-0726.
+        if status.as_u16() == 429
+            && let Some(lock) = self.governor.as_ref()
+        {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_throttled();
         }
         if !status.is_success() {
             // THE VENDOR'S OWN STATUS, for the reason `Discovery::get` gives
@@ -2369,10 +2372,27 @@ impl HttpSource {
         }
         // A FAILED BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status
         // was already a success; what failed is the socket delivering the rest.
-        let body = answer
-            .text()
-            .await
-            .map_err(|why| Refusal::transport(format!("{why}")))?;
+        //
+        // AND THE READ IS BOUNDED, AT THE BARS WINDOW'S OWN CAP. This was
+        // `answer.text()`, which holds the whole answer before anything can
+        // look at its size, and nothing looked afterwards. A rolling answer is
+        // a window of bars, so it is held to `MAX_RESPONSE_BYTES` as
+        // `window_async` is, through the reader discovery already uses: a
+        // declared length past the cap is refused before the read, and an
+        // undeclared one is abandoned at the cap. Both refusals carry the
+        // vendor's status. D-0723.
+        let body = strict_discovery_body(&mut answer, MAX_RESPONSE_BYTES).await?;
+        // ONLY NOW IS THE ANSWER CREDITED. This credit ran on any 2xx status
+        // before the body was read, so a body the socket cut short, one past
+        // the cap and one that is not UTF-8 each counted toward the next step
+        // up although this build refused them. A 2xx whose body carries a
+        // refusal is still credited here: nothing on this path reads the body
+        // for one, which is ledger row W1-pull2-11 and stays open. D-0726.
+        if let Some(lock) = self.governor.as_ref() {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_success();
+        }
         self.keep_first(crate::capture::Method::Post, url, &body);
         Ok(body)
     }
@@ -2406,6 +2426,10 @@ impl HttpSource {
 }
 
 /// A successful discovery document must be bounded and preserve exact UTF-8.
+///
+/// A rolling answer too: [`HttpSource::post_json`] reads through this with
+/// [`MAX_RESPONSE_BYTES`], and `Discovery::get` with
+/// `crate::masters::MAX_BODY_BYTES`. D-0723.
 async fn strict_discovery_body(
     answer: &mut reqwest::Response,
     cap: usize,
@@ -4954,33 +4978,77 @@ mod tests {
     /// with no declared length the pre-read check has nothing to check, and
     /// what the answer costs is decided entirely by the read loop.
     fn flooding_listener(header: &'static str, frame: usize, chunks: usize) -> String {
-        use std::io::{Read as _, Write as _};
+        counted_flood(header, frame, chunks).0
+    }
+
+    /// How far a [`counted_flood`] got before it ended.
+    #[derive(Debug)]
+    struct Flooded {
+        /// Body bytes the socket accepted, the header not counted.
+        sent: usize,
+        /// Whether all `chunks` frames went out. `false` means a write failed,
+        /// which on loopback is the client hanging up.
+        finished: bool,
+    }
+
+    /// [`flooding_listener`], and a report of how many body bytes the socket
+    /// accepted before the flood ended. D-0723.
+    ///
+    /// A refusal naming the cap says the client refused. It does not say WHEN
+    /// the client stopped reading: a reader that held the whole answer and
+    /// measured it afterwards refuses in the same words. The other end of the
+    /// socket is the witness to where the read stopped. The report is sent
+    /// once the thread is done, so the caller waits on it with a timeout
+    /// rather than joining a thread that might never be accepted.
+    fn counted_flood(
+        header: &'static str,
+        frame: usize,
+        chunks: usize,
+    ) -> (String, std::sync::mpsc::Receiver<Flooded>) {
+        use std::io::{ErrorKind, Read as _, Write as _};
         let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let Ok((mut stream, _)) = socket.accept() else {
                 return;
             };
             let mut buf = [0u8; 4096];
             let _request = stream.read(&mut buf);
-            if stream.write_all(header.as_bytes()).is_err() {
-                return;
-            }
+            let mut sent: usize = 0;
+            let mut finished = stream.write_all(header.as_bytes()).is_ok();
             let filler = vec![b'x'; frame];
-            for _ in 0..chunks {
-                // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
-                // Once it has seen more than it will hold it drops the
-                // response, the connection resets, and this write fails — which
-                // is the signal to stop rather than something to report. Rust
-                // ignores SIGPIPE at startup, so this is an `Err` and not a
-                // killed test process.
-                if stream.write_all(&filler).is_err() {
-                    return;
+            'frames: for _ in 0..chunks {
+                if !finished {
+                    break;
+                }
+                let mut rest = filler.as_slice();
+                while !rest.is_empty() {
+                    // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
+                    // Once it has seen more than it will hold it drops the
+                    // response, the connection resets, and this write fails —
+                    // which is the signal to stop and report how far it got.
+                    // Rust ignores SIGPIPE at startup, so this is an `Err` and
+                    // not a killed test process. Every byte the socket accepts
+                    // is counted, not every whole frame.
+                    match stream.write(rest) {
+                        Ok(n) if n > 0 => {
+                            sent = sent.saturating_add(n);
+                            rest = rest.get(n..).unwrap_or_default();
+                        }
+                        Err(why) if why.kind() == ErrorKind::Interrupted => {}
+                        Ok(_) | Err(_) => {
+                            finished = false;
+                            break 'frames;
+                        }
+                    }
                 }
             }
             let _flushed = stream.flush();
+            drop(stream);
+            let _reported = tx.send(Flooded { sent, finished });
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
     }
 
     /// **THE CREDENTIAL MUST NOT FOLLOW A REDIRECT.**
@@ -5194,6 +5262,368 @@ mod tests {
         assert!(
             detail.contains(&MAX_RESPONSE_BYTES.to_string()),
             "and it names the cap: {detail}"
+        );
+    }
+
+    /// **A ROLLING ANSWER WITH NO DECLARED LENGTH STOPS AT THE SAME CAP.**
+    /// D-0723.
+    ///
+    /// `post_json` read its success body with `text()`, which holds the whole
+    /// answer before anything can look at its size. The bars path had stopped
+    /// doing that; the rolling path, which `api` sends once per cell of its
+    /// "`offsets × sides × cadences × ordinals`" cross product, had not.
+    ///
+    /// This offers 64 MiB more than `MAX_RESPONSE_BYTES` with no
+    /// `Content-Length`, so the bound has to live in the read loop, and holds
+    /// WHERE the read stopped as well as that it refused. A reader that held
+    /// the whole answer and measured it afterwards would refuse in the same
+    /// words, so the refusal alone cannot tell the two apart. The server can:
+    /// the client must hang up before the flood ends, with fewer than 32 MiB
+    /// past the cap accepted by the socket. The margin is room for bytes in
+    /// flight between the two ends, which this test does not measure.
+    ///
+    /// The refusal carries the vendor's status, 200, rather than none, so it is
+    /// not read as a transport blip: `api::server::step` maps a status it has
+    /// no other arm for to `Some(_) => Step::Answered` and does not re-ask.
+    #[test]
+    fn a_rolling_answer_with_no_declared_length_is_abandoned_past_the_cap() {
+        const FRAME: usize = 64 * 1024;
+        const EXCESS: usize = 64 * 1024 * 1024;
+        let offered = MAX_RESPONSE_BYTES.saturating_add(EXCESS);
+        let (url, report) = counted_flood(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Connection: close\r\n\r\n",
+            FRAME,
+            offered.div_euclid(FRAME),
+        );
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        // THE READ STOPPED AT THE CAP, NOT AFTER THE ANSWER ENDED.
+        let flooded = report
+            .recv_timeout(core::time::Duration::from_secs(5))
+            .expect("the flood reports how far it got, and a client that never connected gets no report");
+        assert!(
+            !flooded.finished,
+            "the client hangs up before the flood ends: {} of {offered} bytes \
+             went out",
+            flooded.sent
+        );
+        assert!(
+            flooded.sent < MAX_RESPONSE_BYTES.saturating_add(EXCESS / 2),
+            "the read stops at the cap, not at the end of the answer: {} of \
+             {offered} bytes went out",
+            flooded.sent
+        );
+
+        let refusal = match outcome {
+            Ok(body) => panic!(
+                "a rolling answer past the cap is refused, not returned: {} bytes \
+                 were held",
+                body.len()
+            ),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(refusal.status, Some(200), "the vendor did answer");
+        assert!(
+            refusal.detail.contains("ceiling")
+                && refusal.detail.contains(&MAX_RESPONSE_BYTES.to_string()),
+            "it names the cap: {}",
+            refusal.detail
+        );
+        assert!(
+            !refusal.credential_dead,
+            "a size says nothing about a token"
+        );
+    }
+
+    /// **A ROLLING ANSWER DECLARING MORE THAN THE CAP IS REFUSED BEFORE ITS
+    /// BODY IS READ.** D-0723.
+    ///
+    /// Two bytes follow a `Content-Length` one past the cap. `text()` waited
+    /// for the declared length and failed as a dropped socket, a transport
+    /// refusal carrying no status. Checked against the header first, it is
+    /// the vendor's own claim that is refused, under the status it came with.
+    #[test]
+    fn a_rolling_answer_declaring_more_than_the_cap_is_refused_before_reading() {
+        let declared = MAX_RESPONSE_BYTES.saturating_add(1);
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {declared}\r\nConnection: close\r\n\r\n{{}}"
+        )));
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET").block_on_post(&url);
+
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the request has to go out, or this proves nothing"
+        );
+        let refusal = outcome.expect_err("a declared length past the cap is refused");
+        assert_eq!(refusal.status, Some(200), "under the status it came with");
+        assert!(
+            refusal.detail.contains("ceiling"),
+            "and it says the cap was the reason: {}",
+            refusal.detail
+        );
+    }
+
+    /// **A ROLLING ANSWER UNDER THE CAP COMES BACK BYTE FOR BYTE.** D-0723.
+    #[test]
+    fn a_rolling_answer_under_the_cap_is_returned_exactly() {
+        let body = r#"{"data":{"ce":{"close":[101.5]}}}"#;
+        let (url, _seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let got = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
+            .block_on_post(&url)
+            .expect("a small answer is returned");
+        assert_eq!(got, body);
+    }
+
+    /// **A ROLLING ANSWER THAT IS NOT UTF-8 IS REFUSED, NOT REPAIRED.** D-0723.
+    ///
+    /// `text()` decoded lossily: an invalid byte became U+FFFD and the body
+    /// was returned as if the vendor had sent that character. The bounded read
+    /// is the one discovery already used, and it keeps the bytes exact or
+    /// refuses them by name.
+    ///
+    /// The fixture server is never joined. It reports the request it read
+    /// over a channel instead, so a `post_json` that never connects fails this
+    /// test at a five-second wait rather than hanging it on `accept`.
+    #[test]
+    fn a_rolling_answer_that_is_not_utf8_is_refused_not_repaired() {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let received = stream.read(&mut request).unwrap_or(0);
+            let _written = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}",
+            );
+            let _flushed = stream.flush();
+            let _sent = tx.send(received);
+        });
+        let outcome = source_of(spec(PriceScale::Rupees), "SUPERSECRET")
+            .block_on_post(&format!("http://{addr}"));
+
+        let refusal = match outcome {
+            Ok(body) => panic!("an invalid byte is refused, not replaced: {body:?}"),
+            Err(refusal) => refusal,
+        };
+        assert!(
+            rx.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok_and(|received| received > 0),
+            "the request has to reach the fixture, or this proves nothing"
+        );
+        assert_eq!(refusal.status, Some(200));
+        assert!(
+            refusal.detail.contains("UTF-8"),
+            "it names what was wrong with the body: {}",
+            refusal.detail
+        );
+    }
+
+    /// A shared governor, as the governor tests below hold it.
+    type SharedGovernor = std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>;
+
+    /// A loopback server that answers one request with `answer`, byte for
+    /// byte, and reports how many request bytes it read.
+    ///
+    /// It is never joined. A caller that never connects fails at its own timed
+    /// wait on the report rather than hanging on `accept`.
+    fn answer_once(answer: Vec<u8>) -> (String, std::sync::mpsc::Receiver<usize>) {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let received = stream.read(&mut request).unwrap_or(0);
+            let _written = stream.write_all(&answer);
+            let _flushed = stream.flush();
+            let _sent = tx.send(received);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Asserts the fixture behind `report` read a request within five seconds.
+    fn reached(what: &str, report: &std::sync::mpsc::Receiver<usize>) {
+        assert!(
+            report
+                .recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok_and(|received| received > 0),
+            "{what}: the request has to reach the fixture, or this proves nothing"
+        );
+    }
+
+    /// The per-second allowance a shared governor stands at.
+    fn allowance(held: &SharedGovernor) -> u32 {
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .permitted(crate::rate::WindowSpan::Second)
+            .expect("a bounded span")
+    }
+
+    /// A budgeted source sharing its governor with the caller, the governor
+    /// throttled once and then banked one success short of a step, and the
+    /// allowance it stands at. One more credit steps it up.
+    fn one_credit_short() -> (HttpSource, SharedGovernor, u32) {
+        let budgeted = HttpSpec {
+            budget: Budget {
+                per_second: Some(crate::rate::DHAN_PER_SECOND),
+                per_minute: None,
+                per_day: None,
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let owned = HttpSource::new(budgeted, Credential::token("SUPERSECRET".to_owned()))
+            .expect("a client builds");
+        let governor = owned.governor();
+        let held = governor.clone().expect("a budgeted spec is governed");
+        {
+            let mut g = held
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+            for _ in 1..crate::rate::SUCCESSES_PER_STEP {
+                g.record_success();
+            }
+        }
+        let lowered = allowance(&held);
+        (owned.sharing(governor), held, lowered)
+    }
+
+    /// **A ROLLING ANSWER THIS BUILD REFUSES EARNS THE GOVERNOR NOTHING.**
+    /// D-0726.
+    ///
+    /// `post_json` credited the governor with a success on any 2xx status,
+    /// before its body was read. A body the socket cuts short was refused
+    /// after that credit, and D-0723 added two more refusals there: a body
+    /// declaring more than `MAX_RESPONSE_BYTES`, and one that is not UTF-8.
+    /// Each counted toward the allowance's next step up. The credit now comes
+    /// after the body is accepted.
+    ///
+    /// One success moves nothing visible until `SUCCESSES_PER_STEP` are
+    /// banked, so each answer gets a governor of its own from
+    /// `one_credit_short`. A refused answer must leave its allowance where it
+    /// was, and a clean one must step it up. Every refused answer is tried
+    /// before anything is asserted, so a failure names each one that was
+    /// credited. Each governor is shared with its source, so the source
+    /// charges no permit and the throttle's drained bucket makes no request
+    /// wait.
+    #[test]
+    fn a_rolling_answer_this_build_refuses_earns_the_governor_nothing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let past_the_cap = MAX_RESPONSE_BYTES.saturating_add(1);
+        let mut credited = Vec::new();
+        let mut returned = Vec::new();
+        for (what, answer) in [
+            (
+                "a body the socket cuts short",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}".to_vec(),
+            ),
+            (
+                "a body declaring more than the cap",
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {past_the_cap}\r\n\
+                     Connection: close\r\n\r\n{{}}"
+                )
+                .into_bytes(),
+            ),
+            (
+                "a body that is not UTF-8",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n{\xff}".to_vec(),
+            ),
+        ] {
+            let (source, held, lowered) = one_credit_short();
+            let (url, report) = answer_once(answer);
+            let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
+            reached(what, &report);
+            let now = allowance(&held);
+            if now != lowered {
+                credited.push(format!("{what} ({lowered} to {now})"));
+            }
+            if outcome.is_ok() {
+                returned.push(what);
+            }
+        }
+        assert!(
+            credited.is_empty(),
+            "a refused answer earned the governor a success it did not deliver: {}",
+            credited.join("; ")
+        );
+        assert!(returned.is_empty(), "each is refused: {returned:?}");
+
+        // THE OTHER HALF, WHICH KEEPS THE ABOVE FROM BEING VACUOUS: a source
+        // that never credited anything would also leave the allowance alone.
+        let (source, held, lowered) = one_credit_short();
+        let body = r#"{"data":{"ce":{"close":[101.5]}}}"#;
+        let (url, report) = answer_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        );
+        let got = runtime
+            .block_on(source.post_json(&url, "{}".to_owned()))
+            .expect("a clean answer is returned");
+        reached("a clean answer", &report);
+        assert_eq!(got, body);
+        assert!(
+            allowance(&held) > lowered,
+            "a clean answer completes the step: {} !> {lowered}",
+            allowance(&held)
+        );
+    }
+
+    /// **A ROLLING 429 BACKS THE GOVERNOR OFF BEFORE ITS REFUSAL RETURNS.**
+    /// D-0726.
+    ///
+    /// D-0726 kept `post_json`'s throttle above the body read and moved only
+    /// the success credit below it. No test drove `post_json` with a 429 and
+    /// then read the governor, so matching a different status in that branch,
+    /// or dropping its `record_throttled`, passed every test in the crate.
+    ///
+    /// The governor starts one success short of a step. A throttle that is
+    /// never recorded leaves the allowance where it was, and one credited as
+    /// a success steps it up. Only a recorded throttle lowers it. The refusal
+    /// still carries the vendor's 429.
+    #[test]
+    fn a_rolling_429_backs_the_governor_off_before_its_refusal_returns() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let (source, held, lowered) = one_credit_short();
+        let (url, report) = answer_once(
+            b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+        );
+        let outcome = runtime.block_on(source.post_json(&url, "{}".to_owned()));
+        reached("a 429", &report);
+        let now = allowance(&held);
+        assert!(
+            now < lowered,
+            "a 429 on the rolling path backs the governor off: {now} !< {lowered}"
+        );
+        let refusal = outcome.expect_err("a 429 is refused");
+        assert_eq!(
+            refusal.status,
+            Some(429),
+            "the vendor's own status reaches the caller: {refusal:?}"
         );
     }
 
@@ -6062,6 +6492,15 @@ mod tests {
                 .build()
                 .expect("a runtime")
                 .block_on(self.0.window_async(request))
+        }
+
+        /// One rolling POST to `url`, driven to its answer.
+        fn block_on_post(&self, url: &str) -> Result<String, crate::chain::Refusal> {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(self.0.post_json(url, "{}".to_owned()))
         }
     }
 
