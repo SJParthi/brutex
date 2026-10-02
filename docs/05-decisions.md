@@ -52707,3 +52707,83 @@ otherwise unchanged.
 
 Invariants C4-COSTS-02 and the D-1194, D-1197 and D-1182 rows are restated
 beside the tests above.
+
+### D-1120 — V-06's dependency pin reads the engine manifest as TOML and reports the linked package — 2026-10-02
+
+**What was wrong.** D-1107 deferred it. `engine::tests::declared_dependencies`
+backs V-06 (`the_sweep_cannot_compute_a_condition_bit`), which pins
+`crates/engine`'s dependency set to exactly `["vocab"]`. It split each line at
+`#` and `=` and took the table from any line that began with `[`. Run against
+the shapes D-1107 listed, it returned `["vocab"]` for
+`vocab = { package = "store", .. }`, for a `[dependencies.vocab]` table with
+`package = "store"` and for `vocab.package = "store"`, so the exact pin passed
+while `store` linked. It returned `[]` for `[ dependencies . store ]`,
+`["dependencies"]`, `[dev_dependencies]` and a root-level
+`dependencies.store = { .. }`. It returned the escaped text for
+`"store" = ..`, and phantom names for the continuation lines of a
+multi-line array and for a header written inside a multi-line string. All ten
+results were taken by compiling the old function on its own and running it on
+each shape.
+
+**The choice.** `crates/engine/src/manifest.rs`, compiled only under
+`#[cfg(test)]`, reads the manifest as TOML: dotted and quoted keys split into
+segments, basic and literal strings with their escapes decoded, multi-line
+strings, inline tables and arrays across lines. Every key is joined to its
+table's path before it is classified. A dependency is a key under
+`dependencies`, `dev-dependencies` or `build-dependencies` (hyphen or underscore
+spelling), directly or under `target.CFG`. The result is the PACKAGE each one
+links: an explicit `package` wins, and a `NAME.workspace = true` declaration
+resolves through the root manifest's `[workspace.dependencies]`, which the
+reader also parses. Text it cannot parse is an `Err` that fails the test,
+never a partial list, so a nameless key now refuses where the line scan
+dropped it. No TOML crate is in `Cargo.lock` and none was added.
+
+**Not changed.** The reader is permissive where cargo is strict (a multi-line
+key, a trailing comma, a newline inside an inline table), which cannot hide a
+dependency because cargo refuses those manifests itself. It does not read
+`[patch]` or `[replace]`: they redirect a dependency already declared and do
+not add one, and gate 22 clause A, which reads them through
+`.github/source_scan.rs deps`, is unchanged. `crates/core/tests/graph.rs` keeps
+its own line reader and its stated multi-line limit. Invariant V-06b.
+
+### D-1121 — The 41 chained searches gate 11 rule 6 pinned unread are read, bounded and moved into `allow_scan` — 2026-10-02
+
+**What was wrong.** D-1115 made rule 6 read method chains and pinned the 41
+`.iter().find(` / `.position(` sites it newly saw in `allow_scan_unread`,
+without reading them. `docs/06-limits.md` recorded that none of them was shown
+to be bounded by anything.
+
+**The choice.** Each site was opened and its bound written beside the
+`allow_scan` rows in `.github/workflows/ci.yml`. The per-file counts were
+merged into `allow_scan`, so the total allowance (76) is unchanged, and
+`allow_scan_unread` is now empty. Three groups:
+
+- Compile-time tables and fixed-width fields (25 sites): the eight-rung
+  arrays, `PULL_ORDER`, `Vendor::ALL`, the nine charter days, the `&'static`
+  vendor and rolling descriptor slices, the five exit choices, a 24-byte name
+  field, telemetry's twelve fields, the vocabulary table, the `[_; 2]` grid
+  array and the eight campaign rows `validate` requires.
+- Bounded by the feed count or another stated runtime cap (7 sites): census
+  rows and credential vendors (at most `Vendor::ALL`), request knob overrides
+  (at most the `KNOBS` table in the one caller that passes any), one entry
+  minute's attempts (refused above 200) and the eight-entry snapshot cache.
+- Data-sized at a preparation, validation or report boundary (9 sites):
+  locating an execution slice in its minute context (three sites, O(M) once
+  per attestation, beside an O(M) pass over the same slice), the first daily
+  period of an evaluation (beside an O(days) filter over the same periods),
+  two argmax re-checks per fold, up to 25 walks of the population rows per
+  replay request, one CSV header per file, and `Grid::baseline`, which has no
+  production caller. Two older sites of the same kind were read beside them
+  and are now written down too: the other two argmax re-checks and
+  `cli::final_selection`, once per screen.
+
+**Not changed.** No site was rewritten. None is a per-bar or per-candidate scan
+over data where an O(1) structure would pay: the per-bar one (`stored.rs`) is
+nine comparisons, and every data-sized one sits beside a pass of the same order
+over the same data. The minute-context and daily-period searches are over
+ordered slices, and rule 1 bans the binary search that would be cheaper. The
+`strict_range_knobs` bound comes from its callers, not its parameter type, and
+a new caller would have to keep it. The count of 41 is D-1115's. At this commit
+the chain fold yields 46 records that no single corpus line matches; five of
+them are records whose later line also matches on its own, so they were already
+inside the older `allow_scan` counts. Invariant CIG-19b.

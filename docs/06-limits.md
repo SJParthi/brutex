@@ -11179,25 +11179,39 @@ a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
 
-## Forty-one chained searches rule 6 now sees and nobody has classified — D-1115, 2 October 2026
+## ~~Forty-one chained searches rule 6 now sees and nobody has classified~~ — D-1115, CLOSED by D-1121, 2 October 2026
 
-CI gate 11 rule 6 reads method chains as of D-1115. It found 41
-`.iter().find(` / `.position(` / `.rposition(` sites in 29 files that the
-line-based grep had never shown. They are pinned per file in
-`allow_scan_unread`, so a new one is refused. **None has been opened and
-classified.** The list sits beside `allow_scan`, whose entries each carry a
-written bound.
+CI gate 11 rule 6 reads method chains as of D-1115, and the 41 sites it first
+saw were pinned in `allow_scan_unread` unread. D-1121 opened each one, wrote
+its bound beside `allow_scan` in `.github/workflows/ci.yml`, and emptied
+`allow_scan_unread`. 25 are compile-time tables or fixed-width fields, and 7
+are bounded by the feed count or another stated cap.
 
-A spot check of five found a fixed table or one record's own fields each time:
-- `telemetry::record::Record::field`
-- vocab's `TABLE` lookup by name
-- `pull::rolling`'s expiry flags
-- `pull::vendor`'s window caps
-- the grid's baseline cell
+**Nine are not constant, and are stated here as what they are,** with three
+already-counted sites read beside them (two of the four `validate` re-checks
+and `final_selection`, whose chains sat inside older `allow_scan` counts):
 
-Five of 41 is not a measurement of the rest. Until each entry is moved into
-`allow_scan` with its bound, none of these sites is shown to be bounded by a
-compile-time table rather than by the data.
+- `cli::candidate_universe`, `cli::pre_admission_data` and
+  `runner::signal_candle_stop` locate an execution slice's first bar in the
+  complete minute context: O(M), once per attestation, beside an O(M) pass
+  over the same slice (sections 134 and 142).
+- `runner::signal_candle_stop` finds an evaluation's first daily period:
+  O(days) per evaluation, beside an O(days) filter over the same periods and
+  the evaluation's walk of every signal bar.
+- `runner::validate` re-checks an argmax four times: O(retained placements)
+  once per fold, beside a `.max()` over the same slice.
+- `cli::final_selection` finds the best traded row: O(priced rows) once per
+  screen, after two sorts of the same rows.
+- `cli::population_v6` finds each requested strategy among the population rows:
+  at most 25 walks of O(P) per replay request.
+- `pull::cash_auction` finds eight column names in one CSV header: O(columns)
+  once per file.
+- `runner::grid::Grid::baseline` walks one grid's cells. Nothing in production
+  calls it.
+
+The `cli::strict_range_knobs` override search is bounded by its two callers
+(at most the `KNOBS` table, or none), not by its parameter type; a new caller
+would have to keep that bound. None of these timings is measured.
 
 ## The window-range percentile's per-bar bound is read off the source — D-1116, 2 October 2026
 
