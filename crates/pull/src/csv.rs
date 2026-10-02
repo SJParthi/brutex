@@ -60,13 +60,14 @@
 //! as long as its member, and `crate::archive` reads a member whole, with
 //! `fs::read` and no byte cap. `docs/06-limits.md` records both.
 //!
-//! **The row vector is not reserved.** [`decode`] takes no bound and
-//! `decode_rows` starts from `Vec::new()`, so an append is amortised O(1), not
-//! worst-case O(1). This paragraph used to say the vector was reserved from a
-//! caller-supplied bound, and no caller supplies one. **UNVERIFIED as a
-//! measurement:** the amortised bound is `Vec::push`'s own, argued from the
-//! code, and `crates/pull/benches/ratio.rs` does not time [`decode`].
-//! `docs/06-limits.md` records it, D-0721.
+//! **The row vector is reserved ONCE, before the first line**, from a bound
+//! the body itself supplies — one more than its newline count, capped at
+//! [`MAX_ROWS`] — so a decode that succeeds never reallocates it
+//! (`docs/07-o1-architecture.md` law 2). Until o1api-34 (D-1203) this
+//! paragraph said the vector was unreserved, after an earlier version claimed a
+//! caller-supplied bound no caller supplied. Counting the body's newlines is one
+//! extra linear pass over bytes already in memory, the same order as the decode
+//! pass it sizes. Held by `pull::csv::the_row_vector_is_reserved_once_from_the_body`.
 
 use crate::fetch::{FetchError, MAX_ROWS, RawRow};
 use crate::vendor::DateFormat;
@@ -111,6 +112,20 @@ pub enum Columns {
     /// Selected explicitly; [`Self::TrueDataFutures`] remains nine-field only.
     TrueDataFno,
 }
+
+/// The widest row any [`Columns`] layout carries — GDFL's ten.
+///
+/// The decoder splits each line into a fixed array of this many slots rather
+/// than a `Vec`, so no row allocates. Pinned to every layout's
+/// [`Columns::count`] at compile time below.
+pub const MAX_FIELDS: usize = 10;
+
+const _: () = assert!(
+    Columns::TrueDataIndex.count() <= MAX_FIELDS
+        && Columns::TrueDataFutures.count() <= MAX_FIELDS
+        && Columns::Gdfl.count() <= MAX_FIELDS
+        && Columns::TrueDataFno.count() <= MAX_FIELDS
+);
 
 impl Columns {
     /// How many fields a row of this shape has.
@@ -635,16 +650,6 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
     }
 }
 
-/// The most fields any layout this decoder reads carries: [`Columns::Gdfl`]'s
-/// ten.
-///
-/// A row's fields are held in an array this wide rather than collected into a
-/// vector, so a row allocates nothing whatever its line holds. Every layout
-/// `tests::every_layout_fits_the_fixed_field_array` walks fits, and that
-/// test's own doc names the one way a new layout is named there and not
-/// walked. D-0721.
-const MAX_FIELDS: usize = 10;
-
 /// One line's fields, borrowed into a fixed array, when it has exactly `want`
 /// of them; otherwise how many it has.
 ///
@@ -693,7 +698,17 @@ fn check_header(columns: Columns, line: &str) -> Result<(), CsvError> {
 fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<RawRow>, CsvError> {
     let at = columns.offsets();
     let want = columns.count();
-    let mut rows: Vec<RawRow> = Vec::new();
+    // RESERVED ONCE, FROM THE BODY. Every row is one line, so the line count
+    // bounds the row count; `lines()` yields at most one more line than there
+    // are newlines. Capped at `MAX_ROWS`, the most this decoder ever keeps
+    // before it refuses, so a huge body cannot reserve past the refusal.
+    let bound = body
+        .bytes()
+        .filter(|&byte| byte == b'\n')
+        .count()
+        .saturating_add(1)
+        .min(MAX_ROWS);
+    let mut rows: Vec<RawRow> = Vec::with_capacity(bound);
 
     for (i, raw_line) in body.lines().enumerate() {
         let line_no = i + 1;
@@ -723,8 +738,9 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         }
 
         // A FIXED ARRAY, NOT A VECTOR PER ROW. D-0721: this collected every
-        // line into a `Vec<&str>` sized to its commas before the count was
-        // checked, one heap allocation per row as large as the line made it.
+        // line into a vector of string slices sized to its commas before the
+        // count was checked, one heap allocation per row as large as the line
+        // made it. o1api-34 (D-1203) found the same defect; one fix holds both.
         let fields = fields_of(line, want).map_err(|got| CsvError::FieldCount {
             line: line_no,
             got,
@@ -1747,5 +1763,115 @@ mod tests {
         .to_string();
         assert!(refusal.starts_with("line 1: header"), "{refusal}");
         assert!(refusal.contains(GDFL_HEADER), "{refusal}");
+    }
+
+    /// **THE ROW VECTOR IS RESERVED ONCE, FROM THE BODY.** o1api-34, D-1203.
+    ///
+    /// The module header said the vector was reserved from a bound; the code
+    /// started it empty and doubled. `Vec::with_capacity` documents that it
+    /// produces EXACTLY the requested capacity for a non-zero-sized element, so
+    /// the capacity is the observable proof: one more than the newline count,
+    /// where doubling would show a power of two. On main 1,000 rows came back
+    /// with capacity 1,024 and an empty body with capacity 0.
+    #[test]
+    fn the_row_vector_is_reserved_once_from_the_body() {
+        let line = |n: u32| format!("20240103,09:{:02}:{:02},100.00,5,0", 15 + n / 60, n % 60);
+        for count in [1_u32, 2, 3, 7, 64, 1_000] {
+            let mut body = String::new();
+            for n in 0..count {
+                body.push_str(&line(n));
+                body.push('\n');
+            }
+            let rows = decode(&body, Columns::TrueDataIndex).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(
+                rows.capacity(),
+                count as usize + 1,
+                "{count} newline-terminated rows reserve {count} + 1, once"
+            );
+            // No trailing newline: one fewer newline, the same rows, an exact fit.
+            let rows = decode(body.trim_end(), Columns::TrueDataIndex).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(rows.capacity(), count as usize);
+        }
+        // EMPTY. Zero newlines reserve one slot and keep nothing.
+        let rows = decode("", Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, 1));
+        // BLANK LINES ARE COUNTED IN THE BOUND AND SKIPPED IN THE DECODE.
+        let rows = decode(&"\n".repeat(9), Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, 10));
+        // THE CAP. A body with more newlines than `MAX_ROWS` reserves exactly
+        // `MAX_ROWS`, the most the decoder keeps before it refuses.
+        let rows = decode(&"\n".repeat(MAX_ROWS + 5), Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, MAX_ROWS));
+    }
+
+    /// **A LINE WIDER THAN EVERY LAYOUT IS COUNTED, NOT STORED.** o1api-34.
+    ///
+    /// The fields now land in a fixed [`MAX_FIELDS`]-slot array. A line past
+    /// that width must still be refused with the number of fields it really
+    /// carried, or the refusal would misreport the very column count it is
+    /// about.
+    #[test]
+    fn a_line_wider_than_the_field_array_reports_its_true_width() {
+        for (columns, got) in [
+            (Columns::TrueDataIndex, 1_usize),
+            (Columns::TrueDataIndex, 4),
+            (Columns::TrueDataIndex, 6),
+            (Columns::TrueDataIndex, MAX_FIELDS),
+            (Columns::TrueDataIndex, MAX_FIELDS + 1),
+            (Columns::TrueDataIndex, 64),
+            (Columns::TrueDataFutures, MAX_FIELDS + 1),
+            (Columns::TrueDataFno, 9),
+        ] {
+            let line = vec!["X"; got].join(",");
+            assert_eq!(
+                decode(&format!("{line}\n"), columns),
+                Err(CsvError::FieldCount {
+                    line: 1,
+                    got,
+                    want: columns.count(),
+                }),
+                "{got} fields for {columns:?}"
+            );
+        }
+        // GDFL, the widest layout, one past it: the header is line 1.
+        let wide = ["X"; MAX_FIELDS + 1].join(",");
+        assert_eq!(
+            decode(&format!("{GDFL_HEADER}\n{wide}\n"), Columns::Gdfl),
+            Err(CsvError::FieldCount {
+                line: 2,
+                got: MAX_FIELDS + 1,
+                want: MAX_FIELDS,
+            })
+        );
+        assert_eq!(Columns::Gdfl.count(), MAX_FIELDS, "GDFL is the widest");
+    }
+
+    /// **NO ROW ALLOCATES A FIELD LIST.** o1api-34, D-1203.
+    ///
+    /// The per-row `Vec<&str>` has no observable output to assert on, so its
+    /// absence is asserted on the source of [`decode_rows`]. The needles are
+    /// assembled at run time so this test cannot match its own text.
+    #[test]
+    fn the_decode_loop_collects_no_field_vector() {
+        let source = include_str!("csv.rs");
+        let start = source
+            .find(&format!("{}{}", "fn decode_", "rows("))
+            .expect("decode_rows exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("decode_rows ends")];
+        for needle in [
+            format!("{}{}", "Vec<&", "str>"),
+            format!("{}{}", ".coll", "ect()"),
+            format!("{}{}", "Vec::", "new()"),
+        ] {
+            assert!(
+                !body.contains(&needle),
+                "decode_rows holds {needle:?}: a per-row allocation or an \
+                 unreserved row vector is back"
+            );
+        }
+        assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
     }
 }

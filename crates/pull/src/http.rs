@@ -637,9 +637,15 @@ impl HttpSource {
     ///
     /// # Cost
     ///
-    /// One `admit` per attempt, and `admit` walks [`crate::rate::WINDOW_COUNT`]
-    /// windows -- a constant three -- so this is O(1) per request and does not
-    /// grow with how many requests came before it.
+    /// ONE [`crate::rate::Governor::reserve`] per request, never a retry.
+    /// `reserve` walks [`crate::rate::WINDOW_COUNT`] windows -- a constant
+    /// three -- so this is O(1) per request and does not grow with how many
+    /// requests came before it or how many are waiting beside it.
+    ///
+    /// This was a loop of `admit` and sleep until o1api-54 (D-1203): every
+    /// waiter that slept the same named wait woke at the same instant and raced
+    /// for one permit, so service was not first-come-first-served, and the loop
+    /// had no bound. A reservation is granted in lock order and slept once.
     ///
     /// **UNVERIFIED as a measurement.** The bound is argued from the
     /// shape of the code and no bench in this workspace times it.
@@ -660,38 +666,26 @@ impl HttpSource {
         let Some(lock) = self.governor.as_ref() else {
             return;
         };
-        loop {
-            let wait = {
-                let now = Self::now_micros();
-                // POISON IS NOT A REASON TO STOP GOVERNING. A panic in another
-                // chain must not turn the ceiling off for every remaining one,
-                // so the guard is taken either way.
-                let mut g = lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match g.admit(now) {
-                    crate::rate::Verdict::Admit => return,
-                    crate::rate::Verdict::Deny { wait_micros, .. } => wait_micros,
-                }
-            };
-            // A DENY THAT ASKS FOR NO WAIT WOULD SPIN. The governor does not
-            // emit one, and this floor means a future change to it cannot turn
-            // this loop into a busy wait.
-            let at_least = wait.max(1);
-            // COUNTED BEFORE THE SLEEP, NOT AFTER. A run cancelled mid-wait
-            // still absorbed the part it waited, and a counter that only
-            // credits completed sleeps under-reports exactly the runs an
-            // operator is most likely to be asking about.
-            crate::rate::note_absorbed(at_least);
-            tokio::time::sleep(core::time::Duration::from_micros(at_least)).await;
+        let now = crate::rate::monotonic_micros();
+        let at = {
+            // POISON IS NOT A REASON TO STOP GOVERNING. A panic in another
+            // chain must not turn the ceiling off for every remaining one,
+            // so the guard is taken either way.
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.reserve(now)
+        };
+        let wait = at.saturating_sub(now);
+        if wait == 0 {
+            return;
         }
-    }
-
-    /// Microseconds since the epoch, for the governor's windows.
-    fn now_micros() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+        // COUNTED BEFORE THE SLEEP, NOT AFTER. A run cancelled mid-wait
+        // still absorbed the part it waited, and a counter that only
+        // credits completed sleeps under-reports exactly the runs an
+        // operator is most likely to be asking about.
+        crate::rate::note_absorbed(wait);
+        tokio::time::sleep(core::time::Duration::from_micros(wait)).await;
     }
 
     /// This feed's endpoint with every value segment left as its placeholder —
@@ -923,6 +917,18 @@ fn note_answer(
 /// declared shape, and whatever [`RawWindow::decode`] refuses — which includes
 /// **the seven arrays disagreeing in length**, the trap that would otherwise
 /// yield a short window filed as complete.
+///
+/// # Memory — a whole tree, and UNMEASURED
+///
+/// The body is parsed into one `serde_json::Value` tree before any field is
+/// read, so the tree, the body and the decoded columns are alive at once. A
+/// `Value` is 32 bytes on this build (pinned by
+/// `the_json_tree_is_thirty_two_bytes_a_node`) against as few as two bytes of
+/// text for one array element (`0,`), so the tree alone can reach ~16× the
+/// body, and more while an array's backing vector doubles. A body is capped at
+/// [`MAX_RESPONSE_BYTES`]. That is an ARGUED bound: no peak has been measured,
+/// and the typed or streaming decode that would remove the tree is not built.
+/// o1api-33, D-1203; `docs/06-limits.md` states it.
 pub fn decode_body(
     body: &str,
     spec: &HttpSpec,
@@ -3945,6 +3951,23 @@ mod tests {
             (2_450_075, 2_450_075, 2_450_075)
         );
         assert_eq!(row.volume, 250, "a volume is a count and is not scaled");
+    }
+
+    /// **THE TREE NODE THE MEMORY NOTE ON `decode_body` IS ARGUED FROM.**
+    ///
+    /// o1api-33, D-1203: the peak memory of a decode is unmeasured, and the
+    /// stated bound rests on this size. A `serde_json` feature that widens the
+    /// node (`arbitrary_precision`, for one) changes the bound, and this fails
+    /// so the note and `docs/06-limits.md` are revisited rather than left wrong.
+    #[test]
+    fn the_json_tree_is_thirty_two_bytes_a_node() {
+        assert_eq!(size_of::<serde_json::Value>(), 32);
+        let source = include_str!("http.rs");
+        let doc = &source[..source
+            .find(&format!("{}{}", "pub fn decode_", "body("))
+            .expect("decode_body exists")];
+        assert!(doc.contains("# Memory — a whole tree, and UNMEASURED"));
+        assert!(doc.contains("~16× the\n/// body"));
     }
 
     /// Every price the paisa grid can hold, held exactly.

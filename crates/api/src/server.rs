@@ -8131,34 +8131,6 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// Spend one rate permit, WAITING for it rather than refusing.
-///
-/// # Why waiting is the right answer and refusing is not
-///
-/// The governor does not merely say no — it says *when*. This uses that.
-///
-/// Measured on the real universe with the refusing version: 785 instruments
-/// attempted, **6 reached, 779 refused**, the whole run over in 5.2 seconds,
-/// every refusal reading `Groww's minute budget is spent. The next request is
-/// admitted in 0.198s. Nothing was asked of the vendor.` The governor was
-/// right every time and the vendor was never troubled; the pull simply would
-/// not wait a fifth of a second. Refusing turns "slow down" into "give up",
-/// and a backfill that gives up is one a human has to restart — the manual
-/// intervention this exists to remove.
-///
-/// # Why it is bounded, and why the bound is loud
-///
-/// [`MAX_ADMISSION_WAITS`] attempts, after which the refusal is returned
-/// unchanged. Each attempt sleeps the governor's own arithmetic, so this is 64
-/// *earned permits* of patience rather than 64 blind retries. A governor still
-/// denying after that many full waits is not congested, it is misconfigured —
-/// a ceiling below one request per span makes every wait futile — and
-/// `CLAUDE.md` §4 bans a fallback that hides a failure.
-///
-/// # Errors
-///
-/// A poisoned budget lock, or a feed with no HTTP transport: returned on the
-/// first attempt without sleeping, because neither becomes true later.
 /// A [`pull::chain::Discovery`] that charges the rate governor before EVERY
 /// request it makes.
 ///
@@ -8426,101 +8398,88 @@ where
     })
 }
 
-async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
-    let mut last = String::new();
-    for _ in 0..MAX_ADMISSION_WAITS {
-        // ONE `admit` CALL PER ATTEMPT, and the lock is dropped before the
-        // sleep.
-        //
-        // `admit` is not a question, it is a WITHDRAWAL: on `Admit` it has
-        // already spent the permit. Asking twice — once to decide and once to
-        // read the wait — spends a permit and throws it away, which over a
-        // 97,524-request backfill is a leak measured in thousands. The verdict
-        // is taken once and both branches are served from it.
-        //
-        // The lock is released before the sleep because holding a
-        // `std::sync::Mutex` across an await point would stall every other
-        // instrument for the duration of one instrument's wait, turning a
-        // governor into a global serialiser.
-        let verdict = {
-            let mut budgets = site.budgets.lock().map_err(|_| {
-                format!(
-                    "the rate budget for {} cannot be read: another request \
-                     panicked while holding it, so the allowance already spent \
-                     is unknown. Nothing is issued on an unknown budget.",
-                    feed.display()
-                )
-            })?;
-            let Some(Some(governor)) = budgets.get_mut(feed as usize) else {
-                return Err(format!(
-                    "{} has no rate budget, which means it declares no HTTP \
-                     transport. Reaching this function is a routing error \
-                     rather than an operator one.",
-                    feed.display()
-                ));
-            };
-            // ONE LOCK INSIDE ANOTHER, and both are released at the end of this
-            // block. The outer guards the LIST of feeds; the inner guards ONE
-            // feed's state. Taken in this order at every site in this file and
-            // never the other way round, which is what keeps them from
-            // deadlocking — and the inner lock is now the SAME one the
-            // transport takes, which is the whole point of the change.
-            let mut held = governor
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            held.admit(monotonic_micros())
-        };
-
-        let pull::rate::Verdict::Deny { span, wait_micros } = verdict else {
-            return Ok(());
-        };
-        last = format!(
-            "{}'s {} budget is spent. The next request is admitted in \
-             {}.{:03}s. Nothing was asked of the vendor and nothing was written.",
-            feed.display(),
-            // `WindowSpan` has no operator-facing name of its own; its Debug is
-            // already exactly the word an operator wants.
-            format!("{span:?}").to_lowercase(),
-            // INTEGER SECONDS AND MILLISECONDS. `{:.3}` on an `f64` is the
-            // obvious way to write this and clippy denies it workspace-wide —
-            // correctly. A duration that is exact integer arithmetic stays it.
-            wait_micros / 1_000_000,
-            (wait_micros % 1_000_000) / 1_000
-        );
-        // THE GOVERNOR SAID WHEN, so sleep exactly that. A fixed sleep is
-        // either longer than the wait (throughput thrown away) or shorter (a
-        // spin). +1 ms so the clock has certainly passed the instant rather
-        // than landing exactly on it, which would deny once more.
-        tokio::time::sleep(std::time::Duration::from_micros(wait_micros + 1_000)).await;
-    }
-    Err(format!(
-        "{last} — and that wait was taken {MAX_ADMISSION_WAITS} times without \
-         the permit ever being earned, so the ceiling is below one request per \
-         span and waiting longer cannot help."
-    ))
-}
-
-/// How many full waits are taken before a rate refusal is believed.
-const MAX_ADMISSION_WAITS: u32 = 64;
-
-/// A monotonic microsecond reading, which is what [`pull::rate::Governor`] asks
-/// for and deliberately will not read itself.
+/// Spend one rate permit, WAITING for it rather than refusing.
 ///
-/// The governor takes the clock as an argument so a test can drive it without
-/// sleeping. This is the one place that has to supply a real one.
-fn monotonic_micros() -> u64 {
-    use std::sync::OnceLock;
-    static ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
-    ORIGIN
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_micros()
-        // A `u128` of microseconds since process start exceeds `u64` after
-        // ~584,000 years. Saturating rather than wrapping, because a wrapped
-        // clock would hand the governor a reading in the past and refill every
-        // bucket at once.
-        .try_into()
-        .unwrap_or(u64::MAX)
+/// # Why waiting is the right answer and refusing is not
+///
+/// The governor does not merely say no — it says *when*. This uses that.
+///
+/// Measured on the real universe with the refusing version: 785 instruments
+/// attempted, **6 reached, 779 refused**, the whole run over in 5.2 seconds,
+/// every refusal reading `Groww's minute budget is spent. The next request is
+/// admitted in 0.198s. Nothing was asked of the vendor.` The governor was
+/// right every time and the vendor was never troubled; the pull simply would
+/// not wait a fifth of a second. Refusing turns "slow down" into "give up",
+/// and a backfill that gives up is one a human has to restart — the manual
+/// intervention this exists to remove.
+///
+/// # One reservation, never a retry
+///
+/// [`pull::rate::Governor::reserve`] charges the permit against the instant
+/// the bucket will afford it and hands that instant back, so this sleeps once
+/// and returns. The order permits are granted in is the order callers took the
+/// lock.
+///
+/// It was a loop of up to 64 `admit`-and-sleep attempts until o1api-54
+/// (D-1203). Every waiter that slept the same named wait woke together and
+/// raced for one permit, so service was not first-come-first-served, and a
+/// waiter that lost 64 such races was refused with a sentence saying the
+/// ceiling was below one request per span — blaming configuration for what was
+/// contention. A reservation cannot lose a race, so that refusal is gone
+/// rather than reworded: the governor's own construction already refuses a
+/// zero ceiling (`pull::rate::GovernorError::CeilingIsZero`), and every
+/// non-zero ceiling affords one request per span by definition.
+///
+/// # Errors
+///
+/// A poisoned budget lock, or a feed with no HTTP transport: returned on the
+/// first attempt without sleeping, because neither becomes true later.
+async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
+    // ONE `reserve` CALL, and the lock is dropped before the sleep.
+    //
+    // `reserve` is a WITHDRAWAL, as `admit` is: it has already spent the
+    // permit when it returns. It is called once and the instant it names is
+    // slept to; asking again would spend a second permit for one request.
+    //
+    // The lock is released before the sleep because holding a
+    // `std::sync::Mutex` across an await point would stall every other
+    // instrument for the duration of one instrument's wait, turning a
+    // governor into a global serialiser.
+    let now = pull::rate::monotonic_micros();
+    let at = {
+        let mut budgets = site.budgets.lock().map_err(|_| {
+            format!(
+                "the rate budget for {} cannot be read: another request \
+                 panicked while holding it, so the allowance already spent \
+                 is unknown. Nothing is issued on an unknown budget.",
+                feed.display()
+            )
+        })?;
+        let Some(Some(governor)) = budgets.get_mut(feed as usize) else {
+            return Err(format!(
+                "{} has no rate budget, which means it declares no HTTP \
+                 transport. Reaching this function is a routing error \
+                 rather than an operator one.",
+                feed.display()
+            ));
+        };
+        // ONE LOCK INSIDE ANOTHER, and both are released at the end of this
+        // block. The outer guards the LIST of feeds; the inner guards ONE
+        // feed's state. Taken in this order at every site in this file and
+        // never the other way round, which is what keeps them from
+        // deadlocking — and the inner lock is the SAME one the transport
+        // takes.
+        let mut held = governor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.reserve(now)
+    };
+    let wait = at.saturating_sub(now);
+    if wait > 0 {
+        // THE GOVERNOR SAID WHEN, so sleep exactly that, once.
+        tokio::time::sleep(std::time::Duration::from_micros(wait)).await;
+    }
+    Ok(())
 }
 
 /// The requested window, narrowed to what this feed can actually answer.

@@ -1707,12 +1707,10 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     } = plan;
     // THE ONE CONVERSION FROM RUNG TO DIRECTORY. See `Plan::timeframe`.
     let timeframe = plan.timeframe()?;
-    let raw = fetch::RawWindow {
-        rows: member.rows.clone(),
-    };
-    let mut landed =
-        fetch::land_with_cash_schedule(&raw, request, encoding, scale, plan.cash_schedule)
-            .map_err(|why| why.to_string())?;
+    // BORROWED, NOT CLONED. o1api-36, D-1203: this used to copy every row
+    // into a `RawWindow` only to pass a reference to it.
+    let mut landed = fetch::land_rows(&member.rows, request, encoding, scale, plan.cash_schedule)
+        .map_err(|why| why.to_string())?;
     // Bound once so the three returns below cannot disagree. See the field.
     let outside_session = landed.outside_session;
     if landed.bars.is_empty() {
@@ -3336,6 +3334,29 @@ mod tests {
         CensusLock, EntryKey, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked,
         lock_refusal, write_and_count,
     };
+
+    /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
+    ///
+    /// `one` copied every row of every member into a `RawWindow` only to pass
+    /// a reference to it. The copy had no output of its own to assert on, so
+    /// its absence is asserted on the source, with needles assembled at run
+    /// time so this test cannot match its own text. The landing itself is
+    /// proved equal through both entry points in
+    /// `pull::pipeline::borrowed_rows_land_exactly_as_a_window_does`.
+    #[test]
+    fn a_member_is_landed_from_its_own_rows_without_a_copy() {
+        let source = include_str!("ingest.rs");
+        let start = source
+            .find(&format!("{}{}", "fn one(member: &", "Member,"))
+            .expect("ingest::one exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("ingest::one ends")];
+        assert!(
+            !body.contains(&format!("{}{}", "member.rows", ".clone()")),
+            "ingest::one clones a member's rows again"
+        );
+        assert!(body.contains(&format!("{}{}", "land_rows(&", "member.rows,")));
+    }
 
     /// A scratch directory of this test's own, named after the line that asked
     /// for it so two tests cannot collide in a shared `TMPDIR`.
