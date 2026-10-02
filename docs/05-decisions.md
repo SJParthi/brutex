@@ -43779,3 +43779,11 @@ and limit up to 45. The reads and resident rows are not changed and are now
 stated in `docs/06-limits.md`, quoting the lines that pay them;
 `the_sorted_window_read_is_stated_in_the_limits_and_quotes_this_source` fails
 if that section is removed or a line it quotes leaves `bars.rs`.
+
+**No `keep < n` guard around the partition.** `ordered_page` partitions and
+truncates even when `page_side` keeps every row, because that is legal
+(`keep` is at least 1 and at most `n`, so `keep - 1` is an index) and changes
+no page. With the guard, `replace < with <=` in it was a mutant no test could
+kill, because both spellings return the same page;
+`selecting_the_page_then_ordering_it_equals_ordering_everything_then_slicing`
+covers `limit` 60 and 61 over 60 rows at offset 0, where `keep` equals `n`.

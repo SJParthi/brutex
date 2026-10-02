@@ -1126,10 +1126,13 @@ fn ordered_page<T>(
         PageSide::Back(keep) => (keep, true),
     };
     let cmp = |a: &T, b: &T| if back { order(b, a) } else { order(a, b) };
-    if keep < n {
-        all.select_nth_unstable_by(keep - 1, cmp);
-        all.truncate(keep);
-    }
+    /* NO `keep < n` GUARD. `page_side` keeps at least one row and at most
+    `n`, so `keep - 1` is always a legal index; with `keep == n` the partition
+    and the truncation move nothing that the sort does not then order. The
+    guard made no difference to any page, and `cargo mutants` could not tell
+    `<` from `<=` in it (D-0733). */
+    all.select_nth_unstable_by(keep - 1, cmp);
+    all.truncate(keep);
     all.sort_by(cmp);
     let end = offset.saturating_add(limit).min(n);
     if back {
