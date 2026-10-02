@@ -44070,3 +44070,39 @@ Gate 13's own success line no longer claims "built".
 
 Invariant CIG-16.
 
+### D-1113 — Gate 25 reads every manifest's profiles as TOML — 2026-10-02
+
+**What was wrong.** Finding AC-gates-law-6. Gate 25's "off" check was
+`^overflow-checks = false` at column zero of the root manifest. It missed four
+spellings, and each one let a release build wrap while the gate passed:
+- an indented key
+- a quoted key
+- a dotted `profile.release.overflow-checks` key
+- a `[profile.release.package.<name>]` override
+
+The presence checks had the same blindness. The environment
+(`CARGO_PROFILE_<NAME>_OVERFLOW_CHECKS`, or a codegen flag in `RUSTFLAGS`) was
+not read at all.
+
+**The choice.** Every tracked `Cargo.toml` is read through `source_scan toml`,
+and the gate tests parsed leaves.
+- Presence: the root manifest must hold the leaves
+  `profile.release.overflow-checks = true` and
+  `profile.release.panic = "abort"`.
+- Refusal: any leaf under `profile` that ends in `overflow-checks` with a value
+  other than `true`.
+- Environment: every tracked workflow is grepped for the environment variable
+  and for an off-valued `overflow-checks` flag. The patterns are assembled from
+  pieces so the step does not match itself.
+- A tracked `.cargo/config.toml` is already refused by gate 1g (D-1105).
+
+**Measured.**
+- On this tree, the gate passes.
+- It fails on `[profile.release.package.engine]` with an indented,
+  quoted `"overflow-checks" = false`.
+- It fails on an `overflow-checks` environment line appended to `ci.yml`.
+
+**Limits.** A `RUSTFLAGS` value assembled at run time from pieces is not seen.
+An operator's own shell environment is outside the repository. Invariant
+CIG-17.
+

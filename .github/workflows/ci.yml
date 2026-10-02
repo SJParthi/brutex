@@ -4274,16 +4274,47 @@ jobs:
           #
           # NO UNTRUSTED INPUT: the tracked root manifest and the patterns below.
           [ -f Cargo.toml ] || { echo "GATE 25: no root Cargo.toml"; exit 1; }
-          # Comments stripped first -- a comment mentioning a key is not a key,
-          # and this manifest discusses both of them at length directly above the
-          # table. Same defect gate 22 clause A records.
-          rel=$(sed 's/#.*//' Cargo.toml | sed -n '/^\[profile\.release\]/,/^\[/p')
+          # THE MANIFESTS ARE PARSED, NOT GREPPED (D-1113). The "other
+          # direction" check below matched the key set false only at column zero
+          # of the root manifest, so an indented key, a quoted key
+          # (`"overflow-checks"` set false), a dotted key
+          # (`profile.release.overflow-checks` set false before any header) and a
+          # per-package override (`[profile.release.package.engine]`) each made
+          # a release build wrap while this step printed that no profile turned
+          # the check off (AC-gates-law-6). The presence checks had
+          # the same blindness in the other direction.
+          #
+          # `source_scan toml` reads every tracked Cargo.toml as TOML and prints
+          # each leaf as `FILE:LINE:dotted.path = value`, quotes and spacing
+          # normalised. Presence is the leaf `profile.release.overflow-checks =
+          # true` and `profile.release.panic = "abort"` in the root manifest;
+          # refusal is ANY leaf, in any tracked manifest, whose path is under
+          # `profile` and ends in `overflow-checks` with a value other than
+          # `true`. A tracked `.cargo/config.toml`, the other place cargo reads
+          # a profile from, is refused outright by gate 1g (D-1105), and so is
+          # `cargo --config`. What remains is the environment: a
+          # `CARGO_PROFILE_<NAME>_OVERFLOW_CHECKS` variable or an
+          # `overflow-checks` codegen flag in RUSTFLAGS, refused below in every
+          # tracked workflow. The patterns are assembled from pieces so that
+          # this paragraph is not itself a hit.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          g25=$(mktemp -d)
+          git ls-files -z -- '*Cargo.toml' > "$g25/manifests.z"
+          [ -s "$g25/manifests.z" ] || { echo "GATE 25 READ NO MANIFEST."; exit 1; }
           bad=0
-          if [ -z "$rel" ]; then
+          : > "$g25/leaves"
+          while IFS= read -r -d '' m; do
+            case "${m##*/}" in Cargo.toml) ;; *) continue ;; esac
+            if ! "$scan" toml "$m" >> "$g25/leaves"; then
+              echo "  REFUSED  $m could not be read as TOML"
+              bad=1
+            fi
+          done < "$g25/manifests.z"
+          if ! grep -q '^Cargo\.toml:[0-9]*:profile\.release = {table}$' "$g25/leaves"; then
             echo "  REFUSED  Cargo.toml has no [profile.release] table at all"
             bad=1
           fi
-          if grep -qE '^overflow-checks[[:space:]]*=[[:space:]]*true[[:space:]]*$' <<< "$rel"; then
+          if grep -q '^Cargo\.toml:[0-9]*:profile\.release\.overflow-checks = true$' "$g25/leaves"; then
             echo "  present  [profile.release] overflow-checks = true"
           else
             echo "  REFUSED  [profile.release] no longer sets overflow-checks = true."
@@ -4292,7 +4323,7 @@ jobs:
             echo "           written believing the opposite."
             bad=1
           fi
-          if grep -qE '^panic[[:space:]]*=[[:space:]]*"abort"[[:space:]]*$' <<< "$rel"; then
+          if grep -q '^Cargo\.toml:[0-9]*:profile\.release\.panic = "abort"$' "$g25/leaves"; then
             echo '  present  [profile.release] panic = "abort"'
           else
             echo '  REFUSED  [profile.release] no longer sets panic = "abort".'
@@ -4300,16 +4331,27 @@ jobs:
             echo "           where a decision goes."
             bad=1
           fi
-          # And the other direction: a profile that turns the check back OFF.
-          # `[profile.bench]` inherits release, so gate 8 measures the shipped
-          # arithmetic -- unless something re-enables wrapping under it.
-          off=$( { sed 's/#.*//' Cargo.toml \
-                   | grep -nE '^overflow-checks[[:space:]]*=[[:space:]]*false' || true; } )
+          # And the other direction: a profile, or a package override inside
+          # one, that turns the check back OFF. `[profile.bench]` inherits
+          # release, so gate 8 measures the shipped arithmetic -- unless
+          # something re-enables wrapping under it.
+          off=$(grep -E '^[^:]+:[0-9]+:profile\.(.*\.)?overflow-checks = ' "$g25/leaves" \
+                | grep -vE ' = true$' || true)
           if [ -n "$off" ]; then
             printf '  REFUSED  a profile switches overflow checking back off:\n%s\n' "$off"
             bad=1
           else
-            echo "  present  no profile sets overflow-checks = false"
+            echo "  present  no profile in any tracked manifest sets overflow-checks off"
+          fi
+          env_key="CARGO_PRO""FILE_[A-Z0-9_]*_OVER""FLOW_CHECKS"
+          flag_key="over""flow-checks[[:space:]]*=[[:space:]]*(off|no|n|false|0)"
+          git ls-files -z -- '.github/workflows/*' > "$g25/workflows.z"
+          envs=$( { xargs -0 -r grep -nE "${env_key}|${flag_key}" < "$g25/workflows.z" || true; } )
+          if [ -n "$envs" ]; then
+            printf '  REFUSED  a workflow overrides overflow checking from the environment:\n%s\n' "$envs"
+            bad=1
+          else
+            echo "  present  no workflow overrides overflow checking from the environment"
           fi
           # The census is REPORTING, not a rule. It is here so the log carries
           # the size of what these two keys are protecting, and so a reader can
