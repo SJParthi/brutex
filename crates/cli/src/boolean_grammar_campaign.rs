@@ -348,7 +348,7 @@ struct Restored {
 /// that batch's campaign sources again before verifying its saved campaign.
 /// Invocation n re-verifies every nonempty batch completed before it (at most
 /// n - 1); an empty batch takes the `batch.programs().is_empty()` branch and
-/// never reaches `complete` (D-0910).
+/// never reaches `complete` (D-1400).
 fn restore(
     journal: &Journal,
     latest: Option<&Saved>,

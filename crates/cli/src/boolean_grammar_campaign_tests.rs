@@ -1031,7 +1031,7 @@ fn done_link_requires_exact_plan_sequence_seal_and_record_width() {
     }
 }
 
-/// D-0910: every invocation re-verifies EVERY completed nonempty batch, in
+/// D-1400: every invocation re-verifies EVERY completed nonempty batch, in
 /// chain order, before it advances one more. The work of one invocation grows
 /// with the batches already done; `docs/06-limits.md` states it.
 #[test]

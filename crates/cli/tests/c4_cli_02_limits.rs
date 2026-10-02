@@ -1,4 +1,4 @@
-//! D-0910: three resumable Boolean paths re-verify all completed work on every
+//! D-1400: three resumable Boolean paths re-verify all completed work on every
 //! step, and `docs/06-limits.md` says so in the source's own words.
 
 #![allow(
@@ -16,12 +16,12 @@ const OOS: &str = include_str!("../src/boolean_oos_v1.rs");
 const CANDIDATE: &str = include_str!("../src/boolean_candidate_v1.rs");
 
 const HEADING: &str =
-    "## Three resumable Boolean paths re-verify all completed work on every step — D-0910";
+    "## Three resumable Boolean paths re-verify all completed work on every step — D-1400";
 
 fn section() -> &'static str {
     let start = LIMITS
         .find(HEADING)
-        .unwrap_or_else(|| panic!("docs/06-limits.md has no D-0910 section"));
+        .unwrap_or_else(|| panic!("docs/06-limits.md has no D-1400 section"));
     let rest = &LIMITS[start + HEADING.len()..];
     rest.find("\n## ").map_or(rest, |end| &rest[..end])
 }
@@ -125,7 +125,7 @@ fn each_quoted_line_is_in_the_source_it_names() {
     ] {
         assert!(
             section.contains(&format!("`{quote}`")),
-            "the D-0910 section does not quote `{quote}`"
+            "the D-1400 section does not quote `{quote}`"
         );
         assert!(
             source.contains(quote),
@@ -221,7 +221,7 @@ fn the_verify_loops_the_section_describes_are_the_ones_in_the_source() {
         "`complete` runs once for every nonempty completed batch in the chain",
         "prepares that batch's campaign sources again",
         "Invocation n re-verifies every nonempty batch completed before it (at most n - 1)",
-        "an empty batch takes the `batch.programs().is_empty()` branch and never reaches `complete` (D-0910)",
+        "an empty batch takes the `batch.programs().is_empty()` branch and never reaches `complete` (D-1400)",
     ] {
         assert!(comment.contains(phrase), "{comment}");
     }
