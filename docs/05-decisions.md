@@ -43718,3 +43718,52 @@ second wait's sleep and the closing brace before it. Gate 20 declares
 coverage run on this PR is that check. The 21 `sink.rs` lines that stay
 uncovered are assertion messages, test-double methods and one guarded
 `return 0`, none of them a wait.
+
+### D-0946 — The pull does not keep every Muhurat day off disk; the calendar list does, and a 43-bar in-hours stub is now pinned — 2026-10-02
+
+**What was false (cloud audit GAP12-10).** The header of
+`CHARTER_NON_REGULAR_IST_DAYS` in `crates/indicators/src/evaluator.rs` said
+five of the six Muhurats "never reach disk" because `pull::fetch::land` drops
+every bar outside `[09:15, 15:30)` and "hardcodes a 15:30 close", so only
+2025-10-21 needed the list. The charter's DR-drill row repeated it ("unlike
+five of the six Muhurats ... nothing keeps them off disk by accident").
+
+**What the code does, read here.** `land` calls `session::Window::verdict`,
+which takes the hours from the listing's venue table through
+`Venue::hours_on` (`NSE_INDEX_SESSIONS`, `NSE_CASH_SESSIONS`,
+`NSE_DERIVATIVES_SESSIONS`), not from one constant; a bar outside them is
+counted (`outside_session`, `DropCensus`) and dropped. For the index and cash
+venues on every listed date those tables say 09:15–15:30, so an evening
+ceremony's minutes are dropped and any in-hours bar dated that day is kept.
+Whether a Muhurat day is on disk therefore depends on what the vendor sent,
+not on the pull.
+
+**What was measured, and by whom.** The audit reported that dhan's store holds
+43 bars dated 2021-11-04, 14:47–15:29 IST. That is the audit's measurement; the
+store is not available to this change and nothing here re-measured it.
+`crates/pull/src/calendar.rs`'s "no minute bar anywhere in the store" for the
+five pre-2025 Muhurats is a statement about the Zerodha store it was measured
+on and is not changed here.
+
+**The change.** The header now says what `land` does and that the list, not
+the pull, keeps such a day out of the previous-day anchor, `Prev5` and the
+previous-session edge. The 18_935 entry carries the reported on-disk shape.
+Three test comments and one assertion message that called 2025-10-21 "the one"
+listed day whose bars reach disk are corrected, and so is the charter's DR row.
+
+**The test, and what it does not show.**
+`evaluator::tests::a_muhurat_session_inside_the_pull_window_does_not_become_yesterday`
+feeds a 375-bar session, 43 bars at 14:47–15:29 on day 18_935, and a 375-bar
+session, and requires the third day's 44 `daily` positions and 16 previous-day
+Fibonacci positions on every bar, `sessions_completed` and `has_yesterday` to
+equal the same fixture without the stub. Two one-bar stubs, at 15:29 and at
+09:15, cover the window's boundaries. Each stub declared regular
+(`Calendar::all_regular`) must change those bits, so the equality cannot pass
+with the calendar ignored. **It passes on `main` before this change**: the
+defect was the documentation, and the calendar already listed 18_935. It
+guards against the list being trimmed on the strength of the old header. With `Calendar::is_non_regular` mutated by hand to answer `false` for 18_935 (the const assertion refuses removing it from the array outright), the test fails on its first case: "43 bars 14:47-15:29 on 2021-11-04 changed the next day's previous-day pivot or Fibonacci bits, the rolling-window count or yesterday".
+ No
+production line changed. Not added to `docs/11-findings.md`, which records the
+2026-08-11 sweep and its digest. `crates/indicators/src/gap.rs:918` carries a
+similar "the one the pull's window admits" comment; it is left for the worker
+editing that file.
