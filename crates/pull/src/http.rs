@@ -651,7 +651,14 @@ impl HttpSource {
     /// shape of the code and no bench in this workspace times it.
     /// `CLAUDE.md` §3 rule 6: a structural argument is not a
     /// measurement, however sound it is.
-    async fn wait_for_permit(&self) {
+    ///
+    /// # Errors
+    ///
+    /// The governor's reservation saturated: its cursor plus the wait passes
+    /// the end of the clock, so no instant exists to sleep to. Nothing is sent
+    /// and nothing is charged; the reason names the cursor. Until the fix to
+    /// D-1203 this slept toward `u64::MAX` instead, which never ends.
+    async fn wait_for_permit(&self) -> Result<(), String> {
         // THE CALLER ALREADY WITHDREW. Charging again here is two permits for
         // one request -- see `charged_by_caller` for what that measured and how
         // it surfaced as a 502.
@@ -661,24 +668,32 @@ impl HttpSource {
         // governor must learn from every path whether or not that path is the
         // one that pays.
         if self.charged_by_caller {
-            return;
+            return Ok(());
         }
         let Some(lock) = self.governor.as_ref() else {
-            return;
+            return Ok(());
         };
         let now = crate::rate::monotonic_micros();
-        let at = {
+        let (at, cursor) = {
             // POISON IS NOT A REASON TO STOP GOVERNING. A panic in another
             // chain must not turn the ceiling off for every remaining one,
             // so the guard is taken either way.
             let mut g = lock
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            g.reserve(now)
+            (g.reserve(now), g.cursor_micros())
+        };
+        let Some(at) = at else {
+            return Err(format!(
+                "the rate governor's reservation saturated: its cursor is at \
+                 {cursor} µs and the wait for the next permit passes the end \
+                 of the clock, so there is no instant to sleep to. Nothing \
+                 was sent and nothing was charged."
+            ));
         };
         let wait = at.saturating_sub(now);
         if wait == 0 {
-            return;
+            return Ok(());
         }
         // COUNTED BEFORE THE SLEEP, NOT AFTER. A run cancelled mid-wait
         // still absorbed the part it waited, and a counter that only
@@ -686,6 +701,7 @@ impl HttpSource {
         // operator is most likely to be asking about.
         crate::rate::note_absorbed(wait);
         tokio::time::sleep(core::time::Duration::from_micros(wait)).await;
+        Ok(())
     }
 
     /// This feed's endpoint with every value segment left as its placeholder —
@@ -2481,7 +2497,7 @@ impl HttpSource {
     ) -> Result<String, crate::chain::Refusal> {
         use crate::chain::Refusal;
 
-        self.wait_for_permit().await;
+        self.wait_for_permit().await.map_err(Refusal::transport)?;
         let (name, value) = self.header();
         let mut builder = self.client.post(url);
         for (header, word) in self.spec.extra_headers {
@@ -2648,7 +2664,7 @@ impl crate::chain::Discovery for HttpSource {
     async fn get(&self, url: &str) -> Result<String, crate::chain::Refusal> {
         use crate::chain::Refusal;
 
-        self.wait_for_permit().await;
+        self.wait_for_permit().await.map_err(Refusal::transport)?;
         let (name, value) = self.header();
         let mut builder = self.client.get(url);
         for (header, word) in self.spec.extra_headers {
@@ -2800,7 +2816,9 @@ impl HttpSource {
         // THE BUDGET IS SPENT BEFORE THE SOCKET IS OPENED, never after. Asking
         // permission afterwards would already have made the request the ceiling
         // exists to prevent.
-        self.wait_for_permit().await;
+        self.wait_for_permit()
+            .await
+            .map_err(|detail| FetchError::TransportFailed { detail })?;
 
         let mut answer = builder.header(name, value).send().await.map_err(|why| {
             FetchError::TransportFailed {
@@ -3716,7 +3734,10 @@ mod tests {
         };
 
         let untouched = cursor_of(&held);
-        shared.wait_for_permit().await;
+        shared
+            .wait_for_permit()
+            .await
+            .expect("a shared source waits for nothing");
         assert_eq!(
             untouched,
             cursor_of(&held),
@@ -3727,11 +3748,68 @@ mod tests {
         // `wait_for_permit` charged nobody at all, the assertion above would
         // hold for entirely the wrong reason. A source that owns its governor
         // must still move that cursor.
-        owned.wait_for_permit().await;
+        //
+        // THE CLOCK MUST HAVE MOVED FIRST. `monotonic_micros` reads 0 on its
+        // first call in the process, and a reservation at 0 against a cursor
+        // at 0 leaves the cursor where it was; run alone, this test was that
+        // first call and failed for that reason only. Read it once and let a
+        // millisecond pass so the reservation's instant is past the cursor.
+        let _origin = crate::rate::monotonic_micros();
+        tokio::time::sleep(core::time::Duration::from_millis(2)).await;
+        owned
+            .wait_for_permit()
+            .await
+            .expect("a fresh governor has a permit");
         assert!(
             cursor_of(&held) > untouched,
             "a source that owns its governor is still the one that spends it"
         );
+    }
+
+    /// **A SATURATED RESERVATION IS REFUSED BY NAME, NOT SLEPT TOWARD.** The
+    /// fix to D-1203.
+    ///
+    /// A governor whose cursor stands at `u64::MAX` with its second spent has
+    /// no instant at which the next permit exists. `reserve` used to answer
+    /// `u64::MAX` and this slept `u64::MAX - now` microseconds, which never
+    /// ends; the timeout below is what that looked like. It now refuses with
+    /// the cursor named and charges nothing — and the permit still free before
+    /// the second is spent goes at once rather than at the cursor.
+    #[tokio::test]
+    async fn a_saturated_reservation_is_refused_and_never_slept() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let pin = || {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .admit(u64::MAX)
+        };
+        assert_eq!(pin(), crate::rate::Verdict::Admit, "the pin spends one");
+        let bound = core::time::Duration::from_secs(5);
+        // A PERMIT IS FREE, SO IT GOES NOW, with the cursor far ahead.
+        let free = tokio::time::timeout(bound, owned.wait_for_permit()).await;
+        assert_eq!(free, Ok(Ok(())), "a free permit is not slept for");
+        while pin() == crate::rate::Verdict::Admit {}
+        let credit = |held: &std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .credit_micro_permits(crate::rate::WindowSpan::Second)
+        };
+        let before = credit(&held);
+        let refused = tokio::time::timeout(bound, owned.wait_for_permit())
+            .await
+            .expect("a saturated reservation must not sleep");
+        let why = refused.expect_err("a saturated reservation is refused");
+        assert!(why.contains("reservation saturated"), "{why}");
+        assert!(
+            why.contains(&u64::MAX.to_string()),
+            "names the cursor: {why}"
+        );
+        assert_eq!(credit(&held), before, "nothing was charged");
     }
 
     /// A throttle lowers the allowance; clean answers raise it again.

@@ -117,9 +117,10 @@ const ROW: &str = "20221003,09:15:01,38444.90,0,0\n";
 ///
 /// 4,096 rows and then 8,192 are decoded, and the second may make at most four
 /// more allocating calls than the first. A row that allocated would add at
-/// least 4,096. What the added rows may cost is the row vector's own growth:
-/// `decode_rows` starts from `Vec::new()`, so a longer body can take another
-/// doubling. One untimed decode runs first, so a one-time setup anywhere under
+/// least 4,096. What the added rows may cost is the row vector itself: at
+/// D-0721 `decode_rows` started from `Vec::new()`, so a longer body could take
+/// another doubling; since D-1203 it is reserved once from the body's newline
+/// count, so the slack is unused. One untimed decode runs first, so a one-time setup anywhere under
 /// `decode` is not charged to the smaller body.
 #[test]
 fn twice_the_rows_cost_no_allocation_per_row() {

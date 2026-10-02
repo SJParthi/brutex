@@ -887,11 +887,22 @@ impl Governor {
     ///
     /// # The returned instant
     ///
-    /// `max(now_micros, cursor) + w`, where `w` is the wait [`Self::admit`]
-    /// would have named at that cursor — zero when a permit is affordable. The
-    /// caller sleeps until it and then issues, without calling again. Because
+    /// **`now_micros` itself when no window has a shortfall** — the permit is
+    /// affordable, so the caller goes now, wherever the cursor stands. With a
+    /// shortfall it is `max(now_micros, cursor) + w`, where `w` is the wait
+    /// [`Self::admit`] would have named at that cursor. The caller sleeps
+    /// `instant - now_micros` and then issues, without calling again. Because
     /// the cursor is forward-only, a caller holding a reading BELOW the cursor
-    /// (one queued behind earlier reservations) is scheduled after them.
+    /// that finds the bucket empty (one queued behind earlier reservations) is
+    /// scheduled after them.
+    ///
+    /// Until the fix to D-1203 the no-shortfall case answered `cursor + 0`
+    /// too, so a cursor AHEAD of the clock — a governor pinned with
+    /// `admit(u64::MAX)`, or any reading behind the highest one seen — made a
+    /// caller sleep the whole gap with a permit already free. Pinned at
+    /// `u64::MAX` that sleep never ended: lane 1 found
+    /// `api::fno_boundary_tests::rolling_requests_spend_one_shared_permit_per_network_attempt`
+    /// hung on exactly that.
     ///
     /// A clock reading must therefore be MONOTONIC: a wall clock stepped back
     /// an hour would leave an hour between `now_micros` and the cursor, and a
@@ -909,9 +920,12 @@ impl Governor {
     ///
     /// # The far end of the clock
     ///
-    /// If `cursor + w` would pass `u64::MAX`, no permit is charged and
-    /// `u64::MAX` is returned: an instant no caller reaches. Charging there
-    /// would subtract a cost the bucket had not earned.
+    /// If `cursor + w` would pass `u64::MAX`, no permit is charged and `None`
+    /// is returned. Charging there would subtract a cost the bucket had not
+    /// earned, and answering `u64::MAX` — as this did until the fix to D-1203 —
+    /// handed the caller an instant it would sleep toward forever. `None` is a
+    /// refusal each caller must name: both callers in this workspace refuse
+    /// the request with the saturated cursor in the reason (`CLAUDE.md` §4).
     ///
     /// # Cost
     ///
@@ -923,7 +937,7 @@ impl Governor {
     /// `CLAUDE.md` §3 rule 6: a structural argument is not a
     /// measurement, however sound it is.
     #[must_use]
-    pub fn reserve(&mut self, now_micros: u64) -> u64 {
+    pub fn reserve(&mut self, now_micros: u64) -> Option<u64> {
         self.advance_to(now_micros);
         let mut wait = 0_u64;
         for window in self.windows.iter().flatten() {
@@ -931,14 +945,19 @@ impl Governor {
                 wait = wait.max(short);
             }
         }
-        let Some(at) = self.cursor_micros.checked_add(wait) else {
-            return u64::MAX;
+        // NO SHORTFALL: GO NOW, wherever the cursor stands. The permit is
+        // already earned, so the caller has nothing to wait for.
+        let at = if wait == 0 {
+            now_micros
+        } else {
+            let at = self.cursor_micros.checked_add(wait)?;
+            self.advance_to(at);
+            at
         };
-        self.advance_to(at);
         for window in self.windows.iter_mut().flatten() {
             window.charge();
         }
-        at
+        Some(at)
     }
 
     /// Moves the cursor forward and earns the elapsed micro-permits.
