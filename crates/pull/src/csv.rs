@@ -71,6 +71,15 @@
 use crate::fetch::{FetchError, MAX_ROWS, RawRow};
 use crate::vendor::DateFormat;
 
+/// GDFL's observed header row, character for character —
+/// `docs/08-vendor-samples.md`, the `GFDLNFO_TICK_01072025` sample.
+///
+/// The one copy. `crate::vendor`'s GDFL descriptor names this constant rather
+/// than spelling the row a second time, so the descriptor's `HeaderRow` and
+/// the decoder's check cannot drift apart.
+pub const GDFL_HEADER: &str =
+    "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
+
 /// Which columns a vendor's CSV carries, in order.
 ///
 /// One variant per shape actually observed in the operator's archives. A shape
@@ -117,7 +126,23 @@ impl Columns {
     /// Whether the file opens with a header row naming the columns.
     #[must_use]
     pub const fn has_header(self) -> bool {
-        matches!(self, Self::Gdfl)
+        self.header().is_some()
+    }
+
+    /// The header row this shape opens with, character for character, or
+    /// `None` for a shape whose first line is already data.
+    ///
+    /// The decoder compares line one against this and refuses the file when
+    /// they differ. It used to skip line one unread, so a GDFL member that
+    /// arrived without its header silently lost its first trade, and a header
+    /// naming the same ten columns in another order would have been decoded
+    /// against the wrong offsets. D-1360.
+    #[must_use]
+    pub const fn header(self) -> Option<&'static str> {
+        match self {
+            Self::Gdfl => Some(GDFL_HEADER),
+            Self::TrueDataIndex | Self::TrueDataFutures | Self::TrueDataFno => None,
+        }
     }
 
     /// The date format this shape carries.
@@ -228,6 +253,18 @@ pub enum CsvError {
         /// What was there, as the file spells it.
         got: String,
     },
+    /// Line one is not the header row the declared shape opens with.
+    ///
+    /// Refused rather than skipped: a file without its header would lose its
+    /// first data row as if it were one, and a header naming the declared
+    /// columns in another order would be decoded against the wrong offsets —
+    /// plausible numbers in the wrong fields. D-1360.
+    HeaderMismatch {
+        /// Line one as the file spells it, trimmed.
+        got: String,
+        /// The header the declared shape carries.
+        want: &'static str,
+    },
     /// More rows than [`MAX_ROWS`].
     TooManyRows {
         /// How many were found before stopping.
@@ -263,6 +300,13 @@ impl core::fmt::Display for CsvError {
                  `CLAUDE.md` §7 spends i64::MIN on an ABSENT open interest, so \
                  a vendor that sends it could not be told apart from one that \
                  sent no open interest at all"
+            ),
+            Self::HeaderMismatch { ref got, want } => write!(
+                f,
+                "line 1: header {got:?} is not the declared header {want:?}. \
+                 A file without its header would lose its first row, and one \
+                 naming the columns in another order would be read against \
+                 the wrong offsets, so the file is refused"
             ),
             Self::TooManyRows { rows, cap } => {
                 write!(f, "the file holds at least {rows} rows; the cap is {cap}")
@@ -615,6 +659,17 @@ fn fields_of(line: &str, want: usize) -> Result<[&str; MAX_FIELDS], usize> {
     }
 }
 
+/// Line one against the header the shape declares, already trimmed. D-1360.
+fn check_header(columns: Columns, line: &str) -> Result<(), CsvError> {
+    match columns.header() {
+        Some(want) if line != want => Err(CsvError::HeaderMismatch {
+            got: line.to_owned(),
+            want,
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// [`decode`]'s pass over the body, split out for one reason: the two `note_*`
 /// helpers must report what it counted whether it finished or refused, and a
 /// `?` inside it cannot do that on the way past.
@@ -634,11 +689,15 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         // turns the last field into a number that will not parse. Observed in
         // vendor files, so trimmed rather than assumed absent.
         let line = raw_line.trim_end_matches('\r').trim();
-        if line.is_empty() {
+        // THE HEADER IS READ, NOT MERELY SKIPPED, and it is checked before the
+        // blank-line skip so that a blank line one is not mistaken for a file
+        // whose header simply moved down a line. D-1360.
+        if i == 0 && columns.has_header() {
+            check_header(columns, line)?;
             tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
-        if i == 0 && columns.has_header() {
+        if line.is_empty() {
             tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
@@ -1545,5 +1604,72 @@ mod tests {
             next = after(columns);
         }
         assert_eq!(widest, MAX_FIELDS, "the widest layout fills it");
+    }
+
+    /// THE HEADER ROW IS READ, NOT MERELY SKIPPED.
+    ///
+    /// `Columns::Gdfl` declares a header, and the decoder used to drop line one
+    /// without looking at it. A GDFL member that arrived WITHOUT its header
+    /// therefore lost its first trade in silence — `Ok` with one row short —
+    /// and a member whose header named the same ten columns in another order
+    /// would have read `OpenInterest` as `LTQ` with nothing objecting. D-1360.
+    #[test]
+    fn a_gdfl_header_that_is_not_the_declared_one_refuses_the_file() {
+        let dmy = rendered(2025, 7, 1, DateFormat::SlashedDmy);
+        let first = format!("FINNIFTY-III.NFO,{dmy},09:16:16,27674,0,0,0,0,65,65");
+        let second = format!("FINNIFTY-III.NFO,{dmy},09:16:17,27675,0,0,0,0,10,65");
+
+        // The declared header, as observed: both rows land.
+        let good = format!("{GDFL_HEADER}\n{first}\n{second}\n");
+        assert_eq!(decode(&good, Columns::Gdfl).unwrap().len(), 2);
+        // CRLF and surrounding blanks on the header line are tolerated exactly
+        // as they are on a data line.
+        let crlf = format!("{GDFL_HEADER}\r\n{first}\r\n{second}\r\n");
+        assert_eq!(decode(&crlf, Columns::Gdfl).unwrap().len(), 2);
+
+        // No header at all: the first DATA row used to be dropped as one.
+        let headless = format!("{first}\n{second}\n");
+        assert_eq!(
+            decode(&headless, Columns::Gdfl),
+            Err(CsvError::HeaderMismatch {
+                got: first.clone(),
+                want: GDFL_HEADER,
+            }),
+            "a missing header is a refusal, never a silently lost first row"
+        );
+
+        // The same ten names with LTQ and OpenInterest swapped.
+        let swapped = GDFL_HEADER.replace("LTQ,OpenInterest", "OpenInterest,LTQ");
+        let body = format!("{swapped}\n{first}\n");
+        assert!(
+            matches!(
+                decode(&body, Columns::Gdfl),
+                Err(CsvError::HeaderMismatch { ref got, .. }) if *got == swapped
+            ),
+            "a header naming the declared columns in another order is refused"
+        );
+
+        // A blank first line is not the header either.
+        let blank_first = format!("\n{GDFL_HEADER}\n{first}\n");
+        assert!(matches!(
+            decode(&blank_first, Columns::Gdfl),
+            Err(CsvError::HeaderMismatch { ref got, .. }) if got.is_empty()
+        ));
+
+        // An empty body has no header to check and no rows: unchanged.
+        assert_eq!(decode("", Columns::Gdfl), Ok(Vec::new()));
+
+        // Headerless layouts are untouched: their line one is data.
+        assert_eq!(Columns::TrueDataIndex.header(), None);
+        assert_eq!(Columns::TrueDataFno.header(), None);
+        assert_eq!(Columns::TrueDataFutures.header(), None);
+        assert_eq!(Columns::Gdfl.header(), Some(GDFL_HEADER));
+        let refusal = CsvError::HeaderMismatch {
+            got: "x".to_owned(),
+            want: GDFL_HEADER,
+        }
+        .to_string();
+        assert!(refusal.starts_with("line 1: header"), "{refusal}");
+        assert!(refusal.contains(GDFL_HEADER), "{refusal}");
     }
 }

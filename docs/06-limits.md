@@ -10986,3 +10986,14 @@ not measured or bounded here. The `work` counter and every node budget count
 nodes, not this walk. Nothing here is timed; the shape is read off the source, and
 `the_per_node_prefix_scan_the_limit_names_is_the_code` fails if any quoted line
 leaves `expression_search.rs` or this section.
+
+## One archive member's text is capped before it is read — D-1362, 2 October 2026
+
+- **One member's text is now capped at `archive::MAX_MEMBER_BYTES`
+  (256 MiB).** It used to be read whole by `fs::read` before the decoder's row
+  cap could act, and a file of blank lines is never refused by a row cap at
+  all. The cap is an engineering bound, not a vendor fact: `fetch::MAX_ROWS`
+  rows at 268 bytes each, against an observed GDFL row under 80 bytes. Proven
+  by `archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read`.
+  The walk's total resident rows are the bound D-0720 already states.
+  D-1362.

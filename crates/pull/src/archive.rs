@@ -30,8 +30,9 @@
 //! catching itself in.
 //!
 //! What is bounded: [`MAX_MEMBERS`] caps the `.csv` members a walk decodes or
-//! rejects, the ones a census rejects counted with the ones it decodes, and one
-//! file is open at a time.
+//! rejects, the ones a census rejects counted with the ones it decodes,
+//! [`MAX_MEMBER_BYTES`] caps one member's text before it is read (D-1362), and
+//! one file is open at a time.
 //!
 //! **MEMORY IS NOT BOUNDED TO ONE FILE, AND THIS PARAGRAPH USED TO SAY IT
 //! WAS.** It said each file's rows were decoded and passed along, never
@@ -123,6 +124,15 @@ pub const MAX_MEMBERS: usize = 50_000;
 /// D-0725.
 pub const MAX_FINDING_BYTES: usize = 1024;
 
+/// The most bytes one member may hold before it is refused unread.
+///
+/// An engineering bound, not a vendor fact: 256 MiB is [`crate::fetch::MAX_ROWS`]
+/// rows at 268 bytes each, and the longest observed row is GDFL's ten-field
+/// line in `docs/08-vendor-samples.md`, under 80 bytes. A member larger than
+/// this cannot be a file the decoder would accept without also being mostly
+/// blank lines, and reading it whole first is the size bomb. D-1362.
+pub const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Why a directory did not yield rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -161,6 +171,16 @@ pub enum ArchiveError {
         path: PathBuf,
         /// The decoder's own refusal, which names the line.
         why: CsvError,
+    },
+    /// A member larger than [`MAX_MEMBER_BYTES`], refused before it is read.
+    MemberTooLarge {
+        /// Which one.
+        path: PathBuf,
+        /// Its size in bytes, or the bytes read when it grew past the bound
+        /// after its size was checked.
+        bytes: u64,
+        /// The bound.
+        cap: u64,
     },
     /// More members than [`MAX_MEMBERS`].
     TooManyMembers {
@@ -204,6 +224,16 @@ impl core::fmt::Display for ArchiveError {
             Self::MemberMalformed { ref path, ref why } => {
                 write!(f, "{}: {why}", path.display())
             }
+            Self::MemberTooLarge {
+                ref path,
+                bytes,
+                cap,
+            } => write!(
+                f,
+                "{} holds {bytes} bytes; the cap is {cap} — refused before it \
+                 was read",
+                path.display()
+            ),
             Self::TooManyMembers { members, cap } => write!(
                 f,
                 "the directory holds at least {members} members; the cap is {cap}"
@@ -755,10 +785,7 @@ fn descend(
             });
         }
 
-        let bytes = fs::read(&path).map_err(|e| ArchiveError::MemberUnreadable {
-            path: path.clone(),
-            detail: e.to_string(),
-        })?;
+        let bytes = read_bounded(&path)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ArchiveError::MemberNotText { path: path.clone() })?;
         // THE ONE REFUSAL THE CENSUS TURNS INTO A FINDING. `Refuse` is
@@ -794,6 +821,44 @@ fn descend(
     // so ordering here ordered the whole walk's accumulator once per directory.
     // It happens exactly once now, in `walk`, after this recursion unwinds.
     Ok(())
+}
+
+/// One member's bytes, refused past [`MAX_MEMBER_BYTES`] before they are read.
+///
+/// This was `fs::read`, which reads whatever the file holds. [`csv::decode`]
+/// caps ROWS, but it runs after the whole file is in memory, and blank lines
+/// are not rows, so a file of any size could be read in full before anything
+/// refused it. The length is checked from the open handle's metadata first,
+/// and the read is then capped one byte past the bound, so a file that grows
+/// between the check and the read is caught too. D-1362.
+fn read_bounded(path: &Path) -> Result<Vec<u8>, ArchiveError> {
+    use std::io::Read as _;
+    let unreadable = |e: std::io::Error| ArchiveError::MemberUnreadable {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    };
+    let too_large = |bytes: u64| ArchiveError::MemberTooLarge {
+        path: path.to_path_buf(),
+        bytes,
+        cap: MAX_MEMBER_BYTES,
+    };
+    let file = fs::File::open(path).map_err(unreadable)?;
+    let declared = file.metadata().map_err(unreadable)?.len();
+    if declared > MAX_MEMBER_BYTES {
+        return Err(too_large(declared));
+    }
+    // A capacity hint only: `declared` is at most `MAX_MEMBER_BYTES`, which
+    // fits a `usize` on every target this builds for, and a hint of zero
+    // would only cost reallocations, never a wrong answer.
+    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let read = file
+        .take(MAX_MEMBER_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if read as u64 > MAX_MEMBER_BYTES {
+        return Err(too_large(read as u64));
+    }
+    Ok(bytes)
 }
 
 /// Order a walk's members by path — the ONE place it happens, and the one
@@ -860,7 +925,8 @@ pub fn total_rows(members: &[Member]) -> usize {
 )]
 mod tests {
     use super::{
-        ArchiveError, MAX_FINDING_BYTES, MAX_MEMBERS, SORTS, finding, read_dir, read_dir_reporting,
+        ArchiveError, MAX_FINDING_BYTES, MAX_MEMBER_BYTES, MAX_MEMBERS, SORTS, finding, read_dir,
+        read_dir_reporting,
     };
     use crate::csv::{Columns, CsvError};
     use std::fs;
@@ -1216,7 +1282,11 @@ mod tests {
                 CsvError::PriceMalformed { .. } => {
                     Some(CsvError::OpenInterestSentinel { line, got })
                 }
-                CsvError::OpenInterestSentinel { .. } => Some(CsvError::TooManyRows {
+                CsvError::OpenInterestSentinel { .. } => Some(CsvError::HeaderMismatch {
+                    got,
+                    want: crate::csv::GDFL_HEADER,
+                }),
+                CsvError::HeaderMismatch { .. } => Some(CsvError::TooManyRows {
                     rows: usize::MAX,
                     cap: usize::MAX,
                 }),
@@ -1294,6 +1364,55 @@ mod tests {
             ),
             "the census must stop AT the bound, counting the members it \
              rejected; (kept, rejected) = {seen:?}"
+        );
+    }
+
+    /// A MEMBER PAST THE BYTE CAP IS REFUSED BEFORE IT IS READ.
+    ///
+    /// The walk used `fs::read`, so a member of any size was read whole before
+    /// the decoder's row cap could refuse it — and a file of blank lines is
+    /// never refused by a row cap at all. The file here is sparse, so the test
+    /// costs no disk; before the fix it cost a 256 MiB allocation and came back
+    /// as a field-count refusal instead. D-1362.
+    #[test]
+    fn a_member_past_the_byte_cap_is_refused_before_it_is_read() {
+        let scratch = Scratch::new();
+        let root = scratch.root.join("feed");
+        fs::create_dir_all(&root).expect("a feed folder");
+        fs::write(root.join("ALPHA.csv"), ONE_ROW).expect("a member");
+        let big = root.join("BIG.csv");
+        fs::File::create(&big)
+            .expect("a member")
+            .set_len(MAX_MEMBER_BYTES + 1)
+            .expect("a sparse length");
+
+        let why = read_dir(&root, Columns::TrueDataIndex).expect_err("past the cap");
+        assert_eq!(
+            why,
+            ArchiveError::MemberTooLarge {
+                path: big.clone(),
+                bytes: MAX_MEMBER_BYTES + 1,
+                cap: MAX_MEMBER_BYTES,
+            }
+        );
+        let text = why.to_string();
+        assert!(text.contains("BIG.csv"), "{text}");
+        assert!(text.contains("refused before it was read"), "{text}");
+
+        // The census path refuses it too: a size bomb is a fault, not a member
+        // of another product.
+        assert!(matches!(
+            super::read_dir_reporting(&root, Columns::TrueDataIndex),
+            Err(ArchiveError::MemberTooLarge { .. })
+        ));
+
+        // Without it the folder reads, so the refusal was the size alone.
+        fs::remove_file(&big).expect("remove the bomb");
+        assert_eq!(
+            read_dir(&root, Columns::TrueDataIndex)
+                .expect("reads")
+                .len(),
+            1
         );
     }
 }

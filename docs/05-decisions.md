@@ -47427,3 +47427,41 @@ D-1340, the third part of the same lane-4 commit, duplicates D-0750 and D-0982
 (cursor equality is its encoding), already on this branch, and was not taken.
 The module table keeps the `the 370 positions, their names` shape that
 `the_present_tense_position_counts_in_this_crates_prose_match_the_table` reads.
+
+### D-1360 — Read the GDFL header row instead of skipping it — 2026-10-02
+
+**What happened.** `csv::decode_rows` skipped line one of every
+`Columns::Gdfl` body without looking at it. A GDFL member that arrived without
+its header lost its first data row with `Ok` and one row short. A header that
+named the same ten columns in another order would have been decoded against
+the wrong offsets. Shown on `origin/main`: a headerless two-row body decoded to
+`Ok(1)`.
+
+**The change.** `Columns::header()` returns the header a shape opens with
+(`Some` for GDFL, `None` for the three TrueData shapes). Line one is compared
+with it after the CRLF and whitespace trim every line already gets, and
+anything else is refused whole as `CsvError::HeaderMismatch`. The text is
+`csv::GDFL_HEADER`, the row recorded in `docs/08-vendor-samples.md`.
+`vendor.rs`'s descriptor now names that constant instead of a second copy of
+the string. A blank line one is refused as a mismatch rather than skipped.
+An empty body is unchanged. Proven by
+`csv::tests::a_gdfl_header_that_is_not_the_declared_one_refuses_the_file`.
+
+### D-1362 — Cap one archive member's size before reading it — 2026-10-02
+
+**What happened.** `archive::descend` read each member with `fs::read`, with
+no size bound. `csv::decode`'s `MAX_ROWS` acts only after the whole file is in
+memory, and blank lines are not rows. Shown on `origin/main`: a sparse member of
+256 MiB + 1 byte was read whole and then refused as a field-count error.
+
+**The change.** `archive::MAX_MEMBER_BYTES` = 256 MiB. This is an engineering
+bound (`MAX_ROWS` rows at 268 bytes each), not a vendor fact. `read_bounded`
+checks the open handle's length first and reads through `take(cap + 1)`, so a
+file that grows after the check is also refused. The new refusal is
+`ArchiveError::MemberTooLarge`. The census path refuses it as well, because a
+size bomb is a fault and not another product. Proven by
+`archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read`.
+`docs/06-limits.md` records it. The same lane-4 commit carried D-1361
+(hyphenated underlyings) and D-1363 (the walk's peak memory); D-0722 and
+D-0720, already on this branch, hold both, so neither was taken.
+

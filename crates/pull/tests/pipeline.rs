@@ -148,7 +148,12 @@ fn every_archive_refusal_prints_a_sentence_of_its_own() {
             members: 7,
             cap: MAX_MEMBERS,
         },
-        ArchiveError::PathEscapes { path },
+        ArchiveError::PathEscapes { path: path.clone() },
+        ArchiveError::MemberTooLarge {
+            path,
+            bytes: 9,
+            cap: 8,
+        },
     ];
 
     let mut sentences = HashSet::with_capacity(cases.len());
@@ -462,6 +467,10 @@ fn every_csv_refusal_prints_a_sentence_of_its_own() {
         CsvError::TooManyRows {
             rows: MAX_ROWS,
             cap: MAX_ROWS,
+        },
+        CsvError::HeaderMismatch {
+            got: "NOT A HEADER".to_owned(),
+            want: pull::csv::GDFL_HEADER,
         },
     ];
 

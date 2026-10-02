@@ -5718,3 +5718,10 @@ the guard. The existing emits test pins the warning's message and level.
 |---|---|---|
 | One prefix check of a checkpoint's whole selected prefix accepts exactly what a check at every index accepts, so `Cursor::decode` is bounded by `CURSOR_BYTES`, not `at²`. D-1341 | `expression_search::invariant_tests::one_check_of_the_whole_prefix_equals_a_check_at_every_index` | ✓ |
 | The vocab crate doc names every public module and the table's size, and quotes the nine-term run identity exactly as `CLAUDE.md` §3 rule 3 does. D-1342 | `tests::the_crate_doc_names_every_module_the_table_size_and_the_identity` in `crates/vocab/src/lib.rs` | ✓ |
+
+## Pull file boundaries: header and member size — D-1360, D-1362
+
+| ID | Invariant | Proof | ✓ |
+|---|---|---|---|
+| PD-01 | **A shape that declares a header has its line one compared with that header, never skipped unread.** A GDFL body without its header, with a reordered header, or with a blank line one is refused whole as `CsvError::HeaderMismatch`. The declared header (CRLF and surrounding whitespace trimmed) decodes every data row. D-1360 | `pull::csv::tests::a_gdfl_header_that_is_not_the_declared_one_refuses_the_file` | ✓ |
+| PD-02 | **No archive member larger than `MAX_MEMBER_BYTES` is read.** It is refused as `MemberTooLarge` from its length, before its bytes are read, on the ingest and the census walk alike. D-1362 | `pull::archive::tests::a_member_past_the_byte_cap_is_refused_before_it_is_read` | ✓ |
