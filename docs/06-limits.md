@@ -9907,3 +9907,23 @@ The text above is kept as it was written.
 - **Only the old tail block is checked.** A rotted record in an earlier, full
   block is not read by an append and stays where a reader refuses it; the
   append neither verifies nor re-seals that block.
+
+## Four commands load a span for one number, then load it again (audit o1cli-5)
+
+- **Four entry points load a whole stored span to read one number off it,
+  and the work they hand off loads the same span again.**
+  `elite_descend_in_points_inner` loads the span for `reference_price`, drops
+  it, and calls `elite_descend_with_attempt`, which loads it again.
+  `reference_of_span`, which `screen_arm` calls before `screen_range`, does
+  the same for the `screen` command. `screen_range_in_points` loads the span
+  for `reference_price` and the derived rules, then calls `screen_range`,
+  whose kernel loads it again. `descent_bar_count` loads the span for its bar
+  count and the derived floors before the descent's own steps load it. Each
+  is one extra full span load per command, O(span bars), paid once per
+  command and not per step. Reading the count from file headers instead is
+  not a fix: the record count in a month's header is not the swept bar
+  count, which excludes withheld days, and the reference price and floors
+  need the bars themselves. Sharing one load with the handed-off work is
+  possible and is not done here. Stated from the code's shape; not timed.
+  Held to the code by `the_span_loaded_for_one_number_is_stated_and_still_paid`
+  in `crates/cli/tests/limits_o1cli_5.rs`.
