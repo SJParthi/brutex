@@ -5482,7 +5482,7 @@ the guard. The existing emits test pins the warning's message and level.
 
 | Invariant | Test that proves it | Status |
 |---|---|---|
-| AU-O1CLI-5 — **`docs/06-limits.md` states that `elite_descend_in_points_inner`, `reference_of_span` (via `screen_arm`), `screen_range_in_points` and `descent_bar_count` each load a whole span for one number before the work they hand off loads it again, one extra O(span bars) load per command, and why the header record count cannot replace it; and the code still does exactly that.** The test reads the section and each function body, including the chain `screen_range` → `screen_range_inner` → `screen_range_kernel` to its own load. Sharing a load fails it and withdraws the limit | `the_span_loaded_for_one_number_is_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_5.rs` | ✓ |
+| AU-O1CLI-5 — **`docs/06-limits.md` states that `elite_descend_in_points_inner`, `reference_of_span` (via `screen_arm`), `screen_range_in_points` and `descent_bar_count` each load a whole span for one number before the work they hand off loads it again, one extra O(span bars) load per command, and why the header record count cannot replace it; and the code still does exactly that.** The test reads the section and each function body, including the chain `screen_range` → `screen_range_inner` → `screen_range_kernel_cached` → `load_screen_inputs` to its own load (the cache is o1cli-1's, D-0997). Sharing a load fails it and withdraws the limit | `the_span_loaded_for_one_number_is_stated_and_still_paid` in `crates/cli/tests/limits_o1cli_5.rs` | ✓ |
 
 ### The audit kernel's second context read is stated — audit 2026-10-02 o1cli-4
 

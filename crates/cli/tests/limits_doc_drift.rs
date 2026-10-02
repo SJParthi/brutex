@@ -111,15 +111,22 @@ fn section_126_names_the_forward_cursor_that_cuts_fold_prefixes_not_a_binary_sea
 #[test]
 fn section_113_prices_a_trade_walk_by_the_column_rows_it_visits() {
     let walk = function(TRADE, "fn walk_core(");
-    let row_loop =
-        "for (index, (bits, &signal)) in column.bits().iter().zip(column.sources()).enumerate() {";
+    // Since D-1186 the walk starts at `first_row`, the first row that can
+    // fire, and visits every row from there; `index` stays the column row.
+    let row_loop = "for (offset, (bits, &signal)) in rows.enumerate() {";
     let at = walk
         .find(row_loop)
-        .expect("walk_core no longer loops over every column row; re-measure §113");
+        .expect("walk_core no longer loops over the column rows; re-measure §113");
+    assert!(
+        flat(&walk[..at]).contains(".get(first_row..)"),
+        "the walk no longer starts at its first live row; re-measure §113",
+    );
     let after = flat(&walk[at + row_loop.len()..]);
     assert!(
-        after.starts_with("if !fires(bits, index) { continue; }"),
-        "the row loop no longer asks `fires` of every row first",
+        after.starts_with(
+            "let index = first_row.saturating_add(offset); if !fires(bits, index) { continue; }"
+        ),
+        "the row loop no longer asks `fires` of every row it visits first",
     );
 
     let text = flat(section(113));

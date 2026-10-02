@@ -6605,8 +6605,9 @@ the forward vector and the session table remain linear in B and cannot be O(1)
 total while retaining one answer per input bar.
 
 The larger operations keep their real bounds. A trade walk is linear in the
-rows of the column it walks: `walk_core` visits every row and asks `fires` of each, so a row that never fires
-still costs one test, and the signal count bounds only the work after a row
+rows of the column it walks: `walk_core` visits every row from the first one
+that can fire (D-1186; rows before it are all-zero and cannot) and asks `fires`
+of each, so a row that never fires still costs one test, and the signal count bounds only the work after a row
 fires. (This sentence used to say the walk was linear in the signals it decides,
 which understated it; D-1204 corrects it.) Excursion/crossing construction reads the relevant
 paths. An exit grid evaluates its bounded configured cells over ordered

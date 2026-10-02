@@ -89,9 +89,13 @@ fn the_span_loaded_for_one_number_is_stated_and_still_paid() {
     assert!(count.contains("stored::load_span(") && count.contains("loaded.bars.len()"));
     assert!(body("\nfn elite_descend_with_attempt(").contains("descent_bar_count("));
     assert!(body("\npub fn screen_range(").contains("screen_range_inner("));
-    assert!(body("\nfn screen_range_inner(").contains("screen_range_kernel("));
+    // Since o1cli-1 (D-0997) the screen reaches its load through a per-command
+    // cache: `screen_range_kernel_cached` loads once per key through
+    // `load_screen_inputs`, so a lone screen still loads its own span.
+    assert!(body("\nfn screen_range_inner(").contains("screen_range_kernel_cached("));
+    assert!(body("\nfn screen_range_kernel_cached(").contains("load_screen_inputs("));
     assert!(
-        body("\nfn screen_range_kernel(").contains("stored::load_span("),
+        body("\nfn load_screen_inputs(").contains("stored::load_span("),
         "the screen no longer loads its own span: update the limit"
     );
 }
