@@ -733,6 +733,13 @@ impl Column {
     }
 
     /// Both callers supply fixed vocabulary families: 11 or 31 positions.
+    ///
+    /// The family is folded into one mask once per call, and each row is then
+    /// merged with whole six-word mask operations by [`overlay_exact`]: O(1)
+    /// per row, independent of how many positions the family names. It used
+    /// to walk the family's positions one bit at a time on every row.
+    /// Proved by
+    /// `indicators::column::the_exact_minute_merge_is_whole_mask_and_agrees_with_the_per_bit_walk`.
     fn replace_exact_positions(
         &mut self,
         exact: &[(ConditionMask, ConditionMask)],
@@ -741,28 +748,18 @@ impl Column {
         if exact.len() != self.bits.len() {
             return false;
         }
+        let family = (*positions)
+            .clone()
+            .fold(ConditionMask::ZERO, |family, position| {
+                family.with_bit(u32::from(position))
+            });
         for ((mask, known), evidence) in self
             .bits
             .iter_mut()
             .zip(self.known.iter_mut())
             .zip(exact.iter())
         {
-            let mut without_local = *mask;
-            let mut only_exact = ConditionMask::ZERO;
-            let mut only_known = ConditionMask::ZERO;
-            for position in (*positions).clone() {
-                let position = u32::from(position);
-                without_local = without_local.without_bit(position);
-                *known = known.without_bit(position);
-                if evidence.0.get(position) {
-                    only_exact = only_exact.with_bit(position);
-                }
-                if evidence.1.get(position) {
-                    only_known = only_known.with_bit(position);
-                }
-            }
-            *mask = without_local.union(&only_exact);
-            *known = known.union(&only_known).union(&only_exact);
+            (*mask, *known) = overlay_exact(*mask, *known, *evidence, family);
         }
         true
     }
@@ -1092,6 +1089,33 @@ impl Column {
     pub fn is_empty(&self) -> bool {
         self.bits.is_empty()
     }
+}
+
+/// One row's exact-minute merge over `family`, in whole-mask operations.
+///
+/// Outside `family` the row's truth and availability are kept unchanged.
+/// Inside it, the local bits are cleared and replaced by the evidence:
+/// truth is the evidence's truth, and availability is the evidence's
+/// availability plus its truth, since a bit that is true is known. Evidence
+/// outside `family` is ignored.
+fn overlay_exact(
+    mask: ConditionMask,
+    known: ConditionMask,
+    evidence: (ConditionMask, ConditionMask),
+    family: ConditionMask,
+) -> (ConditionMask, ConditionMask) {
+    let outside = |m: ConditionMask| {
+        let (words, family) = (m.words(), family.words());
+        ConditionMask::from_words(std::array::from_fn(|w| {
+            words.get(w).copied().unwrap_or(0) & !family.get(w).copied().unwrap_or(0)
+        }))
+    };
+    let exact_truth = evidence.0.intersect(&family);
+    let exact_known = evidence.1.intersect(&family);
+    (
+        outside(mask).union(&exact_truth),
+        outside(known).union(&exact_known).union(&exact_truth),
+    )
 }
 
 #[cfg(test)]
@@ -1428,6 +1452,94 @@ pub(super) mod tests {
             still_firing > 0,
             "no row after the boundary carries a bit, so the test window is dead too and \
              `clear_before` cannot be distinguished from zeroing the whole column"
+        );
+    }
+
+    /// THE ROW MERGE IS WHOLE-MASK AND AGREES WITH THE PER-BIT WALK IT
+    /// REPLACED. Audit o1engine-40.
+    ///
+    /// `replace_exact_positions` walked the family's 11 or 31 positions one
+    /// bit at a time on every row. `overlay_exact` must give, for every row,
+    /// what that walk gave: checked against an independent per-bit reference
+    /// over all 384 positions for both real families and the empty and
+    /// all-ones families, on zero, all-ones, alternating-word and
+    /// single-bit rows and evidence, including evidence outside the family
+    /// (ignored) and truth without availability (known anyway). The method's
+    /// per-row loop must name no per-position loop.
+    #[test]
+    fn the_exact_minute_merge_is_whole_mask_and_agrees_with_the_per_bit_walk() {
+        fn reference(
+            mut mask: ConditionMask,
+            mut known: ConditionMask,
+            evidence: (ConditionMask, ConditionMask),
+            family: &[u16],
+        ) -> (ConditionMask, ConditionMask) {
+            let (mut only_exact, mut only_known) = (ConditionMask::ZERO, ConditionMask::ZERO);
+            for &position in family {
+                let position = u32::from(position);
+                mask = mask.without_bit(position);
+                known = known.without_bit(position);
+                if evidence.0.get(position) {
+                    only_exact = only_exact.with_bit(position);
+                }
+                if evidence.1.get(position) {
+                    only_known = only_known.with_bit(position);
+                }
+            }
+            (
+                mask.union(&only_exact),
+                known.union(&only_known).union(&only_exact),
+            )
+        }
+        let all = ConditionMask::from_words([u64::MAX; vocab::mask::WORDS]);
+        let odd = ConditionMask::from_words([0x5555_5555_5555_5555; vocab::mask::WORDS]);
+        let even = ConditionMask::from_words([0xAAAA_AAAA_AAAA_AAAA; vocab::mask::WORDS]);
+        let rows = [
+            ConditionMask::ZERO,
+            all,
+            odd,
+            even,
+            ConditionMask::ZERO.with_bit(86).with_bit(142).with_bit(2),
+            ConditionMask::ZERO.with_bit(383),
+        ];
+        let gap = crate::gap::GapFib::positions().to_vec();
+        let both: Vec<u16> = crate::orb::positions()
+            .into_iter()
+            .chain(gap.clone())
+            .collect();
+        let every: Vec<u16> = (0..384).collect();
+        for family in [&gap, &both, &Vec::new(), &every] {
+            let folded = family
+                .iter()
+                .fold(ConditionMask::ZERO, |m, &p| m.with_bit(u32::from(p)));
+            for &mask in &rows {
+                for &known in &rows {
+                    for &truth in &rows {
+                        for &avail in &rows {
+                            assert_eq!(
+                                overlay_exact(mask, known, (truth, avail), folded),
+                                reference(mask, known, (truth, avail), family),
+                                "family of {} positions",
+                                family.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let source = include_str!("column.rs");
+        let body = source
+            .split_once("    fn replace_exact_positions(")
+            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+            .expect("the method is in column.rs")
+            .0;
+        let per_row = body
+            .split_once("for ((mask, known), evidence)")
+            .expect("the per-row loop")
+            .1;
+        assert!(
+            !per_row.contains("for position"),
+            "the per-row loop walks positions again: {per_row}"
         );
     }
 
