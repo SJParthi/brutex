@@ -21,3 +21,38 @@ D-1452..D-1461. Use D-1462+ next, or D-2000+ for new work.
 - Extract static gates with python yaml from `jobs.language-purity.steps` and run with `RUNNER_TEMP=/tmp/claude-0 SOURCE_SCAN=/tmp/claude-0/source-scan` from the repo root. Gate 1e (03) is a full build; skip it locally.
 - Gate 15 bans a language name in all tracked files, prose included. Gate 1d needs every new segment-shaped literal in crates/pull declared in ci.yml.
 - CLI test failure from the audit run: not reproducible (green in CI and 5 local runs); cause not recoverable.
+
+## Exact prompt for the new account (paste as-is into a Claude Code session on SJParthi/brutex)
+
+```
+Resume the PR #74 CI-to-green work on SJParthi/brutex. First read, in full,
+these files on branch fix-queue: resume/pr74-ci-thread.md (this thread),
+resume/RESUME-20261003.md and resume/audit-20261003/RESUME.md, plus CLAUDE.md on
+final/all-fixes. Then:
+1. Find the newest CI run on branch final/all-fixes (PR #74) and list its jobs.
+   For any red job, read its log, reproduce locally, fix it, and validate:
+   cargo fmt --check, cargo clippy --workspace --all-targets -- -D warnings,
+   the static gates (extract jobs.language-purity.steps from
+   .github/workflows/ci.yml), and the affected crates' tests as a non-root
+   user (setpriv --reuid=65534).
+2. When the Gate 18 mutation shards finish, read each failed shard's MISSED
+   and TIMEOUT lines from its job log. Kill each survivor with a real test, or
+   restructure the code (D-0192: never skip a mutant). Work crate by crate, in
+   parallel worktrees.
+3. Fetch origin/final/all-fixes and merge it before pushing (merge commits
+   only, never force-push). Push ONCE per round, because every push restarts
+   the ~6 h CI. Open no new PR: #74 is the one final combined PR.
+4. Record each locked choice in docs/05-decisions.md, starting at D-1462. Each
+   new invariant goes in docs/04-invariants.md with the test that proves it.
+5. Repeat until ci-ok is green on #74.
+My rules: Rust only except web/. O(1) wherever possible, naming anything that
+can't be. Work in parallel. Attack extreme edge cases adversarially. Verify
+with real evidence and never guess. Never ask me to tap, paste or approve
+anything. Keep everything running continuously. Stop at 98% weekly usage after
+saving resume state to fix-queue. Deliver results as easy comparison-table
+Artifacts.
+```
+
+## Status at the 18:50 UTC stop
+- Local `cargo bench --workspace` was inconclusive: it was killed for lack of memory twice (on the cli and api lib-test builds, fat LTO, 15 GB box). Only the store bench was run on its own, and it passed. Gate 8 in CI is the authority.
+- No agents and no open local work. Everything is pushed (8a59ff4 on final/all-fixes).
