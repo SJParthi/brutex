@@ -42,7 +42,7 @@ const NO_PRICING: Pricing<'static> = Pricing {
 #[test]
 fn a_cascade_that_admits_nothing_prints_no_tier_as_met() {
     let fixture = Ranked::of(8);
-    let by_evidence = fixture.by_evidence(8);
+    let by_evidence = fixture.by_evidence(2);
     assert!(!by_evidence.is_empty(), "the fixture must rank candidates");
     let column = &fixture.run.column;
     let bars = &fixture.bars;
@@ -91,8 +91,19 @@ fn a_cascade_that_admits_nothing_prints_no_tier_as_met() {
         result.text
     );
     assert!(
-        result.text.contains("every tier UNMET"),
-        "the probe must settle the walk:\n{}",
+        result.text.contains("NO TIER MET, INCLUDING THE MILDEST"),
+        "the walk must end on the mildest tier's verdict:\n{}",
+        result.text
+    );
+    // Every generated tier was screened and named UNMET, the mildest last.
+    assert_eq!(
+        result
+            .text
+            .lines()
+            .filter(|line| line.trim_end().ends_with(" UNMET"))
+            .count(),
+        ladder.len(),
+        "each tier is walked and reported:\n{}",
         result.text
     );
     // The ranking survives: a subject to drill into, flagged as unadmitted.
@@ -133,79 +144,90 @@ fn walk(admits: &[bool]) -> (Vec<usize>, Vec<usize>, Result<String, String>) {
     )
 }
 
-/// W2-cli8-8. Every shape of the walk, decided by admission alone.
+/// W2-cli8-8. Every shape of the walk, decided by admission alone, strictest
+/// first and stopping at the first tier that admits (D-1731).
 #[test]
-fn the_tier_walk_stops_on_admission_and_probes_the_mildest_first() {
-    // Nothing admits: ONE screen, the mildest, and the walk is settled.
+fn the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission() {
+    // Nothing admits: every tier is screened once, in order. The last screen
+    // is handed back as the diagnostic, so the walk never re-screens it.
     let (screened, unmet, outcome) = walk(&[false, false, false, false]);
-    assert_eq!(screened, [3]);
-    assert!(unmet.is_empty());
+    assert_eq!(screened, [0, 1, 2, 3]);
+    assert_eq!(unmet, [0, 1, 2]);
     assert_eq!(outcome, Ok("none 3 3".to_owned()));
-    // The strictest admits: the probe, then tier 0, nothing reported unmet.
+    // The strictest admits: ONE screen, nothing reported unmet.
     let (screened, unmet, outcome) = walk(&[true, true, true, true]);
-    assert_eq!(screened, [3, 0]);
+    assert_eq!(screened, [0]);
     assert!(unmet.is_empty());
     assert_eq!(outcome, Ok("met 0 0 0".to_owned()));
     // Only the mildest admits: every stricter tier is walked and named unmet.
     let (screened, unmet, outcome) = walk(&[false, false, false, true]);
-    assert_eq!(screened, [3, 0, 1, 2, 3]);
+    assert_eq!(screened, [0, 1, 2, 3]);
     assert_eq!(unmet, [0, 1, 2]);
     assert_eq!(outcome, Ok("met 3 3 3".to_owned()));
     // A middle tier is the first to admit.
     let (screened, unmet, outcome) = walk(&[false, true, true, true]);
-    assert_eq!(screened, [3, 0, 1]);
+    assert_eq!(screened, [0, 1]);
     assert_eq!(unmet, [0]);
     assert_eq!(outcome, Ok("met 1 1 1".to_owned()));
-    // One tier only, admitting: the probe and the walk screen it once each.
+    // One tier only: screened once whichever way it answers.
     let (screened, _, outcome) = walk(&[true]);
-    assert_eq!(screened, [0, 0]);
+    assert_eq!(screened, [0]);
     assert_eq!(outcome, Ok("met 0 0 0".to_owned()));
+    let (screened, unmet, outcome) = walk(&[false]);
+    assert_eq!(screened, [0]);
+    assert!(unmet.is_empty());
+    assert_eq!(outcome, Ok("none 0 0".to_owned()));
     // An empty ladder screens nothing.
     let (screened, unmet, outcome) = walk(&[]);
     assert!(screened.is_empty() && unmet.is_empty());
     assert_eq!(outcome, Ok("exhausted".to_owned()));
 }
 
-/// The probe admitted and no walked tier did: only a screen that answers
-/// differently twice can do that, and it is reported as exhausted, never MET.
-/// A refused screen stops the walk with its reason.
+/// D-1731. Admission is NOT monotone across the ladder: each tier's
+/// `max_mae_ppm` becomes `grid::Levels::forced` and is merged into the stop
+/// ladder, so a stricter tier prices a stop rung the mildest tier's grid may
+/// lack, and a cell can pass there and nowhere milder. The walk must find that
+/// tier. A mildest-first probe settled this ladder as "nothing admits".
 #[test]
-fn the_tier_walk_reports_an_inconsistent_ladder_and_propagates_refusals() {
-    let ladder = [0_usize, 1];
-    let mut calls = 0_usize;
-    let mut unmet = Vec::new();
-    let outcome = walk_ladder(
-        &ladder,
-        |_| {
-            calls += 1;
-            Ok(calls == 1)
-        },
-        |admitted| *admitted,
-        |rank, _| unmet.push(rank),
-    );
-    assert!(matches!(outcome, Ok(LadderWalk::Exhausted)));
-    assert_eq!(unmet, [0, 1]);
+fn a_stricter_tier_that_alone_admits_is_found_and_reported_met() {
+    let (screened, unmet, outcome) = walk(&[false, true, false, false]);
+    assert_eq!(screened, [0, 1]);
+    assert_eq!(unmet, [0]);
+    assert_eq!(outcome, Ok("met 1 1 1".to_owned()));
+    let (screened, unmet, outcome) = walk(&[true, false, false, false]);
+    assert_eq!(screened, [0]);
+    assert!(unmet.is_empty());
+    assert_eq!(outcome, Ok("met 0 0 0".to_owned()));
+}
 
+/// A refused screen stops the walk with its reason, wherever it falls, and
+/// no tier after it is screened.
+#[test]
+fn the_tier_walk_propagates_refusals() {
+    let ladder = [0_usize, 1, 2];
+    let mut screened = Vec::new();
     let refused = walk_ladder(
         &ladder,
         |tier| {
+            screened.push(*tier);
             if *tier == 1 {
-                Ok(true)
+                Err("refused: tier 1".to_owned())
             } else {
-                Err("refused: tier 0".to_owned())
+                Ok(false)
             }
         },
         |admitted: &bool| *admitted,
         |_, _| {},
     );
-    assert!(matches!(refused, Err(why) if why == "refused: tier 0"));
-    let probe_refused = walk_ladder(
+    assert!(matches!(refused, Err(why) if why == "refused: tier 1"));
+    assert_eq!(screened, [0, 1]);
+    let first_refused = walk_ladder(
         &ladder,
-        |_| Err::<bool, String>("refused: probe".to_owned()),
+        |_| Err::<bool, String>("refused: strictest".to_owned()),
         |admitted| *admitted,
         |_, _| {},
     );
-    assert!(matches!(probe_refused, Err(why) if why == "refused: probe"));
+    assert!(matches!(first_refused, Err(why) if why == "refused: strictest"));
 }
 /// The code lines of one function in `lib.rs`, comments dropped: the bodies
 /// keep comments that name old shapes as history.

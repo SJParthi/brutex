@@ -11481,12 +11481,14 @@ pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 ///
 /// The honest bound, per cascade, is `O(T × (M + C × 2 × G))`: `T` tiers
 /// screened, `M` one screen's setup over the execution bars, `C` priced
-/// candidates (at most `screen_cap()`), two sides each, `G` one exit grid. The
-/// mildest-tier probe in [`walk_ladder`] keeps `T` at ONE when nothing admits.
-/// Making a tier O(1) would need one grid holding every tier's forced stop at
+/// candidates (at most `screen_cap()`), two sides each, `G` one exit grid.
+/// [`walk_ladder`] screens tiers strictest first and stops at the first that
+/// admits, so `T` is that tier's rank plus one, and the WHOLE ladder when
+/// nothing admits: no tier is skipped, because a stricter tier's forced stop
+/// can price a rung the mildest grid lacks (D-1731). Making a tier O(1) would need one grid holding every tier's forced stop at
 /// once, which is a different grid and a different run identity: rejected in
 /// D-1720 and stated in `docs/06-limits.md`. The screen COUNTS are proven by
-/// `cli::screen_policy_tests::the_tier_walk_stops_on_admission_and_probes_the_mildest_first`
+/// `cli::screen_policy_tests::the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission`
 /// (invariant SCB-01); the per-screen cost is UNVERIFIED as a measurement, as
 /// no bench times a cascade.
 ///
@@ -11696,45 +11698,40 @@ fn screen_cascade<'a>(
     // what prevents a mask visited by a broader earlier cap from being stamped
     // later with rules under which it was never priced.
     let mut final_priced = yours.priced;
-    // THE MILDEST TIER IS PROBED FIRST, AND IT IS A PROOF RATHER THAN A GUESS.
+    // EVERY TIER IS WALKED IN ORDER, STRICTEST FIRST, AND THE WALK STOPS AT THE
+    // FIRST ONE THAT ADMITS (D-1731).
     //
-    // # What the walk cost, measured
+    // # What the walk costs, measured
     //
-    // The ladder is built "strictest first" and every tier is a FULL re-screen
-    // of the whole candidate set. On the operator's 60min rung the log shows one
-    // pass every ~20 seconds over 577 candidates -- and since `screen` prices
-    // both sides, each pass is two exit grids per candidate. Walking the whole
-    // ladder is that, times the tier count, on every rung, and it runs ONLY when
-    // nothing has passed -- so the machine spends longest on exactly the spans
-    // that have no answer to find.
+    // Every tier is a FULL re-screen of the whole candidate set. On the
+    // operator's 60min rung the log showed one pass every ~20 seconds over 577
+    // candidates -- and since `screen` prices both sides, each pass is two exit
+    // grids per candidate. When nothing passes, the walk pays that once per
+    // tier: the machine spends longest on exactly the spans that have no answer
+    // to find. That cost is accepted, because the shortcut that avoided it was
+    // not sound.
     //
-    // # Why one probe settles it
+    // # Why the mildest tier cannot be probed instead (D-1731)
     //
-    // Every tier relaxes the same three floors -- `max_points` up, `min_rr_bp`
-    // down, `min_win_rate_bp` down -- and `Rules::admits` is a conjunction of
-    // `>=` and `<=` against those floors. So a cell admitted at tier N is
-    // admitted at every tier milder than N: relaxing a floor can only widen the
-    // admitted set, never narrow it. `tiers` sorts strictest first, so the LAST
-    // entry is the widest set the ladder can offer.
-    //
-    // If the mildest tier admits nothing, no tier admits anything. Walking the
-    // rest cannot find a row; it can only spend the time proving what the last
-    // entry already proved.
-    //
-    // The report is unchanged in the case that matters: when something DOES
-    // pass, the loop below still walks strictest-first and names the first tier
-    // that met, which is the answer an operator wants. This only skips the walk
-    // when the answer is known to be "none".
+    // D-1720 screened the mildest tier first and, when it admitted nothing,
+    // declared every tier UNMET without walking them, on the argument that each
+    // tier only relaxes floors and `Rules::admits` is monotone in them. The
+    // floors are monotone; the GRID is not. A tier's `max_mae_ppm` becomes
+    // `grid::Levels::forced`, which `runner::grid` merges INTO the stop ladder,
+    // so a stricter tier prices a stop rung the mildest tier's grid may lack. A
+    // cell at that rung can pass the stricter tier and exist nowhere milder, and
+    // the probe would have printed "every tier UNMET" over a ladder that had an
+    // answer. Nothing proved that cannot happen, so the walk no longer assumes
+    // it.
     //
     // # Admission, not a subject (W2-cli8-8, D-1720)
     //
-    // The probe and the loop both asked `selected.is_none()`. `selected` stopped
-    // meaning "admitted" when `final_selection` began falling back to the best
-    // row that TRADED, so any span with one trade failed the probe, and the loop
-    // then printed the STRICTEST tier as MET over a table in which nothing had
-    // passed. `walk_ladder` decides on `admitted_any` alone, and its tests pin
-    // every shape of the walk: none admits, the first admits, only the mildest
-    // admits, an empty ladder.
+    // The walk once asked `selected.is_none()`. `selected` stopped meaning
+    // "admitted" when `final_selection` began falling back to the best row that
+    // TRADED, so the loop printed the STRICTEST tier as MET over a table in
+    // which nothing had passed. `walk_ladder` decides on `admitted_any` alone,
+    // and its tests pin every shape of the walk: none admits, the first admits,
+    // only the mildest admits, only a stricter tier admits, an empty ladder.
     let walk = walk_ladder(
         &ladder,
         |tier| {
@@ -11755,25 +11752,27 @@ fn screen_cascade<'a>(
         },
     )?;
     match walk {
-        LadderWalk::NoneAdmit(mildest, widest) => {
+        LadderWalk::NoneAdmit(rank, mildest) => {
+            let _ = writeln!(out, "  {:<8} UNMET", Tier::label(rank));
             let _ = writeln!(
                 out,
-                "  every tier UNMET -- the MILDEST tier ({}) admitted nothing, and \
-                 every tier above it is stricter, so none can admit anything. The \
-                 remaining {} tier(s) were not walked: each is a full re-screen and \
-                 the answer is already settled.",
-                mildest.describe(),
-                ladder.len().saturating_sub(1)
+                "\n  NO TIER MET, INCLUDING THE MILDEST. A combination that cannot clear \
+                 even the mildest rung is not a near miss, and the TIGHTEST column in \
+                 the table below is \
+                 how far the closest one actually ran. This is a statement about these \
+                 bars, not a failure of the search."
             );
-            replace_priced(&mut final_priced, widest.priced);
-            out.push_str(&widest.text);
-            // THE RANKING SURVIVES, AS IT DOES ON A SEARCH STEP. `widest.selected`
-            // is the best-ranked row that traded under the mildest tier, priced in
+            // The mildest tier's own screen, already taken by the walk, is the
+            // table a reader sees: no tier is screened twice.
+            out.push_str(&mildest.text);
+            replace_priced(&mut final_priced, mildest.priced);
+            // THE RANKING SURVIVES, AS IT DOES ON A SEARCH STEP. `selected` is
+            // the best-ranked row that traded under the mildest tier, priced in
             // the map returned beside it: a subject an operator can open, and
             // `admitted_any: false` says in so many words that it passed nothing.
             Ok(ScreenResult {
                 text: out,
-                selected: widest.selected,
+                selected: mildest.selected,
                 priced: final_priced,
                 admitted_any: false,
             })
@@ -11796,33 +11795,11 @@ fn screen_cascade<'a>(
         LadderWalk::Exhausted => {
             let _ = writeln!(
                 out,
-                "\n  NO TIER MET, INCLUDING THE MILDEST. A combination that cannot clear \
-                 even the mildest rung is not a near miss, and the TIGHTEST column in \
-                 the table below is \
-                 how far the closest one actually ran. This is a statement about these \
-                 bars, not a failure of the search."
+                "\n  NO TIER MET: the generated ladder is empty, so no tier was screened."
             );
-            let mut selected = None;
-            // The mildest tier's table, so a reader still sees what was tried.
-            if let Some(mildest) = ladder.last() {
-                let diagnostic = screen(
-                    bars,
-                    column,
-                    by_evidence,
-                    horizon,
-                    mildest.rules(top, reference),
-                    pricing,
-                    facts,
-                )?;
-                out.push_str(&diagnostic.text);
-                replace_priced(&mut final_priced, diagnostic.priced);
-                // The same subject rule as the probe: the row that traded, never
-                // an admission, priced in the map returned beside it.
-                selected = diagnostic.selected;
-            }
             Ok(ScreenResult {
                 text: out,
-                selected,
+                selected: None,
                 priced: final_priced,
                 admitted_any: false,
             })
@@ -11832,46 +11809,46 @@ fn screen_cascade<'a>(
 
 /// Where the generated tier ladder's walk stopped. Decided by admission alone.
 enum LadderWalk<'t, T, S> {
-    /// The mildest tier, probed first, admitted nothing, so no stricter tier
-    /// can: the tier and its screen.
-    NoneAdmit(&'t T, S),
+    /// Every tier was screened and none admitted: the mildest tier's rank and
+    /// its screen, which the caller shows as the diagnostic table.
+    NoneAdmit(usize, S),
     /// The strictest tier that admitted a row: its rank, the tier, its screen.
     Met(usize, &'t T, S),
-    /// The ladder is empty, or the probe admitted and no walked tier did.
+    /// The ladder is empty, so nothing was screened.
     Exhausted,
 }
 
 /// Walks `ladder` strictest first and stops at the first tier whose screen
 /// ADMITTED a row.
 ///
-/// The mildest tier (the last entry) is screened first as a probe: a tier is
-/// only ever milder on every axis than the ones before it, so if the mildest
-/// admits nothing the walk is settled in one screen instead of `ladder.len()`.
-/// Every tier walked and found unmet is handed to `unmet` in rank order.
+/// Every tier walked and found unmet BEFORE the last is handed to `unmet` in
+/// rank order; the last tier's unmet screen is returned in
+/// [`LadderWalk::NoneAdmit`] so the caller can show it without screening it
+/// again. No tier is skipped on an argument about the others: admission is not
+/// monotone across the ladder, because each tier's forced stop changes the
+/// grid it prices (D-1731).
 ///
 /// `admitted` is the whole verdict. Asking whether a screen SELECTED a row is
 /// the defect this exists to make untestable (W2-cli8-8, D-1720): a screen
 /// selects the best row that traded whether or not anything passed.
 ///
-/// Cost: one `screen_at` when nothing admits, at most `ladder.len() + 1`
-/// otherwise. Each one is a full re-screen; see `screen_cascade`.
+/// Cost: `rank + 1` calls of `screen_at` when tier `rank` is the first to
+/// admit, `ladder.len()` when none does, zero for an empty ladder. Each call is
+/// a full re-screen; see `screen_cascade`.
 fn walk_ladder<T, S>(
     ladder: &[T],
     mut screen_at: impl FnMut(&T) -> Result<S, String>,
     admitted: impl Fn(&S) -> bool,
     mut unmet: impl FnMut(usize, S),
 ) -> Result<LadderWalk<'_, T, S>, String> {
-    let Some(mildest) = ladder.last() else {
-        return Ok(LadderWalk::Exhausted);
-    };
-    let widest = screen_at(mildest)?;
-    if !admitted(&widest) {
-        return Ok(LadderWalk::NoneAdmit(mildest, widest));
-    }
+    let last = ladder.len().saturating_sub(1);
     for (rank, tier) in ladder.iter().enumerate() {
         let body = screen_at(tier)?;
         if admitted(&body) {
             return Ok(LadderWalk::Met(rank, tier, body));
+        }
+        if rank == last {
+            return Ok(LadderWalk::NoneAdmit(rank, body));
         }
         unmet(rank, body);
     }

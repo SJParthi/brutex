@@ -53696,3 +53696,106 @@ so every series is unchanged. A source-shape test pins one construction and no
 
 **Rejected.** Nothing. This is the existing hoist pattern applied at a fifth
 site.
+
+### D-1731 — The tier walk checks every tier in order; the mildest-first probe is removed — 2026-10-03
+
+**Finding.** Follow-up to D-1720 (a defect that D-1720 itself introduced and
+reported, not a new audit row). Medium bug risk.
+
+**What was wrong.** D-1720 kept the mildest-tier probe: `walk_ladder` screened
+the LAST tier first and, when it admitted nothing, returned "every tier UNMET"
+without screening the others. The argument was that tiers only relax floors
+and `Rules::admits` is monotone in them. The floors are monotone; the grid is
+not. `screen` hands each tier's `max_mae_ppm` to `grid::Levels::forced`, and
+`runner::grid` merges that forced stop INTO the stop ladder, so a stricter
+tier prices a stop rung the mildest tier's grid may lack. A cell at that rung
+can pass the stricter tier and exist nowhere milder. Nothing proved that
+case impossible, so the probe could print "every tier UNMET" over a ladder
+that had an answer. The fake-walk test
+`a_stricter_tier_that_alone_admits_is_found_and_reported_met` (admission
+`[false, true, false, false]`) failed against the probe, which screened `[3]`
+and settled "none" instead of screening `[0, 1]` and reporting tier 1 MET.
+
+**The decision.** The probe is removed. `walk_ladder` screens strictest first
+and stops at the first tier whose screen admitted a row; W2-cli8-8's rule
+stands, MET only on `admitted_any`. When the last tier is unmet its screen is
+returned in `LadderWalk::NoneAdmit` and the cascade shows it as the
+diagnostic table, so no tier is screened twice. The old probe-then-walk cost
+up to `ladder.len() + 1` screens; this costs `rank + 1` when tier `rank`
+admits and `ladder.len()` when none does. The "nothing admits" message is the
+existing `NO TIER MET, INCLUDING THE MILDEST` text, now preceded by every
+tier's UNMET line. An empty ladder prints that no tier was screened.
+
+**Cost, stated honestly.** On a span where nothing admits, the cascade now
+pays every tier (up to eight full re-screens) instead of one. That is the
+case the probe was written to make cheap, and the operator's log put one
+60min pass at about 20 seconds over 577 candidates. That figure is a log
+reading, not a measurement taken for this change; `docs/06-limits.md` states
+the bound and marks the per-screen time UNVERIFIED.
+
+**Rejected.** Proving the probe instead. That would need a test that every
+admitted cell of every stricter tier is also present and admitted on the
+mildest grid. The forced stop is merged into the grid, so this is false by
+construction for any cell sitting exactly on a stricter tier's forced rung,
+unless the mildest grid happens to hold that rung too. Merging every tier's
+forced stop into one grid, so the probe would be sound. That is the
+different-grid, different-identity option D-1720 already rejected.
+
+### D-1732 — The api reads a zero stop ceiling as no ceiling, as `cli` does — 2026-10-03
+
+**Finding.** Follow-up to D-1721, which fixed this in `cli` and reported the
+api copy as a new defect. Low bug.
+
+**What was wrong.** `descent_from_wire` refused `max_points <= 0` with "a
+ceiling of zero admits no trade and a negative one is not a distance", and the
+`screen` command parser refused `max_points <= 0` too. Zero does not admit no
+trade: `Rules::admits` reads a zero `max_mae_ppm` as no ceiling,
+`grid::Levels::forced` forces nothing at zero, `cli`'s `USAGE` documents
+`MAX_POINTS = 0` that way, and since D-1721 both `cli` entry points the api
+calls (`elite_descend_in_points_for_attempt`, `screen_range_in_points`) accept
+it. So the browser could not ask for a run the command line offers, and was
+told something false about why. `a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it`
+failed against the old parsers on its first `expect`.
+
+**The decision.** Both api doors refuse only a negative ceiling and pass zero
+through to `cli` unchanged. The refusal texts now say that 0 means no ceiling.
+The old test `a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with`
+pinned the false rule; it is renamed
+`a_negative_stop_ceiling_is_refused_rather_than_swept_with` and still refuses
+`-20`, now with `-1` in place of `0`. The screen-refusal table's zero row
+becomes `-1` for the same reason. Neither is a weakened test: each still
+refuses the values that are wrong, and the zero case is now asserted the other
+way by a new test. Invariant SW-19 cited the old name; its row now cites both
+tests, so gate 10 still resolves every reference.
+
+**Not done.** `web/src/routes/backtest/+page.svelte` `wholeNumber` still
+refuses a zero ceiling in the browser, and its comment quotes the old server
+refusal as the authority. The control marks the field wrong, so this is not
+silent, but it is now narrower than the server. It was left because the brief
+for this lane is the Rust crates and no front-end toolchain was run here.
+
+**Rejected.** Keeping the api stricter than `cli` on purpose. Neither door
+says why the browser should be denied a run the command line documents, and
+the reason it gave was false.
+
+### D-1733 — The api's strict `top` pin follows D-1727's 1,000-row ceiling — 2026-10-03
+
+**Finding.** A regression from D-1727, found when this lane first ran the
+`api` tests. Low.
+
+**What was wrong.** D-1727 capped `TOP` at `cli::TOP_CEILING` (1,000) at every
+`cli` door, including `cli::audited_range_command::request_value`, which the
+api's `strict_knobs` asks about `BRUTEX_TOP`. The api test
+`strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_start`
+still pinned `top = 9223372036854775807` as accepted, so it failed with
+`top=9223372036854775807`. D-1727 updated the matching pin in
+`cli::strict_range_knobs` and missed this one, because the api crate was not
+tested with that unit.
+
+**The decision.** The pin follows the law it checks: `1000` is accepted and
+`1001` is refused by name before configuration, the slot or a start, beside
+the existing `9223372036854775808` refusal. No refusal was removed.
+
+**Rejected.** Exporting `TOP_CEILING` from `cli` so the api test could name
+it. It is `pub(crate)` on purpose, and the api has no use for it outside this
+pin. The literal is the documented value in `USAGE` and D-1727.

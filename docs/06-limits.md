@@ -13937,9 +13937,17 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   `G` is one exit grid's evaluation, done for both sides. Every tier walked is
   a full re-screen, because a tier's `max_mae_ppm` is merged into the stop
   ladder as `grid::Levels::forced`, so each tier prices a different grid.
-  `walk_ladder` probes the mildest tier first, so a cascade where nothing
-  admits costs ONE screen, and one where something admits costs at most
-  `ladder.len() + 1`. An O(1) tier would need one grid holding every tier's
+  `walk_ladder` screens strictest first and stops at the first tier that
+  admits, so `T` is that tier's rank plus one, and the WHOLE ladder (up to
+  eight screens) when nothing admits. That worst case is paid on exactly the
+  spans with no answer. D-1720's mildest-first probe cut it to one screen, and
+  D-1731 removed it: a stricter tier's forced stop can price a rung the
+  mildest grid lacks, so "the mildest admits nothing" does not prove "no tier
+  admits". The cost is measured only as a count
+  (`the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission`,
+  SCB-01); the time per screen is UNVERIFIED, as no bench times a cascade, and
+  the ~20 s per 60min pass over 577 candidates quoted in the source is an
+  operator log reading, not a measurement taken here. An O(1) tier would need one grid holding every tier's
   forced stop. That is a different grid and a different identity, and it was
   rejected.
 

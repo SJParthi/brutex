@@ -475,6 +475,9 @@ fn strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_sta
     for (name, value) in [
         ("horizon_bars", "4294967296"),
         ("top", "9223372036854775808"),
+        // D-1727 caps `TOP` at 1,000 rows at every `cli` door, and this door
+        // asks `cli` (D-1733).
+        ("top", "1001"),
         ("screen_cap", "10000001"),
         ("grid_rungs", "1"),
         ("grid_rungs", "18446744073709551615"),
@@ -495,7 +498,7 @@ fn strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_sta
     }
     for (name, value) in [
         ("horizon_bars", "4294967295"),
-        ("top", "9223372036854775807"),
+        ("top", "1000"),
         ("screen_cap", "10000000"),
     ] {
         let body = format!("{},\"{name}\":\"{value}\"}}", BODY.trim_end_matches('}'));
