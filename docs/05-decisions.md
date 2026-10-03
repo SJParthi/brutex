@@ -53504,3 +53504,34 @@ A scratch copy with engine's pin left at 12 refuses engine's row.
 
 **Rejected.** A warning when count > pin: a warning is the decorative check
 this gate's history keeps replacing.
+
+### D-1507 — The `/ingest` page reads `/calendar.json`'s `withheld` and stops calling those days holidays — 2026-10-03
+
+**What was observed.** D-1443 made `/calendar.json` name, in `withheld`,
+every in-span stretch whose daily rung was not read or failed its checks, so
+the API no longer serves those days as closed. The page that reads the
+calendar did not read the field: it treated every in-span day absent from
+`days` as "NSE holiday, no session", and counted the month's expectation
+from the remaining days. `docs/06-limits.md` said so (R9-api-law-0 PARTIAL).
+
+**The decision.** `web/src/lib/calendar-owed.js` gains `withheldDays`, which
+expands the inclusive epoch-day runs into ISO days and their months and
+REFUSES a malformed run (not two integers, or backwards) by throwing, which
+the page's existing catch turns into "no measured calendar" — dropping the run
+would turn its days back into holidays. An absent field (an older API) is no
+runs. On the page a withheld day is not "known": its session is ASSUMED for a
+weekday, as outside the span; its tooltip and the newest-day sentence say the
+calendar WITHHOLDS it and why instead of the span sentence, which would be
+false for it; a month holding one is not covered, so its verdict is unknown
+rather than counted against a partial denominator; a window containing one
+opens the census caveat; and the day cell carries its own mark (`.unk`,
+dotted underline). `web/build` is rebuilt (Gate W1).
+
+**Evidence.** `web/tests/calendar-owed.test.js`: inclusive ends of a leap
+February, a one-day run, an absent/null/empty list, and six malformed lists,
+each refused. Baseline: `npm run build` on the unchanged source reproduced the
+committed `web/build` byte for byte under Node 22, so the rebuilt bundle is
+this source's.
+
+**Cost.** One step per withheld day to expand; the window check walks the
+withheld set, not the window.

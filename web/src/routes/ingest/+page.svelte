@@ -90,7 +90,7 @@
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
-  import { foldMinuteOwed } from '$lib/calendar-owed.js';
+  import { foldMinuteOwed, withheldDays } from '$lib/calendar-owed.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1032,6 +1032,7 @@
    *   first: string, last: string,
    *   owed: Map<string, number|null>,
    *   indexOwed: Map<string, number|null>,
+   *   withheld: Set<string>, withheldMonths: Set<string>,
    *   from: string[], clashes: number, why: string
    * }}
    */
@@ -1040,6 +1041,8 @@
     last: '',
     owed: new Map(),
     indexOwed: new Map(),
+    withheld: new Set(),
+    withheldMonths: new Set(),
     from: [],
     clashes: 0,
     why: ''
@@ -1064,6 +1067,8 @@
           last: '',
           owed: new Map(),
           indexOwed: new Map(),
+          withheld: new Set(),
+          withheldMonths: new Set(),
           from: [],
           clashes: 0,
           why: `/calendar.json answered ${response.status}`
@@ -1084,11 +1089,21 @@
         // would silently restore the false 166-hole claim D-0420 refuses.
         indexOwed.set(day, entry.indexOwed ?? null);
       }
+      // A DAY ABSENT FROM `days` IS A HOLIDAY ONLY IF IT IS NOT WITHHELD. The
+      // server names, in `withheld`, every stretch whose daily rung it did not
+      // read or could not trust (R9-api-law-0, D-1443); this page used to read
+      // those days as "NSE holiday", which is the unmeasured dressed as a
+      // fact. A malformed list throws into the catch below and the whole
+      // calendar degrades loudly, rather than its days becoming holidays.
+      // D-1507.
+      const withheld = withheldDays(body?.withheld, isoOfEpochDay);
       calendar = {
         first: owed.size ? isoOfEpochDay(body.firstDay) : '',
         last: owed.size ? isoOfEpochDay(body.lastDay) : '',
         owed,
         indexOwed,
+        withheld: withheld.days,
+        withheldMonths: withheld.months,
         from: body?.derivedFrom ?? [],
         clashes: (body?.disagreements ?? []).length,
         why: owed.size ? '' : 'the store holds no bars for this feed'
@@ -1099,6 +1114,8 @@
         last: '',
         owed: new Map(),
         indexOwed: new Map(),
+        withheld: new Set(),
+        withheldMonths: new Set(),
         from: [],
         clashes: 0,
         why:
@@ -1145,7 +1162,28 @@
   /** Whether the derived calendar actually covers a day, or the page is guessing weekends. */
   /** @param {string} isoDay */
   function holidaysKnownFor(isoDay) {
-    return calendar.owed.size > 0 && isoDay >= calendar.first && isoDay <= calendar.last;
+    return (
+      calendar.owed.size > 0 &&
+      isoDay >= calendar.first &&
+      isoDay <= calendar.last &&
+      !calendar.withheld.has(isoDay)
+    );
+  }
+  /** Whether `/calendar.json` withheld this day: inside its span, never proved shut. D-1507. */
+  /** @param {string} isoDay */
+  function isWithheld(isoDay) {
+    return calendar.withheld.has(isoDay);
+  }
+  /**
+   * WHY THIS DAY'S SESSION IS A GUESS, for the day it is asked about. A withheld
+   * day is inside the measured span, so the span sentence would be false for it.
+   *
+   * @param {string} isoDay
+   */
+  function calendarGapFor(isoDay) {
+    return isWithheld(isoDay)
+      ? `the exchange calendar WITHHOLDS ${dayLabel(isoDay)}: this feed's daily bars for its month were not read or failed their checks, so whether NSE traded is unknown — a weekday is ASSUMED to be a session, and it is not shown as a holiday`
+      : calendarGap;
   }
 
   /**
@@ -1174,7 +1212,9 @@
     return (
       calendar.owed.size > 0 &&
       ym >= calendar.first.slice(0, 7) &&
-      ym <= calendar.last.slice(0, 7)
+      ym <= calendar.last.slice(0, 7) &&
+      // A month with a withheld day has no measured denominator. D-1507.
+      !calendar.withheldMonths.has(ym)
     );
   }
 
@@ -2560,7 +2600,7 @@
   const ceilReason = $derived.by(() => {
     const today = istToday;
     const guessing = !holidaysKnownFor(today)
-      ? ` Note that ${calendarGap}.`
+      ? ` Note that ${calendarGapFor(today)}.`
       : '';
     if (isSession(today) && istMin < CLOSE_MIN) {
       return `Today, ${dayLabel(today)}, is a trading session and it has not closed yet — NSE closes 15:30 IST and it is ${pad(Math.floor(istMin / 60))}:${pad(istMin % 60)} — so no feed has a final bar for it. The newest day that can be asked for is ${dayLabel(maxDay)}, the last session that closed.${guessing}`;
@@ -2723,7 +2763,12 @@
    * away with the rest.
    */
   const outsideHolidayTable = $derived(
-    windowOk && (!holidaysKnownFor(from) || !holidaysKnownFor(to))
+    windowOk &&
+      (!holidaysKnownFor(from) ||
+        !holidaysKnownFor(to) ||
+        // A withheld day INSIDE the window is a guess too. One step per
+        // withheld day, never per window day. D-1507.
+        [...calendar.withheld].some((d) => d >= from && d <= to))
   );
 
   /**
@@ -6287,7 +6332,7 @@
     // end, and past that the page says so rather than projecting.
     const approx = holidaysKnownFor(isoDay)
       ? ''
-      : ` · ${calendarGap}`;
+      : ` · ${calendarGapFor(isoDay)}`;
     const ceiling = isoDay === maxDay ? ` · the newest day that can be asked for. ${ceilReason}` : '';
     return `${dayLabel(isoDay)} · ${ns ?? 'trading session'}${approx}${ceiling}`;
   }
@@ -10103,6 +10148,7 @@
             class:cursor={d === cal.cursor}
             class:oth={d.slice(0, 7) !== calView}
             class:nos={noSessionWhy(d) !== null}
+            class:unk={isWithheld(d)}
             class:now={d === maxDay}
             onclick={() => commit(d)}
           >
@@ -11304,6 +11350,13 @@
        day is --faint with a line-through. */
     color: var(--dim);
     font-weight: var(--w-mid);
+  }
+  /* WITHHELD IS NEITHER A SESSION NOR A HOLIDAY. `/calendar.json` could not
+     speak for the day, so it carries a dotted underline — a mark of its own,
+     not the light "no session" one — and its tooltip says why. D-1507. */
+  .cday.unk {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
   }
   .cday:disabled {
     /* --faint, which is now AA in its own right. Genuinely inactive, and the

@@ -11806,10 +11806,15 @@ below is timed.
   month inside the span that the census holds only at another rung, that it
   does not hold at all, or whose daily records failed their checks is now
   `Unmeasured` day by day and named in `/calendar.json`'s `withheld` runs
-  (R9-api-law-0, W1-api2-9). **The `/ingest` page does not read `withheld`
-  yet.** It still treats an in-span day absent from `days` as a holiday, so
-  the page shows those days as "NSE holiday" until `web/` reads the field and
-  `web/build` is rebuilt (Gate W1). That rebuild was not done in this change.
+  (R9-api-law-0, W1-api2-9). **The `/ingest` page reads `withheld`
+  (D-1507).** A withheld day is no longer a holiday there: its session is
+  ASSUMED for a weekday, as outside the span, its tooltip says the calendar
+  withholds it and why, its month has no measured denominator (verdict
+  unknown), and a window containing one opens the census caveat. A malformed
+  `withheld` list fails the whole calendar loudly rather than dropping its
+  days back into holidays. `web/build` was rebuilt in that change. (This
+  paragraph said the page did not read the field yet.) Reading the runs costs
+  one step per withheld day.
 
 ## JSON renderers: cold admissions and per-request walks — D-1444, 2 October 2026
 
