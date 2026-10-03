@@ -27,3 +27,9 @@ Scope: verify all 547 earlier findings (250 batch-2 in fix-queue/lane{1,2,3}{,-b
 - Three local fixers running on branches audit-fixes (new findings v3b-1/-2, v3a-1, v53-1/-2, audit-root, docs, v4-1..3; D-1480..1489), audit-fixes-2 (c4 non-cli + c4a-N + v4-4; D-1490..1519), audit-fixes-3 (c4 cli + c4b-N; D-1620..1659, moved off the sweep thread's D-1520..1619). These are local; if lost, redo from the out/*.md reports with those decision ranges.
 - When they finish: merge each into final/all-fixes (fetch + merge first, never force), validate, push onto PR #74, then publish the comparison Artifact.
 - Local fix branches are mirrored as wip/audit-fixes, wip/audit-fixes-2, wip/audit-fixes-3 (pushed at each checkpoint; resume from them).
+
+## State 2026-10-03 ~11:05 UTC
+- Artifact published: https://claude.ai/artifact/K6QyihZvvh1d4UXQnApVZT (source brutex-audit-ledger.html here).
+- Fix batches A-C combined on local branch audit-combined (= wip/audit-fixes + -2 + -3 merged, union-resolved docs tails). fmt+clippy clean.
+- Local cargo-mutants 26.2.0 (nextest, max-fail=1) running on 249 mutants of the combined diff vs 1087e544. PR #74 CI run 37092404876 still running Gate 18; push only once, after it finishes or after local mutation is clean.
+- Batch D (wip/audit-fixes-4, D-1503..1519): v2-1/-2/-3, v1-1, R9-api-law-0 web page, W1-api2-11 — in progress.
