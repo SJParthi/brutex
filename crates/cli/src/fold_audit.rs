@@ -378,6 +378,15 @@ pub fn read_month(
     rung: Timeframe,
     ym: YearMonth,
 ) -> Result<Vec<Bar>, String> {
+    // One instrument-month: the boundary a stopping server is honoured at
+    // (hunt-api-2, D-1551).
+    crate::cancel::check(|| {
+        format!(
+            "{} {} {ym}, before it was read",
+            key.underlying,
+            rung.as_str()
+        )
+    })?;
     let path = StorePath::for_key(vendor, key, rung, ym, FileKind::Bars).map_err(|why| {
         format!(
             "no store path for {} {}: {why}",
