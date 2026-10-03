@@ -53577,3 +53577,203 @@ flag, and whether any such file carries a sidecar is UNVERIFIED; recording
 "sealed" outside the header would be an on-disk format change, which §3 rule 8
 forbids doing in place. The CRC is integrity, not authentication; that is
 recorded in `docs/06-limits.md`.
+
+**Also (audit-20261003 hunt-store-5) — the lake reader refuses a timestamp it
+would misread.** `lake::schema::detect` checked the `timestamp` leaf's name,
+physical type and levels but never its logical type, so a NANOS, MILLIS or
+not-UTC-adjusted timestamp decoded silently as UTC microseconds — off by ×1000,
+÷1000 or +5h30. It now refuses any declared logical type other than
+`TIMESTAMP(MICROS, adjusted to UTC)`, as `LakeError::UnsupportedTimestamp`
+naming it; an INT64 with no logical type still opens. Which of the two the
+real lake's files declare is UNVERIFIED in this tree (the real-lake tests are
+off-CI); a real file declaring anything else is now refused loudly rather than
+read at the wrong scale. No store format changes.
+
+Proven by `lake::refusals::a_timestamp_in_another_unit_or_not_in_utc_is_refused_by_name` (AFA-20).
+
+### D-1529 — A derivatives gap audit owes the derivatives venue's dated minutes — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-pull-1. `/gaps.json`'s `audit_one`
+classified every series that was neither NSE CASH nor INDEX against the fixed
+exchange session, 375 minutes a day. `derive` folds a derivatives series to the
+venue-dated hours `fold::minute_session(.., Venue::NseDerivatives, ..)` returns,
+which close at 15:40 from 2026-08-03 — 385 minutes. The ten minutes after
+15:30 were owed by the fold and never audited, so a month missing all of them
+audited clean.
+
+**Decision.** `pull::gaps::classify_derivative_against` classifies against the
+same venue authority the fold uses: a regular day takes the venue's dated
+session, an exceptional day keeps the calendar's shape, and a day whose hours
+this build cannot state is unmeasured. `audit_one` routes an NSE series with a
+contract or segment `FNO` to it, after the CASH door and before the INDEX door.
+
+Proven by `pull::gaps::tests::a_derivatives_audit_owes_the_venues_dated_minutes` (AFA-09).
+
+### D-1530 — A rolling rupee price that snaps to zero or below zero is refused — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-pull-2. `rolling::paisa`'s rupee arm
+snapped the vendor's text half-up and returned it. `0.004` became a price of
+zero, and `-0.004` became zero too, walking past every below-zero check after
+it. `http::one_price` already refused both; the rolling decoder did not.
+
+**Decision.** A rupee text with a non-zero digit that snaps to zero, and any
+value that snaps below zero, is `RollingError::Unrepresentable` naming the
+field. `0`, `0.00` and `-0.0` still read as the real zero.
+
+Proven by `pull::rolling::tests::a_sub_half_paisa_or_negative_rupee_price_is_refused_not_snapped_to_zero` (AFA-10).
+
+### D-1531 — A vendor answer that repeats a key inside one object is refused — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-3. `serde_json` keeps the last
+of a repeated key without saying so, so `"open":[100],"open":[200]` decoded as
+an open of 200. An escaped spelling (`"open"`) is the same key.
+
+**Decision.** `http::decode_body`, after the parse succeeds, runs one linear
+byte pass (`repeated_key`) that keeps one key set per open object, decodes each
+key through `serde_json` so an escape is compared by meaning, and refuses the
+first repeat by name. The same key in two different objects is not a repeat.
+The cost is linear in a body the parse has already paid for.
+
+Proven by `pull::http::tests::an_answer_repeating_a_key_in_one_object_is_refused` (AFA-11).
+
+### D-1532 — A negative snapshot volume and a bucket wider than a day are refused by the fold, and a Muhurat counts as a session — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-5. The fold summed snapshot
+volumes as given, so `10 + -7 = 3` passed every later check: the store's count
+gate sees only the sum. And `Bucket::of_secs` accepted any width, so a
+`u32::MAX` bucket stamped a 2024 snapshot at 1969-12-31.
+
+**Decision.** `FoldError::NegativeVolume { at, volume }` refuses a negative
+volume before it is added, on every fold path. `Bucket::of_secs` refuses a width
+above 86,400 seconds. A divides-a-day rule was considered and not taken: the
+fold deliberately admits widths such as 7 s and 3,607 s.
+
+**Also (audit-20261003 attackdata-6).** `calendar::sessions_between` counted
+only `DayKind::Open`, so a Muhurat of unmeasured length — a day the exchange
+traded — was left out: `Some(0)` for 2024-11-01 alone. It now counts as a
+session, and a day the calendar cannot classify returns `None`, as the doc
+promised. `expected_bars` is unchanged: the day's bar count stays unknown.
+
+Proven by `pull::anchor::a_negative_snapshot_volume_and_a_bucket_wider_than_a_day_are_refused`
+and `pull::calendar::tests::a_muhurat_of_unmeasured_length_is_still_a_session` (AFA-12).
+
+### D-1533 — An exceptional session is named once per day, not once per bucket — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-pull-3. D-1201 collapsed the
+per-bucket diagnostics of an unmeasured day into one line. An exceptional
+session — an outage day, a DR Saturday, a Muhurat — still pushed one identical
+"exceptional session … withheld" line per bucket: 54 lines for 2024-03-02 at
+two minutes, each a `pull.derive` warning and a clause of the rung's refusal.
+
+**Decision.** `complete_minutes_with_calendar` names an exceptional session
+once per day: `day {day}: exceptional session {session:?}: every derived bucket
+of it withheld; …`. Every bucket of it is still withheld. `cli fold`'s
+`withheld` count is a count of derive's diagnostics, so its DR-Saturday fixture
+now expects one per rung.
+
+Proven by `pull::anchor::an_exceptional_session_is_named_once_per_day_not_once_per_bucket`
+and `cli::fold_audit::tests::fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday` (AFA-13).
+
+### D-1534 — A half-set AWS environment is refused, and `AWS_PROFILE` names the profile — 2026-10-03
+
+**What was observed.** audit-20261003 errpaths-1. `AwsIdentity::discover` kept
+the environment's identity only when both variables were set and otherwise
+dropped the environment's error and signed as `[default]`. An operator who
+exported `AWS_ACCESS_KEY_ID` and forgot the secret was silently signed as a
+different identity. `AWS_PROFILE` was read nowhere.
+
+**Decision.** Exactly one of `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` set
+is a refusal naming both. Neither set reads the profile `AWS_PROFILE` names,
+`default` when it is unset or empty. That AWS's own tools read `AWS_PROFILE`
+this way is **UNVERIFIED** here: `docs/00-charter.md` records no AWS source.
+§8 is untouched — this is the AWS identity, not the broker credential.
+
+Proven by `pull::ssm::tests::discovery_refuses_a_half_set_environment_and_honours_the_named_profile` (AFA-14).
+
+### D-1535 — Each leg of a round trip is priced at its own day's regime — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-costs-1. `costs::trip::price`
+resolved one rate set on the ENTRY day (the predecessor's `DEC-COST-002`) and
+charged both legs at it. The transaction tax is a sell-side levy, so a long
+trip bought on 2026-03-31 and sold on 2026-04-01 paid the old 0.10% on a sale
+made under the 0.15% regime — 8.00 rupees where the sale owed 12.00. That is
+an under-charge, against `docs/06-limits.md` §27's "always over-charges". The
+test that pinned it, `the_regime_is_the_entry_days_and_the_exit_day_never_moves_it`,
+is replaced.
+
+**Decision.** `price` resolves the entry day's and the exit day's sets and
+assigns buy and sell by direction (a long sells on exit, a short on entry).
+The tax is at the sell day's rate, the stamp duty at the buy day's, and the
+exchange, SEBI and IPFT levies each leg at its own. GST takes the larger of the
+two flat rates. Either leg's day being unverified refuses the whole trip.
+`charge_stack` is unchanged in signature and passes one set for both legs. The
+lot size is still the entry day's (§27).
+
+Also corrected here (audit-20261003 hunt-costs-6): `crates/costs/src/lib.rs`
+cited D-0039 for the costs crate, which is D-0041; it and `rate.rs` said the
+crate "does not yet compute a charge", which stages two and three do.
+
+**audit-20261003 hunt-costs-5 is UNVERIFIED and not fixed.** `docs/00-charter.md`
+records no source for any cost rate; every rate traces to the predecessor's
+citations (§26, §27). No source has been invented to close it. The missing fact
+is a charter-recorded primary source (circular or notification) for each dated
+rate row.
+
+Proven by `costs::trip::tests::each_legs_charge_is_priced_at_its_own_days_regime` (AFA-15).
+
+### D-1536 — Run ids resume above every run the log's last block carries — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-costs-2. `reserved_run` was seeded
+from the last `seq` alone. A process that reserved two ids and wrote an event
+only under the second left `seq = 1`, so the restart reserved 2 — an id the log
+already carried.
+
+**Decision.** `resume_point` also returns the largest `run` among the decodable
+lines of the 64 KiB block it already reads, and the counter starts at
+`max(seq, max_run)`. Only that block is read; the limit is in
+`docs/06-limits.md`.
+
+Proven by `telemetry::sink::tests::a_restart_never_reserves_a_run_id_an_event_in_the_log_carries` (AFA-16).
+
+### D-1537 — One telemetry sink per directory, across processes — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-costs-3. Two processes could open
+sinks on one directory. Both resumed the same `seq`, reserved the same run ids,
+and each rotated the other's current file out from under it.
+
+**Decision — the refusing option.** `Sink::open` takes an exclusive `flock` on
+`<dir>/events.lock`, held for the sink's life and released by the kernel on
+close or death. Contention is the open's own error, naming the directory and
+"another sink". A shared lock with a single writer was considered and not
+taken: it still needs a second process to give up its log, which is what a
+refusal says plainly. `cli` already prints an install failure and runs on
+without a log, saying so. A `with_target` sink holds no lock.
+
+Proven by `telemetry::sink::tests::a_second_sink_on_a_held_directory_is_refused_by_name` (AFA-17).
+
+### D-1538 — A resumed time floor ahead of the clock is named and its held events counted — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-costs-4. D-1325 resumes the `ms`
+floor from the last line on disk. A line stamped by a clock once set forward
+then held every later event at that future instant, silently, until the clock
+caught up.
+
+**Decision.** An open whose resumed floor is ahead of the clock reports it in
+`last_error` with both readings. `Health::clock_held` counts every event whose
+clock reading was below the floor and was held up to it. `Inner::stamp` returns
+whether it held.
+
+Proven by `telemetry::sink::tests::a_resumed_floor_ahead_of_the_clock_is_named_and_counted` (AFA-18).
+
+### D-1539 — A fragment a still-full disk would not terminate is closed before the next event — 2026-10-03
+
+**What was observed.** audit-20261003 attacksweep-2. After a torn append, `emit`
+wrote one newline to close the fragment and discarded the result. On a disk
+that stayed full that byte failed too, and the next event reported `Written`
+was fused onto the fragment — unreadable, and not counted as dropped.
+
+**Decision.** `Inner::torn` records that the terminator failed; the next append
+leads with the newline, and a landed append clears it. When the fragment was
+empty the leading newline is one blank line the reader steps over.
+
+Proven by `telemetry::sink::tests::a_fragment_the_full_disk_would_not_terminate_is_closed_before_the_next_event` (AFA-19).

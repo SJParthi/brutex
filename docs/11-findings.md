@@ -662,3 +662,32 @@ the failure at the fixture root, separate from the deliberately injected
 journal-publication collision. The test-only fixture now uses a checked
 monotonic suffix with its PID/timestamp. Preserve the failed baseline and
 diagnostic replay; they are not counted as caught production mutants.
+
+### Audit fixes of 2026-10-03, worker w1 — D-1520..D-1539
+
+| Finding | Resolution and evidence boundary |
+|---|---|
+| audit-20261003 attackdata-1: a month with committed records and a truncated header region was re-initialised | Refused when the `.crc` sidecar is non-empty (D-1520, AFA-01). |
+| audit-20261003 hunt-store-2: a torn genesis slot was refused for ever | Repaired when nothing is committed and the region holds only what a torn genesis leaves (D-1521, AFA-02). |
+| audit-20261003 hunt-store-3, hunt-store-4: the writer created a missing store root and did not flush created directories | Root refused; each created directory's parent fsynced (D-1522, AFA-03). |
+| audit-20261003 hunt-store-1: the bar door accepted an overlay or greeks geometry at a bar name | Bar table is `Layout::V2` alone (D-1523, AFA-04). |
+| audit-20261003 attackdata-2: duplicate check by float equality; insane greeks admitted | Byte equality; greeks domain enforced (D-1524, AFA-05). |
+| audit-20261003 attackdata-7: a disagreeing overlap was reported as a format error | `OverlapDisagrees` with the conflict (D-1525, AFA-06). |
+| audit-20261003 hunt-store-7: four permission tests were vacuous as root | Run where permission bits bind (D-1526, AFA-07). |
+| audit-20261003 o1store2-1, o1store2-2, o1store2-3, hunt-store-6: store docs disagreed with the code | Corrected (D-1527, AFA-08). |
+| audit-20261003 attackdata-8: a cleared checksum flag disables verification | Not fixed: needs a new format version. Stated limit (D-1528). |
+| audit-20261003 hunt-store-5: lake never checked the timestamp's unit or UTC flag | Refused by name (D-1528, AFA-20). |
+| audit-20261003 hunt-pull-1: derivatives audit ignored the venue's 15:40 close | Venue-dated classification (D-1529, AFA-09). |
+| audit-20261003 hunt-pull-2: rolling rupee price snapped to zero | Refused (D-1530, AFA-10). |
+| audit-20261003 attackdata-3: repeated JSON key kept the last value silently | Refused by name (D-1531, AFA-11). |
+| audit-20261003 attackdata-5: negative volume netted; bucket wider than a day admitted | Both refused (D-1532, AFA-12). |
+| audit-20261003 attackdata-6: `sessions_between` left out a Muhurat of unmeasured length | Counted as a session (D-1532, AFA-12). |
+| audit-20261003 hunt-pull-3: exceptional session named once per bucket | Once per day (D-1533, AFA-13). |
+| audit-20261003 errpaths-1: half-set AWS env silently fell back to `[default]`; `AWS_PROFILE` ignored | Refused; profile honoured. AWS behaviour UNVERIFIED against the charter (D-1534, AFA-14). |
+| audit-20261003 hunt-costs-1: straddling trip priced at the entry day's regime, under-charging the sell tax | Per-leg regime (D-1535, AFA-15). |
+| audit-20261003 hunt-costs-6: stale costs docs and a wrong D-number | Corrected (D-1535). |
+| audit-20261003 hunt-costs-5: no charter source for any cost rate | UNVERIFIED, not invented (D-1535, `docs/06-limits.md`). |
+| audit-20261003 hunt-costs-2: restart re-reserved a logged run id | Seeded above the block's largest run; one-block limit stated (D-1536, AFA-16). |
+| audit-20261003 hunt-costs-3: two sinks on one directory | Cross-process `flock`, second refused (D-1537, AFA-17). |
+| audit-20261003 hunt-costs-4: future time floor carried silently | Named and counted (D-1538, AFA-18). |
+| audit-20261003 attacksweep-2: unterminated fragment fused onto the next `Written` event | Closed before the next event (D-1539, AFA-19). |

@@ -113,6 +113,17 @@ pub enum LakeError {
         got: ColumnType,
     },
 
+    /// The `timestamp` leaf declares a logical type this reader would misread.
+    ///
+    /// The reader decodes `timestamp` as microseconds since the epoch, UTC. A
+    /// leaf declared NANOS or MILLIS, or MICROS not adjusted to UTC (a wall
+    /// clock), would decode off by ×1000, ÷1000 or the zone offset, so it is
+    /// refused by name (audit-20261003 hunt-store-5, D-1528).
+    UnsupportedTimestamp {
+        /// The declared logical type, rendered.
+        declared: String,
+    },
+
     /// The file's column set matches no layout this crate knows.
     ///
     /// The lake holds exactly two shapes — a 7-column cash/index bar and a
@@ -356,6 +367,10 @@ impl fmt::Display for LakeError {
             Self::UnexpectedSchema { columns, names } => write!(
                 f,
                 "unrecognised lake schema: {columns} column(s) {names:?}; this crate knows only the 7-column cash bar and the 17-column F&O bar"
+            ),
+            Self::UnsupportedTimestamp { declared } => write!(
+                f,
+                "column `timestamp` declares {declared}; this reader decodes INT64 microseconds since the epoch, UTC, and refuses any other unit or a timestamp not adjusted to UTC rather than misreading it"
             ),
             Self::UnsupportedColumnShape {
                 name,
@@ -607,6 +622,12 @@ mod tests {
                 "BROTLI",
             ),
             (LakeError::MissingColumn { name: "vega" }, "vega"),
+            (
+                LakeError::UnsupportedTimestamp {
+                    declared: "TIMESTAMP(NANOS, adjusted to UTC)".to_owned(),
+                },
+                "NANOS",
+            ),
             (
                 LakeError::ColumnTypeMismatch {
                     name: "greeks_provenance_id",

@@ -13932,3 +13932,24 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
+
+* **A cleared header checksum flag is not detected (D-1528, audit-20261003
+  attackdata-8).** Block verification follows the header's `FLAG_CHECKSUMS`.
+  Clearing it in both slots and recomputing their CRCs turns verification off
+  for a sealed month, and the `.crc` beside it is ignored. Random rot cannot do
+  this, because the slot CRC covers the flag. The CRC is integrity, not
+  authentication. Closing it would need "sealed" recorded outside the header,
+  which is a new store format version, not an in-place change.
+* **Run-id resumption reads one block (D-1536).** `reserve_run_id` resumes above
+  the largest `run` in the last 64 KiB of the newest non-empty log file. A run id
+  carried only by lines further back, and above every later `seq`, is not seen.
+  Unmeasured how often that can occur; it needs a reserved id unused for ~250
+  lines and then used.
+* **One telemetry sink per directory (D-1537).** A second process on a held
+  directory runs without a log and says so; it does not share the file.
+* **The cost rates have no charter source (audit-20261003 hunt-costs-5).**
+  UNVERIFIED: `docs/00-charter.md` records no source for any cost rate. Every
+  rate traces to the predecessor's citations; none has been checked against a
+  primary circular recorded here, and none has been invented.
