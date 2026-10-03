@@ -13949,3 +13949,8 @@ bounds are all nonzero.
   levels of a halted sweep and now says so through `closure_complete`; it
   still returns those sets in `kept`. `validate` records `halted` beside its
   candidate count, and the streamed rankers mark the two levels `Unknown`.
+- **`keep::Best` probes a hash set on every offer (v4-4, D-1497).** The
+  duplicate check is one probe of a pre-reserved `MaskSet`: expected O(1),
+  hashing six words, not a worst-case bound. An admission adds one insert and,
+  when full, one removal, inside the reservation. The O(log cap) sift stated
+  above is unchanged. Memory is `cap` itemsets plus `cap` masks. Not timed.

@@ -53562,3 +53562,23 @@ absent and why the meaning prune's answer is the intended one. The cost of
 
 **What it changes.** One new field; no existing output, digest or run
 identity term moves.
+
+### D-1497 — `keep::Best` holds a mask at most once and refuses an impossible capacity — 2026-10-03
+
+**What was observed.** v4-4: `Best::offer` pushed while there was room with no
+membership check, so three offers of one itemset at cap 3 held it three
+times; the top list then names one combination repeatedly and pushes a
+distinct one out. The `ranks_below` doc assumed distinct offers.
+W3-engine1-4: `Best::with_capacity` reserved with `Vec::with_capacity`, which
+panics past `isize::MAX` bytes and aborts when the allocator refuses.
+
+**The decision.** `Best` keeps a pre-reserved set of its held masks (the
+engine's fixed-seed `MaskSet`). An offer whose mask is held is counted in a
+new `repeated()` and not held or discarded, so offered = held + discarded +
+repeated. An evicted mask leaves the set. `with_capacity` is replaced by
+`try_with_capacity`, which reserves both through `try_reserve` and returns
+the `TryReserveError`. Linear search for the duplicate was rejected: Gate 11
+refuses a membership scan, and the probe is expected O(1).
+
+**What it changes.** `Best` has no production caller (D-0762), so no run,
+report or identity moves. Its memory is now `cap` itemsets plus `cap` masks.

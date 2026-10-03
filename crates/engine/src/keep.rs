@@ -52,7 +52,12 @@
 //! of the walk beside the result: [`Streamed::streamed`] is every survivor the
 //! engine handed over and dropped, and [`Best::discarded`] is every one the cap
 //! refused. `engine::keep::every_offer_is_either_held_or_counted_as_discarded`
-//! pins the identity that makes them readable — offered = held + discarded.
+//! pins the identity that makes them readable — offered = held + discarded
+//! for distinct offers — and
+//! `engine::keep::a_repeated_mask_is_held_once_and_counted` the full one,
+//! offered = held + discarded + repeated (D-1497).
+
+use std::collections::TryReserveError;
 
 use crate::{Excluded, Frontier, Halt, Itemset};
 
@@ -244,11 +249,21 @@ fn weaker(held: &[Itemset], lower: usize, upper: usize) -> bool {
 /// constructs it and no other crate's `src` names it: `runner::rank` feeds its
 /// own heap, so no run's retention, ranking or report depends on this type.
 /// `engine/tests/production_callers.rs` fails the day a caller appears (D-0762).
+///
+/// **A mask is held at most once (v4-4, D-1497).** The heap orders by
+/// `(hits, mask)` and assumed every offer was a distinct itemset, so offering
+/// one itemset twice while there was room held it twice and later pushed a
+/// distinct one out. A set of the held masks now refuses a repeat, which is
+/// counted in [`Self::repeated`] rather than held or discarded.
 #[derive(Clone, Debug, Default)]
 pub struct Best {
     cap: usize,
     held: Vec<Itemset>,
+    /// The masks in `held`, so a repeat is found by one expected-O(1) probe
+    /// instead of a scan of the heap.
+    masks: crate::MaskSet,
     discarded: u64,
+    repeated: u64,
 }
 
 impl Best {
@@ -260,16 +275,30 @@ impl Best {
     /// simply keeps nothing, counts everything it was offered in
     /// [`Self::discarded`], and changes no other number anywhere.
     ///
-    /// The vector is reserved to `cap` here, because that is what the type
-    /// promises to hold and growing to it by doubling would overshoot the bound
-    /// the caller asked for.
-    #[must_use]
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
+    /// The vector and the mask set are reserved to `cap` here, because that is
+    /// what the type promises to hold and growing to it by doubling would
+    /// overshoot the bound the caller asked for.
+    ///
+    /// # Errors
+    ///
+    /// [`TryReserveError`] when the allocator refuses `cap` itemsets, or `cap`
+    /// overflows the allocation size. This was an infallible
+    /// `Vec::with_capacity`, which panics past `isize::MAX` bytes and aborts
+    /// when the allocator refuses (W3-engine1-4, D-1497); `CLAUDE.md` §4 wants
+    /// the refusal named, the way the engine's own [`crate::Halt::Memory`]
+    /// names it.
+    pub fn try_with_capacity(cap: usize) -> Result<Self, TryReserveError> {
+        let mut held = Vec::new();
+        held.try_reserve_exact(cap)?;
+        let mut masks = crate::MaskSet::default();
+        masks.try_reserve(cap)?;
+        Ok(Self {
             cap,
-            held: Vec::with_capacity(cap),
+            held,
+            masks,
             discarded: 0,
-        }
+            repeated: 0,
+        })
     }
 
     /// The cap this retention was built with.
@@ -302,14 +331,32 @@ impl Best {
         self.discarded
     }
 
+    /// **Every offer of a mask already held**, refused without touching the
+    /// heap (v4-4, D-1497).
+    ///
+    /// Neither held again nor counted in [`Self::discarded`]: the combination
+    /// it names IS in the result, once. So offered = held + discarded +
+    /// repeated. A mask offered again after it was evicted is not held, so it
+    /// is weighed like any offer and, if refused, counted in `discarded` again.
+    #[must_use]
+    pub const fn repeated(&self) -> u64 {
+        self.repeated
+    }
+
     /// Offer one itemset.
     ///
-    /// Held when the retention is not yet full, or when it ranks above the
-    /// weakest held. Otherwise refused, and counted.
+    /// Refused and counted in [`Self::repeated`] when its mask is already held.
+    /// Otherwise held when the retention is not yet full, or when it ranks
+    /// above the weakest held, and refused and counted in [`Self::discarded`]
+    /// when it does not.
     ///
     /// # Cost: O(1) to refuse, O(log cap) to admit
     ///
-    /// A refusal is one comparison against the root. An admission is a heap
+    /// Every offer first probes the held-mask set once: expected O(1), not a
+    /// worst-case bound, and it hashes six words. A refusal is then one
+    /// comparison against the root. An admission adds one set insert (and, when
+    /// full, one removal), which never grows the set past its reservation, and
+    /// a heap
     /// sift -- `sift_up` while filling, `take_root`'s `sift_down` then
     /// `sift_up` when full -- and each sift walks at most `floor(log2(cap))`
     /// levels, so the admit cost grows with the retention's capacity, not with
@@ -319,7 +366,12 @@ impl Best {
     /// itemsets, fixed; the vector was reserved for `cap` when the retention
     /// was built.
     pub fn offer(&mut self, candidate: Itemset) {
+        if self.masks.contains(&candidate.mask) {
+            self.repeated = self.repeated.saturating_add(1);
+            return;
+        }
         if self.held.len() < self.cap {
+            self.masks.insert(candidate.mask);
             self.held.push(candidate);
             self.sift_up(self.held.len().saturating_sub(1));
             return;
@@ -334,7 +386,10 @@ impl Best {
             .first()
             .is_some_and(|weakest| ranks_below(weakest, &candidate))
         {
-            let _ = self.take_root();
+            if let Some(evicted) = self.take_root() {
+                self.masks.remove(&evicted.mask);
+            }
+            self.masks.insert(candidate.mask);
             self.held.push(candidate);
             self.sift_up(self.held.len().saturating_sub(1));
         }
@@ -528,7 +583,7 @@ mod tests {
     #[test]
     fn every_offer_is_either_held_or_counted_as_discarded() {
         for cap in [0_usize, 1, 7, 39, 40, 100] {
-            let mut best = Best::with_capacity(cap);
+            let mut best = Best::try_with_capacity(cap).expect("a small cap reserves");
             for it in forty() {
                 best.offer(it);
             }
@@ -556,10 +611,79 @@ mod tests {
         }
     }
 
+    /// **A MASK IS HELD AT MOST ONCE (v4-4, D-1497).**
+    ///
+    /// The audit's probe: three offers of one itemset at cap 3 held it three
+    /// times. Now it is held once and the two repeats are counted; a distinct
+    /// itemset still fills the room; a repeat of the ROOT of a full heap is a
+    /// repeat, not a discard; a repeat with different hits is still the same
+    /// mask; and an evicted mask offered again is weighed like any offer.
+    #[test]
+    fn a_repeated_mask_is_held_once_and_counted() {
+        let one = item(9, 3);
+        let mut best = Best::try_with_capacity(3).expect("a small cap reserves");
+        for _ in 0..3 {
+            best.offer(one);
+        }
+        assert_eq!(best.len(), 1, "one combination, held once");
+        assert_eq!(best.repeated(), 2);
+        assert_eq!(best.discarded(), 0, "a repeat is not a cap refusal");
+
+        best.offer(item(5, 4));
+        best.offer(item(1, 5));
+        assert_eq!(best.len(), 3, "distinct itemsets fill the room");
+        // FULL. The root is the weakest, (1, bit 5): its repeat is a repeat.
+        best.offer(item(1, 5));
+        best.offer(Itemset {
+            mask: one.mask,
+            hits: u64::MAX,
+        });
+        assert_eq!(best.repeated(), 4, "same mask, whatever its hits");
+        assert_eq!(best.discarded(), 0);
+        // A stronger distinct itemset evicts the root, and that mask is free.
+        best.offer(item(7, 6));
+        assert_eq!(best.discarded(), 1, "the eviction is counted once");
+        best.offer(item(1, 5));
+        assert_eq!(
+            best.discarded(),
+            2,
+            "an evicted mask is weighed, and refused"
+        );
+        assert_eq!(best.repeated(), 4, "and is not a repeat");
+        let kept: Vec<u64> = best.into_ordered().iter().map(|i| i.hits).collect();
+        assert_eq!(kept, vec![9, 7, 5], "three distinct, strongest first");
+
+        // EVERY OFFER LANDS IN EXACTLY ONE OF THREE PLACES, at every cap.
+        for cap in [0_usize, 1, 7, 40, 100] {
+            let mut best = Best::try_with_capacity(cap).expect("a small cap reserves");
+            for it in forty().into_iter().chain(forty()) {
+                best.offer(it);
+            }
+            let held = u64::try_from(best.len()).expect("fits");
+            assert_eq!(held + best.discarded() + best.repeated(), 80, "cap {cap}");
+            assert_eq!(best.len(), cap.min(40), "cap {cap}: no mask twice");
+            assert!(is_a_min_heap(&best));
+        }
+    }
+
+    /// **AN IMPOSSIBLE CAP IS A REFUSAL, NOT A PANIC (W3-engine1-4, D-1497).**
+    #[test]
+    fn an_impossible_cap_is_refused_rather_than_aborting() {
+        for cap in [usize::MAX, usize::MAX / 2, isize::MAX.unsigned_abs()] {
+            assert!(
+                Best::try_with_capacity(cap).is_err(),
+                "{cap} itemsets cannot be reserved"
+            );
+        }
+        let zero = Best::try_with_capacity(0).expect("zero reserves nothing");
+        assert!(zero.is_empty());
+        assert_eq!(zero.repeated(), 0);
+    }
+
     /// A cap of zero keeps nothing and refuses everything, loudly.
     #[test]
     fn a_cap_of_zero_holds_nothing_and_says_so() {
-        let mut best = Best::with_capacity(0);
+        let mut best = Best::try_with_capacity(0).expect("a small cap reserves");
         for it in forty() {
             best.offer(it);
         }
@@ -574,7 +698,7 @@ mod tests {
     /// What survives the cut is the strongest, and it comes out strongest first.
     #[test]
     fn the_strongest_are_kept_and_ordered_strongest_first() {
-        let mut best = Best::with_capacity(7);
+        let mut best = Best::try_with_capacity(7).expect("a small cap reserves");
         for it in forty() {
             best.offer(it);
         }
@@ -603,7 +727,7 @@ mod tests {
             .collect();
 
         let run = |order: &[Itemset]| {
-            let mut best = Best::with_capacity(4);
+            let mut best = Best::try_with_capacity(4).expect("a small cap reserves");
             for candidate in order {
                 best.offer(*candidate);
             }
@@ -647,7 +771,7 @@ mod tests {
         assert_eq!(strided.len(), ascending.len());
 
         let run = |order: &[Itemset]| {
-            let mut best = Best::with_capacity(9);
+            let mut best = Best::try_with_capacity(9).expect("a small cap reserves");
             for it in order {
                 best.offer(*it);
                 assert!(
@@ -762,7 +886,7 @@ mod tests {
         let column = Column::from_rows(&masks);
 
         let walk = |cap: usize| {
-            let mut best = Best::with_capacity(cap);
+            let mut best = Best::try_with_capacity(cap).expect("a small cap reserves");
             let out = Ladder::with_min_hits(1).walk_column_streamed(
                 &column,
                 &live,

@@ -2629,7 +2629,7 @@ mod tests {
         let ladder = Ladder::with_min_hits(1);
 
         let run = || {
-            let mut best = keep::Best::with_capacity(11);
+            let mut best = keep::Best::try_with_capacity(11).expect("a small cap reserves");
             let out =
                 ladder.walk_column_streamed(&column, &live, &mut |f, _, _| best.offer_level(f));
             (
@@ -2647,7 +2647,7 @@ mod tests {
         assert_eq!(first, run(), "and a third");
 
         let retained = ladder.walk_column(&column, &live, &|_, _, _| {});
-        let mut from_retained = keep::Best::with_capacity(11);
+        let mut from_retained = keep::Best::try_with_capacity(11).expect("a small cap reserves");
         for itemset in retained.all_frequent() {
             from_retained.offer(*itemset);
         }
@@ -2708,10 +2708,10 @@ mod tests {
         let masks = bars(&rows);
         let ladder = Ladder::with_min_hits(1);
 
-        let mut from_masks = keep::Best::with_capacity(5);
+        let mut from_masks = keep::Best::try_with_capacity(5).expect("a small cap reserves");
         let a = ladder.walk_streamed(&masks, &live, &mut |f, _, _| from_masks.offer_level(f));
 
-        let mut from_column = keep::Best::with_capacity(5);
+        let mut from_column = keep::Best::try_with_capacity(5).expect("a small cap reserves");
         let b = ladder.walk_column_streamed(&Column::from_rows(&masks), &live, &mut |f, _, _| {
             from_column.offer_level(f);
         });
