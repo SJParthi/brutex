@@ -702,7 +702,7 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             "5",
         ],
         &[
-            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "1000000", "1", "200",
+            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "999999", "1", "200",
             "1",
         ],
     ];
@@ -735,11 +735,14 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             let mut ledger = crate::results::Results::open_read(root)?;
             assert_eq!(ledger.len()?, 1);
             let row = ledger.read(0)?;
+            // 999,999 ppm of 3,000 bars is 2,999 hits: a million is refused
+            // at both support doors since D-1722.
             assert_eq!(
                 (row.bars, row.min_hits, row.months_asked, row.months_found),
                 // `bars` is the column's swept count, warm-up excluded
                 // (AC-whp-law-2, D-1661): 1,500 of the 3,000 loaded bars.
-                (1_500, 3_000, 1, 1)
+                // `min_hits` is still scaled to all 3,000 (D-1661 note).
+                (1_500, 2_999, 1, 1)
             );
             assert_eq!(row.halted, 0);
             let attempt =

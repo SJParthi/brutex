@@ -13298,6 +13298,11 @@ FIXED RATHER THAN LISTED -- which is what the rule is for.
   cli/lib.rs 5 -- the support ladder's rungs and the report's rows.
     The ladder is a compile-time list of eight; the rows are what is
     printed, which is capped before it is ordered.
+    CORRECTED by D-1726 and D-1728: the tier ladder is GENERATED, up to
+    64 x 28 x 396 tiers sorted once, not a list of eight (its cost is
+    under "`cli` screening, tier-ladder and report costs"); and the
+    frontier commit ordered every retained row before `take(top)` until
+    D-1728 made it select first.
   pull/nseindex.rs 1 -- the REFUSED entries of one exchange page,
     ordered so the refusal list is byte-identical between runs.
   runner/grid.rs 2 -- the exit grid's distinct values, bounded by the
@@ -13424,6 +13429,14 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     `#[cfg(test)] fn` kept as the oracle the prefix cadence must end
     on. This scanner drops `#[cfg(test)] mod` blocks, not a
     `#[cfg(test)]` fn, so it still counts a line no build runs.
+  cli/lib.rs 7 -> 8 -- D-1728, W2-cli8-3. `record_frontier`'s
+    `sort_by_key` over every retained row went, and
+    `first_accepted_in_order` brought two: `select_nth_unstable` cuts the
+    next window of `(key, position)` pairs, and `sort_unstable` orders
+    only that window. The window starts at the page size `top` and
+    doubles only while the dedup rejects rows, so what is ordered is the
+    written page plus what was rejected to fill it, never the
+    unselected rest of the K retained rows.
 ~~~~
 
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
@@ -14125,3 +14138,63 @@ the bound rather than ground through.
 What the census does not withhold: a session-edge hole no signal bar's close
 demands (a `1min` rung that stops at 15:24, a missing 09:15). Such a day is
 swept with the bars it has, as before.
+
+## `cli` screening, tier-ladder and report costs (lane 1-b group B, D-1720 onward)
+
+Each entry names a cost that is not O(1), says what it grows with, and points
+at the decision that measured or bounded it. None is a per-bar or
+per-candidate primitive from `CLAUDE.md` §3 rule 4.
+
+- **`screen_cascade`, per cascade: `O(T × (M + C × 2 × G))`** (W2-cli8-0,
+  D-1720). `T` is the tiers screened, `M` is one screen's setup over the
+  execution bars, `C` is the priced candidates (at most `screen_cap()`), and
+  `G` is one exit grid's evaluation, done for both sides. Every tier walked is
+  a full re-screen, because a tier's `max_mae_ppm` is merged into the stop
+  ladder as `grid::Levels::forced`, so each tier prices a different grid.
+  `walk_ladder` screens strictest first and stops at the first tier that
+  admits, so `T` is that tier's rank plus one, and the WHOLE ladder (up to
+  eight screens) when nothing admits. That worst case is paid on exactly the
+  spans with no answer. D-1720's mildest-first probe cut it to one screen, and
+  D-1731 removed it: a stricter tier's forced stop can price a rung the
+  mildest grid lacks, so "the mildest admits nothing" does not prove "no tier
+  admits". The cost is measured only as a count
+  (`the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission`,
+  SCB-01); the time per screen is UNVERIFIED, as no bench times a cascade, and
+  the ~20 s per 60min pass over 577 candidates quoted in the source is an
+  operator log reading, not a measurement taken here. An O(1) tier would need one grid holding every tier's
+  forced stop. That is a different grid and a different identity, and it was
+  rejected.
+
+- **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
+  number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
+  `grid_rungs`, `max_stop_points`, each once), one
+  `runner::grid::trades_needed_for` per win-rate rung (at most 396, each at
+  most `TRADES_SEARCH_CEILING` Wilson bounds), and one `O(T log T)` sort over
+  `T <= 64 × 28 × 396` generated tiers. Before D-1726 the ceiling scan ran
+  once per rung and the floor search once per tier.
+
+- **`measure_top`, per screen: `O(band × (G + 7 × trades))`** (W2-cli8-7,
+  D-1727). `band = measured_band(top) = max(8 × top, 32)` rows, each a full
+  exit-grid rebuild plus a per-trade walk bucketed at seven calendar grains.
+  `top <= TOP_CEILING` (1,000) at every door, so `band <= 8,000`. The rows are
+  measured across cores with an indexed `par_iter_mut`, and the answer is
+  byte-identical to the sequential loop. The rebuild per row is inherent:
+  carrying each priced row's grid would keep up to `screen_cap()` grids
+  resident.
+
+- **`record_frontier`, per result commit** (W2-cli8-3, D-1728). There are `K`
+  key evaluations (`K <= audit_keep()`) and `O(K)` memory for the
+  `(key, position)` pairs. `first_accepted_in_order` selects and orders only
+  the rows it writes: `O(K + top log top)` when the dedup rejects few rows, and
+  at worst `O(K log K)` comparisons of precomputed keys, over `O(log(K / top))`
+  doubling rounds. Before D-1728 it was `O(K log K)` key EVALUATIONS, each a
+  map probe plus a Wilson bound.
+
+- **`cli results` and `cli top`, per request: `O(ledger rows)` reads, `O(1)`
+  retained** (W2-cli8-5, D-1729). `results_at` makes one newest-first pass
+  over every recorded run and keeps at most `LIST_ROWS` (40) records plus a
+  running best. `newest_complete` makes one pass and keeps one record. Neither
+  can stop early: the best complete run can be anywhere in the ledger. A
+  per-request bound below the ledger would need a secondary index, which this
+  append-only, path-is-the-index file does not keep. UNVERIFIED as a
+  measurement: no bench times either read.

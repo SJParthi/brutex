@@ -86,6 +86,8 @@ mod operator_boundary_tests;
 mod readonly_file;
 #[cfg(test)]
 mod results_report_tests;
+#[cfg(test)]
+mod screen_policy_tests;
 
 #[cfg_attr(
     not(test),
@@ -1294,8 +1296,9 @@ fn elite_arm(
                      A negative ceiling is unsatisfiable, not a looser one",
                 );
             }
-            if n == 0 {
-                return refuse(out, "TOP must be 1 or more");
+            // `1..=TOP_CEILING`, one refusal for every door (D-1727).
+            if let Some(why) = top_refusal(n) {
+                return refuse(out, why);
             }
             // NO SUPPORT ARGUMENT. `elite_descend` walks the threshold from a
             // cheap ceiling down to the floor one trade a week implies, and
@@ -1330,7 +1333,8 @@ fn elite_arm(
         }
         (_, (Err(_), _)) => refuse(
             out,
-            "MAX_POINTS must be a whole number of index points, 1 or more",
+            "MAX_POINTS must be a whole number of index points: 1 or more for a \
+             ceiling, or 0 for no ceiling beyond the ladder the bars derive",
         ),
         (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
     }
@@ -1374,8 +1378,9 @@ fn screen_arm(
                     "MAX_POINTS must be a whole number of index points, 1 or more",
                 );
             }
-            if n == 0 {
-                return refuse(out, "TOP must be 1 or more");
+            // `1..=TOP_CEILING`, one refusal for every door (D-1727).
+            if let Some(why) = top_refusal(n) {
+                return refuse(out, why);
             }
             // THE THIRD NUMBER, VALIDATED LIKE THE OTHER TWO. `pts` and `n`
             // were checked and `rr` was not, so a negative MIN_RR reached
@@ -2469,21 +2474,30 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
 /// defect `engine::Ladder::with_min_hits` raises zero to one to prevent, arriving
 /// through a different door.
 ///
-/// A million is 100% support: a combination that fires on EVERY bar. Above that
-/// nothing can be frequent and the sweep is guaranteed to find nothing, so it is
-/// refused rather than run — a report of zero combinations that took an hour to
-/// produce is a waste, not a finding.
+/// A million is 100% support: a combination that fires on EVERY bar, and
+/// D-0080 excludes exactly that shape (`AlwaysTrue`) before k=1. At or above a
+/// million nothing sweepable can be frequent and the sweep is guaranteed to
+/// find nothing, so it is refused rather than run — a report of zero
+/// combinations that took an hour to produce is a waste, not a finding.
+///
+/// # One domain for both doors (W2-cli8-11, D-1722)
+///
+/// This refused only ABOVE a million while `BRUTEX_SUPPORT_PPM` refused AT it,
+/// so the same 100% was a run from argv and a named refusal from the knob,
+/// under a comment in `one_rung` claiming both refused it. `support_from_knob`
+/// now calls this function, so the two doors cannot disagree again.
 ///
 /// # Errors
 ///
-/// A non-number, zero, or anything above 1,000,000.
+/// A non-number, zero, or 1,000,000 and anything above it.
 fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
     match text.parse::<u64>() {
         Err(_) => Err("SUPPORT_PPM is not a whole number"),
         Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
-        Ok(ppm) if ppm > 1_000_000 => Err(
-            "SUPPORT_PPM is parts per million, so 1000000 is 100%. Above \
-                 that nothing can be frequent",
+        Ok(ppm) if ppm >= 1_000_000 => Err(
+            "SUPPORT_PPM is parts per million, so 1000000 is 100%: a pattern on \
+                 every bar, which D-0080 excludes, so at or above it nothing can \
+                 be frequent",
         ),
         Ok(ppm) => Ok(ppm),
     }
@@ -5642,7 +5656,7 @@ fn grid_exposure(outcome: &runner::RankedOutcome, bars: &[indicators::Candle]) -
 /// It is not invented, and it is not a preference. It is the arithmetic the
 /// three consumers of the series force:
 ///
-/// * the walk-forward splits into [`WALK_FORWARD_SPLITS`] anchored folds, so a
+/// * the walk-forward splits into [`walk_forward_splits`] anchored folds, so a
 ///   fold's TEST window is roughly `sessions / splits`;
 /// * the bootstrap resamples in stationary blocks of
 ///   [`runner::bootstrap::DEFAULT_BLOCK`], so a draw is roughly
@@ -5676,7 +5690,13 @@ const MIN_AUDIT_SESSIONS: usize = 50;
 /// computed over ~20 sessions rendered in **exactly the same format** as one
 /// computed over 3,650, with nothing on the page to tell them apart. The number
 /// was not wrong; the impression it gave was.
-fn sample_warning(sessions: usize) -> String {
+///
+/// `splits` is the fold count the walk-forward actually ran,
+/// `walk_forward_splits(bars.len())`. This printed a constant five and divided
+/// by it while `both_shapes` ran 2 to 20 folds from the span's own length, so
+/// the SAMPLE line contradicted the WALK-FORWARD section of the same report
+/// (ET-strategies-trades-ranking-costs-2, D-1725).
+fn sample_warning(sessions: usize, splits: usize) -> String {
     if sessions >= MIN_AUDIT_SESSIONS {
         return String::new();
     }
@@ -5684,7 +5704,7 @@ fn sample_warning(sessions: usize) -> String {
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
-        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {WALK_FORWARD_SPLITS} · \
+        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {splits} · \
          bootstrap block {block}\n  \
          THIN. Below {MIN_AUDIT_SESSIONS} sessions each fold tests on roughly \
          {} day(s) and each bootstrap draw is roughly {} block(s), so the \
@@ -5692,7 +5712,7 @@ fn sample_warning(sessions: usize) -> String {
          sample does not have. They render in the same format they would over \
          ten years; they do not mean the same thing. The trades, the exit grid \
          and the excursions are unaffected — those measure what happened.",
-        sessions / WALK_FORWARD_SPLITS.max(1),
+        sessions / splits.max(1),
         sessions / block.max(1),
     );
     out
@@ -5948,26 +5968,6 @@ fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
     }
     days
 }
-
-/// How many anchored folds the walk-forward uses.
-///
-/// # A stated assumption, in the form this crate already uses for one
-///
-/// `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` are both constants
-/// their own documentation calls "a stated assumption and not a derivation", and
-/// this is the third. `CLAUDE.md` §3 rule 1 forbids PRETENDING a number is
-/// derived; it does not forbid choosing one and saying so.
-///
-/// Five is the anchored-walk-forward count in common use, and the trade it makes
-/// is legible: each additional fold buys another independent out-of-sample
-/// verdict and costs one more full sweep, while shortening every training window.
-/// On a 91,874-bar column that is roughly 18,000 test bars per fold — enough that
-/// a fold's verdict is not one afternoon.
-///
-/// Nothing in the data says where that trade sits, and no charter source names a
-/// fold count, so this is the assumption and the report prints it beside the
-/// result rather than burying it.
-const WALK_FORWARD_SPLITS: usize = 5;
 
 /// How many anchored folds to split a column into, DERIVED from its length.
 ///
@@ -7303,6 +7303,10 @@ fn append_condition_names(out: &mut String, record: &crate::results::Record) {
 /// number is a reader who will miss it — and because `done: NO` rows must not
 /// win. A halted ladder's total is not comparable with a complete one's: it
 /// covers less of the search while its combination count looks larger.
+// TEST-ONLY SINCE D-1729: the listing folds the same choice in
+// `listing_window`, and this stays as the reference its equivalence test and
+// the tie tests below check that fold against.
+#[cfg(test)]
 fn best_complete_newest_first(rows: &[crate::results::Record]) -> Option<&crate::results::Record> {
     // AND `trades == 0` MUST NOT WIN EITHER, for the same reason `halted` must
     // not: it is not a worse total, it is NO total.
@@ -7419,6 +7423,30 @@ fn rupees(paisa: i64) -> String {
         grouped,
         fraction
     )
+}
+
+/// `n / d` rounded half away from zero, in integers (D-1723).
+///
+/// The one reduction the top report uses for its stored thousandths. Integer
+/// `/` truncates toward zero, which biases every reduced figure toward zero and
+/// erases the sign of a value in `(-d, 0)` that rounds to `-1`. Half away from
+/// zero is symmetric in sign, so `-x` always prints as the negation of `x`.
+///
+/// Never overflows: the remainder is smaller than `d` in magnitude, and the
+/// quotient moves by one only away from zero, which `n / d` for `d >= 2` can
+/// always absorb. A `d` of zero or below is a caller defect: it returns zero
+/// rather than dividing by it (every caller passes a positive constant).
+const fn div_round_half_away(n: i64, d: i64) -> i64 {
+    if d <= 0 {
+        return 0;
+    }
+    let quotient = n / d;
+    let remainder = n % d;
+    if remainder.unsigned_abs().saturating_mul(2) >= d.unsigned_abs() {
+        if n < 0 { quotient - 1 } else { quotient + 1 }
+    } else {
+        quotient
+    }
 }
 
 /// Parts per million as a percentage, to two decimals, in integers.
@@ -7871,7 +7899,7 @@ const LIST_ROWS: usize = 40;
 /// answer could be printed once, on the run that produced it, and never again.
 ///
 /// Which run: the **best complete** one matching the filter, chosen exactly as
-/// [`best_complete_newest_first`] chooses it — highest `pessimistic` among rows
+/// `listing_window` chooses it — highest `pessimistic` among rows
 /// that completed and traded. A halted run's totals are not comparable with a complete one's, so
 /// ranking them together would be the defect `range-all`'s `complete` column
 /// exists to prevent.
@@ -8044,9 +8072,11 @@ pub fn render_top_record(
                 row.n.to_string(),
                 // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
                 // column in this binary. It is stored in thousandths of a paisa,
-                // so it comes back to whole paisa first.
-                rupees(row.mean_milli_paisa / 1_000),
-                hundredths_of(row.t_milli / 10),
+                // so it comes back to whole paisa first -- ROUNDED half away
+                // from zero, not truncated (GAP16-25, D-1723): `/` biased every
+                // figure toward zero, printed 47.6 paisa as 47 and -0.6 as 0.
+                rupees(div_round_half_away(row.mean_milli_paisa, 1_000)),
+                hundredths_of(div_round_half_away(row.t_milli, 10)),
                 if row.payoff_bp == i64::MAX {
                     "inf".to_owned()
                 } else {
@@ -8176,10 +8206,13 @@ fn newest_complete(
 ///
 /// # Cost
 ///
-/// `O(rows)` — the size of the answer, and every individual read is `O(1)` at
-/// `HEADER + i·STRIDE`. There is no scan of anything larger than the ledger and
-/// no index to maintain, which is `CLAUDE.md` §4's *"the path is the index"*
-/// applied to a file that is one array.
+/// `O(ledger rows)` reads -- every recorded run, matching or not -- each `O(1)`
+/// at `HEADER + i·STRIDE`, and `O(1)` retained: at most [`LIST_ROWS`] records
+/// plus one running best (W2-cli8-5, D-1729). This said "`O(rows)` — the size
+/// of the answer", but the printed answer is at most `LIST_ROWS + 1` rows while
+/// the scan is the whole ledger, and it held every matching record in memory to
+/// print forty. A per-request bound below the ledger would need a secondary
+/// index this append-only file does not keep; `docs/06-limits.md` states it.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -8289,44 +8322,33 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         return out;
     }
 
-    // NEWEST FIRST, read backwards. The ledger is append-only, so the last row
-    // is the most recent and no sort is needed to say so.
-    let mut rows: Vec<crate::results::Record> = Vec::new();
-    for back in 1..=count {
-        match store.read(count.saturating_sub(back)) {
-            Err(why) => return format!("refused: {why}\n"),
-            Ok(record) => {
-                let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
-                    && underlying
-                        .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
-                if keep {
-                    rows.push(record);
-                }
-            }
-        }
-    }
+    let window = match listing_window(&mut store, count, feed, underlying) {
+        Ok(window) => window,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let rows = &window.shown;
     if let (Some(f), Some(u)) = (feed, underlying) {
         let _ = writeln!(out, "  filtered to                             {f} {u}");
     }
     let _ = writeln!(
         out,
         "  matching                                {}",
-        rows.len()
+        window.matching
     );
     let _ = writeln!(out);
 
     // THE BEST ROW, BY THE FIGURE SELECTION USES. Chosen before the table,
     // because what it is decides what the page states above the table.
-    let best = best_complete_newest_first(&rows);
-    out.push_str(&listing_equity_note(&rows, best));
+    let best = window.best.as_ref();
+    out.push_str(&listing_equity_note(rows, best));
 
-    results_table(&mut out, &rows);
-    if rows.len() > LIST_ROWS {
+    results_table(&mut out, rows);
+    if window.matching > LIST_ROWS {
         let _ = writeln!(
             out,
             "  ... {} further row(s) NOT SHOWN. The ledger is complete; this \
              table is not.",
-            rows.len().saturating_sub(LIST_ROWS)
+            window.matching.saturating_sub(LIST_ROWS)
         );
     }
 
@@ -8340,6 +8362,62 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         out.push_str(&quality_block(best));
     }
     out
+}
+
+/// What [`results_at`] keeps of one pass over the ledger: the newest
+/// [`LIST_ROWS`] matching records, the best complete one, and how many matched.
+struct ListingWindow {
+    /// The newest matching records, newest first, never more than `LIST_ROWS`.
+    shown: Vec<crate::results::Record>,
+    /// `best_complete_newest_first` over EVERY matching record, folded.
+    best: Option<crate::results::Record>,
+    /// Every matching record, shown or not.
+    matching: usize,
+}
+
+/// One newest-first pass over `count` ledger rows, retaining `O(1)` records
+/// (D-1729): the first [`LIST_ROWS`] matches and a running best. Proven equal
+/// to full retention, and bounded, by
+/// `cli::screen_policy_tests::the_listing_window_equals_full_retention_and_keeps_at_most_forty`
+/// (invariant SCB-10).
+///
+/// The best is the one `best_complete_newest_first` picks over all matches:
+/// the largest `pessimistic` among complete rows, and the NEWEST of a tie.
+/// Visited newest first, a later record replaces it only when strictly larger.
+fn listing_window(
+    store: &mut crate::results::Results,
+    count: u64,
+    feed: Option<&str>,
+    underlying: Option<&str>,
+) -> Result<ListingWindow, crate::results::Refusal> {
+    let mut window = ListingWindow {
+        shown: Vec::with_capacity(LIST_ROWS),
+        best: None,
+        matching: 0,
+    };
+    // NEWEST FIRST, read backwards. The ledger is append-only, so the last row
+    // is the most recent and no sort is needed to say so.
+    for back in 1..=count {
+        let record = store.read(count.saturating_sub(back))?;
+        let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
+            && underlying.is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+        if !keep {
+            continue;
+        }
+        window.matching = window.matching.saturating_add(1);
+        if record.has_complete_trade_total()
+            && window
+                .best
+                .as_ref()
+                .is_none_or(|best| record.pessimistic > best.pessimistic)
+        {
+            window.best = Some(record);
+        }
+        if window.shown.len() < LIST_ROWS {
+            window.shown.push(record);
+        }
+    }
+    Ok(window)
 }
 
 /// What [`results_at`] states above its table: a stock's figures say what they
@@ -8403,12 +8481,12 @@ const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
 /// recorded by [`crate::knobs::refused`].
 fn support_from_knob() -> Option<u64> {
     let raw = crate::knobs::var("BRUTEX_SUPPORT_PPM")?;
-    match raw.trim().parse::<u64>() {
-        Ok(ppm) if ppm > 0 && ppm < 1_000_000 => Some(ppm),
-        _ => {
-            crate::knobs::refuse_value("BRUTEX_SUPPORT_PPM", &raw);
-            None
-        }
+    // THE ARGV DOOR'S OWN VALIDATOR, so the two cannot drift (D-1722).
+    if let Ok(ppm) = parse_support_ppm(raw.trim()) {
+        Some(ppm)
+    } else {
+        crate::knobs::refuse_value("BRUTEX_SUPPORT_PPM", &raw);
+        None
     }
 }
 
@@ -8645,7 +8723,8 @@ fn traded_preamble(
 ) -> String {
     let mut out = traded_line(first, direction);
     out.push_str(&grid_exposure(outcome, bars));
-    out.push_str(&sample_warning(sessions));
+    // The fold count `both_shapes` derives from these same bars (D-1725).
+    out.push_str(&sample_warning(sessions, walk_forward_splits(bars.len())));
     out
 }
 
@@ -9204,7 +9283,7 @@ impl Rules {
             // fill readings. Measured 2.26 on the 60min run, so it is a floor a
             // real record can clear -- unlike `min_rr_bp`, which is min/max.
             min_avg_rr_bp: at("BRUTEX_MIN_AVG_RR_BP", 150),
-            top: usize::try_from(at("BRUTEX_TOP", 25)).unwrap_or(25),
+            top: top_from_knob(),
         }
     }
 
@@ -9745,6 +9824,11 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
     let per_point = points_to_ppm_at(1, reference).max(1);
     // ONE BAR, as above: a points-facing display ladder with no hold in scope.
     let step = grid_step_ppm(bars, 1);
+    // READ ONCE, NOT ONCE PER RUNG (W2-cli8-1, D-1726). This sat inside the
+    // `filter` below, and `max_stop_points` collects every bar's range into a
+    // `Vec` of length N and selects a percentile from it: O(N) per rung for an
+    // answer no rung changes.
+    let ceiling = max_stop_points(bars);
     (1..=grid_rungs(bars))
         .filter_map(|i| i64::try_from(i).ok())
         .map(|i| {
@@ -9752,7 +9836,7 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
             // Ceiling division into whole points.
             ppm.saturating_add(per_point - 1) / per_point
         })
-        .filter(|&pt| pt > 0 && pt <= max_stop_points(bars))
+        .filter(|&pt| pt > 0 && pt <= ceiling)
         .collect()
 }
 
@@ -9853,10 +9937,23 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
     // thousand-trade combination is finer than one judging fifty.
     let rates = win_rate_rungs(trades);
     let ratios = grid_ratios();
+    // ONE TRADE FLOOR PER WIN RATE, NOT PER TIER (W2-cli8-1, D-1726). The floor
+    // below depends on the rate alone, and `trades_needed_for` is a search of up
+    // to `TRADES_SEARCH_CEILING` Wilson bounds. Inside the loop it ran once per
+    // (stop, ratio, rate): up to 64 x 28 x 396 times for 396 distinct answers.
+    let floors: Vec<(i64, u64)> = rates
+        .iter()
+        .map(|&rate| {
+            (
+                rate,
+                runner::grid::trades_needed_for(10_000, rate, TRADES_SEARCH_CEILING),
+            )
+        })
+        .collect();
     let mut out: Vec<Tier> = Vec::with_capacity(stops.len() * ratios.len() * rates.len());
     for &max_points in &stops {
         for &min_rr_bp in &ratios {
-            for &min_win_rate_bp in &rates {
+            for &(min_win_rate_bp, min_trades) in &floors {
                 out.push(Tier {
                     // NAMED BY RANK, ASSIGNED BELOW. A name cannot be computed
                     // from the thresholds without inventing a scale; it is the
@@ -9891,11 +9988,8 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
                     // that with a bound in place "the honest `min_trades` is
                     // small or zero, because the bound already refuses what a
                     // floor was standing in for". The floor stops standing in.
-                    min_trades: runner::grid::trades_needed_for(
-                        10_000,
-                        min_win_rate_bp,
-                        TRADES_SEARCH_CEILING,
-                    ),
+                    // Computed once per rate above, before the loop.
+                    min_trades,
                 });
             }
         }
@@ -11155,7 +11249,7 @@ fn descent_banner(
 /// # Why only the survivor pays for this
 ///
 /// Every step of a descent runs with `validate: false`, which is what makes the
-/// walk finishable: the stack costs `WALK_FORWARD_SPLITS` sweeps twice over plus
+/// walk finishable: the stack costs `walk_forward_splits` sweeps twice over plus
 /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade
 /// re-walks — none of it sized by the data. MEASURED: a 60-minute audit over six
 /// months did not finish in sixty seconds at a candidate ceiling of one
@@ -11476,15 +11570,28 @@ pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 /// listing that dropped them would leave a reader unable to tell "nothing
 /// passed" from "nothing was tried".
 ///
-/// # Why the grid is built once and the tiers only re-filter
+/// # Every tier walked is a full re-screen, and this said otherwise
 ///
-/// Every tier reads the same [`grid::Cell`] values — `worst_mae`,
-/// `reward_to_risk_bp`, `win_rate_bp`, `trades`. None of them changes what the
-/// grid CONTAINS, so eight tiers cost eight passes over cells already computed
-/// rather than eight sweeps. The one thing a tier does change is the forced
-/// stop merged into the ladder, and that is taken from the STRICTEST tier so
-/// the tightest level an operator might want is present in the grid every tier
-/// then reads.
+/// This section was headed "why the grid is built once and the tiers only
+/// re-filter", and it claimed the tiers cost passes over cells already
+/// computed rather than sweeps. That was false (W2-cli8-0, D-1720): each tier
+/// calls [`screen`], and `screen` hands the tier's `max_mae_ppm` to
+/// `grid::Levels::forced`, which `runner::grid` merges INTO the stop ladder. A
+/// tier with a different forced stop prices a different grid, so no tier can
+/// reuse another's cells.
+///
+/// The honest bound, per cascade, is `O(T × (M + C × 2 × G))`: `T` tiers
+/// screened, `M` one screen's setup over the execution bars, `C` priced
+/// candidates (at most `screen_cap()`), two sides each, `G` one exit grid.
+/// [`walk_ladder`] screens tiers strictest first and stops at the first that
+/// admits, so `T` is that tier's rank plus one, and the WHOLE ladder when
+/// nothing admits: no tier is skipped, because a stricter tier's forced stop
+/// can price a rung the mildest grid lacks (D-1731). Making a tier O(1) would need one grid holding every tier's forced stop at
+/// once, which is a different grid and a different run identity: rejected in
+/// D-1720 and stated in `docs/06-limits.md`. The screen COUNTS are proven by
+/// `cli::screen_policy_tests::the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission`
+/// (invariant SCB-01); the per-screen cost is UNVERIFIED as a measurement, as
+/// no bench times a cascade.
 ///
 /// # It never invents a tier
 ///
@@ -11692,118 +11799,161 @@ fn screen_cascade<'a>(
     // what prevents a mask visited by a broader earlier cap from being stamped
     // later with rules under which it was never priced.
     let mut final_priced = yours.priced;
-    // THE MILDEST TIER IS PROBED FIRST, AND IT IS A PROOF RATHER THAN A GUESS.
+    // EVERY TIER IS WALKED IN ORDER, STRICTEST FIRST, AND THE WALK STOPS AT THE
+    // FIRST ONE THAT ADMITS (D-1731).
     //
-    // # What the walk cost, measured
+    // # What the walk costs, measured
     //
-    // The ladder is built "strictest first" and every tier is a FULL re-screen
-    // of the whole candidate set. On the operator's 60min rung the log shows one
-    // pass every ~20 seconds over 577 candidates -- and since `screen` prices
-    // both sides, each pass is two exit grids per candidate. Walking the whole
-    // ladder is that, times the tier count, on every rung, and it runs ONLY when
-    // nothing has passed -- so the machine spends longest on exactly the spans
-    // that have no answer to find.
+    // Every tier is a FULL re-screen of the whole candidate set. On the
+    // operator's 60min rung the log showed one pass every ~20 seconds over 577
+    // candidates -- and since `screen` prices both sides, each pass is two exit
+    // grids per candidate. When nothing passes, the walk pays that once per
+    // tier: the machine spends longest on exactly the spans that have no answer
+    // to find. That cost is accepted, because the shortcut that avoided it was
+    // not sound.
     //
-    // # Why one probe settles it
+    // # Why the mildest tier cannot be probed instead (D-1731)
     //
-    // Every tier relaxes the same three floors -- `max_points` up, `min_rr_bp`
-    // down, `min_win_rate_bp` down -- and `Rules::admits` is a conjunction of
-    // `>=` and `<=` against those floors. So a cell admitted at tier N is
-    // admitted at every tier milder than N: relaxing a floor can only widen the
-    // admitted set, never narrow it. `tiers` sorts strictest first, so the LAST
-    // entry is the widest set the ladder can offer.
+    // D-1720 screened the mildest tier first and, when it admitted nothing,
+    // declared every tier UNMET without walking them, on the argument that each
+    // tier only relaxes floors and `Rules::admits` is monotone in them. The
+    // floors are monotone; the GRID is not. A tier's `max_mae_ppm` becomes
+    // `grid::Levels::forced`, which `runner::grid` merges INTO the stop ladder,
+    // so a stricter tier prices a stop rung the mildest tier's grid may lack. A
+    // cell at that rung can pass the stricter tier and exist nowhere milder, and
+    // the probe would have printed "every tier UNMET" over a ladder that had an
+    // answer. Nothing proved that cannot happen, so the walk no longer assumes
+    // it.
     //
-    // If the mildest tier admits nothing, no tier admits anything. Walking the
-    // rest cannot find a row; it can only spend the time proving what the last
-    // entry already proved.
+    // # Admission, not a subject (W2-cli8-8, D-1720)
     //
-    // The report is unchanged in the case that matters: when something DOES
-    // pass, the loop below still walks strictest-first and names the first tier
-    // that met, which is the answer an operator wants. This only skips the walk
-    // when the answer is known to be "none".
-    if let Some(mildest) = ladder.last() {
-        let widest = screen(
-            bars,
-            column,
-            by_evidence,
-            horizon,
-            mildest.rules(top, reference),
-            pricing,
-            facts,
-        )?;
-        if widest.selected.is_none() {
+    // The walk once asked `selected.is_none()`. `selected` stopped meaning
+    // "admitted" when `final_selection` began falling back to the best row that
+    // TRADED, so the loop printed the STRICTEST tier as MET over a table in
+    // which nothing had passed. `walk_ladder` decides on `admitted_any` alone,
+    // and its tests pin every shape of the walk: none admits, the first admits,
+    // only the mildest admits, only a stricter tier admits, an empty ladder.
+    let walk = walk_ladder(
+        &ladder,
+        |tier| {
+            screen(
+                bars,
+                column,
+                by_evidence,
+                horizon,
+                tier.rules(top, reference),
+                pricing,
+                facts,
+            )
+        },
+        |body| body.admitted_any,
+        |rank, body| {
+            let _ = writeln!(out, "  {:<8} UNMET", Tier::label(rank));
+            replace_priced(&mut final_priced, body.priced);
+        },
+    )?;
+    match walk {
+        LadderWalk::NoneAdmit(rank, mildest) => {
+            let _ = writeln!(out, "  {:<8} UNMET", Tier::label(rank));
             let _ = writeln!(
                 out,
-                "  every tier UNMET -- the MILDEST tier ({}) admitted nothing, and \
-                 every tier above it is stricter, so none can admit anything. The \
-                 remaining {} tier(s) were not walked: each is a full re-screen and \
-                 the answer is already settled.",
-                mildest.describe(),
-                ladder.len().saturating_sub(1)
+                "\n  NO TIER MET, INCLUDING THE MILDEST. A combination that cannot clear \
+                 even the mildest rung is not a near miss, and the TIGHTEST column in \
+                 the table below is \
+                 how far the closest one actually ran. This is a statement about these \
+                 bars, not a failure of the search."
             );
-            replace_priced(&mut final_priced, widest.priced);
-            out.push_str(&widest.text);
-            return Ok(ScreenResult {
+            // The mildest tier's own screen, already taken by the walk, is the
+            // table a reader sees: no tier is screened twice.
+            out.push_str(&mildest.text);
+            replace_priced(&mut final_priced, mildest.priced);
+            // THE RANKING SURVIVES, AS IT DOES ON A SEARCH STEP. `selected` is
+            // the best-ranked row that traded under the mildest tier, priced in
+            // the map returned beside it: a subject an operator can open, and
+            // `admitted_any: false` says in so many words that it passed nothing.
+            Ok(ScreenResult {
+                text: out,
+                selected: mildest.selected,
+                priced: final_priced,
+                admitted_any: false,
+            })
+        }
+        LadderWalk::Met(rank, tier, body) => {
+            let _ = writeln!(
+                out,
+                "  {:<8} MET -- {}\n",
+                Tier::label(rank),
+                tier.describe()
+            );
+            out.push_str(&body.text);
+            Ok(ScreenResult {
+                text: out,
+                selected: body.selected,
+                priced: body.priced,
+                admitted_any: body.admitted_any,
+            })
+        }
+        LadderWalk::Exhausted => {
+            let _ = writeln!(
+                out,
+                "\n  NO TIER MET: the generated ladder is empty, so no tier was screened."
+            );
+            Ok(ScreenResult {
                 text: out,
                 selected: None,
                 priced: final_priced,
                 admitted_any: false,
-            });
+            })
         }
     }
+}
 
+/// Where the generated tier ladder's walk stopped. Decided by admission alone.
+enum LadderWalk<'t, T, S> {
+    /// Every tier was screened and none admitted: the mildest tier's rank and
+    /// its screen, which the caller shows as the diagnostic table.
+    NoneAdmit(usize, S),
+    /// The strictest tier that admitted a row: its rank, the tier, its screen.
+    Met(usize, &'t T, S),
+    /// The ladder is empty, so nothing was screened.
+    Exhausted,
+}
+
+/// Walks `ladder` strictest first and stops at the first tier whose screen
+/// ADMITTED a row.
+///
+/// Every tier walked and found unmet BEFORE the last is handed to `unmet` in
+/// rank order; the last tier's unmet screen is returned in
+/// [`LadderWalk::NoneAdmit`] so the caller can show it without screening it
+/// again. No tier is skipped on an argument about the others: admission is not
+/// monotone across the ladder, because each tier's forced stop changes the
+/// grid it prices (D-1731).
+///
+/// `admitted` is the whole verdict. Asking whether a screen SELECTED a row is
+/// the defect this exists to make untestable (W2-cli8-8, D-1720): a screen
+/// selects the best row that traded whether or not anything passed.
+///
+/// Cost: `rank + 1` calls of `screen_at` when tier `rank` is the first to
+/// admit, `ladder.len()` when none does, zero for an empty ladder. Each call is
+/// a full re-screen; see `screen_cascade`.
+fn walk_ladder<T, S>(
+    ladder: &[T],
+    mut screen_at: impl FnMut(&T) -> Result<S, String>,
+    admitted: impl Fn(&S) -> bool,
+    mut unmet: impl FnMut(usize, S),
+) -> Result<LadderWalk<'_, T, S>, String> {
+    let last = ladder.len().saturating_sub(1);
     for (rank, tier) in ladder.iter().enumerate() {
-        let rules = tier.rules(top, reference);
-        let body = screen(bars, column, by_evidence, horizon, rules, pricing, facts)?;
-        // The typed selection is the same final, post-consistency row the table
-        // renders. Rendered wording is diagnostic, never a control protocol.
-        if body.selected.is_none() {
-            let _ = writeln!(out, "  {:<8} UNMET", Tier::label(rank));
-            replace_priced(&mut final_priced, body.priced);
-            continue;
+        let body = screen_at(tier)?;
+        if admitted(&body) {
+            return Ok(LadderWalk::Met(rank, tier, body));
         }
-        let _ = writeln!(
-            out,
-            "  {:<8} MET -- {}\n",
-            Tier::label(rank),
-            tier.describe()
-        );
-        out.push_str(&body.text);
-        return Ok(ScreenResult {
-            text: out,
-            selected: body.selected,
-            priced: body.priced,
-            admitted_any: body.admitted_any,
-        });
+        if rank == last {
+            return Ok(LadderWalk::NoneAdmit(rank, body));
+        }
+        unmet(rank, body);
     }
-    let _ = writeln!(
-        out,
-        "\n  NO TIER MET, INCLUDING THE MILDEST. A combination that cannot clear \
-         even the mildest rung is not a near miss, and the TIGHTEST column in \
-         the table below is \
-         how far the closest one actually ran. This is a statement about these \
-         bars, not a failure of the search."
-    );
-    // The mildest tier's table, so a reader still sees what was tried.
-    if let Some(mildest) = ladder.last() {
-        let diagnostic = screen(
-            bars,
-            column,
-            by_evidence,
-            horizon,
-            mildest.rules(top, reference),
-            pricing,
-            facts,
-        )?;
-        out.push_str(&diagnostic.text);
-        replace_priced(&mut final_priced, diagnostic.priced);
-    }
-    Ok(ScreenResult {
-        text: out,
-        selected: None,
-        priced: final_priced,
-        admitted_any: false,
-    })
+    Ok(LadderWalk::Exhausted)
 }
 
 /// Replaces one policy tier's priced cells with the next tier's complete map.
@@ -12660,6 +12810,40 @@ fn calendar_terms(c: &Consistency) -> (i64, i64) {
 /// what is printed, which is enough for the calendar gate to demote a measured
 /// row and still have a measured replacement, and independent of how wide the
 /// search was.
+/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
+/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
+///
+/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
+/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
+/// unbounded per-request cost. A thousand printed rows is a page nobody reads
+/// whole; past it the cost grows and the answer does not.
+pub(crate) const TOP_CEILING: usize = 1_000;
+
+/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
+/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
+/// unusable: zero lists nothing, and past the ceiling the measured band is an
+/// unbounded per-request cost (D-1727).
+fn top_from_knob() -> usize {
+    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
+        return 25;
+    };
+    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
+        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
+        25
+    })
+}
+
+/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
+pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
+    if top == 0 {
+        Some("TOP must be 1 or more")
+    } else if top > TOP_CEILING {
+        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
+    } else {
+        None
+    }
+}
+
 const fn measured_band(top: usize) -> usize {
     const WIDEN: usize = 8;
     const FLOOR: usize = 32;
@@ -12766,43 +12950,54 @@ fn measure_top(
     // be printed, so the calendar gate below can demote a measured row and the
     // one that replaces it is measured too. At `top = 10` that is 80 rows
     // whatever the cap.
-    for row in rows.iter_mut().take(measured_band(rules.top)) {
-        // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
-        // was worse than opposite — it was cross-wired.
-        //
-        // `screen` now prices BOTH sides and keeps the better, so
-        // `side_of_evidence` no longer names the side `row.cell` came from.
-        // Re-deriving it here rebuilt the grid on the OTHER side, and
-        // `consistency_of` then took `row.cell`'s `stop`/`target`/`tsl`/`ttp` —
-        // rung indices into the WINNING side's ladders — and resolved them
-        // against this grid's ladders. Not a mirrored measurement: a meaningless
-        // one.
-        //
-        // And it is not cosmetic. The result drives the calendar re-sort and
-        // then the calendar GATE, which sets `row.steady = false` and
-        // `row.admitted = false`. `final_selection` returns only admitted rows,
-        // so a combination priced and admitted SHORT could be demoted by a LONG
-        // measurement and lose the run to a different candidate.
-        let side = side_of_direction(row.side);
-        let g = grid::evaluate_over(
-            bars,
-            column,
-            &row.scored.mask,
-            horizon,
-            side,
-            grid::Levels {
-                rungs: rungs_again,
-                step_ppm: Some(step_ppm_again),
-                forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-                ratios: true,
-                stops_ppm: &stop_rungs_again,
-            },
-            facts,
-        );
-        row.consistency = consistency_of(
-            bars, column, row.scored, horizon, side, &g, &row.cell, facts,
-        );
-    }
+    //
+    // # Across every core, and still byte-identical (W2-cli8-7, D-1727)
+    //
+    // Each row reads `bars`, `column`, the hoisted ladders and the shared
+    // `facts`, and writes only its OWN `consistency`; nothing accumulates across
+    // rows. `par_iter_mut` on the slice is indexed, so every row's figure is the
+    // one the sequential loop computed, whatever the core count. The cost is
+    // `O(band x (G + 7 x trades))` -- `G` one exit grid -- divided across cores,
+    // and `band` is at most `8 x TOP_CEILING`.
+    rows.par_iter_mut()
+        .take(measured_band(rules.top))
+        .for_each(|row| {
+            // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
+            // was worse than opposite — it was cross-wired.
+            //
+            // `screen` now prices BOTH sides and keeps the better, so
+            // `side_of_evidence` no longer names the side `row.cell` came from.
+            // Re-deriving it here rebuilt the grid on the OTHER side, and
+            // `consistency_of` then took `row.cell`'s `stop`/`target`/`tsl`/`ttp` —
+            // rung indices into the WINNING side's ladders — and resolved them
+            // against this grid's ladders. Not a mirrored measurement: a meaningless
+            // one.
+            //
+            // And it is not cosmetic. The result drives the calendar re-sort and
+            // then the calendar GATE, which sets `row.steady = false` and
+            // `row.admitted = false`. `final_selection` returns only admitted rows,
+            // so a combination priced and admitted SHORT could be demoted by a LONG
+            // measurement and lose the run to a different candidate.
+            let side = side_of_direction(row.side);
+            let g = grid::evaluate_over(
+                bars,
+                column,
+                &row.scored.mask,
+                horizon,
+                side,
+                grid::Levels {
+                    rungs: rungs_again,
+                    step_ppm: Some(step_ppm_again),
+                    forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+                    ratios: true,
+                    stops_ppm: &stop_rungs_again,
+                },
+                facts,
+            );
+            row.consistency = consistency_of(
+                bars, column, row.scored, horizon, side, &g, &row.cell, facts,
+            );
+        });
 }
 
 /// The screen's ranked table: one row per printed combination, its side, its
@@ -13540,7 +13735,8 @@ fn one_rung(
     // Refused at zero and at a million: zero makes every combination frequent
     // so the frontier never empties and the walk has no end, and a million
     // demands a pattern present on every bar, which D-0080 excludes as
-    // `AlwaysTrue` before k=1. Both are the same refusal `screen` already makes.
+    // `AlwaysTrue` before k=1. Both are the same refusal `screen` already makes:
+    // `support_from_knob` and argv share `parse_support_ppm` (D-1722).
     // `or_else`, not `or`: an explicit argument wins without even reading the
     // process knob. Recording a malformed value that this run did not use would
     // make the warning itself false.
@@ -14573,16 +14769,24 @@ fn elite_descend_in_points_inner(
     attempt: Option<u64>,
 ) -> String {
     let (from, to) = span;
-    if max_points <= 0 {
-        return "refused: the stop ceiling must be a whole number of index \
-                points, 1 or more. A ceiling of zero admits no trade and a \
-                negative one is not a distance.\n"
+    // ZERO IS "NO CEILING BEYOND THE DERIVED LADDER" HERE TOO (W2-cli8-10,
+    // D-1721). This refused `max_points <= 0` and called a zero ceiling one
+    // that "admits no trade", while `USAGE` and `elite_arm` both document zero
+    // as no ceiling and `Rules::admits` reads `max_mae_ppm == 0` exactly that
+    // way. Only a negative ceiling is refused: it is not a distance.
+    if max_points < 0 {
+        return "refused: the stop ceiling is a whole number of index points: \
+                1 or more for a ceiling, or 0 for no ceiling beyond the ladder \
+                the bars derive. A negative one is not a distance.\n"
             .to_owned();
     }
     if top == 0 {
         return "refused: TOP must be 1 or more — a listing of zero rows is not \
                 a shorter answer, it is no answer.\n"
             .to_owned();
+    }
+    if let Some(why) = top_refusal(top) {
+        return format!("refused: {why}.\n");
     }
     let root = match store_root() {
         Ok(root) => root,
@@ -14592,6 +14796,20 @@ fn elite_descend_in_points_inner(
         Ok(vendor) => vendor,
         Err(why) => return format!("refused: {why}\n"),
     };
+    // NO CEILING NEEDS NO CONVERSION, so no reference and no extra span load:
+    // `max_mae_ppm == 0` is the value `Rules::admits` and `Levels::forced`
+    // both read as "the derived stop ladder stands alone" (D-1721).
+    if max_points == 0 {
+        return elite_descend_with_attempt(
+            vendor_word,
+            underlying,
+            rung,
+            (from, to),
+            0,
+            top,
+            attempt,
+        );
+    }
     // THE REFERENCE IS READ FROM THE BARS THIS RUN WILL SWEEP, not from a
     // constant and not from a different rung. A span that refuses here refuses
     // before any threshold is derived, which is the honest order: a floor
@@ -14730,10 +14948,10 @@ pub fn screen_range_in_points(
     //
     // NEGATIVE remains refused: `worst_mae` is non-negative by construction, so
     // a negative ceiling admits nothing while reading as a relaxation.
-    if max_points < 0 || top == 0 {
+    if max_points < 0 || top_refusal(top).is_some() {
         return "refused: the stop ceiling is a whole number of index points — 1 or \
                 more for a ceiling, or 0 for no ceiling beyond the ladder the bars \
-                derive — and TOP must be 1 row or more.\n"
+                derive — and TOP must be 1 to 1000 rows.\n"
             .to_owned();
     }
     let root = match store_root() {
@@ -16423,7 +16641,7 @@ struct AuditOptions<'a> {
     ///
     /// # Why a search must be able to say no
     ///
-    /// These three cost `WALK_FORWARD_SPLITS` sweeps twice over plus
+    /// These three cost `walk_forward_splits` sweeps twice over plus
     /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade
     /// re-walks, and none of that is sized by the data. MEASURED: a 60-minute
     /// audit over six months did not finish in sixty seconds at a candidate
@@ -17239,7 +17457,7 @@ fn record_trades(
             format!("  {written} trade(s) prepared and synced for this run\n")
         }
         Ok(Prepared::Reused(written)) => format!(
-            "  {written} trade(s) from an interrupted attempt were byte-verified and reused\n"
+            "  {written} trade(s) already present for this exact run identity were byte-verified and reused\n"
         ),
         Ok(Prepared::Empty) => String::new(),
         Err(why) => return Err(why),
@@ -17297,8 +17515,16 @@ fn record_frontier(
     // is measured in `measure_top` over the report's own rows and is not in
     // hand at this call site; using the money keys alone is the closest
     // faithful ordering rather than a second invented one.
-    let mut ordered: Vec<&&runner::rank::Scored> = by_evidence.iter().collect();
-    ordered.sort_by_key(|scored| {
+    //
+    // # Each key once, and only the written rows ordered (W2-cli8-3, D-1728)
+    //
+    // This was `ordered.sort_by_key(..)` over every retained row and then
+    // `take(top)`: O(K log K) KEY EVALUATIONS, each a map probe plus
+    // `rules.admits` (a Wilson square root) plus two ratios, to write `top`
+    // rows. `first_accepted_in_order` evaluates each key once and orders only
+    // the prefix it writes; the rows and their order are unchanged, because the
+    // evidence position is the final key and the old sort was stable.
+    let money_key = |scored: &&runner::rank::Scored| {
         // PASS LEADS HERE TOO, matching the report's own order. A row the report
         // ranks first because it cleared the policy must not appear ninth on the
         // page; that divergence is the defect this whole function was rewritten
@@ -17323,7 +17549,7 @@ fn record_frontier(
                 )
             },
         )
-    });
+    };
     // ONE ROW PER RESULT, and this is what a "top ten" was actually returning.
     //
     // MEASURED, on the first 60-minute run that published a frontier at all:
@@ -17343,8 +17569,8 @@ fn record_frontier(
     // sweep ranked highest. UNPRICED rows are never folded together -- they have
     // no result yet, so identical zeros mean "not measured", not "the same".
     let mut seen: std::collections::HashSet<(u64, u64, i64, i64, i64, i64)> =
-        std::collections::HashSet::with_capacity(ordered.len());
-    ordered.retain(|scored| {
+        std::collections::HashSet::with_capacity(by_evidence.len());
+    let distinct = |scored: &&runner::rank::Scored| {
         priced.get(&scored.mask.words()).is_none_or(|(cell, _)| {
             seen.insert((
                 cell.trades,
@@ -17355,10 +17581,10 @@ fn record_frontier(
                 cell.gross_loss,
             ))
         })
-    });
+    };
+    let ordered = first_accepted_in_order(by_evidence, top, money_key, distinct);
     let rows: Vec<frontier::Row> = ordered
         .iter()
-        .take(top)
         .enumerate()
         .filter_map(|(at, scored)| {
             // A rank past `u16` is a `top` nobody typed -- the argument is
@@ -17384,7 +17610,7 @@ fn record_frontier(
             format!("\n  frontier: {written} of {kept} ranked combination(s) prepared and synced\n")
         }
         Ok(Prepared::Reused(reused)) => format!(
-            "\n  frontier: {reused} of {kept} ranked combination(s) from an interrupted attempt were byte-verified and reused\n"
+            "\n  frontier: {reused} of {kept} ranked combination(s) already present for this exact run identity were byte-verified and reused\n"
         ),
         Ok(Prepared::Empty) => {
             format!("\n  frontier: 0 of {kept} ranked combination(s); no block was required\n")
@@ -17392,6 +17618,63 @@ fn record_frontier(
         Err(why) => return Err(why),
     };
     Ok((report, u64::try_from(rows.len()).unwrap_or(u64::MAX)))
+}
+
+/// The first `top` items of `items` that `accept` admits, visited in ascending
+/// `key` order with ties in input order, each key evaluated exactly ONCE.
+///
+/// Equal, row for row, to a stable sort of every item by `key`, a `retain` of
+/// `accept` in that order, and `take(top)` -- which is what `record_frontier`
+/// did -- without ordering the rows it never writes (W2-cli8-3, D-1728).
+/// `accept` is called in that same order and stops once `top` are admitted, so
+/// a stateful `accept` such as a dedup set sees exactly the prefix it saw
+/// before.
+///
+/// # Cost
+///
+/// `K` key evaluations and `O(K)` memory for the `(key, position)` pairs.
+/// Each round selects the next `window` smallest in `O(remaining)` and sorts
+/// only them; the window starts at `top` and doubles, so with few rejections it
+/// is `O(K + top log top)`. When `accept` rejects most of what it is shown the
+/// rounds number `O(log(K / top))`, bounding the whole at `O(K log K)`
+/// comparisons of precomputed keys -- the old cost, without its key work.
+fn first_accepted_in_order<'t, T, K: Ord>(
+    items: &'t [T],
+    top: usize,
+    mut key: impl FnMut(&T) -> K,
+    mut accept: impl FnMut(&T) -> bool,
+) -> Vec<&'t T> {
+    let mut keyed: Vec<(K, usize)> = items
+        .iter()
+        .enumerate()
+        .map(|(at, item)| (key(item), at))
+        .collect();
+    let mut out: Vec<&'t T> = Vec::with_capacity(top.min(items.len()));
+    let mut rest: &mut [(K, usize)] = &mut keyed;
+    let mut window = top;
+    while out.len() < top && !rest.is_empty() {
+        let cut = window.min(rest.len());
+        if let Some(last) = cut.checked_sub(1)
+            && cut < rest.len()
+        {
+            rest.select_nth_unstable(last);
+        }
+        let (head, tail) = core::mem::take(&mut rest).split_at_mut(cut);
+        head.sort_unstable();
+        for (_, at) in head.iter() {
+            if out.len() == top {
+                break;
+            }
+            if let Some(item) = items.get(*at)
+                && accept(item)
+            {
+                out.push(item);
+            }
+        }
+        rest = tail;
+        window = window.saturating_mul(2);
+    }
+    out
 }
 
 /// Writes or byte-verifies the fixed-stride receipt that names both detail
@@ -17418,7 +17701,7 @@ fn ensure_detail_receipt(
             result_set::TradePolicy::ChosenGridV1.as_str()
         ),
         result_set::Prepared::Reused => format!(
-            "  interrupted detail receipt byte-verified and reused: frontier={frontier_rows}, chosen trades={trade_rows}, direction={direction}, policy={}\n",
+            "  detail receipt already present for this exact run identity, byte-verified and reused: frontier={frontier_rows}, chosen trades={trade_rows}, direction={direction}, policy={}\n",
             result_set::TradePolicy::ChosenGridV1.as_str()
         ),
     })
@@ -18205,6 +18488,15 @@ fn bootstrap_family(
     //
     // `by_evidence` is the same list the traded combination is drawn from, so
     // the head of the family and the strategy under test are now one thing.
+    //
+    // THE SLICE FACTS ONCE FOR THE FAMILY, NOT ONCE PER CANDIDATE (AC-whp-o1-2,
+    // D-1730). `trade::walk` builds `SliceFacts::of(bars, column)` on every
+    // call -- a B-sized hash map, two B+1 prefix arrays and a B-entry forced-
+    // exit table, none of which depends on the candidate -- and this ran it up
+    // to `BOOTSTRAP_CANDIDATES` times. `trade.rs` states the rule: a loop over
+    // candidates hoists the facts and calls `walk_over`. This is the FIFTH site
+    // of that defect (`screen`, `cap_for_budget`, `validate.rs`, `measure_top`).
+    let facts = runner::trade::SliceFacts::of(bars, column);
     let family: Vec<Vec<i64>> = by_evidence
         .iter()
         .take(BOOTSTRAP_CANDIDATES)
@@ -18215,12 +18507,13 @@ fn bootstrap_family(
             // have earned, so the bootstrap's null would be built from returns
             // no strategy in the family would ever have taken — and the p-value
             // beside it would describe that fiction rather than the family.
-            let walked = trade::walk(
+            let walked = trade::walk_over(
                 bars,
                 column,
                 &scored.mask,
                 horizon,
                 direction_of(side_of_evidence(scored)),
+                &facts,
             );
             session_returns(&index, days.len(), bars, &walked)
         })
@@ -19792,10 +20085,10 @@ fn audit_bars_work(
     // `validate::walk_forward` was built, tested and never called: this report
     // printed "NOT SUPPLIED to this render" for it on every run since the
     // function existed. What it needed was a fold count, and
-    // `WALK_FORWARD_SPLITS` supplies one as a STATED ASSUMPTION -- the form
+    // `walk_forward_splits` derives one from the span; it began as a STATED ASSUMPTION -- the form
     // `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` already use.
     //
-    // It re-sweeps once per fold, so it costs about `WALK_FORWARD_SPLITS` times
+    // It re-sweeps once per fold, so it costs about `walk_forward_splits` times
     // the sweep above. That is what an out-of-sample verdict costs, and it is
     // paid here rather than skipped.
     // A FRESH EVALUATOR PER FOLD, AND IT IS A COPY RATHER THAN A REBUILD.
@@ -19850,7 +20143,7 @@ fn audit_bars_work(
     // SEARCH POSSIBLE AT ALL.
     //
     // Below this line are three stages whose cost is fixed by constants rather
-    // than by the data: `both_shapes` runs `WALK_FORWARD_SPLITS` sweeps twice
+    // than by the data: `both_shapes` runs `walk_forward_splits` sweeps twice
     // over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
     // `BOOTSTRAP_DRAWS` (1,000) resamples for each of `BOOTSTRAP_CANDIDATES`
     // (16) — sixteen thousand full trade re-walks, whether the run has forty
@@ -20020,22 +20313,34 @@ fn overfitting_of(folds: &runner::validate::Validated) -> Option<runner::pbo::Pb
         return None;
     }
 
+    // THE EXACT PLACEMENT, NOT THE LEGACY ADAPTER (ET-strategies-trades-
+    // ranking-costs-3, D-1724). This called `runner::pbo::place`, which halves
+    // `place_v1`'s doubled midrank and so rounds an exact half-rank toward the
+    // BETTER half: a winner tied at midrank 1.5 of 2 -- strictly in the bottom
+    // half -- read as rank 1, exactly the median, and was not counted. The
+    // exact placement and its aggregate cost the same and keep that half.
     let mut placements = Vec::with_capacity(folds.folds.len());
     for fold in &folds.folds {
         if fold.in_sample_all.len() != fold.out_of_sample_all.len() {
             return None;
         }
         let placement = if fold.in_sample_all.is_empty() {
-            runner::pbo::Placement {
-                candidates: 0,
-                winner_rank: 0,
-            }
+            runner::pbo::PlacementV1::unrankable(0)?
         } else {
-            runner::pbo::place(&fold.in_sample_all, &fold.out_of_sample_all)?
+            runner::pbo::place_v1(&fold.in_sample_all, &fold.out_of_sample_all)?
         };
         placements.push(placement);
     }
-    Some(runner::pbo::probability_of_overfitting(&placements))
+    let exact = runner::pbo::anchored_walk_forward_bottom_half_rate_v1(&placements);
+    // Carried in the shape `audit::overfitting` renders. Every field is the
+    // exact aggregate's: the count classified on the exact doubled ratio, and
+    // the median of the exact projections.
+    Some(runner::pbo::Pbo {
+        folds: exact.folds,
+        overfit_folds: exact.bottom_half_folds,
+        unrankable: exact.unrankable,
+        median_placement: exact.median_placement_ppm,
+    })
 }
 
 /// [`both_shapes`], or a pair of REFUSED walks when validation is off.
@@ -22064,14 +22369,14 @@ mod tests {
     fn a_thin_sample_is_named_and_a_sufficient_one_says_nothing() {
         // SUFFICIENT: silent, exactly at the boundary and above it.
         assert!(
-            sample_warning(MIN_AUDIT_SESSIONS).is_empty(),
+            sample_warning(MIN_AUDIT_SESSIONS, 5).is_empty(),
             "the boundary itself is sufficient; a warning here would fire on \
              every adequate run and teach the reader to ignore it"
         );
-        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000).is_empty());
+        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000, 5).is_empty());
 
         // THIN: named, with the two numbers that decide it.
-        let thin = sample_warning(20);
+        let thin = sample_warning(20, 5);
         assert!(thin.contains("THIN"), "the verdict is stated: {thin}");
         assert!(
             thin.contains("sessions 20"),
@@ -22091,7 +22396,11 @@ mod tests {
         // ZERO SESSIONS MUST NOT PANIC. The divisors are constants here, but a
         // future change to either could make one zero, and this is the arm that
         // would catch a division by it.
-        assert!(sample_warning(0).contains("THIN"));
+        assert!(sample_warning(0, 5).contains("THIN"));
+        assert!(
+            sample_warning(10, 0).contains("roughly 10 day(s)"),
+            "zero folds never divides by zero"
+        );
     }
 
     /// THE LOG DIRECTORY IS DECIDED WITHOUT TOUCHING THE ENVIRONMENT.

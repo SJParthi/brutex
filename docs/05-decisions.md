@@ -54284,3 +54284,399 @@ stale sentences in both files and requires the corrected one.
 
 **Rejected.** Adding weekend bits: `CLAUDE.md` §3 rule 8 makes appending bits a
 decision of its own, and `weekday_bit`'s doc already records that as open.
+
+### D-1720 — The tier cascade reports a tier MET only when a row PASSED it, and states what each tier costs — 2026-10-03
+
+**Findings.** W2-cli8-8 (medium bug) and W2-cli8-0 (medium cost), both in
+`screen_cascade`.
+
+**What was wrong.** `final_selection` falls back to the best-ranked row that
+traded, so a screen's `selected` is `Some` for any traded row, admitted or
+not. The cascade still read `selected` as admission: the mildest-tier probe
+asked `widest.selected.is_none()` and the tier loop asked
+`body.selected.is_none()`. On any span where something traded and nothing
+passed, the probe failed to settle the walk and the loop printed the
+STRICTEST tier, `S++++++`, as `MET` above a table in which nothing had passed.
+Reproduced on `runner::synthetic::sessions(8)` before the fix:
+`a_cascade_that_admits_nothing_prints_no_tier_as_met` failed on its `MET`
+assertion with the fixture's precondition (mildest tier admits nothing, a row
+traded) measured true. Separately, the function's doc said the tiers "cost
+eight passes over cells already computed rather than eight sweeps". Each tier
+calls `screen`, and `screen` passes the tier's `max_mae_ppm` to
+`grid::Levels::forced`, which `runner::grid` merges into the stop ladder, so
+each tier prices a different grid.
+
+**The decision.** The walk moved into `walk_ladder`, which decides on
+`admitted_any` alone: the mildest tier is screened first, a tier is MET only
+when its screen admitted a row, and every stricter tier walked before it is
+reported UNMET. When nothing admits, the cascade still returns the mildest
+tier's best traded row as the run's subject, with `admitted_any: false` and
+the priced map of that same screen. That keeps the ranking a page can open, as
+the search-step branch already did. The false doc now states the bound,
+`O(T × (M + C × 2 × G))` per cascade, and `docs/06-limits.md` records it.
+
+**Rejected.** Returning `selected: None` when no tier admits. That brings back
+the empty page `final_selection`'s fallback was added to remove. Building one
+grid that holds every tier's forced stop, so a tier only re-filters. That is a
+different grid and a different run identity, and it would change every
+recorded answer to save time on spans that have one.
+
+### D-1721 — `elite`'s zero stop ceiling means no ceiling at every door, as `USAGE` says — 2026-10-03
+
+**Finding.** W2-cli8-10 (low bug).
+
+**What was wrong.** `USAGE` and `elite_arm` document `MAX_POINTS = 0` as "no
+ceiling beyond the ladder the bars themselves derive", and `elite_arm` accepts
+it. It then calls `elite_descend_in_points`, whose inner function refused
+`max_points <= 0` with "a ceiling of zero admits no trade". That is false:
+`Rules::admits` reads `max_mae_ppm == 0` as no ceiling, and `Levels::forced`
+forces nothing at zero. So the value was documented, accepted, and then always
+refused.
+
+**The decision.** `elite_descend_in_points_inner` refuses only a negative
+ceiling. Zero goes straight to the descent with `max_mae_ppm = 0`. It loads no
+span for a reference price, because a ceiling of zero needs no conversion.
+`elite_arm`'s parse refusal now names zero as allowed. The api's
+`/sweep/descent` boundary still refuses zero with its own text; that is a
+stricter door, not this defect, and is reported for its own fix.
+
+**Rejected.** Converting zero through `points_to_ppm_at` and refusing a zero
+result. That is the old refusal under a new name. Treating zero as "the derived
+ladder's own maximum" ceiling. That forces a stop the operator did not ask
+for, and `Rules::admits` already gives zero its meaning.
+
+### D-1722 — One support domain, `1..1_000_000` ppm, for argv and `BRUTEX_SUPPORT_PPM` — 2026-10-03
+
+**Finding.** W2-cli8-11 (low bug).
+
+**What was wrong.** `parse_support_ppm`, the argv door, refused only values
+ABOVE 1,000,000, so 100% support ran. `support_from_knob` refused 1,000,000
+itself. A comment in `one_rung` said both doors refuse zero and a million.
+For argv that was false.
+
+**The decision.** The bound is `1..=999_999`. At 1,000,000 a pattern must fire
+on every bar. D-0080 excludes that shape (`AlwaysTrue`) before k=1, so nothing
+sweepable can be frequent and the sweep finds nothing by construction.
+`support_from_knob` now calls `parse_support_ppm` on the trimmed value, so the
+two doors share one validator and cannot drift apart. The `one_rung` comment
+names the shared validator. `audited_stored_tests.rs`'s public-command flow
+typed `1000000` to get a cheap screen that finds nothing. It now types
+`999999`, which still prunes every condition the synthetic month does not hold
+on 2,999 of 3,000 bars. The test still asserts a recorded result, and its
+pinned `min_hits` moves from 3,000 to 2,999, the hit count the new support
+gives. That is the only expectation that changed.
+
+**Rejected.** Widening the knob to accept 1,000,000. That accepts a value the
+search can never answer, which is the hour-long empty report the argv
+refusal's own doc calls waste.
+
+### D-1723 — `cli top` rounds its stored thousandths half away from zero — 2026-10-03
+
+**Finding.** GAP16-25 (low bug).
+
+**What was wrong.** `render_top_record` reduced `mean_milli_paisa` to paisa
+with `/ 1_000` and `t_milli` to hundredths with `/ 10`. Integer division
+truncates toward zero. So 47.6 paisa printed as `₹0.47`, a t of 2.999 as
+`2.99`, and a mean of -0.6 paisa as `₹0.00`, which loses its sign. The
+browser's figures round (`toFixed`), so the two surfaces disagreed on the same
+stored row.
+
+**The decision.** One integer helper, `div_round_half_away(n, d)`, rounds
+half away from zero for both reductions. That is symmetric in sign:
+`-x` always prints as the negation of `x`, and -0.6 paisa prints `-₹0.01`. It
+cannot overflow. The remainder is smaller than the divisor, and the quotient
+moves by one only away from zero, which `i64::MIN / d` and `i64::MAX / d`
+absorb for every `d >= 2`. A divisor of zero or below returns zero instead of
+panicking; both callers pass constants.
+
+**Rejected.** §7's half-up. It is the tick-grid rule for prices at the write
+boundary, and it rounds -0.5 toward zero, so a reduced statistic would not be
+symmetric in sign. Printing three decimals of the stored thousandths. That
+changes the column widths and the money format every other rupee column uses.
+
+### D-1724 — The audit's OVERFITTING block counts folds with the exact placement — 2026-10-03
+
+**Finding.** ET-strategies-trades-ranking-costs-3 (low bug).
+
+**What was wrong.** `overfitting_of` placed each fold with the legacy
+`runner::pbo::place`. That adapter halves `place_v1`'s doubled midrank, which
+rounds an exact half-rank toward the better half. With three candidates and
+the in-sample winner tied for second out of sample, its midrank is 1.5 of a
+last rank of 2, strictly below the median. The adapter read it as rank 1,
+exactly the median, and did not count it. So the "winner below median" count
+was understated.
+
+**The decision.** `overfitting_of` places folds with `place_v1`, uses
+`PlacementV1::unrankable(0)` for an empty fold, and aggregates with
+`anchored_walk_forward_bottom_half_rate_v1`. That classifies each fold on the
+exact doubled ratio. The result is carried in the `Pbo` shape
+`audit::overfitting` already renders. Every field comes from the exact
+aggregate, and the block keeps its "legacy" and "NOT MEASURED as CSCV" labels,
+because the diagnostic is still not CSCV. The cost is the same.
+
+**Rejected.** Changing `runner::pbo::place`. It is the documented
+compatibility adapter, and other callers rely on its frozen integer field.
+Rewriting the renderer to take the exact type. Same answer, a wider diff in a
+second crate.
+
+### D-1725 — The audit's SAMPLE line states the fold count the walk-forward ran — 2026-10-03
+
+**Finding.** ET-strategies-trades-ranking-costs-2 (low bug).
+
+**What was wrong.** `sample_warning` printed `walk-forward folds 5` from the
+constant `WALK_FORWARD_SPLITS`, and divided sessions by it for "each fold tests
+on roughly N day(s)". `both_shapes` runs `walk_forward_splits(bars.len())`
+folds, which is 2 to 20 from the span's own length. So the SAMPLE block
+contradicted the WALK-FORWARD section of the same report. On
+`runner::synthetic::sessions(8)` the run uses 2 folds and the line said 5.
+
+**The decision.** `sample_warning(sessions, splits)` takes the count.
+`traded_preamble` passes `walk_forward_splits(bars.len())` over the same bars
+`both_shapes` receives. The divisor keeps `.max(1)`, so zero folds cannot
+divide by zero, and a test pins that. `WALK_FORWARD_SPLITS` had no other
+reader, so it was deleted. Its comment references, and its row in
+`docs/04-invariants.md`'s list of static constants, now name
+`walk_forward_splits`.
+
+**Rejected.** Keeping the constant in sync with the function. The function is
+derived from the span, so no constant can match it.
+
+### D-1726 — The tier ladder reads its stop ceiling once and its trade floor once per rate — 2026-10-03
+
+**Finding.** W2-cli8-1 (low cost).
+
+**What was wrong.** `stop_rungs_in_points` called `max_stop_points(bars)`
+inside its per-rung `filter`. Each call collects every bar's range into a
+`Vec` of length N and selects a percentile, so it was O(N) per rung for an
+answer no rung changes. `tiers` called `runner::grid::trades_needed_for`
+inside the stop × ratio × rate loop. That is a search of up to
+`TRADES_SEARCH_CEILING` (5,000) Wilson bounds, and its answer depends on the
+rate alone. So it ran up to 64 × 28 × 396 times for at most 396 distinct
+answers. Neither cost was in `docs/06-limits.md`, and Gate 11's reason for
+this file's sorts called the ladder "a compile-time list of eight".
+
+**The decision.** Hoist the ceiling out of the filter. Compute the floor once
+per rate, as `(rate, floor)` pairs, before the loop. The tiers are
+field-for-field what they were: a test checks every tier's `min_trades`
+against the per-tier call. `docs/06-limits.md` states what remains: a fixed
+number of O(N) scans (`reference_price`, `grid_step_ppm`, `grid_rungs`,
+`max_stop_points`) per ladder, at most 396 floor searches, and the
+`O(T log T)` sort over `T <= 64 × 28 × 396` generated tiers. It also corrects
+the Gate 11 sentence.
+
+**Rejected.** A `HashMap` memo keyed by rate. The rates are already a `Vec`
+walked in order, so a parallel vector is the memo, with no hashing.
+
+### D-1727 — `TOP` has a named ceiling of 1,000 rows, and the measured band runs across every core — 2026-10-03
+
+**Finding.** W2-cli8-7 (medium cost).
+
+**What was wrong.** `measure_top` measures `measured_band(top)` rows
+(`8 × top`, floored at 32) in a sequential loop. Each row is a full exit-grid
+rebuild (`grid::evaluate_over`) plus `per_trade` plus seven calendar grains.
+`BRUTEX_TOP` had no ceiling: `strict_range_knobs` checked only `> 0`, and
+`Rules::operator` took any non-negative value, including 0. The argv `TOP` of
+`elite` and `screen` was unbounded too. The cost was in a code comment
+recording a three-hour stall, not in `docs/06-limits.md`.
+
+**The decision.** `TOP_CEILING = 1_000`. `top_refusal` is the one check for
+`1..=TOP_CEILING`. `elite_arm`, `screen_arm`,
+`elite_descend_in_points_inner` and `screen_range_in_points` refuse outside
+it by name. The strict HTTP reader refuses it with `machine_count`.
+`Rules::operator` reads `BRUTEX_TOP` through `top_from_knob`, which names an
+unusable value in `knobs::refused` and uses the documented 25. Before, 0 gave
+a zero-row listing. The band runs as `rows.par_iter_mut().take(band)`. Each row
+writes only its own `consistency` from shared, read-only inputs, so the
+indexed iterator gives every row the figure the sequential loop gave. A test
+compares it row for row with a sequential `consistency_of`.
+`docs/06-limits.md` states `O(band × (G + 7 × trades))` per screen, with
+`band <= 8 × TOP_CEILING`.
+
+**Rejected.** Clamping `TOP` silently to the ceiling. A clamped value is a
+fallback that hides the request, which §4 bans. Carrying each row's grid from
+the priced pass instead of rebuilding it. That keeps every priced row's grid
+resident, which is the memory the bounded heap exists to avoid. The rebuild
+per row is inherent to that trade.
+
+### D-1728 — The frontier commit evaluates each key once and orders only the rows it writes; a rerun no longer says "interrupted" — 2026-10-03
+
+**Findings.** W2-cli8-3 (low cost) and GAP13-14 (low doc-false).
+
+**What was wrong.** `record_frontier` ran `sort_by_key` over every retained
+row (`K <= audit_keep()`, up to 10,000,000) and then `take(top)`. The key is
+recomputed on every comparison: a map probe, `rules.admits` (a Wilson square
+root) and two ratios. That is O(K log K) key evaluations to write `top` rows.
+Gate 11's reason said these rows were "capped before it is ordered". They were
+capped after. Separately, all three `Reused` branches, for trades, frontier
+and detail receipt, said the rows came "from an interrupted attempt". An exact
+rerun of a completed audit reuses them too, so a routine idempotent rerun
+reported an interruption that never happened.
+
+**The decision.** `first_accepted_in_order` builds `(key, position)` once per
+row: K evaluations. It then repeats one step: `select_nth_unstable` the next
+`window` smallest, sort only that window, and feed it in order to the dedup
+`accept` until `top` are admitted. The window starts at `top` and doubles. The
+position is the last key, so ties keep evidence order, exactly as the old
+stable sort did, and the written rows are the same rows in the same order.
+That is checked against the old sort-retain-take over 400 generated cases full
+of ties and rejections, with each key counted once. The cost is
+`O(K + top log top)` when few rows are rejected, and at worst `O(K log K)`
+comparisons of precomputed keys. The three reuse messages now say "already
+present for this exact run identity", which is true after an interruption
+and after a completed run alike. Gate 11's sort count for `cli/src/lib.rs`
+goes from 7 to 8. The reason is recorded in `docs/06-limits.md`.
+
+**Rejected.** `sort_by_cached_key`. It removes the repeated key work but still
+orders all K rows. Passing in `Results::holds` to choose between "recorded
+run" and "interrupted attempt". That is one more ledger open per commit to
+choose a word, and the neutral sentence is true in both cases.
+
+### D-1729 — `cli results` retains at most forty records and states its real cost — 2026-10-03
+
+**Finding.** W2-cli8-5 (low cost).
+
+**What was wrong.** `results_at` pushed every matching ledger record into a
+`Vec`, printed at most `LIST_ROWS` (40) of them, and chose the best over all
+of them. Its rustdoc said the cost was "`O(rows)` — the size of the answer".
+The answer is at most 41 rows, and the read is the whole ledger.
+`newest_complete`, behind `cli top`, also reads every row. It already
+retained one record.
+
+**The decision.** `listing_window` makes the same one newest-first pass and
+keeps the first 40 matches, a match count and a running best. Visited newest
+first, a later record replaces the best only when strictly larger, which is
+`best_complete_newest_first`'s choice, ties to the newest. That function is
+now test-only and stays as the reference: a 500-row ledger with heavy ties is
+listed both ways under four filters, and the window must equal the full
+retention. The rustdoc and `docs/06-limits.md` say `O(ledger rows)` reads and
+`O(1)` retained.
+
+**Rejected.** The plan's "scan `newest_complete` backward and stop at the
+first complete match". `newest_complete` picks the BEST complete run, not the
+newest, so stopping early would change which run `cli top` reports. It is left
+as one O(1)-memory pass, and the limit says so. A secondary index, for per-request
+O(1). The ledger is one append-only array whose path is its index, and an
+index file is a second store to keep in step.
+
+### D-1730 — The bootstrap family builds its slice facts once — 2026-10-03
+
+**Finding.** AC-whp-o1-2 (low cost).
+
+**What was wrong.** `bootstrap_family` called `trade::walk` for each of up to
+`BOOTSTRAP_CANDIDATES` (16) candidates. `walk` builds `SliceFacts::of(bars,
+column)` on every call: a B-sized hash map, two B+1 prefix arrays and a
+B-entry forced-exit table over the whole execution slice, about 618k one-minute
+bars on the audit path. None of it depends on the candidate. `trade.rs` states
+the rule ("a loop over candidates must hoist the facts and use `walk_over`"),
+and this file had already fixed the same defect at four other sites.
+
+**The decision.** Build the facts once before the family map and call
+`trade::walk_over(.., &facts)`. `walk` is `walk_over` over freshly built facts,
+so every series is unchanged. A source-shape test pins one construction and no
+`trade::walk(` in the function, in the style of the existing D-1190 guard.
+
+**Rejected.** Nothing. This is the existing hoist pattern applied at a fifth
+site.
+
+### D-1731 — The tier walk checks every tier in order; the mildest-first probe is removed — 2026-10-03
+
+**Finding.** Follow-up to D-1720 (a defect that D-1720 itself introduced and
+reported, not a new audit row). Medium bug risk.
+
+**What was wrong.** D-1720 kept the mildest-tier probe: `walk_ladder` screened
+the LAST tier first and, when it admitted nothing, returned "every tier UNMET"
+without screening the others. The argument was that tiers only relax floors
+and `Rules::admits` is monotone in them. The floors are monotone; the grid is
+not. `screen` hands each tier's `max_mae_ppm` to `grid::Levels::forced`, and
+`runner::grid` merges that forced stop INTO the stop ladder, so a stricter
+tier prices a stop rung the mildest tier's grid may lack. A cell at that rung
+can pass the stricter tier and exist nowhere milder. Nothing proved that
+case impossible, so the probe could print "every tier UNMET" over a ladder
+that had an answer. The fake-walk test
+`a_stricter_tier_that_alone_admits_is_found_and_reported_met` (admission
+`[false, true, false, false]`) failed against the probe, which screened `[3]`
+and settled "none" instead of screening `[0, 1]` and reporting tier 1 MET.
+
+**The decision.** The probe is removed. `walk_ladder` screens strictest first
+and stops at the first tier whose screen admitted a row; W2-cli8-8's rule
+stands, MET only on `admitted_any`. When the last tier is unmet its screen is
+returned in `LadderWalk::NoneAdmit` and the cascade shows it as the
+diagnostic table, so no tier is screened twice. The old probe-then-walk cost
+up to `ladder.len() + 1` screens; this costs `rank + 1` when tier `rank`
+admits and `ladder.len()` when none does. The "nothing admits" message is the
+existing `NO TIER MET, INCLUDING THE MILDEST` text, now preceded by every
+tier's UNMET line. An empty ladder prints that no tier was screened.
+
+**Cost, stated honestly.** On a span where nothing admits, the cascade now
+pays every tier (up to eight full re-screens) instead of one. That is the
+case the probe was written to make cheap, and the operator's log put one
+60min pass at about 20 seconds over 577 candidates. That figure is a log
+reading, not a measurement taken for this change; `docs/06-limits.md` states
+the bound and marks the per-screen time UNVERIFIED.
+
+**Rejected.** Proving the probe instead. That would need a test that every
+admitted cell of every stricter tier is also present and admitted on the
+mildest grid. The forced stop is merged into the grid, so this is false by
+construction for any cell sitting exactly on a stricter tier's forced rung,
+unless the mildest grid happens to hold that rung too. Merging every tier's
+forced stop into one grid, so the probe would be sound. That is the
+different-grid, different-identity option D-1720 already rejected.
+
+### D-1732 — The api reads a zero stop ceiling as no ceiling, as `cli` does — 2026-10-03
+
+**Finding.** Follow-up to D-1721, which fixed this in `cli` and reported the
+api copy as a new defect. Low bug.
+
+**What was wrong.** `descent_from_wire` refused `max_points <= 0` with "a
+ceiling of zero admits no trade and a negative one is not a distance", and the
+`screen` command parser refused `max_points <= 0` too. Zero does not admit no
+trade: `Rules::admits` reads a zero `max_mae_ppm` as no ceiling,
+`grid::Levels::forced` forces nothing at zero, `cli`'s `USAGE` documents
+`MAX_POINTS = 0` that way, and since D-1721 both `cli` entry points the api
+calls (`elite_descend_in_points_for_attempt`, `screen_range_in_points`) accept
+it. So the browser could not ask for a run the command line offers, and was
+told something false about why. `a_stop_ceiling_of_zero_means_no_ceiling_as_cli_reads_it`
+failed against the old parsers on its first `expect`.
+
+**The decision.** Both api doors refuse only a negative ceiling and pass zero
+through to `cli` unchanged. The refusal texts now say that 0 means no ceiling.
+The old test `a_stop_ceiling_of_zero_or_less_is_refused_rather_than_swept_with`
+pinned the false rule; it is renamed
+`a_negative_stop_ceiling_is_refused_rather_than_swept_with` and still refuses
+`-20`, now with `-1` in place of `0`. The screen-refusal table's zero row
+becomes `-1` for the same reason. Neither is a weakened test: each still
+refuses the values that are wrong, and the zero case is now asserted the other
+way by a new test. Invariant SW-19 cited the old name; its row now cites both
+tests, so gate 10 still resolves every reference.
+
+**Not done.** `web/src/routes/backtest/+page.svelte` `wholeNumber` still
+refuses a zero ceiling in the browser, and its comment quotes the old server
+refusal as the authority. The control marks the field wrong, so this is not
+silent, but it is now narrower than the server. It was left because the brief
+for this lane is the Rust crates and no front-end toolchain was run here.
+
+**Rejected.** Keeping the api stricter than `cli` on purpose. Neither door
+says why the browser should be denied a run the command line documents, and
+the reason it gave was false.
+
+### D-1733 — The api's strict `top` pin follows D-1727's 1,000-row ceiling — 2026-10-03
+
+**Finding.** A regression from D-1727, found when this lane first ran the
+`api` tests. Low.
+
+**What was wrong.** D-1727 capped `TOP` at `cli::TOP_CEILING` (1,000) at every
+`cli` door, including `cli::audited_range_command::request_value`, which the
+api's `strict_knobs` asks about `BRUTEX_TOP`. The api test
+`strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_start`
+still pinned `top = 9223372036854775807` as accepted, so it failed with
+`top=9223372036854775807`. D-1727 updated the matching pin in
+`cli::strict_range_knobs` and missed this one, because the api crate was not
+tested with that unit.
+
+**The decision.** The pin follows the law it checks: `1000` is accepted and
+`1001` is refused by name before configuration, the slot or a start, beside
+the existing `9223372036854775808` refusal. No refusal was removed.
+
+**Rejected.** Exporting `TOP_CEILING` from `cli` so the api test could name
+it. It is `pub(crate)` on purpose, and the api has no use for it outside this
+pin. The literal is the documented value in `USAGE` and D-1727.
