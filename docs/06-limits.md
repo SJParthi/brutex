@@ -14022,6 +14022,7 @@ not O(1) and not proportional to new work. Making it so would need a durable
 request-keyed index of committed routes that a replay could consult before
 loading, which is a new authority and a new format; D-1683 does not add one and
 states the cost here instead.
+
 ## A sweep-evidence ranking is buffered whole before its one write — D-1741, 3 October 2026
 
 `sweep_evidence::Attempt::ranked` now encodes every ranked row into one

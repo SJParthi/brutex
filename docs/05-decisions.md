@@ -53608,6 +53608,7 @@ Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_o
 (failed first with each fold mint delegated back to the cohort's own
 per-witness mint: 4 source builds, the fold's and one per witness, expected 1),
 `cli::ledger_append_lookup_costs::section_169_prices_the_oos_fold_once_per_cohort`.
+
 ### D-1740 — A search checkpoint's completion marker is published by rename, and a publication refuses before it would pass discovery's directory limit — 2026-10-03
 
 **Findings.** GAP11-0 and W2-cli13-5, both in
