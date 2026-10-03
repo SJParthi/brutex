@@ -12472,6 +12472,39 @@ not:
   is the order `std::sync::Mutex` hands the lock out, and that order is not
   itself FIFO-guaranteed by the standard library.
 
+## Ledger prefix rechecks, walk-order filing and the costs left stated — D-1560 to D-1567, 3 October 2026
+
+- **`runs.bin` and `detail-sets.bin` growth recheck (D-1560).** Opening either
+  file hashes it once more, O(bytes), beside the O(records) index build. When
+  a held handle finds the file grew, it re-reads and re-hashes every byte it
+  had indexed before it decodes the new tail: O(indexed bytes), paid by
+  `append`, `append_exact` and the read-side `refresh` alike, and only on the
+  growth branch. A handle's own appends and the unchanged-length branch stay
+  O(1) plus the appended bytes. This is D-0936's accepted cost, extended.
+- **Reconciliation order (D-1565).** `admission_store::reconcile_all` and
+  `population::reconcile_receipts{,_v3,_v4}` sort their entries by identity
+  before walking them: O(n log n) once per cold open, where the open was
+  already O(n).
+- **`sweep-all` windows (D-1564).** Months are loaded, begun, swept and filed
+  in windows of four per worker. Peak memory holds at most one window of
+  loaded months; the price is a barrier per window, so a window finishes at
+  the pace of its slowest month. NOT MEASURED against the former unwindowed
+  walk.
+- **Completion order elsewhere (D-1564).** `range-all` (`sweep_rungs`),
+  `pool` pass 1 and the Boolean family pools run whole audits or candidate
+  productions per worker. Their attempt tokens and the order of the rows they
+  append to `runs.bin` follow completion order, not input order. Reports are
+  gathered in input order and every ledger lookup is by identity.
+- **Plain `descend` (D-1567).** Every ladder step after the first is a full
+  `one_rung`: the signal span, the 1-min execution span, the daily and minute
+  contexts are reloaded and the anchored column rebuilt, so a ladder of S steps
+  costs S times one rung's load and build on top of its sweeps. `cli elite`'s
+  `ScreenCache` (D-0997) does not reach this path.
+- **`latest_for` (D-1567).** O(runs) per call: it opens the results ledger,
+  which builds the identity index and hashes the file, before its backward
+  scan. Called once per rung of `range-all`, `pool` pass 1 and every `descend`
+  step.
+
 ## Gate 11 allowlist reasons — moved from `.github/workflows/ci.yml`, D-1451, 2 October 2026
 
 Gate 11 declares, per rule, the files allowed a counted number of banned

@@ -329,9 +329,20 @@ fn sweep_under(
     // THE 54,000 SWEEPS, IN PARALLEL, AND STILL BYTE-IDENTICAL.
     //
     // Each instrument-month is wholly independent: its own file, its own
-    // evaluator, its own ladder, its own run identity. Nothing is shared and
-    // nothing is written. This was a `for` loop on one core while `rayon` sat in
-    // the workspace manifest with no crate taking the arrow at all.
+    // evaluator, its own ladder, its own run identity. This was a `for` loop on
+    // one core while `rayon` sat in the workspace manifest with no crate taking
+    // the arrow at all.
+    //
+    // WHAT IS SHARED IS WRITTEN SERIALLY, IN WALK ORDER. This comment used to say
+    // "nothing is shared and nothing is written", and both halves were false:
+    // every month allocated an evidence attempt token from the process-wide
+    // journal and appended a row to the one `runs.bin`, from inside the worker,
+    // so which month got which token and where its ledger row landed followed
+    // thread timing (audit-20261003 hunt-conc-1, KNOWN GAP13-13). Now each
+    // window of months runs in four phases: load and identify in parallel
+    // (reads only), begin every attempt serially in walk order, sweep in
+    // parallel (each month writes only its own attempt's depth file), then file
+    // the ledger row and finish the attempt serially in walk order. D-1564.
     //
     // WHY THE PARALLELISM IS HERE AND NOT OVER CANDIDATES, which is where the
     // architecture document claimed it was: gate 22 pins `vocab indicators
@@ -354,10 +365,31 @@ fn sweep_under(
     // preventing N outer sweeps from each spawning one worker per machine core.
     let concurrent = wanted.len().min(rayon::current_num_threads()).max(1);
     let _sharing = crate::SharedBy::these(concurrent);
-    let rows: Vec<Row> = wanted
-        .par_iter()
-        .map(|held| one(root, held, min_hits, commit))
-        .collect();
+    // A WINDOW, SO THE LOADED MONTHS ARE BOUNDED. Phase one holds every month
+    // of its window in memory until phase three sweeps it; a window of a few
+    // months per worker bounds that to a constant multiple of the workers
+    // rather than to the whole catalog, at the cost of one barrier per window.
+    let window = concurrent.saturating_mul(WINDOW_PER_WORKER).max(1);
+    let mut rows: Vec<Row> = Vec::with_capacity(wanted.len());
+    for months in wanted.chunks(window) {
+        let prepared: Vec<Result<Ready, Row>> = months
+            .par_iter()
+            .map(|held| prepare(root, held, min_hits, commit))
+            .collect();
+        let begun: Vec<Result<(Ready, crate::sweep_evidence::Attempt), Row>> = prepared
+            .into_iter()
+            .map(|ready| ready.and_then(|ready| begin(root, ready)))
+            .collect();
+        let swept: Vec<Result<Swept, Row>> = begun
+            .into_par_iter()
+            .map(|begun| begun.and_then(sweep))
+            .collect();
+        for (held, swept) in months.iter().zip(swept) {
+            rows.push(
+                swept.map_or_else(|refused| refused, |swept| file(root, held, swept, min_hits)),
+            );
+        }
+    }
     for row in &rows {
         tally.fold(row);
     }
@@ -422,7 +454,38 @@ fn at_least_one_filed(walk: &catalog::Census, offered: u64, rows: &[Row]) -> Res
     Err(why.trim_end().to_owned())
 }
 
-/// Sweeps one instrument-month. Pure: it reads the store and returns a row.
+/// Months loaded per worker before a window's attempts begin. D-1564.
+const WINDOW_PER_WORKER: usize = 4;
+
+/// A month whose inputs are loaded and whose identity is known. Nothing durable
+/// has been written for it yet.
+struct Ready {
+    label: String,
+    loaded: stored::Loaded,
+    daily: stored::DailyContext,
+    exact_minute: stored::ExactMinuteContext,
+    signal_length: i64,
+    ladder: Ladder,
+    id: runner::identity::RunId,
+}
+
+/// A month whose sweep ran under its begun attempt, not yet filed.
+struct Swept {
+    ready: Ready,
+    attempt: crate::sweep_evidence::Attempt,
+    outcome: runner::StreamedOutcome,
+}
+
+/// One month, every phase in turn: what the parallel walk does in windows.
+#[cfg(test)]
+fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
+    prepare(root, held, min_hits, commit)
+        .and_then(|ready| begin(root, ready))
+        .and_then(sweep)
+        .map_or_else(|refused| refused, |swept| file(root, held, swept, min_hits))
+}
+
+/// Phase one: load the month and derive its identity. Reads only.
 ///
 /// Takes no `&mut Tally`. That parameter was what stopped the walk above being
 /// parallel, and removing it is what `Tally::fold` exists for.
@@ -430,7 +493,7 @@ fn at_least_one_filed(walk: &catalog::Census, offered: u64, rows: &[Row]) -> Res
     clippy::too_many_lines,
     reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
 )]
-fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row {
+fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Result<Ready, Row> {
     // THE SYMBOL IS A DIRECTORY'S NAME, ESCAPED. The feed, rung and month are
     // parsed before a holding exists; the symbol directory is not, and it can
     // be called anything a filesystem admits. Printed raw, one named
@@ -458,7 +521,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     if let Ok(key) = stored::swept_index(&held.symbol)
         && let Some(why) = stored::misfiled(&key, &held.exchange, &held.segment, &held.symbol)
     {
-        return Row {
+        return Err(Row {
             label,
             bars: 0,
             depth: 0,
@@ -467,7 +530,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             identity: None,
             refused: Some(why),
             ran: false,
-        };
+        });
     }
     let loaded = match stored::load(
         root,
@@ -479,7 +542,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(loaded) => loaded,
         Err(why) => {
-            return Row {
+            return Err(Row {
                 label,
                 bars: 0,
                 depth: 0,
@@ -488,7 +551,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 identity: None,
                 refused: Some(why),
                 ran: false,
-            };
+            });
         }
     };
     let daily = match stored::load_daily_context(
@@ -503,7 +566,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(daily) => daily,
         Err(why) => {
-            return Row {
+            return Err(Row {
                 label,
                 bars: 0,
                 depth: 0,
@@ -512,7 +575,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 identity: None,
                 refused: Some(why),
                 ran: false,
-            };
+            });
         }
     };
     let exact_minute = match stored::load_exact_minute_context(
@@ -527,7 +590,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
     ) {
         Ok(context) => context,
         Err(why) => {
-            return Row {
+            return Err(Row {
                 label,
                 bars: 0,
                 depth: 0,
@@ -536,13 +599,13 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 identity: None,
                 refused: Some(why),
                 ran: false,
-            };
+            });
         }
     };
     let signal_length = match stored::rung_length_micros(held.timeframe.as_str()) {
         Ok(length) => length,
         Err(why) => {
-            return Row {
+            return Err(Row {
                 label,
                 bars: 0,
                 depth: 0,
@@ -551,13 +614,13 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 identity: None,
                 refused: Some(why),
                 ran: false,
-            };
+            });
         }
     };
     let digest = match crate::stored_anchored_digest(&loaded.bars, &exact_minute, &daily) {
         Ok(digest) => digest,
         Err(why) => {
-            return Row {
+            return Err(Row {
                 label,
                 bars: 0,
                 depth: 0,
@@ -566,7 +629,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
                 identity: None,
                 refused: Some(why),
                 ran: false,
-            };
+            });
         }
     };
     // A STATED CEILING, BECAUSE THE DEFAULT ONE IS THE MACHINE'S FREE MEMORY.
@@ -628,53 +691,83 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
         feed: loaded.vendor.as_str(),
     });
 
-    let attempt = match crate::sweep_evidence::begin(
+    Ok(Ready {
+        label,
+        loaded,
+        daily,
+        exact_minute,
+        signal_length,
+        ladder,
+        id,
+    })
+}
+
+/// Phase two, serial and in walk order: the durable start that precedes the
+/// sweep, so attempt tokens are allocated in the order months are offered.
+fn begin(
+    root: &std::path::Path,
+    ready: Ready,
+) -> Result<(Ready, crate::sweep_evidence::Attempt), Row> {
+    match crate::sweep_evidence::begin(
         root,
-        id.bytes(),
+        ready.id.bytes(),
         crate::sweep_evidence::Operation::Sweep,
     ) {
-        Ok(attempt) => attempt,
-        Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: Some(id.hex()),
-                refused: Some(why),
-                ran: false,
-            };
-        }
-    };
-    let availability = crate::stored::vwap_availability(&loaded.key);
-    let column = match crate::stored_anchored_column(
-        &loaded.bars,
-        &daily,
-        &exact_minute,
-        signal_length,
+        Ok(attempt) => Ok((ready, attempt)),
+        Err(why) => Err(unswept(&ready, why)),
+    }
+}
+
+/// A row for a month whose identity is known and whose sweep never ran.
+fn unswept(ready: &Ready, why: String) -> Row {
+    Row {
+        label: ready.label.clone(),
+        bars: 0,
+        depth: 0,
+        kept: 0,
+        completed: false,
+        identity: Some(ready.id.hex()),
+        refused: Some(why),
+        ran: false,
+    }
+}
+
+/// Phase three, in parallel: the sweep. Its only write is this month's own
+/// attempt's depth rows.
+fn sweep((ready, attempt): (Ready, crate::sweep_evidence::Attempt)) -> Result<Swept, Row> {
+    let availability = crate::stored::vwap_availability(&ready.loaded.key);
+    let column = crate::stored_anchored_column(
+        &ready.loaded.bars,
+        &ready.daily,
+        &ready.exact_minute,
+        ready.signal_length,
         availability,
-    ) {
-        Ok(column) => column,
-        Err(why) => {
-            return Row {
-                label,
-                bars: 0,
-                depth: 0,
-                kept: 0,
-                completed: false,
-                identity: Some(id.hex()),
-                refused: Some(why),
-                ran: false,
-            };
-        }
-    };
-    let outcome = Sweeper::new(ladder).run_prepared_streamed_reporting(
+    )
+    .map_err(|why| unswept(&ready, why))?;
+    let outcome = Sweeper::new(ready.ladder).run_prepared_streamed_reporting(
         &column,
         &mut |level, admitted, pairs| {
             let _ = attempt.level(crate::sweep_evidence::DepthRow::of(level, admitted, pairs));
         },
     );
+    Ok(Swept {
+        ready,
+        attempt,
+        outcome,
+    })
+}
+
+/// Phase four, serial and in walk order: the event, the ledger row and the
+/// attempt's terminal record.
+fn file(root: &std::path::Path, held: &Held, swept: Swept, min_hits: u64) -> Row {
+    let Swept {
+        ready,
+        attempt,
+        outcome,
+    } = swept;
+    let Ready {
+        label, loaded, id, ..
+    } = ready;
     let kept = usize::try_from(
         outcome
             .sweep

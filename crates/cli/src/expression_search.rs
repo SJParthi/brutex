@@ -528,6 +528,15 @@ fn execute(
 ) -> Result<State, String> {
     let start_count = state.candidates;
     let start_work = state.work;
+    // A SEARCH ALREADY EXHAUSTED HAS NOTHING NEW TO RECORD. The loop below
+    // takes no step, and publishing anyway appended one more checkpoint per
+    // rerun -- each one a journal reservation, a history link `verify_history`
+    // walks twice, and bytes on disk a rerun was meant not to change (§3 rule
+    // 5). The grammar and Boolean campaigns already return here.
+    // audit-20261003 hunt-cli-b-1, D-1562.
+    if state.exhausted && previous.0 != 0 {
+        return Ok(state);
+    }
     while !state.exhausted
         && state.candidates - start_count < budgets.0
         && state.work - start_work < budgets.1

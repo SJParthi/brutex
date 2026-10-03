@@ -5355,8 +5355,17 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
 ///
 /// On the reference machine that is roughly nine thousand cells per candidate,
 /// solving to seven or eight rungs — the range the old constant already sat in,
-/// now reached by arithmetic rather than by a number that happened to hold. A
-/// larger machine earns more; a smaller one is protected.
+/// now reached by arithmetic rather than by a number that happened to hold.
+///
+/// **The core count cancels, so every machine gets the same budget.** This
+/// sentence used to say "a larger machine earns more; a smaller one is
+/// protected", and the arithmetic does neither: [`whole_machine_ceiling`]
+/// multiplies by `available_parallelism` and the division by `threads` below
+/// divides by the same figure, so the budget is
+/// `DEFAULT_CEILING / REFERENCE_CORES / GRID_SHARE` (9,362 cells, seven rungs)
+/// on one core and on 128 alike, up to integer rounding. That is the
+/// reproducible outcome: the grid rung count, which selects the winning cell,
+/// does not depend on the machine. audit-20261003 hunt-conc-4, D-1566.
 ///
 /// Solved by walking upward rather than inverting a quintic: the answer is
 /// small, the walk is bounded, and `variants` is a `const fn` of a few
@@ -10286,7 +10295,19 @@ fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offere
 /// `validate: false` and only the rung that lands is re-run with the stack. This
 /// gives the same choice to the command an operator reaches for first.
 fn validate_from_env() -> bool {
-    validates(crate::knobs::var("BRUTEX_VALIDATE").as_deref())
+    let raw = crate::knobs::var("BRUTEX_VALIDATE");
+    // A VALUE THAT IS NEITHER `0` NOR `1` IS NAMED, NOT ONLY OUTVOTED. It still
+    // leaves validation ON -- the safe direction `validates` documents -- but
+    // `false`, `off` or `no` used to mean ON in silence, so an operator who
+    // asked for less got more with nothing saying why. Recorded here it reaches
+    // the `!! KNOB REFUSED` block like every other unusable knob.
+    // audit-20261003 hunt-cli-b-4, D-1566.
+    if let Some(value) = raw.as_deref()
+        && !matches!(value.trim(), "0" | "1")
+    {
+        crate::knobs::refuse_value("BRUTEX_VALIDATE", value);
+    }
+    validates(raw.as_deref())
 }
 
 /// The rule itself, over the raw value, so it can be tested without touching the
@@ -15510,14 +15531,16 @@ const IN_SAMPLE_WARNING: &str = "\n  \
 /// The record just written for this exact run, read back from the store.
 ///
 /// Reads BACKWARDS from the newest row and stops at the first match, because the
-/// row this command just appended is the last one. That is `O(1)` in the ordinary
-/// case and `O(rows)` only if the run was somehow not recorded — which is
-/// reported as the refusal it is rather than absorbed.
+/// row this command just appended is usually the last one. The SCAN is short in
+/// the ordinary case; the CALL is not.
 ///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// **O(runs) per call, measured.** `Results::open` builds the identity index
+/// and hashes the file before the first row is read, so every call costs the
+/// whole ledger: audit-20261003 o1surface2-4 measured a 14.13x open cost for
+/// 10x the rows, and about 10.9x even when the newest row matches. This doc
+/// said `O(1)` in the ordinary case until D-1567. The match is on feed,
+/// instrument, rung, span and `min_hits`, not on an identity, so
+/// `Results::of_identity` cannot serve it; `docs/06-limits.md` states the bound.
 fn latest_for(
     vendor_word: &str,
     underlying: &str,
@@ -23277,6 +23300,26 @@ mod tests {
         ] {
             assert_eq!(validates(raw), want, "{why}");
         }
+    }
+
+    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value other than `0`
+    /// or `1` still leaves validation ON, and the run now SAYS so through the
+    /// `!! KNOB REFUSED` block, instead of reading `false` as `1` in silence.
+    #[test]
+    fn an_unexpected_validate_value_stays_on_and_is_named_as_refused() {
+        let _knobs = crate::knobs::serially();
+        for (raw, refused) in [("false", true), ("off", true), ("1", false), (" 0 ", false)] {
+            crate::knobs::clear_all();
+            crate::knobs::set("BRUTEX_VALIDATE", raw);
+            assert_eq!(super::validate_from_env(), raw.trim() != "0", "{raw:?}");
+            let block = crate::knobs::refused().unwrap_or_default();
+            assert_eq!(
+                block.contains("BRUTEX_VALIDATE"),
+                refused,
+                "{raw:?}: {block}"
+            );
+        }
+        crate::knobs::clear_all();
     }
 
     /// AND THE SEARCH ACTUALLY FINISHES, ON A COLUMN WITH BARS TO SWEEP.

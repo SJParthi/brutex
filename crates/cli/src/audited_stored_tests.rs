@@ -15,6 +15,26 @@ pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R
     run(&fixture.root)
 }
 
+/// One root holding the warmed May 2025 fixture for every symbol in `symbols`,
+/// so a whole-store walk offers several sweepable months at once. The first
+/// symbol's fixture owns (and removes) the root; the others only write into it.
+pub(crate) fn with_warmed_symbols<R>(
+    symbols: &[&'static str],
+    run: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    let (first, rest) = symbols.split_first().expect("at least one symbol");
+    let owner = Fixture::warmed_for(first);
+    for symbol in rest {
+        let other = std::mem::ManuallyDrop::new(Fixture {
+            root: owner.root.clone(),
+            symbol,
+        });
+        other.seed();
+        other.warm();
+    }
+    run(&owner.root)
+}
+
 struct Fixture {
     root: PathBuf,
     /// The swept instrument every file and request names. NIFTY unless a
@@ -33,40 +53,48 @@ impl Fixture {
         ));
         fs::create_dir(&root).expect("scratch");
         let fixture = Self { root, symbol };
+        fixture.seed();
+        fixture
+    }
+    /// Writes the two seed sessions of April and May 2025.
+    fn seed(&self) {
         for (month, day) in [(4, 30), (5, 2)] {
             let rows = generated_session(month, day);
             assert!(!rows.is_empty());
-            fixture.write(month, Timeframe::MINUTE_1, &rows);
-            fixture.write(month, Timeframe::DAY_1, &rows[..1]);
+            self.write(month, Timeframe::MINUTE_1, &rows);
+            self.write(month, Timeframe::DAY_1, &rows[..1]);
             if month == 5 {
-                fixture.write(
+                self.write(
                     month,
                     Timeframe::MINUTE_5,
                     &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
                 );
             }
         }
-        fixture
     }
     fn warmed() -> Self {
         Self::warmed_for("NIFTY")
     }
     fn warmed_for(symbol: &'static str) -> Self {
         let fixture = Self::for_symbol(symbol);
+        fixture.warm();
+        fixture
+    }
+    /// Appends the warmed sessions of May 2025 to this fixture's months.
+    fn warm(&self) {
         for day in 5..=13 {
             let rows = generated_session(5, day);
             if rows.is_empty() {
                 continue;
             }
-            fixture.write(5, Timeframe::MINUTE_1, &rows);
-            fixture.write(5, Timeframe::DAY_1, &rows[..1]);
-            fixture.write(
+            self.write(5, Timeframe::MINUTE_1, &rows);
+            self.write(5, Timeframe::DAY_1, &rows[..1]);
+            self.write(
                 5,
                 Timeframe::MINUTE_5,
                 &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
             );
         }
-        fixture
     }
     fn path(&self, month: u8, timeframe: Timeframe) -> PathBuf {
         let key = stored::swept_index(self.symbol).expect("key");

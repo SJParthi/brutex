@@ -692,3 +692,17 @@ diagnostic replay; they are not counted as caught production mutants.
 | audit-20261003 hunt-costs-3: two sinks on one directory | Cross-process `flock`, second refused (D-1537, AFA-17). |
 | audit-20261003 hunt-costs-4: future time floor carried silently | Named and counted (D-1538, AFA-18). |
 | audit-20261003 attacksweep-2: unterminated fragment fused onto the next `Written` event | Closed before the next event (D-1539, AFA-19). |
+### audit-20261003 `crates/cli` fixes (worker w3) — 2026-10-03
+
+| Finding | Resolution and evidence boundary |
+|---|---|
+| audit-20261003 hunt-cli-a-1, hunt-cli-a-2: a held `runs.bin` or `detail-sets.bin` writer absorbed only the tail after a peer rewrote an indexed row and appended | D-1560: growth re-hashes the indexed prefix and refuses a rewrite. AFC-01 to AFC-05; the rewrite tests failed before the change. |
+| audit-20261003 hunt-cli-a-3: a cold open of `runs.bin` indexed two sealed rows of one identity | D-1560: refused by name. AFC-03. |
+| audit-20261003 errpaths-2 (and errpaths-6): `Path::exists` decided absence in `committed_receipt` and six Step-3 stages | D-1561: `symlink_metadata`, `NotFound` only. AFC-06, AFC-07. |
+| audit-20261003 hunt-cli-b-1: an exhausted expression search appended a checkpoint per rerun | D-1562. AFC-08. |
+| KNOWN GAP11-0 and W2-cli13-5: torn completion marker; no `DIRECTORY_LIMIT` check in `publish_inner` | D-1563: staged marker renamed into place; limit refused before reserving. AFC-09, AFC-10. |
+| audit-20261003 hunt-conc-1 (KNOWN GAP13-13): `sweep-all` attempt tokens and ledger rows followed thread timing | D-1564: windowed four-phase walk, serial in walk order. AFC-12. `range-all`, `pool` and the Boolean pools (hunt-conc-2) are stated as completion-ordered in `docs/06-limits.md`, not changed. |
+| audit-20261003 hunt-conc-3: refusal text depended on `HashMap` order | D-1565. AFC-13, AFC-14. |
+| audit-20261003 hunt-conc-4, hunt-cli-b-2, hunt-cli-b-4, hunt-cli-a-6 | D-1566. AFC-11, AFC-15; the doc corrections carry no test. |
+| audit-20261003 o1surface2-1, o1surface2-4 (KNOWN W2-cli8-4) | D-1567: bounds stated, not removed. |
+| audit-20261003 gaps-1: Step-3 V1-V4 modules unwired from any command | D-1568: recorded, nothing deleted. |
