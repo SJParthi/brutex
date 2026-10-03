@@ -6923,7 +6923,11 @@ jobs:
             echo "           assertion no machine makes. Reasons above."
             bad=1
           fi
-          if "$scan" step-runs "$wf" 'echo "GATE 8 MEASURED NOTHING' | sed 's/^/  /'; then
+          # D-1460: the proof is the top-level `git ls-files --error-unmatch`
+          # line, not the `echo` inside gate 8's `if`, which D-1601's
+          # `step-runs` refuses as a line that may never run.
+          if "$scan" step-runs "$wf" "git ls-files --error-unmatch 'crates/*/benches/*.rs'" | sed 's/^/  /' \
+             && grep -qE "^[[:space:]]+git ls-files --error-unmatch 'crates/\\*/benches/\\*\\.rs' > /dev/null[[:space:]]*$" "$wf"; then
             echo "  present  gate 8 still refuses an empty bench set"
           else
             echo "  REFUSED  gate 8 no longer fails when no bench exists. A skip"
@@ -7746,6 +7750,12 @@ jobs:
             echo "docs/05-decisions.md. This step does not skip."
             exit 1
           fi
+          # The `if` above names the cause; this line is the refusal gate 14
+          # proves. D-1601's `step-runs` (rightly) refuses a line inside an
+          # `if` as one that may never run, so the proof needs a TOP-LEVEL
+          # command that fails the step when no bench is tracked: git exits 1
+          # on a pathspec that matches nothing. D-1460.
+          git ls-files --error-unmatch 'crates/*/benches/*.rs' > /dev/null
           echo "$n bench source file(s) tracked."
           # Each harness is `harness = false`: it prints every number it took
           # and exits non-zero on a breach. See docs/04-invariants.md C-01,

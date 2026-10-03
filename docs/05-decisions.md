@@ -56112,3 +56112,22 @@ no input can reach, which the coverage gate cannot cover and which would
 breed mutants of its own. A 256 MiB exact-size sparse read in the archive
 test: correct, but it allocates and reads the whole bound on every test run
 to prove one comparison.
+
+### D-1460 — Gate 8 refuses an empty bench set with a top-level line, so Gate 14 can prove it — 2026-10-03
+
+**What was observed.** After D-1601, `source_scan step-runs` refuses a needle
+line inside an `if`, loop, `case` or brace group, because such a line may never
+run. Gate 14 layer 5 (D-1503) proved "gate 8 still refuses an empty bench set"
+by asking `step-runs` about `echo "GATE 8 MEASURED NOTHING`, and that line sits
+inside gate 8's `if [ "$n" -eq 0 ]`. Run locally against PR #74's merged head,
+Gate 14 failed on every workflow from a39e4cc onward, with the new scanner and
+no workflow change. The refusal was right; the proof had picked the wrong line.
+
+**The decision.** Gate 8 keeps its `if` block, which names the cause, and adds
+a top-level `git ls-files --error-unmatch 'crates/*/benches/*.rs' > /dev/null`.
+git exits 1 when the pathspec matches no tracked file, so under `set -e` the
+step fails with no bench, whether or not the `if` ran. Layer 5 asks `step-runs`
+about that line and also requires the exact line, as its bench check already
+does. Checked locally: `git ls-files --error-unmatch` on a pathspec that matches
+nothing exits 1 and on `crates/*/benches/*.rs` exits 0, and `step-runs` reports
+the step as running the line unconditionally and blocking.
