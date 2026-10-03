@@ -2,7 +2,7 @@
 - Owner: Parthiban Subramanian (GitHub SJParthi)
 - Repo: https://github.com/SJParthi/brutex
 - What it is: Rust brute-force backtesting engine. Continuing work from the user's previous account.
-- Resume notes live on branch fix-queue: resume/RESUME-20261003.md and resume/audit-20261003/RESUME.md Key facts: [[resume-20261003-pr74-state]], [[audit-20261003-state]], [[brutex-ci-and-merge-gotchas]].
+- MASTER RESUME for the new account (2026-10-04): fix-queue resume/RESUME-20261004.md (all threads, prompts, branch heads, copies of project files + memory). Older notes: resume/RESUME-20261003.md and resume/audit-20261003/RESUME.md Key facts: [[resume-20261003-pr74-state]], [[audit-20261003-state]], [[brutex-ci-and-merge-gotchas]].
 - Final combined PR: #74 on branch final/all-fixes. No other new PRs (if #74 merged, exactly one new combined PR).
 - GDFL engine build lives on the user's Mac: /Volumes/WD_BLACK/brutex/fresh-20260919/project, resume kit work-20260925/state/resume-kit/RESUME.md. NEVER push the GDFL reader branch while real GDFL data rows are in its history.
 

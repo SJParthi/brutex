@@ -1,18 +1,30 @@
 ---
 name: workspace-audit-20261003
-description: 2026-10-03 whole-workspace Rust-only / O(1) / adversarial audit of PR #74 head 1087e54 - 91 NEW findings, artifact link, report location
+description: 2026-10-03 whole-workspace audit of PR #74 (91 findings): fix state, branches, resume notes on fix-queue, blocked items
 metadata:
   type: project
-  modified: 2026-10-03T05:27:39.107Z
+  modified: 2026-10-03T18:52:11.109Z
 ---
-Audit of final/all-fixes @ 1087e54 by 20 parallel workers (2026-10-03). Excludes the 547 already-known findings (lane1/2/3, audit-53, batch-1).
+Audit of final/all-fixes @ 1087e54 found 91 NEW findings (1 high, 28 medium). Artifact: https://claude.ai/artifact/YYYZhcv7YjfW5txZL12Ki1 (it has a tail-latency p50/p99 tab).
 
-- Artifact: https://claude.ai/artifact/YYYZhcv7YjfW5txZL12Ki1
-- Reports (verbatim probe output): /mnt/project-files/audit-20261003-workspace/*.md (+ test2.log, clippy2.log, fmt2.log)
-- New findings: 1 high (splits look like winners, objective risk), 28 medium, 50 low, 12 info; 44 proven by a Rust probe that ran. None were fixed in this pass.
-- Gates at 1087e54: fmt clean, clippy -D warnings clean, test 6565 pass / 4 fail only as root (pass as uid 65534) / 12 ignored. deny, coverage, mutants not run locally.
-- Rust-only holds (0 native deps, binaries link only libc); 7 low guard-bypass holes in CI gates.
-- Core sweep held every attack (oracle 0 missing/0 extra, byte-identical 1-64 lanes).
+Full resume state lives on the fix-queue branch, under resume/workspace-audit-20261003/:
+- RESUME.md: start here.
+- PROMPTS-AND-BRIEFS.md: the user's words and every agent brief.
+- STATUS.md: all 91 findings.
+- QUEUE.md, FIXRULES2.md.
 
-**Why:** next session should route these to a fix lane rather than re-audit.
-**How to apply:** fixes go onto final/all-fixes (PR #74) per [[resume-20261003-pr74-state]]; see [[brutex-ci-and-merge-gotchas]].
+State as of 2026-10-03 18:55 UTC:
+- 71 of 91 fixed.
+- On PR #74: 0cab319, which carries a21d031 (D-1520..D-1592).
+- w6 is done on origin audit-fix/w6 @ 700e644, not yet pushed to PR #74.
+- w7 (cli) is in progress, w8 is WIP (d2ed52d, untested), and w9 (features) is not started.
+- Per-finding board file: /mnt/project-files/fix-board/status/sweep.tsv.
+
+Blocked, and code cannot fix them:
+- No charter source: gaps-6 threshold, gaps-7, gaps-8, hunt-costs-5, hunt-runner-5.
+- Owner setting: hunt-ci-1.
+- Operator data: testgaps-7.
+- Not a defect: rustonly2-10.
+
+**Why:** the user resumes from a different account using GitHub only.
+**How to apply:** resume from fix-queue RESUME.md. Before pushing to final/all-fixes, coordinate with the PR #74 CI thread. Gate 15 bans other language names in text. See [[resume-20261003-pr74-state]] and [[brutex-ci-and-merge-gotchas]].

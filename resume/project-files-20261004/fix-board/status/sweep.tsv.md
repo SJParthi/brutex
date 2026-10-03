@@ -26,8 +26,8 @@ gaps-3	fixing	f1f25c3
 gaps-5	found	
 gaps-7	found	
 gaps-8	found	
-o1surface2-1	fixing	78ce90f
-hunt-conc-1	fixing	78ce90f
+o1surface2-1	branch	858c8bb
+hunt-conc-1	branch	858c8bb
 hunt-cli-a-3	pushed	a21d031
 hunt-cli-b-1	pushed	a21d031
 hunt-pull-3	pushed	a21d031
@@ -50,7 +50,7 @@ webcontract-3	pushed	a21d031
 errpaths-2	pushed	a21d031
 errpaths-3	pushed	a21d031
 errpaths-4	branch	700e644
-hunt-conc-2	fixing	78ce90f
+hunt-conc-2	branch	858c8bb
 hunt-conc-3	pushed	a21d031
 attackdata-2	pushed	a21d031
 attackdata-3	pushed	a21d031
@@ -83,7 +83,7 @@ hunt-ci-12	pushed	0cab319
 rustonly2-10	found	
 webcontract-5	pushed	a21d031
 hunt-api-6	pushed	a21d031
-hunt-cli-a-5	fixing	78ce90f
+hunt-cli-a-5	branch	858c8bb
 hunt-conc-4	pushed	a21d031
 o1eng2-3	pushed	a21d031
 o1store2-2	pushed	a21d031

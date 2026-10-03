@@ -80,3 +80,4 @@ W2-cli5-4	found		user approved 13:27 UTC (Fix them); queued F6 after 18:00 UTC: 
 W3-runner2-8	found		user approved 13:27 UTC (Fix them); queued F6 after 18:00 UTC: one frontier-rule authority, column digest v2
 W3-runner2-7	found		user approved 13:27 UTC (Fix them); queued F6 after 18:00 UTC: one frontier-rule authority, column digest v2
 W3-runner5-0	found		user approved 13:27 UTC (Fix them); queued F6 after 18:00 UTC: one frontier-rule authority, column digest v2
+h-cli-4	found		same seek(End)+write_all no-rollback shape seen by F9 in anchored_search_lineage_v2/v3, population_observations_v1, sweep_evidence; not yet audited
