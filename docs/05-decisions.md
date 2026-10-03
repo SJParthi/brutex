@@ -55017,3 +55017,15 @@ verified (D-1901): it cuts to the last whole record, syncs, and emits a
 the 768-byte member stride, so a whole NIFTY member of a torn pair is kept as
 the orphan the scan already resumes. Read-only opens still refuse until a
 writer has healed the file. A whole-record tail with a bad seal still refuses.
+
+### D-1911 — The serve lock names the host, not another instance, when flock itself is refused — 2026-10-03
+
+locks-1: `take_serve_lock` reported every `try_lock` refusal as "another
+brutex api is already serving this store" and quoted line 1 of `serve.lock`.
+`TryLockError::Error` is the host refusing `flock` (ENOLCK on a mount without a
+lock manager, ENOTSUP on a filesystem without advisory locks). No other
+instance exists then, and the stamp is the last SUCCESSFUL holder's, a dead
+pid. The new `serve_lock_refusal` keeps the text and the holder stamp for
+`WouldBlock` only. `Error(host)` names the host refusal, says no other instance
+is implied, and asks for a filesystem with advisory locks. The serve is still
+refused in both cases. This is the D-0955 split, applied to this site.
