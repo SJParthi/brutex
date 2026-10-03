@@ -54224,7 +54224,7 @@ law question the prior pass raised and left to the operator. Invariant AFE-04.
 
 **What was observed.** rustonly2-1: `compiled_roots` counted every
 `.github/*.rs` and every `crates/*/src/lib.rs`, so a tracked `.github/notes.rs`
-or a non-member `crates/zz/src/lib.rs` holding Python passed gate 1 and its
+or a non-member `crates/zz/src/lib.rs` holding another language's source passed gate 1 and its
 "every .rs outside web/ is compiled" line. rustonly2-3: gate 2 refused only
 naming a process API; a build script could write `.cargo/config.toml`
 (a `rustc-wrapper` the next cargo runs), print `rustc-link-arg=-fuse-ld=…`,
