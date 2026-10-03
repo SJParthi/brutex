@@ -254,7 +254,10 @@ fn read_at(file: &mut File, at: u64, version: u32) -> Result<([u8; STRIDE_BYTES]
 
 /// The refusal for two sealed rows that carry one run identity.
 fn duplicate_identity(path: &Path, identity: &[u8; 32], first: u64, second: u64) -> Refusal {
-    let hex: String = identity.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex = identity.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    });
     format!(
         "{} holds duplicate run identity {hex}: sealed rows at bytes {first} and {second}. \
          A run is recorded once (§3 rule 5), so the ledger is ambiguous and is \

@@ -454,14 +454,6 @@ fn at_least_one_filed(walk: &catalog::Census, offered: u64, rows: &[Row]) -> Res
     Err(why.trim_end().to_owned())
 }
 
-/// Sweeps one instrument-month. Pure: it reads the store and returns a row.
-///
-/// Takes no `&mut Tally`. That parameter was what stopped the walk above being
-/// parallel, and removing it is what `Tally::fold` exists for.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
-)]
 /// Months loaded per worker before a window's attempts begin. D-1564.
 const WINDOW_PER_WORKER: usize = 4;
 
@@ -494,6 +486,13 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
 }
 
 /// Phase one: load the month and derive its identity. Reads only.
+///
+/// Takes no `&mut Tally`. That parameter was what stopped the walk above being
+/// parallel, and removing it is what `Tally::fold` exists for.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stored batch row keeps its signal, daily, exact-minute, identity, and refusal receipts together"
+)]
 fn prepare(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Result<Ready, Row> {
     // THE SYMBOL IS A DIRECTORY'S NAME, ESCAPED. The feed, rung and month are
     // parsed before a holding exists; the symbol directory is not, and it can

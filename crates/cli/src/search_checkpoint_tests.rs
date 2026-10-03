@@ -253,6 +253,10 @@ fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Res
     Ok(())
 }
 
+/// What the marker hook saw: discovery's latest, its interrupted count, and
+/// the latest checkpoint's payload read at that instant.
+type Observed = (Option<u64>, u64, Result<Vec<u8>, String>);
+
 /// audit-20261003 GAP11-0: a kill between creating the completion marker and
 /// writing its seal must not leave a `complete` that discovery acknowledges.
 /// The hook observes the namespace at exactly that instant, as a cold reader
@@ -264,8 +268,7 @@ fn a_kill_while_the_marker_is_written_leaves_the_previous_checkpoint_latest() ->
     let scratch = Scratch::new().map_err(error)?;
     let mut journal = Journal::open(&scratch.0, "expression-search-v1", [6; 32])?;
     journal.publish(b"first", 1024)?;
-    let observed: Rc<RefCell<Option<(Option<u64>, u64, Result<Vec<u8>, String>)>>> =
-        Rc::new(RefCell::new(None));
+    let observed: Rc<RefCell<Option<Observed>>> = Rc::new(RefCell::new(None));
     let slot = Rc::clone(&observed);
     MARKER_CREATED.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move |namespace: &Path| {
@@ -305,9 +308,9 @@ fn publishing_past_the_directory_limit_refuses_before_reserving() -> Result<(), 
     let scratch = Scratch::new().map_err(error)?;
     let mut journal = Journal::open(&scratch.0, "expression-search-v1", [7; 32])?;
     journal.next = u64::try_from(DIRECTORY_LIMIT).map_err(error)?;
-    let why = journal
-        .publish(b"one too many", 1024)
-        .expect_err("a reservation past the discovery limit refuses");
+    let Err(why) = journal.publish(b"one too many", 1024) else {
+        return Err("a reservation past the discovery limit was published".to_owned());
+    };
     assert!(why.contains("directory admission limit"), "{why}");
     assert!(
         !journal
