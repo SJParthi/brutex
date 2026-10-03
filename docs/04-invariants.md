@@ -6216,3 +6216,9 @@ old line regex the same input and watched it pass.
 | CUH-06 | One candidate-trade `Summary` hashes its catalog once across thirty page-level reads, a `read` summary adds none, and a replaced or removed catalog is still refused on every page surface (D-0991) | `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change` | ✓ |
 | CUH-07 | An empty candidate-trade catalog is verified once and its absent tier is refused (D-0991) | `cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses` | ✓ |
 | CUH-08 | A capture derives slice facts once for all of its candidate sides, records a side with no trading cell with no rows, and issues exactly four `fsync`s per candidate side (D-0991) | `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side` | ✓ |
+
+### Audit fixer 2 follow-ups — D-1490 onward
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AFX-01 | The columnar, positional and object decode shapes each skip one row for a negative volume on a traded listing or a negative non-sentinel open interest (at `-1`, `-0.5`, `-5.0` and `i64::MIN + 1`), keep the good row with its own counts, record an index's negative volume as zero, refuse the `i64::MIN` open interest by name, and keep a zero (D-1490) | `pull::http::tests::all_three_decode_shapes_skip_a_negative_count_alike` | ✓ |

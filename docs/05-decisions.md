@@ -53403,3 +53403,29 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1490 — Every JSON decode shape applies one count rule: a negative volume or open interest skips its row — 2026-10-03
+
+**What was observed (c4a-1, c4a-2).** `pull::http::kept_rows`, the columnar
+shape Dhan answers in, skipped a row whose equity volume was negative and a
+row whose open interest was negative (the `i64::MIN` sentinel aside), and
+counted both. `decode_positional` (Zerodha, Groww) refused the WHOLE window
+over one negative equity volume, through `one_volume`, and passed a negative
+open interest straight into the window; `decode_objects` did the same. Probe:
+a Zerodha row with volume `-5` refused the window; a row with open interest
+`-7` decoded as `Some(-7)`. Same vendor fault, opposite outcome, chosen by the
+response shape. D-0323 and D-0332 record the same "one door missed" pattern.
+
+**The decision.** One function, `count_verdict`, holds the rule and its
+reasons, and all three shapes call it before pushing a column. A skipped row
+is counted and reported once per window through the existing
+`note_negative_volume_bars` and `note_negative_interest_bars`. An index's
+negative volume is still recorded as zero (P-60), `i64::MIN` open interest is
+still refused by name, and zero is still a reading.
+
+**What it changes.** A positional or object window that used to be refused now
+lands without the bad rows; a negative open interest that used to land is now
+skipped. Valid bars are byte-identical. No run identity term moves.
+
+**Rejected.** Making every shape refuse: D-0323's measured `-125` on ADANIENT
+showed that refusal costs an instrument every intraday rung it has.
