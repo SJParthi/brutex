@@ -53583,3 +53583,39 @@ day's rows equal a build over that day alone.
 **Rejected.** Dropping every same-day record per signal day: the offered
 stream is one slice for the whole span, and the evaluator already enforces the
 per-row rule.
+
+### D-1665 — Seed `isqrt_i128` at or above the root and stop on the first non-decreasing Newton step — 2026-10-03
+
+**Findings.** W3-indicators2-1 (low, bug) and W3-indicators2-0 (low, cost).
+`isqrt_i128_counted` started Newton at `guess = v` and stopped on
+`guess == previous`. At every `v = k^2 - 1` the integer iteration oscillates
+between `k - 1` and `k`, so the loop never met its exit and ran the whole
+128-step cap before a bounded step-down repaired the root: 128 or 129
+iterations at 3, 143, 975² − 1, (10¹⁵)² − 1 and isqrt(i128::MAX)² − 1, and 999
+of the inputs in `1..=10^6` hit the cap (measured on the old code with a
+verbatim copy in a scratch program). `docs/06-limits.md` §51, the module
+header and the function doc all said 1 to 69. The root was always exact; the
+cost and the documentation were not. It runs on the VWAP sigma path, twice per
+bar on an equity column build.
+
+**Decision.** Seed with `1 << ceil(bits(v) / 2)`, which is at least the root
+and at most twice it, and iterate `next = (g + v / g) / 2` while it strictly
+decreases; the first step that does not decrease is the exit and lands exactly
+on `floor(sqrt(v))`, so the step-down is deleted. `NEWTON_STEPS` = 16 and
+`ITERATION_CEILING` = `NEWTON_STEPS`; `STEP_DOWN_STEPS` is removed. Measured:
+at most 5 iterations over `1..=10^6`, 2/5/5/6 at 1, `i64::MAX`, `10^30`,
+`i128::MAX`, 7 at isqrt(i128::MAX)² − 1, worst 8 over five million
+pseudo-random inputs. Tests pin the exactness over `1..=10^6`, the `k² − 1`
+counts, perfect squares and the four documented counts; §51, the module
+header, the function doc, the bench doc and C-I-03 state the new figures and
+say the new loop's timings are not re-measured.
+
+**Changed tests.** `the_documented_iteration_counts_are_the_measured_ones`
+pinned 1/37/55/69 and now pins 2/5/5/6; `the_iteration_ceiling_is_the_sum_of_
+the_two_loops` pinned 128 + 2 and is replaced by
+`the_iteration_ceiling_is_the_newton_budget`, because there is one loop.
+
+**Rejected.** Keeping `guess = v` and adding a cycle check: it fixes the
+oscillation but keeps 64 halvings for wide inputs. Using `i128::isqrt`: it is
+not `const` and its iteration bound is not ours to state. Removing the cap: the
+proof is a sketch and a hard ceiling is what C-I-03 asserts against.

@@ -3527,33 +3527,37 @@ slowdown is measurable, which is what C-T-02 requires.
 
 ---
 
-## 51. `isqrt_i128` is BOUNDED, not flat: a 217× cost spread inside a constant step bound
+## 51. `isqrt_i128` is BOUNDED, not flat: an operand-dependent cost inside a constant step bound
 
-Measured 2026-08-11, `cargo bench -p indicators`, on the operator's machine.
+**Rewritten by D-1665 (W3-indicators2-0, W3-indicators2-1).** The loop is now a
+decreasing Newton iteration from the seed `1 << ceil(bits(v) / 2)`, which is at
+or above the root, with the textbook exit `next >= guess`. Its step count is
+bounded by `ITERATION_CEILING` = `NEWTON_STEPS` = 16, a compile-time constant.
 
-| `v` | Iterations | Total | Per iteration |
-|---|---|---|---|
-| 1 | 1 | 4.0 ns | 4.0 ns |
-| `i64::MAX` | 37 | 293 ns | 7.9 ns |
-| `10^30` | 55 | 712 ns | 13.0 ns |
-| `i128::MAX` | 69 | 916 ns | 13.3 ns |
+**Iteration counts, measured by `cargo test -p indicators` (exact, not timed):**
+2 at `v = 1`, 5 at `i64::MAX`, 5 at `10^30`, 6 at `i128::MAX`, at most 5 over
+every `v` in `1..=10^6`, 7 at `isqrt(i128::MAX)^2 - 1`, and 8 as the worst of
+five million pseudo-random inputs across every bit length (a scratch program,
+not a committed test). **Proved, as a sketch:** the seed's relative error is at
+most 1 and each step leaves at most the square of it over two, so six steps
+reach an error under one unit for any root an `i128` has and one or two more
+reach the exit. 16 is twice the measured worst.
 
-The iteration count is bounded by `ITERATION_CEILING` = `NEWTON_STEPS` +
-`STEP_DOWN_STEPS` = 130, a compile-time constant, and `C-I-03` asserts the real
-count against it at all four probes. **That bound is real and it is the thing
-worth having** — it is what prevents the regression this function already had,
-where an unbounded step-down needed 1,638,791,155,897,336,446 decrements at
-`i128::MAX` under a doc comment calling itself constant-cost.
+**The figures this replaced were wrong.** The previous loop started at
+`guess = v` and stopped on `guess == previous`. This section said "a small
+input finishes in one iteration and a 127-bit one needs sixty-nine", and that
+was true only of inputs that converge: at every `v = k^2 - 1` Newton
+oscillates between `k - 1` and `k`, so the loop ran its whole 128-step cap and
+a bounded step-down repaired the root — 128 or 129 iterations at 3, 8, 143,
+975² − 1, (10¹⁵)² − 1 and isqrt(i128::MAX)² − 1, and 999 inputs in `1..=10^6`
+hit the cap. The root was always exact.
 
-**What is not true is that the cost is flat.** Two effects compound:
-
-1. The Newton loop exits on convergence (`guess != previous`), so a small input
-   finishes in one iteration and a 127-bit one needs sixty-nine. **69×.**
-2. Each iteration performs a 128-bit division, which on this architecture is a
-   library call whose own cost rises with the magnitude of its operands. **3.3×
-   per iteration.**
-
-Together, **217×** end to end.
+**What is not true is that the cost is flat.** The count still depends on the
+operand (2 to 8), and each iteration is a 128-bit division whose own cost
+rises with its operands. Historical timings on the old loop, 2026-08-11 on the
+operator's machine: 4.0 ns at `v = 1` against 916 ns at `i128::MAX`, 217× end
+to end. **The new loop has not been re-timed**: no figure is claimed for it
+here, and `C-I-03` prints its cost as context, not as a ceiling.
 
 ### Why the bench reports this as context and not as a ratio
 
@@ -3570,7 +3574,7 @@ passes. So the row asserts the bound and the root, and prints the cost with
 
 ### Why it is not made genuinely flat
 
-Dropping the convergence exit would run all 130 iterations every call, paying the
+Dropping the convergence exit would run all 16 iterations every call, paying the
 worst case always to buy a uniformity no caller needs. **VWAP abstains on spot
 indices**, which the stored paths sweep with `Availability::Absent`, so on an
 index `isqrt_i128` does not execute.
@@ -3579,8 +3583,8 @@ index `isqrt_i128` does not execute.
 swept data at all.** Since D-0507, `cli::stored::vwap_availability` answers
 `Availability::Present` for every cash-equity key, so an equity sweep reaches
 `isqrt_i128` through the VWAP sigma bands (`vwap.rs`, the variance's square
-root) on every bar where enough volume has contributed for a sigma. The 217×
-spread is therefore a real per-call spread on equity runs. It stays bounded by
+root) on every bar where enough volume has contributed for a sigma. The
+operand-dependent spread is therefore a real per-call spread on equity runs. It stays bounded by
 `ITERATION_CEILING`, and its share of a whole bar is inside what gate 8 measures:
 `C-R-05` builds the column with `Availability::Present` on bars that carry volume,
 and D-0690 recorded the VWAP family adding about 42% to 44% per bar on that
