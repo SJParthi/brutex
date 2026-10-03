@@ -3423,6 +3423,8 @@ mod tests {
         let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
             .expect("a path for a stored index");
         let id = brutex_core::universe::fnv1a(symbol) as u32;
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(&r).expect("the store root");
         let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
         // An empty batch is refused by the store as `EmptyBatch`, correctly — so
         // thezero -bar case is a file that was created and never appended to, which
@@ -3976,6 +3978,7 @@ mod tests {
                     .expect("a path for a stored key");
             let on_disk = path.to_path_buf(&r);
             let id = brutex_core::universe::fnv1a("FINNIFTY") as u32;
+            std::fs::create_dir_all(&r).expect("the store root");
             BarFile::open_or_create(&r, path, id)
                 .expect("a fresh month opens")
                 .append(&bars(3))
@@ -4216,6 +4219,8 @@ mod tests {
             let ym = YearMonth::new(y, m).expect("a real month");
             let path = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars)
                 .expect("a path for a swept index");
+            // The writer never creates a missing store root (D-1522).
+            std::fs::create_dir_all(&r).expect("the store root");
             let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
             file.append(&bars_in(i64::from(y), i64::from(m), n))
                 .expect("and takes its bars");

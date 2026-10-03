@@ -2931,6 +2931,8 @@ mod tests {
         );
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         let id = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(&root).unwrap();
         let mut file = store::file::BarFile::open_or_create(&root, path, id).unwrap();
         let ts = (i64::from(date(2026, 8, 27).days_from_epoch()) * 86_400 + 9 * 3600 + 15 * 60
             - pull::session::IST_OFFSET_SECS)

@@ -2978,7 +2978,7 @@ fn what_a_changed_rows_line_costs_is_named_in_part_and_read_off_the_source() {
         (
             "Sink::emit_for_run",
             emit,
-            "let _terminated = inner.target.append(b\"\\n\");",
+            "inner.torn = inner.target.append(b\"\\n\").is_err();",
             &["ends the fragment"],
         ),
         (

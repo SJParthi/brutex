@@ -3133,6 +3133,11 @@ fn audit_one(
         pull::gaps::classify_cash(&stamps, first, last, cash_schedule)
     } else if asked.segment == "INDEX" {
         pull::gaps::classify_spot_index_against(&stamps, first, last, calendar)
+    } else if asked.exchange == "NSE" && (asked.contract.is_some() || asked.segment == "FNO") {
+        // A DERIVATIVES SERIES OWES THE DERIVATIVES VENUE'S DATED HOURS, the
+        // ones `derive` folds it to (hunt-pull-1, D-1529): from 2026-08-03 a
+        // 385-minute day, so the ten minutes after 15:30 are audited too.
+        pull::gaps::classify_derivative_against(&stamps, first, last, calendar)
     } else {
         pull::gaps::classify_against(&stamps, first, last, calendar)
     };

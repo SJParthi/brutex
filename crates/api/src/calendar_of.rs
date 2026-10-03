@@ -1154,6 +1154,8 @@ pub(crate) mod tests {
             reason = "the id is the cross-check `open` folds; any 32 bits serve"
         )]
         let symbol_id = brutex_core::universe::fnv1a(symbol) as u32;
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(root).expect("the store root");
         let mut file =
             store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
         let rows: Vec<store::format::Bar> = stamps
