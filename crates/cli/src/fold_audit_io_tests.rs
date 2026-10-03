@@ -253,6 +253,14 @@ fn assert_fold_command_case(case: &str) {
         matches!(case, "clean" | "withheld"),
         "only a complete agreeing comparison may claim agreement: {text}"
     );
+    // The span summary names withheld rung-months only when there are some:
+    // a clean or failing span must not print "0 rung-month(s) carry buckets
+    // derive WITHHELD", which reads as a finding where there is none.
+    assert_eq!(
+        text.contains("rung-month(s) carry buckets derive WITHHELD"),
+        case == "withheld",
+        "the withheld summary must appear exactly when derive withheld a bucket: {text}"
+    );
     assert_eq!(
         text.contains("WITHHELD by derive policy"),
         case == "withheld",
