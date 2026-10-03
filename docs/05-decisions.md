@@ -53446,3 +53446,38 @@ million directories in a test: the thread-local lowered limit reaches the
 same boundary with real files in milliseconds.
 
 Invariants DUR-C-01 to DUR-C-04.
+
+### D-1741 — A failed sweep-evidence append rolls back to the length measured under its lock, and a ranking is written in one write — 2026-10-03
+
+**Finding.** GAP11-1, `crates/cli/src/sweep_evidence.rs`.
+
+**What was wrong.** `append_events`, `append_row`, `shape`'s fresh header
+and `Attempt::ranked` each wrote with `write_all` and never truncated a
+partial write. A full filesystem extends a file and then errors, so one
+short write left a tail that is not a whole row. `shape` then refused the
+file as "torn or short" on every later open. In `attempts.bin` or an
+identity's `starts.bin` that blocked every later attempt in the store, of
+any identity, until someone repaired the tail by hand. `ranked` wrote its
+rows one `write_all` at a time, so a failure could also leave a prefix of a
+ranking.
+
+**The decision.** One helper, `append_rolled_back`, does every one of those
+appends: it measures `end` with `seek(End)` under the caller's held lock,
+writes, issues the barrier, and on a write or barrier failure truncates to
+`end` and syncs. The refusal says whether the rollback held, in the D-0426
+wording `frontier.rs` already uses. A barrier failure rolls back too: a row
+whose barrier failed was never acknowledged, and leaving it would let a
+later row depend on it. `ranked` encodes the whole block into one buffer
+reserved with `try_reserve_exact` and writes it once, so a failure leaves
+only the header. Every write goes through `write_rows`, a seam a test arms on
+its own thread to write a prefix and then fail with `StorageFull`.
+
+**Rejected.** Repairing a torn tail on the next open: that would truncate
+bytes another writer might still own, and only the writer that measured
+`end` under the lock knows which bytes are its own. Keeping `ranked`'s
+streaming writes with a rollback around the loop: it would work, but one
+write is simpler and the memory it costs is stated in `docs/06-limits.md`.
+`reserve_start` is unchanged: its file is private to one token, a torn one
+is refused by every reader, and the next `begin` takes a new token.
+
+Invariant DUR-C-05.

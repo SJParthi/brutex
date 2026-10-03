@@ -13911,3 +13911,15 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## A sweep-evidence ranking is buffered whole before its one write — D-1741, 3 October 2026
+
+`sweep_evidence::Attempt::ranked` now encodes every ranked row into one
+buffer and writes it with one `write_all`, so a failure rolls back to the
+header and no prefix of a ranking survives. Time was already O(N) in the N
+rows written; **memory is now O(N) as well**: 200 bytes per row
+(`RANK_BYTES`), reserved with `try_reserve_exact`, so an impossible size is a
+named refusal rather than an abort. The rows themselves are already held in
+memory by the caller, so this at most doubles that footprint. Not measured.
+The rollback on a failed append is one `seek`, one `set_len` and one
+`fsync`, on the failure path only.
