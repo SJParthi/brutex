@@ -3667,7 +3667,7 @@ fn stored_month_kernel(
                 Recording {
                     root: &root,
                     feed: vendor.as_str(),
-                    underlying,
+                    underlying: loaded.key.underlying.as_str(),
                     timeframe: rung,
                     from: (year, month),
                     to: (year, month),
@@ -3677,7 +3677,7 @@ fn stored_month_kernel(
                 },
                 &id,
                 &outcome.sweep,
-                u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX),
+                outcome.census.swept,
                 min_hits,
             )
             .map(|(report, _committed)| report)
@@ -6292,7 +6292,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
             recording: Some(Recording {
                 root: &root,
                 feed: vendor.as_str(),
-                underlying,
+                underlying: loaded.key.underlying.as_str(),
                 timeframe: rung,
                 from: (year, month),
                 to: (year, month),
@@ -7000,7 +7000,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
             recording: Some(Recording {
                 root: &root,
                 feed: vendor.as_str(),
-                underlying,
+                underlying: span.key.underlying.as_str(),
                 timeframe: span.timeframe,
                 from,
                 to,
@@ -16068,7 +16068,7 @@ fn screen_range_kernel_cached(
             recording: Some(Recording {
                 root: &root,
                 feed: vendor.as_str(),
-                underlying,
+                underlying: span.key.underlying.as_str(),
                 timeframe: span.timeframe,
                 from,
                 to,
@@ -19348,7 +19348,7 @@ fn audit_bars_work(
                 recording,
                 id,
                 &outcome.sweep,
-                u64::try_from(bars.len()).unwrap_or(u64::MAX),
+                outcome.census.swept,
                 min_hits,
                 if outcome.sweep.halted.is_some() {
                     "the streamed ladder halted on a budget before it could certify closure"
@@ -19401,7 +19401,7 @@ fn audit_bars_work(
             recording,
             id,
             &outcome.sweep,
-            u64::try_from(bars.len()).unwrap_or(u64::MAX),
+            outcome.census.swept,
             min_hits,
             "no closed combination survived edge ranking, so no TRADE was selected",
         );
@@ -19544,7 +19544,7 @@ fn audit_bars_work(
             }
             let unadmitted = Unadmitted {
                 sweep: &outcome.sweep,
-                bars: u64::try_from(bars.len()).unwrap_or(u64::MAX),
+                bars: outcome.census.swept,
                 min_hits,
                 by_evidence: &by_evidence,
                 rules,
@@ -19746,7 +19746,7 @@ fn audit_bars_work(
         outcome: &outcome,
         selected: chosen.cell,
         direction: chosen.direction,
-        bars: u64::try_from(bars.len()).unwrap_or(u64::MAX),
+        bars: outcome.census.swept,
         min_hits,
         mask_words: chosen.scored.mask.words(),
         by_evidence: &by_evidence,

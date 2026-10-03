@@ -725,7 +725,7 @@ fn one(root: &std::path::Path, held: &Held, min_hits: u64, commit: &str) -> Row 
             crate::Recording {
                 root,
                 feed: loaded.vendor.as_str(),
-                underlying: held.symbol.as_str(),
+                underlying: loaded.key.underlying.as_str(),
                 timeframe: held.timeframe.as_str(),
                 from: (held.month.year(), held.month.month()),
                 to: (held.month.year(), held.month.month()),

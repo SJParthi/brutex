@@ -241,7 +241,8 @@ fn run(
             recording: Some(crate::Recording {
                 root: request.store_root,
                 feed: span.vendor.as_str(),
-                underlying: request.underlying,
+                // CANONICAL, as the identity's `span.key` is (AC-whp-law-0).
+                underlying: span.key.underlying.as_str(),
                 timeframe: span.timeframe,
                 from: request.from,
                 to: request.to,

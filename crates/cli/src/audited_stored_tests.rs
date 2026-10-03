@@ -351,7 +351,9 @@ fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
     // An explicit finite operator budget also keeps a generated constant-price
     // vocabulary from consuming a machine if new always-true bits are added.
     crate::knobs::set("BRUTEX_CEILING", "256");
-    for (rung, retained, withheld) in [("1min", 2_625, 374), ("5min", 525, 75)] {
+    // `swept` is the ledger's `bars`: what the column folded past warm-up, as
+    // every door records it since D-1661. Support stays scaled to `retained`.
+    for (rung, retained, withheld, swept) in [("1min", 2_625, 374, 1_500), ("5min", 525, 75, 300)] {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
         let source = fixture.path(5, Timeframe::MINUTE_1);
@@ -361,7 +363,7 @@ fn stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions() {
         let mut ledger = crate::results::Results::open_read(&fixture.root).expect("screen ledger");
         assert_eq!(ledger.len().expect("parent count"), 1);
         let row = ledger.read(0).expect("screen parent");
-        assert_eq!(row.bars, retained);
+        assert_eq!(row.bars, swept, "{rung}");
         assert_eq!(
             row.min_hits, retained,
             "100% support must use the retained sample"
@@ -383,7 +385,9 @@ fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
-    for (rung, bars) in [("1min", 3_000), ("5min", 600)] {
+    // `bars` is the retained sample support scales to; `swept` the ledger's
+    // count past warm-up (D-1661).
+    for (rung, bars, swept) in [("1min", 3_000, 1_500), ("5min", 600, 300)] {
         let fixture = Fixture::warmed();
         let mut identities = Vec::new();
         for (index, support) in [20_000, 50_000, 1_000_000].into_iter().enumerate() {
@@ -399,7 +403,7 @@ fn stored_screen_support_and_exact_retries_bind_the_actual_sample() {
                 index as u64 + 1
             );
             let row = ledger.read(index as u64).expect("exact screen parent");
-            assert_eq!(row.bars, bars);
+            assert_eq!(row.bars, swept, "{rung}");
             assert_eq!(row.min_hits, bars * support / 1_000_000);
             assert_eq!((row.months_asked, row.months_found), (1, 1));
             assert!(!identities.contains(&row.identity));
@@ -509,7 +513,9 @@ fn a_damaged_newest_header_slot_screens_as_the_previous_commit() {
         ledger.read(0).expect("whole month"),
         ledger.read(1).expect("previous commit"),
     );
-    assert_eq!((first.bars, second.bars), (600, 525));
+    // `bars` is the swept count past warm-up, as every door records it since
+    // D-1661: the 600- and 525-bar slices sweep 300 and 225 signal bars.
+    assert_eq!((first.bars, second.bars), (300, 225));
     assert_ne!(first.identity, second.identity);
     drop(ledger);
     assert_eq!(
@@ -1868,7 +1874,13 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
             .expect("date")
             .days_from_epoch(),
     );
-    for (rung, retained, withheld) in [("1min", 2_625_u64, 374_u64), ("5min", 525, 75)] {
+    // `swept` is what the column folded past warm-up: the ledger's `bars`
+    // (AC-whp-law-2, D-1661). It pinned `retained`, the slice length, which
+    // counts warming bars the sweep never folded.
+    for (rung, retained, withheld, swept) in [
+        ("1min", 2_625_u64, 374_u64, 1_500_u64),
+        ("5min", 525, 75, 300),
+    ] {
         let fixture = Fixture::warmed();
         fixture.omit_owned_minutes(&[5]);
         let source = fixture.path(5, Timeframe::MINUTE_1);
@@ -1926,7 +1938,7 @@ fn the_ordinary_stored_sweep_withholds_and_names_a_holed_session() {
         assert!(report.contains("RESULT RECORDED"), "{report}");
         let mut ledger = crate::results::Results::open_read(&fixture.root).expect("sweep ledger");
         assert_eq!(ledger.len().expect("one parent"), 1);
-        assert_eq!(ledger.read(0).expect("sweep parent").bars, retained);
+        assert_eq!(ledger.read(0).expect("sweep parent").bars, swept, "{rung}");
         drop(ledger);
         assert_eq!(fs::read(&source).expect("unmodified source"), source_bytes);
     }
@@ -2343,4 +2355,35 @@ fn a_descent_loads_its_stored_inputs_once() {
     assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 2);
     assert_ne!(one_minute.replace(&cached_root, &fresh_root), expected[0]);
     crate::knobs::clear_all();
+}
+
+/// AC-whp-law-0, D-1661: `sweep-stored zerodha nifty` then `NIFTY` is ONE run.
+/// The store reads one file for either case and the identity is built from the
+/// canonical key, so the rerun must be accepted as the recorded answer. It was
+/// refused as "deterministic fields differ" because the row stored the typed
+/// word while the identity used the key.
+#[test]
+fn a_case_only_rerun_of_a_stored_sweep_is_the_recorded_answer() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let lower = crate::StoredSweepRequest {
+        underlying: "nifty",
+        ..fixture.month_request("5min")
+    };
+    let first = crate::sweep_stored_kernel(lower).expect("lower case sweeps");
+    assert!(first.contains("RESULT RECORDED"), "{first}");
+    let again = fixture
+        .sweep("5min")
+        .expect("the canonical word is a rerun");
+    assert!(
+        again.contains("RESULT ALREADY RECORDED AND VERIFIED"),
+        "{again}"
+    );
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("one parent"), 1);
+    assert_eq!(
+        crate::results::read_field(&ledger.read(0).expect("parent").underlying),
+        "NIFTY"
+    );
 }

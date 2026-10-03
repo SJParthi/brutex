@@ -53441,3 +53441,48 @@ forbids. Deriving the count from the execution prefix: the screen derives it
 from signal bars, and the fold must ask the same question of the same series.
 Dropping the override's fixed path: an explicit operator count is not
 look-ahead and changing it would silently change a knob's meaning.
+
+### D-1661 — Every stored door records the canonical instrument and the swept bar count — 2026-10-03
+
+**Findings.** AC-whp-law-0 (medium, bug) and AC-whp-law-2 (low, bug), both
+wrong ledger fields written at the same `Recording` / `record_swept_run` call
+sites.
+
+- AC-whp-law-0. The stored doors build the run identity from the canonical
+  key (`Symbol::new` upper-cases), but `sweep-stored`, `audit-stored`,
+  `audit-range` (both its command door and its kernel) and `screen` recorded
+  the word the operator typed. `sweep-stored zerodha nifty …` then `NIFTY …`
+  computed one identity over the same bars and the second run was refused as
+  "deterministic fields differ" — a safe rerun reported as a collision
+  (`CLAUDE.md` §3 rule 5).
+- AC-whp-law-2. `results::Record::bars` is documented "Signal bars swept".
+  `sweep-all` recorded `census.swept`; `sweep-stored` and the audit door
+  recorded the length of the bar slice, which includes the warm-up bars the
+  column folded and did not sweep. One instrument-month gave two `bars` under
+  one field name.
+
+**Decision.** Every stored door records `key.underlying` (the canonical word
+the identity uses) and `outcome.census.swept` (the column's swept rows).
+`sweep-all` now also reads the canonical word off its loaded key rather than
+the directory name. The field docs stay "Signal bars swept", now true of every
+door. Four tests pinned the old `bars` (the retained slice length) and now
+pin the swept count, because the old value was the defect:
+`a_damaged_newest_header_slot_screens_as_the_previous_commit` (600 and 525
+become 300 and 225),
+`the_ordinary_stored_sweep_withholds_and_names_a_holed_session`,
+`stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions` and
+`stored_screen_support_and_exact_retries_bind_the_actual_sample`. The screens'
+`min_hits` is still scaled to the retained bars, warm-up included; that is
+unchanged here and is noted as open rather than silently altered.
+
+**Legacy rows.** `same_run_answer` is unchanged and still refuses any
+deterministic-field difference loudly. A row written before this change
+cannot meet a rerun from this build under one identity, because the build's
+commit is an identity term and this change is a new commit; a binary at the
+old commit keeps writing its own old values consistently. Nothing is silently
+accepted.
+
+**Rejected.** Renaming the doc to "signal bars offered" and making `sweep-all`
+match: the support fraction readers compute is hits over swept bars, and
+offered bars include rows that could never hit. Upper-casing inside `record_run`:
+the key is the authority and is already in hand at every door.
