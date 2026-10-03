@@ -4218,12 +4218,16 @@ fn blocks_without_pricing(
     if open_until.is_some_and(|until| c.entry <= until) {
         return true;
     }
-    // A count with no location cannot be placed against the exit, so it keeps
-    // the conservative answer. `crossings_with` locates every hole it counts.
+    // LOCATED, NOT COUNTED (D-1452). `first_refused` is `Some` on exactly the
+    // paths whose `refused()` is non-zero: `excursion::admit_located` is the
+    // only production site that counts a refusal, and it records the first
+    // one's offset in the same call. The former `map_or(refused() > 0, ..)`
+    // read the count only where it was zero, so its comparison was a
+    // surviving mutant no test could observe.
     let hole_reaches_exit = c
         .cross
         .first_refused()
-        .map_or(c.cross.refused() > 0, |hole| hole <= exit_offset);
+        .is_some_and(|hole| hole <= exit_offset);
     if c.block_only || hole_reaches_exit {
         *open_until = Some(c.time_exit);
         return true;

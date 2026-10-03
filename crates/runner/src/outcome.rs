@@ -643,7 +643,13 @@ impl WindowExtremes {
     /// The highest high and lowest low over `bars[lo..=hi]`, or `None` when the
     /// range is empty or reaches past the slice.
     fn over(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
-        if hi < lo || hi >= bars.len() {
+        // ONE BOUNDS CHECK, NOT TWO COMPARISONS (D-1452). `get(lo..=hi)` is
+        // `None` when `hi` reaches past the slice or `lo > hi + 1`, and the one
+        // empty `Some` is `lo == hi + 1`. The former `hi < lo || hi >= len`
+        // carried a `||` -> `&&` mutant no test could observe: every range it
+        // let through still answered `None` further down, so the operator
+        // decided only how much work a refusal cost. O(1) either way.
+        if bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty) {
             return None;
         }
         // BACKWARDS, OR A JUMP PAST EVERYTHING HELD: start again at `lo`. A
@@ -4183,6 +4189,12 @@ mod window_tests {
         assert_eq!(window.over(&bars, 7, 6), None);
         assert_eq!(window.over(&bars, 398, 400), None);
         assert_eq!(WindowExtremes::new().over(&[], 0, 0), None);
+        // Reversed by more than one, and `hi == usize::MAX`, whose `hi + 1`
+        // cannot be formed: both absent, and a valid query after them is still
+        // the scan (D-1452).
+        assert_eq!(window.over(&bars, 9, 3), None);
+        assert_eq!(window.over(&bars, 0, usize::MAX), None);
+        assert_eq!(window.over(&bars, 2, 5), scan(&bars, 2, 5));
     }
 
     /// And through `forward` itself: every measured excursion equals the scan
