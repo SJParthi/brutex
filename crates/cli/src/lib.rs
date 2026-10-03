@@ -843,7 +843,8 @@ fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
 /// close on that minute.
 ///
 /// [`crate::minute_gaps::days_with_interior_gaps`] was written for this and
-/// GUESSES: it walks the minute series looking for a step wider than a minute.
+/// GUESSED (its successor, `days_with_minute_holes`, now asks the overlay's
+/// own question up front, D-1662, so this loop is a defence): it walks the minute series looking for a step wider than a minute.
 /// The overlay does not need "a day with a gap somewhere" — it needs, for each
 /// signal bar, the exact minute its close lands on. Those are different
 /// questions, and the gap walk answered the wrong one: the day survived its
@@ -1008,6 +1009,8 @@ fn column_withholding_at_build(
     // does not change when a day is withheld.
     let availability = stored::vwap_availability(&stored::swept_index(underlying)?);
     for _ in 0..ATTEMPTS {
+        #[cfg(test)]
+        COLUMN_BUILD_ATTEMPTS.with(|count| count.set(count.get().saturating_add(1)));
         let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
         let digest = stored_anchored_digest(bars, &exact, &daily)?;
@@ -1068,6 +1071,15 @@ fn column_withholding_at_build(
          {ATTEMPTS} day(s): {dropped:?}. A span needing more than that is not a \
          span with holes. Nothing was swept."
     ))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: passes of [`column_withholding_at_build`]'s loop on this
+    /// thread, so a test can prove the census withheld every day up front and
+    /// the loop ran once (W2-cli8-6, D-1662).
+    pub(crate) static COLUMN_BUILD_ATTEMPTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Records preparation under the same admitted build identity as its caller.
@@ -3336,7 +3348,7 @@ fn sweep_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
 /// # Exactly as the other four doors do it
 ///
 /// The day list is MEASURED from the execution series with
-/// [`crate::minute_gaps::days_with_interior_gaps`] and never written down;
+/// [`crate::minute_gaps::days_with_minute_holes`] and never written down;
 /// [`crate::minute_gaps::withhold`] removes those days from the signal bars;
 /// and the daily and exact-minute contexts are derived afterwards, from the
 /// bars that remain, so all three agree. On a coarse rung the separately
@@ -3393,7 +3405,11 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
             "the {EXECUTION_RUNG} execution series for {year}-{month:02} is malformed: {why}. Nothing was swept; repair or repull that exact feed/instrument/month"
         )
     })?;
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &loaded.bars,
+        execution_slice,
+        stored::rung_length_micros(rung)?,
+    );
     let withheld = if holed_days.is_empty() {
         0
     } else {
@@ -3946,7 +3962,8 @@ fn auto_stored_kernel(
     // against a refusal that stops the run dead. See `crate::minute_gaps` for
     // what is withheld and why it is measured rather than listed.
     let minutes = stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(&minutes);
+    let holed_days =
+        crate::minute_gaps::days_with_minute_holes(&span.bars, &minutes, signal_length);
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
@@ -6836,7 +6853,11 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     // siblings -- all still hold: a hole still refuses when its day IS swept.
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &span.bars,
+        execution_slice,
+        stored::rung_length_micros(rung)?,
+    );
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
@@ -15910,7 +15931,11 @@ fn load_screen_inputs(
     // siblings -- all still hold: a hole still refuses when its day IS swept.
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &span.bars,
+        execution_slice,
+        stored::rung_length_micros(rung)?,
+    );
     let withheld = if holed_days.is_empty() {
         0
     } else {

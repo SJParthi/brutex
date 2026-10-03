@@ -2137,10 +2137,14 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     crate::knobs::set("BRUTEX_CEILING", "256");
+    // Rule 1 (D-0694) withheld interior gaps only. D-1662 withholds every day
+    // missing its demanded closing minute too, which is a different rule, so
+    // it takes the next number and 1 keeps meaning what it always meant
+    // (`CLAUDE.md` §3 rule 8). The literal still refuses a silent renumbering.
     assert_eq!(
         crate::minute_gaps::MINUTE_GAP_POLICY,
-        1,
-        "renumbering the rule re-keys every ordinary stored sweep recorded since D-0694"
+        2,
+        "renumbering the rule re-keys every ordinary stored sweep recorded since D-1662"
     );
     for rung in ["1min", "5min"] {
         let fixture = Fixture::warmed();
@@ -2165,8 +2169,13 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         drop(ledger);
         assert_eq!(
             ordinary_row.identity,
+            month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[2])),
+            "{rung}: the ordinary door binds minute-gap rule 2"
+        );
+        assert_ne!(
+            ordinary_row.identity,
             month_identity(&ordinary, month_digest(&ordinary), legacy.with_policy(&[1])),
-            "{rung}: the ordinary door binds minute-gap rule 1"
+            "{rung}: rule 1's word must not name D-1662's census"
         );
         let bound = audited.bind_digest(month_digest(audited.data()));
         assert_eq!(
@@ -2176,7 +2185,7 @@ fn the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder
         );
         assert_ne!(
             audited_row.identity,
-            month_identity(audited.data(), bound, legacy.with_policy(&[1])),
+            month_identity(audited.data(), bound, legacy.with_policy(&[2])),
             "{rung}: the rule did not reach the audited door"
         );
     }
@@ -2385,5 +2394,76 @@ fn a_case_only_rerun_of_a_stored_sweep_is_the_recorded_answer() {
     assert_eq!(
         crate::results::read_field(&ledger.read(0).expect("parent").underlying),
         "NIFTY"
+    );
+}
+
+/// W2-cli9-3 and W2-cli8-6, D-1662: three sessions that stop at 15:24 — their
+/// 15:25-15:29 minutes missing while every other day holds them — are found by
+/// the census before any column is built. The screen, which has no retry loop,
+/// sweeps the span instead of refusing it, and the range audit builds its
+/// column once instead of once per holed day plus one.
+#[test]
+fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let holed = [6_u8, 8, 12];
+    fixture.rewrite_owned_minutes(|day, rows| {
+        if holed.contains(&day) {
+            let keep = rows.len().saturating_sub(5);
+            rows.truncate(keep);
+        }
+    });
+    let days: Vec<i64> = holed
+        .iter()
+        .map(|day| {
+            i64::from(
+                pull::session::Day::new(2025, 5, *day)
+                    .expect("date")
+                    .days_from_epoch(),
+            )
+        })
+        .collect();
+
+    let signal =
+        stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "5min", 2025, 5).expect("signal");
+    let minutes =
+        stored::load(&fixture.root, Vendor::Zerodha, "NIFTY", "1min", 2025, 5).expect("minutes");
+    let signal_length = stored::rung_length_micros("5min").expect("five minutes");
+    assert!(
+        crate::minute_gaps::days_with_interior_gaps(&minutes.bars).is_empty(),
+        "the interior walk cannot see a session that stops early"
+    );
+    assert_eq!(
+        crate::minute_gaps::days_with_minute_holes(&signal.bars, &minutes.bars, signal_length),
+        days
+    );
+    // On `1min` no signal bar demands the missing minutes, so none is withheld.
+    assert!(
+        crate::minute_gaps::days_with_minute_holes(&minutes.bars, &minutes.bars, 60_000_000)
+            .is_empty()
+    );
+    // A day with signal bars and no minutes at all is flagged too.
+    let no_minutes: Vec<_> = minutes
+        .bars
+        .iter()
+        .copied()
+        .filter(|bar| indicators::ist_day(bar.ts_micros) != days[0])
+        .collect();
+    assert!(
+        crate::minute_gaps::days_with_minute_holes(&signal.bars, &no_minutes, signal_length)
+            .contains(&days[0])
+    );
+
+    let screen = fixture.screen("5min", 1);
+    assert!(screen.is_ok(), "{screen:?}");
+
+    crate::COLUMN_BUILD_ATTEMPTS.with(|count| count.set(0));
+    let range = fixture.audit_range("5min", (2025, 5));
+    assert!(range.is_ok(), "{range:?}");
+    assert_eq!(
+        crate::COLUMN_BUILD_ATTEMPTS.with(std::cell::Cell::get),
+        1,
+        "every holed day was withheld before the first build"
     );
 }

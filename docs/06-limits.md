@@ -13923,3 +13923,26 @@ outer thread once per fold, never per bar or per candidate, so none of the
 five operations `CLAUDE.md` §3 rule 4 bounds is touched. **UNVERIFIED as a
 measured bound**: read off the source, no bench times it. With
 `BRUTEX_GRID_RUNGS` set the count is fixed and no per-fold pass runs.
+
+## The minute-gap census asks the overlay's question once; the retry loop is a defence — D-1662, 3 October 2026
+
+`minute_gaps::days_with_minute_holes` (W2-cli9-3) withholds, before any column
+is built, every day with an interior minute gap and every day holding a
+signal bar whose demanded closing minute is absent. **O(signal + minutes +
+d log d)** for d flagged days, one `kind_of` lookup per signal bar, off every
+per-bar sweep path. **UNVERIFIED as a measured bound**: read off the source.
+
+`column_withholding_at_build` and `exact_minute_withholding_unsourceable_days`
+keep their 64-pass loops (W2-cli8-6). Each pass still reloads the daily and
+exact-minute contexts, re-digests, writes a durable preparation attempt and
+rebuilds the column, so the worst case remains O(64 x (bars x vocabulary +
+minutes)) per rung. With the census asking the overlay's own question the
+loop runs once on every span the census can see;
+`sessions_missing_their_closing_minutes_are_withheld_up_front` counts one pass
+on a span with three edge-holed days. A second pass now means the census and
+the overlay disagree, which is a defect, and it is still refused loudly at
+the bound rather than ground through.
+
+What the census does not withhold: a session-edge hole no signal bar's close
+demands (a `1min` rung that stops at 15:24, a missing 09:15). Such a day is
+swept with the bars it has, as before.

@@ -53486,3 +53486,45 @@ accepted.
 match: the support fraction readers compute is hits over swept bars, and
 offered bars include rows that could never hit. Upper-casing inside `record_run`:
 the key is the authority and is already in hand at every door.
+
+### D-1662 — Withhold every day whose demanded closing minute is absent before the column is built — 2026-10-03
+
+**Findings.** W2-cli9-3 (medium, bug) and W2-cli8-6 (low, cost), one root
+cause. `minute_gaps::days_with_interior_gaps` flagged a day only for a step
+wider than a minute between two minutes of the SAME day. A session that stops
+early (15:25 to 15:29 missing while other days hold them) steps from its last
+minute to the next morning's 09:15 and fails the same-day test, and a day with
+signal bars and no minutes has no step at all. Neither was withheld. The
+exact-minute overlay then refused `MissingClosingMinute` for that day's last
+bucket: `pool` and `screen`, which have no retry, refused the whole span, and
+`audit-range` discovered the days one refusal at a time inside
+`column_withholding_at_build`, each pass reloading both contexts, re-digesting,
+writing a durable preparation attempt and rebuilding the whole column (up to
+64 passes).
+
+**Decision.** `minute_gaps::days_with_minute_holes(signal, minutes,
+signal_length)` is the census every stored door now calls (sweep-stored,
+auto-stored, audit-range, screen, pool): the interior-gap days, plus every day
+holding a signal bar whose demanded closing minute is not stored. The demanded
+minute comes from the overlay's own rule, now public as
+`indicators::anchored::exact_closing_minute` and called by the overlay itself,
+with the same `stored::nse_session_close_minute` the stored column passes it,
+so census and join cannot disagree. One pass, O(signal + minutes + d log d).
+The retry loops stay, bounded and loud, as a defence that a correct census
+makes run once; a test counts `column_withholding_at_build`'s passes on a span
+with three edge-holed days and requires one. `MINUTE_GAP_POLICY` becomes 2,
+because the rule withholds more days than version 1 and the identity binds it;
+1 keeps naming the interior-gap rule (`CLAUDE.md` §3 rule 8).
+`the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder_alone`
+pinned the literal 1 and now pins the literal 2, and also refuses a row
+recorded under rule 1's word; AF-19's row says so.
+
+**Not withheld, by design.** A day whose missing minutes no signal bar
+demands — a `1min` rung that stops at 15:24, or a missing 09:15 — is not
+withheld: the overlay never refuses it, and the census asks only the
+overlay's question. That is stated in `docs/06-limits.md`.
+
+**Rejected.** Comparing each day's first and last stored minute against
+`pull::calendar::kind_of`'s window: the calendar is venue-blind, so every
+NSE cash equity day after 2026-08-03 (continuous trading ends 15:14 for a
+CAS-eligible share) would have been withheld on its correct close.
