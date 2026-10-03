@@ -5342,12 +5342,12 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
 /// was collapsing the stop ladder to one rung — but that clamp was also the
 /// only thing bounding `cap / step_points` above. And `screen` was
 /// parallelised, so `available_parallelism` of these grids are live at once.
-/// The candidate ceiling covers none of it: [`derived_ceiling`] counts APRIORI
+/// The candidate ceiling covers none of it: [`ceiling_from_env`] counts APRIORI
 /// candidates, and an exit grid is transient per-candidate work it never sees.
 ///
 /// # Derived, not typed
 ///
-/// [`derived_ceiling`] already answers *"how many 146-byte records fit in this
+/// [`ceiling_from_env`] already answers *"how many 146-byte records fit in this
 /// machine's share"* — scaled by core count and divided among concurrent rungs
 /// by `SharedBy`. A `Cell` is about the same width, and a grid is TRANSIENT
 /// where a candidate is RETAINED, so a grid gets a small fraction of that: one
@@ -16424,7 +16424,7 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// # The defect this closes, and it is why a run "ran out of budget"
 ///
-/// [`derived_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
+/// [`whole_machine_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
 /// memory"* — `engine::DEFAULT_CEILING` at roughly 146 bytes each is about
 /// **19.6 GB**, and its own doc says that is *"a fact about ONE machine"*. It is
 /// therefore a budget for the machine, not for a caller.
@@ -16596,7 +16596,7 @@ impl Drop for SharedBy {
 ///
 /// # It is at module scope because TWO functions need it
 ///
-/// It was declared inside [`derived_ceiling`], which is why [`shared_out`] could
+/// It was declared inside `derived_ceiling` (since removed), which is why [`shared_out`] could
 /// not apply the same floor and why the sharing division existed on one ceiling
 /// path and not the other. A constant only one function can see is a constant
 /// the other function will re-derive differently.
@@ -16629,7 +16629,7 @@ const REFERENCE_CORES: usize = 14;
 
 /// This machine's whole candidate budget, BEFORE any sharing.
 ///
-/// Split out from [`derived_ceiling`] so [`ceiling_asked`] can name the same
+/// Split out from `derived_ceiling` (since removed) so [`ceiling_asked`] can name the same
 /// figure without the process-global division -- the identity must describe the
 /// search and not the scheduling.
 ///

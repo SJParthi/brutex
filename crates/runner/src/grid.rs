@@ -7901,10 +7901,74 @@ mod tests {
                     .saturating_add(c.targeted)
                     .saturating_add(c.timed_out),
                 c.trades,
-                "a trade that ended by none of the three, or by two, is a walk \
+                "a trade that ended by none of the five, or by two, is a walk \
                  that lost one"
             );
         }
+    }
+
+    /// ER-01, audit-20261003 testgaps-2 (D-1606). The row cited this name and
+    /// no test carried it; the one above sums the counters, but over a grid it
+    /// never checks is non-empty, so it passes vacuously on zero trades. This
+    /// one proves both halves: each of the five `Ended` shapes moves exactly
+    /// one counter, a different one each, and a real grid that traded on both
+    /// sides charges every trade to exactly one of them.
+    #[test]
+    fn every_trade_ends_by_exactly_one_of_the_five_exits() {
+        use super::{Ended, TrailKind, count_exit};
+        let trail = |kind| Ended::Trail {
+            anchor: 0,
+            ppm: 0,
+            kind,
+            rested_at_open: false,
+        };
+        let counters = |c: &Cell| {
+            [
+                c.stopped,
+                c.trailed_stop,
+                c.trailed_profit,
+                c.targeted,
+                c.timed_out,
+            ]
+        };
+        let shapes = [
+            Ended::Stop,
+            trail(TrailKind::Live),
+            trail(TrailKind::Armed),
+            Ended::Target,
+            Ended::Time,
+        ];
+        for (slot, ended) in shapes.into_iter().enumerate() {
+            let mut cell = Cell::default();
+            count_exit(&mut cell, ended);
+            let want: [u64; 5] = std::array::from_fn(|i| u64::from(i == slot));
+            assert_eq!(
+                counters(&cell),
+                want,
+                "exit shape {slot} moved the wrong counter"
+            );
+        }
+        let (bars, column) = swept();
+        let mut traded = 0_u64;
+        for side in [Side::Long, Side::Short] {
+            let g = evaluate(
+                &bars,
+                &column,
+                &ConditionMask::default(),
+                h(15),
+                side,
+                Levels::derived(4),
+            );
+            for c in &g.cells {
+                let sum = counters(c).iter().try_fold(0_u64, |a, n| a.checked_add(*n));
+                assert_eq!(sum, Some(c.trades), "a trade lost or double-counted");
+                traded = traded.saturating_add(c.trades);
+            }
+        }
+        assert!(
+            traded > 0,
+            "a grid with no trade proves nothing about its exits"
+        );
     }
 
     /// One bar, as `Candle::new` orders its fields.

@@ -132,8 +132,8 @@ fn lex(src: &str) -> Result<Lexed, String> {
     let mut i = 0;
     let mut shebang = false;
     // A first line `#!` that is not `#![` is a shebang rustc skips.
-    if src.starts_with("#!") {
-        let rest = src[2..].trim_start();
+    if let Some(rest) = src.strip_prefix("#!") {
+        let rest = rest.trim_start();
         if !rest.starts_with('[') {
             shebang = true;
             while i < n && at(i) != '\n' {
@@ -357,13 +357,10 @@ fn lex(src: &str) -> Result<Lexed, String> {
             let s = i;
             while i < n {
                 let d = at(i);
-                if is_ident_continue(d) {
-                    i += 1;
-                } else if d == '.' && at(i + 1).is_ascii_digit() {
-                    i += 1;
-                } else if (d == '+' || d == '-')
+                let exponent_sign = (d == '+' || d == '-')
                     && matches!(at(i - 1), 'e' | 'E')
-                    && !src[off(s)..off(i)].starts_with("0x")
+                    && !src[off(s)..off(i)].starts_with("0x");
+                if is_ident_continue(d) || (d == '.' && at(i + 1).is_ascii_digit()) || exponent_sign
                 {
                     i += 1;
                 } else {
@@ -791,13 +788,18 @@ fn path_string(p: &Path) -> String {
 /// The string value of `path = "..."` in an attribute's tokens, if it is one.
 fn attr_path(attr: &[Token]) -> Option<String> {
     // attr = `#` `[` ... `]`
-    if is_ident(attr.get(2), "path") && is_punct(attr.get(3), '=') {
-        if let Some(Tok::Str(s)) = attr.get(4).map(|t| &t.tok) {
-            return Some(s.clone());
-        }
+    if is_ident(attr.get(2), "path")
+        && is_punct(attr.get(3), '=')
+        && let Some(Tok::Str(s)) = attr.get(4).map(|t| &t.tok)
+    {
+        return Some(s.clone());
     }
     None
 }
+
+/// A file a module pulls in: its path, whether it owns its directory, and
+/// the module path it is mounted at.
+type Child = (String, bool, Vec<String>);
 
 /// Every file a module declaration, `#[path]` or `include!` in `file` pulls
 /// in. `owns_dir` is rustc's "mod-rs" ownership: true for a crate root, a
@@ -807,7 +809,7 @@ fn children(
     src: &str,
     owns_dir: bool,
     exists: &dyn Fn(&str) -> bool,
-) -> Result<Vec<(String, bool, Vec<String>)>, Vec<String>> {
+) -> Result<Vec<Child>, Vec<String>> {
     let lexed = lex(src).map_err(|e| vec![format!("{file}: {e}")])?;
     let t = &lexed.tokens;
     let fp = Path::new(file);
@@ -1068,9 +1070,30 @@ fn build_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
     let t = &lexed.tokens;
     let mut out = Vec::new();
     for (i, tok) in t.iter().enumerate() {
+        // A program can be started without naming one (rustonly2-3, D-1603):
+        // a `.cargo/config*` written beside the workspace names a
+        // `rustc-wrapper` or linker the NEXT cargo command runs, and a link
+        // argument such as `-fuse-ld=<path>` makes the linker run another
+        // program. Read from the string literal, wherever it is printed to.
+        if let Tok::Str(lit) = &tok.tok {
+            let why = if lit.contains(".cargo") {
+                Some("names cargo's configuration directory, which a build script must not write")
+            } else if lit.contains("rustc-link-arg") || lit.contains("fuse-ld") {
+                Some("passes the linker an argument, which can make it run a program")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                out.push(format!("{path}:{}: {:?} {why}", tok.line, lit));
+            }
+            continue;
+        }
         let Some(name) = ident(tok) else { continue };
         let why = match name {
             "Command" | "CommandExt" => Some("names the process-spawning type"),
+            "duct" | "xshell" | "cmd_lib" | "subprocess" | "run_script" | "popen" => {
+                Some("names a crate whose purpose is starting a process")
+            }
             "process" => {
                 let member = if is_path_sep(t, i + 1) {
                     t.get(i + 3).and_then(ident)
@@ -1096,6 +1119,43 @@ fn build_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
         };
         if let Some(why) = why {
             out.push(format!("{path}:{}: `{name}` {why}", tok.line));
+        }
+    }
+    Ok(out)
+}
+
+/// A shell or a language interpreter named as the program of a
+/// `Command::new("...")` anywhere in crate code, test code included
+/// (rustonly2-4, D-1603). Gate 1e shadows interpreters by NAME on PATH, so a
+/// literal absolute path walked past it, and `sh -c` reaches every program
+/// there is; gate 2 reads build scripts only. A program held in a variable is
+/// not read here (`api`'s browser opener, D-1202, is one), and that limit is
+/// stated in docs/06-limits.md.
+fn spawn_findings(path: &str, src: &str) -> Result<Vec<String>, String> {
+    let lexed = lex(src)?;
+    let t = &lexed.tokens;
+    let mut out = Vec::new();
+    for (i, tok) in t.iter().enumerate() {
+        if ident(tok) != Some("Command")
+            || !is_path_sep(t, i + 1)
+            || !is_ident(t.get(i + 3), "new")
+            || !is_punct(t.get(i + 4), '(')
+        {
+            continue;
+        }
+        let Some(Tok::Str(program)) = t.get(i + 5).map(|x| &x.tok) else {
+            continue;
+        };
+        let base = program.rsplit('/').next().unwrap_or(program);
+        if matches!(
+            base,
+            "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "env"
+        ) || interpreter(base).is_some()
+        {
+            out.push(format!(
+                "{path}:{}: `Command::new({program:?})` starts a shell or an interpreter",
+                tok.line
+            ));
         }
     }
     Ok(out)
@@ -1568,10 +1628,8 @@ fn toml_leaves(src: &str) -> Result<Vec<Leaf>, String> {
             if r.bump() != ']' || (array && r.bump() != ']') {
                 return Err(format!("line {line}: malformed table header"));
             }
-            if array {
-                if let Some(last) = k.last_mut() {
-                    last.push_str("[]");
-                }
+            if array && let Some(last) = k.last_mut() {
+                last.push_str("[]");
             }
             table = k;
             out.push(Leaf {
@@ -1682,10 +1740,10 @@ fn jobs_and_steps(src: &str) -> (BTreeMap<String, Vec<String>>, Vec<Step>) {
             jobs.entry(job.clone()).or_default().push(line.to_owned());
             continue;
         }
-        if let Some(s) = steps.last_mut() {
-            if s.job == job {
-                s.lines.push(line.to_owned());
-            }
+        if let Some(s) = steps.last_mut()
+            && s.job == job
+        {
+            s.lines.push(line.to_owned());
         }
     }
     (jobs, steps)
@@ -1734,6 +1792,85 @@ fn own_key<'a>(lines: &'a [String], key: &str, indent: usize) -> Vec<&'a str> {
         .collect()
 }
 
+/// Why no line of a step's script that begins `needle` decides the step, or
+/// None when one does (hunt-ci-3, D-1601). A line decides the step only when
+/// it sits at the top level of the script: not inside an `if`, a loop, a
+/// `case` or a brace group or function (any of which may never reach it), not
+/// inside a heredoc (where it is data), not after `set +e`, and not followed
+/// by `|`, `&` or `;`, each of which discards or replaces its exit status --
+/// `cargo deny check || true` RUNS the command and keeps none of its verdict.
+fn swallowed(lines: &[String], needle: &str) -> Option<String> {
+    let mut depth: i64 = 0;
+    let mut heredoc: Option<String> = None;
+    let mut errexit_off = false;
+    let mut why = None;
+    for l in lines {
+        let body = l.trim();
+        if let Some(end) = &heredoc {
+            if body == end {
+                heredoc = None;
+            } else if body.starts_with(needle) {
+                why = Some("sits inside a heredoc, where it is data".to_owned());
+            }
+            continue;
+        }
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = body.strip_prefix(needle) {
+            if depth > 0 {
+                why = Some(
+                    "sits inside a block, loop or function that may never reach it".to_owned(),
+                );
+            } else if errexit_off {
+                why = Some("runs after `set +e`, so its failure does not stop the step".to_owned());
+            } else if rest.contains(['|', '&', ';']) {
+                why = Some("is followed by an operator that discards its exit status".to_owned());
+            } else {
+                return None;
+            }
+            continue;
+        }
+        let words: Vec<&str> = body
+            .split(|c: char| c.is_whitespace() || c == ';')
+            .filter(|w| !w.is_empty())
+            .collect();
+        if words.first() == Some(&"set")
+            && words[1..]
+                .iter()
+                .any(|w| (w.starts_with('+') && w.contains('e')) || *w == "errexit")
+            && !words.contains(&"-o")
+        {
+            errexit_off = true;
+        }
+        for w in &words {
+            match *w {
+                "if" | "while" | "until" | "for" | "case" | "select" | "{" => depth += 1,
+                "fi" | "done" | "esac" | "}" => depth -= 1,
+                _ => {}
+            }
+        }
+        if body.ends_with('{') && words.last() != Some(&"{") {
+            depth += 1;
+        }
+        if let Some(at) = body.find("<<")
+            && !body[at..].starts_with("<<<")
+        {
+            let end: String = body[at + 2..]
+                .trim_start_matches('-')
+                .trim_start()
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .filter(|c| *c != '\'' && *c != '"')
+                .collect();
+            if !end.is_empty() {
+                heredoc = Some(end);
+            }
+        }
+    }
+    Some(why.unwrap_or_else(|| "is not in the script".to_owned()))
+}
+
 /// Does a step whose script carries a line beginning `needle` run on every
 /// run, and does its failure fail the run? Reasons it does not, or none.
 fn step_runs(src: &str, needle: &str) -> Result<usize, Vec<String>> {
@@ -1747,6 +1884,9 @@ fn step_runs(src: &str, needle: &str) -> Result<usize, Vec<String>> {
         }
         found += 1;
         let at = format!("step at line {} in job `{}`", s.line, s.job);
+        if let Some(why) = swallowed(&s.lines, needle) {
+            errs.push(format!("{at}: `{needle}` {why}"));
+        }
         for v in own_key(&s.lines, "continue-on-error", 8) {
             if v != "false" {
                 errs.push(format!("{at} sets continue-on-error: {v}"));
@@ -1789,6 +1929,150 @@ fn step_runs(src: &str, needle: &str) -> Result<usize, Vec<String>> {
     }
 }
 
+/// The aggregator's own shape (hunt-ci-4, D-1601). Branch protection requires
+/// only the check `ci-ok`, so every gate is advisory unless `ci-ok` `needs`
+/// every other job, runs under exactly `if: always()` (GitHub counts a SKIPPED
+/// required job as passing, and a job-level `success()` skips it the moment a
+/// gate fails), sets no `continue-on-error`, and still refuses every result
+/// that is not `success`. Reasons it does not, or none.
+fn aggregator_findings(src: &str) -> Vec<String> {
+    let (jobs, steps) = jobs_and_steps(src);
+    let Some(own) = jobs.get("ci-ok") else {
+        return vec!["no job named `ci-ok`, the one check branch protection requires".to_owned()];
+    };
+    let mut out = Vec::new();
+    let needs = own_key(own, "needs", 4);
+    if needs.len() != 1 || !needs.iter().all(|v| v.starts_with('[') && v.ends_with(']')) {
+        out.push(format!(
+            "ci-ok must carry exactly one flow-style `needs: [...]`; found {needs:?}"
+        ));
+    }
+    let listed: BTreeSet<&str> = needs
+        .iter()
+        .flat_map(|v| v.trim_start_matches('[').trim_end_matches(']').split(','))
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .collect();
+    let others: BTreeSet<&str> = jobs
+        .keys()
+        .map(String::as_str)
+        .filter(|j| *j != "ci-ok")
+        .collect();
+    for j in others.difference(&listed) {
+        out.push(format!(
+            "job `{j}` is not in ci-ok's needs, so its failure cannot fail ci-ok"
+        ));
+    }
+    for j in listed.difference(&others) {
+        out.push(format!("ci-ok needs `{j}`, which is not a job"));
+    }
+    match own_key(own, "if", 4).as_slice() {
+        ["always()"] => {}
+        other => out.push(format!(
+            "ci-ok's job-level `if:` must be exactly `always()`; found {other:?}"
+        )),
+    }
+    for v in own_key(own, "continue-on-error", 4) {
+        out.push(format!("ci-ok sets continue-on-error: {v}"));
+    }
+    let mine: Vec<&Step> = steps.iter().filter(|s| s.job == "ci-ok").collect();
+    for s in &mine {
+        for v in own_key(&s.lines, "if", 8) {
+            out.push(format!("a ci-ok step at line {} carries `if: {v}`", s.line));
+        }
+        for v in own_key(&s.lines, "continue-on-error", 8) {
+            out.push(format!(
+                "a ci-ok step at line {} sets continue-on-error: {v}",
+                s.line
+            ));
+        }
+    }
+    let body: Vec<&str> = mine
+        .iter()
+        .flat_map(|s| s.lines.iter())
+        .map(|l| l.trim())
+        .collect();
+    for want in [
+        "RESULTS: ${{ join(needs.*.result, ' ') }}",
+        "for x in ${RESULTS}; do",
+        "[ \"$x\" = \"success\" ] || { echo \"a gate did not pass: $x\"; exit 1; }",
+    ] {
+        if !body.contains(&want) {
+            out.push(format!(
+                "ci-ok no longer carries `{want}`, its success-only check"
+            ));
+        }
+    }
+    out
+}
+
+/// Is this word, with a path and a pair of enclosing quotes removed, the name
+/// of a program that runs source handed to it?
+fn interpreter(word: &str) -> Option<&str> {
+    let w = match word.as_bytes() {
+        [q @ (b'"' | b'\''), .., e] if q == e && word.len() >= 2 => &word[1..word.len() - 1],
+        _ => word,
+    };
+    let prog = w.rsplit('/').next().unwrap_or(w);
+    (matches!(
+        prog,
+        "node" | "nodejs" | "bun" | "deno" | "perl" | "ruby" | "php" | "lua"
+    ) || prog.starts_with(concat!("py", "thon")))
+    .then_some(prog)
+}
+
+/// Every place one logical shell line hands an interpreter a program that is
+/// not a tracked file (rustonly2-2, D-1602): an inline-program flag in any
+/// spelling (`-e`, `-ne`, `-pe`, `-Bc`, `--eval`, `--eval=..`), a program on
+/// standard input (`-`, a heredoc or here-string, or a pipe into an
+/// interpreter given no script), and `deno eval`.
+fn inline_programs(l: &str) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    let words: Vec<&str> = l
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '(' || c == '&' || c == '|')
+        .filter(|w| !w.is_empty())
+        .collect();
+    for (i, w) in words.iter().enumerate() {
+        let Some(prog) = interpreter(w) else { continue };
+        let next = words.get(i + 1).copied().unwrap_or("");
+        let cluster = next.starts_with('-') && !next.starts_with("--") && next.len() > 1;
+        let inline_flag = match prog {
+            "node" | "nodejs" | "bun" => {
+                (cluster && next.contains(['e', 'p']))
+                    || ["--eval", "--print"]
+                        .iter()
+                        .any(|f| next == *f || next.starts_with(&format!("{f}=")))
+            }
+            "deno" => next == "eval",
+            "perl" | "ruby" => cluster && next.contains(['e', 'E']),
+            "php" => cluster && next.contains('r'),
+            "lua" => cluster && next.contains('e'),
+            _ => cluster && next.contains('c'),
+        };
+        if inline_flag {
+            out.push((format!("{w} {next}"), "runs a program written inline"));
+        } else if next == "-" || words[i + 1..].iter().any(|x| x.starts_with("<<")) {
+            out.push((
+                (*w).to_owned(),
+                "reads a program from standard input or a heredoc",
+            ));
+        }
+    }
+    // A pipe into an interpreter that names no script hands it its program.
+    for stage in l.split('|').skip(1) {
+        let mut stage_words = stage
+            .split_whitespace()
+            .skip_while(|w| matches!(*w, "{" | "(" | "!" | "then" | "do"));
+        if let Some(w) = stage_words.next()
+            && interpreter(w).is_some()
+            && stage_words.next().is_none()
+        {
+            out.push((format!("| {w}"), "reads a program from a pipe"));
+        }
+    }
+    out
+}
+
 /// Workflow-wide refusals. `continue-on-error` anywhere turns a red step
 /// into a green job. A pipe into `grep -q` under `pipefail` reads a match
 /// as a miss once the producer outruns one pipe buffer. An interpreter
@@ -1804,12 +2088,10 @@ fn workflow_findings(path: &str, src: &str) -> Vec<String> {
             continue;
         }
         let joins = logical.last().is_some_and(|(_, l)| l.ends_with('\\')) || body.starts_with('|');
-        if joins {
-            if let Some((_, l)) = logical.last_mut() {
-                let l2 = l.trim_end_matches('\\').to_owned();
-                *l = format!("{l2} {body}");
-                continue;
-            }
+        if joins && let Some((_, l)) = logical.last_mut() {
+            let l2 = l.trim_end_matches('\\').to_owned();
+            *l = format!("{l2} {body}");
+            continue;
         }
         logical.push((n + 1, body.to_owned()));
     }
@@ -1848,26 +2130,8 @@ fn workflow_findings(path: &str, src: &str) -> Vec<String> {
                 ));
             }
         }
-        let words: Vec<&str> = l
-            .split(|c: char| c.is_whitespace() || c == ';' || c == '(' || c == '&' || c == '|')
-            .filter(|w| !w.is_empty())
-            .collect();
-        for w in words.windows(2) {
-            let prog = w[0].rsplit('/').next().unwrap_or(w[0]);
-            let inline = match prog {
-                "node" | "nodejs" | "bun" => matches!(w[1], "-e" | "--eval" | "-p" | "--print"),
-                "deno" => w[1] == "eval",
-                "perl" | "ruby" => w[1] == "-e" || w[1] == "-E",
-                "php" => w[1] == "-r",
-                p if p.starts_with(concat!("py", "thon")) => w[1] == "-c",
-                _ => false,
-            };
-            if inline {
-                out.push(format!(
-                    "{path}:{n}: `{} {}` runs a program written inline",
-                    w[0], w[1]
-                ));
-            }
+        for (at, why) in inline_programs(l) {
+            out.push(format!("{path}:{n}: `{at}` {why}"));
         }
     }
     out
@@ -1889,38 +2153,93 @@ fn tracked_set(listing: &str) -> BTreeSet<String> {
 
 /// Every root cargo or this workflow compiles: crate roots by convention,
 /// target `path` keys, and the workflow's own `.github/*.rs` tools.
-fn compiled_roots(tracked: &BTreeSet<String>) -> Result<Vec<String>, String> {
+///
+/// ONLY WHAT IS REALLY BUILT (rustonly2-1, D-1603). Every `.github/*.rs` and
+/// every `crates/*/src/lib.rs` used to count, so a tracked `.github/notes.rs`
+/// or `crates/zz/src/lib.rs` holding another language passed gate 1, whose
+/// success line then said "every .rs outside web/ is compiled". A crate file
+/// is a root now only when its directory is a `workspace.members` entry of
+/// the root `Cargo.toml`, and a `.github/*.rs` only when a non-comment
+/// workflow line hands it to `rustc`. A manifest or workflow that cannot be
+/// read is an error, never an empty list.
+fn compiled_roots(
+    tracked: &BTreeSet<String>,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    let manifest = tracked
+        .contains("Cargo.toml")
+        .then(|| read("Cargo.toml"))
+        .flatten()
+        .ok_or("the workspace manifest Cargo.toml is not tracked or cannot be read")?;
+    let mut members = BTreeSet::new();
+    for l in toml_leaves(&manifest).map_err(|e| format!("Cargo.toml: {e}"))? {
+        if l.path == ["workspace", "members"] {
+            for (k, part) in l.value.split('"').enumerate() {
+                if k % 2 == 1 {
+                    members.insert(part.to_owned());
+                }
+            }
+        }
+    }
+    let member = |krate: &str| members.contains(&format!("crates/{krate}"));
+    let mut built = BTreeSet::new();
+    for wf in tracked
+        .iter()
+        .filter(|f| f.starts_with(".github/workflows/") && f.ends_with(".yml"))
+    {
+        let src = read(wf).ok_or_else(|| format!("{wf}: cannot be read"))?;
+        for line in src.lines() {
+            let body = line.trim_start();
+            let words: Vec<&str> = body.split_whitespace().collect();
+            if body.starts_with('#') || !words.iter().any(|w| w.rsplit('/').next() == Some("rustc"))
+            {
+                continue;
+            }
+            for w in words {
+                let w = w.trim_matches(|c| c == '"' || c == '\'');
+                if let [".github", file] = w.split('/').collect::<Vec<_>>().as_slice()
+                    && file.ends_with(".rs")
+                {
+                    built.insert(w.to_owned());
+                }
+            }
+        }
+    }
     let mut roots = BTreeSet::new();
     for f in tracked {
         let parts: Vec<&str> = f.split('/').collect();
         let is_root = match parts.as_slice() {
-            [".github", file] => file.ends_with(".rs"),
-            ["crates", _, "build.rs"] => true,
-            ["crates", _, "src", "lib.rs" | "main.rs"] => true,
-            ["crates", _, "src", "bin", file] => file.ends_with(".rs"),
-            ["crates", _, "src", "bin", _, "main.rs"] => true,
-            ["crates", _, "tests" | "benches" | "examples", file] => file.ends_with(".rs"),
-            ["crates", _, "tests" | "benches" | "examples", _, "main.rs"] => true,
+            [".github", _] => built.contains(f),
+            ["crates", c, "build.rs"] => member(c),
+            ["crates", c, "src", "lib.rs" | "main.rs"] => member(c),
+            ["crates", c, "src", "bin", file] => member(c) && file.ends_with(".rs"),
+            ["crates", c, "src", "bin", _, "main.rs"] => member(c),
+            ["crates", c, "tests" | "benches" | "examples", file] => {
+                member(c) && file.ends_with(".rs")
+            }
+            ["crates", c, "tests" | "benches" | "examples", _, "main.rs"] => member(c),
             _ => false,
         };
         if is_root {
             roots.insert(f.clone());
         }
-        if parts.first() == Some(&"crates") && parts.len() == 3 && parts[2] == "Cargo.toml" {
-            let src = read_file(f)?;
+        if let ["crates", c, "Cargo.toml"] = parts.as_slice()
+            && member(c)
+        {
+            let src = read(f).ok_or_else(|| format!("{f}: cannot be read"))?;
             for l in toml_leaves(&src).map_err(|e| format!("{f}: {e}"))? {
                 let p: Vec<&str> = l.path.iter().map(String::as_str).collect();
-                if let [t, "path"] | [t, "build"] = p.as_slice() {
-                    if matches!(
+                if let [t, "path"] | [t, "build"] = p.as_slice()
+                    && matches!(
                         *t,
                         "lib" | "bin[]" | "test[]" | "bench[]" | "example[]" | "package"
-                    ) {
-                        let rel = l.value.trim_matches('"');
-                        let full = path_string(&normalise(
-                            &Path::new(f).parent().unwrap_or(Path::new("")).join(rel),
-                        ));
-                        roots.insert(full);
-                    }
+                    )
+                {
+                    let rel = l.value.trim_matches('"');
+                    let full = path_string(&normalise(
+                        &Path::new(f).parent().unwrap_or(Path::new("")).join(rel),
+                    ));
+                    roots.insert(full);
                 }
             }
         }
@@ -1960,7 +2279,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|strings|fns|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -1980,12 +2299,13 @@ fn run(args: &[String]) -> Result<bool, String> {
                 );
             }
         }
-        "browser" | "build" | "unsafe" => {
+        "browser" | "build" | "unsafe" | "spawns" => {
             for f in rest {
                 let src = read_file(f)?;
                 let found = match cmd.as_str() {
                     "browser" => browser_scan(f, &src),
                     "build" => build_findings(f, &src),
+                    "spawns" => spawn_findings(f, &src),
                     _ => unsafe_findings(f, &src),
                 }
                 .map_err(|e| format!("{f}: {e}"))?;
@@ -2023,16 +2343,16 @@ fn run(args: &[String]) -> Result<bool, String> {
                 .split_first()
                 .ok_or("closure needs a NUL-separated tracked listing")?;
             let tracked = tracked_set(&read_file(listing)?);
-            let roots: Vec<String> = if cmd == "orphans" {
-                compiled_roots(&tracked)?
-            } else {
-                roots.to_vec()
-            };
             let read = |p: &str| {
                 tracked
                     .contains(p)
                     .then(|| std::fs::read_to_string(p).ok())
                     .flatten()
+            };
+            let roots: Vec<String> = if cmd == "orphans" {
+                compiled_roots(&tracked, &read)?
+            } else {
+                roots.to_vec()
             };
             let exists = |p: &str| tracked.contains(p);
             let (files, errs) = closure(&roots, &read, &exists);
@@ -2061,7 +2381,13 @@ fn run(args: &[String]) -> Result<bool, String> {
                 .first()
                 .ok_or("modules needs a NUL-separated tracked listing")?;
             let tracked = tracked_set(&read_file(listing)?);
-            let roots: Vec<(String, Vec<String>)> = compiled_roots(&tracked)?
+            let read = |p: &str| {
+                tracked
+                    .contains(p)
+                    .then(|| std::fs::read_to_string(p).ok())
+                    .flatten()
+            };
+            let roots: Vec<(String, Vec<String>)> = compiled_roots(&tracked, &read)?
                 .into_iter()
                 .map(|r| {
                     let parts: Vec<&str> = r.split('/').collect();
@@ -2084,12 +2410,6 @@ fn run(args: &[String]) -> Result<bool, String> {
                     (r, own)
                 })
                 .collect();
-            let read = |p: &str| {
-                tracked
-                    .contains(p)
-                    .then(|| std::fs::read_to_string(p).ok())
-                    .flatten()
-            };
             let exists = |p: &str| tracked.contains(p);
             let (mounted, errs) = module_paths(&roots, &read, &exists);
             for e in &errs {
@@ -2143,6 +2463,15 @@ fn run(args: &[String]) -> Result<bool, String> {
                         clean = false;
                     }
                 }
+            }
+        }
+        "aggregator" => {
+            for f in rest {
+                let found = aggregator_findings(&read_file(f)?);
+                for line in &found {
+                    println!("{f}: {line}");
+                }
+                clean &= found.is_empty();
             }
         }
         "workflow" => {
@@ -2782,6 +3111,8 @@ mod tests {
     #[test]
     fn compiled_roots_cover_every_target_shape() {
         let t: BTreeSet<String> = [
+            "Cargo.toml",
+            ".github/workflows/w.yml",
             ".github/tool.rs",
             "crates/a/build.rs",
             "crates/a/src/lib.rs",
@@ -2794,10 +3125,179 @@ mod tests {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-        let r = compiled_roots(&t).unwrap();
+        let read = |p: &str| match p {
+            "Cargo.toml" => Some("[workspace]\nmembers = [\"crates/a\"]\n".to_owned()),
+            ".github/workflows/w.yml" => Some("          rustc .github/tool.rs\n".to_owned()),
+            _ => None,
+        };
+        let r = compiled_roots(&t, &read).unwrap();
         assert!(r.contains(&"crates/a/tests/t.rs".to_owned()));
         assert!(!r.contains(&"crates/a/tests/common/mod.rs".to_owned()));
         assert!(!r.contains(&"web/x.rs".to_owned()));
         assert_eq!(r.len(), 6);
+    }
+
+    // ---- audit-20261003 (D-1600..D-1619) ----
+
+    #[test]
+    fn a_step_that_swallows_or_skips_its_command_is_refused() {
+        // hunt-ci-3: a line that RUNS the command but discards its verdict.
+        for to in [
+            "          cargo deny check || true\n",
+            "          cargo deny check || :\n",
+            "          cargo deny check; true\n",
+            "          cargo deny check &\n",
+            "          cargo deny check | tee log\n",
+            "          if false; then\n          cargo deny check\n          fi\n",
+            "          while false; do\n          cargo deny check\n          done\n",
+            "          skip() {\n          cargo deny check\n          }\n",
+            "          set +e\n          cargo deny check\n",
+            "          cat <<EOF\n          cargo deny check\n          EOF\n",
+        ] {
+            let wf = WF.replacen("          cargo deny check\n", to, 1);
+            assert!(step_runs(&wf, "cargo deny check").is_err(), "passed: {to}");
+        }
+        // A block that has CLOSED before the line does not hide it.
+        let wf = WF.replacen(
+            "          cargo deny check\n",
+            "          if [ -n x ]; then\n            echo y\n          fi\n          cargo deny check\n",
+            1,
+        );
+        assert_eq!(step_runs(&wf, "cargo deny check"), Ok(1));
+    }
+
+    const AGG: &str = "jobs:\n  a:\n    runs-on: x\n  b:\n    runs-on: x\n  ci-ok:\n    name: ci-ok\n    needs: [a, b]\n    if: always()\n    steps:\n      - name: v\n        env:\n          RESULTS: ${{ join(needs.*.result, ' ') }}\n        run: |\n          for x in ${RESULTS}; do\n            [ \"$x\" = \"success\" ] || { echo \"a gate did not pass: $x\"; exit 1; }\n          done\n";
+
+    #[test]
+    fn the_aggregator_needs_every_job_runs_always_and_accepts_only_success() {
+        // hunt-ci-4.
+        assert_eq!(aggregator_findings(AGG), Vec::<String>::new());
+        for (from, to) in [
+            ("    needs: [a, b]\n", "    needs: [a]\n"),
+            ("    needs: [a, b]\n", "    needs: [a, b, gone]\n"),
+            ("    if: always()\n", ""),
+            ("    if: always()\n", "    if: success()\n"),
+            (
+                "    if: always()\n",
+                "    if: always()\n    continue-on-error: true\n",
+            ),
+            ("[ \"$x\" = \"success\" ]", "[ \"$x\" != \"failure\" ]"),
+            ("join(needs.*.result, ' ')", "join(needs.a.result, ' ')"),
+            ("  ci-ok:\n", "  ok:\n"),
+        ] {
+            let wf = AGG.replacen(from, to, 1);
+            assert!(!aggregator_findings(&wf).is_empty(), "passed: {to}");
+        }
+        // A job added without being listed is the case the gate exists for.
+        let wf = AGG.replacen("  ci-ok:\n", "  c:\n    runs-on: x\n  ci-ok:\n", 1);
+        assert!(!aggregator_findings(&wf).is_empty());
+    }
+
+    #[test]
+    fn only_a_member_crate_or_a_built_tool_is_a_root() {
+        // rustonly2-1.
+        let t: BTreeSet<String> = [
+            "Cargo.toml",
+            ".github/workflows/ci.yml",
+            ".github/tool.rs",
+            ".github/notes.rs",
+            "crates/a/src/lib.rs",
+            "crates/a/tests/t.rs",
+            "crates/zz/src/lib.rs",
+            "crates/zz/tests/t.rs",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let read = |p: &str| {
+            match p {
+            "Cargo.toml" => Some("[workspace]\nmembers = [\"crates/a\"]\n".to_owned()),
+            ".github/workflows/ci.yml" => Some(
+                "jobs:\n  x:\n    steps:\n      - run: |\n          # rustc .github/notes.rs is prose\n          rustc --edition=2024 .github/tool.rs -o t\n"
+                    .to_owned(),
+            ),
+            _ => None,
+        }
+        };
+        let r = compiled_roots(&t, &read).unwrap();
+        assert_eq!(
+            r,
+            vec![
+                ".github/tool.rs".to_owned(),
+                "crates/a/src/lib.rs".to_owned(),
+                "crates/a/tests/t.rs".to_owned(),
+            ]
+        );
+        // No workspace manifest is an error, not an empty member list.
+        let none = |_: &str| None;
+        assert!(compiled_roots(&t, &none).is_err());
+    }
+
+    #[test]
+    fn every_inline_program_form_is_refused() {
+        // rustonly2-2.
+        for bad in [
+            concat!("          py", "thon3 - <<'PYEOF'\n"),
+            "          perl -ne 'print' f\n",
+            "          node --eval='1'\n",
+            concat!("          py", "thon3 -Bc 'import os'\n"),
+            "          echo 'x' | node\n",
+            "          \"node\" -e 'x'\n",
+            "          node -pe 'x'\n",
+            "          ruby <<< 'puts 1'\n",
+            "          echo x | perl -\n",
+        ] {
+            assert!(!workflow_findings("w", bad).is_empty(), "passed: {bad}");
+        }
+        for good in [
+            "          node --test web/tests/a.test.js\n",
+            "          node web/ci/css-comments.mjs\n",
+            "          for t in node npm perl; do\n",
+            "          grep -Ew 'node|perl' f || true\n",
+            "          read -r total zero <<EOF\n",
+        ] {
+            assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+        }
+    }
+
+    #[test]
+    fn every_indirect_spawn_from_a_build_script_is_refused() {
+        // rustonly2-3.
+        for src in [
+            "fn main() { std::fs::write(\"../../.cargo/config.toml\", \"[build]\").ok(); }",
+            "fn main() { println!(\"cargo::rustc-link-arg=-fuse-ld=/tmp/x\"); }",
+            "fn main() { println!(\"cargo:rustc-link-arg-bins=-Wl,x\"); }",
+            "fn main() { duct::cmd(\"sh\", [\"-c\", \"x\"]).run().ok(); }",
+            "fn main() { let s = xshell::Shell::new(); }",
+        ] {
+            assert!(
+                !build_findings("b.rs", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shell_or_interpreter_spawned_from_crate_code_is_refused() {
+        // rustonly2-4.
+        for src in [
+            "fn t() { std::process::Command::new(\"sh\").arg(\"-c\").arg(\"x\"); }",
+            "fn t() { Command::new(\"/bin/bash\"); }",
+            "fn t() { Command :: new ( \"/usr/bin/perl\" ); }",
+            concat!("fn t() { Command::new(\"/usr/bin/py", "thon3\"); }"),
+            "fn t() { Command::new(r\"/usr/bin/env\"); }",
+        ] {
+            assert!(
+                !spawn_findings("t.rs", src).unwrap().is_empty(),
+                "passed: {src}"
+            );
+        }
+        for src in [
+            "fn t() { Command::new(\"/usr/bin/mkfifo\"); Command::new(\"git\"); }",
+            "fn t() { Command::new(program); let s = \"sh\"; }",
+            "// Command::new(\"sh\") in prose\nfn t() {}",
+        ] {
+            assert_eq!(spawn_findings("t.rs", src).unwrap(), Vec::<String>::new());
+        }
     }
 }

@@ -216,7 +216,7 @@ exactly the mistake the read-only-mapping decision was made to avoid.
 |---|---|
 | Extension allowlist | the design is good — only that it is one language |
 | 100% coverage | the tests assert anything useful; that is what mutation testing is for |
-| 100% coverage | **branches** were covered. `cargo llvm-cov` reports `Branches 0 0 -` for every file: zero branches are instrumented, and the coverage job gates on `--fail-under-lines` and `--fail-under-regions` only. `--branch` needs `-Z coverage-options=branch`, which is nightly, and `rust-toolchain.toml` pins stable 1.97.1 — so `cargo llvm-cov --branch` fails with `error: 1 nightly option were parsed`. Branch coverage is **unmeasured and currently unmeasurable here**. `docs/04-invariants.md` X-06 claimed it for a long time with a ✓ beside it; D-0030 narrowed the row to what is enforced. Region coverage is the closest stable substitute and is the number that is actually 100%. |
+| 100% coverage | **branches** were covered. `cargo llvm-cov` reports `Branches 0 0 -` for every file: zero branches are instrumented, and the coverage job gates on `--fail-under-lines` and `--fail-under-regions` only. `--branch` needs `-Z coverage-options=branch`, which is nightly, and `rust-toolchain.toml` pins stable 1.97.1 — so `cargo llvm-cov --branch` fails with `error: 1 nightly option were parsed`. Branch coverage is **unmeasured and currently unmeasurable here**. `docs/04-invariants.md` X-06 claimed it for a long time with a ✓ beside it; D-0030 narrowed the row to what is enforced. Region coverage is the closest stable substitute. It is not 100% either: the coverage job gates 90% lines and 89% regions (D-0677), and since D-1610 the check is named for those numbers rather than `Coverage 100%`. |
 | Gate 10 | the invariants file is complete. It walks **rows → tests** and never tests → rows, so a module can ship with genuine invariants, real tests and no rows at all, and the build stays green. `crates/core/src/universe.rs` did exactly that; D-0029 and rows `U-01`…`U-05` are the correction, and the gap in the gate remains. |
 | Gate 8 ratios | absolute speed is acceptable — only that it did not degrade with input size |
 | `cargo deny` | a dependency is trustworthy — only that it is licensed and un-advised |
@@ -1634,8 +1634,9 @@ use `RoundTrip::new`, which takes units.
 
 ### The futures charge stack is NOT ported
 
-`brutex/costs/futures_costs.py` (48 KB) and `rust/fno-math/src/exec/costs_futures.rs`
-were read and are not ported. Two reasons, in order:
+In the predecessor repository, `brutex/costs/futures_costs.py` (48 KB) and
+`rust/fno-math/src/exec/costs_futures.rs` were read and are not ported; neither
+path exists in this tree. Two reasons, in order:
 
 1. **The rates do not exist here.** A futures stack needs a futures transaction
    tax, a futures exchange transaction charge, and the Groww
@@ -3665,9 +3666,11 @@ measurement are separate evidence, and neither may be inferred from the other.
 
 ## 54. Why `crates/telemetry` is 99.24% and not 100%, line by line
 
-`CLAUDE.md` §9 asks for 100% line and branch coverage, and CI's `Coverage 100%`
-job enforces it with `--fail-under-lines 100 --fail-under-regions 100` and **no
-exclusion mechanism at all** — no ignore-regex, no `continue-on-error`. That job
+`CLAUDE.md` §9 asks for 100% line and branch coverage, and when this section was
+written CI's coverage job (then named `Coverage 100%`) enforced it with
+`--fail-under-lines 100 --fail-under-regions 100` and **no
+exclusion mechanism at all**. It now gates 90% lines and 89% regions (D-0677)
+and is named for those numbers (D-1610). It has no ignore-regex and no `continue-on-error`. That job
 is in `ci-ok`'s `needs`, so it is not advisory.
 
 The logging crate does not meet it. Measured 2026-08-11, `cargo llvm-cov -p
@@ -5046,7 +5049,7 @@ comment and names no row is invisible to it. **OPEN.**
 
 ## 82. The browser tree is gated at last, and two of its three gates are ratchets rather than floors
 
-`.github/workflows/web.yml`, `web/svelte.config.js`.
+the `web` job of `.github/workflows/ci.yml` (gates W1-W6; no `web.yml` exists), `web/svelte.config.js`.
 
 Gate W1, W2 and W3 close three findings — the committed bundle was tied to
 nothing, the tracked tests never ran, and `svelte-check` was a script nobody
@@ -5987,8 +5990,10 @@ deciding how far the ladder may walk before it halts and reports
 `complete = NO` — and a combination past the halt is not ranked badly, it is
 never built.
 
-`cli::derived_ceiling` now scales it by
-`std::thread::available_parallelism()`, so the bound moves with the machine
+`cli::whole_machine_ceiling` now scales it by
+`std::thread::available_parallelism()` (and `cli::ceiling_from_env` divides
+that among the sweeps sharing the machine; `derived_ceiling`, which this
+sentence named, was removed), so the bound moves with the machine
 instead of with an assumption. **The quantity that belongs there is usable RAM,
 and it is not what is read.**
 
@@ -6030,7 +6035,8 @@ number it stands in for.
 
 ## 94. `REFERENCE_CORES` is a measured property of one machine and no test can check it — D-0307
 
-`cli::derived_ceiling` scales `engine::DEFAULT_CEILING` by
+`cli::whole_machine_ceiling` (formerly reached through the removed
+`derived_ceiling`) scales `engine::DEFAULT_CEILING` by
 `std::thread::available_parallelism()` against a reference. **The reference must
 be in the unit the measurement answers in, and it was not.**
 
@@ -6114,7 +6120,10 @@ See D-0310 and D-0311.
 
 `CLAUDE.md` §2 forbids *"any `build.rs` that invokes an external process"* and
 lists it under **"forbidden without exception"**. Two gates enforce it — gate 2
-greps every tracked `build.rs` for `Command::new` and `std::process`, and gate 13
+(since D-1100/D-1101) reads every file compiled into a tracked build script as
+TOKENS -- `source_scan closure` then `source_scan build`, refusing `Command`,
+`std::process` beyond the members that start nothing, `unsafe`, `extern`, macros
+and (D-1603) cargo-configuration paths, link arguments and spawning crates -- and gate 13
 layer 3 refuses every tracked build script its allowlist does not name. **Both read
 `git ls-files`.** Neither has ever looked at a dependency.
 
@@ -14032,3 +14041,57 @@ bounds are all nonzero.
   longer cancels it, so the connection that asked cannot be used to stop a
   pull: the seat stays held until the pull ends. The stop control for a hand
   pull remains the per-instrument pause of the autopilot epoch, as before.
+## CI gate limits stated by the audit-20261003 w5 fixes — D-1600 onward, 3 October 2026
+
+- **Gate 10, module-first two-segment tokens (D-1606).** `grid::name` is
+  resolved only to "`name` is declared in some tracked source file", not to
+  the file of module `grid`: an inline `mod grid { … }` has no file the
+  declarations table can bind it to. A crate-first `api::name` is bound to the
+  crate. Three-segment and longer tokens keep their stricter rule.
+- **Gate 10, bare proof names (D-1606).** Only names with three or more
+  underscores, in the cell before a status glyph, are read. A shorter name,
+  or one in prose, is still checked by nothing.
+- **Gate 0 `spawns` (D-1603).** Reads only a string literal passed straight
+  to `Command::new`. A program held in a variable (`api`'s browser opener,
+  D-1202) or built at run time is not seen, and `sh`/`bash` are not shadowed
+  on gate 1e's PATH because the `git` the tests spawn may start a shell.
+- **The `.github/*.rs` gate tools (D-1600).** Gate 6c holds them to rustfmt
+  and clippy `-D warnings`; no coverage or mutation measure applies to them.
+- **Twelve `#[ignore]`d tests never run in CI, by design (D-1613,
+  audit-20261003 testgaps-7).** No workflow passes `--ignored`, and none can:
+  each needs an input that cannot be tracked or a machine CI is not, and each
+  refuses loudly ("MISSING FIXTURE") rather than passing when started without
+  it. They prove nothing on CI and every row citing one says so.
+  - `~/.brutex/lake` (a `.parquet` lake gate 1 forbids tracking):
+    `lake::real_lake` `the_real_fno_sample_decodes_to_the_values_it_holds`,
+    `the_real_cash_sample_has_the_seven_column_layout`,
+    `a_real_contract_directory_name_parses_and_round_trips`,
+    `a_spread_of_real_files_decodes_with_no_failures`;
+    `lake::real_lake_regression`
+    `a_wide_sample_of_the_real_lake_decodes_with_no_refusal_and_a_stable_digest`;
+    `lake::refusals` `no_real_lake_file_triggers_either_defect`.
+  - `BRUTEX_NSE_CASH_SAMPLE_DIR` (NSE's dated masters, not redistributable
+    here): `pull::cash_auction` `actual_dated_masters_match_every_current_fno_cash_identity`;
+    `pull::cash_session_cache` `actual_receipted_lifecycle_snapshot_never_claims_complete_history`
+    (cited beside a test that does run, row labelled) and
+    `official_25_dated_masters_install_and_validate_without_network`.
+  - The operator's real store: `api::calendar_of` `it_reproduces_the_operators_store`.
+  - Explicit frozen request and receipt paths: `api::recovery`
+    `authentic_saved_request_reproduces_its_accepted_scope_identity_without_rebuilding_history`.
+  - A timing measurement for a release build: `cli::index_stop_tests`
+    `catalog_attempt_throughput_measurement`.
+- **One store test runs only on macOS (audit-20261003 testgaps-8).**
+  `store::open_flags::macos_values_are_the_sdk_ones` is
+  `#[cfg(target_os = "macos")]` and every CI job runs on `ubuntu-24.04`, so it
+  is compiled out of every CI run; so is the aarch64 Linux row. Row
+  S-NOFOLLOW-01 already says CI runs only the x86_64 row.
+- **Gate 6d runs the native tests under `web/` except two (D-1607).**
+  `web/saved-backtest/viewer.rs`'s
+  `vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses` and
+  `exact_saved_search_rejects_foreign_pin_through_existing_handler` need an
+  operator-captured vocabulary file and a completed search in a real store;
+  they are skipped by name and run only by hand. `web/sweep-readiness/verify.rs`
+  is a runner, not a test file: CI compiles it and does not run it, because it
+  executes the whole workspace suite and the browser toolchain. Gate 10 does
+  not read `web/` paths, so the eleven rows that cite these files are still
+  checked by name by nothing; Gate 6d is what makes their tests run.

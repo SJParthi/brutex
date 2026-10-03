@@ -58,6 +58,9 @@ async function settle() {
  * @param {Record<string, {status: number, body: any}>} [answers] what each URL answers
  */
 async function open(source, answers = {}) {
+ * @param {(url: string) => unknown} [respond] the JSON body each request reads
+ */
+async function open(source, respond = () => ({})) {
   /** @type {string[]} */
   const requests = [];
   /** @type {Map<string, ReturnType<typeof element>>} */
@@ -105,6 +108,8 @@ async function open(source, answers = {}) {
       const answer = answers[String(url)];
       const status = answer ? answer.status : 200;
       return { ok: status >= 200 && status < 300, status, json: async () => (answer ? answer.body : {}) };
+      const body = respond(String(url));
+      return { ok: true, status: 200, json: async () => body };
     },
     setTimeout: schedule,
     setInterval: schedule,
@@ -247,4 +252,31 @@ test('vendor text reaching the page is escaped, never parsed as markup', async (
   ].join('\n');
   assert.ok(markup.includes('&lt;img src=x onerror=alert(1)&gt;'), markup);
   assert.ok(!markup.includes('<img'), markup);
+// MR-23, audit-20261003 testgaps-3 (D-1606). The row said the join "names the
+// symbols it could not resolve" and cited a test that never existed; the two
+// that did only found `id="xverify"` in the HTML. This presses Verify against
+// a join that refuses two symbols and reads what the page rendered.
+test('a press of verify names every symbol the exchange did not confirm', async () => {
+  const join = {
+    published: 4,
+    listed: 3,
+    resolved: 1,
+    refused: 2,
+    rows: [
+      { symbol: 'NIFTY PVT BANK', nse: 'NIFTY PRIVATE BANK', basis: 'abbreviation' },
+      { symbol: 'NIFTY100QLTY30', nse: null, why: 'ambiguous', candidates: 2 },
+      { symbol: 'INDIA VIX', nse: null, why: 'absent' },
+    ],
+  };
+  const { elements } = await open(SOURCE, (url) =>
+    url.startsWith('/indexmap.json?feed=') ? join : {},
+  );
+  await press(elements, 'verify');
+  const box = elements.get('xverify');
+  assert.ok(box, '#xverify was looked up by the script');
+  for (const feed of ['dhan', 'groww', 'zerodha']) {
+    assert.ok(box.innerHTML.includes(`<b>${feed}</b>`), `${feed} has no row`);
+  }
+  assert.ok(box.innerHTML.includes('NIFTY100QLTY30, INDIA VIX'), box.innerHTML);
+  assert.ok(!box.innerHTML.includes('NIFTY PVT BANK'), 'a resolved symbol is not unconfirmed');
 });

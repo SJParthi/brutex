@@ -5289,6 +5289,19 @@ mod tests {
         let public: PublicEntry = commit_stored_candidate_pre_admission_v1;
         let authority: AuthorityEntry = commit_stored_candidate_pre_admission_authority_v1;
         std::hint::black_box((public, authority));
+        // audit-20261003 testgaps-10 (D-1614): the bindings above pin the two
+        // signatures at compile time only. These read the property at run
+        // time: two functions, and only the projection is public.
+        assert!(
+            !std::ptr::fn_addr_eq(public, authority),
+            "the public projection and the private authority are one function"
+        );
+        let source = include_str!("step3_orchestrator.rs");
+        assert!(source.contains("\npub fn commit_stored_candidate_pre_admission_v1("));
+        assert!(
+            source.contains("\npub(crate) fn commit_stored_candidate_pre_admission_authority_v1("),
+            "the authority entry must stay crate-private"
+        );
     }
 
     #[test]
@@ -5352,6 +5365,36 @@ mod tests {
             statistics,
             projection,
         ));
+        // audit-20261003 testgaps-10 (D-1614). "Crate-private" is a property
+        // of the declarations, which a `pub fn` of the same signature would
+        // have bound identically above, so it is read from the source. The
+        // two sources are two accessors, not one.
+        assert!(
+            !std::ptr::fn_addr_eq(nifty, banknifty),
+            "both sides read one source"
+        );
+        let source = include_str!("step3_orchestrator.rs");
+        assert!(
+            source.contains("\npub(crate) fn commit_stored_observation_statistics_v2("),
+            "the statistics seam must stay crate-private"
+        );
+        for accessor in [
+            "nifty_source",
+            "banknifty_source",
+            "base_evidence",
+            "observation_commit",
+            "statistics_commit",
+            "projection_source",
+        ] {
+            assert!(
+                source.contains(&format!("    pub(crate) const fn {accessor}(&self)")),
+                "{accessor} must stay a crate-private accessor"
+            );
+            assert!(
+                !source.contains(&format!("    pub const fn {accessor}(&self)")),
+                "{accessor} became public"
+            );
+        }
     }
 
     #[test]

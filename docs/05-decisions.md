@@ -54168,3 +54168,334 @@ is served with `Cache-Control: public, max-age=31536000, immutable`. Nothing
 else gains a cache header, so the shell and `version.json` are fetched
 afresh and a rebuild is seen. No `ETag`: it would need a hash or stat per
 request for files that never change under one name.
+### D-1600 — The `.github/*.rs` gate tools meet the workspace's fmt and clippy bar (Gate 6c) — 2026-10-03
+
+**What was observed (audit-20261003 hunt-ci-5).** The three CI tools under
+`.github/` decide a dozen gates and are built by bare `rustc`, so Gate 6a
+(`cargo fmt --all --check`) and Gate 6b (`cargo clippy --workspace`) never
+read them. `clippy-driver --edition=2024 -D warnings .github/source_scan.rs`
+failed with nine errors (a manual prefix strip, two identical `if` blocks,
+five collapsible `if`s, one very complex type).
+
+**The decision.** The nine are fixed without changing behaviour (the scanner's
+own 40 tests pass unchanged), and a new build-job step, Gate 6c, runs
+`rustfmt --edition 2024 --check` and `clippy-driver --edition=2024 -D warnings`
+(non-test and `--test`) on every tracked `.github/*.rs`, refusing an empty
+listing. Coverage and mutation testing of these tools are still not measured;
+that limit is unchanged and stays stated in `docs/06-limits.md`.
+
+### D-1601 — `step-runs` reads whether the line decides its step, and `ci-ok`'s own shape is a gate — 2026-10-03
+
+**What was observed.** hunt-ci-3: `source_scan step-runs` accepted any line
+*beginning* with the needle, so `cargo deny check || true`, or the line inside
+`if false; then … fi`, passed the meta-gate that is meant to prove gate 3
+blocks. hunt-ci-4: nothing checked `ci-ok` itself. Branch protection requires
+only that check, GitHub counts a skipped required job as passing, and a job
+left out of `needs` makes its gate advisory.
+
+**The decision.** `swallowed` refuses a needle line that sits inside an
+`if`/loop/`case`/brace group or function, inside a heredoc, after `set +e`, or
+is followed by `|`, `&` or `;`. A new `source_scan aggregator` subcommand,
+run by Gate 0, refuses a `ci-ok` whose flow-style `needs` is not exactly every
+other job, whose job-level `if:` is not exactly `always()`, which sets
+`continue-on-error` or a step `if:`, or which no longer carries the
+`join(needs.*.result, ' ')` input and the success-only loop. Invariants
+AFE-01 and AFE-02.
+
+### D-1602 — Gate 0 refuses every inline-program form, not only `node -e` — 2026-10-03
+
+**What was observed (rustonly2-2).** Gate 0's matcher caught only the exact
+word pairs `node -e/--eval/-p/--print`, `perl -e/-E`, `php -r`, `py… -c` and
+`deno eval`. A heredoc or here-string into an interpreter, a pipe into one,
+`perl -ne`, `node -pe`, `py… -Bc`, `--eval=…` and a quoted program name all
+passed.
+
+**The decision.** `inline_programs` reads, per logical shell line: any
+single-dash flag cluster carrying the inline letter for that interpreter
+(`e`/`p` for node and bun, `e`/`E` for perl and ruby, `r` for php, `e` for
+lua, `c` for the py family), `--eval`/`--print` with or without `=`, `-` as
+the program, any later `<<` (heredoc or here-string), and a pipe stage whose
+first word is an interpreter given no script. Quotes around the program name
+and a leading path are stripped. `awk` is not refused: its 73 uses are the
+gates themselves, and whether shell in a workflow is a second language is the
+law question the prior pass raised and left to the operator. Invariant AFE-04.
+
+### D-1603 — Gate 1 counts only what is built; build scripts and crate code may not start a program indirectly — 2026-10-03
+
+**What was observed.** rustonly2-1: `compiled_roots` counted every
+`.github/*.rs` and every `crates/*/src/lib.rs`, so a tracked `.github/notes.rs`
+or a non-member `crates/zz/src/lib.rs` holding Python passed gate 1 and its
+"every .rs outside web/ is compiled" line. rustonly2-3: gate 2 refused only
+naming a process API; a build script could write `.cargo/config.toml`
+(a `rustc-wrapper` the next cargo runs), print `rustc-link-arg=-fuse-ld=…`,
+or call `duct`/`xshell`. rustonly2-4: gate 1e shadows interpreters by name
+on PATH, so `Command::new("sh")` or `Command::new("/usr/bin/<interpreter>")`
+in test or production code passed every gate.
+
+**The decision.** A crate file is a root only when its directory is listed in
+the root `Cargo.toml` `workspace.members`, and a `.github/*.rs` only when a
+non-comment workflow line hands it to `rustc`; an unreadable manifest or
+workflow is an error. Gate 2's token scan also refuses a string literal
+naming `.cargo`, `rustc-link-arg` or `fuse-ld`, and the identifiers `duct`,
+`xshell`, `cmd_lib`, `subprocess`, `run_script` and `popen`. A new
+`source_scan spawns`, run by Gate 0 over every tracked `crates/**/*.rs`,
+refuses `Command::new("<literal>")` whose program's base name is a shell
+(`sh`, `bash`, `dash`, `zsh`, `ksh`, `fish`), `env`, or an interpreter.
+**Limit:** a program held in a variable is not read (`api`'s browser opener,
+D-1202, is one); `sh` and `bash` are not added to gate 1e's PATH stubs
+because `git`, which the tests spawn, may start a shell itself. Invariants
+AFE-03, AFE-05, AFE-06.
+
+### D-1608 — Gate 27 reads row ids whose prefix carries a digit — 2026-10-03
+
+**What was observed (hunt-ci-6).** Gate 27's id pattern
+`[A-Z][A-Z-]*-[0-9]{2,3}` allowed no digit in the prefix, so 179 rows
+(`FV4-01`, `PS3-01`, `C-O1CLI1-01`, `S-PROBESTORE3-01`, …) were never checked
+for uniqueness; a second `FV4-01` passed.
+
+**The decision.** The prefix is `[A-Z][A-Z0-9-]*`. The tree reads 1,494 ids,
+the same count as the broadest row-id shape, and none is duplicated, so no
+row needed renumbering. Proven by running the step on a copy of the document
+with a second `FV4-01` appended: the old pattern printed OK, the new one
+names the duplicate and exits 1.
+
+### D-1606 — Gate 10 resolves two-segment tokens and bare proof names; four phantom citations are replaced by tests that exist and assert the row — 2026-10-03
+
+**What was observed (audit-20261003 testgaps-1..5).** Gate 10 checked only
+`a::b::c` tokens and names written "`name` in `crates/…`". 303 two-segment
+and 857 bare proof tokens were checked by nothing, and four `✓` rows cited
+tests that do not exist: ER-01 (`grid::every_trade_ends_by_exactly_one_of_the_five_exits`),
+MR-23 (`the_cross_verification_is_also_bound_to_a_press`), AD-02
+(`exact_codecs_bind_every_status_and_refuse_reserves_and_seals`) and ED-01
+(`parameterized_fixture_proves_banknifty_hourly_top25_capacity`). Running the
+extended checker on the old document also found SW-19 citing the removed
+`cli::points_to_ppm`, a row citing `pattern::exemplars` (an inline module, no
+test name), and two rows (P-02, A-20) that backticked an abandoned name as
+history.
+
+**The decision.** `invariant_paths.rs` now refuses, in any table row, an
+`a::b` token (both segments snake case) whose `b` is neither a function nor a
+module in crate `a`, or — when `a` is not a crate — is declared nowhere (an
+inline `tests`/`*_tests` module is accepted; `std`, `alloc`, `tokio`, `str`,
+`crate`, `self`, `super` and `process` roots are skipped). It also refuses a
+bare backticked name with three or more underscores, not ending in `_`, in
+the proof cell of a row whose last cell is a status glyph (`✓ ◐ — ✗ ~`),
+when no tracked source declares it as a function or module. The rows:
+- ER-01 cites a new `runner::grid::tests::every_trade_ends_by_exactly_one_of_the_five_exits`,
+  which proves each of the five exit shapes moves exactly one, distinct
+  counter and that a grid which traded on both sides sums its counters to
+  `trades` (the old test passed vacuously on zero trades).
+- MR-23 cites `api::indexmap::tests::every_outcome_reaches_the_wire_including_the_refusals`
+  and a new node test in `web/tests/masters-load.test.js` that presses
+  Verify and reads the refused symbols in the rendered table (proven to fail
+  when the page stops naming them).
+- AD-02 cites the renamed V1 codec test and the four-status counter kernel.
+- ED-01 cites the renamed `…_but_v1_blocks_top25_admission`, which asserts
+  what the row now says.
+- SW-19 names `cli::points_to_ppm_at`; the exemplar row names its two tests;
+  P-02 and A-20 quote their abandoned names in quotation marks, not code.
+
+**Limit.** A module-first two-segment token is resolved only to "declared
+somewhere", because an inline module has no file to bind it to. Stated in
+`docs/06-limits.md`.
+
+### D-1604 — A pull request that changes the gates or the law is armed only after a code owner approves its head; a stop disarms; the workflow_run PR is the one whose head is the sha — 2026-10-03
+
+**What was observed.** hunt-ci-1: branch protection on `main` requires only
+`ci-ok`, which the pull request's own `ci.yml` produces; no review is
+required, no CODEOWNERS existed, and `auto-merge.yml` armed every same-repo
+PR, so a PR could weaken or delete a gate and merge itself. hunt-ci-8: a STOP
+said "Auto-merge was not enabled" while an earlier run had usually armed it,
+and nothing disarmed it. hunt-ci-9: on `workflow_run` the PR was the first
+open one listed for the sha, which can be a stacked PR that merely contains
+it.
+
+**The decision.**
+1. A root `CODEOWNERS` (allowed by name in CLAUDE.md §2) names `@SJParthi` for
+   `/.github/`, `/CLAUDE.md` and `/CODEOWNERS`.
+2. `auto-merge.yml` section 5b reads the PR's changed files (renames by both
+   names). When any is under `.github/`, is `CLAUDE.md` or a CODEOWNERS file,
+   it reads the owners from the CODEOWNERS **on `main`** and the latest
+   non-comment review per reviewer **on the current head**, and arms only when
+   an owner approved. Any read that fails, a missing CODEOWNERS on `main`, or
+   an owner list that is empty, is a STOP. The first PR that adds CODEOWNERS
+   therefore stops and is merged by hand.
+3. The `pull_request` trigger becomes `pull_request_target`, so the arming
+   decision is always made by `main`'s copy of `auto-merge.yml`; a PR cannot
+   edit the check away for itself. The job checks out and runs no PR code,
+   and every event value still crosses into the shell through `env:`.
+4. `stopped` calls `disarm`, which reads `autoMergeRequest` and disables an
+   armed merge, and the alarm states which of "not armed", "was armed and is
+   now disabled" or "IS STILL ARMED" holds.
+5. On `workflow_run` the PR is the open one whose `head.sha` equals the run's
+   sha.
+
+**What only the owner can do.** The binding control is branch protection's
+"Require review from Code Owners" (and "Require approval of the most recent
+reviewable push") on `main`. That is a repository setting; this change does
+not and cannot make it. Until it is on, a PR whose own `ci.yml` stays green
+can still be merged by anyone with merge rights; the workflow only declines
+to arm it. Proven with a stub `gh` on PATH running the step: a `.github/`
+change with no approval stopped (exit 1) and disarmed an armed PR; the same
+change approved by the owner on head armed; a crate-only change armed; a
+missing or owner-less CODEOWNERS on `main` stopped.
+
+### D-1605 — Main is re-verified after every bot merge by an hourly dispatch — 2026-10-03
+
+**What was observed (hunt-ci-2).** Merges performed by auto-merge are made as
+`GITHUB_TOKEN`, and GitHub creates no run for an event that token caused, so
+`ci.yml`'s `push: branches: [main]` never fired for them. The newest push run
+on `main` was 2026-09-23; five merged commits after it had no CI run of
+their own, and the one weekly scheduled run had failed unnoticed.
+
+**The decision.** A new `.github/workflows/main-check.yml` runs hourly (and on
+dispatch). It reads `main`'s head and, when no `push`, `workflow_dispatch` or
+`schedule` CI run exists for that sha, calls `gh workflow run ci.yml --ref
+main`. A dispatch made with `GITHUB_TOKEN` is the documented exception that
+does start a run, so no new secret is needed. Permissions are
+`actions: write, contents: read`. Proven with a stub `gh`: zero runs for the
+sha dispatched once, one run dispatched nothing.
+
+**Rejected.** A `workflow_run` trigger on CI: the merge happens when `ci-ok`
+passes, so a run started on CI's completion races the merge and may check
+the pre-merge `main`. A daily full schedule: it re-runs an unchanged `main`
+and still leaves a day of unverified merges.
+
+### D-1609 — Gate W4 fails on a failed build and refuses a silent zero — 2026-10-03
+
+**What was observed (hunt-ci-7).** W4 piped `npm --prefix web run build` into
+`tee` with no `pipefail`, so a failed build passed it, and a log in which the
+build said nothing counted zero unused selectors and passed. Gates 26, 27 and
+W3 already refuse that shape.
+
+**The decision.** W4 runs under `set -euo pipefail`, writes the build log
+directly, and refuses a log without vite's `built in <n>` line. Proven with a
+stub `npm`: silent output and a failing build passed the old step and fail
+the new one; a clean build passes; one unused selector fails.
+
+### D-1610 — Coverage check named for what it enforces; stale toolchain comment; least-privilege CI token; Gate 5 counts every unsafe exception form — 2026-10-03
+
+**What was observed.** hunt-ci-10: the check shown on every PR was named
+`Coverage 100%` while it enforces `--fail-under-lines 90
+--fail-under-regions 89` (D-0677) and no branch coverage, and
+`docs/06-limits.md` still called region coverage "the number that is actually
+100%". hunt-ci-11: a Gate 3 comment said `rust-toolchain.toml` pins 1.85.0; it
+pins 1.97.1. hunt-ci-12: `ci.yml` had no `permissions:`, so its jobs got the
+repository-default token scope. hunt-ci-13: Gate 5 counted only the literal
+`allow(unsafe_code)`, not `allow(unsafe_code, reason = …)` or
+`expect(unsafe_code)`.
+
+**The decision.** The job's display name is `Coverage — 90% lines, 89% regions
+(D-0677)`; its id `coverage`, which `ci-ok`'s `needs` names, is unchanged, and
+branch protection requires only `ci-ok`, so nothing matches on the old name.
+The two `docs/06-limits.md` sentences now state the real floors. The comment
+says what was pinned then and what is pinned now. `ci.yml` declares
+`permissions: contents: read` at the top: no step uses `GITHUB_TOKEN` for a
+write (artifacts and caches use the runner's own token). `auto-merge.yml`
+keeps exactly `contents: write, pull-requests: write, checks: read`, which
+`gh pr merge --auto`/`--disable-auto`, the reviews and file listings and the
+check-run read need. Gate 5 counts `(allow|expect)(unsafe_code` followed by
+`,` or `)`; the tree still holds one exception
+(`crates/pull/tests/allocation.rs`). Proven on a scratch repository with four
+`allow(unsafe_code, reason = "x")` files: the old step counted 0 and passed,
+the new one counts 4 and fails. Third-party actions are still referenced by
+mutable tag (`dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`);
+pinning them to a commit needs the commit ids from GitHub, which this change
+did not fetch, so that hardening is left open rather than guessed.
+
+### D-1612 — Gate 1g refuses a linker in RUSTFLAGS, a CARGO_HOME, and a nextest config file by another name — 2026-10-03
+
+**What was observed (rustonly2-7).** Gate 1g's workflow regex missed
+`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` with `-C linker=` (the door
+`target.<t>.linker` opens), `CARGO_HOME=<tracked dir>` (whose `config.toml`
+is any allowed `.toml`), and `cargo nextest run --config-file <file>`.
+
+**The decision.** A second pattern, read with file names and skipping comment
+lines, refuses `CARGO_HOME` set to anything, a `RUSTFLAGS`-family value naming
+`linker`, `link-arg` or `fuse-ld`, and nextest's `--config-file` and
+`--tool-config-file`. The workflow-wide `RUSTFLAGS: -D warnings` still
+passes. Proven on a scratch workflow carrying all three forms plus a comment
+naming them: the old step printed OK, the new one names the three lines and
+not the comment.
+
+### D-1611 — The dependency fingerprint hashes each package's version — 2026-10-03
+
+**What was observed (rustonly2-6).** `crates/vocab/tests/workspace_is_rust.rs`
+hashed each package's name and dependency list and used the version only to
+sort, so a version-only change (ring 0.17.14 → 0.17.99) left the pinned
+fingerprint equal. A new release of a crate that starts vendoring C under the
+same name was invisible to the pin.
+
+**The decision.** The fingerprint eats the version between the name and the
+dependency list. The pin is re-computed over the unchanged `Cargo.lock`; the
+package count (192) is unchanged and no package was added, so there is no new
+set to scan. From now on any version bump moves the fingerprint and requires
+the same scan-then-re-pin the count already requires. Invariant AFE-10.
+
+### D-1613 — The twelve `#[ignore]`d tests are documented, not run — 2026-10-03
+
+**What was observed (testgaps-7).** Twelve `#[ignore]`d tests never run in
+CI, and one `✓` row cited one of them beside a running test without saying so.
+
+**The decision.** No CI job runs `--ignored`: every one of the twelve needs an
+input that cannot be tracked (the `~/.brutex/lake` parquet lake gate 1
+forbids, NSE's dated masters, the operator's store, frozen receipts) or a
+release-build timing run, and each refuses loudly when started without it, so
+a CI job would be red by construction. Each is listed with its reason in
+`docs/06-limits.md`, and the row citing
+`actual_receipted_lifecycle_snapshot_never_claims_complete_history` now says
+it is ignored. The macOS-only `store::open_flags::macos_values_are_the_sdk_ones`
+(testgaps-8) is listed there too; row S-NOFOLLOW-01 already said so.
+
+### D-1614 — Stale limits and plan rows corrected; two compile-time-only tests gain runtime assertions — 2026-10-03
+
+**What was observed.** testgaps-10: two tests in `cli::step3_orchestrator`
+bound functions to fn-pointer types and `black_box`ed them, so they asserted
+nothing at run time, and "crate-private" in one's name was unproven (a `pub
+fn` of the same signature binds identically). testgaps-11: `docs/06-limits.md`
+§93/§94 and five rustdoc links in `crates/cli/src/lib.rs` named
+`cli::derived_ceiling`, which no longer exists. testgaps-12: §82 named
+`.github/workflows/web.yml`, which never existed. testgaps-13: the futures
+paragraph named predecessor-repository paths without saying so. rustonly2-9:
+§96 still said gate 2 greps build scripts for two strings. gaps-13:
+`docs/07-plan.md` R-4 said F&O pull was not yet open (`/pull/fno` is routed),
+§9.3 said there is no trading calendar (`pull::calendar::kind_of` exists), §10
+#11 said a mid-run token expiry has no re-read (`Watch::reread` runs on the
+production path, D-0948), and §11's "no CLI caller" rows predate `ledger-v6`
+and `ledger-v6-replay`.
+
+**The decision.** The two tests now assert, at run time, that the public
+projection and the private authority are two functions
+(`std::ptr::fn_addr_eq`) and that the NIFTY and BANKNIFTY accessors are two,
+and read their own source to assert the authority entry, the statistics seam
+and its six accessors are declared `pub(crate)`. Each stale sentence is
+edited to the current tree, naming what replaced the removed item; the rustdoc
+links point at `ceiling_from_env` and `whole_machine_ceiling`. `07-plan.md`
+§11 is a dated measurement, so it gains a dated status note instead of having
+its rows rewritten.
+
+### D-1607 — CI builds and runs the native Rust tests under `web/` (Gate 6d) — 2026-10-03
+
+**What was observed (testgaps-6).** Eleven invariant rows are proven only by
+native Rust tests in `web/saved-backtest/viewer.rs` and
+`web/sweep-readiness/{frontend-publish,main-inspector(-tests),deployment-preflight(-tests),verify}.rs`.
+They belong to no crate, `cargo test` never sees them, and no CI step named
+them, so no run executed what those rows rely on.
+
+**The decision.** A build-job step, Gate 6d, runs after `Tests`. It asks
+cargo (`cargo build -p api -p cli --lib --tests --locked
+--message-format=json`, which the `Tests` step has already compiled) for the
+exact rlib of `serde`, `serde_json`, `axum`, `tower`, `tokio`, `api`, `cli`,
+`brutex_core` and `vocab`, refusing when any name resolves to zero or two
+files; sets the four `*_SHA256` build stamps the two servers embed from those
+files; compiles `verify.rs` and builds each of the four test roots with
+`rustc --edition=2024 --test -D warnings`; and runs them. Two viewer tests
+need an operator-captured vocabulary and store and are skipped by name; the
+row that cites one now says so, and `docs/06-limits.md` lists both. Measured
+locally: 7 + 13 + 35 + 13 tests passed (2 filtered); a constructed failing
+assertion in `frontend-publish.rs` made its test binary exit 101, which fails
+the step under `set -e`. This uses only `rustc` and cargo's own output; no
+interpreter or `web/` toolchain is involved, so §2's engine boundary holds.
+Moving the files into a crate was rejected: they would become members, add
+arrows to the measured graph, and stop being the standalone tools their
+READMEs describe.

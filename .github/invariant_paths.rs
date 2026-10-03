@@ -185,6 +185,163 @@ fn module_first_resolves(
     })
 }
 
+/// A path root no tracked file declares: the standard library, a dependency,
+/// or a crate-relative spelling whose crate the token does not name.
+const EXTERNAL_ROOTS: [&str; 8] = [
+    "std", "alloc", "tokio", "str", "crate", "self", "super", "process",
+];
+
+/// Every backticked `a::b` token in a line, both segments snake case. D-1606.
+fn two_segment_tokens(line: &str) -> Vec<(&str, &str)> {
+    let segment = |part: &str| {
+        let mut bytes = part.bytes();
+        bytes
+            .next()
+            .is_some_and(|first| first == b'_' || first.is_ascii_lowercase())
+            && bytes.all(|byte| byte == b'_' || byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    };
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(open) = line[from..].find('`').map(|at| from + at) {
+        let Some(close) = line[open + 1..].find('`').map(|at| open + 1 + at) else {
+            break;
+        };
+        let value = line[open + 1..close]
+            .strip_suffix("()")
+            .unwrap_or(&line[open + 1..close]);
+        match value.split_once("::") {
+            Some((a, b)) if segment(a) && segment(b) => {
+                out.push((a, b));
+                from = close + 1;
+            }
+            _ => from = close,
+        }
+    }
+    out
+}
+
+/// The module names a source file answers to: every path component under its
+/// crate (or its own stem under `.github/`), plus each segment it is mounted
+/// at in the MODULES table.
+fn module_segments<'a>(path: &'a str, modules: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    let mut out: Vec<&str> = match path.strip_prefix("crates/") {
+        Some(rest) => rest
+            .split('/')
+            .skip(1)
+            .map(|c| c.strip_suffix(".rs").unwrap_or(c))
+            .collect(),
+        None => path
+            .rsplit('/')
+            .next()
+            .map(|c| c.strip_suffix(".rs").unwrap_or(c))
+            .into_iter()
+            .collect(),
+    };
+    for (file, mounted) in modules {
+        if *file == path {
+            out.extend(mounted.split("::").filter(|s| !s.is_empty()));
+        }
+    }
+    out
+}
+
+/// Does a two-segment token resolve? D-1606, audit-20261003 testgaps-1.
+///
+/// Gate 10 read only `a::b::c` and longer, so `grid::renamed_test` sat in a
+/// `✓` row with the gate green. Crate-first (`api::name`): `name` is a
+/// function declared, or a module file, in that crate. Module-first
+/// (`grid::name`): `name` is declared somewhere, or is a module (an inline
+/// `mod tests` is in no table, so `tests` and `*_tests` are accepted). The
+/// module-first rule cannot tell WHICH module declares the name -- an inline
+/// module has no file to bind it to -- and that limit is stated in
+/// docs/06-limits.md.
+fn two_segment_resolves((a, b): (&str, &str), names: &Names<'_>) -> bool {
+    match names.by_crate.get(a) {
+        Some(declared) => declared.contains(b),
+        None => b == "tests" || b.ends_with("_tests") || names.anywhere.contains(b),
+    }
+}
+
+/// Every function and module name, once: in each crate, and anywhere.
+struct Names<'a> {
+    by_crate: std::collections::HashMap<&'a str, HashSet<&'a str>>,
+    anywhere: HashSet<&'a str>,
+}
+
+impl<'a> Names<'a> {
+    fn of(pairs: &[(&'a str, &'a str)], modules: &[(&'a str, &'a str)]) -> Self {
+        let mut by_crate: std::collections::HashMap<&str, HashSet<&str>> =
+            std::collections::HashMap::new();
+        let mut anywhere = HashSet::new();
+        let paths: HashSet<&str> = pairs.iter().map(|(path, _)| *path).collect();
+        for path in paths {
+            let segments = module_segments(path, modules);
+            if let Some(krate) = path
+                .strip_prefix("crates/")
+                .and_then(|r| r.split('/').next())
+            {
+                by_crate.entry(krate).or_default().extend(&segments);
+            }
+            anywhere.extend(segments);
+        }
+        for (path, function) in pairs {
+            if let Some(krate) = path
+                .strip_prefix("crates/")
+                .and_then(|r| r.split('/').next())
+            {
+                by_crate.entry(krate).or_default().insert(function);
+            }
+            anywhere.insert(function);
+        }
+        Names { by_crate, anywhere }
+    }
+}
+
+/// The status glyphs a row's last cell carries when the row states an
+/// invariant and the cell before it names the proof.
+const STATUS: [&str; 5] = ["✓", "◐", "—", "✗", "~"];
+
+/// Backticked bare test names in a status row's proof cell (the cell before
+/// the status glyph): snake case, at least three underscores (a test name,
+/// not a field or a variable), not a prefix ending in `_`. D-1606.
+fn bare_proof_names(line: &str) -> Vec<&str> {
+    let cells: Vec<&str> = {
+        let mut cells = Vec::new();
+        let mut start = 0;
+        let bytes = line.as_bytes();
+        for (at, byte) in bytes.iter().enumerate() {
+            if *byte == b'|' && (at == 0 || bytes[at - 1] != b'\\') {
+                if at > 0 {
+                    cells.push(&line[start..at]);
+                }
+                start = at + 1;
+            }
+        }
+        cells
+    };
+    let [.., proof, status] = cells.as_slice() else {
+        return Vec::new();
+    };
+    if cells.len() < 3 || !STATUS.contains(&status.trim()) {
+        return Vec::new();
+    }
+    proof
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(|v| v.strip_suffix("()").unwrap_or(v))
+        .filter(|v| {
+            v.bytes().filter(|b| *b == b'_').count() >= 3
+                && !v.ends_with('_')
+                && v.bytes()
+                    .next()
+                    .is_some_and(|first| first == b'_' || first.is_ascii_lowercase())
+                && v.bytes()
+                    .all(|b| b == b'_' || b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 fn verify(document: &str, declarations: &str) -> Result<usize, String> {
     verify_with(document, declarations, "")
@@ -200,6 +357,7 @@ fn verify_with(document: &str, declarations: &str, modules: &str) -> Result<usiz
         .filter_map(|line| line.split_once('\t'))
         .collect();
     let crates = crate_names(&pairs);
+    let names = Names::of(&pairs, &modules);
     let declarations: HashSet<&str> = declarations
         .lines()
         .filter(|line| !line.is_empty())
@@ -217,6 +375,31 @@ fn verify_with(document: &str, declarations: &str, modules: &str) -> Result<usiz
                 if !module_first_resolves(token, &pairs, &modules) {
                     refusals.push(format!(
                         "line {}: {token} names no crate, and no tracked file of a module `{first}` declares its function",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        if line.starts_with('|') {
+            for token in two_segment_tokens(line) {
+                if EXTERNAL_ROOTS.contains(&token.0) {
+                    continue;
+                }
+                checked += 1;
+                if !two_segment_resolves(token, &names) {
+                    refusals.push(format!(
+                        "line {}: {}::{} names no declared function or module",
+                        index + 1,
+                        token.0,
+                        token.1
+                    ));
+                }
+            }
+            for name in bare_proof_names(line) {
+                checked += 1;
+                if !names.anywhere.contains(name) {
+                    refusals.push(format!(
+                        "line {}: proof `{name}` is declared in no tracked source file",
                         index + 1
                     ));
                 }
@@ -419,5 +602,65 @@ mod tests {
         let refusal = verify(document, DECLARATIONS).unwrap_err();
         assert!(refusal.contains("line 2"));
         assert!(refusal.contains("absent"));
+    }
+
+    // ---- audit-20261003 testgaps-1 (D-1606) ----
+
+    const LONG: &str = "crates/api/src/example.rs\ta_long_test_name_here\ncrates/api/src/example.rs\tfirst\ncrates/cli/tests/other.rs\tsecond_long_test_name\n";
+
+    #[test]
+    fn a_two_segment_token_must_name_a_declared_function_or_module() {
+        for good in [
+            "| X-01 | `api::first` | ✓ |",
+            "| X-01 | `api::example` | ✓ |",
+            "| X-01 | `example::first` | ✓ |",
+            "| X-01 | `example::tests` | ✓ |",
+            "| X-01 | `tests::first` | ✓ |",
+        ] {
+            assert_eq!(verify(good, LONG), Ok(1), "{good}");
+        }
+        for skipped in [
+            "| X-01 | `std::process` | ✓ |",
+            "| X-01 | `crate::file` | ✓ |",
+            "| X-01 | `tokio::spawn` | ✓ |",
+            "`api::gone` in prose, not a row",
+        ] {
+            assert_eq!(verify(skipped, LONG), Ok(0), "{skipped}");
+        }
+        for bad in [
+            "| X-01 | `api::renamed` | ✓ |",
+            "| X-01 | `cli::first` | ✓ |",
+            "| X-01 | `example::gone` | ✓ |",
+            "| X-01 | `grid::every_trade_ends_by_exactly_one_of_the_five_exits` | ✓ |",
+        ] {
+            let refusal = verify(bad, LONG).expect_err(bad);
+            assert!(refusal.contains("line 1"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_bare_proof_name_in_a_status_row_must_be_declared() {
+        let good = "| X-01 | a property | `a_long_test_name_here`; `second_long_test_name` | ✓ |";
+        assert_eq!(verify(good, LONG), Ok(2));
+        for status in ["✓", "◐", "—", "✗", "~"] {
+            let bad = format!(
+                "| X-01 | a property | `a_long_test_name_here`; `the_renamed_test_name` | {status} |"
+            );
+            let refusal = verify(&bad, LONG).expect_err(&bad);
+            assert!(refusal.contains("the_renamed_test_name"), "{refusal}");
+        }
+        // A file or module named in the proof cell is not a phantom test.
+        let module = "| X-01 | p | `other` and `example` inventory tests | ✓ |";
+        assert_eq!(verify(module, LONG), Ok(0));
+        for unchecked in [
+            // the invariant cell is prose
+            "| X-01 | `the_renamed_test_name` was here | `a_long_test_name_here` | ✓ |",
+            // no status cell
+            "| X-01 | `the_renamed_test_name` |",
+            // too short to be a test name, or a prefix
+            "| X-01 | p | `allow_scan_unread`, `close_above_level_` | ✓ |",
+        ] {
+            assert!(verify(unchecked, LONG).is_ok(), "{unchecked}");
+        }
     }
 }
