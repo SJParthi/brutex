@@ -8,14 +8,11 @@ Saved because weekly usage reached 93% at 20:09 UTC. Work stopped after this sav
   P3-02-03, P3-02-04, P3-02-05; p3floor-1, p3floor-2; CE-22 was already fixed by
   D-1762). Invariants ZR-32..ZR-56. New module `crates/core/src/knob.rs`
   (shared empty-folder / HOME / boolean-switch refusals).
-  - If the commit hash is in the tsv as `branch <hash>`, it was pushed to
-    `final/all-fixes-zero`. If the tsv still says `fixing`, the batch was NOT
-    committed: it lived only in the cloud container's working tree and is lost;
-    redo from the D-1769 bullets in this file's section below.
-  - Verification state at save: clippy -D warnings clean on the batch before the
-    P3-01-01 edit; first full test run stopped at `core/tests/lint.rs`
-    (knob.rs missing from OTHERS — fixed). A `--no-fail-fast` re-run was in
-    flight; see the commit message for its result.
+  - **COMMITTED AND PUSHED: final/all-fixes-zero @ 9c6284c2.** Tracker rows set
+    to `branch 9c6284c2`. Verified: clippy -D warnings clean; full workspace
+    tests --no-fail-fast green apart from two targets then fixed and re-run
+    green (grid fingerprint re-taken for p3floor-2; libm_key lists live.rs).
+    Not run: cargo-mutants, non-root tests.
 - Web tests: `node --test web/tests/*.test.js` shows 20 failures that are
   ENVIRONMENTAL (`Cannot find package 'svelte'`; no node_modules in the cloud
   box). Same 20 fail with the batch stashed. Run `npm ci` in web/ to check them.
