@@ -53509,3 +53509,24 @@ two re-reads, a `SameValue` stop and the reason. Both fail on the previous
 code, which sent `stale` a second time. The spot test
 `a_read_that_returns_a_value_already_rejected_is_never_sent` still passes.
 APIC-08.
+
+### D-1483 — A separated vendor date's separators are checked byte for byte — 2026-10-03
+
+**What was observed (v53-1).** `pull::csv::day_of` checked each digit field
+(D-1201) and never read the bytes between them. A GDFL date `01-07-2025`,
+`01+07+2025` or `01x07x2025` was accepted as `SlashedDmy` and stored as
+1 July 2025, and `DashedYmd` accepted any byte at offsets 4 and 7 the same
+way. A misdeclared or corrupted date column decoded as data instead of
+refusing.
+
+**The decision.** `DashedYmd` requires `-` at bytes 4 and 7 and `SlashedDmy`
+requires `/` at bytes 2 and 5, through one helper, `separated`, which also
+holds the length check. Anything else is `CsvError::DateMalformed` naming the
+line, the field and the declared format. The compact formats have no
+separator and are unchanged.
+
+**Proof.** `pull::csv::tests::a_date_whose_separator_is_not_the_declared_byte_is_refused`
+puts every ASCII byte but the declared one at each separator offset of both
+formats and expects `None`, swaps the two formats' separators, and decodes
+five GDFL rows with wrong separators through `decode`, each refused as
+`DateMalformed` on line 2. PIF-09.

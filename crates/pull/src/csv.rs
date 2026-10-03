@@ -418,6 +418,13 @@ fn ist_seconds(text: &str) -> Option<i64> {
     Some(h * 3_600 + m * 60 + s)
 }
 
+/// Whether `text` is `len` bytes long with exactly `separator` at both `at`
+/// offsets. The digit fields between them are checked by [`digits`].
+fn separated(text: &str, len: usize, at: [usize; 2], separator: u8) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == len && at.iter().all(|&i| bytes.get(i) == Some(&separator))
+}
+
 /// A calendar date from a vendor's date field.
 fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
     let (y, m, d) = match format {
@@ -427,14 +434,16 @@ fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
             digits(text.get(4..6)?)?,
             digits(text.get(6..8)?)?,
         ),
-        // `2022-10-03`
-        DateFormat::DashedYmd if text.len() == 10 => (
+        // `2022-10-03`. The separators are bytes too, checked exactly: the
+        // digit fields alone accepted `2022x10x03` (v53-1, D-1483).
+        DateFormat::DashedYmd if separated(text, 10, [4, 7], b'-') => (
             digits(text.get(0..4)?)?,
             digits(text.get(5..7)?)?,
             digits(text.get(8..10)?)?,
         ),
         // `01/07/2025` — DAY first. 1 July, not 7 January.
-        DateFormat::SlashedDmy if text.len() == 10 => (
+        // `01-07-2025` and `01x07x2025` were read as 1 July too (v53-1).
+        DateFormat::SlashedDmy if separated(text, 10, [2, 5], b'/') => (
             digits(text.get(6..10)?)?,
             digits(text.get(3..5)?)?,
             digits(text.get(0..2)?)?,
@@ -1241,6 +1250,53 @@ mod tests {
         );
         assert_eq!(digits::<u8>(&format!("{:02}", 0)), Some(0));
         assert_eq!(digits::<u16>("9999"), Some(9_999));
+    }
+
+    /// **A separated date's separators are bytes that are checked.** v53-1,
+    /// D-1483. The digit fields were checked and the bytes between them were
+    /// never read, so a GDFL date `01-07-2025` or `01x07x2025` was stored as
+    /// 1 July 2025 and a Dhan-shaped `2025/07/01` as the same day. Every byte
+    /// a separator may not be, at each separator offset, in both separated
+    /// formats, directly and through `decode`.
+    #[test]
+    fn a_date_whose_separator_is_not_the_declared_byte_is_refused() {
+        for (format, wanted, at) in [
+            (DateFormat::DashedYmd, b'-', [4, 7]),
+            (DateFormat::SlashedDmy, b'/', [2, 5]),
+        ] {
+            let whole = rendered(2025, 7, 1, format);
+            assert!(day_of(&whole, format).is_some(), "the control: {whole}");
+            for offset in at {
+                for byte in (0..=0x7f_u8).filter(|&byte| byte != wanted) {
+                    let mut bytes = whole.clone().into_bytes();
+                    bytes[offset] = byte;
+                    let text = String::from_utf8(bytes).expect("ASCII");
+                    assert_eq!(day_of(&text, format), None, "{text:?} as {format:?}");
+                }
+            }
+            // Both separators swapped for the other format's.
+            let other = if wanted == b'-' { '/' } else { '-' };
+            let swapped = whole.replace(char::from(wanted), &other.to_string());
+            assert_eq!(day_of(&swapped, format), None, "{swapped:?} as {format:?}");
+        }
+        for (first, second) in [('-', '-'), ('x', 'x'), ('+', '+'), ('/', '-'), ('.', '/')] {
+            let date = format!("01{first}07{second}2025");
+            let line = format!("{GDFL_HEADER}\nNIFTY,{date},09:15:00,100.00,0,0,0,0,5,0\n");
+            assert_eq!(
+                decode(&line, Columns::Gdfl),
+                Err(CsvError::DateMalformed {
+                    line: 2,
+                    got: date.clone(),
+                    format: DateFormat::SlashedDmy,
+                }),
+                "{date:?} is refused, never read as 1 July"
+            );
+        }
+        // The helper itself at its edges: a wrong length is refused before an
+        // offset is read, and an offset past the end is never a match.
+        assert!(!separated(&format!("{}-0", "2025-07"), 10, [4, 7], b'-'));
+        assert!(!separated("2025-07", 7, [4, 7], b'-'));
+        assert!(separated("2025-07-01", 10, [4, 7], b'-'));
     }
 
     /// The byte ranges each format reads its year, month and day from, in the
