@@ -1,4 +1,7 @@
-//! Durable receipt-last authority for same-pass Base Evidence V2.
+//! Durable receipt-last authority for same-pass Base Evidence, format V3.
+//!
+//! Format V3 (D-1644) moves every magic, domain and file name from V2: a V2
+//! ledger's files stay where they are, untouched and never opened as V3.
 //!
 //! Records are the fixed 1,024-byte Phase-A records.  A separate fixed
 //! completion is appended only after the contiguous record block is synced.
@@ -34,19 +37,19 @@ const COMPLETION_BYTES: usize = 512;
 const COMPLETION_PAYLOAD_BYTES: usize = COMPLETION_BYTES - 32;
 const COMPLETION_BYTES_U64: u64 = 512;
 const RECORD_BYTES_U64: u64 = 1_024;
-const HEADER_VERSION: u32 = 2;
+const HEADER_VERSION: u32 = 3;
 const RECORD_KIND: u32 = 1;
 const COMPLETION_KIND: u32 = 2;
-const RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-ROW-V2\0";
-const COMPLETION_MAGIC: [u8; 16] = *b"BTX-BASE-CMP-V2\0";
-const COMPLETION_RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-DONEV2\0";
-const HEADER_DOMAIN: &[u8] = b"brutex-base-evidence-v2-ledger-header\0";
-const COMPLETION_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-completion-id\0";
-const COMPLETION_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v2-completion-seal\0";
-const PAIR_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-nifty-banknifty-pair\0";
-const RECORD_FILE: &str = "base-evidence-records-v2.bin";
-const COMPLETION_FILE: &str = "base-evidence-completions-v2.bin";
-const LOCK_FILE: &str = "base-evidence-write-v2.lock";
+const RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-ROW-V3\0";
+const COMPLETION_MAGIC: [u8; 16] = *b"BTX-BASE-CMP-V3\0";
+const COMPLETION_RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-DONEV3\0";
+const HEADER_DOMAIN: &[u8] = b"brutex-base-evidence-v3-ledger-header\0";
+const COMPLETION_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-completion-id\0";
+const COMPLETION_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v3-completion-seal\0";
+const PAIR_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-nifty-banknifty-pair\0";
+const RECORD_FILE: &str = "base-evidence-records-v3.bin";
+const COMPLETION_FILE: &str = "base-evidence-completions-v3.bin";
+const LOCK_FILE: &str = "base-evidence-write-v3.lock";
 
 const _: () = assert!(BASE_EVIDENCE_RECORD_BYTES_V2 == 1_024);
 const _: () = assert!(COMPLETION_PAYLOAD_BYTES + 32 == COMPLETION_BYTES);

@@ -459,7 +459,7 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    LARGEST loss, 0 drops the rule. TOP is how many
                                    to print.
        cli elite        VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
-                        MAX_POINTS TOP
+                        MAX_POINTS TOP [LENS]
                                    THE RARE-WINNER HUNT, and it takes NO support
                                    threshold. Whatever number you type for that,
                                    you have already decided how often the answer
@@ -489,6 +489,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    in the search at all: support is walked, every
                                    quality floor is measured off the bars, and the
                                    stop ladder is a percentile of the span.
+                                   LENS picks which question decides who survives
+                                   the screen cut, and it is part of the run
+                                   identity: `payoff` (the default, mean win over
+                                   mean loss), `asymmetry` (the smallest win over
+                                   the largest loss -- the 3x rule itself),
+                                   `path` (move over the excursion against
+                                   entry) or `detectability` (|t|).
        cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                         CEILING_PPM CADENCE
                                    sweep ONE rung at successively LOWER supports,
@@ -1236,7 +1243,16 @@ fn elite_arm(
     rung: &str,
     span: (&str, &str, &str, &str),
     limits: (&str, &str),
+    lens: Option<&str>,
 ) -> u8 {
+    // THE LENS IS THE OPERATOR'S TO CHOOSE (AC-whp-tb-2, D-1645). `Asymmetry`
+    // is the only lens that ranks by the operator's own min-win >= 3x max-loss
+    // rule, and no command could select it: `elite` hard-coded `Payoff`. Absent
+    // keeps `Payoff`, so every existing invocation is the same run.
+    let lens = match lens.map_or(Ok(runner::rank::Lens::Payoff), parse_lens) {
+        Ok(lens) => lens,
+        Err(why) => return refuse(out, &why),
+    };
     let (max_points, top) = limits;
     let (from_y, from_m, to_y, to_m) = span;
     let numbers = (
@@ -1298,8 +1314,15 @@ fn elite_arm(
             // parser was the one caller left on the constant. It reads the
             // reference off the span it is about to sweep, so nothing here
             // needs to know a price.
-            let text =
-                elite_descend_in_points(vendor, underlying, rung, (fy, fm), (ty, tm), pts, n);
+            let text = elite_descend_in_points_inner(
+                vendor,
+                underlying,
+                rung,
+                ((fy, fm), (ty, tm)),
+                (pts, n),
+                lens,
+                None,
+            );
             let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -1315,6 +1338,20 @@ fn elite_arm(
             "MAX_POINTS must be a whole number of index points, 1 or more",
         ),
         (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
+    }
+}
+
+/// The `elite` LENS word, one per [`runner::rank::Lens`]; anything else is
+/// refused by name rather than read as the default. D-1645.
+fn parse_lens(word: &str) -> Result<runner::rank::Lens, String> {
+    match word {
+        "payoff" => Ok(runner::rank::Lens::Payoff),
+        "asymmetry" => Ok(runner::rank::Lens::Asymmetry),
+        "path" => Ok(runner::rank::Lens::Path),
+        "detectability" => Ok(runner::rank::Lens::Detectability),
+        other => Err(format!(
+            "LENS must be one of payoff, asymmetry, path or detectability, not `{other}`"
+        )),
     }
 }
 
@@ -2243,7 +2280,10 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
             screen_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, rr, n))
         }
         ["elite", v, u, r, fy, fm, ty, tm, pts, n] => {
-            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n))
+            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n), None)
+        }
+        ["elite", v, u, r, fy, fm, ty, tm, pts, n, lens] => {
+            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n), Some(lens))
         }
         ["research-plan", v] => research::command(v, out),
         ["pool", v, r, fy, fm, ty, tm, mh] => pool_arm(out, v, r, (fy, fm), (ty, tm), mh),
@@ -14152,10 +14192,11 @@ fn elite_descend_with_attempt(
     underlying: &str,
     rung: &str,
     span: ((u16, u8), (u16, u8)),
-    max_mae_ppm: i64,
-    top: usize,
+    limits: (i64, usize),
+    lens: runner::rank::Lens,
     attempt: Option<u64>,
 ) -> String {
+    let (max_mae_ppm, top) = limits;
     let (from, to) = span;
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
         return format!(
@@ -14210,7 +14251,8 @@ fn elite_descend_with_attempt(
     let ladder = support_ladder(DESCENT_CEILING_PPM, floor);
     let policy = Policy {
         rules,
-        lens: runner::rank::Lens::Payoff,
+        // The operator's lens (D-1645); `Payoff` unless `elite` named another.
+        lens,
         // NO VALIDATION PER STEP. Ten supports x sixteen thousand trade re-walks
         // is what made this walk impossible to finish; the step only needs to
         // know whether anything cleared the rules. The survivor is re-run with
