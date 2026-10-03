@@ -16178,6 +16178,22 @@ fn repeated_form_key(body: &str) -> Option<&str> {
         .find(|key| !seen.insert(*key))
 }
 
+/// The body bound [`one_value_per_form_field`] reads within, by route.
+///
+/// The two member routes carry their own larger `DefaultBodyLimit`,
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499). This middleware runs
+/// outside every route layer, so reading at the shared [`MAX_FORM_BYTES`] here
+/// answered 750 ticked members with a 413 before the route's own bound was
+/// ever consulted (D-1592). Every other route keeps the shared bound, which its
+/// extractor enforces again. O(1): two fixed comparisons.
+fn form_read_bound(path: &str) -> usize {
+    if matches!(path, "/ingest/queue" | "/pull/spot") {
+        crate::ingest::MAX_MEMBER_FORM_BYTES
+    } else {
+        MAX_FORM_BYTES
+    }
+}
+
 /// Refuses a form body that names one field twice.
 ///
 /// audit-20261003 hunt-api-5 / attacksweep-3, D-1587. D-1202 refused a
@@ -16189,7 +16205,7 @@ fn repeated_form_key(body: &str) -> Option<&str> {
 /// already gave every handler, answered with the same `413` past it), checked,
 /// and handed on unchanged. A JSON body is not a form and is passed through.
 ///
-/// O(body) once per request, bounded by [`MAX_FORM_BYTES`].
+/// O(body) once per request, bounded by [`form_read_bound`].
 async fn one_value_per_form_field(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -16202,7 +16218,8 @@ async fn one_value_per_form_field(
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, MAX_FORM_BYTES).await else {
+    let bound = form_read_bound(parts.uri.path());
+    let Ok(bytes) = axum::body::to_bytes(body, bound).await else {
         return (
             axum::http::StatusCode::PAYLOAD_TOO_LARGE,
             [(
@@ -16210,7 +16227,7 @@ async fn one_value_per_form_field(
                 "text/plain; charset=utf-8",
             )],
             format!(
-                "REFUSED — the request body is larger than the {MAX_FORM_BYTES} bytes \
+                "REFUSED — the request body is larger than the {bound} bytes \
                  this server reads. Nothing was read or run.\n"
             ),
         )
@@ -23446,6 +23463,23 @@ mod tests {
     /// member routes: 750 full-width symbols reach the parser, 2,001 reach the
     /// named refusal, 2,000 symbols percent-encoded at the worst 3x still
     /// reach it, and one byte past `MAX_MEMBER_FORM_BYTES` is a 413.
+    /// D-1592: the repeated-field middleware is wide on the two member routes
+    /// only. Every other path, including a near miss, keeps the shared bound.
+    #[test]
+    fn form_read_bound_is_wide_only_on_the_member_routes() {
+        assert_eq!(
+            form_read_bound("/ingest/queue"),
+            crate::ingest::MAX_MEMBER_FORM_BYTES
+        );
+        assert_eq!(
+            form_read_bound("/pull/spot"),
+            crate::ingest::MAX_MEMBER_FORM_BYTES
+        );
+        for path in ["/pull/fno", "/ingest/queue/", "/pull", "/", "/control"] {
+            assert_eq!(form_read_bound(path), MAX_FORM_BYTES, "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn every_ticked_member_fits_and_one_too_many_is_named_not_a_413() {
         let status = |reply: &str| {

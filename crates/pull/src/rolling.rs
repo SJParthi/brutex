@@ -959,9 +959,14 @@ mod tests {
                 r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
                 "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
             );
+            // The refusal is D-1492's `NotAPrice`, which landed on the same
+            // guard from the other audit; this test pins that it names the cell.
             assert_eq!(
                 read(&body, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
-                Err(RollingError::Unrepresentable { field: "open" }),
+                Err(RollingError::NotAPrice {
+                    field: "open",
+                    text: cell.to_owned(),
+                }),
                 "{cell} is not a price this decoder may store"
             );
         }

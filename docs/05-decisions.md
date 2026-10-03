@@ -55966,3 +55966,20 @@ reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
 **Not changed.** The wall-clock cost of these reads is not measured. Holding
 one calendar slot for a whole range audit means a long range can make the
 calendar route answer 429 sooner; that is a bound, stated, not a queue.
+
+### D-1592 — The repeated-field middleware reads the member routes at their own bound — 2026-10-03
+
+**Context.** D-1587 added `one_value_per_form_field`, which buffers every
+non-GET body at the shared `MAX_FORM_BYTES` (8 KiB). D-1499 gave `/ingest/queue`
+and `/pull/spot` a larger `DefaultBodyLimit`, `ingest::MAX_MEMBER_FORM_BYTES`,
+so that ticking all 750 instruments reaches the parser and 2,001 reaches the
+named `TooManyMembers` refusal. The middleware runs outside every route layer,
+so after both landed a 750-member form was a 413 again and D-1499's test failed.
+
+**Decision.** `server::form_read_bound` picks the read bound by path: the two
+member routes read within `MAX_MEMBER_FORM_BYTES`, every other route within
+`MAX_FORM_BYTES`, and the 413 names the bound that applied. Every other route's
+extractor still enforces the shared bound. O(1) per request for the choice.
+
+**Proof.** `server::tests::every_ticked_member_fits_and_one_too_many_is_named_not_a_413`
+and `server::tests::form_read_bound_is_wide_only_on_the_member_routes`.
