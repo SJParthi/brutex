@@ -53569,9 +53569,12 @@ the test alone as uid 65534 when the suite runs as root. Two unit tests in
 permissions cannot run this test") and
 `only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused`
 (a mode-000 root is still searchable by root, so the `os error 13` arm never
-ran).
+ran). The store's full suite as root failed two more in
+`crates/store/tests/catalog.rs` for the same reason:
+`a_store_root_that_cannot_be_searched_is_refused` and
+`a_directory_the_walk_cannot_list_is_counted_not_dropped`.
 
-**The decision.** Test-only, D-0995's shape exactly: each is now a thin
+**The decision.** Test-only, D-0995's shape exactly, for all four: each is now a thin
 `#[test]` calling `where_permission_binds` with its full harness name, and its
 body moved unchanged into `<name>_body`. The helper is the file the store's
 integration tests already use, `crates/store/tests/support/mod.rs`, mounted
@@ -53579,8 +53582,10 @@ into the library under `#[cfg(all(test, unix))]` as `pull` mounts its own.
 Nothing is skipped and nothing returns early: the same refusal runs under the
 same assertions as root and as anyone else.
 
-**Proof.** `cargo test -p store --lib` as root: 100 passed, 0 failed (it
-failed 2 before). No new invariant: the two tests' own rows are unchanged.
+**Proof.** As root, `cargo test -p store --lib`: 100 passed, 0 failed (it
+failed 2 before); `cargo test -p store --test catalog`: 26 passed, 0 failed
+(it failed 2 before). The integration file mounts the same `support` module
+its siblings do. No new invariant: the two tests' own rows are unchanged.
 
 ### D-1486 — Three stale doc sentences corrected, one more read back by `stale_claims`, and D-1204's misnamed test file — 2026-10-03
 
