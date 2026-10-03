@@ -1,0 +1,9 @@
+crates/cli/src/results.rs
+crates/cli/src/search_checkpoint.rs
+crates/cli/src/selection.rs
+crates/cli/src/selection_v3.rs
+crates/cli/src/selection_v4.rs
+crates/cli/src/selection_v4_authority.rs
+crates/cli/src/selection_v5.rs
+crates/cli/src/selection_v6.rs
+crates/cli/src/selection_v6_source.rs
