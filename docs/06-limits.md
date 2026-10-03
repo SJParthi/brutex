@@ -12979,6 +12979,15 @@ set that refuses a seed batch naming one recovery key twice, is bound
 the walk; no insert precedes it. The `images` Vec just above it
 is reserved the same way. `with_capacity` would abort on allocation
 failure where this path returns the `io::Error` the journal reports.
+
+`pull/http.rs` 1, D-1531, D-1458 -- `repeated_key`'s per-object key set,
+`HashSet::new()` pushed when the walk meets a `{`. The number of keys an
+object holds is not known until its `}` is reached, so there is no count
+to reserve from without a second pass over the body. The walk runs once
+per vendor answer, after `serde_json` has already parsed the same body,
+over a body capped at `MAX_RESPONSE_BYTES`; every set together holds at
+most every key of that body once, so growth is amortised O(1) per key
+and bounded by the response cap, never by the store.
 ~~~~
 
 ### Gate 11 — rule 4. docs/07 layer 12: bounded page, never O(universe).
@@ -13456,6 +13465,17 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     `#[cfg(test)] fn` kept as the oracle the prefix cadence must end
     on. This scanner drops `#[cfg(test)] mod` blocks, not a
     `#[cfg(test)]` fn, so it still counts a line no build runs.
+  cli/admission_store.rs 1 -- D-1565, D-1458 (hunt-conc-3). The cold
+    open's receipt reconciliation sorts `completions` by population
+    identity before it validates, so with two bad populations the
+    refusal names the same one in every process instead of whichever
+    a randomly seeded `HashMap` yielded first (§3 rule 5). O(n log n)
+    over n receipts, once per open, on a path whose read is already
+    O(n); never on a query or an append.
+  cli/population.rs 1 -- D-1565, D-1458. `in_identity_order`, the same
+    determinism fix for `reconcile_receipts`, `_v3` and `_v4`: one
+    sort of the receipt map's entries per cold-open reconciliation,
+    O(n log n) over the O(n) open, never per query.
 ~~~~
 
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
@@ -14398,3 +14418,21 @@ and H the committed blocks in `global-selection-v6.bin` (at most
 
 None of these is O(1), and none grows with the request alone. They are not
 reduced here (D-1642).
+
+## Gate 12 cost claims left UNVERIFIED by the audit-20261003 fixes — D-1459, 3 October 2026
+
+Three doc blocks the audit fixes added make a cost claim that no tracked test
+or bench measures. Each now names the test that proves what it can, and says
+UNVERIFIED for the rest:
+
+- **`api::logs::Ration` (D-1583).** "O(1) per request": three counters, no
+  loop. `api::logs::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`
+  proves the line bound per window over 100,000 admits; nothing times one
+  `admit`, so the per-request cost is by construction only.
+- **`api::server::form_read_bound` (D-1592).** "O(1)": two comparisons
+  against literal paths. `api::server::form_read_bound_is_wide_only_on_the_member_routes`
+  proves which route gets which bound; nothing times the call.
+- **`cli::latest_for` (D-1567).** The stated O(runs) per call (the bullet
+  above) rests on the audit's measurement (14.13x open cost for 10x rows,
+  o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
+  `Results::open`, so no tracked bench repeats it.

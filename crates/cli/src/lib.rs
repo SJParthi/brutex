@@ -15612,6 +15612,9 @@ const IN_SAMPLE_WARNING: &str = "\n  \
 /// said `O(1)` in the ordinary case until D-1567. The match is on feed,
 /// instrument, rung, span and `min_hits`, not on an identity, so
 /// `Results::of_identity` cannot serve it; `docs/06-limits.md` states the bound.
+/// That bound is UNVERIFIED by any tracked test or bench: the 14.13x is the
+/// audit's measurement, and `crates/cli/benches/ratio.rs` deliberately does not
+/// time `Results::open` (D-1459).
 fn latest_for(
     vendor_word: &str,
     underlying: &str,

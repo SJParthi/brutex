@@ -1103,7 +1103,11 @@ pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
 /// The process's one failed-request ration.
 static FAILED_LINES: std::sync::Mutex<Ration> = std::sync::Mutex::new(Ration::new());
 
-/// A fixed-window count of failed-request lines. O(1) per request.
+/// A fixed-window count of failed-request lines. O(1) per request: three
+/// counters and no loop. The bound on lines written per window is proven by
+/// `api::logs::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`;
+/// the per-request time is by construction and UNVERIFIED by any measurement
+/// (`docs/06-limits.md`, D-1459).
 #[derive(Debug)]
 pub(crate) struct Ration {
     /// When the current window opened.

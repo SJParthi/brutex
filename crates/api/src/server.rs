@@ -16185,7 +16185,11 @@ fn repeated_form_key(body: &str) -> Option<&str> {
 /// outside every route layer, so reading at the shared [`MAX_FORM_BYTES`] here
 /// answered 750 ticked members with a 413 before the route's own bound was
 /// ever consulted (D-1592). Every other route keeps the shared bound, which its
-/// extractor enforces again. O(1): two fixed comparisons.
+/// extractor enforces again. O(1): two comparisons against literal paths.
+/// Which route gets which bound is proven by
+/// `api::server::form_read_bound_is_wide_only_on_the_member_routes`; the
+/// constant cost is by construction and UNVERIFIED by any measurement
+/// (`docs/06-limits.md`, D-1459).
 fn form_read_bound(path: &str) -> usize {
     if matches!(path, "/ingest/queue" | "/pull/spot") {
         crate::ingest::MAX_MEMBER_FORM_BYTES
