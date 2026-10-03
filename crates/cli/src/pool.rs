@@ -799,7 +799,9 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
 /// committed every row this union reads, so it holds them.
 ///
 /// Cost: O(L + R) once, plus one frontier-block read, O(rows), per screened
-/// instrument, plus one `HashSet` insert per row.
+/// instrument, plus one `HashSet` insert per row. The single admission is
+/// proved by `crate::pool::tests::the_union_admits_the_parent_ledger_once_not_once_per_instrument`
+/// (invariant L1A-05); the per-row terms are UNVERIFIED by any bench.
 fn union_of(
     root: &std::path::Path,
     screened: &[Screened],
