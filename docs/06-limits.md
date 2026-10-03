@@ -11799,9 +11799,14 @@ below is timed.
   misses on one series and stamp derive once and share the answer; a follower
   waits on a condition variable for the leader. Followers do not count
   against the admission bound twice, but each holds a blocking thread while it
-  waits. Not changed: `folder::answer`, `indexmap::Published::read` and the
-  rest of `/gaps.json` (`audit_one`) still read the store inline on an async
-  worker, which W1-api2-11 also names. Their cost is not measured.
+  waits. `/gaps.json`'s month audits (`audit_one`) now run in that same
+  calendar pool, in one admission for the whole span, with each month's
+  dated cash-session evidence read on the same blocking thread.
+  `/folder.json` (`folder::answer`) and `/indexmap.json`
+  (`indexmap::Published::read` and the join) run in a third pool,
+  `detail::MAX_STORE_READ_CONCURRENT` = 8, and a ninth is answered 429 naming
+  the bound. (This paragraph said those three still read inline on an async
+  worker; D-1508 moved them.) Their wall-clock cost is not measured.
 * **Days a month's daily rung did not prove are withheld, not closed.** A
   month inside the span that the census holds only at another rung, that it
   does not hold at all, or whose daily records failed their checks is now

@@ -53535,3 +53535,37 @@ this source's.
 
 **Cost.** One step per withheld day to expand; the window check walks the
 withheld set, not the window.
+
+### D-1508 — `/gaps.json`'s audits, `/folder.json` and `/indexmap.json` read off the async workers — 2026-10-03
+
+**What was observed.** D-1443 moved `/calendar.json` and `/gaps.json`'s peer
+vote onto the blocking pool behind `detail::MAX_CALENDAR_CONCURRENT`, and
+`docs/06-limits.md` stated what it left: `folder::answer`,
+`indexmap::Published::read` and the rest of `/gaps.json` (`audit_one`) still
+read the store inline on an async worker (W1-api2-11 PARTIAL). `audit_one`
+reads one minute file per month for up to `MAX_AUDIT_MONTHS`; `read_census`
+walks and decodes a whole archive folder; the index map re-reads its
+catalogue every request. Each held a Tokio worker for the whole read. The
+dated cash-session evidence `audit_cash_schedule` prepares is an `async fn`,
+but its local variant never awaits a fetch and locks and reads files inline.
+
+**The decision.** `/gaps.json` runs every month's evidence read and audit in
+one calendar-pool admission after the peer vote; the evidence future is driven
+to completion on that blocking thread with `Handle::block_on`, which is legal
+off the async context and blocks no worker. `/folder.json` and
+`/indexmap.json` run in a third pool, `detail::run_store_read`,
+`MAX_STORE_READ_CONCURRENT` = 8, separate from the detail pool's 4 and the
+calendar pool's 8 for the reason D-1443 gave its own. A refused admission is
+429 (saturated) or 503 (join failed) through `detail::admission_refused`,
+naming what was refused and the bound. Nothing queues without bound.
+
+**Evidence.** `api::detail::tests::a_store_read_runs_off_the_worker_and_refuses_past_its_bound`
+runs work on a thread other than the test's worker, fills all eight slots and
+sees the ninth refused before it queues while the calendar pool still admits,
+and sees a released slot admit again. `api::server::calendar_route_tests::the_gap_audit_folder_and_index_map_read_on_the_blocking_pool`
+reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
+`answer` or catalogue read outside the admitted closure.
+
+**Not changed.** The wall-clock cost of these reads is not measured. Holding
+one calendar slot for a whole range audit means a long range can make the
+calendar route answer 429 sooner; that is a bound, stated, not a queue.

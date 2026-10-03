@@ -35,8 +35,18 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// per key. W1-api2-11, D-1443.
 pub const MAX_CALENDAR_CONCURRENT: usize = 8;
 
+/// Operator routes that read a folder or the masters directory
+/// (`/folder.json`, `/indexmap.json`) and may be queued or running at once on
+/// the blocking pool.
+///
+/// A pool of its own for the reason [`MAX_CALENDAR_CONCURRENT`] has one: a
+/// page asking what a folder holds must not be refused because sweep detail
+/// reads or calendar derivations are busy. W1-api2-11, D-1508.
+pub const MAX_STORE_READ_CONCURRENT: usize = 8;
+
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static CALENDAR_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static STORE_READ_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// One admitted request in one pool.  Dropping it always returns the slot.
 pub(crate) struct Permit(&'static AtomicUsize);
@@ -111,6 +121,47 @@ where
     let permit = Permit::try_take_from(&CALENDAR_ACTIVE, MAX_CALENDAR_CONCURRENT)
         .ok_or(RunError::Saturated)?;
     admitted(permit, work).await
+}
+
+/// Runs an operator route's folder or masters read outside Tokio's worker
+/// pool, in its own pool of [`MAX_STORE_READ_CONCURRENT`] slots. W1-api2-11,
+/// D-1508.
+///
+/// # Errors
+///
+/// [`RunError::Saturated`] before queueing when every slot is occupied, or
+/// [`RunError::Join`] when Tokio cannot join the blocking task.
+pub async fn run_store_read<T, F>(work: F) -> Result<T, RunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit = Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
+        .ok_or(RunError::Saturated)?;
+    admitted(permit, work).await
+}
+
+/// The status and JSON body a route answers when its blocking work was not
+/// admitted (429) or could not be joined (503), naming `what` and its bound.
+/// D-1508.
+#[must_use]
+pub fn admission_refused(
+    what: &str,
+    bound: usize,
+    why: &RunError,
+) -> (axum::http::StatusCode, String) {
+    let status = if matches!(why, RunError::Saturated) {
+        axum::http::StatusCode::TOO_MANY_REQUESTS
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = serde_json::json!({
+        "error": format!(
+            "{what} not admitted ({why:?}): at most {bound} run at once, off the async \
+             workers; retry"
+        )
+    });
+    (status, body.to_string())
 }
 
 async fn admitted<T, F>(permit: Permit, work: F) -> Result<T, RunError>
@@ -712,7 +763,9 @@ pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> boo
 mod tests {
     use super::{
         Cached, IDENTITY_REFUSAL, MAX_PAGE, MAX_PAGE_ROWS, MAX_QUERY_BYTES, MAX_RESULT_ROWS,
-        MAX_SCAN_BYTES, Page, Selector, must_admit, preflight, run, seek_window, window,
+        MAX_SCAN_BYTES, MAX_STORE_READ_CONCURRENT, Ordering, Page, Permit, RunError,
+        STORE_READ_ACTIVE, Selector, admission_refused, must_admit, preflight, run, run_calendar,
+        run_store_read, seek_window, window,
     };
 
     /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-1444.
@@ -1112,6 +1165,46 @@ mod tests {
         assert!(seek_window(pages, page(&format!("page={MAX_PAGE}&limit=1"))).is_ok());
         // usize::MAX is a total no page can reach, and refusing it cannot overflow.
         assert!(seek_window(usize::MAX, page("")).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_store_read_runs_off_the_worker_and_refuses_past_its_bound() {
+        let _serial = super::TEST_SERIAL.lock().await;
+        let worker = std::thread::current().id();
+        let blocking = run_store_read(|| std::thread::current().id())
+            .await
+            .expect("admitted store read");
+        assert_ne!(blocking, worker, "spawn_blocking owns a different thread");
+        // Hold every slot; the next is refused before it queues, and a
+        // released slot admits again. D-1508.
+        let held: Vec<Permit> = (0..MAX_STORE_READ_CONCURRENT)
+            .map(|_| {
+                Permit::try_take_from(&STORE_READ_ACTIVE, MAX_STORE_READ_CONCURRENT)
+                    .expect("a free slot")
+            })
+            .collect();
+        assert_eq!(run_store_read(|| ()).await, Err(RunError::Saturated));
+        // The other pools are not this one's.
+        assert_eq!(run_calendar(|| 7).await, Ok(7));
+        drop(held);
+        assert_eq!(run_store_read(|| 9).await, Ok(9));
+        assert_eq!(STORE_READ_ACTIVE.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_refused_admission_names_what_its_bound_and_why() {
+        let (status, body) = admission_refused("folder read", 8, &RunError::Saturated);
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            body.contains("folder read not admitted (Saturated): at most 8"),
+            "{body}"
+        );
+        let (status, body) =
+            admission_refused("folder read", 8, &RunError::Join("gone".to_owned()));
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("gone"), "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        assert!(parsed["error"].is_string());
     }
 
     #[tokio::test(flavor = "current_thread")]
