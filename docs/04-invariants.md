@@ -6256,3 +6256,18 @@ old line regex the same input and watched it pass.
 | AFC-13 | Admission reconciliation over several bad populations refuses the lowest identity in every fresh `HashMap` order (D-1565) | `cli::admission_store::tests::reconcile_refuses_the_lowest_bad_population_whatever_the_map_order` | ✓ |
 | AFC-14 | Population V2 reconciliation over several bad receipts refuses the lowest identity in every fresh `HashMap` order (D-1565) | `cli::population::tests::reconcile_refuses_the_lowest_bad_population_whatever_the_map_order` | ✓ |
 | AFC-15 | A `BRUTEX_VALIDATE` value other than `0` or `1` leaves validation on and is named in the knob-refused block; `0` and `1` are not (D-1566) | `cli::tests::an_unexpected_validate_value_stays_on_and_is_named_as_refused` | ✓ |
+| AFD-01 | Leading CR/LF before a request line does not complete a request head: a connection that sends only blank lines is closed at the head deadline, and a head after them is still served (D-1580) | `api::server::head_deadline_tests::leading_blank_lines_do_not_stop_the_head_deadline` | ✓ |
+| AFD-02 | Connections holding only blank lines cannot starve a real request at the connection cap (D-1580) | `api::server::head_deadline_tests::blank_line_holders_cannot_starve_a_real_request` | ✓ |
+| AFD-03 | A hand pull's work runs to its end when the route's future is dropped (client disconnect) (D-1581) | `api::server::tests::a_dropped_pull_route_does_not_cancel_the_pull` | ✓ |
+| AFD-04 | A panicking hand-pull task answers 500 saying bars may have been written, never NOT STARTED (D-1581) | `api::server::tests::a_pull_task_that_panics_is_reported_as_failed` | ✓ |
+| AFD-05 | Shutdown returns within its grace while an engine task still runs, and names it as abandoned (D-1582) | `api::sweeprun::tests::stopping_does_not_wait_out_a_running_engine_task` | ✓ |
+| AFD-06 | A flood of failed requests writes at most the per-window ration of log lines, and the held-back count is said in a later window (D-1583) | `api::logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines` | ✓ |
+| AFD-07 | A pending attempt outside a recovery plan's scope, naming a symbol this build refuses, does not block that plan (D-1584) | `api::recovery::tests::a_retired_symbol_outside_the_plan_does_not_block_it` | ✓ |
+| AFD-08 | The scope read from a stored attempt body equals the checked scope (D-1584) | `api::recovery::tests::a_stored_scope_matches_the_checked_scope` | ✓ |
+| AFD-09 | `/vocab.json` carries `commit_digest` = hex blake3 of the build's commit stamp, or null unstamped (D-1586) | `api::server::tests::the_vocabulary_names_the_build_its_names_belong_to` | ✓ |
+| AFD-10 | A form body naming a non-list field twice is refused 400 before any handler; `member` may repeat (D-1587) | `api::server::tests::a_form_body_naming_a_field_twice_is_refused` | ✓ |
+| AFD-11 | An autopilot tick reads only its own vendor's census, never every vendor's (D-1588) | `api::autopilot::tests::a_tick_reads_only_its_own_vendors_census` | ✓ |
+| AFD-12 | Blocking landing work leaves another task free to run on a one-worker runtime (D-1589) | `api::server::tests::blocking_landing_work_leaves_the_runtime_answering` | ✓ |
+| AFD-13 | The browser-launch child is waited for and leaves no zombie (D-1590) | `api::server::tests::a_launched_child_is_reaped_not_left_a_zombie` | ✓ |
+| AFD-14 | Only content-hashed `_app/immutable/` files are served cacheable as immutable (D-1591) | `api::assets::tests::only_content_hashed_files_are_served_immutable` | ✓ |
+| AFD-15 | The /masters footer does not claim a refresh leaves the universe unreloaded (D-1585) | `api::mastersrun::tests::the_page_says_a_restart_is_required_rather_than_pretending_otherwise` | ✓ |
