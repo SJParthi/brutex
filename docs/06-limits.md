@@ -1591,6 +1591,17 @@ The **direction** is certain; the size above is a ceiling, not a measurement of
 the typical case. No distribution of the actual over-charge over real trades has
 been computed, because no real trade set has been priced.
 
+### Each leg is priced at its own day's regime — and why that is not "entry day"
+
+A round trip whose legs straddle a dated rate change is priced leg by leg:
+the transaction tax at the SELL day's rate, the stamp duty at the BUY day's
+rate, and the exchange, SEBI and IPFT levies each leg at its own. Until D-1535
+the whole trip was keyed to the entry day (the predecessor's `DEC-COST-002`),
+so a long trip bought on 2026-03-31 and sold on 2026-04-01 paid the old 0.10%
+tax on a sale made under the 0.15% regime — an UNDER-charge of a third of that
+row, against this section's own "always over-charges". Either leg's day being
+unverified now refuses the trip. The lot size is still the entry day's, below.
+
 ### Nothing here has been checked against a broker contract note
 
 Unchanged from §26 and worth restating, because stage 3 is where it would show.
