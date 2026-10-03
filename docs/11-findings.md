@@ -662,3 +662,27 @@ the failure at the fixture root, separate from the deliberately injected
 journal-publication collision. The test-only fixture now uses a checked
 monotonic suffix with its PID/timestamp. Preserve the failed baseline and
 diagnostic replay; they are not counted as caught production mutants.
+
+### Audit 20261003 — CI, gate and test-gap fixes (worker w5)
+
+| Finding (audit-20261003) | Resolution |
+|---|---|
+| hunt-ci-1 PR can weaken its own gates and auto-merge | D-1604: CODEOWNERS; auto-merge (now `pull_request_target`, main's copy) arms a gate or law change only on a code owner's approval of head. Branch-protection code-owner review is an owner setting, not made here |
+| hunt-ci-2 main never re-checked after bot merges | D-1605: hourly `main-check.yml` dispatches CI on an unverified main head |
+| hunt-ci-3 `step-runs` passes `\|\| true` and dead branches | D-1601, AFE-01 |
+| hunt-ci-4 nothing guards `ci-ok` | D-1601, AFE-02: `source_scan aggregator` in Gate 0 |
+| hunt-ci-5 gate tools outside fmt/clippy | D-1600: nine clippy errors fixed, Gate 6c |
+| hunt-ci-6 Gate 27 blind to digit prefixes | D-1608 |
+| hunt-ci-7 W4 pipefail and silent zero | D-1609 |
+| hunt-ci-8 / hunt-ci-9 stop messages, stacked-PR choice | D-1604 |
+| hunt-ci-10..13 coverage name, stale pin comment, token scope, Gate 5 forms | D-1610 |
+| rustonly2-1 / -3 / -4 orphan roots, indirect build-script spawns, shells from crate code | D-1603, AFE-03, AFE-05, AFE-06 |
+| rustonly2-2 inline interpreter forms | D-1602, AFE-04 |
+| rustonly2-6 version-only lock change | D-1611, AFE-10 |
+| rustonly2-7 Gate 1g environment doors | D-1612 |
+| rustonly2-9 stale §96 | D-1614 |
+| testgaps-1..5 Gate 10 token shapes, four phantom citations | D-1606, AFE-07..09 |
+| testgaps-6 web/ native tests never run | D-1607, Gate 6d |
+| testgaps-7 / -8 ignored and macOS-only tests | D-1613, documented |
+| testgaps-10 two assertion-free tests | D-1614, AFE-11 |
+| testgaps-11..13, gaps-13 stale limits and plan rows | D-1614 |
