@@ -55072,3 +55072,26 @@ lifecycle is walked again with limit `i + 1`. The walk stops on the marker, so
 only damage between it and the newest end is judged. If that walk does not end
 on the same record (a newer one landed between the walks), the whole window's
 verdict stands. Damage newer than the marker still blocks launch.
+
+### D-1915 — A failed barrier on Base Evidence, Candidate Universe or Boolean evidence is withdrawn, never reused — 2026-10-03
+
+ledgers-2: a failed `fsync` left its bytes in place, and a later run's
+barrier on a fresh descriptor reported success over them (K2: after a failed
+writeback the pages are clean, and the second `fsync` writes nothing).
+
+- Base Evidence V2 and Candidate Universe (both in the store root): the record
+  and completion barriers now go through `fixed_tail::sync_or_roll_back`, so a
+  failure cuts the block and is remembered for this process (D-1900). A
+  receipt-less orphan that matches the exact retry is cut back and written
+  again whole rather than vouched for by a new barrier. The bytes are
+  identical. The reuse path refuses a path whose barrier failed in this
+  process.
+- Boolean and index-stop evidence (`write_or_equal`): a file this call created
+  whose write or barrier failed is removed by name, so its whole-length
+  receipt is never `committed` to the next run. The reuse arm now syncs the
+  file it compared.
+
+Not covered here, and still open: Search Lineage V4, Selection V6, Global
+Replay V4 and Admission V4 re-sync in place on their exact-retry or reuse
+paths. Pre-Admission, Execution V4, Population V6, Observation, Statistics V3
+and Finalization V4 already cut a failed barrier (D-1900).

@@ -166,3 +166,32 @@ fn only_the_owner_lock_refusal_is_a_lost_race() -> Result<(), String> {
     }
     Ok(())
 }
+
+/// ledgers-2, D-1915: a receipt or body whose barrier failed is withdrawn, so
+/// no later run reuses it as committed history; the rerun then commits.
+#[test]
+fn a_file_whose_barrier_failed_is_withdrawn_and_the_rerun_commits() -> Result<(), String> {
+    for name in ["complete.bin", "body.bin"] {
+        let root = scratch(&format!("withdrawn-{}", name.replace('.', "-")));
+        let identity = [13_u8; 32];
+        let body = b"barrier evidence".to_vec();
+        let digest = brutex_core::blake3::hash(&body);
+        let directory = publication(&root, identity);
+        {
+            let _armed =
+                crate::fixed_tail::fault::Armed::arm(name, crate::fixed_tail::fault::Kind::Sync);
+            let attempt =
+                prepare_in_namespace(&root, "index-stop-vix-reference-v1", identity, &body)
+                    .and_then(|pending| {
+                        pending.verify_body(digest, body.len() as u64)?;
+                        pending.finish(identity, digest, body.len() as u64)
+                    });
+            assert!(attempt.is_err(), "{name}");
+        }
+        assert!(!directory.join(name).exists(), "{name}");
+        assert!(!committed(&directory)?, "{name}");
+        publish(&root, identity, &body)?;
+        assert!(committed(&directory)?, "{name}");
+    }
+    Ok(())
+}

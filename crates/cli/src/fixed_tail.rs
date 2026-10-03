@@ -188,6 +188,21 @@ pub(crate) fn sync_or_roll_back(
     })
 }
 
+/// `sync_all` through the same test fault hook as [`sync_or_roll_back`], for
+/// a caller whose rollback is not a truncation (a created file withdrawn by
+/// name).
+///
+/// # Errors
+///
+/// Whatever the barrier returned.
+pub(crate) fn sync_all_hooked(file: &File, path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if fault::take_sync(&path.display()) {
+        return Err(std::io::Error::other("injected sync fault"));
+    }
+    file.sync_all()
+}
+
 /// [`sync_or_roll_back`] through `sync_all`.
 pub(crate) fn sync_all_or_roll_back(
     file: &File,

@@ -3688,6 +3688,10 @@ impl CandidateUniverseLedgerV1 {
                 existing.first_row,
                 prepared.rows.as_slice(),
             )?;
+            // A path whose barrier failed in this process is never reused as
+            // committed history (ledgers-2, D-1915).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.row_path)?;
+            crate::fixed_tail::refuse_after_failed_barrier(&self.receipt_path)?;
             return Ok(CandidateUniverseProductionCommitV1::Reused(existing));
         }
         let current_universes = u64::try_from(self.audits.len())
@@ -3723,10 +3727,20 @@ impl CandidateUniverseLedgerV1 {
                         .get(..prefix)
                         .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
                 )?;
-                (orphan.first_row, orphan.row_count)
+                // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915): the orphan
+                // may be the bytes of a run whose barrier failed, and a barrier
+                // on this descriptor cannot prove them durable. The block is
+                // cut back and written again whole; the bytes are identical.
+                let start = candidate_row_offset(orphan.first_row)?;
+                self.row_file
+                    .set_len(start)
+                    .and_then(|()| self.row_file.sync_all())
+                    .map_err(|why| format!("cannot cut candidate orphan for rewrite: {why}"))?;
+                (orphan.first_row, 0)
             }
             None => (self.total_rows, 0),
         };
+        let block_start = candidate_row_offset(first_row)?;
         let desired_total = first_row
             .checked_add(receipt.row_count)
             .ok_or_else(|| "candidate append row total overflowed u64".to_owned())?;
@@ -3745,9 +3759,13 @@ impl CandidateUniverseLedgerV1 {
                 .get(prefix_usize..)
                 .ok_or_else(|| "candidate append prefix exceeds prepared rows".to_owned())?,
         )?;
-        self.row_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync candidate rows: {why}"))?;
+        // A failed barrier cuts the block back (ledgers-2, D-1915).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.row_file,
+            &self.row_path,
+            block_start,
+            File::sync_data,
+        )?;
         self.total_rows = desired_total;
         self.orphan = Some(OrphanBlockV1 {
             universe_id: receipt.universe_id(),
@@ -3755,10 +3773,18 @@ impl CandidateUniverseLedgerV1 {
             row_count: receipt.row_count,
         });
         self.row_generation = file_generation(&self.row_file, &self.row_path)?;
+        let receipt_start = self
+            .receipt_file
+            .metadata()
+            .map_err(|why| format!("cannot stat candidate completions: {why}"))?
+            .len();
         append_receipt(&mut self.receipt_file, &receipt)?;
-        self.receipt_file
-            .sync_data()
-            .map_err(|why| format!("cannot sync candidate completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.receipt_file,
+            &self.receipt_path,
+            receipt_start,
+            File::sync_data,
+        )?;
         let audit = CandidateUniverseReopenAuditV1 { first_row, receipt };
         self.audits.insert(receipt.universe_id(), audit);
         self.orphan = None;
@@ -6145,6 +6171,14 @@ fn verify_header(
     )
 }
 
+/// The byte offset of candidate row `index` in the row file.
+fn candidate_row_offset(index: u64) -> Result<u64, CandidateUniverseRefusal> {
+    index
+        .checked_mul(CANDIDATE_ROW_STRIDE_V1)
+        .and_then(|bytes| bytes.checked_add(HEADER_BYTES_V1))
+        .ok_or_else(|| "candidate row offset overflowed u64".to_owned())
+}
+
 fn record_count(
     file: &File,
     stride: u64,
@@ -6907,6 +6941,47 @@ mod tests {
             receipt: *candidate.receipt(),
         };
         (audit, base)
+    }
+
+    /// ledgers-2, D-1915: a failed Base record or completion barrier is cut
+    /// back, so no later barrier on a fresh descriptor vouches for it; the
+    /// exact rerun then writes.
+    #[test]
+    fn a_failed_base_barrier_is_cut_and_the_rerun_writes() {
+        for name in [
+            "base-evidence-records-v2.bin",
+            "base-evidence-completions-v2.bin",
+        ] {
+            let root = test_dir();
+            let bounds = BaseEvidenceLedgerBoundsV2::new(32, 8).expect("nonzero Base bounds");
+            let (candidate, base) = candidate_base_fixture(47, InstrumentFamilyV1::Nifty);
+            {
+                let _armed = crate::fixed_tail::fault::Armed::arm(
+                    name,
+                    crate::fixed_tail::fault::Kind::Sync,
+                );
+                assert!(
+                    append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                        .is_err(),
+                    "{name}"
+                );
+            }
+            let completions =
+                std::fs::metadata(root.path().join("base-evidence-completions-v2.bin"))
+                    .expect("measure completions")
+                    .len();
+            assert_eq!(
+                completions, 64,
+                "{name}: no completion survives a failed barrier"
+            );
+            let written =
+                append_and_reopen_base_evidence_v2(root.path(), bounds, &candidate, &base)
+                    .expect("the exact rerun writes");
+            assert!(
+                matches!(written, BaseEvidenceProductionCommitV2::Written(_)),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -8844,6 +8919,45 @@ mod tests {
                 .expect_err("another universe cannot overwrite an orphan")
                 .contains("row tail belongs")
         );
+    }
+
+    /// ledgers-2, D-1915: a failed candidate row or completion barrier is cut
+    /// back, so no later barrier vouches for it; the exact rerun writes.
+    #[test]
+    fn a_failed_candidate_barrier_is_cut_and_the_rerun_writes() {
+        let bounds = CandidateUniverseBoundsV1::new(32, 4).expect("fixture bounds are nonzero");
+        for name in [ROW_FILE, RECEIPT_FILE] {
+            let root = test_dir();
+            let offered = prepared(52);
+            let mut ledger =
+                CandidateUniverseLedgerV1::open(root.path(), bounds).expect("ledger opens");
+            {
+                let _armed = crate::fixed_tail::fault::Armed::arm(
+                    name,
+                    crate::fixed_tail::fault::Kind::Sync,
+                );
+                assert!(ledger.append_complete(&offered).is_err(), "{name}");
+            }
+            drop(ledger);
+            assert_eq!(
+                std::fs::metadata(root.path().join(RECEIPT_FILE))
+                    .expect("measure completions")
+                    .len(),
+                HEADER_BYTES_V1,
+                "{name}: no completion survives a failed barrier"
+            );
+            let mut ledger =
+                CandidateUniverseLedgerV1::open(root.path(), bounds).expect("ledger reopens");
+            assert!(
+                matches!(
+                    ledger
+                        .append_complete(&offered)
+                        .expect("the exact rerun writes"),
+                    CandidateUniverseProductionCommitV1::Written(_)
+                ),
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -1177,6 +1177,13 @@ impl LedgerV2 {
                 ));
             }
             compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
+            // A path whose barrier failed in this process is never confirmed
+            // by a second one (ledgers-2, D-1915).
+            crate::fixed_tail::refuse_after_failed_barrier(&self.record_path)
+                .and_then(|()| {
+                    crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path)
+                })
+                .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
             self.record_file
                 .sync_data()
                 .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
@@ -1224,10 +1231,22 @@ impl LedgerV2 {
                     prepared,
                     orphan.record_count,
                 )?;
-                (orphan.first_record, orphan.record_count)
+                // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915). The orphan
+                // may be the bytes of a run whose barrier failed; a barrier on
+                // this descriptor cannot prove them durable, so the block is
+                // cut back and written again whole. The bytes are identical.
+                let start = record_offset(orphan.first_record)?;
+                self.record_file
+                    .set_len(start)
+                    .and_then(|()| self.record_file.sync_all())
+                    .map_err(|why| {
+                        io_error("cut Base orphan for rewrite", &self.record_path, &why)
+                    })?;
+                (orphan.first_record, 0)
             }
             None => (self.total_records, 0),
         };
+        let block_start = record_offset(first_record)?;
         let completion = CompletionV2::from_prepared(&receipt, prepared, first_record)?;
         let new_total =
             first_record
@@ -1237,16 +1256,30 @@ impl LedgerV2 {
                 ))?;
         require_bound("records", new_total, self.bounds.records)?;
         append_prepared_records(&mut self.record_file, prepared, prefix)?;
-        self.record_file
-            .sync_data()
-            .map_err(|why| io_error("sync Base records", &self.record_path, &why))?;
+        // A failed barrier cuts the block back (ledgers-2, D-1915).
+        crate::fixed_tail::sync_or_roll_back(
+            &self.record_file,
+            &self.record_path,
+            block_start,
+            File::sync_data,
+        )
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         self.total_records = new_total;
         self.orphan = Some(orphan_from_completion(&completion));
         self.record_generation = file_generation(&self.record_file, &self.record_path)?;
+        let completion_start = self
+            .completion_file
+            .metadata()
+            .map_err(|why| io_error("stat Base completion", &self.completion_path, &why))?
+            .len();
         append_completion(&mut self.completion_file, &completion)?;
-        self.completion_file
-            .sync_data()
-            .map_err(|why| io_error("sync Base completion", &self.completion_path, &why))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.completion_file,
+            &self.completion_path,
+            completion_start,
+            File::sync_data,
+        )
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
         sync_directory(&self.root_file, &self.root)?;
         let audit = BaseEvidenceReopenAuditV2 { completion };
         self.audits.insert(receipt.universe_id(), audit);
@@ -1458,6 +1491,14 @@ fn compare_prepared_prefix(
         }
     }
     Ok(())
+}
+
+/// The byte offset of record `index` in the record file.
+fn record_offset(index: u64) -> Result<u64, BaseEvidenceLedgerRefusalV2> {
+    index
+        .checked_mul(RECORD_BYTES_U64)
+        .and_then(|bytes| bytes.checked_add(HEADER_BYTES_U64))
+        .ok_or(BaseEvidenceLedgerRefusalV2::Arithmetic("record offset"))
 }
 
 fn append_prepared_records(
