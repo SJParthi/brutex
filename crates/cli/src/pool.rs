@@ -953,7 +953,6 @@ fn render_pooled(
     pooled: &[Pooled],
     rules: crate::Rules,
 ) {
-    use crate::columns::{left, right};
     let refused: Vec<(&String, &String)> = surface
         .iter()
         .zip(priced)
@@ -974,59 +973,13 @@ fn render_pooled(
         rule_bp / 100,
         rule_bp % 100
     );
-    // LAID OUT TOGETHER (v4-2, GAP13-16, D-1487). This was one `format!` of
-    // adjacent width specifiers, the shape D-1420 removed from every other cli
-    // table and left here: a 12-wide `net` beside a 5-wide `dd>=`, or raw paisa
-    // at `i64::MIN` (20 characters) in `worst`, `min_win` or `net`, ran into
-    // its neighbour and slid every column after it off its header. The widths
-    // stay as minimums, so a table whose figures fit renders as it did.
-    let columns = [
-        right(4),
-        left(5).after(1),
-        right(6),
-        right(8),
-        right(6),
-        right(12),
-        right(12),
-        right(10),
-        right(10),
-        right(12),
-        right(5),
-    ];
-    let header = [
-        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>=",
-    ];
     let shown: Vec<(usize, &Pooled, Option<&Candidate>)> = pooled
         .iter()
         .take(rules.top.max(1))
         .enumerate()
         .map(|(rank, p)| (rank, p, union.get(p.candidate)))
         .collect();
-    let cells: Vec<Vec<String>> = shown
-        .iter()
-        .filter_map(|&(rank, p, candidate)| {
-            candidate.map(|candidate| {
-                vec![
-                    (rank + 1).to_string(),
-                    match candidate.direction {
-                        Direction::Long => "long",
-                        Direction::Short => "short",
-                    }
-                    .to_owned(),
-                    p.fired.to_string(),
-                    p.trades.to_string(),
-                    p.wins.to_string(),
-                    p.worst.to_string(),
-                    p.min_win.to_string(),
-                    ratio_cell(p.tail_bp()),
-                    ratio_cell(p.profit_factor_bp()),
-                    p.net.to_string(),
-                    p.dd_bound.to_string(),
-                ]
-            })
-        })
-        .collect();
-    let laid = crate::columns::with_header(&columns, &header, cells);
+    let laid = laid_pooled(&shown);
     let _ = writeln!(out, "  {}  fired on", laid.header);
     let mut lines = laid.rows.iter();
     for &(rank, p, candidate) in &shown {
@@ -1075,6 +1028,59 @@ fn render_pooled(
         }
     }
     out.push_str(crate::IN_SAMPLE_WARNING);
+}
+
+/// The pass-2 rows whose candidate exists, laid out under their header.
+///
+/// LAID OUT TOGETHER (v4-2, GAP13-16, D-1487). This was one `format!` of
+/// adjacent width specifiers, the shape D-1420 removed from every other cli
+/// table and left here: a 12-wide `net` beside a 5-wide `dd>=`, or raw paisa
+/// at `i64::MIN` (20 characters) in `worst`, `min_win` or `net`, ran into its
+/// neighbour and slid every column after it off its header. The widths stay as
+/// minimums, so a table whose figures fit renders as it did.
+fn laid_pooled(shown: &[(usize, &Pooled, Option<&Candidate>)]) -> crate::columns::Laid {
+    use crate::columns::{left, right};
+    let columns = [
+        right(4),
+        left(5).after(1),
+        right(6),
+        right(8),
+        right(6),
+        right(12),
+        right(12),
+        right(10),
+        right(10),
+        right(12),
+        right(5),
+    ];
+    let header = [
+        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>=",
+    ];
+    let cells: Vec<Vec<String>> = shown
+        .iter()
+        .filter_map(|&(rank, p, candidate)| {
+            candidate.map(|candidate| {
+                vec![
+                    (rank + 1).to_string(),
+                    match candidate.direction {
+                        Direction::Long => "long",
+                        Direction::Short => "short",
+                    }
+                    .to_owned(),
+                    p.fired.to_string(),
+                    p.trades.to_string(),
+                    p.wins.to_string(),
+                    p.worst.to_string(),
+                    p.min_win.to_string(),
+                    ratio_cell(p.tail_bp()),
+                    ratio_cell(p.profit_factor_bp()),
+                    p.net.to_string(),
+                    p.dd_bound.to_string(),
+                ]
+            })
+        })
+        .collect();
+    crate::columns::with_header(&columns, &header, cells)
 }
 
 /// A ratio in hundredths as `12.34x`, or `never lost` for the sentinel.

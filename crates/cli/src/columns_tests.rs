@@ -264,7 +264,7 @@ fn the_descent_progress_line_keeps_extreme_figures_apart() {
         (1_000, extreme_record(i64::MAX, 0)),
         (10, extreme_record(0, 1)),
     ] {
-        let line = crate::descent_line(support, Ok(record.clone()));
+        let line = crate::descent_line(support, Ok(record));
         let words: Vec<&str> = line.split_whitespace().collect();
         let wanted = [
             format!("{support}ppm"),
