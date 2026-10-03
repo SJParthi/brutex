@@ -10,7 +10,7 @@ name: Auto-merge
 # load-bearing — the duty to say out loud when it did not.
 #
 # Two triggers, because one is not enough:
-#   pull_request  — catches a PR that is already green when it opens or is
+#   pull_request_target — catches a PR that is already green when it opens or is
 #                   re-pushed (a rebase onto a green main, for instance).
 #   workflow_run  — catches the far more common case: the PR opened while CI
 #                   was still running, and CI has only now finished.
@@ -53,6 +53,19 @@ name: Auto-merge
 # required check, so going red cannot block a merge GitHub would otherwise
 # make — which is deliberate: the alarm must never become a second gate.
 #
+# A CHANGE TO THE GATES NEEDS A CODE OWNER (D-1604, audit-20261003 hunt-ci-1).
+# The only merge condition is `ci-ok`, produced by the PR's OWN copy of
+# ci.yml, so a PR that weakens a gate used to certify itself. A pull request
+# whose diff touches anything under `.github/`, `CLAUDE.md` or a CODEOWNERS
+# file is now armed only when a code owner named in the CODEOWNERS file ON
+# `main` approved its current head; otherwise this job STOPS and disarms.
+# `pull_request_target` (not `pull_request`) is the trigger for exactly this
+# reason: it runs main's copy of THIS file, so a PR cannot edit the check away
+# for itself. Nothing here checks out or runs pull-request code, so its write
+# token never meets untrusted code. HONEST LIMIT: this file can only decline
+# to arm. The binding control is branch protection's "Require review from
+# Code Owners" on main, which only the repository owner can switch on.
+#
 # SECURITY. No value from the event payload is interpolated into a `run:`
 # body. Every value crosses into the shell through `env:` and is quoted at the
 # point of use, so a branch name or a title cannot become a command. The base
@@ -60,7 +73,7 @@ name: Auto-merge
 # attacker-shaped decides what we compare against.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_run:
     workflows: [CI]
@@ -122,14 +135,35 @@ jobs:
           # between them render as ONE paragraph, which is why the block below
           # writes its own blank lines), and the exit status is what stops the
           # check from claiming green over a red run.
+          # A STOP NEVER LEAVES AN EARLIER ARMING IN PLACE (hunt-ci-8, D-1604).
+          # An earlier run of this workflow has usually armed auto-merge
+          # already, and "was not enabled" read as "nothing is armed" while the
+          # PR still landed on its next green ci-ok. So a stop disarms, and
+          # says which of the three states the pull request is really in.
+          disarm() {
+            [ -n "${pr:-}" ] || { echo "no pull request was identified, so nothing is armed"; return; }
+            armed=$(gh pr view "$pr" --repo "$REPO" --json autoMergeRequest \
+                      --jq 'if .autoMergeRequest == null then "no" else "yes" end') \
+              || { echo "COULD NOT READ whether auto-merge is armed on #${pr}; treat it as ARMED"; return; }
+            if [ "$armed" = "no" ]; then
+              echo "auto-merge is not armed on #${pr}"
+            elif gh pr merge "$pr" --repo "$REPO" --disable-auto >/dev/null; then
+              echo "auto-merge WAS armed on #${pr} and has now been disabled"
+            else
+              echo "auto-merge IS STILL ARMED on #${pr}: disabling it failed; disable it by hand"
+            fi
+          }
           stopped() {
-            printf '::error title=Auto-merge stopped::%s\n' "$*"
-            printf 'STOPPED — %s\n' "$*"
+            state_line=$(disarm)
+            printf '::error title=Auto-merge stopped::%s (%s)\n' "$*" "$state_line"
+            printf 'STOPPED — %s\n%s\n' "$*" "$state_line"
             {
               printf '\n'
-              printf '## STOPPED — auto-merge was NOT enabled\n'
+              printf '## STOPPED — this run did not arm auto-merge\n'
               printf '\n'
               printf '%s\n' "$*"
+              printf '\n'
+              printf '%s.\n' "$state_line"
               printf '\n'
               printf 'Nothing retries this and nobody is notified. It needs a human.\n'
             } >> "$GITHUB_STEP_SUMMARY"
@@ -139,13 +173,16 @@ jobs:
           # ---------------------------------------------------------------
           # 1. Which pull request is this about?
           # ---------------------------------------------------------------
-          if [ "$EVENT_NAME" = "pull_request" ]; then
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
             pr="$PR_FROM_EVENT"
             sha=""
           else
             sha="$SHA_FROM_RUN"
+            # `commits/{sha}/pulls` also lists open PRs that merely CONTAIN
+            # the sha (a stacked PR). Only the one whose HEAD is this sha is
+            # the PR this CI run judged (hunt-ci-9, D-1604).
             pr=$(gh api "repos/${REPO}/commits/${sha}/pulls" \
-                   --jq '[.[] | select(.state == "open")] | .[0].number // empty')
+                   --jq '[.[] | select(.state == "open" and .head.sha == env.SHA_FROM_RUN)] | .[0].number // empty')
           fi
           # No pull request is the shape of every CI run on main, INCLUDING a
           # failed one. Quiet is right there: the red X belongs to that CI run
@@ -203,7 +240,7 @@ jobs:
                 # shape of two pushes in quick succession.
                 not_yet "the CI run that triggered this concluded ${CI_CONCLUSION}, which is not a verdict on ${head}." ;;
               *)
-                stopped "CI concluded ${CI_CONCLUSION} on ${head}. Auto-merge was not enabled and this pull request will not land until CI is green. ${CI_RUN_URL}" ;;
+                stopped "CI concluded ${CI_CONCLUSION} on ${head}. This pull request will not land until CI is green. ${CI_RUN_URL}" ;;
             esac
           fi
 
@@ -263,9 +300,40 @@ jobs:
           done <<< "$runs"
 
           [ -z "$failed" ] || \
-            stopped "these gates have already failed on ${head}: ${failed}. Auto-merge was not enabled."
+            stopped "these gates have already failed on ${head}: ${failed}."
 
           say "No gate on ${head} has failed."
+
+          # ---------------------------------------------------------------
+          # 5b. A change to the gates needs a code owner's approval (D-1604).
+          # ---------------------------------------------------------------
+          # Every read here that fails is a STOP, never an empty answer.
+          if ! files=$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate \
+                         --jq '.[] | .filename, (.previous_filename // empty)'); then
+            stopped "the changed-file list of #${pr} could not be read, so whether it changes a gate is unknown."
+          fi
+          [ -n "$files" ] || stopped "the changed-file list of #${pr} is empty, which no pull request can be."
+          sensitive=$(grep -E '^(\.github/|CLAUDE\.md$|CODEOWNERS$|docs/CODEOWNERS$)' <<< "$files" || true)
+          if [ -n "$sensitive" ]; then
+            say "This pull request changes the gates or the law:"
+            while IFS= read -r f; do say "  ${f}"; done <<< "$sensitive"
+            if ! owners_file=$(gh api "repos/${REPO}/contents/CODEOWNERS?ref=${BASE_BRANCH}" \
+                                 -H 'Accept: application/vnd.github.raw'); then
+              stopped "#${pr} changes ${sensitive//$'\n'/, } and ${BASE_BRANCH} has no readable CODEOWNERS, so no approval can be checked. Merge it by hand after review."
+            fi
+            owners=$(grep -v '^[[:space:]]*#' <<< "$owners_file" | grep -oE '@[A-Za-z0-9-]+' | tr -d '@' | sort -u || true)
+            [ -n "$owners" ] || stopped "the CODEOWNERS on ${BASE_BRANCH} names no owner."
+            # The latest review per reviewer on THIS head; an approval of an
+            # older head approves code that is no longer the pull request.
+            if ! approvers=$(HEAD_SHA="$head" gh api "repos/${REPO}/pulls/${pr}/reviews" --paginate \
+                   --jq '[.[] | select(.commit_id == env.HEAD_SHA and .state != "COMMENTED" and .state != "PENDING")] | group_by(.user.login) | map(max_by(.submitted_at)) | .[] | select(.state == "APPROVED") | .user.login'); then
+              stopped "the reviews of #${pr} could not be read."
+            fi
+            approved_by=$(comm -12 <(sort -u <<< "$owners") <(sort -u <<< "$approvers"))
+            [ -n "$approved_by" ] || \
+              stopped "#${pr} changes the gates or the law and no code owner ($(tr '\n' ' ' <<< "$owners")) has approved head ${head}. After an approval, re-run this job."
+            say "Gate change approved on ${head} by: ${approved_by//$'\n'/, }"
+          fi
           say "Required check '${REQUIRED_CHECK}' is enforced by branch protection."
 
           # ---------------------------------------------------------------

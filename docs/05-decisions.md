@@ -53534,3 +53534,65 @@ when no tracked source declares it as a function or module. The rows:
 **Limit.** A module-first two-segment token is resolved only to "declared
 somewhere", because an inline module has no file to bind it to. Stated in
 `docs/06-limits.md`.
+
+### D-1604 — A pull request that changes the gates or the law is armed only after a code owner approves its head; a stop disarms; the workflow_run PR is the one whose head is the sha — 2026-10-03
+
+**What was observed.** hunt-ci-1: branch protection on `main` requires only
+`ci-ok`, which the pull request's own `ci.yml` produces; no review is
+required, no CODEOWNERS existed, and `auto-merge.yml` armed every same-repo
+PR, so a PR could weaken or delete a gate and merge itself. hunt-ci-8: a STOP
+said "Auto-merge was not enabled" while an earlier run had usually armed it,
+and nothing disarmed it. hunt-ci-9: on `workflow_run` the PR was the first
+open one listed for the sha, which can be a stacked PR that merely contains
+it.
+
+**The decision.**
+1. A root `CODEOWNERS` (allowed by name in CLAUDE.md §2) names `@SJParthi` for
+   `/.github/`, `/CLAUDE.md` and `/CODEOWNERS`.
+2. `auto-merge.yml` section 5b reads the PR's changed files (renames by both
+   names). When any is under `.github/`, is `CLAUDE.md` or a CODEOWNERS file,
+   it reads the owners from the CODEOWNERS **on `main`** and the latest
+   non-comment review per reviewer **on the current head**, and arms only when
+   an owner approved. Any read that fails, a missing CODEOWNERS on `main`, or
+   an owner list that is empty, is a STOP. The first PR that adds CODEOWNERS
+   therefore stops and is merged by hand.
+3. The `pull_request` trigger becomes `pull_request_target`, so the arming
+   decision is always made by `main`'s copy of `auto-merge.yml`; a PR cannot
+   edit the check away for itself. The job checks out and runs no PR code,
+   and every event value still crosses into the shell through `env:`.
+4. `stopped` calls `disarm`, which reads `autoMergeRequest` and disables an
+   armed merge, and the alarm states which of "not armed", "was armed and is
+   now disabled" or "IS STILL ARMED" holds.
+5. On `workflow_run` the PR is the open one whose `head.sha` equals the run's
+   sha.
+
+**What only the owner can do.** The binding control is branch protection's
+"Require review from Code Owners" (and "Require approval of the most recent
+reviewable push") on `main`. That is a repository setting; this change does
+not and cannot make it. Until it is on, a PR whose own `ci.yml` stays green
+can still be merged by anyone with merge rights; the workflow only declines
+to arm it. Proven with a stub `gh` on PATH running the step: a `.github/`
+change with no approval stopped (exit 1) and disarmed an armed PR; the same
+change approved by the owner on head armed; a crate-only change armed; a
+missing or owner-less CODEOWNERS on `main` stopped.
+
+### D-1605 — Main is re-verified after every bot merge by an hourly dispatch — 2026-10-03
+
+**What was observed (hunt-ci-2).** Merges performed by auto-merge are made as
+`GITHUB_TOKEN`, and GitHub creates no run for an event that token caused, so
+`ci.yml`'s `push: branches: [main]` never fired for them. The newest push run
+on `main` was 2026-09-23; five merged commits after it had no CI run of
+their own, and the one weekly scheduled run had failed unnoticed.
+
+**The decision.** A new `.github/workflows/main-check.yml` runs hourly (and on
+dispatch). It reads `main`'s head and, when no `push`, `workflow_dispatch` or
+`schedule` CI run exists for that sha, calls `gh workflow run ci.yml --ref
+main`. A dispatch made with `GITHUB_TOKEN` is the documented exception that
+does start a run, so no new secret is needed. Permissions are
+`actions: write, contents: read`. Proven with a stub `gh`: zero runs for the
+sha dispatched once, one run dispatched nothing.
+
+**Rejected.** A `workflow_run` trigger on CI: the merge happens when `ci-ok`
+passes, so a run started on CI's completion races the merge and may check
+the pre-merge `main`. A daily full schedule: it re-runs an unchanged `main`
+and still leaves a day of unverified merges.

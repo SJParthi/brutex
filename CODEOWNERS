@@ -1,0 +1,10 @@
+# Code owners. CLAUDE.md section 2 allows this file by name. D-1604.
+#
+# The gates and the law. auto-merge.yml reads THIS file as it stands on main
+# and arms a pull request that touches these paths only after an owner listed
+# here approved its current head. GitHub enforces the same rule only when
+# branch protection on main requires review from Code Owners, which is a
+# repository setting the owner switches on; this file cannot do that itself.
+/.github/ @SJParthi
+/CLAUDE.md @SJParthi
+/CODEOWNERS @SJParthi
