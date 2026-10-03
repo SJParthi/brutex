@@ -5544,6 +5544,7 @@ jobs:
           crates/api/src/calendar_of.rs 2
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
+          crates/api/src/credential_law.rs 1
           crates/api/src/merge.rs 2
           crates/api/src/server.rs 4
           crates/api/src/sweeprun.rs 5

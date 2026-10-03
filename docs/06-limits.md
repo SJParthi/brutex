@@ -13924,4 +13924,14 @@ bounds are all nonzero.
     D-0991 deleted it -- the existing equality check proves
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
+  api/src/credential_law.rs 1 (D-1482, v3a-1) -- `self.dead.contains(&print)`
+    in `Watch::is_dead` IS a `Vec` scan, and it is declared rather than
+    hashed on purpose: `pull::http::CredentialPrint` has a constant-time
+    `PartialEq` and deliberately no `Hash`. The list holds the
+    fingerprints this ONE run saw rejected and then replaced, one per
+    rotation, and each rotation is bought by a vendor rejection and a
+    Parameter Store read, so it does not grow with bars, instruments,
+    cells or requests. It is asked once per credential read or re-read.
+    O(d) in the run's rotations; "Audit fixes -- D-1480 onward" above
+    states it.
 ~~~~
