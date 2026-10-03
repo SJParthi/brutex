@@ -95,7 +95,7 @@ fn reopen_reuse_and_append_preserve_exact_history_and_capacity() {
 }
 
 #[test]
-fn incomplete_prefix_is_never_authority_and_only_exact_resume_appends() {
+fn incomplete_prefix_is_never_authority_and_a_foreign_one_is_set_aside() {
     let expected = frame(7);
     for len in [
         1,
@@ -122,15 +122,18 @@ fn incomplete_prefix_is_never_authority_and_only_exact_resume_appends() {
     let foreign = frame(8);
     let path = scratch.0.join(FILE_NAME);
     std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
-    assert!(persist(&scratch.0, bounds(1), &expected).is_err());
+    // D-1569: a foreign unsealed prefix is moved aside whole, never lost.
+    assert!(persist(&scratch.0, bounds(1), &expected).expect("foreign tail set aside"));
+    assert_eq!(std::fs::read(path).expect("completed bytes"), expected);
     assert_eq!(
-        std::fs::read(path).expect("preserved foreign prefix"),
+        std::fs::read(scratch.0.join(format!("{FILE_NAME}.abandoned-0")))
+            .expect("preserved foreign prefix"),
         &foreign[..4096]
     );
 }
 
 #[test]
-fn duplicate_corrupt_wrong_version_and_trailing_partial_refuse_without_repair() {
+fn duplicate_corrupt_and_wrong_version_refuse_without_repair() {
     let first = frame(3);
     let mut corrupt = first;
     corrupt[400] ^= 1;
@@ -140,7 +143,6 @@ fn duplicate_corrupt_wrong_version_and_trailing_partial_refuse_without_repair() 
         [first.as_slice(), first.as_slice()].concat(),
         corrupt.to_vec(),
         old_version.to_vec(),
-        [first.as_slice(), &[1]].concat(),
     ] {
         let scratch = Scratch::new();
         let path = scratch.0.join(FILE_NAME);
