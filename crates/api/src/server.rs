@@ -49,7 +49,14 @@ pub const DEFAULT_ADDR: SocketAddr =
 /// only thing standing between this server and that allocation was a
 /// dependency's default value. A request past this answers `413` — the refusal
 /// is the framework's and it is loud, not a truncation.
-const MAX_FORM_BYTES: usize = 8 * 1024;
+///
+/// **Two routes read more than this, and they are named.** `/pull/spot` and
+/// `/ingest/queue` take repeated `member` fields, and 750 ticked instruments do
+/// not fit 8 KiB, so `ingest::TooManyMembers` could never be reached: the
+/// framework's 413 answered first (W1-api3-6, D-1499). Those two routes carry
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] instead; every other form keeps
+/// this bound.
+pub(crate) const MAX_FORM_BYTES: usize = 8 * 1024;
 
 /// One line of operator-facing text on stdout, written without a panic.
 ///
@@ -16131,7 +16138,15 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             }),
         )
         .route("/pull", axum::routing::get(pull_get))
-        .route("/pull/spot", axum::routing::post(pull_spot))
+        // THE TWO MEMBER FORMS READ A LARGER BODY (W1-api3-6, D-1499). A
+        // route-level limit is inner to the router's, so it is the one the
+        // `String` extractor reads.
+        .route(
+            "/pull/spot",
+            axum::routing::post(pull_spot).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ingest::MAX_MEMBER_FORM_BYTES,
+            )),
+        )
         .route("/pull/fno", axum::routing::post(pull_fno))
         // THE ONE PRESS. `/pull/spot` and `/pull/fno` above are unchanged and
         // still serve one leg each; this starts a run that drives them itself,
@@ -16180,7 +16195,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             "/ingest/status.json",
             axum::routing::get(crate::ingest::status_json),
         )
-        .route("/ingest/queue", axum::routing::post(crate::ingest::queue))
+        .route(
+            "/ingest/queue",
+            axum::routing::post(crate::ingest::queue).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ingest::MAX_MEMBER_FORM_BYTES,
+            )),
+        )
         // THE AUDIT'S TWO. `/audit.json` is what the browser console reads and
         // `/audit` is the no-script page, unchanged. Before the JSON route
         // existed the console fetched the PAGE and parsed its table back out
@@ -22857,11 +22877,14 @@ mod tests {
             // Just outside: the field is padded past MAX_FORM_BYTES. It is
             // refused for its SIZE, before any parser sees it -- so the reply
             // carries neither the accepted page nor a named field refusal.
+            // `/pull/fno`, not `/pull/spot`: the two member forms read the
+            // larger `ingest::MAX_MEMBER_FORM_BYTES` (D-1499), and their bound
+            // is the next test's.
             let huge = format!(
-                "target=swept&from=2024-01-01&to=2024-01-31&pad={}",
+                "underlying=NIFTY&series=fut&expiry=2020-01-30&from=2020-01-01&to=2020-01-30&pad={}",
                 "x".repeat(MAX_FORM_BYTES + 1)
             );
-            let refused = post(addr, "/pull/spot", &huge).await;
+            let refused = post(addr, "/pull/fno", &huge).await;
             assert!(
                 refused
                     .lines()
@@ -22874,6 +22897,77 @@ mod tests {
                 !refused.contains("REFUSED ·"),
                 "and it never reached the form parser: {refused}"
             );
+        })
+        .await;
+    }
+
+    /// **EVERY TICKED MEMBER FITS, AND ONE TOO MANY IS NAMED, NOT A 413**
+    /// (W1-api3-6, D-1499).
+    ///
+    /// Under the shared 8 KiB form bound, 750 ticked instruments answered the
+    /// framework's 413 and `TooManyMembers` was unreachable over HTTP. On both
+    /// member routes: 750 full-width symbols reach the parser, 2,001 reach the
+    /// named refusal, 2,000 symbols percent-encoded at the worst 3x still
+    /// reach it, and one byte past `MAX_MEMBER_FORM_BYTES` is a 413.
+    #[tokio::test]
+    async fn every_ticked_member_fits_and_one_too_many_is_named_not_a_413() {
+        let status = |reply: &str| {
+            reply
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .map(str::to_owned)
+        };
+        let members = |n: usize, encode: bool| -> String {
+            (0..n)
+                .map(|i| {
+                    let symbol = format!("S{i:0>23}");
+                    let symbol = if encode {
+                        symbol.bytes().map(|b| format!("%{b:02X}")).collect()
+                    } else {
+                        symbol
+                    };
+                    format!("&member={symbol}")
+                })
+                .collect()
+        };
+        assert_eq!(crate::ingest::MAX_MEMBER_FORM_BYTES, 168_192);
+        with_server("memberlimit", move |addr| async move {
+            for path in ["/ingest/queue", "/pull/spot"] {
+                let all = format!(
+                    "target=equities&from=2024-01-01&to=2024-01-31{}",
+                    members(750, false)
+                );
+                assert!(all.len() > MAX_FORM_BYTES, "the case the old bound refused");
+                let reply = post(addr, path, &all).await;
+                assert_ne!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+
+                let over = format!(
+                    "target=equities&from=2024-01-01&to=2024-01-31{}",
+                    members(2_001, false)
+                );
+                let reply = post(addr, path, &over).await;
+                assert_ne!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+                assert!(
+                    reply.contains("names 2001 instrument(s)"),
+                    "{path}: the named refusal, not a 413: {reply}"
+                );
+
+                let at_cap = format!(
+                    "target=equities&from=2024-01-01&to=2024-01-31{}",
+                    members(2_000, true)
+                );
+                assert!(at_cap.len() <= crate::ingest::MAX_MEMBER_FORM_BYTES);
+                let reply = post(addr, path, &at_cap).await;
+                assert_ne!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+
+                let past = format!(
+                    "target=equities&pad={}",
+                    "x".repeat(crate::ingest::MAX_MEMBER_FORM_BYTES)
+                );
+                let reply = post(addr, path, &past).await;
+                assert_eq!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+            }
         })
         .await;
     }

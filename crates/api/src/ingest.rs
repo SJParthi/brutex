@@ -83,6 +83,18 @@ pub const MAX_WINDOW_DAYS: u32 = 3_653;
 /// and the set's own size is the exchange's business rather than a caller's.
 pub const MAX_MEMBERS: usize = 2_000;
 
+/// The body `/pull/spot` and `/ingest/queue` read: room for [`MAX_MEMBERS`]
+/// `member` fields, each a symbol of at most
+/// `brutex_core::symbol::SYMBOL_CAPACITY` bytes percent-encoded at worst 3x,
+/// plus the other fields' ordinary [`crate::server::MAX_FORM_BYTES`].
+///
+/// 168,192 bytes. Under the shared 8 KiB bound, ticking all 750 of the widest
+/// set was a framework 413 and [`Refusal::TooManyMembers`] was unreachable
+/// (W1-api3-6, D-1499). Sized from `MAX_MEMBERS` so a request with one member
+/// too many reaches that named refusal rather than a 413.
+pub const MAX_MEMBER_FORM_BYTES: usize = crate::server::MAX_FORM_BYTES
+    + MAX_MEMBERS * ("member=".len() + 3 * brutex_core::symbol::SYMBOL_CAPACITY + 1);
+
 /// Which instruments a spot pull covers.
 ///
 /// Seven fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
