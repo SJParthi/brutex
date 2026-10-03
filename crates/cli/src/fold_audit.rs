@@ -243,35 +243,42 @@ pub fn compare(
         stored: 0,
         folded: f.ts_micros,
     };
-    let (mut si, mut fi) = (0_usize, 0_usize);
+    // THE CURSORS ARE THE UNREAD SUFFIXES, NOT COUNTERS. Each step replaces a
+    // suffix with its own tail, so a step that advances a side shortens it by
+    // one by construction. With `si += 1` a mistyped step (`si *= 1`) left
+    // the walk on the same pair for ever, and the gate saw a hang rather than
+    // a wrong answer. The index a disagreement names is derived from what is
+    // left, so it can be wrong without the walk failing to end -- and a wrong
+    // index is something a test can see.
+    let (mut s_rest, mut f_rest) = (stored, folded.as_slice());
     loop {
-        let at = u64::try_from(si).unwrap_or(u64::MAX);
-        let found = match (stored.get(si), folded.get(fi)) {
-            (Some(s), Some(f)) => match s.ts_micros.cmp(&f.ts_micros) {
+        let at = u64::try_from(stored.len() - s_rest.len()).unwrap_or(u64::MAX);
+        let fi = folded.len() - f_rest.len();
+        let found = match (s_rest.split_first(), f_rest.split_first()) {
+            (Some((s, s_tail)), Some((f, f_tail))) => match s.ts_micros.cmp(&f.ts_micros) {
                 // The store is ahead and the fold's next bucket opens no later
                 // than the stored bar: the store skipped this bucket.
                 Ordering::Greater
-                    if folded
-                        .get(fi + 1)
+                    if f_tail
+                        .first()
                         .is_some_and(|next| next.ts_micros <= s.ts_micros) =>
                 {
-                    let named = only_folded(fi, f);
-                    fi += 1;
-                    Some(named)
+                    f_rest = f_tail;
+                    Some(only_folded(fi, f))
                 }
                 // The fold is ahead and the store's next bar opens no later
                 // than the folded bucket: the store holds an extra bar.
                 Ordering::Less
-                    if stored
-                        .get(si + 1)
+                    if s_tail
+                        .first()
                         .is_some_and(|next| next.ts_micros <= f.ts_micros) =>
                 {
-                    si += 1;
+                    s_rest = s_tail;
                     Some(only_stored(at, s))
                 }
                 _ => {
-                    si += 1;
-                    fi += 1;
+                    s_rest = s_tail;
+                    f_rest = f_tail;
                     // EVERY FIELD, IN RECORD ORDER, AND THE FIRST ONE ONLY.
                     //
                     // Naming all seven for one bar would bury the next bar's
@@ -298,14 +305,13 @@ pub fn compare(
                     })
                 }
             },
-            (Some(s), None) => {
-                si += 1;
+            (Some((s, s_tail)), None) => {
+                s_rest = s_tail;
                 Some(only_stored(at, s))
             }
-            (None, Some(f)) => {
-                let named = only_folded(fi, f);
-                fi += 1;
-                Some(named)
+            (None, Some((f, f_tail))) => {
+                f_rest = f_tail;
+                Some(only_folded(fi, f))
             }
             (None, None) => break,
         };

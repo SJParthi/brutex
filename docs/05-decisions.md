@@ -56071,3 +56071,44 @@ pinned commit, so the pinned action still installs the current stable toolchain:
 the action's code is frozen, the toolchain it installs is not, and gate 6b's
 exposure to a new stable lint is unchanged. Bumping an action is now a commit
 that names the new id.
+
+### D-1456 — Four Gate 18 survivors on PR #74: two boundaries pinned, one walk that cannot hang, one report handed a selection — 2026-10-03
+
+**What happened.** Gate 18 on PR #74 named three surviving mutants and one
+timeout. A timeout fails the gate exactly as a survivor does.
+
+- `pull::archive::read_bounded`: `read as u64 > MAX_MEMBER_BYTES` to `>=`
+  survived. The only size test stood a sparse file one byte PAST the bound,
+  and a member of exactly the bound was never read. The bound is now the
+  parameter `cap`; the walk passes `MAX_MEMBER_BYTES` and nothing else does,
+  and `a_member_of_exactly_the_cap_is_read_and_one_byte_more_is_refused`
+  reads a one-row file at `cap` equal to its length and refuses it at one
+  less, without a 256 MiB read.
+- `pull::ssm::get_parameter` replaced by `Ok(String::new())` survived: the
+  region refusal was proved on `Signable::authorization`, never on the free
+  function that calls it. A `tokio::test` now calls `get_parameter` with a
+  foreign region and asserts the signer's refusal comes back. The refusal is
+  before the HTTPS client is built, so the test opens no socket. It reuses the
+  generic `/org/env/vendor/field` shape and the region and stamp literals the
+  module's tests already carry (§8, gates 1c and 1d).
+- `cli::ledger_all::render_winners` replaced by `Ok(())` survived: no test
+  had ever handed it a committed Selection V5. The eight-rung step-3 test
+  already holds one whose completion file it corrupts; it now passes that
+  stale capability to `render_winners` and asserts the refusal, the heading,
+  and that no table was printed. The function is `pub(crate)` for that call.
+- `cli::fold_audit::compare`: `si += 1` to `si *= 1` in the extra-stored-bar
+  arm TIMED OUT, because the pairing walk was driven by index counters and a
+  counter that stops advancing loops for ever. Restructured rather than
+  tested around (D-0192): the cursors are now the unread suffixes, replaced
+  by their own `split_first` tails, so every advancing step shortens a slice
+  by construction and there is no counter to mistype. The index a
+  disagreement names is derived as `len - rest.len()`, so a mutant there
+  names a wrong `at`, which the existing pairing tests assert, instead of
+  hanging.
+
+**Rejected.** Adding a step bound and an unreachable "walk did not end"
+refusal to `compare`: it would turn the hang into a failure but add a branch
+no input can reach, which the coverage gate cannot cover and which would
+breed mutants of its own. A 256 MiB exact-size sparse read in the archive
+test: correct, but it allocates and reads the whole bound on every test run
+to prove one comparison.
