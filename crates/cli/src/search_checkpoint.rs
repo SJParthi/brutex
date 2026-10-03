@@ -233,16 +233,13 @@ impl Journal {
             .sync_all()
             .map_err(error)?;
         let path = directory.join("payload");
-        let mut file = Flock::lock(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(error)?,
-            path.as_path(),
-        )
-        .map_err(error)?;
+        let mut raw = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(error)?;
+        let mut file = Flock::lock(&mut raw, path.as_path()).map_err(error)?;
         #[cfg(test)]
         tests::payload_locked(&file);
         let header = header_of(self.identity, sequence, length);
@@ -260,6 +257,16 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
+        // RELEASED BEFORE THE MARKER EXISTS (locks-3, D-1913). The payload is
+        // whole, verified and durable here, and the marker is what makes it
+        // discoverable. Held until after the marker, every reader that found
+        // the new sequence in that window was refused "checkpoint payload is
+        // busy" for bytes already published, through two fsyncs and a full
+        // re-read. Released by name, not by closing: a duplicate a spawned
+        // child still carried kept a closed descriptor's lock alive (D-0693).
+        // A refused release leaves `latest` and `acknowledged` unadvanced and
+        // poisons the writer through `publish`.
+        file.release().map_err(|u| u.to_string())?;
         // WRITTEN UNDER A SCRATCH NAME AND RENAMED (CE-3, D-1909). Created
         // under its final name, a kill or ENOSPC between create and write left
         // a 0-31 byte `complete` that discovery made `latest`, and every later
@@ -277,16 +284,12 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
-        verify_acknowledged(&mut file, &path, &header, payload, seal)?;
+        #[cfg(test)]
+        tests::marker_visible();
+        verify_acknowledged(&mut raw, &path, &header, payload, seal)?;
         if regular_bytes(&directory.join("complete"), 32)? != seal {
             return Err("checkpoint marker changed before acknowledgment".to_owned());
         }
-        // The payload lock is released by name before the publication is
-        // acknowledged. Closing the descriptor alone left it held by any
-        // duplicate a spawned child still carried, and `latest` then refused
-        // this very checkpoint as busy. A refused release leaves `latest` and
-        // `acknowledged` unadvanced and poisons the writer through `publish`.
-        file.release().map_err(|u| u.to_string())?;
         // Only this acknowledged publication updates the cached latest position.
         // A later reopen validates the marker and all bytes again.
         self.latest = Some(sequence);

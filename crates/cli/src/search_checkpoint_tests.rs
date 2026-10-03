@@ -11,6 +11,16 @@ thread_local! {
     /// Armed by a test on its own thread, taken by the next publication on
     /// that thread and by nothing else.
     static PAYLOAD_LOCKED: RefCell<Option<PayloadHook>> = const { RefCell::new(None) };
+    /// Armed by a test, taken by the next publication on this thread once its
+    /// `complete` marker is visible to readers.
+    static MARKER_VISIBLE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Called by `publish_inner` right after its marker becomes discoverable.
+pub(super) fn marker_visible() {
+    if let Some(hook) = MARKER_VISIBLE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
 }
 
 /// Called by `publish_inner` right after it takes the payload lock: runs the
@@ -265,5 +275,32 @@ fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String
         let resumed = reopened.latest(1024)?.ok_or("the resume is latest")?;
         assert_eq!(resumed.payload, b"resumed");
     }
+    Ok(())
+}
+
+/// locks-3, D-1913: once a checkpoint's marker is discoverable, a reader of
+/// that checkpoint is never refused as busy by the publishing writer.
+#[test]
+fn a_discoverable_checkpoint_is_never_refused_as_busy() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [13; 32])?;
+    let seen: Rc<RefCell<Option<Result<Vec<u8>, String>>>> = Rc::default();
+    let into = Rc::clone(&seen);
+    let base = scratch.0.clone();
+    MARKER_VISIBLE.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let read = Snapshot::open(&base, "and-checkpoint-v1", [13; 32])
+                .and_then(|snapshot| snapshot.ok_or_else(|| "namespace".to_owned()))
+                .and_then(|snapshot| snapshot.read(1, 1024))
+                .map(|saved| saved.payload);
+            *into.borrow_mut() = Some(read);
+        }));
+    });
+    journal.publish(b"visible", 1024)?;
+    let read = seen
+        .borrow_mut()
+        .take()
+        .ok_or("the hook ran once the marker was visible")?;
+    assert_eq!(read?, b"visible");
     Ok(())
 }

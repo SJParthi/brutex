@@ -55044,3 +55044,18 @@ still-admitted entry back on drop. A request that finds the slot empty opens
 its own reader, and the last to finish is the one retained. Concurrency stays
 bounded by `detail::run`'s admission. Two concurrent cold requests for one
 identity now both open a reader rather than one being refused.
+
+### D-1913 — A checkpoint payload lock is released before its marker is discoverable — 2026-10-03
+
+locks-3: `search_checkpoint::publish_inner` created the `complete` marker
+while it still held the payload's exclusive flock, and kept it through two
+fsyncs and a full re-read of the payload. Every `Snapshot` reader that found
+the new sequence in that window (the campaign monitor, unpinned
+`/index-stop-ranking.json`, `/expression-search.json`, the qualified observer)
+was refused "checkpoint payload is busy" for bytes already durable and
+verified. Three such refusals in a row stopped the campaign monitor. The
+payload lock is now released by name (D-0693) after the first verification
+and the directory barrier, before the marker exists. The second verification
+runs on the same, now unlocked, descriptor. The namespace's `owner.lock`
+still excludes any second writer, and a reader's own seal check still covers
+the marker.
