@@ -53439,3 +53439,27 @@ the empty page `final_selection`'s fallback was added to remove. Building one
 grid that holds every tier's forced stop, so a tier only re-filters. That is a
 different grid and a different run identity, and it would change every
 recorded answer to save time on spans that have one.
+
+### D-1721 — `elite`'s zero stop ceiling means no ceiling at every door, as `USAGE` says — 2026-10-03
+
+**Finding.** W2-cli8-10 (low bug).
+
+**What was wrong.** `USAGE` and `elite_arm` document `MAX_POINTS = 0` as "no
+ceiling beyond the ladder the bars themselves derive", and `elite_arm` accepts
+it. It then calls `elite_descend_in_points`, whose inner function refused
+`max_points <= 0` with "a ceiling of zero admits no trade". That is false:
+`Rules::admits` reads `max_mae_ppm == 0` as no ceiling, and `Levels::forced`
+forces nothing at zero. So the value was documented, accepted, and then always
+refused.
+
+**The decision.** `elite_descend_in_points_inner` refuses only a negative
+ceiling. Zero goes straight to the descent with `max_mae_ppm = 0`. It loads no
+span for a reference price, because a ceiling of zero needs no conversion.
+`elite_arm`'s parse refusal now names zero as allowed. The api's
+`/sweep/descent` boundary still refuses zero with its own text; that is a
+stricter door, not this defect, and is reported for its own fix.
+
+**Rejected.** Converting zero through `points_to_ppm_at` and refusing a zero
+result. That is the old refusal under a new name. Treating zero as "the derived
+ladder's own maximum" ceiling. That forces a stop the operator did not ask
+for, and `Rules::admits` already gives zero its meaning.

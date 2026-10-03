@@ -207,3 +207,61 @@ fn the_tier_walk_reports_an_inconsistent_ladder_and_propagates_refusals() {
     );
     assert!(matches!(probe_refused, Err(why) if why == "refused: probe"));
 }
+/// The code lines of one function in `lib.rs`, comments dropped: the bodies
+/// keep comments that name old shapes as history.
+fn code_of(head: &str) -> String {
+    let source = include_str!("lib.rs");
+    let body = source
+        .split_once(head)
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    assert!(!body.is_empty(), "{head} is no longer in lib.rs");
+    body.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// W2-cli8-10. `MAX_POINTS = 0` is documented and accepted by `elite_arm` as
+/// "no ceiling beyond the derived ladder", and the inner function refused it.
+#[test]
+fn a_zero_stop_ceiling_is_no_ceiling_and_never_the_points_refusal() {
+    let zero = elite_descend_in_points_inner(
+        "zerodha",
+        "NIFTY",
+        "1min",
+        ((2026, 8), (2026, 8)),
+        0,
+        10,
+        None,
+    );
+    assert!(
+        !zero.contains("stop ceiling must be"),
+        "zero is the documented no-ceiling value: {zero}"
+    );
+    let negative = elite_descend_in_points_inner(
+        "zerodha",
+        "NIFTY",
+        "1min",
+        ((2026, 8), (2026, 8)),
+        -1,
+        10,
+        None,
+    );
+    assert!(
+        negative.starts_with("refused:") && negative.contains("negative"),
+        "a negative ceiling is still refused, by name: {negative}"
+    );
+    let words: Vec<String> = [
+        "elite", "zerodha", "NIFTY", "1min", "2026", "8", "2026", "8", "0", "10",
+    ]
+    .iter()
+    .map(|word| (*word).to_owned())
+    .collect();
+    let mut report = String::new();
+    let _ = dispatch(&words, &mut report);
+    assert!(
+        !report.contains("stop ceiling must be"),
+        "the CLI door agrees with its own USAGE: {report}"
+    );
+}

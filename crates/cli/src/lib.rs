@@ -1314,7 +1314,8 @@ fn elite_arm(
         }
         (_, (Err(_), _)) => refuse(
             out,
-            "MAX_POINTS must be a whole number of index points, 1 or more",
+            "MAX_POINTS must be a whole number of index points: 1 or more for a \
+             ceiling, or 0 for no ceiling beyond the ladder the bars derive",
         ),
         (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
     }
@@ -14536,10 +14537,15 @@ fn elite_descend_in_points_inner(
     attempt: Option<u64>,
 ) -> String {
     let (from, to) = span;
-    if max_points <= 0 {
-        return "refused: the stop ceiling must be a whole number of index \
-                points, 1 or more. A ceiling of zero admits no trade and a \
-                negative one is not a distance.\n"
+    // ZERO IS "NO CEILING BEYOND THE DERIVED LADDER" HERE TOO (W2-cli8-10,
+    // D-1721). This refused `max_points <= 0` and called a zero ceiling one
+    // that "admits no trade", while `USAGE` and `elite_arm` both document zero
+    // as no ceiling and `Rules::admits` reads `max_mae_ppm == 0` exactly that
+    // way. Only a negative ceiling is refused: it is not a distance.
+    if max_points < 0 {
+        return "refused: the stop ceiling is a whole number of index points: \
+                1 or more for a ceiling, or 0 for no ceiling beyond the ladder \
+                the bars derive. A negative one is not a distance.\n"
             .to_owned();
     }
     if top == 0 {
@@ -14555,6 +14561,20 @@ fn elite_descend_in_points_inner(
         Ok(vendor) => vendor,
         Err(why) => return format!("refused: {why}\n"),
     };
+    // NO CEILING NEEDS NO CONVERSION, so no reference and no extra span load:
+    // `max_mae_ppm == 0` is the value `Rules::admits` and `Levels::forced`
+    // both read as "the derived stop ladder stands alone" (D-1721).
+    if max_points == 0 {
+        return elite_descend_with_attempt(
+            vendor_word,
+            underlying,
+            rung,
+            (from, to),
+            0,
+            top,
+            attempt,
+        );
+    }
     // THE REFERENCE IS READ FROM THE BARS THIS RUN WILL SWEEP, not from a
     // constant and not from a different rung. A span that refuses here refuses
     // before any threshold is derived, which is the honest order: a floor
