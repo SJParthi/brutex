@@ -288,3 +288,89 @@ fn argv_and_the_knob_share_one_support_domain() {
     assert_eq!(parse_support_ppm("999999"), Ok(999_999));
     assert_eq!(parse_support_ppm("1"), Ok(1));
 }
+
+fn top_row(mean_milli_paisa: i64, t_milli: i64) -> crate::frontier::Row {
+    crate::frontier::Row {
+        direction: Direction::Long,
+        rules: Rules::elite(0, 25),
+        identity: [7; 32],
+        rank: 1,
+        mask_words: [1, 0, 0, 0, 0, 0],
+        hits: 10,
+        n: 10,
+        mean_milli_paisa,
+        t_milli,
+        payoff_bp: 100,
+        wins: 5,
+        trades: 10,
+        cell_wins: 5,
+        pessimistic: 0,
+        worst_trade: 0,
+        max_drawdown: 0,
+        min_win: 0,
+        gross_win: 0,
+        gross_loss: 0,
+    }
+}
+
+fn top_text(mean_milli_paisa: i64, t_milli: i64) -> String {
+    let mut record = crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES]);
+    record.underlying = crate::results::field("NSE-NIFTY");
+    record.feed = crate::results::field("zerodha");
+    record.timeframe = crate::results::field("5min");
+    render_top_record(&record, &[top_row(mean_milli_paisa, t_milli)], None, "")
+}
+
+/// GAP16-25. The top report reduced thousandths by truncating toward zero;
+/// it rounds half away from zero now, and keeps the sign it rounds to.
+#[test]
+fn the_top_report_rounds_its_thousandths_half_away_from_zero() {
+    let text = top_text(47_600, 2_999);
+    assert!(text.contains("\u{20b9}0.48"), "47.6 paisa is 48: {text}");
+    assert!(text.contains("3.00"), "t 2.999 is 3.00: {text}");
+    let text = top_text(-600, -2_995);
+    assert!(text.contains("-\u{20b9}0.01"), "-0.6 paisa is -1: {text}");
+    assert!(text.contains("-3.00"), "t -2.995 is -3.00: {text}");
+}
+
+/// GAP16-25. The rounding helper at its edges: exact halves both ways, zero,
+/// the extremes of `i64`, a divisor of one, and a divisor that is a defect.
+#[test]
+fn half_away_from_zero_is_symmetric_and_never_overflows() {
+    for (n, d, want) in [
+        (0, 1_000, 0),
+        (499, 1_000, 0),
+        (500, 1_000, 1),
+        (501, 1_000, 1),
+        (-499, 1_000, 0),
+        (-500, 1_000, -1),
+        (-501, 1_000, -1),
+        (1_500, 1_000, 2),
+        (-1_500, 1_000, -2),
+        (2_000, 1_000, 2),
+        (-2_000, 1_000, -2),
+        (47_600, 1_000, 48),
+        (2_999, 10, 300),
+        (-2_995, 10, -300),
+        (-2_994, 10, -299),
+        (7, 1, 7),
+        (-7, 1, -7),
+        (i64::MAX, 1_000, 9_223_372_036_854_776),
+        (i64::MIN, 1_000, -9_223_372_036_854_776),
+        (i64::MAX, 10, 922_337_203_685_477_581),
+        (i64::MIN, 10, -922_337_203_685_477_581),
+        (i64::MAX, i64::MAX, 1),
+        (i64::MIN, i64::MAX, -1),
+        (5, 0, 0),
+        (5, -10, 0),
+    ] {
+        assert_eq!(div_round_half_away(n, d), want, "{n} / {d}");
+    }
+    for n in -2_000..=2_000_i64 {
+        assert_eq!(
+            div_round_half_away(-n, 1_000),
+            -div_round_half_away(n, 1_000),
+            "symmetric in sign at {n}"
+        );
+    }
+}

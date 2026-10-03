@@ -7343,6 +7343,30 @@ fn rupees(paisa: i64) -> String {
     )
 }
 
+/// `n / d` rounded half away from zero, in integers (D-1723).
+///
+/// The one reduction the top report uses for its stored thousandths. Integer
+/// `/` truncates toward zero, which biases every reduced figure toward zero and
+/// erases the sign of a value in `(-d, 0)` that rounds to `-1`. Half away from
+/// zero is symmetric in sign, so `-x` always prints as the negation of `x`.
+///
+/// Never overflows: the remainder is smaller than `d` in magnitude, and the
+/// quotient moves by one only away from zero, which `n / d` for `d >= 2` can
+/// always absorb. A `d` of zero or below is a caller defect: it returns zero
+/// rather than dividing by it (every caller passes a positive constant).
+const fn div_round_half_away(n: i64, d: i64) -> i64 {
+    if d <= 0 {
+        return 0;
+    }
+    let quotient = n / d;
+    let remainder = n % d;
+    if remainder.unsigned_abs().saturating_mul(2) >= d.unsigned_abs() {
+        if n < 0 { quotient - 1 } else { quotient + 1 }
+    } else {
+        quotient
+    }
+}
+
 /// Parts per million as a percentage, to two decimals, in integers.
 ///
 /// The excursion columns are ppm because a rung must mean the same distance on
@@ -7966,9 +7990,11 @@ pub fn render_top_record(
                 row.n.to_string(),
                 // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
                 // column in this binary. It is stored in thousandths of a paisa,
-                // so it comes back to whole paisa first.
-                rupees(row.mean_milli_paisa / 1_000),
-                hundredths_of(row.t_milli / 10),
+                // so it comes back to whole paisa first -- ROUNDED half away
+                // from zero, not truncated (GAP16-25, D-1723): `/` biased every
+                // figure toward zero, printed 47.6 paisa as 47 and -0.6 as 0.
+                rupees(div_round_half_away(row.mean_milli_paisa, 1_000)),
+                hundredths_of(div_round_half_away(row.t_milli, 10)),
                 if row.payoff_bp == i64::MAX {
                     "inf".to_owned()
                 } else {

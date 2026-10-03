@@ -53486,3 +53486,27 @@ on 2,999 of 3,000 bars. The test still asserts a recorded result.
 **Rejected.** Widening the knob to accept 1,000,000. That accepts a value the
 search can never answer, which is the hour-long empty report the argv
 refusal's own doc calls waste.
+
+### D-1723 — `cli top` rounds its stored thousandths half away from zero — 2026-10-03
+
+**Finding.** GAP16-25 (low bug).
+
+**What was wrong.** `render_top_record` reduced `mean_milli_paisa` to paisa
+with `/ 1_000` and `t_milli` to hundredths with `/ 10`. Integer division
+truncates toward zero. So 47.6 paisa printed as `₹0.47`, a t of 2.999 as
+`2.99`, and a mean of -0.6 paisa as `₹0.00`, which loses its sign. The
+browser's figures round (`toFixed`), so the two surfaces disagreed on the same
+stored row.
+
+**The decision.** One integer helper, `div_round_half_away(n, d)`, rounds
+half away from zero for both reductions. That is symmetric in sign:
+`-x` always prints as the negation of `x`, and -0.6 paisa prints `-₹0.01`. It
+cannot overflow. The remainder is smaller than the divisor, and the quotient
+moves by one only away from zero, which `i64::MIN / d` and `i64::MAX / d`
+absorb for every `d >= 2`. A divisor of zero or below returns zero instead of
+panicking; both callers pass constants.
+
+**Rejected.** §7's half-up. It is the tick-grid rule for prices at the write
+boundary, and it rounds -0.5 toward zero, so a reduced statistic would not be
+symmetric in sign. Printing three decimals of the stored thousandths. That
+changes the column widths and the money format every other rupee column uses.
