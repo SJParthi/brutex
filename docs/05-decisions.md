@@ -53429,3 +53429,40 @@ skipped. Valid bars are byte-identical. No run identity term moves.
 
 **Rejected.** Making every shape refuse: D-0323's measured `-125` on ADANIENT
 showed that refusal costs an instrument every intraday rung it has.
+
+### D-1491 — The rolling-options reader refuses an unreadable timestamp or volume instead of filing a zero — 2026-10-03
+
+**What was observed (c4a-3, W1-pull3-7).** `pull::rolling::read` read every
+timestamp and volume cell through `number`, which answered `0` for a `null`,
+text or missing cell and passed a negative through. A `null` stamp filed a bar
+at the epoch, and `saturating_mul(1_000_000)` turned a stamp past the
+microsecond range into `i64::MAX`. Probe: `timestamp:[null,"x",9999999999999]`,
+`volume:["abc",-50,null]` read as `(0,0),(0,-50),(i64::MAX,0)`. D-0952 fixed
+open interest and recorded that these two still went through `number`.
+
+**The decision.** `number` is removed. A timestamp is read by `stamp`: an
+integer or a whole-number decimal of seconds, refused when `null`, text,
+fractional, `i64::MIN`, or when its microseconds overflow `i64`
+(`RollingError::Unstampable`). A negative stamp is still accepted, matching
+`http::one_number` and `session::IstMoment`. A volume is read by `count`,
+the open-interest reader: a non-negative whole number, refused otherwise,
+`null` included. The columnar intraday path for the same vendor already
+refuses a null volume, and no vendor document says a null volume here is zero.
+
+**What it changes.** Only malformed cells: a body that used to land with a
+fabricated zero, epoch stamp or saturated stamp is now refused by name. Valid
+bodies decode to the same bars.
+
+### D-1492 — The rolling reader refuses a negative price and a non-zero price that snaps to zero — 2026-10-03
+
+**What was observed (GAP16-23).** `pull::rolling`'s `paisa` converted rupee
+text half-up with no sign check and no zero-snap check, so `-5` was stored as
+a negative price and `0.0001` or `-0.001` as a real zero. `http::one_price`
+has refused both since D-0143 and its zero-snap guard.
+
+**The decision.** The same two guards, on the text, for every rolling price
+field (OHLC, spot, strike), through `RollingError::NotAPrice`. `0`, `0.00` and
+`-0.0` stay a real zero.
+
+**What it changes.** Only cells that are negative or sub-half-paisa non-zero,
+which now refuse instead of landing. No run identity term moves.
