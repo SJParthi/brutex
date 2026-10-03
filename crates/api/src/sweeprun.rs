@@ -1261,12 +1261,28 @@ impl TaskFinisher {
         }
     }
 
+    /// Runs one engine task's work and, when the process was asked to stop
+    /// while it ran, answers with the cancellation instead of its output.
+    ///
+    /// audit-20261003 hunt-api-2, D-1551. The work itself stops at its next
+    /// structural boundary (`cli::cancel`), and a cancelled `cli` answer
+    /// already names itself. This covers the rest: work whose last boundary
+    /// passed before the stop, or a command whose own refusal hid the
+    /// cancelled one. Either way its output is not presented as a complete
+    /// result, and its slot and invocation audit say CANCELLED.
+    fn conduct(&self, work: impl FnOnce() -> Progress) -> Progress {
+        let mut done = self.enter(work);
+        cancelled_at_stop(&mut done);
+        done
+    }
+
     /// Installs a normal result and prevents `Drop` from painting over it.
     fn finish(mut self, mut done: Progress) {
         use cli::operation_audit::Phase;
         let phase = match completion_audit(&done).outcome {
             "report" => Phase::Completed,
             "refused" => Phase::Refused,
+            "cancelled" => Phase::Cancelled,
             _ => Phase::Failed,
         };
         if let Some(audit) = self.audit.as_mut()
@@ -1321,6 +1337,28 @@ impl Drop for TaskFinisher {
     }
 }
 
+/// Replaces an engine answer with the named cancellation once a stop was asked.
+///
+/// Leaves an answer that already names [`cli::cancel::CANCELLED`] as it is.
+fn cancelled_at_stop(done: &mut Progress) {
+    if !cli::cancel::requested()
+        || done
+            .refusal
+            .as_deref()
+            .is_some_and(|why| why.contains(cli::cancel::CANCELLED))
+    {
+        return;
+    }
+    done.report = None;
+    done.refusal = Some(
+        format!(
+            "{REFUSED}: {} Stopped at: the end of the task, before its answer was recorded.",
+            cli::cancel::CANCELLED
+        )
+        .into(),
+    );
+}
+
 /// Files `cli`'s answer under the field that describes it, and ends the run.
 ///
 /// # The bug this exists to make impossible
@@ -1371,6 +1409,14 @@ fn completion_audit(progress: &Progress) -> CompletionAudit<'_> {
             level: telemetry::Level::Info,
             outcome: "report",
             why: "",
+        },
+        // A STOP IS NOT A REFUSAL OF THE REQUEST: it is named as its own
+        // outcome so the log and the invocation audit say the run was
+        // cancelled, not that it was judged and refused (hunt-api-2, D-1551).
+        (None, Some(why)) if why.contains(cli::cancel::CANCELLED) => CompletionAudit {
+            level: telemetry::Level::Error,
+            outcome: "cancelled",
+            why,
         },
         (None, Some(why)) => CompletionAudit {
             level: telemetry::Level::Warn,
@@ -1947,7 +1993,7 @@ pub(crate) fn run_with(
     // begins. A guard constructed inside the closure would miss that window.
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
-        let finished = guard.enter(|| conduct(&asked, started, attempt));
+        let finished = guard.conduct(|| conduct(&asked, started, attempt));
         let elapsed = now_micros().saturating_sub(started);
         let _outcome = emit_completion(&finished, "sweep", elapsed.max(0).unsigned_abs());
         let mut done = finished;
@@ -2082,7 +2128,7 @@ pub(crate) fn descend_with(
 
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
-        let finished = guard.enter(|| conduct_descent(&asked, started, attempt));
+        let finished = guard.conduct(|| conduct_descent(&asked, started, attempt));
         let elapsed = now_micros().saturating_sub(started);
         let _outcome = emit_completion(&finished, "descent", elapsed.max(0).unsigned_abs());
         let mut done = finished;
@@ -3166,7 +3212,7 @@ fn command_with_configuration(
     let store_root = site.store_root.clone();
     let launch_site = std::sync::Arc::clone(site);
     tokio::task::spawn_blocking(move || {
-        let finished = guard.enter(|| match (launch, &asked) {
+        let finished = guard.conduct(|| match (launch, &asked) {
             (
                 Some(PreparedCommand::Boolean(admission)),
                 Command::BooleanQualifiedSearch { request },
@@ -3447,7 +3493,8 @@ mod tests {
             .expect("the task started");
         assert!(super::engine_tasks_running() >= 1);
         let began = std::time::Instant::now();
-        let abandoned = crate::server::end_runtime(runtime, std::time::Duration::from_millis(300));
+        let abandoned =
+            crate::server::wait_then_end(runtime, std::time::Duration::from_millis(300));
         let took = began.elapsed();
         assert!(abandoned >= 1, "the running sweep was not named");
         assert!(
@@ -3456,6 +3503,117 @@ mod tests {
         );
         assert!(took >= std::time::Duration::from_millis(250), "{took:?}");
         assert!(crate::server::SHUTDOWN_GRACE <= std::time::Duration::from_secs(30));
+    }
+
+    /// audit-20261003 hunt-api-2, D-1551: SHUTDOWN DURING A SWEEP CANCELS IT,
+    /// PROMPTLY AND BY NAME. In a child process, because the stop is
+    /// process-wide and never withdrawn. A finisher-guarded task walks
+    /// generated months through the real `cli::cancel` boundary and would run
+    /// for a minute; `end_runtime` stops it within two seconds with nothing
+    /// abandoned, the slot answers CANCELLED naming the month it stopped at,
+    /// no report survives, and the invocation audit is `Cancelled`. A task that
+    /// passed its last boundary before the stop is answered CANCELLED too,
+    /// never as a complete result.
+    #[test]
+    fn shutdown_during_a_sweep_cancels_it_promptly_and_names_the_cancellation() {
+        const CHILD: &str = "BRUTEX_TEST_SHUTDOWN_CANCELS_SWEEP";
+        if std::env::var_os(CHILD).is_none() {
+            assert!(!cli::cancel::requested(), "the stop leaked into the parent");
+            let result = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "sweeprun::tests::shutdown_during_a_sweep_cancels_it_promptly_and_names_the_cancellation",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "child")
+                .output()
+                .expect("child test ran");
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(
+                result.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            return;
+        }
+        let (site, id, guard) = durable_finisher("shutdown-cancels-sweep");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let _sweep = runtime.spawn_blocking(move || {
+            let done = guard.conduct(|| {
+                let mut progress =
+                    Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, id);
+                let _told = started.send(());
+                let mut month = 0_u32;
+                let text = loop {
+                    month += 1;
+                    if let Err(why) = cli::cancel::check(|| format!("generated month {month}")) {
+                        break format!("refused: {why}");
+                    }
+                    if month > 3_000 {
+                        break "a complete report the stop never reached".to_owned();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                settle(&mut progress, text, now_micros());
+                progress
+            });
+            guard.finish(done);
+        });
+        running
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the sweep started");
+        let began = std::time::Instant::now();
+        let abandoned = crate::server::end_runtime(runtime, crate::server::SHUTDOWN_GRACE);
+        let took = began.elapsed();
+        assert_eq!(abandoned, 0, "the sweep was abandoned, not cancelled");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "cancellation took {took:?}"
+        );
+        assert!(cli::cancel::observed() >= 1);
+        let slot = site.sweep.lock().expect("slot").clone().expect("finished");
+        assert!(slot.report.is_none(), "a cancelled sweep kept a report");
+        let why = slot.refusal.expect("the cancellation is the answer");
+        assert!(why.starts_with("refused: "), "{why}");
+        assert!(why.contains(cli::cancel::CANCELLED), "{why}");
+        assert!(why.contains("Stopped at: generated month"), "{why}");
+        assert_eq!(completion_audit(&slot_of(&site)).outcome, "cancelled");
+        let saved = cli::operation_audit::read(&site.store_root, id)
+            .expect("read exact")
+            .expect("saved");
+        assert_eq!(saved.phase, cli::operation_audit::Phase::Cancelled);
+
+        // Work whose last boundary passed before the stop: its finished report
+        // is still not presented as complete.
+        let (late, late_id, late_guard) = durable_finisher("shutdown-cancels-late");
+        let done = late_guard.conduct(|| {
+            let mut progress =
+                Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, late_id);
+            settle(&mut progress, "a finished table".to_owned(), now_micros());
+            progress
+        });
+        assert!(done.report.is_none());
+        let why = done.refusal.clone().expect("cancelled");
+        assert!(why.contains(cli::cancel::CANCELLED), "{why}");
+        assert!(why.contains("before its answer was recorded"), "{why}");
+        late_guard.finish(done);
+        let saved = cli::operation_audit::read(&late.store_root, late_id)
+            .expect("read exact")
+            .expect("saved");
+        assert_eq!(saved.phase, cli::operation_audit::Phase::Cancelled);
+        let _ = std::fs::remove_dir_all(&site.store_root);
+        let _ = std::fs::remove_dir_all(&late.store_root);
+    }
+
+    fn slot_of(site: &crate::server::Loaded) -> Progress {
+        site.sweep.lock().expect("slot").clone().expect("finished")
     }
 
     /// **Admission I/O runs with the slot UNLOCKED, and admissions still
