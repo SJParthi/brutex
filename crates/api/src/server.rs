@@ -2410,11 +2410,26 @@ async fn bars_json(
     // `bars_array` filter, which is exactly the previous behaviour. A window
     // genuinely past the last bar costs one wasted pass and still answers `[]`
     // -- the same answer, arrived at by reading rather than by assuming.
-    let begins = from_micros
+    //
+    // EXCEPT IN A SEALED FILE, WHERE THE LANDING IS PROOF (W1-api5-8, D-1831).
+    // A bisection that returns `n_valid` probed record `n_valid - 1` last, and
+    // in a file born with `FLAG_CHECKSUMS` that probe verified its whole block
+    // against the sidecar. A zero-filled extent is the tail of an interrupted
+    // append, so record `n_valid - 1` lies in it and fails that check: the
+    // bisection refuses, `.ok()` drops it, and the month is read as before. A
+    // landing that survived the check therefore stands on a real last bar
+    // stamped before `from`, and the writer kept every sealed bar strictly
+    // increasing, so no bar of this month is in the window. The answer is `[]`
+    // after the bisection's `ceil(log2(n_valid + 1))` reads instead of
+    // `n_valid`. A file born without the flag has nothing that could detect the
+    // zeros, so it keeps the full read.
+    let landed = from_micros
         .and_then(|at| file.first_at_or_after(at).ok())
-        .and_then(|index| usize::try_from(index).ok())
-        .filter(|&index| index < held)
-        .unwrap_or(0);
+        .and_then(|index| usize::try_from(index).ok());
+    if landed == Some(held) && file.header().checksums_present() {
+        return (axum::http::StatusCode::OK, json(), "[]".to_owned());
+    }
+    let begins = landed.filter(|&index| index < held).unwrap_or(0);
     // THE END IS BISECTED TOO, and the first version said it did not need to be.
     //
     // That commit argued "those rows have to be read to be returned, so a second
@@ -4731,14 +4746,31 @@ async fn verify_json(
             no_such_feed_json(&asked),
         );
     };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: a scrub opens one bar file per held
+    // entry, and running it inline held a runtime worker for the whole walk.
+    // W1-api6-0, D-1832.
+    match crate::detail::run_store_read(move || verify_reading(&site, feed, &asked)).await {
+        Ok((code, body)) => (code, headers, body),
+        Err(why) => {
+            let (code, body) = crate::detail::admission_refused(
+                "scrub",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (code, headers, body)
+        }
+    }
+}
+
+/// [`verify_json`]'s census read, scrub and render, run on the store-read pool.
+fn verify_reading(site: &Site, feed: Vendor, asked: &str) -> (axum::http::StatusCode, String) {
     // FRESH, NEVER THE STARTUP SNAPSHOT. A scrub answering from a census read
     // at boot would verify a store that has since been written to.
-    let (censuses, _entries) = census_now(&site);
+    let (censuses, _entries) = census_now(site);
     let Some(census) = censuses.iter().find(|c| c.vendor == feed) else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            headers,
-            no_such_feed_json(&asked),
+            no_such_feed_json(asked),
         );
     };
 
@@ -4778,7 +4810,7 @@ async fn verify_json(
             .as_ref()
             .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
     );
-    (code, headers, body)
+    (code, body)
 }
 
 /// One census body's validator, for conditional requests.
@@ -25162,6 +25194,151 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{junk}");
         assert!(junk.contains("from"), "named date refusal: {junk}");
         assert_eq!(junk.matches("\"t\":").count(), 0, "no bar response: {junk}");
+    }
+
+    /// **A WINDOW PAST A SEALED MONTH'S LAST BAR IS ANSWERED BY THE BISECTION,
+    /// AND AN UNSEALED MONTH STILL READS ITSELF** (W1-api5-8, D-1831).
+    ///
+    /// Three months, one route. A sealed month of 200 bars has a byte in block 0
+    /// flipped: the bisection for a later day probes only blocks 1 and 2, so the
+    /// answer is a clean `200 []`. Reading the whole month, as the route did,
+    /// would have met the flipped block and answered `206` with a fault — so the
+    /// clean answer is the observation that the month was NOT read. The same
+    /// damage under a window that covers the bars still answers `206`, which
+    /// proves the damage is real. A sealed month whose header names a
+    /// zero-filled tail refuses its tail probe and falls back to reading. An
+    /// UNSEALED month with that tail lands past the end through the zeros and
+    /// must still read the month and return its two real bars.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "three stores, each a different landing; one route over all three \
+                  is the test, and splitting it would repeat the fixture thrice"
+    )]
+    async fn bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection() {
+        use std::os::unix::fs::FileExt as _;
+        let month = store::path::YearMonth::new(2024, 1).expect("a legal month");
+        // 2024-01-01 12:00 IST plus `m` minutes; every bar is on the first day.
+        let stamp = |m: i64| ((19_723 * 86_400 - 19_800 + 6 * 3_600) + m * 60) * 1_000_000;
+        let bar = |m: i64| store::format::Bar {
+            ts_micros: stamp(m),
+            open: 100,
+            high: 110,
+            low: 90,
+            close: 105,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: store::path::Timeframe::MINUTE_1,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path");
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let layout = store::layout::Layout::CURRENT;
+        let write = |root: &std::path::Path, count: i64| {
+            let mut file =
+                store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
+            let rows: Vec<store::format::Bar> = (0..count).map(bar).collect();
+            file.append(&rows).expect("legal bars");
+            let header = file.header();
+            drop(file);
+            (path.to_path_buf(root), header)
+        };
+        // Names `n_valid` records in the header and zero-fills the extent past
+        // the written ones, as an append whose records never reached the disk
+        // leaves it; `flags` decides whether the month claims a sidecar.
+        let zero_tail = |bin: &std::path::Path, header: store::header::Header, n: u64, flags| {
+            let raw = std::fs::OpenOptions::new()
+                .write(true)
+                .open(bin)
+                .expect("the month opens for the fault");
+            let from = layout.offset_of(header.n_valid).expect("an offset");
+            let to = layout.offset_of(n).expect("an offset");
+            let zeros = vec![0u8; usize::try_from(to - from).expect("small")];
+            raw.write_all_at(&zeros, from).expect("the zero extent");
+            let mut grown = header;
+            grown.n_valid = n;
+            grown.flags = flags;
+            grown.generation = header.generation + 1;
+            let commit = grown.commit().expect("a header image");
+            raw.write_all_at(&commit.bytes, commit.offset)
+                .expect("the header names the zeros");
+        };
+        let ask = |root: &std::path::Path, tag: &str, window: &str| {
+            let site = std::sync::Arc::new(Site::serving(&masters(tag, None, None), root));
+            let uri: axum::http::Uri = format!(
+                "/bars.json?feed=dhan&exchange=NSE&segment=INDEX&symbol=NIFTY\
+                 &timeframe=1min&month=2024-01{window}"
+            )
+            .parse()
+            .expect("a uri");
+            async move { bars_json(axum::extract::State(site), uri).await }
+        };
+
+        // SEALED, 200 BARS, BLOCK 0 DAMAGED.
+        let root = store_root("barspastsealed");
+        let (bin, header) = write(&root, 200);
+        assert!(header.checksums_present(), "the premise: a sealed month");
+        let raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&bin)
+            .expect("the month opens for the fault");
+        let in_block_zero = layout.offset_of(10).expect("an offset") + 40;
+        raw.write_all_at(&[0x5a], in_block_zero)
+            .expect("one flipped byte");
+        drop(raw);
+        let (code, _, body) = ask(&root, "barspastsealed", "&from=2024-01-05").await;
+        assert_eq!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "past the last bar of a sealed month: the bisection is the answer"
+        );
+        let (code, _, body) = ask(&root, "barspastsealed", "&from=2024-01-01").await;
+        assert_eq!(
+            code,
+            axum::http::StatusCode::PARTIAL_CONTENT,
+            "the damage is real, and a window over it reads and names it: {body}"
+        );
+
+        // SEALED, A ZERO TAIL: the tail probe refuses and the month is read.
+        let root = store_root("barspastsealedzero");
+        let (bin, header) = write(&root, 3);
+        zero_tail(&bin, header, 10, header.flags);
+        let (code, _, body) = ask(&root, "barspastsealedzero", "&from=2024-01-01").await;
+        assert_ne!(
+            (code, body.as_str()),
+            (axum::http::StatusCode::OK, "[]"),
+            "a sealed zero tail never reads as an empty window"
+        );
+
+        // UNSEALED, A ZERO TAIL: nothing can detect the zeros, so it reads.
+        let root = store_root("barspastunsealed");
+        let (bin, header) = write(&root, 3);
+        zero_tail(&bin, header, 10, 0);
+        let (code, _, body) = ask(
+            &root,
+            "barspastunsealed",
+            "&from=2024-01-01",
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body.matches("\"t\":").count(),
+            3,
+            "the bisection walked up through the zeros to n_valid; an unsealed \
+             month must still be read, and its three real bars returned: {body}"
+        );
     }
 
     /// **A COMPLETE SESSION SCORES ZERO LOSSES, AND ONE MISSING MINUTE IS

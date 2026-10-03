@@ -884,6 +884,21 @@ fn pinned(root: &Path, summary: &Summary, max_bytes: u64) -> Result<PathBuf, Str
     Ok(dir)
 }
 
+/// Proves `summary` still names the catalog on disk, without re-reading it.
+///
+/// For a `Summary` that [`read_model`] returned this is [`pinned`]'s warm
+/// check: one shared-lock open, a generation comparison and the bounded
+/// start-descriptor check, O(1) in the catalog. It is the check a page already
+/// trusts between its own reads, offered to a caller that holds a `Summary`
+/// across requests or re-checks one at the end of a page. D-1833 (W1-api2-2).
+///
+/// # Errors
+/// Refuses a catalog whose generation moved, a start descriptor that no longer
+/// matches, or a catalog that is busy or gone.
+pub fn require_unchanged(root: &Path, summary: &Summary, max_bytes: u64) -> Result<(), String> {
+    pinned(root, summary, max_bytes).map(|_| ())
+}
+
 /// Reads the actual policy and pricing cap for a visited tier.
 ///
 /// # Errors

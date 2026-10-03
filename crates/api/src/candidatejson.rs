@@ -163,7 +163,58 @@ fn refusal(status: axum::http::StatusCode, why: &str) -> Response {
         json!({"schema_version":1,"status":"refused","refusal":why,"rows":[]}).to_string(),
     )
 }
-fn render(root: &Path, asked: &Asked) -> Result<String, String> {
+/// The one catalog summary held across requests, and what it was read for.
+struct HeldSummary {
+    model: Model,
+    root: PathBuf,
+    identity: [u8; 32],
+    attempt: u64,
+    summary: std::sync::Arc<Summary>,
+}
+
+/// The process's held summary. One slot, like [`trade_page`]'s reader.
+static SUMMARY: Mutex<Option<HeldSummary>> = Mutex::new(None);
+
+#[cfg(test)]
+thread_local! {
+    /// Cold catalog reads [`summary_for`] made on this thread.
+    static COLD_SUMMARIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The sealed catalog's summary for `asked`, read cold only when the held one
+/// is for another capture or no longer names the file on disk.
+///
+/// # Cost, and what invalidates the held summary
+///
+/// Warm: [`candidate_trades::require_unchanged`], one shared-lock open, a
+/// generation comparison and the start-descriptor check, O(1) in the catalog.
+/// Cold: [`candidate_trades::read_model`], which reads and hashes the whole
+/// catalog, O(catalog bytes) bounded by `MAX_SCAN_BYTES`. The held summary is
+/// dropped and re-read when the key (model, root, identity, attempt) differs,
+/// or when the generation check refuses, which any rewrite, replacement or
+/// truncation of `catalog.bin` causes (D-0991). An absent catalog is never
+/// held. One slot: two clients alternating captures make every request cold.
+/// D-1833 (W1-api2-2).
+fn summary_for(
+    slot: &Mutex<Option<HeldSummary>>,
+    root: &Path,
+    asked: &Asked,
+) -> Result<Option<std::sync::Arc<Summary>>, String> {
+    let mut held = slot
+        .lock()
+        .map_err(|_| "candidate summary cache poisoned")?;
+    if let Some(found) = held.as_ref().filter(|found| {
+        found.model == asked.model
+            && found.root == root
+            && found.identity == asked.identity
+            && found.attempt == asked.attempt
+    }) && candidate_trades::require_unchanged(root, &found.summary, crate::detail::MAX_SCAN_BYTES)
+        .is_ok()
+    {
+        return Ok(Some(std::sync::Arc::clone(&found.summary)));
+    }
+    #[cfg(test)]
+    COLD_SUMMARIES.with(|count| count.set(count.get() + 1));
     let Some(summary) = candidate_trades::read_model(
         root,
         asked.identity,
@@ -172,6 +223,29 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         crate::detail::MAX_SCAN_BYTES,
     )?
     else {
+        return Ok(None);
+    };
+    let summary = std::sync::Arc::new(summary);
+    *held = Some(HeldSummary {
+        model: asked.model,
+        root: root.to_path_buf(),
+        identity: asked.identity,
+        attempt: asked.attempt,
+        summary: std::sync::Arc::clone(&summary),
+    });
+    Ok(Some(summary))
+}
+
+fn render(root: &Path, asked: &Asked) -> Result<String, String> {
+    render_with(&SUMMARY, root, asked)
+}
+
+fn render_with(
+    slot: &Mutex<Option<HeldSummary>>,
+    root: &Path,
+    asked: &Asked,
+) -> Result<String, String> {
+    let Some(summary) = summary_for(slot, root, asked)? else {
         if asked.digest.is_some() {
             return Err(
                 "the pinned candidate catalog is absent; no replacement page exposed".to_owned(),
@@ -238,17 +312,13 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         _ => return Err("candidate key is incomplete".to_owned()),
     };
     validate_window(total, asked.offset, rows.len())?;
-    let observed = candidate_trades::read_model(
-        root,
-        asked.identity,
-        asked.attempt,
-        asked.model,
-        crate::detail::MAX_SCAN_BYTES,
-    )?
-    .ok_or("candidate catalog disappeared during read")?;
-    if observed.digest != summary.digest {
-        return Err("candidate catalog changed during read; no mixed page exposed".to_owned());
-    }
+    // THE CLOSING CHECK IS THE GENERATION, NOT A SECOND WHOLE READ. This re-read
+    // and re-hashed the whole catalog to compare digests; the generation check
+    // is the one `tier` and `candidates_page` already trust between their own
+    // reads, and any rewrite of `catalog.bin` moves it. D-1833 (W1-api2-2).
+    candidate_trades::require_unchanged(root, &summary, crate::detail::MAX_SCAN_BYTES).map_err(
+        |why| format!("candidate catalog changed during read; no mixed page exposed: {why}"),
+    )?;
     let lifecycle = cli::sweep_evidence::read_attempt(
         root,
         asked.identity,
@@ -770,44 +840,61 @@ mod tests {
         &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
     }
 
-    /// **A candidate page reads the whole sealed catalog five times, and
-    /// that is stated with the count the source pays.** W1-api2-2, D-1444.
+    /// **A candidate page reads the whole sealed catalog at most once, and only
+    /// when the held summary is cold; that is stated with the calls the source
+    /// makes.** W1-api2-2, D-1444, D-1833.
     ///
-    /// Two reads are `render`'s own; `tier` pays one through `pinned`, and
-    /// `candidates_page` pays two (entry and exit). Each is counted off the
-    /// source, so a change to any of them fails here and the bullet is
-    /// revisited rather than left stating an old count.
+    /// `render` reaches the catalog through `summary_for` alone, whose only
+    /// whole read is its cold `read_model`; the closing check is the
+    /// generation (`require_unchanged`), and `tier` and `candidates_page` go
+    /// through `pinned`, which is warm for every summary `read_model` returns.
     #[test]
     fn a_candidate_pages_catalog_reads_are_counted_and_stated() {
         let api = include_str!("candidatejson.rs");
         let cli = include_str!("../../cli/src/candidate_trades.rs");
+        assert_eq!(body(api, "render_with").matches("read_model(").count(), 0);
         assert_eq!(
-            body(api, "render")
-                .matches("candidate_trades::read_model(")
+            body(api, "render_with")
+                .matches("candidate_trades::require_unchanged(")
                 .count(),
-            2
+            1
         );
         assert_eq!(
-            body(api, "render")
+            body(api, "render_with")
+                .matches("summary_for(slot, root, asked)")
+                .count(),
+            1
+        );
+        assert_eq!(
+            body(api, "summary_for")
+                .matches("candidate_trades::read_model(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            body(api, "render_with")
                 .matches("candidate_trades::tier(")
                 .count(),
             1
         );
         assert_eq!(
-            body(api, "render")
+            body(api, "render_with")
                 .matches("candidate_trades::candidates_page(")
                 .count(),
             1
         );
         assert_eq!(body(cli, "pinned").matches("read_model(").count(), 1);
+        assert!(body(cli, "read_model").contains("let _first = summary.catalog_generation.set(generation);"));
+        assert_eq!(body(cli, "require_unchanged").matches("pinned(").count(), 1);
         assert_eq!(body(cli, "tier").matches("pinned(").count(), 1);
         assert_eq!(body(cli, "candidates_page").matches("pinned(").count(), 2);
         let bullet = crate::booleanjson::tests::d0951_bullet("W1-api2-2");
         for word in [
             "candidatejson::render",
             "candidate_trades::read_model",
-            "five times",
-            "`pinned`",
+            "Since D-1833",
+            "`summary_for`",
+            "`require_unchanged`",
             "catalog.bin",
             "32 bytes per candidate side plus 40 per tier",
             "MAX_SCAN_BYTES",
@@ -815,6 +902,73 @@ mod tests {
         ] {
             assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
         }
+    }
+
+    /// **The held summary serves a later page without a cold read, and any
+    /// other capture or a rewritten catalog makes the next one cold.**
+    /// D-1833 (W1-api2-2). Counted on this thread against a slot of its own,
+    /// so no other test's requests can evict it.
+    #[test]
+    fn a_held_summary_serves_again_warm_and_is_dropped_by_a_key_or_a_rewrite()
+    -> Result<(), String> {
+        let root = crate::scratch::path("candidate-api-held-summary");
+        let _ = std::fs::remove_dir_all(&root);
+        let first_id = [0xc1_u8; 32];
+        let query = and_capture(&root, first_id, true)?;
+        let other = and_capture(&root, [0xc2; 32], true)?;
+        let slot = Mutex::new(None);
+        let cold = || COLD_SUMMARIES.with(std::cell::Cell::get);
+        let start = cold();
+        let page = |query: &str| render_with(&slot, &root, &Asked::parse(query)?);
+        let first = page(&query)?;
+        assert_eq!(cold() - start, 1, "the first request reads the catalog");
+        assert_eq!(page(&query)?, first, "the same page, warm");
+        assert_eq!(cold() - start, 1, "and warm means no second read");
+        let digest = serde_json::from_str::<Value>(&first)
+            .map_err(|why| why.to_string())?
+            .get("catalog_digest")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or("premise: the catalog digest")?;
+        let trades = page(&format!("{query}&digest={digest}&rank=1&direction=long"))?;
+        assert!(trades.contains(r#""kind":"trades""#), "{trades}");
+        assert_eq!(cold() - start, 1, "a trade page of the held capture is warm too");
+
+        let theirs = page(&other)?;
+        assert!(
+            theirs.contains(&crate::server::hex32([0xc2; 32])),
+            "another capture is answered from its own catalog: {theirs}"
+        );
+        assert!(!theirs.contains(&crate::server::hex32(first_id)), "{theirs}");
+        assert_eq!(cold() - start, 2, "another identity is a cold read");
+        assert_eq!(page(&query)?, first);
+        assert_eq!(cold() - start, 3, "and evicts the first");
+
+        // The same bytes under a new inode: the generation moves, so the held
+        // summary is not trusted, and the page read cold is the same page.
+        let attempt = query
+            .split("attempt=")
+            .nth(1)
+            .ok_or("premise: an attempt")?;
+        let catalog = root
+            .join("results/candidate-trades-v1")
+            .join(crate::server::hex32(first_id))
+            .join(attempt)
+            .join("catalog.bin");
+        let bytes = std::fs::read(&catalog).map_err(|why| why.to_string())?;
+        let fresh = catalog.with_extension("fresh");
+        std::fs::write(&fresh, &bytes).map_err(|why| why.to_string())?;
+        std::fs::rename(&fresh, &catalog).map_err(|why| why.to_string())?;
+        assert_eq!(page(&query)?, first, "the same bytes are the same page");
+        assert_eq!(cold() - start, 4, "a moved generation is a cold read");
+
+        // Gone: the held summary does not answer for a missing catalog.
+        std::fs::remove_file(&catalog).map_err(|why| why.to_string())?;
+        let missing = page(&query)?;
+        assert!(missing.contains(r#""status":"missing""#), "{missing}");
+        assert_eq!(cold() - start, 5);
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 
     /// **The trade page keeps one reader, so a change of candidate re-reads

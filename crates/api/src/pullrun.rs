@@ -515,6 +515,37 @@ pub(crate) fn rows_now(site: &Site) -> u64 {
         .sum()
 }
 
+/// [`rows_now`] on the blocking pool, for an async caller.
+///
+/// A miss in [`rows_now`] reads every vendor manifest whole and sorts every
+/// held entry. The conductor's ticker, its pass loop and recovery called it
+/// inline on a runtime worker, so a miss held that worker for the whole read
+/// (W1-api3-1). This moves the read onto `spawn_blocking`; the count is the
+/// same call's. D-1832.
+pub(crate) async fn rows_now_off_worker(site: &Loaded) -> u64 {
+    let site = Loaded::clone(site);
+    off_worker(move || rows_now(&site)).await
+}
+
+/// Runs `work` on the blocking pool and hands back its value.
+///
+/// A panic in `work` is raised again here, where an inline call would have
+/// raised it, so the caller never goes on with an invented value. A task
+/// cancelled because the runtime is shutting down is raised as a panic that
+/// says so, for the same reason.
+async fn off_worker<T, F>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => value,
+        Err(failed) => std::panic::resume_unwind(failed.try_into_panic().unwrap_or_else(|_| {
+            Box::new("blocking work was cancelled: the runtime is shutting down")
+        })),
+    }
+}
+
 /// Edits the live progress, if a run still owns the slot.
 ///
 /// A closure rather than a returned guard, so the lock cannot be held across an
@@ -930,7 +961,7 @@ where
         site: Loaded::clone(&site),
     };
     let groups = by_feed(legs);
-    let started_rows = rows_now(&site);
+    let started_rows = rows_now_off_worker(&site).await;
     with_progress(&site, |progress| {
         progress.rows_at_start = started_rows;
         progress.rows_now = started_rows;
@@ -949,7 +980,7 @@ where
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(ROWS_TICK).await;
-                let seen = rows_now(&site);
+                let seen = rows_now_off_worker(&site).await;
                 with_progress(&site, |progress| progress.rows_now = seen);
             }
         })
@@ -963,10 +994,10 @@ where
             break;
         }
         let repairing = outcomes.contains(&PassOutcome::Retry);
-        let before = rows_now(&site);
+        let before = rows_now_off_worker(&site).await;
         run_pass(&site, &groups, &mut outcomes, &checkpoints, &request).await;
         passes = passes.saturating_add(1);
-        let after = rows_now(&site);
+        let after = rows_now_off_worker(&site).await;
         with_progress(&site, |progress| {
             progress.passes = passes;
             progress.rows_now = after;
@@ -1003,7 +1034,7 @@ where
         }
     }
     ticker.abort();
-    let current_rows = rows_now(&site);
+    let current_rows = rows_now_off_worker(&site).await;
     with_progress(&site, |progress| {
         progress.rows_now = current_rows;
         progress.finished = Some(run_summary(
@@ -1131,6 +1162,48 @@ pub fn summary_of(passes: u32, retries: u32, landed: u64, stopped: bool) -> Stri
 )]
 mod tests {
     use super::*;
+
+    /// The row count leaves the runtime worker, returns the same count, and a
+    /// panic in it is not turned into a number (W1-api3-1, D-1832).
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count() {
+        let worker = std::thread::current().id();
+        let ran_on = off_worker(|| std::thread::current().id()).await;
+        assert_ne!(ran_on, worker, "the work ran on the blocking pool");
+        assert_eq!(off_worker(|| 41_u64 + 1).await, 42);
+        let raised = tokio::spawn(off_worker(|| -> u64 { panic!("the census read broke") }))
+            .await
+            .expect_err("a panicking count must not come back as a value");
+        assert!(raised.is_panic(), "re-raised as the panic it was");
+        let said = raised.into_panic();
+        assert_eq!(
+            said.downcast_ref::<&str>().copied(),
+            Some("the census read broke")
+        );
+        // Every async caller takes the off-worker door; the inline one is left
+        // to the helper and to tests.
+        let conductor = include_str!("pullrun.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let recovery = include_str!("recovery.rs");
+        assert_eq!(
+            conductor.matches("rows_now_off_worker(&site).await").count(),
+            5
+        );
+        assert_eq!(
+            recovery
+                .matches("crate::pullrun::rows_now_off_worker(site).await")
+                .count(),
+            2
+        );
+        assert!(!recovery.contains("crate::pullrun::rows_now(site)"));
+        assert_eq!(
+            conductor.matches("rows_now(&site)").count(),
+            1,
+            "only the helper's own"
+        );
+    }
 
     /// What `encodeURIComponent` does to the characters this scheme depends on.
     ///

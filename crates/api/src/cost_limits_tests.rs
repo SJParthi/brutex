@@ -290,10 +290,20 @@ fn w1_api5_7_a_scrub_walks_the_append_log_and_opens_a_file_per_entry() {
         SERVER.contains("/// `O(log length)` in memory plus `O(E_v)` file opens."),
         "the route's own doc names the log walk"
     );
+    // The scrub runs on the store-read pool, never on the handler's own task
+    // (W1-api6-0, D-1832).
+    let handler = item(SERVER, "async fn verify_json(");
+    assert!(
+        handler.contains("run_store_read(move || verify_reading(&site, feed, &asked))"),
+        "{handler}"
+    );
+    assert!(!handler.contains("crate::verify::vendor("), "{handler}");
+    assert!(!handler.contains("census_now("), "{handler}");
+    assert!(item(SERVER, "fn verify_reading(").contains("crate::verify::vendor(&site.store_root, census)"));
 }
 
 #[test]
-fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
+fn w1_api5_8_a_window_past_the_last_bar_reads_the_month_only_when_unsealed() {
     names(
         "W1-api5-8",
         &[
@@ -301,12 +311,21 @@ fn w1_api5_8_a_window_past_the_last_bar_reads_the_month() {
             "`n_valid`",
             "O(n_valid) reads",
             "zero-filled records",
+            "Since D-1831 only in a month born without `FLAG_CHECKSUMS`",
+            "`ceil(log2(n_valid + 1))` reads",
         ],
     );
     let route = item(SERVER, "async fn bars_json(");
     assert!(
-        route.contains(".filter(|&index| index < held)\n        .unwrap_or(0);"),
-        "a bisection that lands past the end falls back to the whole month: {route}"
+        route.contains(
+            "if landed == Some(held) && file.header().checksums_present() {\n        \
+             return (axum::http::StatusCode::OK, json(), \"[]\".to_owned());"
+        ),
+        "a sealed landing past the end answers from the bisection: {route}"
+    );
+    assert!(
+        route.contains("let begins = landed.filter(|&index| index < held).unwrap_or(0);"),
+        "an unsealed landing past the end still falls back to the whole month: {route}"
     );
 }
 

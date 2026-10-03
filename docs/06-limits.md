@@ -11678,10 +11678,15 @@ rule 6); every bound is read from the source.
 * **W1-api5-8 — `bars_json` past the last bar.** When `from=` lies after the
   month's last stored bar, the bisection returns `n_valid` and the fallback
   reads the whole month to answer `[]`: O(n_valid) reads instead of
-  O(log n_valid). It is kept because the same landing is how a header naming
-  zero-filled records shows itself, and reading the month is what answers
-  that file correctly; a cheaper test that tells the two apart needs a
-  monotonicity proof the record cannot give.
+  O(log n_valid). **Since D-1831 only in a month born without
+  `FLAG_CHECKSUMS`.** In a sealed month a landing at `n_valid` probed record
+  `n_valid - 1` last and verified its block against the sidecar; a zero-filled
+  tail fails that check and the bisection refuses, so a landing that survives
+  it proves the window empty and `[]` is answered after
+  `ceil(log2(n_valid + 1))` reads. An unsealed month has nothing that detects
+  zero-filled records, which is why it alone keeps the full read: that part
+  is inherent to the file it was born as. Proved by
+  `api::server::tests::bars_json_past_a_sealed_months_last_bar_reads_no_more_than_the_bisection`.
 * **W1-api5-9 — `indexmap_json`.** Per request: `nse_indices.csv` is read and
   parsed whole (`indexmap::Published::read`), and every key of the merged
   universe is filtered to the index symbols: O(file bytes + U).
@@ -11870,14 +11875,23 @@ no bench row covers these routes, so each is UNVERIFIED as a measurement.
   `DIRECTORY_LIMIT` (1,000,000 directories) and every read by
   `detail::MAX_SCAN_BYTES`. A poll of this route pays the whole history each
   time.
-- **`/candidate-trades.json` reads the whole sealed catalog five times a page
-  (W1-api2-2).** `candidatejson::render` calls
+- **`/candidate-trades.json` read the whole sealed catalog more than once a
+  page (W1-api2-2).** `candidatejson::render` called
   `candidate_trades::read_model` twice itself (open, and the "changed during
-  read" re-check), and `candidate_trades::tier` and `candidates_page` call it
-  three more times through `pinned`. Each read hashes and decodes all of
+  read" re-check); `candidate_trades::tier` and `candidates_page` reach it
+  through `pinned`, which since D-0991 is a generation check for any summary
+  `read_model` returned. Each `read_model` hashes and decodes all of
   `catalog.bin` (32 bytes per candidate side plus 40 per tier), bounded by
-  `MAX_SCAN_BYTES`. So one page of at most 256 rows costs about five times
-  O(catalog bytes). A trade page pays three, or five when its reader is cold.
+  `MAX_SCAN_BYTES`. **Since D-1833 a page of at most 256 rows reads the
+  catalog at most once, and not at all when warm:** `render` takes its summary
+  from `summary_for`, one slot held across requests and re-checked with
+  `require_unchanged` (one shared-lock open, a generation comparison and the
+  start-descriptor check, O(1) in the catalog), and the closing re-check is the
+  same generation check. The slot is dropped and the catalog read cold when
+  the capture key differs or the generation moved (any rewrite, replacement or
+  truncation of `catalog.bin`). Two clients alternating captures make every
+  request cold, as for the trade reader below: that part is the bound of a
+  one-slot cache, not of the route.
 - **The exact candidate trade page keeps one reader (W1-api2-3).**
   `candidatejson::trade_page` holds a single slot; a change of key re-runs
   `TradeReader::open`, which re-reads, re-hashes and re-sums every trade row of
@@ -14012,13 +14026,19 @@ bounds are all nonzero.
 - **`/verify.json` walks the census log and opens every held month, on the
   request's task (W1-api6-0, D-1501).** O(log length) for
   `Manifest::newest`, then one open, one header read and two record reads per
-  held entry, inline in `async fn verify_json`, so the runtime worker serving
-  it is blocked for the whole scrub. Moving it to a blocking pool was not done
-  here. Not timed.
+  held entry. **Since D-1832 it runs on the store-read pool**
+  (`detail::run_store_read` behind `verify_reading`, the same eight-slot bound
+  `/folder.json` and `/indexmap.json` share, 429 past it), so no runtime worker
+  waits on the scrub. The O(log length + E_v) itself is inherent: a scrub is
+  asked to open every month the census claims. Not timed.
 - **The conductor's row count runs on a runtime task (W1-api3-1, D-1502).**
-  The D-1382 entry above states the cost of `pullrun::rows_now`; its ticker
-  calls it inside `tokio::spawn`, so a miss (a whole-manifest read and sort)
-  blocks that runtime worker while it runs. Not timed.
+  The D-1382 entry above states the cost of `pullrun::rows_now`. **Since
+  D-1832 every async caller (the ticker, the pass loop and recovery) goes
+  through `rows_now_off_worker`, which runs the count on `spawn_blocking`**, so
+  a miss no longer holds a runtime worker. The miss's whole-manifest read is
+  the D-1382 cost and is unchanged. Proved by
+  `api::pullrun::tests::the_row_count_runs_off_the_worker_and_a_panic_is_not_a_count`.
+  Not timed.
 - **A Boolean qualification row renders every one of its folds (W1-api2-8,
   D-1502).** `booleanqualification_projection::row_detail` maps all of a
   row's folds into the page: O(F) per row and O(page x F) per page, F bounded
