@@ -1626,7 +1626,12 @@ fn ensure_header(
             .and_then(|()| file.sync_data())
             .map_err(|why| io_error("initialize header", path, &why))?;
     }
-    verify_header(file, magic, kind, stride, path)
+    verify_header(file, magic, kind, stride, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER_BYTES_U64, stride, &[])
+        .map(drop)
+        .map_err(BaseEvidenceLedgerRefusalV2::Io)
 }
 
 fn verify_header(
@@ -2095,6 +2100,30 @@ mod projection_tests {
                 maximum: 1,
             })
         ));
+    }
+
+    /// ledgers-3, D-1910: a kill-torn tail in either file is refused by a
+    /// reader and cut by the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        for name in [RECORD_FILE, COMPLETION_FILE] {
+            let root = TestRoot::new();
+            let bounds = BaseEvidenceLedgerBoundsV2::new(4, 4).expect("fixture bounds are nonzero");
+            drop(LedgerV2::open(root.ledger(), bounds).expect("headers initialize"));
+            let path = root.ledger().join(name);
+            OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&[7; 5]))
+                .expect("torn bytes write");
+            assert!(LedgerV2::open_read(root.ledger(), bounds).is_err());
+            drop(LedgerV2::open(root.ledger(), bounds).expect("writer heals"));
+            assert_eq!(
+                std::fs::metadata(&path).expect("measure").len(),
+                HEADER_BYTES_U64
+            );
+            drop(LedgerV2::open_read(root.ledger(), bounds).expect("reader opens"));
+        }
     }
 
     #[test]

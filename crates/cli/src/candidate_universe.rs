@@ -6099,7 +6099,10 @@ fn ensure_header(
             .and_then(|()| file.sync_data())
             .map_err(|why| format!("cannot initialize candidate file {}: {why}", path.display()))?;
     }
-    verify_header(file, magic, kind, stride, path)
+    verify_header(file, magic, kind, stride, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(file, path, HEADER_BYTES_V1, stride, &[]).map(drop)
 }
 
 fn verify_header(
@@ -8859,9 +8862,25 @@ mod tests {
         ragged.sync_data().expect("ragged byte syncs");
         drop(ragged);
         assert!(
-            CandidateUniverseLedgerV1::open(ragged_root.path(), bounds)
-                .expect_err("ragged fixed-stride file must refuse")
+            CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
+                .err()
+                .expect("a reader refuses the ragged fixed-stride file")
                 .contains("ragged")
+        );
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(
+            CandidateUniverseLedgerV1::open(ragged_root.path(), bounds)
+                .expect("the writer cuts the ragged tail"),
+        );
+        assert_eq!(
+            std::fs::metadata(ragged_root.path().join(ROW_FILE))
+                .expect("measure")
+                .len(),
+            HEADER_BYTES_V1
+        );
+        drop(
+            CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
+                .expect("a reader opens the healed ledger"),
         );
 
         let corrupt_root = test_dir();

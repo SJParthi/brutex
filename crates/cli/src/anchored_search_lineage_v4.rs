@@ -725,6 +725,28 @@ impl AnchoredSearchLineageV4Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("anchored search-lineage V4 root changed while opening".to_owned());
             }
+            if writable {
+                // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+                // lock; the bytes past the last whole record were never acknowledged.
+                // A whole NIFTY member left by a torn pair is kept: the scan
+                // already treats it as the exact retry's orphan.
+                for (file, path, width) in [
+                    (
+                        &member_file,
+                        &member_path,
+                        ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES,
+                    ),
+                ] {
+                    let width = u64::try_from(width)
+                        .map_err(|_| "search-lineage V4 width does not fit u64".to_owned())?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, width, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_FILE_MAX_BYTES)?;
             let member_generation =
                 file_generation(&member_file, &member_path, bounds.member_bytes)?;
@@ -2638,6 +2660,16 @@ mod tests {
             assert_refuses(
                 AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds()),
                 "ragged",
+            );
+            // ledgers-3, D-1910: the next writer cuts the never-acknowledged
+            // tail, and a reader then opens.
+            drop(
+                AnchoredSearchLineageV4Ledger::open_write(root.path(), bounds())
+                    .expect("the writer cuts the ragged tail"),
+            );
+            drop(
+                AnchoredSearchLineageV4Ledger::open_read(root.path(), bounds())
+                    .expect("a reader opens the healed ledger"),
             );
         }
 

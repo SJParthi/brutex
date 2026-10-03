@@ -2485,6 +2485,35 @@ impl ExecutionV4Ledger {
             if named_identity(&root)? != root_identity {
                 return Err("Execution V4 root changed while child files opened".to_owned());
             }
+            if writable {
+                // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+                // lock; the bytes past the last whole record were never acknowledged.
+                for (file, path, stride) in [
+                    (
+                        &parameter_file,
+                        &parameter_path,
+                        EXECUTION_V4_PARAMETER_BYTES,
+                    ),
+                    (
+                        &percentile_file,
+                        &percentile_path,
+                        EXECUTION_V4_PERCENTILE_BYTES,
+                    ),
+                    (
+                        &disposition_file,
+                        &disposition_path,
+                        EXECUTION_V4_DISPOSITION_BYTES,
+                    ),
+                    (
+                        &completion_file,
+                        &completion_path,
+                        EXECUTION_V4_COMPLETION_BYTES,
+                    ),
+                ] {
+                    let stride = usize_to_u64(stride, "heal stride")?;
+                    crate::fixed_tail::heal_torn_tail(file, path, 0, stride, &[])?;
+                }
+            }
             let lock_generation = file_generation(&lock_file, &lock_path, LOCK_MAX_BYTES)?;
             let parameter_generation =
                 file_generation(&parameter_file, &parameter_path, bounds.parameters.bytes)?;
@@ -6572,6 +6601,15 @@ mod tests {
         file.write_all(&[1]).expect("append ragged byte");
         file.sync_data().expect("sync ragged byte");
         assert!(ExecutionV4Ledger::open_read(&ragged.path, bounds()).is_err());
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(ExecutionV4Ledger::open_write(&ragged.path, bounds()).expect("writer heals"));
+        assert_eq!(
+            std::fs::metadata(ragged.path.join(DISPOSITION_FILE))
+                .expect("measure")
+                .len(),
+            0
+        );
+        drop(ExecutionV4Ledger::open_read(&ragged.path, bounds()).expect("reader opens"));
 
         #[cfg(unix)]
         {

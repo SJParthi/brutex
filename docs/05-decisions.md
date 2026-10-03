@@ -55000,3 +55000,20 @@ a regular `complete` shorter than 32 bytes, left by an older build, as
 interrupted, so `latest` is the newest whole checkpoint and the resume takes
 the next sequence. A whole-width marker that disagrees with its payload is
 still refused, not skipped.
+
+### D-1910 — Store-root and rung-root ledger writers cut a kill-torn tail on open — 2026-10-03
+
+ledgers-3: a kill or power loss inside a `write` left Pre-Admission V1/V2,
+Base Evidence V2 and Candidate Universe (all in the store root), and Execution
+V4, Observation V1/V2 and Search Lineage V4 (per rung root), with a
+sub-record tail. Every open, the writer's included, refused it before any
+orphan or retry logic ran, so even the identical rerun could not recover, and
+the three store-root ledgers wedged every `ledger-all` and `ledger-v6` run on
+the store. Each of these ledgers is receipt-last, so bytes past the last whole
+record were never acknowledged. The writable open now calls
+`fixed_tail::heal_torn_tail` under its exclusive lock, after the header is
+verified (D-1901): it cuts to the last whole record, syncs, and emits a
+`cli.ledger` warn event naming the file and both lengths. Lineage V4 cuts at
+the 768-byte member stride, so a whole NIFTY member of a torn pair is kept as
+the orphan the scan already resumes. Read-only opens still refuse until a
+writer has healed the file. A whole-record tail with a bad seal still refuses.

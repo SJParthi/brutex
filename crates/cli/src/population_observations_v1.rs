@@ -2184,6 +2184,17 @@ impl ObservationAuthorityLedgerV1 {
             // not make its directory entry durable.
             sync_observation_root(&admitted_root)?;
         }
+        if writable {
+            // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+            // lock; the bytes past the last whole record were never acknowledged.
+            crate::fixed_tail::heal_torn_tail(
+                &file,
+                &file_path,
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V1,
+                OBSERVATION_AUTHORITY_RECORD_STRIDE_V1,
+                &authority_header(),
+            )?;
+        }
         let bytes = read_bounded_authority_file(&mut file, bounds)?;
         let (audits, data_by_id, orphan) = scan_authority_file(&bytes, bounds)?;
         let snapshot_digest = digest_authority_file(&bytes);
@@ -3396,6 +3407,17 @@ impl ObservationAuthorityLedgerV2 {
             // The new names are made durable (D-1903, slice24-F2).
             sync_observation_root(&admitted_root)?;
         }
+        if writable {
+            // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+            // lock; the bytes past the last whole record were never acknowledged.
+            crate::fixed_tail::heal_torn_tail(
+                &file,
+                &file_path,
+                OBSERVATION_AUTHORITY_HEADER_BYTES_V2,
+                OBSERVATION_AUTHORITY_RECORD_STRIDE_V2,
+                &observation_v2_header(),
+            )?;
+        }
         let bytes = read_bounded_observation_v2_file(&mut file, bounds)?;
         let (audits, data_by_id, orphan) = scan_observation_v2_file(&bytes, bounds)?;
         let snapshot_digest = digest_observation_v2_file(&bytes);
@@ -4487,6 +4509,32 @@ mod tests {
         );
     }
 
+    /// ledgers-3, D-1910: a kill-torn V1 tail is refused by a reader and cut
+    /// by the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() {
+        let bounds = authority_bounds();
+        let root = test_dir();
+        drop(ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("header initializes"));
+        let path = root.path().join(AUTHORITY_FILE);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&[7; 5]))
+            .expect("torn bytes write");
+        assert!(
+            ObservationAuthorityLedgerV1::open_read(root.path(), bounds)
+                .expect_err("a reader refuses")
+                .contains("ragged")
+        );
+        drop(ObservationAuthorityLedgerV1::open(root.path(), bounds).expect("writer heals"));
+        assert_eq!(
+            std::fs::metadata(&path).expect("measure").len(),
+            OBSERVATION_AUTHORITY_HEADER_BYTES_V1
+        );
+        drop(ObservationAuthorityLedgerV1::open_read(root.path(), bounds).expect("reader opens"));
+    }
+
     #[test]
     fn v2_ragged_corrupt_resealed_and_stale_authorities_fail_closed() {
         let bounds = authority_bounds_v2();
@@ -4506,6 +4554,15 @@ mod tests {
             ObservationAuthorityLedgerV2::open_read(ragged_root.path(), bounds)
                 .expect_err("ragged V2 file refuses")
                 .contains("ragged")
+        );
+        // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.
+        drop(
+            ObservationAuthorityLedgerV2::open(ragged_root.path(), bounds)
+                .expect("the V2 writer cuts the ragged tail"),
+        );
+        drop(
+            ObservationAuthorityLedgerV2::open_read(ragged_root.path(), bounds)
+                .expect("a reader opens the healed V2 ledger"),
         );
 
         let (source, commit) =

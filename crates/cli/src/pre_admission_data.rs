@@ -3520,7 +3520,17 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRef
             .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
         return Ok(());
     }
-    verify_header(file, path)
+    verify_header(file, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(
+        file,
+        path,
+        PRE_ADMISSION_HEADER_BYTES_V1,
+        PRE_ADMISSION_RECORD_STRIDE_V1,
+        &[],
+    )
+    .map(drop)
 }
 
 fn verify_header(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRefusal> {
@@ -3745,7 +3755,17 @@ fn ensure_header_v2(file: &mut File, path: &Path) -> Result<(), PreAdmissionData
             .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
         return Ok(());
     }
-    verify_header_v2(file, path)
+    verify_header_v2(file, path)?;
+    // ledgers-3, D-1910: the writer cuts a kill-torn tail under its exclusive
+    // lock; the bytes past the last whole record were never acknowledged.
+    crate::fixed_tail::heal_torn_tail(
+        file,
+        path,
+        PRE_ADMISSION_HEADER_BYTES_V2,
+        PRE_ADMISSION_RECORD_STRIDE_V2,
+        &[],
+    )
+    .map(drop)
 }
 
 fn verify_header_v2(file: &mut File, path: &Path) -> Result<(), PreAdmissionDataRefusal> {
@@ -4706,6 +4726,74 @@ mod tests {
             must(reopened.page(0, 1), "completed pair reads")?.rows(),
             &[value]
         );
+        Ok(())
+    }
+
+    /// ledgers-3, D-1910: a kill-torn tail is refused by a reader and cut by
+    /// the next writer, after which both open.
+    #[test]
+    fn a_kill_torn_tail_is_cut_by_the_writer_and_refused_by_a_reader() -> TestResult {
+        let configured = bounds(4)?;
+        let root = test_dir()?;
+        drop(must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "header initializes",
+        )?);
+        let path = root.path().join(DATA_FILE);
+        let mut torn = must(open_file(&path, true, false), "file reopens")?;
+        must(torn.seek(SeekFrom::End(0)), "seek")?;
+        must(torn.write_all(&[7; 5]), "torn bytes write")?;
+        drop(torn);
+        assert!(
+            must_refuse(
+                PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+                "reader refuses",
+            )?
+            .contains("ragged")
+        );
+        drop(must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "writer heals",
+        )?);
+        assert_eq!(
+            must(std::fs::metadata(&path), "measure")?.len(),
+            PRE_ADMISSION_HEADER_BYTES_V1
+        );
+        drop(must(
+            PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+            "reader opens",
+        )?);
+
+        let configured = bounds_v2(3)?;
+        let root = test_dir()?;
+        drop(must(
+            PreAdmissionDataLedgerV2::open(root.path(), configured),
+            "V2 header initializes",
+        )?);
+        let path = root.path().join(DATA_FILE_V2);
+        let mut torn = must(open_file(&path, true, false), "V2 file reopens")?;
+        must(torn.seek(SeekFrom::End(0)), "V2 seek")?;
+        must(torn.write_all(&[7; 5]), "V2 torn bytes write")?;
+        drop(torn);
+        assert!(
+            must_refuse(
+                PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+                "V2 reader refuses",
+            )?
+            .contains("ragged")
+        );
+        drop(must(
+            PreAdmissionDataLedgerV2::open(root.path(), configured),
+            "V2 writer heals",
+        )?);
+        assert_eq!(
+            must(std::fs::metadata(&path), "V2 measure")?.len(),
+            PRE_ADMISSION_HEADER_BYTES_V2
+        );
+        drop(must(
+            PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+            "V2 reader opens",
+        )?);
         Ok(())
     }
 
