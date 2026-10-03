@@ -56071,3 +56071,45 @@ pinned commit, so the pinned action still installs the current stable toolchain:
 the action's code is frozen, the toolchain it installs is not, and gate 6b's
 exposure to a new stable lint is unchanged. Bumping an action is now a commit
 that names the new id.
+
+### D-1458 — Declare the audit fixes' new print, lock-file open and three bounded sorts or sets; repoint K-44 — 2026-10-03
+
+**What was observed.** Four static gates refused the tree after the
+audit-20261003 fixes (commit a21d031 and before it), each over a site the fix
+added without updating the gate's declaration:
+
+- Gate 23: `api/src/main.rs` gained a second `eprintln!` (D-1582), printed when
+  the hand-built tokio runtime fails to start.
+- Gate 21: `telemetry/src/sink.rs` gained a third `OpenOptions::new`
+  (D-1537), `hold_directory` opening `<dir>/events.lock` for its `flock`.
+- Gate 11 rule 3: `pull/src/http.rs`'s `repeated_key` (D-1531) binds an
+  unsized `HashSet` per JSON object. Rule 4: `cli/src/admission_store.rs` and
+  `cli/src/population.rs` each sort a receipt map by identity (D-1565).
+- Gate 10: K-44 named `costs::trip::the_regime_is_the_entry_days_and_the_exit_day_never_moves_it`,
+  which D-1535 replaced.
+
+**Decision.** Each site is declared with its reason, none is loosened. The
+runtime-failure print is a production diagnostic and its arm already calls
+`note_exit`, so `api.main` records it. The lock open writes and reads no byte
+and names no path outside the sink's own directory. The per-object key set
+cannot be reserved without a second pass, and its total is bounded by the
+response cap. The two sorts run once per cold open, O(n log n) over an O(n)
+open, so a refusal names the same population in every process. Their reasons
+are in `docs/06-limits.md` under "Gate 11 allowlist reasons" (D-1451). K-44
+keeps its row, its claim restated to D-1535's per-leg regime and its proof
+moved to `costs::trip::each_legs_charge_is_priced_at_its_own_days_regime`;
+the lot-size half is unchanged.
+
+### D-1459 — Answer gate 12's four new cost claims: three UNVERIFIED halves, one non-claim declared — 2026-10-03
+
+**What was observed.** Gate 12 refused four doc blocks from the audit fixes:
+`api::logs::Ration`, `api::server::form_read_bound`, `cli::latest_for` and
+`costs::trip::charge_stack_legs`.
+
+**Decision.** The first three name the existing test that proves their
+behaviour and say UNVERIFIED for the cost half no test or bench measures;
+`docs/06-limits.md` records all three. No test was named as proving a bound
+it does not measure. `charge_stack_legs` makes no cost claim: the trigger is
+the word `flat` in "Brokerage and GST are flat in this crate's tables", the
+financial sense, so it joins `base_win_rate_bp` in gate 12's `allow_claim`
+with that reason rather than gaining a false UNVERIFIED.

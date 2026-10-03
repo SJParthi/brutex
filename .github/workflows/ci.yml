@@ -3303,6 +3303,10 @@ jobs:
           # command. It is not left terminal-only: `note_exit` emits
           # `api.main` with the exit code `MISUSED` and the argument count on
           # every exit, this one included.
+          # The SECOND (D-1582, hunt-api-2) is a production diagnostic: the
+          # hand-built tokio runtime failed to start, so nothing ran. It is
+          # not terminal-only either: the same arm calls `note_exit` with
+          # `FAILED` before returning, so `api.main` records it. D-1458.
           #
           # `cli/src/main.rs:print!` is the PROGRAM'S OWN OUTPUT, not a
           # diagnostic. `cli::run` renders its whole report into a String and
@@ -3401,7 +3405,7 @@ jobs:
           #     Folded with D-1450.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
-          api/src/main.rs:eprintln!:1
+          api/src/main.rs:eprintln!:2
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
@@ -3884,7 +3888,15 @@ jobs:
           # not a path. `.metadata()` on an open handle was already excluded on
           # purpose (above); `Path::exists` is not used in this crate's
           # production code today.
-          declared='sink.rs:std::fs::OpenOptions::new:2
+          #
+          # `OpenOptions::new` went from two to three (D-1537, hunt-costs-3).
+          # The two old sites open the event file to append (`FileTarget::open`
+          # and `reopen` after a roll). The third, `hold_directory`, opens
+          # `<dir>/events.lock` -- create, no truncate, write -- only to take a
+          # non-blocking `flock` on it, so two sinks cannot write one event
+          # stream. It writes no byte, reads none, and names no path outside
+          # the sink's own directory. D-1458.
+          declared='sink.rs:std::fs::OpenOptions::new:3
           sink.rs:std::fs::create_dir_all:1
           sink.rs:std::fs::metadata:1
           sink.rs:std::fs::remove_file:1
@@ -5225,6 +5237,7 @@ jobs:
           crates/cli/src/selection_v6.rs 1
           crates/cli/src/index_stop_store.rs 1
           crates/api/src/recovery_journal.rs 1
+          crates/pull/src/http.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5286,6 +5299,8 @@ jobs:
           crates/cli/src/index_stop_vix_codec.rs 1
           crates/cli/src/boolean_qualified_journal.rs 1
           crates/cli/src/pool.rs 2
+          crates/cli/src/admission_store.rs 1
+          crates/cli/src/population.rs 1
           '
 
           # ---- rule 5. CLAUDE.md section 4: refuse, never die. --------------
@@ -6032,8 +6047,16 @@ jobs:
           # no proof; that block now says UNVERIFIED too. Entries are
           # `FILE ITEM`, the item being the name below the doc block, so the
           # one left can excuse `base_win_rate_bp` and nothing else.
+          #
+          # `charge_stack_legs` (D-1535, entry D-1459) is the same case as
+          # `base_win_rate_bp`: the trigger is `\bflat\b` and the word is the
+          # FINANCIAL one -- "Brokerage and GST are flat in this crate's
+          # tables", a charge that does not scale with quantity. The word is
+          # a predicate, so the noun list cannot reach it, and the block makes
+          # no claim about cost. UNVERIFIED there would be a false statement.
           allow_claim='
           crates/cli/src/lib.rs base_win_rate_bp
+          crates/costs/src/trip.rs charge_stack_legs
           '
 
           inv=docs/04-invariants.md
