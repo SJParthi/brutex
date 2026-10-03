@@ -1552,4 +1552,28 @@ mod tests {
         assert_eq!(keys, ["Name", "WithDecryption"]);
         assert_eq!(object["WithDecryption"], serde_json::Value::Bool(true));
     }
+
+    /// THE FREE FUNCTION REFUSES TOO, NOT ONLY THE SIGNER IT CALLS.
+    ///
+    /// The region test above proves `Signable::authorization` refuses; nothing
+    /// proved `get_parameter` passes that refusal on, so a body of
+    /// `Ok(String::new())` -- an empty secret handed to the broker as if it
+    /// were read -- survived gate 18. The refusal is before the client is
+    /// built, so no socket is opened and no network is needed. D-1456.
+    #[tokio::test]
+    async fn get_parameter_returns_the_signers_refusal_rather_than_a_value() {
+        let Err(SsmError { detail, kind }) = get_parameter(
+            &identity(),
+            "us-east-1",
+            "/org/env/vendor/field",
+            "20260807T120000Z",
+        )
+        .await
+        else {
+            panic!("a foreign region must not yield a parameter value")
+        };
+        assert_eq!(kind, SecretError::Unreachable);
+        assert!(detail.contains("ap-south-1"), "{detail}");
+        assert!(detail.contains("§8"), "{detail}");
+    }
 }

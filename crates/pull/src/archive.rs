@@ -785,7 +785,7 @@ fn descend(
             });
         }
 
-        let bytes = read_bounded(&path)?;
+        let bytes = read_bounded(&path, MAX_MEMBER_BYTES)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ArchiveError::MemberNotText { path: path.clone() })?;
         // THE ONE REFUSAL THE CENSUS TURNS INTO A FINDING. `Refuse` is
@@ -831,7 +831,12 @@ fn descend(
 /// refused it. The length is checked from the open handle's metadata first,
 /// and the read is then capped one byte past the bound, so a file that grows
 /// between the check and the read is caught too. D-1362.
-fn read_bounded(path: &Path) -> Result<Vec<u8>, ArchiveError> {
+///
+/// `cap` is a parameter so a test can stand a file of EXACTLY the bound
+/// beside it without a 256 MiB read: the walk passes [`MAX_MEMBER_BYTES`]
+/// and nothing else does. A member of exactly `cap` bytes is read; one
+/// byte more is refused. D-1456.
+fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, ArchiveError> {
     use std::io::Read as _;
     let unreadable = |e: std::io::Error| ArchiveError::MemberUnreadable {
         path: path.to_path_buf(),
@@ -840,22 +845,22 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, ArchiveError> {
     let too_large = |bytes: u64| ArchiveError::MemberTooLarge {
         path: path.to_path_buf(),
         bytes,
-        cap: MAX_MEMBER_BYTES,
+        cap,
     };
     let file = fs::File::open(path).map_err(unreadable)?;
     let declared = file.metadata().map_err(unreadable)?.len();
-    if declared > MAX_MEMBER_BYTES {
+    if declared > cap {
         return Err(too_large(declared));
     }
-    // A capacity hint only: `declared` is at most `MAX_MEMBER_BYTES`, which
-    // fits a `usize` on every target this builds for, and a hint of zero
-    // would only cost reallocations, never a wrong answer.
+    // A capacity hint only: `declared` is at most `cap` (the walk passes
+    // `MAX_MEMBER_BYTES`), which fits a `usize` on every target this builds
+    // for, and a hint of zero would only cost reallocations, never a wrong answer.
     let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
     let read = file
-        .take(MAX_MEMBER_BYTES.saturating_add(1))
+        .take(cap.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
-    if read as u64 > MAX_MEMBER_BYTES {
+    if read as u64 > cap {
         return Err(too_large(read as u64));
     }
     Ok(bytes)
@@ -925,8 +930,8 @@ pub fn total_rows(members: &[Member]) -> usize {
 )]
 mod tests {
     use super::{
-        ArchiveError, MAX_FINDING_BYTES, MAX_MEMBER_BYTES, MAX_MEMBERS, SORTS, finding, read_dir,
-        read_dir_reporting,
+        ArchiveError, MAX_FINDING_BYTES, MAX_MEMBER_BYTES, MAX_MEMBERS, SORTS, finding,
+        read_bounded, read_dir, read_dir_reporting,
     };
     use crate::csv::{Columns, CsvError};
     use std::fs;
@@ -1413,6 +1418,34 @@ mod tests {
                 .expect("reads")
                 .len(),
             1
+        );
+    }
+
+    /// A MEMBER OF EXACTLY THE CAP IS READ; ONE BYTE MORE IS REFUSED.
+    ///
+    /// The sparse-file test above stands one byte PAST the bound, which a
+    /// `>=` still refuses -- so no test read a member of exactly the bound,
+    /// and gate 18 found `read as u64 >= cap` alive. The cap is a
+    /// parameter so the exact-bound case costs one row, not 256 MiB.
+    /// D-1456.
+    #[test]
+    fn a_member_of_exactly_the_cap_is_read_and_one_byte_more_is_refused() {
+        let scratch = Scratch::new();
+        let exact = scratch.root.join("EXACT.csv");
+        fs::write(&exact, ONE_ROW).expect("a member");
+        let cap = ONE_ROW.len() as u64;
+
+        assert_eq!(
+            read_bounded(&exact, cap).expect("exactly the cap is within it"),
+            ONE_ROW.as_bytes()
+        );
+        assert_eq!(
+            read_bounded(&exact, cap - 1).expect_err("one byte past the cap"),
+            ArchiveError::MemberTooLarge {
+                path: exact.clone(),
+                bytes: cap,
+                cap: cap - 1,
+            }
         );
     }
 }
