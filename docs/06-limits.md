@@ -12071,13 +12071,19 @@ not the average.
   that extends the month never reaches it. This is the ingest boundary. It
   runs once per re-offered batch and never inside the sweep.
 
-**UNVERIFIED.** The wall-clock cost of either lookup has not been measured.
-C-28 and C-29 time `read_record`, including its `pread`, but only warm: one
-fixed index, so the page is resident and the block cached after the first
-call. They do not measure a cold block verify or a cold device. Neither does
-anything else in the workspace, and ET-bars-candles-store-9 tracks that gap.
-The probe and verify counts above are proven or computed. The time per probe
-is not.
+**What is measured, and what is not.** C-28 and C-29 time `read_record`,
+including its `pread`, warm: one fixed index, so the page is resident and the
+block cached after the first call. The COLD read every bisection probe pays is
+timed too: C-BC-01 cycles fourteen indices in fourteen distinct blocks and
+checks the cold read is flat in the file at 1×, 10× and 100×, C-BC-02 holds it
+to its own 10,000-floor budget, and C-BC-03 proves its verify allocates
+nothing on the heap (`crates/store/benches/ratio.rs`, D-0914). (This paragraph
+said nothing in the workspace measured a cold block verify, and pointed at
+ET-bars-candles-store-9 for the gap, after D-0914 had closed both; D-1506.)
+**UNVERIFIED:** a whole `first_at_or_after` or `already_stored` call has no
+wall-clock bench of its own, so its time is the computed probe count times the
+measured per-probe cost, an extrapolation; and a cold DEVICE, the page cache
+dropped, is not measured by anything.
 
 **Not changed.** The bisection already uses the fewest reads a comparison
 search over `n_valid` sorted records can use, so no cheaper probe order was

@@ -6222,3 +6222,4 @@ old line regex the same input and watched it pass.
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | AU4-01 | On the runner's synthetic eight-session sweep every level from k=2 up keeps only masks of exactly `k` bits, no mask twice, and at least one such level keeps two or more, so distinctness is tested rather than read from the literal `duplicates: 0` the join writes (D-1505) | `runner::join_answer_is_unchanged::the_join_no_longer_walks_a_pair_it_will_discard` | ✓ |
+| AU4-02 | No store document says the cold block-verify read is unmeasured while `crates/store/benches/ratio.rs` defines and runs C-BC-01 and C-BC-02 (D-1506) | `store::docs::no_document_says_the_cold_block_verify_is_unmeasured` | ✓ |

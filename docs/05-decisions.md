@@ -53458,3 +53458,28 @@ passes. Gate 14 on the real workflow: OK, rc 0.
 
 **Not changed.** A shell-level bypass inside the script (`if false; then`)
 is out of scope, as it is for gate 13.
+
+### D-1506 — The cold block-verify read is measured, and two sentences said it was not — 2026-10-03
+
+**What was observed.** D-0914 added C-BC-01 (the cold `read_record` is flat
+in the file at 1×, 10× and 100×), C-BC-02 (its own 10,000-floor budget) and
+C-BC-03 (its verify allocates nothing on the heap), and Gate 8 runs them
+(`crates/store/benches/ratio.rs`, both called from `main`). D-1434, merged
+beside it, left two statements saying the opposite: `docs/06-limits.md`'s
+`first_at_or_after` section said "They do not measure a cold block verify or
+a cold device. Neither does anything else in the workspace, and
+ET-bars-candles-store-9 tracks that gap", and `BarFile::read_record`'s doc
+said "The cold block verify a random index pays, and a cold device, are
+UNVERIFIED." The finding named as the tracker is closed (audit v1-1). A
+claim that a measurement was never taken, when it is taken, is the
+CLAUDE.md §3 rule 6 defect in the other direction.
+
+**The decision.** Both are corrected in place and say what each bench
+measures. What remains UNVERIFIED is stated: a cold DEVICE (page cache
+dropped) is measured by nothing, and a whole `first_at_or_after` or
+`already_stored` call has no bench of its own, so its time is the computed
+probe count times the measured per-probe cost, labelled an extrapolation.
+`store::docs::no_document_says_the_cold_block_verify_is_unmeasured` refuses
+the three stale phrases in `file.rs`, `docs/06-limits.md` and
+`docs/02-store-format.md`, and fails if the bench stops defining or running
+either cold row, so the test's premise cannot go stale silently.
