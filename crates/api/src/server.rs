@@ -19009,6 +19009,36 @@ mod tests {
         assert!(!page.contains("members failed"));
     }
 
+    /// **AN FNO LANDING KEEPS EXACTLY FIVE REASONS AND COUNTS EVERY REFUSAL.**
+    /// Six refusals are six failures, but only the first five reasons are
+    /// kept, verbatim and in order, with the credential marker stripped; the
+    /// sixth is counted and dropped. Only a refusal carrying the marker
+    /// answers that the credential must be re-read. D-0948.
+    #[test]
+    fn an_fno_landing_keeps_five_refusal_reasons_and_counts_all_six() {
+        let mut landed = FnoLanded::default();
+        let dead = format!("{CREDENTIAL_DEAD}NIFTY24JANFUT: token rejected");
+        assert!(
+            landed.record_refusal(&dead),
+            "the marker asks for a re-read"
+        );
+        for n in 2..=6 {
+            assert!(!landed.record_refusal(&format!("contract {n}: refused")));
+        }
+        assert_eq!(landed.failed, 6, "every refusal is counted");
+        assert_eq!(
+            landed.why,
+            vec![
+                "NIFTY24JANFUT: token rejected".to_owned(),
+                "contract 2: refused".to_owned(),
+                "contract 3: refused".to_owned(),
+                "contract 4: refused".to_owned(),
+                "contract 5: refused".to_owned(),
+            ],
+            "five reasons kept, the sixth dropped"
+        );
+    }
+
     #[test]
     fn a_partial_broker_basket_cannot_render_or_record_as_stored() {
         let mark = crate::emitted::mark();
