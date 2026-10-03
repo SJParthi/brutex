@@ -43,3 +43,29 @@ pub const O_NONBLOCK: i32 = 0x0800;
 /// macOS SDK `sys/fcntl.h`: `O_NONBLOCK 0x00000004`.
 #[cfg(target_os = "macos")]
 pub const O_NONBLOCK: i32 = 0x0004;
+
+// The two flags together, for the evidence opens that want both. Written as
+// one literal per target rather than `O_NOFOLLOW | O_NONBLOCK`: the bits are
+// disjoint on every target here, so `|` and `^` produce the same value and the
+// `^` mutant of that expression is equivalent -- no test can observe it.
+// D-0192's rule for an equivalent mutant is to remove the expression, not to
+// skip it. `crates/store/tests/open_flags.rs` pins each literal to the union
+// of the two constants above, so this is not a second authority for either bit.
+
+/// `O_NOFOLLOW | O_NONBLOCK` on `x86_64` Linux: `0x2_0000 | 0x800`.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    target_arch = "x86_64"
+))]
+pub const O_NOFOLLOW_NONBLOCK: i32 = 0x0002_0800;
+
+/// `O_NOFOLLOW | O_NONBLOCK` on `aarch64` Linux: `0x8000 | 0x800`.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    target_arch = "aarch64"
+))]
+pub const O_NOFOLLOW_NONBLOCK: i32 = 0x8800;
+
+/// `O_NOFOLLOW | O_NONBLOCK` on macOS: `0x100 | 0x4`.
+#[cfg(target_os = "macos")]
+pub const O_NOFOLLOW_NONBLOCK: i32 = 0x0104;
