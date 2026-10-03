@@ -900,6 +900,25 @@ pub const RUNGS: [pull::vendor::Granularity; 2] = [
     pull::vendor::Granularity::Minute1,
 ];
 
+// `fly` counts ticks with `wrapping_add` and [`rung_for`] reduces the count
+// modulo this length, so the alternation survives the wrap at `usize::MAX`
+// only when the length divides 2^64.
+const _: () = assert!(RUNGS.len().is_power_of_two());
+
+/// The rung tick number `tick` of the autopilot drives: [`RUNGS`] in turn,
+/// from the first. One remainder and one array read — O(1).
+///
+/// A function rather than an expression inside `fly` so the alternation is
+/// tested directly: `fly` is an endless loop over a live store, and a choice
+/// made there that always picked the day rung would starve the minute rung
+/// with nothing to observe it. D-1454.
+fn rung_for(tick: usize) -> pull::vendor::Granularity {
+    RUNGS
+        .get(tick % RUNGS.len())
+        .copied()
+        .unwrap_or(pull::vendor::Granularity::Day1)
+}
+
 /// Where one rung of one feed stands on the ladder while the other rung is
 /// being driven.
 ///
@@ -2648,11 +2667,8 @@ pub async fn fly(site: Loaded) {
         // `continue` below cannot leave the same rung selected forever. Each
         // feed keeps a frontier per rung (`Place`, D-0949), which `round`
         // swaps in.
-        let rung = RUNGS
-            .get(next_rung % RUNGS.len())
-            .copied()
-            .unwrap_or(granularity);
-        next_rung = next_rung.wrapping_add(1) % RUNGS.len();
+        let rung = rung_for(next_rung);
+        next_rung = next_rung.wrapping_add(1);
         // THE SERIES IS PER RUNG. `tracked_series` answers "which
         // instrument-months does this timeframe still owe", and the day rung
         // and the minute rung owe different ones — sharing one list would have
@@ -5572,6 +5588,27 @@ mod tests {
         );
     }
 
+    /// **THE TICKS ALTERNATE THE RUNGS, DAY FIRST, AND THE WRAP KEEPS THE
+    /// ALTERNATION.** A choice that always answered the day rung would starve
+    /// the minute rung — the one the engine sweeps — while every round still
+    /// ran. `usize::MAX` is odd and wraps to the even zero, so the two ticks
+    /// either side of the wrap still differ. D-1454.
+    #[test]
+    fn the_rung_alternates_day_then_minute_across_the_wrap() {
+        use pull::vendor::Granularity::{Day1, Minute1};
+        let ticks = [
+            0,
+            1,
+            2,
+            3,
+            usize::MAX - 1,
+            usize::MAX,
+            usize::MAX.wrapping_add(1),
+        ];
+        let rungs = ticks.map(rung_for);
+        assert_eq!(rungs, [Day1, Minute1, Day1, Minute1, Day1, Minute1, Day1]);
+    }
+
     /// The autopilot asks for BOTH pulled rungs, not just the minute one.
     ///
     /// # The deadlock this pins
@@ -5612,8 +5649,10 @@ mod tests {
             RUNGS.contains(&pull::vendor::Granularity::Minute1),
             "and the minute rung too — it is the one the engine sweeps"
         );
+        // `fly` reaches the table through `rung_for`, whose walk of `RUNGS` is
+        // pinned by `the_rung_alternates_day_then_minute_across_the_wrap`.
         assert!(
-            code.contains("RUNGS"),
+            code.contains("rung_for(next_rung)"),
             "`fly` chooses its rung from the table"
         );
         // BOTH REACH `round`, which is the only thing that pulls. Naming a rung

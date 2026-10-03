@@ -56173,3 +56173,38 @@ it does not measure. `charge_stack_legs` makes no cost claim: the trigger is
 the word `flat` in "Brokerage and GST are flat in this crate's tables", the
 financial sense, so it joins `base_win_rate_bp` in gate 12's `allow_claim`
 with that reason rather than gaining a false UNVERIFIED.
+
+### D-1454 — Kill six Gate 18 `api` survivors and one timeout: four by tests, three by lifting a condition into a tested function — 2026-10-03
+
+**Finding.** Gate 18 (cargo-mutants 26.2.0) on `final/all-fixes` reported six
+surviving mutants in `api` and one timeout. Each is killed here; none is
+excluded, as D-0192 requires.
+
+**Missing tests, now written.** `server.rs` `Slots::try_take`'s `n < cap` ->
+`n <= cap`: nothing took a slot at the cap.
+`a_slot_is_taken_below_the_cap_and_refused_at_it` fills a cap of two and
+asserts the third take is refused and moves nothing. The TIMEOUT was
+`LimitedListener::accept`'s `while !try_take()` with the `!` deleted: a free
+slot is taken and then the acceptor waits on a freed signal nobody sends, so
+the tests that serve over a real socket hung until cargo-mutants' own timeout
+rather than failing.
+`accept_takes_a_free_slot_at_once_and_waits_only_when_full` bounds each accept
+by a 400 ms timeout, so the mutant fails in under a second; it also asserts
+that a full house waits and that a closed connection admits the next.
+`calendar_of.rs` `<Cache as Debug>::fmt` -> `Ok(Default::default())`:
+`the_cache_debugs_as_its_name_and_its_waiting_gauge` pins the exact output.
+
+**Restructured, then tested.** `derived_and_kept`'s warning condition
+(`!withheld.is_empty() || !unreadable.is_empty()`, three mutants) guarded only
+an event to the process-wide telemetry sink, which a unit test cannot read
+without racing every other test. It is now `Report::says_what_it_lacks`, and
+`a_report_warns_on_a_withheld_or_unreadable_month_and_never_otherwise` checks
+all four corners. `autopilot.rs` `fly`'s `RUNGS.get(next_rung % RUNGS.len())`
+(`%` -> `/` and `%` -> `+`, both of which always choose the day rung and starve
+the minute rung) sat inside an endless loop over a live store. It is now
+`rung_for(tick)`, pinned by `the_rung_alternates_day_then_minute_across_the_wrap`
+from tick 0 through the wrap at `usize::MAX`. `fly` now counts with a bare
+`wrapping_add(1)`: the second remainder was redundant once `rung_for` reduces,
+and a compile-time assertion that `RUNGS.len()` is a power of two keeps the
+alternation intact across the wrap. Each is one remainder or one compare-and-
+swap; nothing here scans.

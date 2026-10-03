@@ -17377,7 +17377,8 @@ pub async fn serve_limited(
 )]
 mod head_deadline_tests {
     use super::{
-        ConnectionLimits, HEAD_READ_TIMEOUT, HeadDeadline, Slot, Slots, serve, serve_limited,
+        ConnectionLimits, HEAD_READ_TIMEOUT, HeadDeadline, LimitedListener, Slot, Slots, serve,
+        serve_limited,
     };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
@@ -17489,6 +17490,63 @@ mod head_deadline_tests {
             0,
             "the slot is given back with the wrapper"
         );
+    }
+
+    /// **THE CAP IS EXACT: `cap` SLOTS, NOT `cap + 1`.** A slot is taken only
+    /// while fewer than `cap` are live, and a refused take leaves the count
+    /// where it was. D-1454.
+    #[test]
+    fn a_slot_is_taken_below_the_cap_and_refused_at_it() {
+        let slots = Slots {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            cap: 2,
+            freed: tokio::sync::Notify::new(),
+        };
+        let live = || slots.live.load(std::sync::atomic::Ordering::Acquire);
+        assert!(slots.try_take(), "0 of 2 live: taken");
+        assert_eq!(live(), 1);
+        assert!(slots.try_take(), "1 of 2 live: taken");
+        assert_eq!(live(), 2);
+        assert!(!slots.try_take(), "2 of 2 live: refused at the cap");
+        assert_eq!(live(), 2, "a refused take moves nothing");
+    }
+
+    /// **A FREE SLOT IS TAKEN AT ONCE, AND A FULL HOUSE WAITS FOR A CLOSE.**
+    /// `accept` with a slot free must reach the socket without waiting on the
+    /// freed signal — nobody will send one — and with every slot held it must
+    /// wait until one is given back. Each step is bounded by a short timeout,
+    /// so an accept that waits when it should not is a failure here, not a
+    /// hung test. D-1454.
+    #[tokio::test]
+    async fn accept_takes_a_free_slot_at_once_and_waits_only_when_full() {
+        use axum::serve::Listener as _;
+        let inner = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = inner.local_addr().unwrap();
+        let slots = std::sync::Arc::new(Slots {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            cap: 1,
+            freed: tokio::sync::Notify::new(),
+        });
+        let mut listener = LimitedListener {
+            inner,
+            slots: std::sync::Arc::clone(&slots),
+            head_read_timeout: T,
+        };
+        let _first_client = TcpStream::connect(addr).await.unwrap();
+        let (first, _) = tokio::time::timeout(T, listener.accept())
+            .await
+            .expect("a free slot is taken without waiting for a close");
+        assert_eq!(slots.live.load(std::sync::atomic::Ordering::Acquire), 1);
+        let _second_client = TcpStream::connect(addr).await.unwrap();
+        assert!(
+            tokio::time::timeout(T, listener.accept()).await.is_err(),
+            "with the one slot held, a second connection is not accepted"
+        );
+        drop(first);
+        let (_second, _) = tokio::time::timeout(T, listener.accept())
+            .await
+            .expect("a slot given back admits the waiting connection");
+        assert_eq!(slots.live.load(std::sync::atomic::Ordering::Acquire), 1);
     }
 
     /// THE PROBE ITSELF, against the server the operator runs: a partial
