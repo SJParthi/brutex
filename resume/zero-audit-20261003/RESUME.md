@@ -114,3 +114,15 @@ scripts, mutants. Merge notes:
   pull `signing_key_for`; ci.yml gate 1d declares literal `iam`.
 - Not fixed (production): `cli auto` exits 0 when it measured nothing — open
   finding; the test now uses 6 sessions.
+
+## Agent branch: zero/ledger-tails (pushed, head 281cbb46, NOT merged into staging)
+D-1900..D-1915, invariants ZL-01..ZL-21. Fixed + tested: original brief findings
+incl. CE-31 (4cee129e), ledgers-1 (38280a94), CE-3 (78a216d5), ledgers-3
+(bd22a9ad: six ledger writers cut a torn tail on open; readers still refuse),
+locks-1 (9ba9110e), locks-2 (66c7632d), locks-3 (46f2c763), CE-11 (80b389c1).
+PARTIAL: ledgers-2 (281cbb46, D-1915) — Base Evidence V2, Candidate Universe and
+boolean evidence fixed; Lineage V4, Selection V6, Global Replay V4, Admission V4
+still re-sync a failed barrier in place (open). Not run: clippy over cli/api,
+full workspace tests, mutants, non-root. Agent reports pre-existing fmt drift
+and clippy failures in boolean_candidate_persistence*.rs and
+index_stop_vix_tests.rs on its base. ledgers-3's docs/06-limits entry not added.
