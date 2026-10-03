@@ -1593,11 +1593,11 @@ mod tests {
         // was appended after every real bar and only `census.swept` was
         // compared, so a refusal that folded the bar into evaluator state
         // before refusing it had no later bar to show the damage on. It now
-        // sits inside session five, after warm-up, and every mask of the
+        // sits inside session seven, after the 1,876-bar warm-up, and every mask of the
         // column -- and every frequent combination -- must equal the clean
         // run's.
         let clean_bars = synthetic::sessions(8);
-        let at = 4 * 375 + 100;
+        let at = 6 * 375 + 100;
         let before = clean_bars
             .get(at - 1)
             .copied()
