@@ -1021,7 +1021,7 @@ pub async fn note_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let rationed = cross_site(request.headers());
+    let from_another_site = cross_site(request.headers());
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     let started = std::time::Instant::now();
@@ -1036,21 +1036,30 @@ pub async fn note_request(
     } else {
         telemetry::Level::Debug
     };
-    // THE FAILED-REQUEST LINES ARE RATIONED. See [`FAILED_LINES_PER_WINDOW`].
-    if rationed && level != telemetry::Level::Debug {
+    // THE FAILED-REQUEST LINES ARE RATIONED ON BOTH PATHS. See
+    // [`FAILED_LINES_PER_WINDOW`] and [`LOCAL_FAILED_LINES_PER_WINDOW`].
+    if level != telemetry::Level::Debug {
         let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
         let admit = FAILED_LINES
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admit(now);
+            .admit(from_another_site, now);
         if let Some(suppressed) = admit.summary {
             let _dropped_when_filtered = telemetry::emit(
                 &telemetry::Event::new(
                     telemetry::Level::Warn,
                     "api.request",
-                    "failed-request lines suppressed in the previous window",
+                    suppression_message(from_another_site),
                 )
                 .with("suppressed", telemetry::Value::Uint(suppressed))
+                .with(
+                    "origin",
+                    telemetry::Value::Str(if from_another_site {
+                        "cross-site"
+                    } else {
+                        "same-origin"
+                    }),
+                )
                 .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
             );
         }
@@ -1085,11 +1094,40 @@ pub async fn note_request(
 /// each — about 1.8 MB an hour at the worst, against a 64 MiB retained log.
 pub const FAILED_LINES_PER_WINDOW: u64 = 50;
 
+/// How many failed-request lines the operator's own pages and local tools may
+/// write in one window.
+///
+/// audit-20261003 hunt-api-3, D-1552. D-1583 rationed only requests another
+/// site sent, so a same-origin client (a page of this console stuck in a
+/// retry loop, a local script) still wrote one line per failed request and
+/// could roll the whole 64 MiB window away exactly as the cross-site flood
+/// did. This path now has its own ration, four times the cross-site one
+/// because it is the operator's own traffic, with the same counted summary:
+/// what is held back is said in one Warn line carrying `suppressed` = N, never
+/// dropped silently. A separate count, so a local flood cannot spend the
+/// cross-site lines and a cross-site flood cannot silence the operator's own
+/// failures.
+///
+/// Bound: at most this many lines plus one summary per window, ~620 bytes
+/// each, about 7.4 MB an hour at the worst; with the cross-site ration, about
+/// 9.3 MB an hour, so a sustained flood of both still takes some seven hours
+/// to roll the 64 MiB retained log (`docs/06-limits.md`).
+pub const LOCAL_FAILED_LINES_PER_WINDOW: u64 = 200;
+
+/// The summary line's message for one origin class.
+pub(crate) const fn suppression_message(from_another_site: bool) -> &'static str {
+    if from_another_site {
+        "cross-site failed-request lines suppressed in the previous window"
+    } else {
+        "same-origin failed-request lines suppressed in the previous window"
+    }
+}
+
 /// Whether a request came from another site, by the browser's own
 /// `Sec-Fetch-Site`: anything but absent, `same-origin` or `none` (typed or
-/// bookmarked). Only these failed requests are rationed. The operator's own
-/// pages and local tools are logged in full; the flood the ration exists for
-/// comes from a page on another site, and every browser that sends a
+/// bookmarked). These failed requests draw on [`FAILED_LINES_PER_WINDOW`];
+/// the operator's own pages and local tools draw on the separate
+/// [`LOCAL_FAILED_LINES_PER_WINDOW`] (D-1552). Every browser that sends a
 /// `no-cors` fetch sends this header with it.
 pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
     headers
@@ -1100,8 +1138,35 @@ pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
 /// The length of one rationing window, in milliseconds.
 pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
 
-/// The process's one failed-request ration.
-static FAILED_LINES: std::sync::Mutex<Ration> = std::sync::Mutex::new(Ration::new());
+/// The process's failed-request rations, one per origin class.
+static FAILED_LINES: std::sync::Mutex<Rations> = std::sync::Mutex::new(Rations::new());
+
+/// One ration per origin class: cross-site (D-1583) and same-origin (D-1552).
+#[derive(Debug)]
+pub(crate) struct Rations {
+    /// Failed requests another site sent.
+    cross: Ration,
+    /// Failed requests from this console's own pages and local tools.
+    local: Ration,
+}
+
+impl Rations {
+    pub(crate) const fn new() -> Self {
+        Self {
+            cross: Ration::new(FAILED_LINES_PER_WINDOW),
+            local: Ration::new(LOCAL_FAILED_LINES_PER_WINDOW),
+        }
+    }
+
+    /// Accounts one failed request of its origin class at `now_ms`.
+    pub(crate) fn admit(&mut self, from_another_site: bool, now_ms: u64) -> Admit {
+        if from_another_site {
+            self.cross.admit(now_ms)
+        } else {
+            self.local.admit(now_ms)
+        }
+    }
+}
 
 /// A fixed-window count of failed-request lines. O(1) per request.
 #[derive(Debug)]
@@ -1112,6 +1177,8 @@ pub(crate) struct Ration {
     written: u64,
     /// Lines held back in it.
     suppressed: u64,
+    /// Lines one window may write.
+    limit: u64,
 }
 
 /// What one failed request may write.
@@ -1124,11 +1191,12 @@ pub(crate) struct Admit {
 }
 
 impl Ration {
-    pub(crate) const fn new() -> Self {
+    pub(crate) const fn new(limit: u64) -> Self {
         Self {
             opened_ms: 0,
             written: 0,
             suppressed: 0,
+            limit,
         }
     }
 
@@ -1140,13 +1208,11 @@ impl Ration {
             if self.suppressed > 0 {
                 summary = Some(self.suppressed);
             }
-            *self = Self {
-                opened_ms: now_ms,
-                written: 0,
-                suppressed: 0,
-            };
+            self.opened_ms = now_ms;
+            self.written = 0;
+            self.suppressed = 0;
         }
-        let write = self.written < FAILED_LINES_PER_WINDOW;
+        let write = self.written < self.limit;
         if write {
             self.written = self.written.saturating_add(1);
         } else {
@@ -1168,7 +1234,7 @@ mod tests {
     /// the ration, and the next window opens with one line counting the rest.
     #[test]
     fn a_flood_of_failed_requests_writes_a_bounded_number_of_lines() {
-        let mut ration = Ration::new();
+        let mut ration = Ration::new(FAILED_LINES_PER_WINDOW);
         let start = 1_000_000_u64;
         let mut written = 0_u64;
         for i in 0..100_000_u64 {
@@ -1210,6 +1276,52 @@ mod tests {
         assert!(with("cross-site") && with("same-site"));
         assert!(!with("same-origin") && !with("none"));
         assert!(!cross_site(&axum::http::HeaderMap::new()));
+    }
+
+    /// audit-20261003 hunt-api-3, D-1552: A SAME-ORIGIN FLOOD IS BOUNDED TOO,
+    /// AND COUNTED. 100,000 failed same-origin requests in one window write at
+    /// most [`LOCAL_FAILED_LINES_PER_WINDOW`] lines and the next window names
+    /// the rest; the two classes draw on separate counts, so a same-origin
+    /// flood leaves the cross-site lines intact and the reverse.
+    #[test]
+    fn a_same_origin_flood_is_bounded_and_counted_separately_from_cross_site() {
+        let mut rations = Rations::new();
+        let start = 5_000_000_u64;
+        let mut local = 0_u64;
+        for i in 0..100_000_u64 {
+            let admit = rations.admit(false, start + i / 10);
+            assert_eq!(admit.summary, None);
+            if admit.write {
+                local += 1;
+            }
+        }
+        assert_eq!(local, LOCAL_FAILED_LINES_PER_WINDOW);
+        // The cross-site lines of the same window were not spent by it.
+        let mut cross = 0_u64;
+        for i in 0..1_000_u64 {
+            if rations.admit(true, start + i).write {
+                cross += 1;
+            }
+        }
+        assert_eq!(cross, FAILED_LINES_PER_WINDOW);
+        let next_local = rations.admit(false, start + FAILED_LINE_WINDOW_MS);
+        assert!(next_local.write);
+        assert_eq!(
+            next_local.summary,
+            Some(100_000 - LOCAL_FAILED_LINES_PER_WINDOW),
+            "the same-origin lines held back are counted, not lost"
+        );
+        let next_cross = rations.admit(true, start + FAILED_LINE_WINDOW_MS);
+        assert_eq!(next_cross.summary, Some(1_000 - FAILED_LINES_PER_WINDOW));
+        // The summary line names its class and its count.
+        assert_eq!(
+            suppression_message(false),
+            "same-origin failed-request lines suppressed in the previous window"
+        );
+        assert_eq!(
+            suppression_message(true),
+            "cross-site failed-request lines suppressed in the previous window"
+        );
     }
 
     /// A sink of our own, in a scratch directory — never the process global.
