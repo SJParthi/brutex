@@ -2344,3 +2344,86 @@ fn a_descent_loads_its_stored_inputs_once() {
     assert_ne!(one_minute.replace(&cached_root, &fresh_root), expected[0]);
     crate::knobs::clear_all();
 }
+
+/// A RELIANCE (or index) May whose every price halves from 2025-05-09 on:
+/// an unadjusted 1:2 split, written at all three rungs `warmed_for` writes.
+fn split_on_the_ninth(symbol: &'static str) -> Fixture {
+    let fixture = Fixture::for_symbol(symbol);
+    for day in 5..=13 {
+        let mut rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        if day >= 9 {
+            for row in &mut rows {
+                row.open /= 2;
+                row.high /= 2;
+                row.low /= 2;
+                row.close /= 2;
+            }
+        }
+        fixture.write(5, Timeframe::MINUTE_1, &rows);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    fixture
+}
+
+/// **A stock's stored report names its largest overnight move by date and
+/// size, and an index's never does.** gaps-6, D-1540.
+///
+/// D-0694 says corporate actions are unchecked; nothing told the reader WHERE
+/// to look. Over a month with an unadjusted 1:2 split on 2025-05-09 (close
+/// 1010.00, next open 500.00), every single-instrument stored door that holds
+/// the bars names that session and the -50.49% move, with no threshold
+/// claimed. The same bars as NIFTY carry no such line: an index never splits.
+#[test]
+fn every_stored_stock_report_names_its_largest_overnight_move() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for (symbol, stock) in [("RELIANCE", true), ("NIFTY", false)] {
+        let fixture = split_on_the_ninth(symbol);
+        let audited = Inputs::load(fixture.request("5min")).expect("audited generated inputs");
+        let reports = [
+            ("sweep-stored", fixture.sweep("5min")),
+            (
+                "sweep-audited-stored",
+                crate::stored_month_kernel(
+                    fixture.month_request("5min"),
+                    audited.data(),
+                    Some(&audited),
+                ),
+            ),
+            ("audit-stored", fixture.audit("5min")),
+            ("audit-range", fixture.audit_range("5min", (2025, 5))),
+            ("screen", fixture.screen("5min", 1_000_000)),
+            ("auto-stored", fixture.auto("5min")),
+        ];
+        for (door, report) in reports {
+            let report = report.expect(door);
+            let flat = report.split_whitespace().collect::<Vec<_>>().join(" ");
+            let named = "LARGEST OVERNIGHT MOVE IN THESE BARS: -50.49% into the 2025-05-09 \
+                         session (close 1010.00 to open 500.00). NO THRESHOLD";
+            assert_eq!(flat.contains(named), stock, "{symbol} {door}:\n{report}");
+            assert_eq!(
+                report.contains("LARGEST OVERNIGHT MOVE"),
+                stock,
+                "{symbol} {door}:\n{report}"
+            );
+            if stock {
+                assert!(
+                    report.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED)
+                        < report.find("LARGEST OVERNIGHT MOVE"),
+                    "{door}: the measurement follows the statement it qualifies:\n{report}"
+                );
+                assert!(!crate::carries_refusal(&report), "{door}:\n{report}");
+            }
+        }
+    }
+    crate::knobs::clear_all();
+}

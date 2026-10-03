@@ -3591,6 +3591,7 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
+    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -4020,6 +4021,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
+    out.push_str(&stored::overnight_note(&span.key, &span.bars));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -6176,6 +6178,9 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         loaded.bars.len(),
         commit,
     );
+    // D-1540: the month banner names the largest overnight move of a stock's
+    // bars, where `month_banner` itself sees only their count.
+    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -6393,6 +6398,7 @@ fn span_banner(
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
+    header.push_str(&stored::overnight_note(&span.key, &span.bars));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
