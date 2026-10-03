@@ -13949,3 +13949,21 @@ per-launch multiplier, so it is stated here (W2-cli6-0).
 It is not removed: the replay is how a resume proves an acknowledged child
 still says what its pin says. A trusted cache of verified frames would be a
 new durable authority, and none exists.
+
+## Recording a run reopens the chosen-trades file; ledger-v6 sizing reloads the NIFTY span per rung — D-1634, 3 October 2026
+
+- **`Trades::open` per recorded run (W2-cli16-2).** `ensure_trade_rows`
+  opens the writer for each run it records and reopens it to verify. Each
+  open reads every row in `chosen-trades.bin` to rebuild the identity index:
+  O(H + T) per recorded run for H rows already stored and T of this run,
+  Θ(N·H) over N runs. The writer open has no byte ceiling. The module
+  rustdoc said "once per process" until D-1634.
+- **`strict::size_sweeper` per rung (W2-cli16-3).** `ledger_v6` calls it once
+  for each of the eight rungs. Each call loads the whole NIFTY signal, daily
+  and exact-minute span (with prior context) under the strict checksum
+  receipts, to learn one integer, the signal bar count, from which
+  `min_hits_for` sizes the ladder. The NIFTY family commit then loads the same
+  span again. Cost per rung is O(span bytes + months × fsyncs), twice. Not
+  removed: carrying the loaded context from sizing into the family commit
+  changes the guard lifetime of the strict inputs, which this change does not
+  take on.

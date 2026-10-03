@@ -53560,7 +53560,7 @@ that did not judge it, and a re-judge from the stored rule could flip a
 verdict. A stored rule that differs from the applied one is a silent fallback
 (§4).
 
-**The change.** `Frontier::append_with` refuses, before any byte is written,
+**The change.** `Frontier::append_locked_with` refuses, before any byte is written,
 a row whose `min_fill_headroom_bp` is outside `0..=i32::MAX`, naming the run
 and the value. The format is unchanged (still version 6, still an `i32`).
 Every value that was stored exactly before is stored exactly now; only values
@@ -53590,3 +53590,52 @@ responses. It needs one change across `cli`, `api` and `web`, with the web
 verifier's tests, and is left open as stated here. Until then a PASS on
 `/frontier.json` means "the five named rules hold", as `Verdict::admitted`'s
 rustdoc already says, and does not cover average payoff or fill headroom.
+
+### D-1624 — The trade calendar's Hour key is documented as the IST clock hour — 2026-10-03
+
+**What was wrong (c4b-3).** `trades::Period::Hour`'s rustdoc said "Minutes
+from midnight IST, rounded down to the clock hour". The key is
+`ist_micros.rem_euclid(DAY) / HOUR`, the hour `0..=23`, and the web reader
+(`trade-analytics.js`) expects `0..=23`. The code was right and the doc was
+false.
+
+**The change.** The doc now says "the IST clock hour the trade entered in,
+`0..=23`". No output changes.
+
+**What it proves.** `cli::trades::period_tests::the_hour_key_is_the_ist_clock_hour`
+requires 09:20 IST to key 9, 09:59:59.999999 to key 9 and 10:00 to key 10.
+
+### D-1625 — Trade-calendar money totals are `i128`, exact, not clamped — 2026-10-03
+
+**What was wrong (c4b-6).** `trades::Bucket::take` summed `best_paisa` and
+`worst_paisa` in `i64` with `saturating_add`. A sum past `i64::MAX` or
+`i64::MIN` was served by `/trades.json` as if it were the real total, the
+hidden fallback §4 bans. Global Replay V4 already sums the same money in
+`i128`.
+
+**The change.** `Bucket::best_paisa` and `worst_paisa` are `i128`. Each
+addend is an `i64`, and at most `usize::MAX` of them cannot reach `i128::MAX`
+in magnitude, so the total is exact for any slice; the remaining
+`saturating_add` is unreachable and is commented as such. `api`'s
+`/trades.json` writes the same decimal digits for every total that fit `i64`;
+a total that used to be clamped is now written exactly. No stored bytes
+change; the buckets are computed per request. Prices themselves stay `i64`
+paisa (§7); only these sums widened.
+
+**What it proves.** `cli::trades::period_tests::bucket_totals_past_i64_are_exact_not_clamped`
+sums three `i64::MAX` best fills and three `i64::MIN` worst fills and
+requires `3 × i64::MAX` and `3 × i64::MIN` exactly.
+
+### D-1634 — The chosen-trades writer is opened per recorded run; its rustdoc said once per process — 2026-10-03
+
+**What was wrong (W2-cli16-2).** `trades.rs`'s cost table said the open pass
+runs "once per process". `ensure_trade_rows` opens `Trades` for every
+recorded run and reopens it to verify, and each open reads every row ever
+written to rebuild the index. `docs/06-limits.md` already stated
+"O(all chosen rows)" per open; the source doc contradicted it.
+
+**The change.** The rustdoc says "on every open" and states the per-run
+O(H + T) and cumulative Θ(N·H) cost and that the writer open has no byte
+ceiling. A persistent index or a held writer would be a new on-disk format or
+a process-lifetime cache, neither of which this change adds.
+`docs/06-limits.md` gains the sizing reload (W2-cli16-3) beside it.
