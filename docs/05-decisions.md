@@ -53583,3 +53583,34 @@ the Gate 11 sentence.
 
 **Rejected.** A `HashMap` memo keyed by rate. The rates are already a `Vec`
 walked in order, so a parallel vector is the memo, with no hashing.
+
+### D-1727 — `TOP` has a named ceiling of 1,000 rows, and the measured band runs across every core — 2026-10-03
+
+**Finding.** W2-cli8-7 (medium cost).
+
+**What was wrong.** `measure_top` measures `measured_band(top)` rows
+(`8 × top`, floored at 32) in a sequential loop. Each row is a full exit-grid
+rebuild (`grid::evaluate_over`) plus `per_trade` plus seven calendar grains.
+`BRUTEX_TOP` had no ceiling: `strict_range_knobs` checked only `> 0`, and
+`Rules::operator` took any non-negative value, including 0. The argv `TOP` of
+`elite` and `screen` was unbounded too. The cost was in a code comment
+recording a three-hour stall, not in `docs/06-limits.md`.
+
+**The decision.** `TOP_CEILING = 1_000`. `top_refusal` is the one check for
+`1..=TOP_CEILING`. `elite_arm`, `screen_arm`,
+`elite_descend_in_points_inner` and `screen_range_in_points` refuse outside
+it by name. The strict HTTP reader refuses it with `machine_count`.
+`Rules::operator` reads `BRUTEX_TOP` through `top_from_knob`, which names an
+unusable value in `knobs::refused` and uses the documented 25. Before, 0 gave
+a zero-row listing. The band runs as `rows.par_iter_mut().take(band)`. Each row
+writes only its own `consistency` from shared, read-only inputs, so the
+indexed iterator gives every row the figure the sequential loop gave. A test
+compares it row for row with a sequential `consistency_of`.
+`docs/06-limits.md` states `O(band × (G + 7 × trades))` per screen, with
+`band <= 8 × TOP_CEILING`.
+
+**Rejected.** Clamping `TOP` silently to the ceiling. A clamped value is a
+fallback that hides the request, which §4 bans. Carrying each row's grid from
+the priced pass instead of rebuilding it. That keeps every priced row's grid
+resident, which is the memory the bounded heap exists to avoid. The rebuild
+per row is inherent to that trade.

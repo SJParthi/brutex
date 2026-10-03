@@ -472,3 +472,144 @@ fn the_tier_ladder_hoists_its_per_rung_and_per_rate_work() {
         );
     }
 }
+
+/// W2-cli8-7. `BRUTEX_TOP` has a named ceiling, refused by name.
+#[test]
+fn brutex_top_has_a_ceiling_and_says_so() {
+    assert!(crate::audited_range_command::request_value(
+        "BRUTEX_TOP",
+        "1000"
+    ));
+    assert!(crate::audited_range_command::request_value(
+        "BRUTEX_TOP",
+        "1"
+    ));
+    assert!(!crate::audited_range_command::request_value(
+        "BRUTEX_TOP",
+        "1001"
+    ));
+    assert!(!crate::audited_range_command::request_value(
+        "BRUTEX_TOP",
+        "0"
+    ));
+}
+
+/// W2-cli8-7. One refusal for every door, at both ends and at the ceiling.
+#[test]
+fn every_top_door_shares_one_ceiling() {
+    assert_eq!(top_refusal(0), Some("TOP must be 1 or more"));
+    assert_eq!(top_refusal(1), None);
+    assert_eq!(top_refusal(TOP_CEILING), None);
+    assert!(top_refusal(TOP_CEILING + 1).is_some_and(|why| why.contains("1000 or fewer")));
+    assert!(top_refusal(usize::MAX).is_some());
+    assert_eq!(measured_band(1), 32, "the floor");
+    assert_eq!(
+        measured_band(TOP_CEILING),
+        8 * TOP_CEILING,
+        "the bounded band"
+    );
+
+    let _serial = crate::knobs::serially();
+    for (raw, want, refused) in [
+        ("25", 25, false),
+        ("1000", 1_000, false),
+        ("1", 1, false),
+        ("1001", 25, true),
+        ("0", 25, true),
+        ("-3", 25, true),
+        ("lots", 25, true),
+    ] {
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_TOP", raw);
+        assert_eq!(top_from_knob(), want, "BRUTEX_TOP={raw}");
+        let named = crate::knobs::refused().is_some_and(|block| block.contains("BRUTEX_TOP"));
+        assert_eq!(
+            named, refused,
+            "BRUTEX_TOP={raw} is named only when unusable"
+        );
+    }
+    crate::knobs::clear_all();
+    assert_eq!(top_from_knob(), 25, "unset is the documented 25");
+
+    let mut report = String::new();
+    let words: Vec<String> = [
+        "elite", "zerodha", "NIFTY", "1min", "2026", "8", "2026", "8", "20", "1001",
+    ]
+    .iter()
+    .map(|word| (*word).to_owned())
+    .collect();
+    assert_eq!(dispatch(&words, &mut report), MISUSED);
+    assert!(report.contains("1000 or fewer"), "{report}");
+}
+
+/// W2-cli8-7. The parallel band measures exactly what the sequential loop did,
+/// row for row, and leaves every row past the band unmeasured.
+#[test]
+fn the_parallel_band_matches_a_sequential_measurement() {
+    let fixture = Ranked::of(8);
+    let bars = &fixture.bars;
+    let column = &fixture.run.column;
+    let facts = runner::trade::SliceFacts::of(bars, column);
+    let horizon = Horizon::DEFAULT;
+    let mut rules = Rules::elite(0, 25);
+    rules.top = 1;
+    let stops = stop_ladder_ppm(bars, horizon.as_bars() as usize);
+    let levels = grid::Levels {
+        rungs: grid_rungs(bars),
+        step_ppm: Some(grid_step_ppm(bars, horizon.as_bars() as usize)),
+        forced: None,
+        ratios: true,
+        stops_ppm: &stops,
+    };
+    let mut rows = Vec::new();
+    let mut expected = Vec::new();
+    for (rank, scored) in fixture.run.ranked.top.iter().take(40).enumerate() {
+        let side = Direction::Long;
+        let g = grid::evaluate_over(
+            bars,
+            column,
+            &scored.mask,
+            horizon,
+            side_of_direction(side),
+            levels,
+            &facts,
+        );
+        let Some(cell) = g.best().copied() else {
+            continue;
+        };
+        expected.push(consistency_of(
+            bars,
+            column,
+            scored,
+            horizon,
+            side_of_direction(side),
+            &g,
+            &cell,
+            &facts,
+        ));
+        rows.push(Screened {
+            side,
+            scored,
+            rank,
+            cell,
+            tightest: None,
+            admitted: false,
+            consistency: None,
+            steady: true,
+        });
+    }
+    assert!(rows.len() > 2, "fixture: rows to measure");
+    measure_top(&mut rows, bars, column, horizon, rules, &facts);
+    let band = measured_band(rules.top);
+    assert!(
+        expected.iter().take(band).any(Option::is_some),
+        "fixture: something measurable"
+    );
+    for (at, (row, want)) in rows.iter().zip(&expected).enumerate() {
+        if at < band {
+            assert_eq!(&row.consistency, want, "row {at}");
+        } else {
+            assert_eq!(row.consistency, None, "row {at} is past the band");
+        }
+    }
+}

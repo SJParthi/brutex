@@ -1278,8 +1278,9 @@ fn elite_arm(
                      A negative ceiling is unsatisfiable, not a looser one",
                 );
             }
-            if n == 0 {
-                return refuse(out, "TOP must be 1 or more");
+            // `1..=TOP_CEILING`, one refusal for every door (D-1727).
+            if let Some(why) = top_refusal(n) {
+                return refuse(out, why);
             }
             // NO SUPPORT ARGUMENT. `elite_descend` walks the threshold from a
             // cheap ceiling down to the floor one trade a week implies, and
@@ -1359,8 +1360,9 @@ fn screen_arm(
                     "MAX_POINTS must be a whole number of index points, 1 or more",
                 );
             }
-            if n == 0 {
-                return refuse(out, "TOP must be 1 or more");
+            // `1..=TOP_CEILING`, one refusal for every door (D-1727).
+            if let Some(why) = top_refusal(n) {
+                return refuse(out, why);
             }
             // THE THIRD NUMBER, VALIDATED LIKE THE OTHER TWO. `pts` and `n`
             // were checked and `rr` was not, so a negative MIN_RR reached
@@ -9139,7 +9141,7 @@ impl Rules {
             // fill readings. Measured 2.26 on the 60min run, so it is a floor a
             // real record can clear -- unlike `min_rr_bp`, which is min/max.
             min_avg_rr_bp: at("BRUTEX_MIN_AVG_RR_BP", 150),
-            top: usize::try_from(at("BRUTEX_TOP", 25)).unwrap_or(25),
+            top: top_from_knob(),
         }
     }
 
@@ -12675,6 +12677,40 @@ fn calendar_terms(c: &Consistency) -> (i64, i64) {
 /// what is printed, which is enough for the calendar gate to demote a measured
 /// row and still have a measured replacement, and independent of how wide the
 /// search was.
+/// The most rows one listing may ask to print: `BRUTEX_TOP` and every argv
+/// `TOP` are refused above it, by name (W2-cli8-7, D-1727).
+///
+/// `measure_top` measures `measured_band(top)` = `8 x top` rows, each a full
+/// exit-grid rebuild plus seven calendar grains, so an unbounded `top` was an
+/// unbounded per-request cost. A thousand printed rows is a page nobody reads
+/// whole; past it the cost grows and the answer does not.
+pub(crate) const TOP_CEILING: usize = 1_000;
+
+/// `BRUTEX_TOP`, or the documented 25 with the unusable value NAMED by
+/// [`crate::knobs::refused`]. Zero and anything above [`TOP_CEILING`] are
+/// unusable: zero lists nothing, and past the ceiling the measured band is an
+/// unbounded per-request cost (D-1727).
+fn top_from_knob() -> usize {
+    let Some(raw) = crate::knobs::var("BRUTEX_TOP") else {
+        return 25;
+    };
+    crate::knobs::machine_count(&raw, TOP_CEILING).unwrap_or_else(|| {
+        crate::knobs::refuse_value("BRUTEX_TOP", &raw);
+        25
+    })
+}
+
+/// The refusal for a `TOP` outside `1..=TOP_CEILING`, or `None`.
+pub(crate) const fn top_refusal(top: usize) -> Option<&'static str> {
+    if top == 0 {
+        Some("TOP must be 1 or more")
+    } else if top > TOP_CEILING {
+        Some("TOP must be 1000 or fewer: each printed row costs eight measured rows")
+    } else {
+        None
+    }
+}
+
 const fn measured_band(top: usize) -> usize {
     const WIDEN: usize = 8;
     const FLOOR: usize = 32;
@@ -12781,43 +12817,54 @@ fn measure_top(
     // be printed, so the calendar gate below can demote a measured row and the
     // one that replaces it is measured too. At `top = 10` that is 80 rows
     // whatever the cap.
-    for row in rows.iter_mut().take(measured_band(rules.top)) {
-        // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
-        // was worse than opposite — it was cross-wired.
-        //
-        // `screen` now prices BOTH sides and keeps the better, so
-        // `side_of_evidence` no longer names the side `row.cell` came from.
-        // Re-deriving it here rebuilt the grid on the OTHER side, and
-        // `consistency_of` then took `row.cell`'s `stop`/`target`/`tsl`/`ttp` —
-        // rung indices into the WINNING side's ladders — and resolved them
-        // against this grid's ladders. Not a mirrored measurement: a meaningless
-        // one.
-        //
-        // And it is not cosmetic. The result drives the calendar re-sort and
-        // then the calendar GATE, which sets `row.steady = false` and
-        // `row.admitted = false`. `final_selection` returns only admitted rows,
-        // so a combination priced and admitted SHORT could be demoted by a LONG
-        // measurement and lose the run to a different candidate.
-        let side = side_of_direction(row.side);
-        let g = grid::evaluate_over(
-            bars,
-            column,
-            &row.scored.mask,
-            horizon,
-            side,
-            grid::Levels {
-                rungs: rungs_again,
-                step_ppm: Some(step_ppm_again),
-                forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-                ratios: true,
-                stops_ppm: &stop_rungs_again,
-            },
-            facts,
-        );
-        row.consistency = consistency_of(
-            bars, column, row.scored, horizon, side, &g, &row.cell, facts,
-        );
-    }
+    //
+    // # Across every core, and still byte-identical (W2-cli8-7, D-1727)
+    //
+    // Each row reads `bars`, `column`, the hoisted ladders and the shared
+    // `facts`, and writes only its OWN `consistency`; nothing accumulates across
+    // rows. `par_iter_mut` on the slice is indexed, so every row's figure is the
+    // one the sequential loop computed, whatever the core count. The cost is
+    // `O(band x (G + 7 x trades))` -- `G` one exit grid -- divided across cores,
+    // and `band` is at most `8 x TOP_CEILING`.
+    rows.par_iter_mut()
+        .take(measured_band(rules.top))
+        .for_each(|row| {
+            // THE SIDE THE ROW WAS PRICED AT, NOT THE PROXY, and getting this wrong
+            // was worse than opposite — it was cross-wired.
+            //
+            // `screen` now prices BOTH sides and keeps the better, so
+            // `side_of_evidence` no longer names the side `row.cell` came from.
+            // Re-deriving it here rebuilt the grid on the OTHER side, and
+            // `consistency_of` then took `row.cell`'s `stop`/`target`/`tsl`/`ttp` —
+            // rung indices into the WINNING side's ladders — and resolved them
+            // against this grid's ladders. Not a mirrored measurement: a meaningless
+            // one.
+            //
+            // And it is not cosmetic. The result drives the calendar re-sort and
+            // then the calendar GATE, which sets `row.steady = false` and
+            // `row.admitted = false`. `final_selection` returns only admitted rows,
+            // so a combination priced and admitted SHORT could be demoted by a LONG
+            // measurement and lose the run to a different candidate.
+            let side = side_of_direction(row.side);
+            let g = grid::evaluate_over(
+                bars,
+                column,
+                &row.scored.mask,
+                horizon,
+                side,
+                grid::Levels {
+                    rungs: rungs_again,
+                    step_ppm: Some(step_ppm_again),
+                    forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+                    ratios: true,
+                    stops_ppm: &stop_rungs_again,
+                },
+                facts,
+            );
+            row.consistency = consistency_of(
+                bars, column, row.scored, horizon, side, &g, &row.cell, facts,
+            );
+        });
 }
 
 /// The screen's ranked table: one row per printed combination, its side, its
@@ -14591,6 +14638,9 @@ fn elite_descend_in_points_inner(
                 a shorter answer, it is no answer.\n"
             .to_owned();
     }
+    if let Some(why) = top_refusal(top) {
+        return format!("refused: {why}.\n");
+    }
     let root = match store_root() {
         Ok(root) => root,
         Err(why) => return format!("refused: {why}\n"),
@@ -14751,10 +14801,10 @@ pub fn screen_range_in_points(
     //
     // NEGATIVE remains refused: `worst_mae` is non-negative by construction, so
     // a negative ceiling admits nothing while reading as a relaxation.
-    if max_points < 0 || top == 0 {
+    if max_points < 0 || top_refusal(top).is_some() {
         return "refused: the stop ceiling is a whole number of index points — 1 or \
                 more for a ceiling, or 0 for no ceiling beyond the ladder the bars \
-                derive — and TOP must be 1 row or more.\n"
+                derive — and TOP must be 1 to 1000 rows.\n"
             .to_owned();
     }
     let root = match store_root() {

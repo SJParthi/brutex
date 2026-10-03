@@ -13942,3 +13942,12 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   most `TRADES_SEARCH_CEILING` Wilson bounds), and one `O(T log T)` sort over
   `T <= 64 × 28 × 396` generated tiers. Before D-1726 the ceiling scan ran
   once per rung and the floor search once per tier.
+
+- **`measure_top`, per screen: `O(band × (G + 7 × trades))`** (W2-cli8-7,
+  D-1727). `band = measured_band(top) = max(8 × top, 32)` rows, each a full
+  exit-grid rebuild plus a per-trade walk bucketed at seven calendar grains.
+  `top <= TOP_CEILING` (1,000) at every door, so `band <= 8,000`. The rows are
+  measured across cores with an indexed `par_iter_mut`, and the answer is
+  byte-identical to the sequential loop. The rebuild per row is inherent:
+  carrying each priced row's grid would keep up to `screen_cap()` grids
+  resident.
