@@ -208,7 +208,7 @@ fn the_consistency_table_keeps_extreme_shares_and_the_worst_day_apart() {
         hits: 1,
         edge: Edge::default(),
     };
-    let row = |share: i64, worst: i64, years: usize, rank: usize| crate::Screened {
+    let row = |share: i64, worst: i128, years: usize, rank: usize| crate::Screened {
         side: costs::fill::Direction::Long,
         scored: &scored,
         rank,
@@ -223,8 +223,8 @@ fn the_consistency_table_keeps_extreme_shares_and_the_worst_day_apart() {
         steady: true,
     };
     let rows = [
-        row(i64::MIN, i64::MIN, usize::MAX, usize::MAX),
-        row(i64::MAX, i64::MAX, 1, 2),
+        row(i64::MIN, i128::from(i64::MIN), usize::MAX, usize::MAX),
+        row(i64::MAX, i128::from(i64::MAX), 1, 2),
         row(10_000, -1, 1, 3),
     ];
     let mut text = String::new();

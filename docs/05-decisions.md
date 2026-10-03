@@ -54668,3 +54668,40 @@ do not.
 renders RELIANCE, TCS, NIFTY and BANKNIFTY. It requires the head to equal
 `stored_provenance(symbol)`, the corporate-actions statement exactly once for
 a stock and never for an index, and the counts body to be byte-exact.
+
+### D-1852 — Pooled and per-period money totals are `i128`, exact, not clamped — 2026-10-03
+
+**What was wrong (h-cli-3).** `pool::fold` summed each instrument's
+`pessimistic`, `gross_win` and `gross_loss` paisa into `i64` with
+`saturating_add`, and `stability::at` did the same for each period's `net`. A
+sum past either end was printed and ranked as `i64::MAX` or `i64::MIN`, as if
+it were the real total. That is the silent clamp §4 bans, the same class as
+D-1625. Both ratios clamped too. `tail_bp` multiplied an `i64` `min_win` by
+100 with `saturating_mul`, so any win above `i64::MAX / 100` produced
+`i64::MAX`, which is the never-lost sentinel. A measured tail therefore
+rendered as "never lost" and was demoted in the ranking.
+
+**The change.** `Pooled::net`, `gross_win` and `gross_loss`,
+`stability::Bucket::net`, `Stability::worst_period`, and `Consistency::worst_day`
+are now `i128`. At most `usize::MAX` `i64` addends cannot leave `i128`'s range,
+so the remaining `saturating_add`s are unreachable, and the code says so where
+they stand. Both pooled ratios are computed in `i128`. The tail is exact for
+every `i64`. The profit factor's `saturating_mul` is unreachable short of
+pooling about 1.8 × 10^17 instruments. The never-lost sentinel is now
+`i128::MAX`, behind a pool-local `ranked`, and no finite ratio reaches it.
+`rupees` takes any integer up to `i128`. Every figure that fit in `i64` prints
+the same digits as before. Only a figure that used to be clamped changes, and
+it is now exact. The ranking of rows whose totals fit in `i64` is unchanged.
+Nothing stored changes. Pool and stability figures are computed per run and
+rendered, never persisted.
+
+**What it proves.** `cli::pool::tests::pooled_money_totals_past_i64_are_exact_not_clamped`
+pools three `i64::MAX` and three `i64::MIN` cells. It requires the exact
+`3 × i64::MAX` and `3 × i64::MIN` totals, both printed, a profit factor of 99,
+an exact tail of `i64::MAX × 100` that is not the sentinel, and the ranking to
+follow the exact values. `cli::stability::tests::a_period_net_past_i64_is_exact_not_clamped`
+requires `2 × i64::MAX + 1` and `3 × i64::MIN`, and requires a bucket that sums
+`i64::MIN + i64::MAX` to read exactly −1.
+`cli::tests::rupees_render_zero_unsigned_and_every_i128_exactly` pins zero
+unsigned and the exact Indian-grouped rendering of `i64::MIN`,
+`3 × i64::MIN`, `i128::MIN` and `i128::MAX`.
