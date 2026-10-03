@@ -1674,7 +1674,16 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// The rows of the table above, every one of them struck through — plus
     /// `pull.fno discovery refused`, the three named before it and the eight
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 9;
+    ///
+    /// AND TWO MORE, added with D-1582 and D-1583 (audit-20261003):
+    /// `api.main engine tasks abandoned at shutdown`, whose arm
+    /// `sweeprun::tests::stopping_does_not_wait_out_a_running_engine_task`
+    /// drives, but which only ever writes into the sink of a process that is
+    /// ending; and `api.request failed-request lines suppressed in the
+    /// previous window`, which needs more than fifty cross-site failures and
+    /// then a minute's wait — the ration it reports is proven by
+    /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
+    const UNREACHABLE: usize = 11;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1694,9 +1703,11 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
     // unreachable list above.
+    //
+    // 61 -> 63 at D-1582 and D-1583: the two unreachable sites named above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 61,
+        lib_sites, 63,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

@@ -72,11 +72,16 @@ impl Drop for Group {
     }
 }
 
-/// What the ungrouped producer at 759ba45a wrote for `pinned_programs`.
+/// What the ungrouped producer at 759ba45a wrote for `pinned_programs`, re-taken
+/// once for D-1542 and D-1543. `pinned_programs` reads positions 0 to 4, the
+/// EMA rows, so the evaluated conditions moved with the SMA seed and the
+/// classical candlestick shapes. With `trend.rs` and `pattern.rs` restored to
+/// their previous bytes this test passed on the previous pins, so nothing else
+/// moved them. The grouped and ungrouped producers still agree.
 const PINS: [&str; 3] = [
-    "35da362a7e9447ce690104094bc4581d63c66ee440cffea0ec72bde465a35fc1",
-    "b244ecba43067e3a89a68a9e46f262428089684faa7d17f1f59d6c40efaff63d",
-    "8106fa46e8728158036905540dca8ae37e0419454057e909aa560d1e9f888802",
+    "789752930d76edd64452a594b00a12beb964f5e27786a396041d94ee6063a5de",
+    "90d4e939bb80383e0921207e6da2834951ae30ef3e24069eb91455aa09183795",
+    "4ca1e9cc7a1127c19fa221be0249b0d42a2afad60788be18b34e62dfa3fbb804",
 ];
 
 fn body_hex(fixture: &Fixture, identity: [u8; 32]) -> Result<String, String> {

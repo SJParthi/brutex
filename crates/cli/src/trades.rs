@@ -208,7 +208,7 @@ impl Row {
     #[allow(
         clippy::indexing_slicing,
         reason = "every write is at a compile-time offset into an array whose \
-                  length is asserted above; `PAYLOAD_BYTES` is checked to be 96 \
+                  length is asserted above; `PAYLOAD_BYTES` is checked to be 128 \
                   and the writes below sum to exactly that."
     )]
     pub fn to_bytes(&self) -> [u8; STRIDE_BYTES] {

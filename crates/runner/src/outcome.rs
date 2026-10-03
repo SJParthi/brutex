@@ -614,9 +614,12 @@ impl Forward {
 /// [`Self::over`] does not TRUST the monotonicity above. A right end earlier
 /// than the last bar already pushed cannot be served from the deques, so they
 /// are cleared and rebuilt from the query's left end -- Θ(window) for that one
-/// query, and correct. `forward` never issues one; the branch exists so that a
-/// future caller with a different order gets the right answer rather than a
-/// stale maximum, and the unit test drives it.
+/// query, and correct. **`forward` does issue one** (o1eng2-1): since D-1410
+/// the deadline is `ts(i) + step_at(i)·H` and `step_at` is a prefix median
+/// that can step DOWN, so on a slice whose median cadence flips the exit
+/// moves backwards and the deques are rebuilt. The monotone argument above
+/// holds while the cadence is constant; `docs/06-limits.md` names the rebuild
+/// cost (D-1550).
 ///
 /// **UNVERIFIED as a measured bound.** No bench row times `forward`; the
 /// O(bars) total is argued from the shape above. `CLAUDE.md` §3 rule 6.
@@ -1814,9 +1817,12 @@ impl OverlapWindow {
         // whose OLDER window had already EXITED by this entry: `forward` ends
         // every window at the earlier of the horizon and that day's forced
         // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
-        // apart and share nothing at any horizon. `sources` strictly increase
-        // and exits only advance with the entry (see `WindowExtremes`), so both
-        // halves drain from the front and the drain is complete.
+        // apart and share nothing at any horizon. `sources` strictly increase,
+        // and exits advance with the entry WHILE THE CADENCE IS CONSTANT (see
+        // `WindowExtremes`). When the prefix median cadence steps down an exit
+        // can move backwards, and a queued hit whose exit precedes the front's
+        // stays queued until the front drains: its pairs are then counted as
+        // overlapping. `docs/06-limits.md` states that bound (D-1550).
         while let Some(&(offset, y_old, old_exit)) = self.queue.front() {
             let older = self
                 .anchor

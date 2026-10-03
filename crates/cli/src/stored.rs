@@ -2159,6 +2159,29 @@ pub(crate) fn equity_note(key: &InstrumentKey) -> String {
         .map_or_else(String::new, runner::audit::CostScope::report_note)
 }
 
+/// The largest overnight move in a stock's bars, named by its session, for
+/// the line under [`equity_note`]. D-1540 (audit-20261003 gaps-6).
+///
+/// [`runner::audit::largest_overnight_move`] measures it and applies no
+/// threshold, because D-0018 names none. A stock whose bars hold fewer than
+/// two sessions says so; an index or a contract gets nothing, as it gets no
+/// [`equity_note`].
+pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle]) -> String {
+    if key.kind != Kind::Equity {
+        return String::new();
+    }
+    runner::audit::largest_overnight_move(bars).map_or_else(
+        || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
+        |found| {
+            let date = u32::try_from(found.day)
+                .ok()
+                .and_then(|days| pull::session::Day::from_days(days).ok())
+                .map_or_else(|| format!("IST day {}", found.day), |day| day.to_string());
+            runner::audit::overnight_line(&found, &date)
+        },
+    )
+}
+
 /// [`equity_note`] for a symbol as the operator typed it.
 ///
 /// A symbol [`swept_index`] refuses gets nothing: the run it would head
@@ -3423,6 +3446,8 @@ mod tests {
         let path = StorePath::for_key(vendor, &key, Timeframe::MINUTE_1, ym, FileKind::Bars)
             .expect("a path for a stored index");
         let id = brutex_core::universe::fnv1a(symbol) as u32;
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(&r).expect("the store root");
         let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
         // An empty batch is refused by the store as `EmptyBatch`, correctly — so
         // thezero -bar case is a file that was created and never appended to, which
@@ -3976,6 +4001,7 @@ mod tests {
                     .expect("a path for a stored key");
             let on_disk = path.to_path_buf(&r);
             let id = brutex_core::universe::fnv1a("FINNIFTY") as u32;
+            std::fs::create_dir_all(&r).expect("the store root");
             BarFile::open_or_create(&r, path, id)
                 .expect("a fresh month opens")
                 .append(&bars(3))
@@ -4216,6 +4242,8 @@ mod tests {
             let ym = YearMonth::new(y, m).expect("a real month");
             let path = StorePath::for_key(vendor, &key, timeframe, ym, FileKind::Bars)
                 .expect("a path for a swept index");
+            // The writer never creates a missing store root (D-1522).
+            std::fs::create_dir_all(&r).expect("the store root");
             let mut file = BarFile::open_or_create(&r, path, id).expect("a fresh month opens");
             file.append(&bars_in(i64::from(y), i64::from(m), n))
                 .expect("and takes its bars");

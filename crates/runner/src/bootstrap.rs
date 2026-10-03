@@ -165,9 +165,14 @@ impl Verdict {
     /// [`crate::significance`]. It is a threshold on the p-value and nothing
     /// more — clearing it does not make a strategy profitable, and
     /// [`crate::grid`]'s pessimistic total is a separate question.
+    ///
+    /// Inclusive, `p <= 0.05`: the same boundary the Romano-Wolf stepdown
+    /// rejects on (`(1 + count) / (B + 1) <= alpha`), so a strategy at exactly
+    /// 5% is not printed as failing White beside a stepdown that rejects it
+    /// (D-1548).
     #[must_use]
     pub fn clears(&self) -> bool {
-        self.draws > 0 && self.p_value < 0.05
+        self.draws > 0 && self.p_value <= 0.05
     }
 
     /// What this verdict's sample size is worth, in measured terms.
@@ -543,6 +548,13 @@ fn white_point_mass_would_mint_evidence(returns: &[Vec<i64>], observed: f64) -> 
 /// It is also STUDENTIZED — each mean is divided by its own standard error — so
 /// a strategy with a large but wildly variable return does not outrank a steady
 /// one purely on size.
+///
+/// **The standard error is the i.i.d. one, and Hansen's is not.** Hansen
+/// (2005) studentizes by a long-run (HAC or bootstrap) estimate; [`summarise`]
+/// gives `sqrt(variance / n)`. Both sides of the comparison share it, so the
+/// test stays a valid max-type test, but under serial correlation the
+/// recentring gate drops a different set of strategies (hunt-runner-5,
+/// D-1549, `docs/06-limits.md`).
 ///
 /// `None` under the same conditions as [`reality_check`].
 ///
@@ -2003,6 +2015,37 @@ mod tests {
             "the best of twenty noise series cleared at p = {}",
             v.p_value
         );
+    }
+
+    /// WHITE, SPA AND ROMANO-WOLF JUDGE ONE 5% WITH ONE BOUNDARY.
+    /// hunt-runner-2, D-1548.
+    ///
+    /// Romano-Wolf rejects when `(1 + count) / (B + 1) <= alpha`, the usual
+    /// "reject when p <= alpha". `Verdict::clears` was `p < 0.05`, so at 19
+    /// draws a strategy no draw beat had p = 1/20 = 0.05 exactly: the stepdown
+    /// rejected it and White and SPA, printed beside it "at the same 5%",
+    /// said it did not clear.
+    #[test]
+    fn an_exact_five_percent_p_value_clears_where_the_stepdown_rejects() {
+        let set = vec![edged(300, 5, 500)];
+        let white = reality_check(&set, 19, 7, DEFAULT_BLOCK).expect("a verdict");
+        let hansen = spa(&set, 19, 7, DEFAULT_BLOCK).expect("a verdict");
+        let stepdown = romano_wolf(&set, 19, 7, DEFAULT_BLOCK, 50_000);
+        // Bit-exact on purpose: the boundary case is p EQUAL to 0.05.
+        let five = 0.05_f64.to_bits();
+        assert_eq!(
+            white.p_value.to_bits(),
+            five,
+            "premise: no draw beat the edge"
+        );
+        assert_eq!(
+            hansen.p_value.to_bits(),
+            five,
+            "premise: no draw beat the edge"
+        );
+        assert_eq!(stepdown.len(), 1, "premise: the stepdown rejects at 5%");
+        assert!(white.clears(), "White at p = 0.05");
+        assert!(hansen.clears(), "SPA at p = 0.05");
     }
 
     #[test]

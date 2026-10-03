@@ -305,10 +305,51 @@ impl AwsIdentity {
     /// [`SsmError`] naming every place that was looked at, so "no credentials"
     /// is never the whole message.
     pub fn discover() -> Result<Self, SsmError> {
-        if let Ok(from_env) = Self::from_env() {
-            return Ok(from_env);
+        Self::discover_from(|name| std::env::var(name).ok(), Self::from_shared_file)
+    }
+
+    /// [`Self::discover`] over any environment lookup and any profile reader.
+    ///
+    /// # A half-set environment is refused, not discarded
+    ///
+    /// This kept the environment's identity only when it was whole and
+    /// otherwise dropped the env error and signed as `[default]` — so an
+    /// operator who exported `AWS_ACCESS_KEY_ID` and forgot the secret was
+    /// silently signed as a DIFFERENT identity, with no mention of the
+    /// variable they set. Exactly one of the pair present is now a refusal
+    /// naming both (errpaths-1, D-1534).
+    ///
+    /// # The profile is the one `AWS_PROFILE` names
+    ///
+    /// `AWS_PROFILE` was read nowhere, so an operator who chose a profile was
+    /// signed as `[default]`. It now names the profile; empty or unset is
+    /// `default`, as an empty key is unset (D-1372). That AWS's own tools read
+    /// the variable the same way is UNVERIFIED here: `docs/00-charter.md`
+    /// records no AWS source.
+    fn discover_from(
+        lookup: impl Fn(&str) -> Option<String>,
+        from_file: impl Fn(&str) -> Result<Self, SsmError>,
+    ) -> Result<Self, SsmError> {
+        let key = non_blank(lookup("AWS_ACCESS_KEY_ID")).is_some();
+        let secret = non_blank(lookup("AWS_SECRET_ACCESS_KEY")).is_some();
+        if key && secret {
+            return Self::from_lookup(&lookup);
         }
-        Self::from_shared_file("default")
+        if key || secret {
+            let (set, missing) = if key {
+                ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+            } else {
+                ("AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID")
+            };
+            return Err(SsmError::unreachable(format!(
+                "the AWS identity in this process's environment is half set: \
+                 {set} is set and {missing} is unset or empty. Refused rather \
+                 than signing as the credentials file's profile instead, which \
+                 would be a different identity from the one you exported."
+            )));
+        }
+        let profile = non_blank(lookup("AWS_PROFILE")).unwrap_or_else(|| "default".to_owned());
+        from_file(&profile)
     }
 
     /// One profile out of `~/.aws/credentials`.
@@ -1498,6 +1539,70 @@ mod tests {
         .expect("a full pair");
         assert_eq!(id.key_id, "AKIAEXAMPLE");
         assert_eq!(id.session_token, None, "an empty token is not sent");
+    }
+
+    /// audit-20261003 errpaths-1 (D-1534). Discovery refuses a HALF-SET
+    /// environment identity loudly instead of discarding the env error and
+    /// signing as `[default]`, and it reads the profile `AWS_PROFILE` names
+    /// instead of always `[default]`.
+    #[test]
+    fn discovery_refuses_a_half_set_environment_and_honours_the_named_profile() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        let file = |profile: &str| {
+            Ok(AwsIdentity {
+                key_id: format!("FILE_{profile}"),
+                secret: "shhh".to_owned(),
+                session_token: None,
+            })
+        };
+
+        for half in [
+            &[("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")][..],
+            &[("AWS_SECRET_ACCESS_KEY", "shhh")][..],
+            &[
+                ("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"),
+                ("AWS_SECRET_ACCESS_KEY", ""),
+            ][..],
+        ] {
+            let found = AwsIdentity::discover_from(env(half), file);
+            let Err(SsmError { detail, .. }) = found else {
+                panic!("a half-set environment must be refused: {found:?}")
+            };
+            assert!(
+                detail.contains("AWS_ACCESS_KEY_ID") && detail.contains("AWS_SECRET_ACCESS_KEY"),
+                "the refusal names both halves: {detail}"
+            );
+        }
+
+        let named = AwsIdentity::discover_from(env(&[("AWS_PROFILE", "Second")]), file)
+            .expect("the named profile");
+        assert_eq!(named.key_id, "FILE_Second", "AWS_PROFILE picks the profile");
+
+        let fallback = AwsIdentity::discover_from(env(&[("AWS_PROFILE", "")]), file)
+            .expect("the default profile");
+        assert_eq!(
+            fallback.key_id,
+            format!("FILE_{}", "default"),
+            "an empty AWS_PROFILE is unset, as an empty key is"
+        );
+
+        let whole = AwsIdentity::discover_from(
+            env(&[
+                ("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE"),
+                ("AWS_SECRET_ACCESS_KEY", "shhh"),
+                ("AWS_PROFILE", "Second"),
+            ]),
+            file,
+        )
+        .expect("a whole environment identity");
+        assert_eq!(whole.key_id, "AKIAEXAMPLE", "a whole env pair still wins");
     }
 
     /// An absent file names the path it looked at, not "no credentials".

@@ -455,8 +455,13 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
     let mut count = 0_u32;
     let mut day = first;
     while day <= last {
-        if matches!(kind_of(day), DayKind::Open(_)) {
-            count = count.saturating_add(1);
+        match kind_of(day) {
+            // A Muhurat of unmeasured LENGTH is still a day the exchange
+            // traded, so it is a session here (attackdata-6, D-1532). Only its
+            // bar count is unknown, which is `expected_bars`'s question.
+            DayKind::Open(_) | DayKind::OpenLengthUnmeasured => count = count.saturating_add(1),
+            DayKind::Closed => {}
+            DayKind::Unmeasured => return None,
         }
         day += 1;
     }
@@ -467,6 +472,26 @@ pub fn sessions_between(first: i64, last: i64) -> Option<u32> {
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
 mod tests {
     use super::*;
+
+    /// audit-20261003 attackdata-6 (D-1532). A Muhurat whose LENGTH was never
+    /// measured is still a day the exchange traded, so it is a session in the
+    /// count. `sessions_between` counted only `Open(_)` and returned `Some(0)`
+    /// for 2024-11-01 alone and 11 for a fortnight holding 12 traded days.
+    #[test]
+    fn a_muhurat_of_unmeasured_length_is_still_a_session() {
+        assert_eq!(kind_of(20_028), DayKind::OpenLengthUnmeasured);
+        assert_eq!(sessions_between(20_028, 20_028), Some(1));
+        let traded = (20_020..=20_035)
+            .filter(|day| {
+                matches!(
+                    kind_of(*day),
+                    DayKind::Open(_) | DayKind::OpenLengthUnmeasured
+                )
+            })
+            .count();
+        assert_eq!(traded, 12, "the premise: twelve traded days");
+        assert_eq!(sessions_between(20_020, 20_035), Some(12));
+    }
 
     /// **THE COST NOTE ON `kind_of` NAMES BOTH WALKS.** o1api-39, D-1203.
     ///

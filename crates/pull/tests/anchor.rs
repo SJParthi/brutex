@@ -412,6 +412,37 @@ fn derivative_extension_changes_the_missing_observed_day_tail() {
     assert!(diagnostics[0].contains("observed-day tail"));
 }
 
+/// audit-20261003 hunt-pull-3 (D-1533). An exceptional session is named ONCE
+/// per day, not once per bucket. o1api-44 / D-1201 collapsed the per-bucket
+/// lines for unmeasured days; an outage day, a DR Saturday or a Muhurat still
+/// pushed one identical "exceptional session ... withheld" line per bucket,
+/// each a `pull.derive` warning and a clause of the rung's refusal: 54 lines
+/// for 2024-03-02 at two minutes.
+#[test]
+fn an_exceptional_session_is_named_once_per_day_not_once_per_bucket() {
+    let day = 19_784; // 2024-03-02, a disaster-recovery Saturday in two windows
+    let pull::calendar::DayKind::Open(session) = pull::calendar::kind_of(day) else {
+        panic!("known session")
+    };
+    let midnight = day * 86_400 - pull::session::IST_OFFSET_SECS;
+    let bars: Vec<_> = (0..1440_u16)
+        .filter(|m| session.expects(*m))
+        .map(|m| minute(midnight + i64::from(m) * 60))
+        .collect();
+    let (complete, diagnostics) =
+        pull::fold::complete_minutes(&bars, Bucket::of_secs(120).unwrap()).unwrap();
+    assert!(complete.is_empty(), "the session is still withheld");
+    let named: Vec<_> = diagnostics
+        .iter()
+        .filter(|why| why.contains("exceptional session"))
+        .collect();
+    assert_eq!(named.len(), 1, "one line for the day: {diagnostics:?}");
+    assert!(
+        named.iter().all(|why| why.contains(&day.to_string())),
+        "the line names the day: {named:?}"
+    );
+}
+
 #[test]
 fn venue_hours_do_not_override_an_exceptional_calendar_session() {
     for venue in pull::vendor::Venue::ALL {
@@ -530,6 +561,45 @@ fn bars_on_a_closed_day_are_named_once_as_a_store_defect() {
     }
 }
 
+/// audit-20261003 attackdata-5 (D-1532). A snapshot with a NEGATIVE volume is
+/// refused by the fold, not netted into a plausible positive sum: 10 + -7 = 3
+/// passed every later check, because the store's own count gate sees only the
+/// sum. And a bucket wider than one IST day is refused by `Bucket::of_secs`: a
+/// `u32::MAX` bucket stamped a 2024 snapshot at 1969-12-31.
+#[test]
+fn a_negative_snapshot_volume_and_a_bucket_wider_than_a_day_are_refused() {
+    let five = Bucket::of_secs(300).unwrap();
+    let mut a = minute(OPEN_UTC);
+    a.volume = 10;
+    let mut b = minute(OPEN_UTC + 60);
+    b.volume = -7;
+    let pair = vec![a, b];
+    assert_eq!(
+        fold(&pair, five),
+        Err(pull::fold::FoldError::NegativeVolume { at: 1, volume: -7 }),
+        "a negative volume is not netted into the bucket's sum"
+    );
+    assert_eq!(
+        pull::fold::fold_from_bars(&pair, five, Bucket::MINUTE),
+        Err(pull::fold::FoldError::NegativeVolume { at: 1, volume: -7 }),
+        "the minute path refuses too"
+    );
+    let rendered = pull::fold::FoldError::NegativeVolume { at: 1, volume: -7 }.to_string();
+    assert!(
+        rendered.contains("-7") && rendered.contains("negative"),
+        "{rendered}"
+    );
+
+    assert_eq!(Bucket::of_secs(86_400).map(Bucket::secs), Some(86_400));
+    assert_eq!(Bucket::of_secs(86_401), None, "wider than a day");
+    assert_eq!(Bucket::of_secs(u32::MAX), None, "wider than a day");
+    assert_eq!(
+        Bucket::of_secs(7).map(Bucket::secs),
+        Some(7),
+        "any width up to a day"
+    );
+}
+
 /// **A BUCKET'S VOLUME THAT LEAVES `i64` IS REFUSED, NOT CAPPED.**
 /// ET-bars-candles-store-4, D-0955.
 ///
@@ -546,7 +616,9 @@ fn a_bucket_whose_volume_leaves_i64_is_refused_not_capped() {
         b.volume = second;
         vec![a, b]
     };
-    for (first, second) in [(i64::MAX, 1), (1, i64::MAX), (i64::MIN, -1), (-1, i64::MIN)] {
+    // The negative ends are refused as NegativeVolume before any sum (D-1532),
+    // so only the positive end can overflow.
+    for (first, second) in [(i64::MAX, 1), (1, i64::MAX)] {
         assert_eq!(
             fold(&pair(first, second), five),
             Err(pull::fold::FoldError::VolumeOverflow {
@@ -577,9 +649,14 @@ fn a_bucket_whose_volume_leaves_i64_is_refused_not_capped() {
         fold(&pair(i64::MAX - 1, 1), five).unwrap()[0].volume,
         i64::MAX
     );
+    // The negative end is no longer a sum at all: a negative minute volume is
+    // refused before it is added (D-1532).
     assert_eq!(
-        fold(&pair(i64::MIN + 1, -1), five).unwrap()[0].volume,
-        i64::MIN
+        fold(&pair(i64::MIN + 1, -1), five),
+        Err(pull::fold::FoldError::NegativeVolume {
+            at: 0,
+            volume: i64::MIN + 1
+        })
     );
     // Two buckets each holding i64::MAX never meet.
     let mut apart = pair(i64::MAX, i64::MAX);

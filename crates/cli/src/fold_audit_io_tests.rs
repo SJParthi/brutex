@@ -79,6 +79,8 @@ impl Fixture {
     fn write(&self, rung: Timeframe, bars: &[Bar]) {
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         let symbol = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        // The writer never creates a missing store root (D-1522).
+        fs::create_dir_all(&self.root).expect("the store root");
         BarFile::open_or_create(&self.root, self.path(rung), symbol)
             .expect("fixture file")
             .append(bars)

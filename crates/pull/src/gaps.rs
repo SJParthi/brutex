@@ -281,6 +281,26 @@ pub fn classify_against(
     classify_with_subject(stored, first, last, against, Subject::ExchangeSession)
 }
 
+/// Classify an NSE equity-derivatives series against that venue's dated hours.
+///
+/// The exchange calendar decides which days are regular sessions; the venue
+/// decides their hours, exactly as `fold::complete_minutes_for_venue` does for
+/// the same bars. [`classify_against`] used the calendar's fixed 375-minute
+/// session for every series, so after NSE extended derivatives trading to
+/// 15:40 from 2026-08-03 a month whose vendor dropped 15:30..=15:39 audited as
+/// lost nothing while the fold withheld it (audit-20261003 hunt-pull-1,
+/// D-1529). A day whose venue hours cannot be stated is `Unmeasured`, as a cash
+/// day without dated eligibility is.
+#[must_use]
+pub fn classify_derivative_against(
+    stored: &[i64],
+    first: i64,
+    last: i64,
+    against: Option<&Calendar>,
+) -> Ledger {
+    classify_with_subject(stored, first, last, against, Subject::Derivatives)
+}
+
 /// Classify a spot-index series without inventing index publication during the
 /// 2021-02-24 NSE systems outage.
 ///
@@ -322,6 +342,7 @@ pub fn classify_cash(
 enum Subject<'a> {
     ExchangeSession,
     SpotIndex,
+    Derivatives,
     Cash(Option<&'a crate::cash_auction::Schedule>),
 }
 
@@ -388,6 +409,15 @@ fn classify_with_subject(
         }
         if let Subject::Cash(schedule) = subject {
             kind = cash_kind(day, kind, schedule);
+        }
+        // THE DERIVATIVES VENUE'S DATED HOURS on a regular day, by the one
+        // authority the fold uses (D-1529). Exceptional days keep the
+        // calendar's own shape, and a day whose hours this build cannot state
+        // is unmeasured rather than given the fixed session.
+        if matches!(subject, Subject::Derivatives) {
+            kind =
+                crate::fold::minute_session(day, kind, crate::vendor::Venue::NseDerivatives, None)
+                    .unwrap_or(DayKind::Unmeasured);
         }
         // ADVANCE PAST ANY STORED BAR BEFORE THIS DAY. A bar the caller handed
         // us from outside the range is skipped rather than counted against it.
@@ -595,6 +625,46 @@ mod tests {
         (calendar::OPEN_MINUTE..=calendar::LAST_MINUTE)
             .map(|m| at(day, m))
             .collect()
+    }
+
+    /// audit-20261003 hunt-pull-1 (D-1529). An NSE derivatives series is
+    /// audited against the derivatives venue's DATED hours, not the fixed
+    /// 375-minute session. From 2026-08-03 the venue closes at 15:40, so a day
+    /// owes 385 minutes and a vendor that dropped 15:30..=15:39 lost ten.
+    /// `fold::complete_minutes_for_venue` already withheld that day; the gap
+    /// audit reported it clean.
+    #[test]
+    fn a_derivatives_audit_owes_the_venues_dated_minutes() {
+        let day = 20_669; // 2026-08-04, after the 2026-08-03 extension
+        let whole: Vec<i64> = (555..940).map(|minute| at(day, minute)).collect();
+        let full = classify_derivative_against(&whole, day, day, None);
+        assert_eq!(full.expected, 385, "the extended session owes 385 minutes");
+        assert_eq!(full.held, 385);
+        assert_eq!(full.lost_minutes(), 0);
+
+        let short: Vec<i64> = (555..930).map(|minute| at(day, minute)).collect();
+        let lost = classify_derivative_against(&short, day, day, None);
+        assert_eq!(lost.expected, 385);
+        assert_eq!(
+            lost.lost_minutes(),
+            10,
+            "15:30..=15:39 are owed by the venue and were not delivered"
+        );
+        assert!(
+            lost.gaps.iter().any(|gap| gap.day == day
+                && gap.from == 930
+                && gap.to == 939
+                && gap.reason == Reason::VendorHole),
+            "the ten minutes are one vendor-hole run: {:?}",
+            lost.gaps
+        );
+
+        // Before the extension the derivatives session is the 375-minute one.
+        let before = 20_663; // 2026-07-29
+        let old: Vec<i64> = (555..930).map(|minute| at(before, minute)).collect();
+        let pre = classify_derivative_against(&old, before, before, None);
+        assert_eq!(pre.expected, 375);
+        assert_eq!(pre.lost_minutes(), 0);
     }
 
     #[test]

@@ -951,7 +951,73 @@ pub fn decode_body(
     listing: crate::vendor::Listing,
 ) -> Result<RawWindow, FetchError> {
     let root = parse_answer(body).map_err(|why| not_json(&why))?;
+    // A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS IN ONE BODY
+    // (attackdata-3, D-1531). `serde_json` keeps the last and says nothing, so
+    // `"open":[100],"open":[200]` decoded as an open of 200. `container`
+    // already refuses two objects' fields mixed; this is the same case inside
+    // one object, and it is refused by name.
+    if let Some(key) = repeated_key(body) {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "the vendor's answer repeats the key {key:?} inside one object, \
+                 so it carries two values for one field; refused rather than \
+                 silently keeping the last"
+            ),
+        });
+    }
     decode_value(&root, spec, listing)
+}
+
+/// The first key that appears twice in one JSON object of `body`, decoded.
+///
+/// Run only over a body `serde_json` has already parsed, so every string is
+/// well formed and balanced. One pass over the bytes: a `{` opens a key set, a
+/// `[` opens a level with none, and a string followed by `:` is a key, decoded
+/// by `serde_json` so an escaped spelling of a held key is the same key. The
+/// cost is linear in the body, which the parse above already paid; the sets
+/// hold at most every key of the body once.
+fn repeated_key(body: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    let mut open: Vec<Option<std::collections::HashSet<String>>> = Vec::new();
+    let mut at = 0usize;
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b'{' => open.push(Some(std::collections::HashSet::new())),
+            b'[' => open.push(None),
+            b'}' | b']' => {
+                open.pop();
+            }
+            b'"' => {
+                let mut end = at.saturating_add(1);
+                while let Some(&inner) = bytes.get(end) {
+                    match inner {
+                        b'\\' => end = end.saturating_add(2),
+                        b'"' => break,
+                        _ => end = end.saturating_add(1),
+                    }
+                }
+                let after = bytes
+                    .get(end.saturating_add(1)..)
+                    .unwrap_or_default()
+                    .iter()
+                    .copied()
+                    .find(|b| !b.is_ascii_whitespace());
+                if after == Some(b':')
+                    && let Some(Some(keys)) = open.last_mut()
+                    && let Some(key) = body
+                        .get(at..=end)
+                        .and_then(|token| serde_json::from_str::<String>(token).ok())
+                    && !keys.insert(key.clone())
+                {
+                    return Some(key);
+                }
+                at = end;
+            }
+            _ => {}
+        }
+        at = at.saturating_add(1);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1426,8 +1492,12 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
-        // Rupees: the text is the truth, and `core`'s half-up reader owns the
-        // rule. NOT `csv::paisa`, which refuses past two decimals — see the
+        // Rupees: `core`'s half-up reader owns the rule, applied to serde's
+        // re-rendering of the number — NOT the vendor's own text. Past ~17
+        // significant digits the f64 has already rounded and the snap can
+        // land one paisa from the vendor's text (audit-20261003 attackdata-4;
+        // a 2M-case differential found no realistic price affected). Stated
+        // in `docs/06-limits.md`. NOT `csv::paisa`, which refuses past two decimals — see the
         // header on `prices` for why that refusal was wrong and what it cost.
         //
         // STILL NO FLOAT. `serde_json` renders the number back to its shortest
@@ -4091,6 +4161,54 @@ mod tests {
     /// `CLAUDE.md` §7 puts the tick grid at two decimals and the single snap at
     /// the write boundary. Rounding to whole rupees is a snap at the wrong
     /// granularity, in the wrong place.
+    /// audit-20261003 attackdata-3 (D-1531). A vendor answer that repeats a
+    /// key inside one object is refused, not silently resolved to the last
+    /// value. It is two answers in one body, the case `container` already
+    /// refuses across objects; `serde_json`'s map kept the second array and
+    /// decoded `"open":[100],"open":[200]` as an open of 200.
+    #[test]
+    fn an_answer_repeating_a_key_in_one_object_is_refused() {
+        let body = r#"{"open":[100],"open":[200],"high":[200],"low":[100],
+            "close":[150],"volume":[1],"timestamp":[1751337900]}"#;
+        let refused = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        );
+        let Err(FetchError::TransportFailed { detail }) = refused else {
+            panic!("a repeated key must be refused: {refused:?}");
+        };
+        assert!(
+            detail.contains("repeats") && detail.contains("open"),
+            "the refusal names the repeated key: {detail}"
+        );
+
+        // The same key spelled with an escape is the same key.
+        let escaped = r#"{"open":[100],"op\u0065n":[200],"high":[200],"low":[100],
+            "close":[150],"volume":[1],"timestamp":[1751337900]}"#;
+        assert!(
+            decode_body(
+                escaped,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity
+            )
+            .is_err(),
+            "an escaped spelling of a held key is a repeat"
+        );
+
+        // One key per object, and a string VALUE equal to a key, are not
+        // repeats.
+        let clean = r#"{"open":[100],"high":[200],"low":[100],"close":[150],
+            "volume":[1],"timestamp":[1751337900],"symbol":{"code":"open","p":"code"}}"#;
+        let window = decode_body(
+            clean,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("one key per object decodes");
+        assert_eq!(window.rows.len(), 1);
+    }
+
     #[test]
     fn a_fractional_rupee_price_keeps_its_paise() {
         let body = r#"{

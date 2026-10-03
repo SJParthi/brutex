@@ -112,3 +112,40 @@ fn the_invariant_row_names_the_probe_test() {
         "S-BISECT-01 does not name the test that proves it"
     );
 }
+
+/// audit-20261003 o1store2-1 (D-1527). The register's ceiling counted session
+/// minutes only, but the store admits any on-grid stamp inside the month
+/// (D-0915): a one-minute month can hold every minute of 31 days and a
+/// one-second month every second. The section states both ceilings and their
+/// heights, so "fourteen reads" is not read as the bound for every file.
+#[test]
+fn the_bisection_ceiling_counts_every_minute_the_store_admits() {
+    let body = section();
+    for needle in [
+        "31 × 1,440 = 44,640",
+        "sixteen",
+        "2,678,400",
+        "twenty-two",
+        "D-0915",
+    ] {
+        assert!(
+            body.contains(needle),
+            "docs/06-limits.md D-1434 section does not say `{needle}`"
+        );
+    }
+}
+
+/// audit-20261003 o1store2-2 (D-1527). Since D-1433 and D-0914 the cold
+/// verify reads into the handle's fixed buffer and a stack array, and
+/// `crates/store/tests/cold_read.rs` fails the build on a `vec!` in either
+/// function. The register must not still say the path allocates.
+#[test]
+fn no_register_passage_still_puts_a_heap_buffer_on_the_cold_verify() {
+    let limits = flat(LIMITS);
+    for stale in ["a heap buffer of the same size", "two heap buffers"] {
+        assert!(
+            !limits.contains(stale),
+            "docs/06-limits.md still says `{stale}` of the cold verify"
+        );
+    }
+}

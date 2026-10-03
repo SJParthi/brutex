@@ -5036,6 +5036,7 @@ mod tests {
             targets: ladders.targets,
             trails: ladders.trails,
             refused_paths: 0,
+            refused_levels: None,
         };
         evaluated
     }
@@ -5881,6 +5882,7 @@ mod tests {
             targets: ladders.targets,
             trails: ladders.trails,
             refused_paths: 0,
+            refused_levels: None,
         };
         let evaluated = resolved.evaluate_training_grid(
             &input,
@@ -7370,6 +7372,7 @@ mod tests {
             targets: ladders.targets,
             trails: ladders.trails,
             refused_paths: 0,
+            refused_levels: None,
         };
         let evaluated = resolved.evaluate_training_grid(
             &input,

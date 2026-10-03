@@ -274,6 +274,22 @@ fn looks_like_asset(segments: &[String]) -> bool {
         || segments.last().is_some_and(|s| s.contains('.'))
 }
 
+/// How long a browser may keep a content-addressed bundle file.
+///
+/// audit-20261003 webcontract-5, D-1591. Nothing was cacheable, so every
+/// navigation re-downloaded every chunk (the backtest node alone is 716 KB)
+/// with a whole-file read on the server. A file under `_app/immutable/` carries
+/// a hash of its own content in its name — a changed file is a new URL — so it
+/// can be kept for a year with no revalidation. Everything else (the shell,
+/// `version.json`, the hand-written scripts) keeps no cache header and is
+/// fetched afresh, so a rebuild is seen on the next navigation.
+const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
+
+/// Whether `segments` name a content-hashed bundle file.
+fn content_addressed(segments: &[String]) -> bool {
+    matches!(segments, [app, immutable, _, ..] if app == IMMUTABLE_DIR && immutable == "immutable")
+}
+
 /// The `Content-Type` for a file, decided by its extension and nothing else.
 ///
 /// An unknown extension is `application/octet-stream`. Sniffing the bytes to
@@ -816,7 +832,14 @@ impl Assets {
         if let Some(real) = target
             && let Ok(bytes) = std::fs::read(&real)
         {
-            return answer(StatusCode::OK, content_type(&real), bytes);
+            let mut served = answer(StatusCode::OK, content_type(&real), bytes);
+            if content_addressed(&segments) {
+                served.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static(IMMUTABLE_CACHE),
+                );
+            }
+            return served;
         }
         if looks_like_asset(&segments) {
             return self.not_found(raw_path);
@@ -1287,6 +1310,30 @@ mod tests {
     // 2. ROUTING ORDER, the half this module owns: a real asset, then the
     //    shell, then an honest 404.
     // ---------------------------------------------------------------------
+
+    /// audit-20261003 webcontract-5, D-1591: a content-hashed bundle file is
+    /// served cacheable as immutable; the shell and any other file are not.
+    #[tokio::test]
+    async fn only_content_hashed_files_are_served_immutable() {
+        let dir = furnished("cache");
+        put(&dir, "_app/version.json", "{}");
+        let assets = Assets::new(&dir);
+        let cache = |path: &str| {
+            assets
+                .respond(&axum::http::Method::GET, path)
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+        assert_eq!(
+            cache("/_app/immutable/entry/app.js").as_deref(),
+            Some(IMMUTABLE_CACHE)
+        );
+        assert_eq!(cache("/"), None, "the shell must see a rebuild");
+        assert_eq!(cache("/backtest"), None);
+        assert_eq!(cache("/_app/version.json"), None);
+        assert_eq!(cache("/_app/immutable/nope"), None, "a 404 is not cached");
+    }
 
     #[tokio::test]
     async fn a_real_asset_is_served_and_a_missing_one_is_a_404_not_the_shell() {

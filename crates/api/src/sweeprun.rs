@@ -1194,6 +1194,36 @@ struct TaskFinisher {
     audit: Option<cli::operation_audit::Attempt>,
     /// Excludes cooperating CLI/HTTP writers until this guard is dropped.
     lease: Option<cli::execution_lease::Lease>,
+    /// This task's place in [`engine_tasks_running`], given back on drop.
+    _counted: EngineTaskCount,
+}
+
+/// How many [`TaskFinisher`]s exist: engine tasks queued or running on a
+/// blocking thread. audit-20261003 hunt-api-2, D-1582: the stopping process
+/// reads it to bound and to name what it abandons
+/// ([`crate::server::end_runtime`]).
+static ENGINE_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Engine tasks (sweeps, descents, commands) not yet finished.
+pub(crate) fn engine_tasks_running() -> usize {
+    ENGINE_TASKS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// One count in [`ENGINE_TASKS`], held for exactly as long as its finisher.
+#[derive(Debug)]
+struct EngineTaskCount;
+
+impl EngineTaskCount {
+    fn take() -> Self {
+        ENGINE_TASKS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for EngineTaskCount {
+    fn drop(&mut self) {
+        ENGINE_TASKS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl TaskFinisher {
@@ -1201,6 +1231,7 @@ impl TaskFinisher {
     #[cfg(test)]
     fn new(site: crate::server::Loaded) -> Self {
         Self {
+            _counted: EngineTaskCount::take(),
             site,
             armed: true,
             audit: None,
@@ -1210,6 +1241,7 @@ impl TaskFinisher {
 
     fn audited(site: crate::server::Loaded, audit: cli::operation_audit::Attempt) -> Self {
         Self {
+            _counted: EngineTaskCount::take(),
             site,
             armed: true,
             audit: Some(audit),
@@ -3391,6 +3423,40 @@ mod tests {
         Refusal, TaskFinisher, asked_from, attempt_started_event, command_from, completion_audit,
         conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
     };
+
+    /// audit-20261003 hunt-api-2, D-1582: CTRL-C ENDS THE PROCESS WHILE A
+    /// SWEEP RUNS. A blocking task holding an engine-task count sleeps far past
+    /// the grace; dropping a runtime would wait for all of it (tokio's
+    /// documented `Drop`), while `end_runtime` returns within the grace and
+    /// names at least that one task as abandoned.
+    #[test]
+    fn stopping_does_not_wait_out_a_running_engine_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let _sweep = runtime.spawn_blocking(move || {
+            let _counted = super::EngineTaskCount::take();
+            let _told = started.send(());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        running
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the task started");
+        assert!(super::engine_tasks_running() >= 1);
+        let began = std::time::Instant::now();
+        let abandoned = crate::server::end_runtime(runtime, std::time::Duration::from_millis(300));
+        let took = began.elapsed();
+        assert!(abandoned >= 1, "the running sweep was not named");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "shutdown waited {took:?} for a sweep"
+        );
+        assert!(took >= std::time::Duration::from_millis(250), "{took:?}");
+        assert!(crate::server::SHUTDOWN_GRACE <= std::time::Duration::from_secs(30));
+    }
 
     /// **Admission I/O runs with the slot UNLOCKED, and admissions still
     /// exclude each other.** W1-api6-2, D-0954.

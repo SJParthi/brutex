@@ -554,11 +554,13 @@ mod tests {
 
     /// GAP12-4, D-0912: the reference is the derive authority, so a month that
     /// `pull` derived correctly agrees, and the buckets derive withheld are
-    /// counted as withheld rather than as store defects.
+    /// counted as withheld rather than as store defects. The exceptional DR
+    /// Saturday is ONE diagnostic per rung, not one per bucket: derive names an
+    /// exceptional session once per day (audit-20261003 hunt-pull-3, D-1533).
     #[test]
     fn fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday() {
         let minutes = month_with_a_dr_saturday();
-        for (rung, withheld) in DERIVED_RUNGS.into_iter().zip([54, 35, 21, 12, 7, 5, 3]) {
+        for (rung, withheld) in DERIVED_RUNGS.into_iter().zip([1; 7]) {
             let bucket = store_bucket(rung).expect("derived width");
             let (stored, _) = pull::fold::complete_minutes_for_venue(
                 &minutes,
