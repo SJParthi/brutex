@@ -759,4 +759,91 @@ mod tests {
             },
         }
     }
+
+    /// The body of `name` in `source`, up to its closing brace at column 0.
+    fn body<'a>(source: &'a str, name: &str) -> &'a str {
+        let found = source
+            .split_once(&format!("\nfn {name}("))
+            .or_else(|| source.split_once(&format!("\npub fn {name}(")));
+        assert!(found.is_some(), "{name} exists");
+        let rest = found.unwrap_or_default().1;
+        &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
+    }
+
+    /// **A candidate page reads the whole sealed catalog five times, and
+    /// that is stated with the count the source pays.** W1-api2-2, D-1444.
+    ///
+    /// Two reads are `render`'s own; `tier` pays one through `pinned`, and
+    /// `candidates_page` pays two (entry and exit). Each is counted off the
+    /// source, so a change to any of them fails here and the bullet is
+    /// revisited rather than left stating an old count.
+    #[test]
+    fn a_candidate_pages_catalog_reads_are_counted_and_stated() {
+        let api = include_str!("candidatejson.rs");
+        let cli = include_str!("../../cli/src/candidate_trades.rs");
+        assert_eq!(
+            body(api, "render")
+                .matches("candidate_trades::read_model(")
+                .count(),
+            2
+        );
+        assert_eq!(
+            body(api, "render")
+                .matches("candidate_trades::tier(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            body(api, "render")
+                .matches("candidate_trades::candidates_page(")
+                .count(),
+            1
+        );
+        assert_eq!(body(cli, "pinned").matches("read_model(").count(), 1);
+        assert_eq!(body(cli, "tier").matches("pinned(").count(), 1);
+        assert_eq!(body(cli, "candidates_page").matches("pinned(").count(), 2);
+        let bullet = crate::booleanjson::tests::d0951_bullet("W1-api2-2");
+        for word in [
+            "candidatejson::render",
+            "candidate_trades::read_model",
+            "five times",
+            "`pinned`",
+            "catalog.bin",
+            "32 bytes per candidate side plus 40 per tier",
+            "MAX_SCAN_BYTES",
+            "at most 256 rows",
+        ] {
+            assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+        }
+    }
+
+    /// **The trade page keeps one reader, so a change of candidate re-reads
+    /// every one of its trades, and that is stated.** W1-api2-3, D-1444.
+    #[test]
+    fn a_trade_pages_single_slot_and_cold_reread_are_stated() {
+        let api = include_str!("candidatejson.rs");
+        let cli = include_str!("../../cli/src/candidate_trades.rs");
+        let page = body(api, "trade_page");
+        assert!(page.contains("static CACHE: OnceLock<Mutex<Option<Cached>>>"));
+        assert!(page.contains("|| held.key != key"));
+        assert!(
+            page.contains("TradeReader::open(root, summary, key, crate::detail::MAX_SCAN_BYTES)")
+        );
+        assert!(
+            cli.contains("for seq in 0..count {"),
+            "the cold open visits every row"
+        );
+        let bullet = crate::booleanjson::tests::d0951_bullet("W1-api2-3");
+        for word in [
+            "candidatejson::trade_page",
+            "single slot",
+            "TradeReader::open",
+            "O(trades of that candidate)",
+            "MAX_SCAN_BYTES",
+            "Alternating between two candidates",
+            "O(page)",
+        ] {
+            assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+        }
+    }
 }

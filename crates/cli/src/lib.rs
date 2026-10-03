@@ -40,6 +40,20 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+// The no-follow opens below take their flag from `store::open_flags`, which
+// states it only for the architectures whose UAPI values were verified. There
+// is no Linux-wide default: bit 17 is O_NOFOLLOW on x86_64 and O_LARGEFILE on
+// aarch64, so a guessed value can silently follow symlinks (D-0980).
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+compile_error!(
+    "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
+);
+
+/// The one append-with-rollback every fixed-stride ledger appends through (D-1850).
+mod append_rollback;
 #[cfg(test)]
 mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
@@ -47,6 +61,24 @@ pub mod audited_range_command;
 mod audited_stored;
 /// Independent full-file checksum audit and retained historical admission receipts.
 pub mod checksum_receipts;
+mod columns;
+#[cfg(test)]
+mod columns_tests;
+// THE BUILD-TIME VERIFIER, MOUNTED WHERE CARGO-MUTANTS WALKS (D-1119). It was
+// compiled only into `build.rs` and an integration test, and cargo-mutants
+// mutates neither, so gate 18 could never mutate it. It is test-only here for
+// the reason `Cargo.toml` gives: its readers are dev-dependencies, not the
+// binary's. `all(test)` is `test` -- but cargo-mutants skips a module marked
+// exactly `cfg(test)`, and gate 18's self-test fails if it ever skips this one.
+#[cfg(all(test))]
+#[allow(
+    clippy::non_minimal_cfg,
+    dead_code,
+    reason = "`cfg(test)` spelled so cargo-mutants walks the module, and the \
+              watch lists are read only by `build.rs`; see above"
+)]
+#[path = "../build_provenance.rs"]
+mod build_provenance;
 #[path = "../commit_stamp.rs"]
 mod commit_stamp;
 #[cfg(test)]
@@ -287,7 +319,9 @@ use std::fmt::Write as _;
 pub const OK: u8 = 0;
 /// It was asked for something reasonable and could not do it.
 pub const FAILED: u8 = 1;
-/// It was asked for something it does not understand.
+/// It was asked for something it does not understand: an unknown word, a
+/// malformed argument, or an argument that is not valid UTF-8 at all
+/// ([`run_durable_os`], D-0998). The binary never exits 101 for an argument.
 pub const MISUSED: u8 = 2;
 
 /// The sentence every rendered report carries above it.
@@ -623,6 +657,53 @@ struct FoldAuditReport {
     failed: bool,
 }
 
+/// Names what derive withheld in one rung-month, apart from agreement and
+/// disagreement, and answers whether there was anything to name.
+fn write_withheld(
+    out: &mut String,
+    (year, month): (u16, u8),
+    verdict: &crate::fold_audit::RungVerdict,
+) -> bool {
+    if verdict.withheld == 0 {
+        return false;
+    }
+    let _ = writeln!(
+        out,
+        "  {year}-{month:02}  {:>5}  WITHHELD by derive policy: {} diagnostic(s), \
+         neither agreement nor disagreement",
+        verdict.rung, verdict.withheld
+    );
+    for why in &verdict.withheld_named {
+        let _ = writeln!(out, "           {why}");
+    }
+    true
+}
+
+/// Names one disagreeing rung-month and each disagreement it names.
+fn write_disagreement(
+    out: &mut String,
+    (year, month): (u16, u8),
+    v: &crate::fold_audit::RungVerdict,
+) {
+    let _ = writeln!(
+        out,
+        "  {year}-{month:02}  {:>5}  DISAGREES  stored {} bars, folded {} bars, \
+         {} named disagreement(s){}",
+        v.rung,
+        v.stored_bars,
+        v.folded_bars,
+        v.disagreements.len(),
+        if v.elided == 0 {
+            String::new()
+        } else {
+            format!(", {} more not named", v.elided)
+        }
+    );
+    for d in &v.disagreements {
+        let _ = writeln!(out, "           {}", d.line());
+    }
+}
+
 /// [`fold_audit_arm`]'s report, over a span of instrument-months.
 ///
 /// One month is the unit [`crate::fold_audit::audit_month`] offers, and a span
@@ -644,11 +725,13 @@ fn fold_audit_range(
     let months = stored::months_between(from, to)?;
 
     let mut out = String::from(
-        "FOLD AUDIT -- does each stored coarse rung equal the fold of the stored minutes?\n\n  \
+        "FOLD AUDIT -- does each stored coarse rung equal what derive writes from the stored minutes?\n\n  \
          The seven coarse rungs are NEVER pulled. `pull::ingest::derive_all` folds\n  \
-         them from the one-minute file at ingest, so a dirty minute month produces\n  \
-         coarse bars built out of gaps that are byte-indistinguishable from whole\n  \
-         ones. Nothing else in this workspace looks across rungs.\n\n",
+         them from the one-minute file at ingest with the minute-completeness\n  \
+         authority, which writes a bucket only when every scheduled minute exists\n  \
+         and withholds exceptional sessions. This audit re-derives with that same\n  \
+         authority; a bucket it withholds is counted as WITHHELD, neither agreement\n  \
+         nor disagreement. Nothing else in this workspace looks across rungs.\n\n",
     );
     let _ = writeln!(
         out,
@@ -663,6 +746,7 @@ fn fold_audit_range(
     let mut unreadable = 0_u64;
     let mut agreeing = 0_u64;
     let mut disagreeing = 0_u64;
+    let mut withheld = 0_u64;
 
     for (year, month) in months {
         // NAMED, NOT UNWRAPPED. `months_between` already refused a month
@@ -687,31 +771,16 @@ fn fold_audit_range(
             }
         };
         for verdict in verdicts {
+            if let Ok(v) = &verdict
+                && write_withheld(&mut out, (year, month), v)
+            {
+                withheld = withheld.saturating_add(1);
+            }
             match verdict {
                 Ok(v) if v.agrees() => agreeing = agreeing.saturating_add(1),
                 Ok(v) => {
                     disagreeing = disagreeing.saturating_add(1);
-                    let _ = writeln!(
-                        out,
-                        "  {year}-{month:02}  {:>5}  DISAGREES  stored {} bars, folded {} bars, \
-                         {} named disagreement(s){}",
-                        v.rung,
-                        v.stored_bars,
-                        v.folded_bars,
-                        v.disagreements.len(),
-                        if v.elided == 0 {
-                            String::new()
-                        } else {
-                            format!(", {} more not named", v.elided)
-                        }
-                    );
-                    for d in &v.disagreements {
-                        let _ = writeln!(
-                            out,
-                            "           record {} ts {} field {} -- stored {}, folded {}",
-                            d.at, d.ts_micros, d.field, d.stored, d.folded
-                        );
-                    }
+                    write_disagreement(&mut out, (year, month), &v);
                 }
                 Err(why) => {
                     unreadable = unreadable.saturating_add(1);
@@ -725,10 +794,18 @@ fn fold_audit_range(
         out,
         "\n  {agreeing} rung-month(s) agree, {disagreeing} DISAGREE, {unreadable} unreadable."
     );
+    if withheld > 0 {
+        let _ = writeln!(
+            out,
+            "  {withheld} rung-month(s) carry buckets derive WITHHELD; those buckets are \
+             not in the store and are not counted as disagreements."
+        );
+    }
     if disagreeing > 0 {
         out.push_str(
-            "  A DISAGREEING rung holds bars the minute series does not support. \
-             Re-fold that month rather than sweeping it.\n",
+            "  A DISAGREEING rung holds bars the minute series does not support, or \
+             lacks bars derive would write. Do not sweep that month; derived rungs are \
+             append-only, so its correction is a versioned store repair.\n",
         );
     }
     if unreadable > 0 {
@@ -739,7 +816,9 @@ fn fold_audit_range(
     }
     let failed = disagreeing > 0 || unreadable > 0;
     if !failed {
-        out.push_str("  Every stored coarse bar equals the fold of the stored minutes.\n");
+        out.push_str(
+            "  Every stored coarse bar equals what derive writes from the stored minutes.\n",
+        );
     }
     Ok(FoldAuditReport { text: out, failed })
 }
@@ -1790,8 +1869,9 @@ fn stored_month_arm(
 /// # Why it takes no UNDERLYING
 ///
 /// Every other stored command takes one, because it sweeps one instrument. This
-/// chain does not: `CLAUDE.md` §1 names two instruments as the engine surface
-/// and the Population V5 pipeline commits BOTH per rung, pairing them as one
+/// chain does not: it is built for the two spot indices of `CLAUDE.md` §1
+/// (whose surface also holds the F&O cash equities, which this chain does not
+/// sweep) and the Population V5 pipeline commits BOTH per rung, pairing them as one
 /// cross-sectional statistic. The pair is structural all the way down --
 /// `CandidateFamilyPairV1 { nifty, banknifty }` -- so there is no argument an
 /// operator could pass to ask for one of them, and offering one would be a
@@ -1966,6 +2046,50 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
     run_with_sink(args, out, telemetry::global())
 }
 
+/// The binary's entry: the raw process arguments, admitted as text first.
+///
+/// # Why the arguments arrive as `OsString`
+///
+/// `main` used to collect `std::env::args()`, which PANICS on the first
+/// argument that is not valid Unicode: exit 101, a backtrace hint on stderr,
+/// no line saying where events went, and no event in the log. Every command
+/// word this binary understands is text, so an argument that is not text is a
+/// misuse like an unknown word: refused by name, with the usage, exit
+/// [`MISUSED`], and one `cli.lifecycle` event recording why. Nothing is
+/// dispatched, and no lossy conversion guesses what the word was meant to be.
+/// D-0998, probeapi-3.
+#[must_use]
+pub fn run_durable_os(raw: impl IntoIterator<Item = std::ffi::OsString>, out: &mut String) -> u8 {
+    match text_args(raw) {
+        Ok(args) => run_durable(&args, out),
+        Err(why) => {
+            note(
+                &telemetry::Event::warn("cli.lifecycle", "command refused")
+                    .with("phase", "refused")
+                    .with("reason", why.as_str())
+                    .with("exit_code", u64::from(MISUSED)),
+            );
+            refuse(out, &why)
+        }
+    }
+}
+
+/// Every argument as text, or the first one that is not, named by position.
+fn text_args(raw: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(index, word)| {
+            word.into_string().map_err(|word| {
+                format!(
+                    "argument {} is not valid UTF-8 (read as `{}`); every command word is text, so nothing was dispatched",
+                    index.saturating_add(1),
+                    word.to_string_lossy()
+                )
+            })
+        })
+        .collect()
+}
+
 /// Binary entry with required durable history for every recognized sweep.
 /// Inspection commands retain their existing read-only behavior. Library tests
 /// use [`run`] or an explicit private journal, never a hidden real-store write.
@@ -2057,7 +2181,15 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         {
             (Ok(s), Ok(m)) => {
                 let text = sweep(s, m);
-                let code = if carries_refusal(&text) { FAILED } else { OK };
+                // A sweep that walked no ladder measured nothing, and its own
+                // verdict says the answer is not trustworthy. Exiting 0 on it
+                // let `cli sweep 1 10 && <next>` proceed where `cli audit 1 10`
+                // stopped.
+                let code = if carries_refusal(&text) || nothing_measured(&text) {
+                    FAILED
+                } else {
+                    OK
+                };
                 out.push_str(&text);
                 code
             }
@@ -2483,6 +2615,7 @@ fn stored_anchored_column(
         signal_length_micros,
         widths,
         indicators::evaluator::Calendar::charter(),
+        stored::nse_session_close_minute,
         &mut column,
     )
     .map_err(|why| {
@@ -2950,10 +3083,12 @@ pub fn install_log() -> String {
 
 /// One structural event about a run. **Never called per bar or per candidate.**
 ///
-/// Gate 17's rule is that the innermost loop calls nothing at all; this crate
-/// holds no loop over bars and none over candidates, so every call site here is
-/// a boundary — one per run, or one per instrument-month in a batch. That is the
-/// granularity gate 17's own comment prescribes as the affordable one.
+/// Gate 17's rule is that the innermost loop calls nothing at all. This crate
+/// is not on its list and does hold loops over bars and over candidates —
+/// `screen`'s `by_evidence.par_iter()` among them (see [`note_grid_progress`]) —
+/// but every call site of this function is a boundary: one per run, or one per
+/// instrument-month in a batch. That is the granularity gate 17's own comment
+/// prescribes as the affordable one. D-1448 corrected "holds no loop".
 /// The token a log record is bound to when no browser attempt supplied one.
 ///
 /// # Why the telemetry run id and not a fresh number
@@ -2983,6 +3118,60 @@ pub(crate) fn note(event: &telemetry::Event<'_>) {
     // sink — and `install_log` above is the one place that reports the absence,
     // so reporting it again per event would be noise on every line.
     let _ = telemetry::emit(event);
+}
+
+/// Writes the binary's whole output to `out`, and returns the exit code the
+/// run earns once that write is known (v53-2, D-1484).
+///
+/// `main` printed with `println!` and `print!`, which PANIC on a closed
+/// stdout: `cli sweep 6 100 | true` exited 101 with a backtrace after the
+/// work was done, and a `> report.txt` on a full disk did the same. The shape
+/// is `api`'s `say_line` (probeapi-7, D-1202): written with `write_all`, never
+/// a panic, and a failure SAID on `fallback` with one `cli.output` event.
+///
+/// The code depends on why. A closed pipe (`BrokenPipe`) is a reader that
+/// stopped reading -- `| head` is the ordinary case -- so the computed code
+/// stands, as it does for any Unix filter. Any other error means the report
+/// was meant to land and did not, so a run that would have exited [`OK`]
+/// exits [`FAILED`]: zero would say "everything went as asked" over a report
+/// nobody has. A run that already earned a non-zero code keeps it. If
+/// `fallback` is gone too there is nobody left to tell; the event remains.
+pub fn deliver(
+    code: u8,
+    text: &str,
+    out: &mut impl std::io::Write,
+    fallback: &mut impl std::io::Write,
+) -> u8 {
+    let Err(why) = out.write_all(text.as_bytes()).and_then(|()| out.flush()) else {
+        return code;
+    };
+    let closed = why.kind() == std::io::ErrorKind::BrokenPipe;
+    let earned = if closed || code != OK { code } else { FAILED };
+    let said = why.to_string();
+    note(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "cli.output",
+            "stdout is not writable; the report was not shown whole",
+        )
+        .with("why", telemetry::Value::Str(&said))
+        .with(
+            "bytes",
+            telemetry::Value::Uint(u64::try_from(text.len()).unwrap_or(u64::MAX)),
+        )
+        .with("exit", telemetry::Value::Uint(u64::from(earned))),
+    );
+    let _told = writeln!(
+        fallback,
+        "stdout is not writable ({why}); the report ({} bytes) was not shown whole. {}",
+        text.len(),
+        if closed {
+            "The reader closed the pipe, so the run's own exit code stands."
+        } else {
+            "The report was meant to land and did not, so this is not a clean exit."
+        }
+    );
+    earned
 }
 
 /// Emits one structural event under an exact browser-attempt key when one was
@@ -3459,6 +3648,7 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
+    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -3888,6 +4078,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
+    out.push_str(&stored::overnight_note(&span.key, &span.bars));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -4622,6 +4813,11 @@ fn stop_ladder_derived(bars: &[indicators::Candle], hold: usize) -> Vec<i64> {
 /// the whole walk is O(bars) with an amortised O(1) step — the bound §3 rule 4
 /// requires. The obvious `windows(hold).map(...)` would be O(bars × hold), which
 /// on the 1-minute series at a 60-bar hold is 36 million comparisons.
+///
+/// **UNVERIFIED — that bound is read off the source, not measured.** No bench
+/// row times this walk, and the `select_nth_unstable` that ends it is expected
+/// O(n) rather than worst-case O(n). The tests in this file prove the percentile it
+/// returns, not its cost.
 fn window_range_percentile(
     bars: &[indicators::Candle],
     hold: usize,
@@ -5205,12 +5401,12 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
 /// was collapsing the stop ladder to one rung — but that clamp was also the
 /// only thing bounding `cap / step_points` above. And `screen` was
 /// parallelised, so `available_parallelism` of these grids are live at once.
-/// The candidate ceiling covers none of it: [`derived_ceiling`] counts APRIORI
+/// The candidate ceiling covers none of it: [`ceiling_from_env`] counts APRIORI
 /// candidates, and an exit grid is transient per-candidate work it never sees.
 ///
 /// # Derived, not typed
 ///
-/// [`derived_ceiling`] already answers *"how many 146-byte records fit in this
+/// [`ceiling_from_env`] already answers *"how many 146-byte records fit in this
 /// machine's share"* — scaled by core count and divided among concurrent rungs
 /// by `SharedBy`. A `Cell` is about the same width, and a grid is TRANSIENT
 /// where a candidate is RETAINED, so a grid gets a small fraction of that: one
@@ -5218,8 +5414,17 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
 ///
 /// On the reference machine that is roughly nine thousand cells per candidate,
 /// solving to seven or eight rungs — the range the old constant already sat in,
-/// now reached by arithmetic rather than by a number that happened to hold. A
-/// larger machine earns more; a smaller one is protected.
+/// now reached by arithmetic rather than by a number that happened to hold.
+///
+/// **The core count cancels, so every machine gets the same budget.** This
+/// sentence used to say "a larger machine earns more; a smaller one is
+/// protected", and the arithmetic does neither: [`whole_machine_ceiling`]
+/// multiplies by `available_parallelism` and the division by `threads` below
+/// divides by the same figure, so the budget is
+/// `DEFAULT_CEILING / REFERENCE_CORES / GRID_SHARE` (9,362 cells, seven rungs)
+/// on one core and on 128 alike, up to integer rounding. That is the
+/// reproducible outcome: the grid rung count, which selects the winning cell,
+/// does not depend on the machine. audit-20261003 hunt-conc-4, D-1566.
 ///
 /// Solved by walking upward rather than inverting a quintic: the answer is
 /// small, the walk is bounded, and `variants` is a `const fn` of a few
@@ -6039,6 +6244,9 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         loaded.bars.len(),
         commit,
     );
+    // D-1540: the month banner names the largest overnight move of a stock's
+    // bars, where `month_banner` itself sees only their count.
+    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -6256,6 +6464,7 @@ fn span_banner(
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
+    header.push_str(&stored::overnight_note(&span.key, &span.bars));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7162,9 +7371,13 @@ fn grouped(n: u64) -> String {
 /// The conversion happens HERE, at the render boundary, and nowhere else — the
 /// same rule the tick grid follows. Integer arithmetic throughout: the rupees
 /// and the paise are separated by division and remainder, never by a float.
-fn rupees(paisa: i64) -> String {
+///
+/// Takes any integer up to `i128`, because a pooled or per-period money total is
+/// summed exactly in `i128` rather than clamped in `i64` (D-1852).
+fn rupees(paisa: impl Into<i128>) -> String {
+    let paisa: i128 = paisa.into();
     let negative = paisa < 0;
-    // `unsigned_abs` and not `abs`: `i64::MIN` has no positive counterpart, and
+    // `unsigned_abs` and not `abs`: `i128::MIN` has no positive counterpart, and
     // it is exactly the value `saturating_add` produces for a variant that lost
     // without bound. A sort that panicked on the worst possible result would be
     // the report killing the process over the answer.
@@ -7784,6 +7997,7 @@ pub fn render_top_record(
     damaged: Option<&str>,
     unreadable: &str,
 ) -> String {
+    use crate::columns::{left, right};
     let mut out = stored_provenance(&crate::results::read_field(&rows.underlying));
     blank_line_after_banner(&mut out);
     let _ = writeln!(
@@ -7804,28 +8018,46 @@ pub fn render_top_record(
         return out;
     }
 
-    let _ = writeln!(
-        out,
-        "\n  {:<5}{:>10}{:>9}{:>14}{:>10}{:>10}  conditions",
-        "rank", "hits", "n", "mean", "t", "payoff"
+    // COLUMNS LAID OUT TOGETHER, NOT FORMATTED ONE ROW AT A TIME: a figure
+    // that filled its width ran into the next one and pushed every column
+    // after it off its header. D-1420.
+    let body = found
+        .iter()
+        .map(|row| {
+            vec![
+                row.rank.to_string(),
+                row.hits.to_string(),
+                row.n.to_string(),
+                // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
+                // column in this binary. It is stored in thousandths of a paisa,
+                // so it comes back to whole paisa first.
+                rupees(row.mean_milli_paisa / 1_000),
+                hundredths_of(row.t_milli / 10),
+                if row.payoff_bp == i64::MAX {
+                    "inf".to_owned()
+                } else {
+                    hundredths_of(row.payoff_bp)
+                },
+            ]
+        })
+        .collect();
+    let lines = crate::columns::with_header(
+        &[
+            left(5),
+            right(10),
+            right(9),
+            right(14),
+            right(10),
+            right(10),
+        ],
+        &["rank", "hits", "n", "mean", "t", "payoff"],
+        body,
     );
-    for row in found {
+    let _ = writeln!(out, "\n  {}  conditions", lines.header);
+    for (row, line) in found.iter().zip(&lines.rows) {
         let _ = writeln!(
             out,
-            "  {:<5}{:>10}{:>9}{:>14}{:>10}{:>10}  {}",
-            row.rank,
-            row.hits,
-            row.n,
-            // MEAN IS PAISA AND IS SHOWN AS RUPEES, like every other money
-            // column in this binary. It is stored in thousandths of a paisa, so
-            // it comes back to whole paisa first.
-            rupees(row.mean_milli_paisa / 1_000),
-            hundredths_of(row.t_milli / 10),
-            if row.payoff_bp == i64::MAX {
-                "inf".to_owned()
-            } else {
-                hundredths_of(row.payoff_bp)
-            },
+            "  {line}  {}",
             runner::report::names_from_words(row.mask_words).join(" · ")
         );
     }
@@ -7948,6 +8180,66 @@ pub fn results_list(feed: Option<&str>, underlying: Option<&str>) -> String {
     results_at(&root, feed, underlying)
 }
 
+/// The listing's table: the newest `LIST_ROWS` rows, one line each.
+fn results_table(out: &mut String, rows: &[crate::results::Record]) {
+    use crate::columns::{left, right};
+    // LAID OUT TOGETHER (D-1420): a 16-byte feed filled its 9-character
+    // column and ran into the rung, and a money figure past 16 characters
+    // pushed every column after it off its header.
+    let body = rows
+        .iter()
+        .take(LIST_ROWS)
+        .map(|record| {
+            vec![
+                crate::results::read_field(&record.feed),
+                crate::results::read_field(&record.timeframe),
+                // THE NUMBER THE WHOLE ENGINE EXISTS TO PRODUCE, and the listing
+                // did not print it. An operator asking "how many combinations
+                // did this actually weigh" had no answer on this surface at all
+                // -- the field has been in every record since the ledger landed.
+                grouped(record.combinations),
+                grouped(record.min_hits),
+                format!("{}/{}", record.months_found, record.months_asked),
+                record.depth.to_string(),
+                if record.halted == 0 { "yes" } else { "NO" }.to_owned(),
+                rupees(record.pessimistic),
+                rupees(record.optimistic),
+                record.trades.to_string(),
+            ]
+        })
+        .collect();
+    let laid = crate::columns::with_header(
+        &[
+            left(9),
+            left(8),
+            right(16),
+            right(16),
+            right(7),
+            right(6),
+            right(6),
+            right(17),
+            right(17),
+            right(9),
+        ],
+        &[
+            "feed",
+            "rung",
+            "COMBINATIONS",
+            "min_hits",
+            "months",
+            "depth",
+            "done",
+            "worst",
+            "best",
+            "trades",
+        ],
+        body,
+    );
+    for line in std::iter::once(&laid.header).chain(&laid.rows) {
+        let _ = writeln!(out, "  {line}");
+    }
+}
+
 /// The same read-only listing against a caller-owned root.
 fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&str>) -> String {
     // OPEN_READ, BECAUSE THIS IS A LISTING. `Results::open` calls
@@ -8014,44 +8306,7 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
     let best = best_complete_newest_first(&rows);
     out.push_str(&listing_equity_note(&rows, best));
 
-    let _ = writeln!(
-        out,
-        "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
-        "feed",
-        "rung",
-        "COMBINATIONS",
-        "min_hits",
-        "months",
-        "depth",
-        "done",
-        "worst",
-        "best",
-        "trades"
-    );
-    for record in rows.iter().take(LIST_ROWS) {
-        let _ = writeln!(
-            out,
-            "  {:<9}{:<8}{:>16}{:>16}{:>7}{:>6}{:>6}{:>17}{:>17}{:>9}",
-            crate::results::read_field(&record.feed),
-            crate::results::read_field(&record.timeframe),
-            // THE NUMBER THE WHOLE ENGINE EXISTS TO PRODUCE, and the listing did
-            // not print it. An operator asking "how many combinations did this
-            // actually weigh" had no answer on this surface at all -- the field
-            // has been in every record since the ledger landed.
-            grouped(record.combinations),
-            grouped(record.min_hits),
-            format!("{}/{}", record.months_found, record.months_asked),
-            record.depth,
-            if record.halted == 0 { "yes" } else { "NO" },
-            rupees(record.pessimistic),
-            rupees(record.optimistic),
-            record.trades,
-            // The first sixteen hex characters. The full digest is 64 and would
-            // own the line; sixteen is enough to find a row and short enough to
-            // read, and `cli results` prints the whole one when a row is asked
-            // for by name.
-        );
-    }
+    results_table(&mut out, &rows);
     if rows.len() > LIST_ROWS {
         let _ = writeln!(
             out,
@@ -8262,12 +8517,27 @@ fn trade_and_screen<'a>(
         screen_cap(),
         validate,
     );
+    // EVERY SLICE FACT ONCE FOR THIS SLICE (D-1190). Each tier's `screen`, its
+    // `measure_top` and the final exact rebuild below each built their own
+    // slice facts over `bars` and `column`, an O(B) value: up to two per tier
+    // plus two here. The facts are a pure function of `bars` and `column`, so sharing one
+    // changes no answer.
+    let facts = runner::trade::SliceFacts::of(bars, column);
     let ScreenResult {
         text: screened,
         selected,
         priced,
         admitted_any: _,
-    } = screen_cascade(bars, column, by_evidence, horizon, rules, pricing, validate)?;
+    } = screen_cascade(
+        bars,
+        column,
+        by_evidence,
+        horizon,
+        rules,
+        pricing,
+        validate,
+        &facts,
+    )?;
     if let Some(capture) = pricing.capture {
         capture.finish()?;
     }
@@ -8290,7 +8560,7 @@ fn trade_and_screen<'a>(
     // be able to survive. Passing 1 here is what produced a 14-point ceiling on a
     // sixty-minute trade.
     let stop_rungs = stop_ladder_ppm(bars, horizon.as_bars() as usize);
-    let exits = grid::evaluate(
+    let exits = grid::evaluate_over(
         bars,
         column,
         &selected.scored.mask,
@@ -8303,6 +8573,7 @@ fn trade_and_screen<'a>(
             ratios: true,
             stops_ppm: &stop_rungs,
         },
+        &facts,
     );
     let Some(cell) = exits.cells.iter().find(|cell| **cell == selected.cell) else {
         return Err(format!(
@@ -8310,7 +8581,7 @@ fn trade_and_screen<'a>(
             selected.direction
         ));
     };
-    let rows = grid::materialize_cell(
+    let rows = grid::materialize_cell_over(
         bars,
         column,
         &selected.scored.mask,
@@ -8318,13 +8589,15 @@ fn trade_and_screen<'a>(
         side,
         &exits,
         cell,
+        &facts,
     )?;
-    let taken = trade::walk(
+    let taken = trade::walk_over(
         bars,
         column,
         &selected.scored.mask,
         horizon,
         selected.direction,
+        &facts,
     );
     note_grid_finished(recording, priced.len(), by_evidence.len(), rows.len());
     Ok(TradeScreen {
@@ -10089,7 +10362,19 @@ fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offere
 /// `validate: false` and only the rung that lands is re-run with the stack. This
 /// gives the same choice to the command an operator reaches for first.
 fn validate_from_env() -> bool {
-    validates(crate::knobs::var("BRUTEX_VALIDATE").as_deref())
+    let raw = crate::knobs::var("BRUTEX_VALIDATE");
+    // A VALUE THAT IS NEITHER `0` NOR `1` IS NAMED, NOT ONLY OUTVOTED. It still
+    // leaves validation ON -- the safe direction `validates` documents -- but
+    // `false`, `off` or `no` used to mean ON in silence, so an operator who
+    // asked for less got more with nothing saying why. Recorded here it reaches
+    // the `!! KNOB REFUSED` block like every other unusable knob.
+    // audit-20261003 hunt-cli-b-4, D-1566.
+    if let Some(value) = raw.as_deref()
+        && !matches!(value.trim(), "0" | "1")
+    {
+        crate::knobs::refuse_value("BRUTEX_VALIDATE", value);
+    }
+    validates(raw.as_deref())
 }
 
 /// The rule itself, over the raw value, so it can be tested without touching the
@@ -10887,7 +11172,12 @@ struct AttemptRung<'a> {
 }
 
 /// Runs one descent step inside the same lifecycle the live table folds.
-fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> String {
+fn screen_step(
+    question: AttemptRung<'_>,
+    support: u64,
+    policy: Policy,
+    cache: &mut ScreenCache,
+) -> String {
     let (from, to) = question.span;
     let min_hits = min_hits_for(
         usize::try_from(question.bars).unwrap_or(usize::MAX),
@@ -10905,6 +11195,8 @@ fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> Strin
         named_support: true,
     };
     note_rung_sweeping(progress);
+    // ONE LOAD FOR THE WHOLE DESCENT: `cache` carries the span, contexts and
+    // column from the first step to the rest. D-0997.
     let page = screen_range_for_attempt(
         question.vendor_word,
         question.underlying,
@@ -10913,6 +11205,7 @@ fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> Strin
         support,
         policy,
         question.attempt,
+        cache,
     );
     let refused = page.strip_prefix("refused: ").map_or_else(
         || not_recorded_reason(&page),
@@ -10926,7 +11219,13 @@ fn screen_step(question: AttemptRung<'_>, support: u64, policy: Policy) -> Strin
     page
 }
 
-fn validated_at(question: AttemptRung<'_>, support: u64, policy: Policy, searched: &str) -> String {
+fn validated_at(
+    question: AttemptRung<'_>,
+    support: u64,
+    policy: Policy,
+    searched: &str,
+    cache: &mut ScreenCache,
+) -> String {
     let validated = screen_step(
         question,
         support,
@@ -10934,6 +11233,7 @@ fn validated_at(question: AttemptRung<'_>, support: u64, policy: Policy, searche
             validate: true,
             ..policy
         },
+        cache,
     );
     if validated.contains(YOUR_RULES_MET) {
         validated
@@ -11190,6 +11490,10 @@ pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 /// is shown — carried no documentation at all. Nothing in the build can catch
 /// this; it is caught by reading.
 #[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the per-slice facts built once by `trade_and_screen` (D-1190)"
+)]
+#[expect(
     clippy::too_many_lines,
     reason = "the ordered operator-policy, generated-tier, and mildest-fallback cascade is kept in one function so its selected rows and priced map cannot come from different tiers"
 )]
@@ -11205,6 +11509,9 @@ fn screen_cascade<'a>(
     // Whether to walk the tier ladder when the stated rules find nothing. A
     // SEARCH step passes false: it needs one bit, not 960 priced tiers.
     validate: bool,
+    // The slice facts over `bars` and `column`, built once per slice by
+    // `trade_and_screen` and shared by every tier's `screen` (D-1190).
+    facts: &runner::trade::SliceFacts,
 ) -> Result<ScreenResult<'a>, String> {
     let top = rules.top;
     let mut out = String::with_capacity(4_096);
@@ -11221,7 +11528,7 @@ fn screen_cascade<'a>(
     // So the stated policy is tried first and named in the output. The tier
     // ladder below it is the fallback — the "what IS there" answer — and not a
     // replacement for the question that was asked.
-    let yours = screen(bars, column, by_evidence, horizon, rules, pricing)?;
+    let yours = screen(bars, column, by_evidence, horizon, rules, pricing, facts)?;
     // THE BANNER ASKS "did anything PASS", not "is there a subject".
     //
     // `final_selection` now falls back to the best-ranked row that traded, so
@@ -11409,6 +11716,7 @@ fn screen_cascade<'a>(
             horizon,
             mildest.rules(top, reference),
             pricing,
+            facts,
         )?;
         if widest.selected.is_none() {
             let _ = writeln!(
@@ -11433,7 +11741,7 @@ fn screen_cascade<'a>(
 
     for (rank, tier) in ladder.iter().enumerate() {
         let rules = tier.rules(top, reference);
-        let body = screen(bars, column, by_evidence, horizon, rules, pricing)?;
+        let body = screen(bars, column, by_evidence, horizon, rules, pricing, facts)?;
         // The typed selection is the same final, post-consistency row the table
         // renders. Rendered wording is diagnostic, never a control protocol.
         if body.selected.is_none() {
@@ -11472,6 +11780,7 @@ fn screen_cascade<'a>(
             horizon,
             mildest.rules(top, reference),
             pricing,
+            facts,
         )?;
         out.push_str(&diagnostic.text);
         replace_priced(&mut final_priced, diagnostic.priced);
@@ -11529,7 +11838,9 @@ struct Consistency {
     /// every year can still have a day that took a quarter of the account, and
     /// the yearly view cannot show it. A day is the smallest unit an intraday
     /// operator carries risk across.
-    worst_day: i64,
+    ///
+    /// `i128`: a period's net is summed exactly, never clamped (D-1852).
+    worst_day: i128,
     /// Periods counted at the coarsest grain, so a share can be read against a
     /// denominator. `10_000` of one year is not the same evidence as `10_000` of
     /// seven, and a share alone cannot tell them apart.
@@ -11559,6 +11870,10 @@ impl Consistency {
 /// worth failing the screen over, because the cell it came from is still a
 /// valid measurement. The row simply reports no consistency rather than a
 /// fabricated one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the hoisted per-slice facts (D-1184)"
+)]
 fn consistency_of(
     bars: &[indicators::Candle],
     column: &indicators::column::Column,
@@ -11567,6 +11882,7 @@ fn consistency_of(
     side: runner::excursion::Side,
     exits: &grid::Grid,
     cell: &grid::Cell,
+    facts: &runner::trade::SliceFacts,
 ) -> Option<Consistency> {
     // `Chosen` is `Cell`'s four exit fields and nothing else, so the variant
     // that won is re-expressed rather than re-searched. Re-searching would risk
@@ -11577,7 +11893,8 @@ fn consistency_of(
         tsl: cell.tsl,
         ttp: cell.ttp,
     };
-    let (_, rows) = grid::per_trade(
+    // Over the caller's facts (D-1184): `per_trade` rebuilt them per row.
+    let (_, rows) = grid::per_trade_over(
         bars,
         column,
         &scored.mask,
@@ -11589,13 +11906,14 @@ fn consistency_of(
             trails: &exits.trails,
         },
         chosen,
+        facts,
     )?;
     if rows.is_empty() {
         return None;
     }
     // Sized from the ladder, so a new grain cannot be silently discarded.
     let mut shares_bp = [0_i64; crate::stability::GRAINS.len()];
-    let mut worst_day = 0_i64;
+    let mut worst_day = 0_i128;
     let mut years = 0_usize;
     for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
         let measured = crate::stability::at(&rows, *grain);
@@ -11672,6 +11990,8 @@ fn screen<'a>(
     horizon: Horizon,
     rules: Rules,
     pricing: Pricing<'_>,
+    // Built once per slice by `trade_and_screen` (D-1190), not once per tier.
+    facts: &runner::trade::SliceFacts,
 ) -> Result<ScreenResult<'a>, String> {
     let recording = pricing.recording;
     // Built ONCE for the whole screen: the same ladder judges every combination,
@@ -11749,10 +12069,10 @@ fn screen<'a>(
         ratios: true,
         stops_ppm: &stop_rungs,
     };
-    // EVERY SLICE FACT ONCE FOR THE WHOLE CANDIDATE LOOP. Both calibration and
-    // the real pass share this forced-exit table and spacing measurement.
-    let facts = runner::trade::SliceFacts::of(bars, column);
-    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence, &levels, &facts);
+    // EVERY SLICE FACT ONCE PER SLICE, NOT ONCE PER SCREEN (D-1190). Both
+    // calibration and the real pass share the caller's forced-exit table and
+    // spacing measurement, and so does every other tier's screen.
+    let priced_cap = cap_for_budget(bars, column, horizon, by_evidence, &levels, facts);
     // THE PHASE THAT WAS SILENT. Everything above this line is per-run work; the
     // loop below prices every candidate against the whole exit grid and is where
     // a multi-hour sweep spends nearly all of its time. It said nothing at all
@@ -11855,7 +12175,7 @@ fn screen<'a>(
                 if let Some(capture) = pricing.capture {
                     capture.check()?;
                 }
-                let g = grid::evaluate_over(bars, column, &scored.mask, horizon, s, levels, &facts);
+                let g = grid::evaluate_over(bars, column, &scored.mask, horizon, s, levels, facts);
                 let shown = shown_cell(&g, rules);
                 if let (Some(capture), Some(tier)) = (pricing.capture, captured_tier.as_ref()) {
                     capture.record(
@@ -12007,7 +12327,7 @@ fn screen<'a>(
     // rule is ranked where it earned and printed beside the rule it broke.
     rows.sort_by_key(|r| money_key(&r.cell));
 
-    measure_top(&mut rows, bars, column, horizon, rules);
+    measure_top(&mut rows, bars, column, horizon, rules, facts);
 
     // THE CALENDAR RE-SORT, over the measured band only.
     //
@@ -12065,7 +12385,7 @@ fn screen<'a>(
         let (weakest, worst_period) = r.consistency.as_ref().map_or(
             // The unmeasured floor: worse than any real grain share and any
             // real period, so measured rows always sort ahead.
-            (i64::MIN, i64::MIN),
+            (i64::MIN, i128::MIN),
             calendar_terms,
         );
         core::cmp::Reverse((
@@ -12117,50 +12437,7 @@ fn screen<'a>(
 
     let passed = rows.iter().filter(|r| r.admitted).count();
     let mut out = rules_banner(rules, passed, rows.len());
-    let _ = writeln!(
-        out,
-        // SIDE IS THE SECOND COLUMN, before any measurement. Every figure in
-        // this table is unactionable without it, and `struct Screened`
-        // computed the side and had no field to keep it in.
-        "  {:<5}{:>7}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  conditions",
-        "rank", "side", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule"
-    );
-    for row in rows.iter().take(rules.top) {
-        let pf = row.cell.profit_factor_bp();
-        // `pf` is still printed; `rr` moved into the TIGHTEST column, which
-        // answers a question the ratio could not: what stop is REACHABLE.
-        let _ = row.cell.reward_to_risk_bp();
-        let _ = writeln!(
-            out,
-            "  {:<5}{:>7}{:>8}{:>6}{:>10}{:>11}{:>6}{:>13}{:>13}{:>6}  {}",
-            row.rank,
-            row.side.as_str().to_uppercase(),
-            row.cell.trades,
-            format!("{}%", row.cell.win_rate_bp() / 100),
-            ppm_as_percent(row.cell.worst_mae),
-            // THE TIGHTEST ANY VARIANT ACHIEVED, in points, so a reader learns
-            // what is REACHABLE instead of guessing another threshold. A rule
-            // below this cannot be met by any of the 625 exits.
-            row.tightest.map_or_else(
-                || "-".to_owned(),
-                |t| format!("{}pt", ppm_to_points_at(t.worst_mae, reference)),
-            ),
-            if pf == i64::MAX {
-                "inf".to_owned()
-            } else {
-                hundredths_of(pf)
-            },
-            rupees(row.cell.pessimistic),
-            exit_label(&row.cell),
-            if row.admitted {
-                "PASS"
-            } else {
-                why_refused(&row.cell, rules, row.steady())
-            },
-            // BUILT HERE, FOR THE ROWS THAT ARE PRINTED. See `Screened`.
-            runner::report::condition_names(&row.scored.mask).join(" · ")
-        );
-    }
+    screen_table(&mut out, &rows, rules, reference);
     let _ = writeln!(out);
 
     append_consistency(&mut out, &rows, rules.top);
@@ -12316,7 +12593,7 @@ const fn money_key(cell: &grid::Cell) -> core::cmp::Reverse<(i64, i64, i64)> {
 /// Both terms are carried RAW because the caller wraps the key in `Reverse`:
 /// the tuple sorts descending, so a larger term ranks higher, and for both a
 /// grain share and a period's net "larger" already means "better".
-fn calendar_terms(c: &Consistency) -> (i64, i64) {
+fn calendar_terms(c: &Consistency) -> (i64, i128) {
     (c.weakest_bp(), c.worst_day)
 }
 
@@ -12385,6 +12662,7 @@ fn measure_top(
     column: &indicators::column::Column,
     horizon: Horizon,
     rules: Rules,
+    facts: &runner::trade::SliceFacts,
 ) {
     // MEASURED AFTER THE SORT, AND ONLY FOR WHAT WILL BE PRINTED.
     //
@@ -12423,7 +12701,9 @@ fn measure_top(
     // and `column` in scope.
     let rungs_again = grid_rungs(bars);
     let step_ppm_again = grid_step_ppm(bars, horizon.as_bars() as usize);
-    let facts_again = runner::trade::SliceFacts::of(bars, column);
+    // The caller's facts, built once per slice by `trade_and_screen` (D-1190):
+    // this function used to build its own copy on every `screen`.
+
     // EVERY PRICED ROW, NOT A BAND. The band was the last constant that could
     // permanently exclude a combination from the reported top ten.
     //
@@ -12506,9 +12786,87 @@ fn measure_top(
                 ratios: true,
                 stops_ppm: &stop_rungs_again,
             },
-            &facts_again,
+            facts,
         );
-        row.consistency = consistency_of(bars, column, row.scored, horizon, side, &g, &row.cell);
+        row.consistency = consistency_of(
+            bars, column, row.scored, horizon, side, &g, &row.cell, facts,
+        );
+    }
+}
+
+/// The screen's ranked table: one row per printed combination, its side, its
+/// chosen exit's figures and the rule that refused it, then its conditions.
+fn screen_table(out: &mut String, rows: &[Screened<'_>], rules: Rules, reference: i64) {
+    use crate::columns::{left, right};
+    let shown: Vec<&Screened<'_>> = rows.iter().take(rules.top).collect();
+    let body = shown
+        .iter()
+        .map(|row| {
+            let pf = row.cell.profit_factor_bp();
+            // `pf` is still printed; `rr` moved into the TIGHTEST column, which
+            // answers a question the ratio could not: what stop is REACHABLE.
+            let _ = row.cell.reward_to_risk_bp();
+            vec![
+                row.rank.to_string(),
+                row.side.as_str().to_uppercase(),
+                row.cell.trades.to_string(),
+                format!("{}%", row.cell.win_rate_bp() / 100),
+                ppm_as_percent(row.cell.worst_mae),
+                // THE TIGHTEST ANY VARIANT ACHIEVED, in points, so a reader
+                // learns what is REACHABLE instead of guessing another
+                // threshold. A rule below this cannot be met by any of the 625
+                // exits.
+                row.tightest.map_or_else(
+                    || "-".to_owned(),
+                    |t| format!("{}pt", ppm_to_points_at(t.worst_mae, reference)),
+                ),
+                if pf == i64::MAX {
+                    "inf".to_owned()
+                } else {
+                    hundredths_of(pf)
+                },
+                rupees(row.cell.pessimistic),
+                exit_label(&row.cell),
+                if row.admitted {
+                    "PASS"
+                } else {
+                    why_refused(&row.cell, rules, row.steady())
+                }
+                .to_owned(),
+            ]
+        })
+        .collect();
+    // LAID OUT TOGETHER (D-1420), so a figure wider than its column widens the
+    // column for every row instead of running into the next one.
+    let lines = crate::columns::with_header(
+        &[
+            left(5),
+            right(7),
+            right(8),
+            right(6),
+            right(10),
+            right(11),
+            right(6),
+            right(13),
+            right(13),
+            right(6),
+        ],
+        // SIDE IS THE SECOND COLUMN, before any measurement. Every figure in
+        // this table is unactionable without it, and `struct Screened`
+        // computed the side and had no field to keep it in.
+        &[
+            "rank", "side", "trades", "win%", "worstMAE", "TIGHTEST", "PF", "net", "exit", "rule",
+        ],
+        body,
+    );
+    let _ = writeln!(out, "  {}  conditions", lines.header);
+    for (row, line) in shown.iter().zip(&lines.rows) {
+        // BUILT HERE, FOR THE ROWS THAT ARE PRINTED. See `Screened`.
+        let _ = writeln!(
+            out,
+            "  {line}  {}",
+            runner::report::condition_names(&row.scored.mask).join(" · ")
+        );
     }
 }
 
@@ -12534,6 +12892,7 @@ const _: () = assert!(
 /// make it STEADILY" -- a different question, on a different table, with a
 /// different failure mode.
 fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
+    use crate::columns::{left, right};
     // CONSISTENCY, and it is a SEPARATE table on purpose.
     //
     // # Why not another column
@@ -12583,9 +12942,21 @@ fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
     // need a parallel table of them -- which is the same drift in another shape.
     // `GRAINS.len()` is asserted against the count below so a new grain cannot
     // be added without a column.
-    let _ = writeln!(
-        out,
-        "  {:<5}{:>6}{:>8}{:>7}{:>10}{:>8}{:>7}{:>7}{:>8}{:>9}{:>14}",
+    let columns = [
+        left(5),
+        right(6),
+        right(8),
+        right(7),
+        right(10),
+        right(8),
+        right(7),
+        right(7),
+        right(8),
+        right(9),
+        right(14),
+    ];
+    let shown: Vec<&Screened<'_>> = rows.iter().take(top).collect();
+    let header = [
         "rank",
         "years",
         "yearly",
@@ -12596,32 +12967,43 @@ fn append_consistency(out: &mut String, rows: &[Screened<'_>], top: usize) {
         "daily",
         "hourly",
         "WEAKEST",
-        "worst day"
-    );
-    for row in rows.iter().take(top) {
+        "worst day",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for row in &shown {
         let Some(ref c) = row.consistency else {
-            let _ = writeln!(out, "  {:<5}   not measured", row.rank);
+            // Its rank still counts toward the first column's width.
+            cells.push(vec![row.rank.to_string()]);
             continue;
         };
-        let _ = writeln!(
-            out,
-            "  {:<5}{:>6}{:>8}{:>7}{:>10}{:>8}{:>7}{:>7}{:>8}{:>9}{:>14}",
-            row.rank,
-            c.years,
+        cells.push(vec![
+            row.rank.to_string(),
+            c.years.to_string(),
             // `GRAINS` order: year, half, quarter, month, week, day, hour.
-            c.share_bp(0),
-            c.share_bp(1),
-            c.share_bp(2),
-            c.share_bp(3),
-            c.share_bp(4),
-            c.share_bp(5),
-            c.share_bp(6),
+            c.share_bp(0).to_string(),
+            c.share_bp(1).to_string(),
+            c.share_bp(2).to_string(),
+            c.share_bp(3).to_string(),
+            c.share_bp(4).to_string(),
+            c.share_bp(5).to_string(),
+            c.share_bp(6).to_string(),
             // THE COLUMN THE OPERATOR'S RULE ACTUALLY READS. His requirement is
             // every grain at once, so the weakest one is the whole answer and
             // the seven before it are the evidence for it.
-            c.weakest_bp(),
+            c.weakest_bp().to_string(),
             rupees(c.worst_day),
-        );
+        ]);
+    }
+    // LAID OUT TOGETHER (D-1420): `worst day` is a money figure and a share is
+    // an `i64`, and either at its extreme ran into its neighbour.
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (row, line) in shown.iter().zip(&laid.rows) {
+        if row.consistency.is_some() {
+            let _ = writeln!(out, "  {line}");
+        } else {
+            let _ = writeln!(out, "  {line}   not measured");
+        }
     }
     let _ = writeln!(
         out,
@@ -13893,6 +14275,9 @@ fn elite_descend_with_attempt(
     // THE FIRST REFUSAL, KEPT, because a walk where every step refused has no
     // page to show and `exhausted_walk` would otherwise report the market.
     let mut first_refusal: Option<String> = None;
+    // LOADED ONCE, ON THE FIRST STEP, AND HELD FOR EVERY LATER ONE: nothing a
+    // step loads depends on its support. D-0997, o1cli-1.
+    let mut cache = ScreenCache::default();
     for (step, support) in ladder.iter().enumerate() {
         // PROGRESS TO STDERR as each step lands, for the reason `descend`
         // records: a walk that buffers its whole output prints nothing for
@@ -13902,7 +14287,7 @@ fn elite_descend_with_attempt(
             step.saturating_add(1),
             ladder.len()
         );
-        let page = screen_step(question, *support, policy);
+        let page = screen_step(question, *support, policy, &mut cache);
 
         // ADMITTED ROWS ARE READ BACK OFF THE RENDERED PAGE, which is the
         // pattern `results_arm` already takes and states the reason for: a
@@ -13925,7 +14310,7 @@ fn elite_descend_with_attempt(
             );
             // THE SURVIVOR IS VALIDATED, and only the survivor — see
             // `validated_at` for why the search half cannot afford this stack.
-            out.push_str(&validated_at(question, *support, policy, &page));
+            out.push_str(&validated_at(question, *support, policy, &page, &mut cache));
             return out;
         }
         // ONE PREDICATE FOR BOTH DECISIONS, which is the defect this replaces.
@@ -14024,6 +14409,22 @@ fn refusal_reason(page: &str) -> Option<&str> {
 /// their body's result and hardcoded success. All four now ask this.
 fn carries_refusal(text: &str) -> bool {
     refusal_reason(text).is_some()
+}
+
+/// Whether a rendered report's verdict says no ladder was walked.
+///
+/// `runner::report`'s verdict prints `outcome ... NOTHING MEASURED` for a
+/// sweep that never started: too few bars to warm, or every bar refused. That
+/// is not a refusal line, so [`carries_refusal`] does not see it, and it is not
+/// an answer either: the same verdict says the run is not trustworthy as a
+/// whole. Matched on the verdict row itself, so a word elsewhere on the page
+/// cannot trip it.
+fn nothing_measured(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("outcome")
+            .is_some_and(|rest| rest.trim_start().starts_with("NOTHING MEASURED"))
+    })
 }
 
 /// Every step refused, so there is no page and no verdict on the rules.
@@ -14385,16 +14786,94 @@ fn exhausted_walk(out: &mut String, floor: u64, last_page: Option<&str>) {
     }
 }
 
-/// One completed or refused support step in the legacy descent table.
+/// The descent table as the report prints it: the header, then every step in
+/// the order it landed.
+fn descent_table(out: &mut String, steps: Vec<(u64, Result<crate::results::Record, String>)>) {
+    use crate::columns::{left, right};
+    // LAID OUT AFTER THE LAST STEP, NOT AS EACH LANDS (D-1420). The progress
+    // line on stderr is still printed the moment a step lands; the report is
+    // one artifact read whole, so its columns can be sized from every row and
+    // a raw paisa figure at its extreme no longer runs into the next column.
+    let columns = [
+        left(10),
+        right(10),
+        right(14),
+        right(7),
+        right(10),
+        right(9),
+        right(12),
+        right(12),
+        right(14),
+    ];
+    let header = [
+        "support",
+        "min_hits",
+        "combinations",
+        "depth",
+        "complete",
+        "trades",
+        "worst_mae",
+        "all_mae",
+        "worst",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    let mut refusals = Vec::new();
+    for (support, row) in steps {
+        match row {
+            Err(why) => {
+                cells.push(vec![format!("{support}ppm")]);
+                refusals.push(Some(why.lines().next().unwrap_or(&why).to_owned()));
+            }
+            Ok(record) => {
+                cells.push(vec![
+                    format!("{support}ppm"),
+                    record.min_hits.to_string(),
+                    record.combinations.to_string(),
+                    record.depth.to_string(),
+                    if record.halted == 0 { "yes" } else { "NO" }.to_owned(),
+                    record.trades.to_string(),
+                    record.winner_mae.to_string(),
+                    record.all_mae.to_string(),
+                    record.pessimistic.to_string(),
+                ]);
+                refusals.push(None);
+            }
+        }
+    }
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (line, refused) in laid.rows.iter().zip(refusals) {
+        match refused {
+            Some(why) => {
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
+            }
+            None => {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+    }
+}
+
+/// One completed or refused support step, as the `descend` progress line on
+/// stderr announces it the moment it lands.
+///
+/// ONE LITERAL SPACE BETWEEN EVERY FIELD (v4-3, D-1487). The fields were
+/// adjacent width specifiers, the shape D-1420 removed from the stdout tables:
+/// `min_hits` at `u64::MAX` (20 digits) in a 10-wide field, or `pessimistic`
+/// at `i64::MIN` (20 characters), ran into the field beside it and read as
+/// one number. The progress line is printed row by row as each step finishes,
+/// so no later row's width is known and [`crate::columns`] cannot lay it out
+/// jointly; a literal separator keeps any two figures apart whatever their
+/// width. The stdout report is [`descent_table`], laid out with `columns`.
 fn descent_line(support: u64, row: Result<crate::results::Record, String>) -> String {
     match row {
         Err(why) => format!(
-            "  {:<10}REFUSED: {}",
+            "  {:<10} REFUSED: {}",
             format!("{support}ppm"),
             why.lines().next().unwrap_or(&why)
         ),
         Ok(record) => format!(
-            "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
+            "  {:<10} {:>10} {:>14} {:>7} {:>10} {:>9} {:>12} {:>12} {:>14}",
             format!("{support}ppm"),
             record.min_hits,
             record.combinations,
@@ -14542,19 +15021,6 @@ pub fn descend(
         seed.bars.saturating_mul(floor) / 1_000_000,
         ladder.len()
     );
-    let _ = writeln!(
-        out,
-        "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
-        "support",
-        "min_hits",
-        "combinations",
-        "depth",
-        "complete",
-        "trades",
-        "worst_mae",
-        "all_mae",
-        "worst"
-    );
 
     // SEQUENTIAL, and deliberately so.
     //
@@ -14564,6 +15030,7 @@ pub fn descend(
     // would hold the cheap answers hostage to the expensive one -- which is the
     // exact failure this command exists to avoid. One at a time, printed as it
     // lands.
+    let mut steps = Vec::with_capacity(ladder.len());
     for (step, &support) in ladder.iter().enumerate() {
         let row = if step == 0 {
             // Already swept, above. Re-sweeping it would be a second identical
@@ -14581,7 +15048,7 @@ pub fn descend(
             )
             .outcome
         };
-        let line = descent_line(support, row);
+        let line = descent_line(support, row.clone());
         // EACH ROW IS ANNOUNCED THE MOMENT IT LANDS, ON STDERR.
         //
         // # The defect this closes, found by running the command
@@ -14602,8 +15069,9 @@ pub fn descend(
         // stdout that a pipe or a file capture sees whole. Progress is for the
         // human watching; the report is for whatever reads the output.
         eprintln!("  [{}/{}] {line}", step + 1, ladder.len());
-        let _ = writeln!(out, "{line}");
+        steps.push((support, row));
     }
+    descent_table(&mut out, steps);
 
     let _ = writeln!(
         out,
@@ -14832,16 +15300,91 @@ fn range_opening(
     out
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one table, rendered once. The body is a single report: the two \
-              argument refusals, the provenance banner, the all-refused guard, \
-              the column header, the per-rung row and the named missing months. \
-              Splitting it would put the header in one function and the row that \
-              must match it in another, which is the defect `the_generated_and_\
-              stored_banners_make_opposite_claims` exists to catch — a format \
-              string and its columns have to be readable together or they drift"
-)]
+/// The `range-all` comparison table: one row per rung, or its refusal.
+fn range_table(out: &mut String, rows: &[RungRow]) {
+    use crate::columns::{left, right};
+    let columns = [
+        left(8),
+        right(10),
+        right(10),
+        right(8),
+        right(14),
+        right(7),
+        right(10),
+        right(9),
+        right(14),
+        right(14),
+        right(10),
+    ];
+    let header = [
+        "rung",
+        "bars",
+        "min_hits",
+        "months",
+        "combinations",
+        "depth",
+        "complete",
+        "trades",
+        "worst",
+        "best",
+        "ret/DD",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for row in rows {
+        match &row.outcome {
+            // A refusal names its rung; the rung still counts toward the
+            // first column's width.
+            Err(_) => cells.push(vec![row.rung.to_owned()]),
+            Ok(r) => cells.push(vec![
+                row.rung.to_owned(),
+                r.bars.to_string(),
+                r.min_hits.to_string(),
+                format!("{}/{}", r.months_found, r.months_asked),
+                r.combinations.to_string(),
+                r.depth.to_string(),
+                // THE ONE COLUMN THAT DECIDES WHETHER THE REST MEAN ANYTHING. A
+                // halted sweep's depth is PARTIAL and its combination count
+                // covers less of the ladder than it looks like, so a `no` here
+                // is not a footnote.
+                if r.halted == 0 { "yes" } else { "NO" }.to_owned(),
+                r.trades.to_string(),
+                r.pessimistic.to_string(),
+                r.optimistic.to_string(),
+                // A PEAK-TO-TROUGH FALL IS NON-NEGATIVE, AND THIS TESTED
+                // THE OTHER SIGN.
+                //
+                // `grid::Cell::max_drawdown` is documented "Always >= 0"
+                // and asserted so; `record_run` copies that value straight
+                // in. So `r.max_drawdown < 0` was false for every real run
+                // and this column printed "-" on all eight rungs, forever
+                // -- the one column answering "what did this rung risk per
+                // unit of return", structurally dead.
+                //
+                // It survived because FOUR test fixtures in this file wrote
+                // the drawdown NEGATIVE, so the suite exercised a branch
+                // production could not reach. They now carry the engine's
+                // sign, which is what made this visible at all.
+                //
+                return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
+            ]),
+        }
+    }
+    // LAID OUT TOGETHER (D-1420): a raw paisa total past fourteen characters
+    // ran into the next column and pushed every column after it off its header.
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (row, line) in rows.iter().zip(&laid.rows) {
+        match &row.outcome {
+            Err(why) => {
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
+            }
+            Ok(_) => {
+                let _ = writeln!(out, "  {line}");
+            }
+        }
+    }
+}
+
 fn range_over_inner(
     vendor_word: &str,
     underlying: &str,
@@ -14903,64 +15446,7 @@ fn range_over_inner(
         );
     }
 
-    let _ = writeln!(
-        out,
-        "  {:<8}{:>10}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
-        "rung",
-        "bars",
-        "min_hits",
-        "months",
-        "combinations",
-        "depth",
-        "complete",
-        "trades",
-        "worst",
-        "best",
-        "ret/DD"
-    );
-    for row in &rows {
-        match &row.outcome {
-            Err(why) => {
-                let _ = writeln!(out, "  {:<8}REFUSED: {why}", row.rung);
-            }
-            Ok(r) => {
-                let _ = writeln!(
-                    out,
-                    "  {:<8}{:>10}{:>10}{:>8}{:>14}{:>7}{:>10}{:>9}{:>14}{:>14}{:>10}",
-                    row.rung,
-                    r.bars,
-                    r.min_hits,
-                    format!("{}/{}", r.months_found, r.months_asked),
-                    r.combinations,
-                    r.depth,
-                    // THE ONE COLUMN THAT DECIDES WHETHER THE REST MEAN
-                    // ANYTHING. A halted sweep's depth is PARTIAL and its
-                    // combination count covers less of the ladder than it looks
-                    // like, so a `no` here is not a footnote.
-                    if r.halted == 0 { "yes" } else { "NO" },
-                    r.trades,
-                    r.pessimistic,
-                    r.optimistic,
-                    // A PEAK-TO-TROUGH FALL IS NON-NEGATIVE, AND THIS TESTED
-                    // THE OTHER SIGN.
-                    //
-                    // `grid::Cell::max_drawdown` is documented "Always >= 0"
-                    // and asserted so; `record_run` copies that value straight
-                    // in. So `r.max_drawdown < 0` was false for every real run
-                    // and this column printed "-" on all eight rungs, forever
-                    // -- the one column answering "what did this rung risk per
-                    // unit of return", structurally dead.
-                    //
-                    // It survived because FOUR test fixtures in this file wrote
-                    // the drawdown NEGATIVE, so the suite exercised a branch
-                    // production could not reach. They now carry the engine's
-                    // sign, which is what made this visible at all.
-                    //
-                    return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
-                );
-            }
-        }
-    }
+    range_table(&mut out, &rows);
     // AND THE HOLES ARE NAMED, not just counted. The `months` column above
     // shows `found/asked`, so a short span is VISIBLE -- but a reader cannot
     // act on `61/80` without knowing WHICH nineteen are absent, and every
@@ -15124,14 +15610,19 @@ const IN_SAMPLE_WARNING: &str = "\n  \
 /// The record just written for this exact run, read back from the store.
 ///
 /// Reads BACKWARDS from the newest row and stops at the first match, because the
-/// row this command just appended is the last one. That is `O(1)` in the ordinary
-/// case and `O(rows)` only if the run was somehow not recorded — which is
-/// reported as the refusal it is rather than absorbed.
+/// row this command just appended is usually the last one. The SCAN is short in
+/// the ordinary case; the CALL is not.
 ///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// **O(runs) per call, measured.** `Results::open` builds the identity index
+/// and hashes the file before the first row is read, so every call costs the
+/// whole ledger: audit-20261003 o1surface2-4 measured a 14.13x open cost for
+/// 10x the rows, and about 10.9x even when the newest row matches. This doc
+/// said `O(1)` in the ordinary case until D-1567. The match is on feed,
+/// instrument, rung, span and `min_hits`, not on an identity, so
+/// `Results::of_identity` cannot serve it; `docs/06-limits.md` states the bound.
+/// That bound is UNVERIFIED by any tracked test or bench: the 14.13x is the
+/// audit's measurement, and `crates/cli/benches/ratio.rs` deliberately does not
+/// time `Results::open` (D-1459).
 fn latest_for(
     vendor_word: &str,
     underlying: &str,
@@ -15206,13 +15697,19 @@ pub fn screen_range(
         support_ppm,
         policy,
         None,
+        &mut ScreenCache::default(),
     ) {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
     }
 }
 
-/// [`screen_range`] under one exact browser attempt.
+/// [`screen_range`] under one exact browser attempt, reusing `cache`'s
+/// support-independent inputs when it holds this question (D-0997).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven screen inputs plus the descent's shared input cache (D-0997); the cache is state the caller owns across steps, not part of the question"
+)]
 fn screen_range_for_attempt(
     vendor_word: &str,
     underlying: &str,
@@ -15221,6 +15718,7 @@ fn screen_range_for_attempt(
     support_ppm: u64,
     policy: Policy,
     attempt: Option<u64>,
+    cache: &mut ScreenCache,
 ) -> String {
     match screen_range_inner(
         vendor_word,
@@ -15230,6 +15728,7 @@ fn screen_range_for_attempt(
         support_ppm,
         policy,
         attempt,
+        cache,
     ) {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
@@ -15266,6 +15765,10 @@ pub struct Policy {
 }
 
 /// [`screen_range`]'s work, with its refusals unrendered.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven screen inputs plus the descent's shared input cache (D-0997); the cache is state the caller owns across steps, not part of the question"
+)]
 fn screen_range_inner(
     vendor_word: &str,
     underlying: &str,
@@ -15274,6 +15777,7 @@ fn screen_range_inner(
     support_ppm: u64,
     policy: Policy,
     attempt: Option<u64>,
+    cache: &mut ScreenCache,
 ) -> Result<String, stored::Refusal> {
     swept_rung(rung)?;
     let commit = commit_stamp().ok_or_else(|| {
@@ -15285,17 +15789,26 @@ fn screen_range_inner(
     })?;
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
-    screen_range_kernel(StoredScreenRequest {
-        root,
-        vendor,
-        underlying,
-        rung,
-        span,
-        support_ppm,
-        policy,
-        attempt,
-        commit,
-    })
+    screen_range_kernel_cached(
+        StoredScreenRequest {
+            root,
+            vendor,
+            underlying,
+            rung,
+            span,
+            support_ppm,
+            policy,
+            attempt,
+            commit,
+        },
+        cache,
+    )
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: how many times this thread loaded a screen's stored inputs. D-0997.
+    static SCREEN_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 struct StoredScreenRequest<'a> {
@@ -15311,38 +15824,80 @@ struct StoredScreenRequest<'a> {
 }
 
 /// Own the admitted screen inputs after the public boundary verifies the build.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the ordered source, execution, context, identity and publication preconditions form one screen transaction; every refusal retains its original reason"
-)]
+///
+/// Test-only since D-0997: every production caller now goes through
+/// [`screen_range_kernel_cached`] with the cache it owns.
+#[cfg(test)]
 fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, stored::Refusal> {
-    let StoredScreenRequest {
-        root,
-        vendor,
-        underlying,
-        rung,
-        span: (from, to),
-        support_ppm,
-        policy,
-        attempt,
-        commit,
-    } = request;
-    let Policy {
-        rules,
-        lens,
-        validate,
-    } = policy;
-    // REFUSED BEFORE THE SPAN IS READ, as every recorded kernel does. Each step
-    // of an `elite` descent arrives here. D-0685.
-    recorded_budget_refusal()?;
-    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+    screen_range_kernel_cached(request, &mut ScreenCache::default())
+}
+
+/// Which stored question a [`ScreenCache`] holds the inputs for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScreenKey {
+    root: std::path::PathBuf,
+    vendor: Vendor,
+    underlying: String,
+    rung: String,
+    span: ((u16, u8), (u16, u8)),
+}
+
+/// Everything a stored screen loads that does not depend on the support.
+///
+/// # Why this is held across the steps of a descent
+///
+/// An `elite` descent screens one span at up to ten supports. Each step used to
+/// re-enter [`screen_range_kernel`], which read the signal span, the one-minute
+/// execution span, the daily and exact-minute contexts, and rebuilt the
+/// anchored column: all of it O(bars) and none of it a function of the support.
+/// The support only sets `min_hits`, and everything that reads `min_hits` --
+/// the ladder, the identity, the sweep and the ranking -- still runs per step.
+/// o1cli-1, D-0997.
+struct ScreenInputs {
+    span: stored::Span,
+    signal_length: i64,
+    execution_bars: Option<stored::Span>,
+    holed_days: Vec<i64>,
+    withheld: u64,
+    daily: stored::DailyContext,
+    exact_minute: stored::ExactMinuteContext,
+    availability: Availability,
+    cost: audit::CostScope,
+    /// `None` when the anchored build refused. The audit then rebuilds it and
+    /// refuses with the same reason at the same point it always did, so a
+    /// refusal is never moved earlier by the cache.
+    column: Option<Column>,
+}
+
+/// The inputs of the last stored question screened, or its refusal.
+///
+/// Keyed, so a cache handed a different question loads afresh rather than
+/// answering it from another span. A refusal is held too: every step of a
+/// descent over a span that cannot load refuses with the same reason, as each
+/// step's own load did before. D-0997.
+#[derive(Default)]
+struct ScreenCache {
+    loaded: Option<(ScreenKey, Result<ScreenInputs, stored::Refusal>)>,
+}
+
+/// Load the support-independent half of a stored screen, in its original order.
+fn load_screen_inputs(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    (from, to): ((u16, u8), (u16, u8)),
+) -> Result<ScreenInputs, stored::Refusal> {
+    #[cfg(test)]
+    SCREEN_SPAN_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
+    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
 
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
         Some(stored::load_span(
-            &root,
+            root,
             vendor,
             underlying,
             EXECUTION_RUNG,
@@ -15404,14 +15959,95 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
     if span.bars.is_empty() {
         return Err("every signal session has a minute gap; no screenable bars remain".to_owned());
     }
-    // Support is a fraction of the admitted sample, which excludes holed days.
-    let min_hits = min_hits_for(span.bars.len(), support_ppm);
-    let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
     let exact_minute =
-        stored::load_exact_minute_context(&root, vendor, underlying, (from, to), &span.bars)?;
+        stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
     let cost = stored::audit_cost_scope(&span.key)?;
+    let column = stored_anchored_column(
+        &span.bars,
+        &daily,
+        &exact_minute,
+        signal_length,
+        availability,
+    )
+    .ok();
+    Ok(ScreenInputs {
+        span,
+        signal_length,
+        execution_bars,
+        holed_days,
+        withheld,
+        daily,
+        exact_minute,
+        availability,
+        cost,
+        column,
+    })
+}
 
+/// [`screen_range_kernel`], reusing `cache`'s inputs when it holds this question.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the ordered identity and publication preconditions form one screen transaction; every refusal retains its original reason"
+)]
+fn screen_range_kernel_cached(
+    request: StoredScreenRequest<'_>,
+    cache: &mut ScreenCache,
+) -> Result<String, stored::Refusal> {
+    let StoredScreenRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        span: (from, to),
+        support_ppm,
+        policy,
+        attempt,
+        commit,
+    } = request;
+    let Policy {
+        rules,
+        lens,
+        validate,
+    } = policy;
+    // REFUSED BEFORE THE SPAN IS READ, as every recorded kernel does. Each step
+    // of an `elite` descent arrives here, and is still refused here on every
+    // step even when the span is already held. D-0685.
+    recorded_budget_refusal()?;
+    let key = ScreenKey {
+        root: root.clone(),
+        vendor,
+        underlying: underlying.to_owned(),
+        rung: rung.to_owned(),
+        span: (from, to),
+    };
+    let loaded = match &mut cache.loaded {
+        Some((held, loaded)) if *held == key => loaded,
+        slot => {
+            let loaded = load_screen_inputs(&root, vendor, underlying, rung, (from, to));
+            &mut slot.insert((key, loaded)).1
+        }
+    };
+    let ScreenInputs {
+        span,
+        signal_length,
+        execution_bars,
+        holed_days,
+        withheld,
+        daily,
+        exact_minute,
+        availability,
+        cost,
+        column,
+    } = loaded.as_ref().map_err(Clone::clone)?;
+    let (signal_length, withheld, availability) = (*signal_length, *withheld, *availability);
+    let execution = execution_bars.as_ref().map(|exec| Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
+    // Support is a fraction of the admitted sample, which excludes holed days.
+    let min_hits = min_hits_for(span.bars.len(), support_ppm);
     let ladder = ladder_for(min_hits)?;
     let horizon = horizon_for(&span.bars, rung != EXECUTION_RUNG);
     let rungs = grid_rungs(&span.bars);
@@ -15428,11 +16064,11 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
         params: Params::of(ladder).with_policy(&policy_of(
             &span.bars, rules, lens, validate, horizon, rungs,
         )),
-        data_digest: stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?,
+        data_digest: stored_executed_digest(&span.bars, exact_minute, daily, execution_slice)?,
         commit,
         feed: span.vendor.as_str(),
     });
-    let mut header = span_banner(&span, underlying, from, to, commit);
+    let mut header = span_banner(span, underlying, from, to, commit);
     if withheld > 0 {
         let dates = holed_days
             .iter()
@@ -15450,18 +16086,18 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
             span.bars.len(),
         );
     }
-    header.push_str(&daily_reference_note(&daily, &exact_minute));
+    header.push_str(&daily_reference_note(daily, exact_minute));
     Ok(audit_bars(
         &evaluator_stored(availability),
-        span.bars,
+        span.bars.clone(),
         &header,
         min_hits,
         Some(&id),
         AuditOptions {
-            prepared_column: None,
+            prepared_column: column.clone(),
             replay: Some(StoredReplay {
-                daily: &daily,
-                exact_minute: &exact_minute,
+                daily,
+                exact_minute,
                 signal_length_micros: signal_length,
                 availability,
             }),
@@ -15483,7 +16119,7 @@ fn screen_range_kernel(request: StoredScreenRequest<'_>) -> Result<String, store
             // The environment's ceiling -- see `AuditOptions::ceiling`.
             ceiling: None,
             validate,
-            cost,
+            cost: *cost,
         },
     ))
 }
@@ -15870,7 +16506,7 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// # The defect this closes, and it is why a run "ran out of budget"
 ///
-/// [`derived_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
+/// [`whole_machine_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
 /// memory"* — `engine::DEFAULT_CEILING` at roughly 146 bytes each is about
 /// **19.6 GB**, and its own doc says that is *"a fact about ONE machine"*. It is
 /// therefore a budget for the machine, not for a caller.
@@ -16042,7 +16678,7 @@ impl Drop for SharedBy {
 ///
 /// # It is at module scope because TWO functions need it
 ///
-/// It was declared inside [`derived_ceiling`], which is why [`shared_out`] could
+/// It was declared inside `derived_ceiling` (since removed), which is why [`shared_out`] could
 /// not apply the same floor and why the sharing division existed on one ceiling
 /// path and not the other. A constant only one function can see is a constant
 /// the other function will re-derive differently.
@@ -16075,7 +16711,7 @@ const REFERENCE_CORES: usize = 14;
 
 /// This machine's whole candidate budget, BEFORE any sharing.
 ///
-/// Split out from [`derived_ceiling`] so [`ceiling_asked`] can name the same
+/// Split out from `derived_ceiling` (since removed) so [`ceiling_asked`] can name the same
 /// figure without the process-global division -- the identity must describe the
 /// search and not the scheduling.
 ///
@@ -17688,8 +18324,17 @@ fn signal_spacing_minutes(bars: &[indicators::Candle]) -> u32 {
 ///
 /// The gate silences `vocab engine indicators runner` because those hold the
 /// innermost loops, and its own remedy prescribes the shape: *"plain integer
-/// counters … emitted ONCE at a structural boundary"*. This is `cli`, called
-/// once per rung, holding no loop over bars and none over candidates.
+/// counters … emitted ONCE at a structural boundary"*. This event is that
+/// boundary: it is built once per rung, before the grid starts. The path it
+/// marks is NOT loop-free, and this sentence said it was until D-1486
+/// (AC-gates-o1-4): right after it, `SliceFacts::of` walks every bar of the
+/// slice, and `screen_cascade` walks every candidate (`screen`'s
+/// `by_evidence.par_iter()`), pricing each one with `grid::evaluate_over`
+/// over the bars. Those loops emit nothing per iteration; their only event is
+/// [`note_grid_progress`], one in every `stride` candidates. `cli` is not on
+/// gate 17's silenced list, so the gate does not refuse them; it is the
+/// boundary discipline, not an absence of loops, that keeps this crate's
+/// events affordable.
 fn grid_entered_event(
     recording: Option<Recording<'_>>,
     bars: usize,
@@ -17800,11 +18445,11 @@ impl<'a> GridProgress<'a> {
 ///
 /// # Gate 17, and a correction to what the sibling doc claims
 ///
-/// [`grid_entered_event`] says this path is *"`cli`, called once per rung,
-/// holding no loop over bars and none over candidates."* The first half is
-/// true and the second is not: `screen` runs `by_evidence.par_iter()` over
-/// every candidate and calls `grid::evaluate_over` inside it. That loop is the
-/// phase being timed here.
+/// [`grid_entered_event`]'s doc said this path was called once per rung and
+/// looped over neither bars nor candidates. The first half is true and the
+/// second was not: `screen` runs `by_evidence.par_iter()` over every candidate
+/// and calls `grid::evaluate_over` inside it. That loop is the phase being
+/// timed here. D-1486 corrected the sibling doc.
 ///
 /// It is still `cli`, which is not on gate 17's silenced list, and the cost is
 /// one relaxed `fetch_add` per candidate — the counter is O(1) and the emit
@@ -19399,28 +20044,35 @@ fn decay_block(
     anchored: &runner::validate::Validated,
     rolling: &runner::validate::Validated,
 ) -> String {
+    use crate::columns::{left, right};
     let mut out = String::from("\nWINDOW SHAPE -- did the edge survive on RECENT history too\n");
-    let _ = writeln!(
-        out,
-        "  {:<12}{:>8}{:>10}{:>12}{:>14}",
-        "shape", "folds", "decided", "positive", "train bars"
+    let body = [("anchored", anchored), ("rolling", rolling)]
+        .iter()
+        .map(|&(shape, v)| {
+            // `held_up` and not a hand-rolled comparison: it already encodes
+            // what counts as a fold that survived -- an exit total above zero
+            // where one exists, and the worst-case-positive test otherwise --
+            // and a second definition beside it would drift from the audit
+            // table above.
+            let positive = v.held_up();
+            let width = v.folds.last().map_or(0, |f| f.train_bars);
+            vec![
+                shape.to_owned(),
+                v.folds.len().to_string(),
+                v.decided().to_string(),
+                format!("{positive}/{}", v.folds.len()),
+                width.to_string(),
+            ]
+        })
+        .collect();
+    // LAID OUT TOGETHER (D-1420).
+    let laid = crate::columns::with_header(
+        &[left(12), right(8), right(10), right(12), right(14)],
+        &["shape", "folds", "decided", "positive", "train bars"],
+        body,
     );
-    for (shape, v) in [("anchored", anchored), ("rolling", rolling)] {
-        // `held_up` and not a hand-rolled comparison: it already encodes what
-        // counts as a fold that survived -- an exit total above zero where one
-        // exists, and the worst-case-positive test otherwise -- and a second
-        // definition beside it would drift from the audit table above.
-        let positive = v.held_up();
-        let width = v.folds.last().map_or(0, |f| f.train_bars);
-        let _ = writeln!(
-            out,
-            "  {:<12}{:>8}{:>10}{:>12}{:>14}",
-            shape,
-            v.folds.len(),
-            v.decided(),
-            format!("{positive}/{}", v.folds.len()),
-            width
-        );
+    for line in std::iter::once(&laid.header).chain(&laid.rows) {
+        let _ = writeln!(out, "  {line}");
     }
     let anchored_positive = anchored.held_up();
     let rolling_positive = rolling.held_up();
@@ -19754,6 +20406,36 @@ fn record_all_attempt(
               test that cannot panic cannot fail."
 )]
 mod tests {
+    /// **Text arguments pass through unchanged; the first that is not text is
+    /// refused by position, as a misuse, and nothing is dispatched.** D-0998.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_argument_is_refused_by_position_and_text_passes() {
+        use std::os::unix::ffi::OsStringExt;
+        let words = vec!["sweep".into(), "6".into(), "200".into()];
+        assert_eq!(
+            super::text_args(words),
+            Ok(vec!["sweep".to_owned(), "6".to_owned(), "200".to_owned()])
+        );
+        let bad = vec![
+            "sweep".into(),
+            std::ffi::OsString::from_vec(b"6\xff".to_vec()),
+            std::ffi::OsString::from_vec(vec![0xfe]),
+        ];
+        let why = super::text_args(bad.clone()).expect_err("not text");
+        assert!(
+            why.starts_with("argument 2 is not valid UTF-8 (read as `6\u{fffd}`)"),
+            "{why}"
+        );
+        let mut out = String::new();
+        assert_eq!(super::run_durable_os(bad, &mut out), MISUSED);
+        assert!(
+            out.starts_with("refused: argument 2 is not valid UTF-8"),
+            "{out}"
+        );
+        assert!(out.contains(USAGE), "{out}");
+    }
+
     use super::{
         COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
         USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, calendar_terms,
@@ -19764,6 +20446,7 @@ mod tests {
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
+    use super::{FAILED, carries_refusal, nothing_measured};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -20114,11 +20797,52 @@ mod tests {
         }
     }
 
+    /// A SWEEP THAT MEASURED NOTHING EXITS NON-ZERO. Audit probeapi-6.
+    ///
+    /// `cli sweep` over one to five generated sessions walks no ladder: its
+    /// verdict reads `NOTHING MEASURED` and `trustworthy as a whole answer
+    /// NO`, and it exited 0 while `cli audit` on the same input exited 1. Every
+    /// count from one to five now exits `FAILED` and still prints its report;
+    /// six sessions at 100 hits, which completes a ladder, exits `OK`. The
+    /// predicate reads the verdict row only: the phrase in prose, or an
+    /// `outcome` row with any other value, does not trip it.
+    #[test]
+    fn a_sweep_that_measured_nothing_exits_non_zero() {
+        for sessions in ["1", "2", "3", "4", "5"] {
+            for hits in ["1", "10"] {
+                let mut out = String::new();
+                assert_eq!(
+                    run(&argv(&["sweep", sessions, hits]), &mut out),
+                    FAILED,
+                    "sweep {sessions} {hits}:\n{out}"
+                );
+                assert!(nothing_measured(&out), "{out}");
+                assert!(out.contains("BARS"), "the report still renders:\n{out}");
+                assert!(!carries_refusal(&out), "it is not a refusal line:\n{out}");
+            }
+        }
+        let mut out = String::new();
+        assert_eq!(run(&argv(&["sweep", "6", "100"]), &mut out), OK, "{out}");
+        assert!(nothing_measured(
+            "  outcome          NOTHING MEASURED  no ladder"
+        ));
+        assert!(!nothing_measured(
+            "  outcome                  complete  extinct"
+        ));
+        assert!(!nothing_measured("NOTHING MEASURED appears in prose here"));
+        assert!(!nothing_measured("  outcomes        NOTHING MEASURED"));
+        assert!(!nothing_measured(""));
+    }
+
     #[test]
     fn a_valid_sweep_and_a_valid_auto_both_render_and_exit_zero() {
         let mut out = String::new();
-        assert_eq!(run(&argv(&["sweep", "1", "1"]), &mut out), OK);
+        assert_eq!(run(&argv(&["sweep", "6", "100"]), &mut out), OK);
         assert!(out.contains("BARS"), "the report body rendered:\n{out}");
+        assert!(
+            out.contains("the frontier went extinct"),
+            "six sessions at 100 hits complete a ladder:\n{out}"
+        );
 
         let mut out = String::new();
         assert_eq!(run(&argv(&["auto", "1"]), &mut out), OK);
@@ -20745,6 +21469,10 @@ mod tests {
     /// answer must be distinguishable from an unmeasured one.
     #[test]
     fn an_impossible_threshold_still_renders_a_report_rather_than_nothing() {
+        // `sweep` reads the process-wide knobs, so it waits for any test that
+        // is setting one; otherwise a knob held for another test's duration
+        // (a ceiling, a threshold) decides this report.
+        let _guard = crate::knobs::serially();
         let text = sweep(1, u64::MAX);
         assert!(text.starts_with(PROVENANCE));
         assert!(text.contains("BARS"), "the census is still shown:\n{text}");
@@ -21883,10 +22611,24 @@ mod tests {
 
         // A value far above the floor, so the division is what decides the
         // answer rather than the floor clamping both sides to the same number.
-        let asked = floor.saturating_mul(sharing.max(1)).saturating_mul(64);
+        //
+        // CAPPED AT THE REFUSAL LIMIT. `ceiling_asked` refuses anything above
+        // 64x this machine's derived ceiling, and that figure scales with the
+        // machine while `floor * sharing * 64` scales with the share count other
+        // tests raise. On a smaller CI runner with a raised share the uncapped
+        // value crossed the limit, the knob was refused, and the `expect` below
+        // panicked BEFORE `clear_all`, leaking `BRUTEX_CEILING` into every
+        // knob-reading test that ran next.
+        let asked = floor
+            .saturating_mul(sharing.max(1))
+            .saturating_mul(64)
+            .min(crate::ceiling_limit());
         crate::knobs::set("BRUTEX_CEILING", &asked.to_string());
-        let got = crate::ceiling_from_env().expect("a positive integer parses");
+        // Cleared before the answer is unwrapped, so a refusal cannot leak the
+        // knob into the next test.
+        let got = crate::ceiling_from_env();
         crate::knobs::clear_all();
+        let got = got.expect("a positive integer parses");
 
         assert_eq!(
             got,
@@ -22457,6 +23199,33 @@ mod tests {
         );
     }
 
+    /// h-cli-3, D-1852: `rupees` renders every integer up to `i128` exactly,
+    /// zero without a sign, and the `i128` totals a pooled or per-period sum
+    /// can now reach, including `i128::MIN`, without a panic or a clamp.
+    #[test]
+    fn rupees_render_zero_unsigned_and_every_i128_exactly() {
+        assert_eq!(super::rupees(0_i64), "\u{20b9}0.00");
+        assert_eq!(super::rupees(-1_i64), "-\u{20b9}0.01");
+        assert_eq!(super::rupees(1_i64), "\u{20b9}0.01");
+        assert_eq!(super::rupees(12_345_678_i64), "\u{20b9}1,23,456.78");
+        assert_eq!(
+            super::rupees(i64::MIN),
+            "-\u{20b9}92,23,37,20,36,85,47,758.08"
+        );
+        assert_eq!(
+            super::rupees(3 * i128::from(i64::MIN)),
+            "-\u{20b9}2,76,70,11,61,10,56,43,274.24"
+        );
+        assert_eq!(
+            super::rupees(i128::MIN),
+            "-\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.28"
+        );
+        assert_eq!(
+            super::rupees(i128::MAX),
+            "\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.27"
+        );
+    }
+
     /// THE WORST DAY RANKS A SMALLER LOSS HIGHER, WHICH IS WHAT THE RULE SAYS.
     ///
     /// `calendar_terms` feeds a key the caller wraps in `Reverse`, so the tuple
@@ -22477,7 +23246,7 @@ mod tests {
     /// catch it.
     #[test]
     fn a_row_that_never_lost_a_day_outranks_one_that_lost_heavily() {
-        let row = |worst_day: i64| Consistency {
+        let row = |worst_day: i128| Consistency {
             shares_bp: [5_000; crate::stability::GRAINS.len()],
             worst_day,
             years: 6,
@@ -22649,6 +23418,26 @@ mod tests {
         ] {
             assert_eq!(validates(raw), want, "{why}");
         }
+    }
+
+    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value other than `0`
+    /// or `1` still leaves validation ON, and the run now SAYS so through the
+    /// `!! KNOB REFUSED` block, instead of reading `false` as `1` in silence.
+    #[test]
+    fn an_unexpected_validate_value_stays_on_and_is_named_as_refused() {
+        let _knobs = crate::knobs::serially();
+        for (raw, refused) in [("false", true), ("off", true), ("1", false), (" 0 ", false)] {
+            crate::knobs::clear_all();
+            crate::knobs::set("BRUTEX_VALIDATE", raw);
+            assert_eq!(super::validate_from_env(), raw.trim() != "0", "{raw:?}");
+            let block = crate::knobs::refused().unwrap_or_default();
+            assert_eq!(
+                block.contains("BRUTEX_VALIDATE"),
+                refused,
+                "{raw:?}: {block}"
+            );
+        }
+        crate::knobs::clear_all();
     }
 
     /// AND THE SEARCH ACTUALLY FINISHES, ON A COLUMN WITH BARS TO SWEEP.
@@ -22908,7 +23697,7 @@ mod tests {
     /// recorded in `docs/05-decisions.md`.
     #[test]
     fn a_recorded_run_is_addressable_and_a_rerun_adds_nothing() {
-        let root = std::env::temp_dir().join("brutex-wire-test");
+        let root = std::env::temp_dir().join(format!("brutex-wire-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a temp root");
 
@@ -25924,8 +26713,17 @@ mod tests {
         );
         let cell = *exits.best().expect("the grid must hold a best variant");
 
-        let measured = consistency_of(&bars, &run.column, scored, horizon, side, &exits, &cell)
-            .expect("a variant with trades must re-walk into per-trade rows");
+        let measured = consistency_of(
+            &bars,
+            &run.column,
+            scored,
+            horizon,
+            side,
+            &exits,
+            &cell,
+            &runner::trade::SliceFacts::of(&bars, &run.column),
+        )
+        .expect("a variant with trades must re-walk into per-trade rows");
         let (_, rows) = grid::per_trade(
             &bars,
             &run.column,
@@ -25989,6 +26787,57 @@ mod tests {
                 .unwrap_or(0),
             "WEAKEST must be the minimum across grains and not one of them"
         );
+    }
+
+    /// D-1190: one stored rung builds `SliceFacts` once, in `trade_and_screen`,
+    /// and every tier's `screen`, its `measure_top` and the final exact rebuild
+    /// borrow it. A source-shape test: the cost is an allocation count, and
+    /// no value at runtime says how many builds a function made.
+    #[test]
+    fn one_rung_screen_builds_its_slice_facts_once() {
+        let source = include_str!("lib.rs");
+        let body_of = |head: &str| -> String {
+            // Code lines only: the bodies keep comments that name the old
+            // per-call builds as history.
+            source
+                .split_once(head)
+                .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let build = concat!("SliceFacts", "::of(");
+        let trade = body_of("fn trade_and_screen<'a>(\n");
+        assert_eq!(trade.matches(build).count(), 1, "built once per slice");
+        for door in [
+            concat!("grid::evaluate", "("),
+            concat!("grid::materialize_cell", "("),
+            concat!("trade::walk", "("),
+        ] {
+            assert!(!trade.contains(door), "{door} rebuilds the facts");
+        }
+        for door in [
+            concat!("grid::evaluate_over", "("),
+            concat!("grid::materialize_cell_over", "("),
+            concat!("trade::walk_over", "("),
+        ] {
+            assert!(trade.contains(door), "{door} takes the shared facts");
+        }
+        for head in [
+            "fn screen_cascade<'a>(\n",
+            "fn screen<'a>(\n",
+            "fn measure_top(\n",
+        ] {
+            let body = body_of(head);
+            assert!(!body.is_empty(), "{head} is still in lib.rs");
+            assert!(
+                body.contains("facts: &runner::trade::SliceFacts,"),
+                "{head} takes the caller's facts"
+            );
+            assert_eq!(body.matches(build).count(), 0, "{head} builds none");
+        }
     }
 
     /// The weakest grain is the minimum, never the mean.
@@ -27124,9 +27973,18 @@ mod derived_floor_tests {
             "digest(&loaded.bars,&exact_minute,&daily,execution_slice)?"
         );
 
+        // The screen kernel holds its loaded inputs by reference since
+        // D-0997 (one load per descent), so it passes them without the `&`.
+        let screen_bound = concat!(
+            "data_digest:stored_executed_",
+            "digest(&span.bars,exact_minute,daily,execution_slice)?"
+        );
         assert_eq!(
-            code.matches(span_bound).count(),
-            2,
+            (
+                code.matches(span_bound).count(),
+                code.matches(screen_bound).count()
+            ),
+            (1, 1),
             "audit-range and screen-range must bind signal, exact-minute context, daily references and the actual separately loaded execution slice"
         );
         assert_eq!(

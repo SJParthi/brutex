@@ -51,14 +51,31 @@ use rayon::prelude::*;
 use vocab::ConditionMask;
 
 use crate::exit_grid_policy::{
-    AttestedTrainingV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1, OosExecutionSeriesV1,
-    ResolvedExitGridV1, SelectedExitV1, column_digest_v1,
+    AttestedTrainingV1, ExecutionDigestsV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1,
+    OosExecutionSeriesV1, ResolvedExitGridV1, SelectedExitV1, column_digest_v1,
 };
-use crate::identity::{Params, Run, data_digest, data_digest_with_execution};
+use crate::identity::{Params, Run, data_digest};
 use crate::outcome::Horizon;
 use crate::split::Shape;
-use crate::trade::{Trades, walk};
+use crate::trade::Trades;
 use costs::fill::Direction;
+
+#[cfg(test)]
+thread_local! {
+    /// Full private-seal reconciliations run on this thread (test-only probe).
+    static RECONCILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Full private-seal reconciliations run on the calling thread so far.
+#[cfg(test)]
+pub(crate) fn reconciles_on_this_thread() -> u64 {
+    RECONCILES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn count_reconcile() {
+    RECONCILES.with(|count| count.set(count.get() + 1));
+}
 
 /// What one combination did over one set of bars.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -529,6 +546,10 @@ pub struct AnchoredAdmissionValidationV2 {
     validation_policy_digest: [u8; 32],
     validation_family_digest: [u8; 32],
     walk_facts_digest: [u8; 32],
+    /// The projection the full reconciliation derived when this value was
+    /// issued (D-0740). `None` only between construction and that one
+    /// reconciliation inside the issuing door.
+    issued: Option<AnchoredAdmissionProjectionV2>,
 }
 
 impl AnchoredAdmissionValidationV2 {
@@ -536,6 +557,19 @@ impl AnchoredAdmissionValidationV2 {
     #[must_use]
     pub const fn validated(&self) -> &Validated {
         &self.validated
+    }
+
+    /// The projection sealed at issuance, read in O(1) by each per-candidate
+    /// Admission decision instead of re-running the fold-wide reconciliation
+    /// (D-0740). The fields are private and only the issuing door writes
+    /// them, so the value cannot drift from what that reconciliation saw.
+    /// Proved by `runner::admission::per_candidate_admission_never_re_reconciles_the_opaque_validation`.
+    pub(crate) fn issued_authority_projection(
+        &self,
+    ) -> Result<AnchoredSearchAuthorityProjectionV2, AnchoredAdmissionValidationRefusalV2> {
+        self.issued
+            .map(AnchoredSearchAuthorityProjectionV2::from_private)
+            .ok_or(AnchoredAdmissionValidationRefusalV2::SealMismatch)
     }
 
     /// Revalidates every private policy, candidate-family, chosen-ordinal and
@@ -794,6 +828,9 @@ pub struct AnchoredSearchValidationV3 {
     validation_policy_digest: [u8; 32],
     validation_family_digest: [u8; 32],
     walk_facts_digest: [u8; 32],
+    /// The projection derived by the one reconciliation run at issuance
+    /// (D-0740).
+    issued: Option<AnchoredSearchProjectionV3>,
 }
 
 impl AnchoredSearchValidationV3 {
@@ -801,6 +838,17 @@ impl AnchoredSearchValidationV3 {
     #[must_use]
     pub const fn validated(&self) -> &Validated {
         &self.validated
+    }
+
+    /// The projection sealed at issuance, read in O(1) per Admission
+    /// decision (D-0740).
+    /// Proved by `runner::admission::per_candidate_admission_never_re_reconciles_the_opaque_validation`.
+    pub(crate) fn issued_authority_projection(
+        &self,
+    ) -> Result<AnchoredSearchAuthorityProjectionV3, AnchoredSearchValidationRefusalV3> {
+        self.issued
+            .map(AnchoredSearchAuthorityProjectionV3::from_private)
+            .ok_or(AnchoredSearchValidationRefusalV3::SealMismatch)
     }
 
     /// Revalidates all private seals and returns the minimum detached equality
@@ -1039,6 +1087,9 @@ pub struct AnchoredSearchValidationV4 {
     validation_policy_digest: [u8; 32],
     validation_family_digest: [u8; 32],
     walk_facts_digest: [u8; 32],
+    /// The projection derived by the one reconciliation run at issuance
+    /// (D-0740).
+    issued: Option<AnchoredSearchProjectionV4>,
 }
 
 impl AnchoredSearchValidationV4 {
@@ -1063,6 +1114,18 @@ impl AnchoredSearchValidationV4 {
     ) -> Result<AnchoredSearchAuthorityProjectionV4, AnchoredSearchValidationRefusalV4> {
         let private = reconcile_anchored_search_v4(self)?;
         Ok(AnchoredSearchAuthorityProjectionV4::from_private(&private))
+    }
+
+    /// The projection sealed at issuance, read in O(1) per Admission
+    /// decision (D-0740).
+    /// Proved by `runner::admission::per_candidate_admission_never_re_reconciles_the_opaque_validation`.
+    pub(crate) fn issued_authority_projection(
+        &self,
+    ) -> Result<AnchoredSearchAuthorityProjectionV4, AnchoredSearchValidationRefusalV4> {
+        self.issued
+            .as_ref()
+            .map(AnchoredSearchAuthorityProjectionV4::from_private)
+            .ok_or(AnchoredSearchValidationRefusalV4::SealMismatch)
     }
 }
 
@@ -1603,13 +1666,34 @@ pub const DEFAULT_RUNGS: usize = 4;
 ///
 /// A zero is refused rather than obeyed: a ladder with no rungs prices only the
 /// no-exit baseline, which would silently turn every walk-forward fold into a
-/// buy-and-hold test.
-#[must_use]
-pub fn fold_rungs() -> usize {
-    std::env::var_os("BRUTEX_GRID_RUNGS")
-        .and_then(|raw| raw.to_string_lossy().trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_RUNGS)
+/// buy-and-hold test. So is anything that is not a whole number. Until D-1547
+/// both fell back to [`DEFAULT_RUNGS`] with no word, which is the fallback
+/// `CLAUDE.md` §4 bans; [`walk_forward_shaped`] now records the refusal in
+/// [`Validated::refused`] and runs no fold.
+///
+/// No ceiling is applied here: the machine-safe clamp is `cli`'s, on the
+/// explicit doors, and this legacy door has no binary caller.
+///
+/// # Errors
+///
+/// The refusal, naming the variable and the value it held.
+pub fn fold_rungs() -> Result<usize, String> {
+    fold_rungs_from(std::env::var_os("BRUTEX_GRID_RUNGS").as_deref())
+}
+
+/// [`fold_rungs`] over a value already read: `None` when the variable is unset.
+fn fold_rungs_from(raw: Option<&std::ffi::OsStr>) -> Result<usize, String> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_RUNGS);
+    };
+    let text = raw.to_string_lossy();
+    match text.trim().parse::<usize>() {
+        Ok(rungs) if rungs > 0 => Ok(rungs),
+        _ => Err(format!(
+            "BRUTEX_GRID_RUNGS is {text:?}; it must be a whole number of rungs \
+             above zero, so the walk-forward was not run on a ladder nobody asked for"
+        )),
+    }
 }
 
 /// The excursion side matching a fill direction.
@@ -1879,7 +1963,15 @@ pub fn walk_forward_shaped(
     // LEGACY DOOR: resolve the process environment once, before any fold or
     // candidate lane starts. Operator-facing callers should resolve through
     // their own knob store and use `walk_forward_shaped_with_rungs` instead.
-    let rungs = fold_rungs();
+    let rungs = match fold_rungs() {
+        Ok(rungs) => rungs,
+        Err(why) => {
+            return Validated {
+                refused: Some(why),
+                ..Validated::default()
+            };
+        }
+    };
     walk_forward_shaped_with_rungs(
         bars,
         horizon,
@@ -2100,6 +2192,10 @@ pub fn walk_forward_projected_prepared_anchored_admission_v2(
 /// Refuses zero resolved rungs, malformed input/build paths, empty folds,
 /// incomplete candidate families, missing chosen outcomes, overflow, or any
 /// private provenance mismatch.
+///
+/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it;
+/// only this module's tests call it. `docs/07-plan.md` names no surface for it,
+/// so wiring it would be a design this crate does not have.
 pub fn walk_forward_projected_prepared_anchored_search_v3(
     signal: &[Candle],
     execution: ExecutionSeries<'_>,
@@ -2236,7 +2332,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
         validation_family_digest,
         &folds,
     );
-    let opaque = AnchoredSearchValidationV4 {
+    let mut opaque = AnchoredSearchValidationV4 {
         validated,
         policy,
         folds,
@@ -2244,8 +2340,9 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
         validation_policy_digest,
         validation_family_digest,
         walk_facts_digest,
+        issued: None,
     };
-    opaque.search_authority_projection()?;
+    opaque.issued = Some(reconcile_anchored_search_v4(&opaque)?);
     Ok(opaque)
 }
 
@@ -2505,10 +2602,15 @@ fn walk_forward_exact_grid_v4(
         // see this one. The hoist is made here; widening that gate to reach V4
         // is a separate change and is noted rather than smuggled in.
         //
-        // `ExecutionRunV1::new` below recomputes the identical digest to check
-        // it, which is deliberate -- it is the attestation, not a duplicate --
-        // and is left alone.
-        let train_data_digest = data_digest_with_execution(train, Some(trade_train));
+        // `ExecutionRunV1::new` used to recompute the identical digest per
+        // candidate per side to check it -- and hash `trade_train` a third
+        // time for the execution digest. That check is the attestation and it
+        // stays; what moved (D-1143) is the HASHING. `ExecutionDigestsV1` is
+        // built here from the real bars once, its fields cannot be forged, and
+        // `ExecutionRunV1::with_digests` makes the same comparison per run at
+        // O(1).
+        let train_digests = ExecutionDigestsV1::of(train, Some(trade_train));
+        let train_data_digest = train_digests.data_digest();
         // THE TRAINING SLICE IS ATTESTED ONCE PER SIDE, NOT ONCE PER CANDIDATE.
         //
         // `evaluate_training_grid_attested` re-attested `train_series` and
@@ -2569,7 +2671,7 @@ fn walk_forward_exact_grid_v4(
                 commit: execution.commit(),
                 feed: execution.feed(),
             };
-            let execution_run = ExecutionRunV1::new(&run, train, Some(trade_train))?;
+            let execution_run = ExecutionRunV1::with_digests(&run, &train_digests)?;
             let evaluated = resolved.evaluate_with_attested(attested, execution_run)?;
             let evaluated_cells = stable_u64_v4(evaluated.grid().cells.len())?;
             if evaluated_cells != resolved.cell_count() {
@@ -2702,6 +2804,13 @@ fn walk_forward_exact_grid_v4(
             )
             .map_err(AnchoredSearchValidationRefusalV4::BuilderRefused)?;
 
+            // The OOS slices are the fold's, not the candidate's: hashed once
+            // here (D-1143) rather than three times per pending candidate.
+            let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));
+            // And the OOS slice facts with them (D-1184): `replay_selected`
+            // built `SliceFacts::of(trade_test, &projected_oos)` once per
+            // pending candidate, an O(E_prefix) value no candidate changes.
+            let oos_facts = crate::trade::SliceFacts::of(trade_test, &projected_oos);
             for (ordinal, candidate) in pending.iter().enumerate() {
                 let resolved = match candidate.side {
                     Direction::Long => &long,
@@ -2713,16 +2822,17 @@ fn walk_forward_exact_grid_v4(
                     instrument: execution.instrument(),
                     timeframe,
                     params,
-                    data_digest: data_digest_with_execution(signal_upto, Some(trade_test)),
+                    data_digest: oos_digests.data_digest(),
                     commit: execution.commit(),
                     feed: execution.feed(),
                 };
-                let execution_run = ExecutionRunV1::new(&run, signal_upto, Some(trade_test))?;
-                let replay = resolved.replay_selected(
+                let execution_run = ExecutionRunV1::with_digests(&run, &oos_digests)?;
+                let replay = resolved.replay_selected_over(
                     oos,
                     &projected_oos,
                     &candidate.selected,
                     execution_run,
+                    &oos_facts,
                 )?;
                 let outcome = replay.cell().ok_or(
                     AnchoredSearchValidationRefusalV4::IncompleteCandidateOos {
@@ -3247,6 +3357,8 @@ fn reconcile_anchored_search_fold_v4(
 fn reconcile_anchored_search_v4(
     value: &AnchoredSearchValidationV4,
 ) -> Result<AnchoredSearchProjectionV4, AnchoredSearchValidationRefusalV4> {
+    #[cfg(test)]
+    count_reconcile();
     if value.policy.semantic_order != CANDIDATE_SEMANTIC_ORDER_V4
         || value.policy.full_long_policy_digest == value.policy.full_short_policy_digest
         || value.policy.full_long_resolution_digest == value.policy.full_short_resolution_digest
@@ -3549,15 +3661,16 @@ impl AnchoredAdmissionCaptureV2 {
             validation_family_digest,
             &self.folds,
         );
-        let opaque = AnchoredAdmissionValidationV2 {
+        let mut opaque = AnchoredAdmissionValidationV2 {
             validated,
             policy: self.policy,
             folds: self.folds,
             validation_policy_digest,
             validation_family_digest,
             walk_facts_digest,
+            issued: None,
         };
-        opaque.search_authority_projection()?;
+        opaque.issued = Some(reconcile_anchored_admission_v2(&opaque)?);
         Ok(opaque)
     }
 }
@@ -3712,15 +3825,16 @@ impl AnchoredSearchCaptureV3 {
             validation_family_digest,
             &self.folds,
         );
-        let opaque = AnchoredSearchValidationV3 {
+        let mut opaque = AnchoredSearchValidationV3 {
             validated,
             policy: self.policy,
             folds: self.folds,
             validation_policy_digest,
             validation_family_digest,
             walk_facts_digest,
+            issued: None,
         };
-        opaque.search_authority_projection()?;
+        opaque.issued = Some(reconcile_anchored_search_v3(&opaque)?);
         Ok(opaque)
     }
 }
@@ -3728,6 +3842,8 @@ impl AnchoredSearchCaptureV3 {
 fn reconcile_anchored_admission_v2(
     value: &AnchoredAdmissionValidationV2,
 ) -> Result<AnchoredAdmissionProjectionV2, AnchoredAdmissionValidationRefusalV2> {
+    #[cfg(test)]
+    count_reconcile();
     if value.policy.resolved_rungs == 0 {
         return Err(AnchoredAdmissionValidationRefusalV2::ZeroResolvedRungs);
     }
@@ -3829,6 +3945,8 @@ fn reconcile_anchored_admission_v2(
 fn reconcile_anchored_search_v3(
     value: &AnchoredSearchValidationV3,
 ) -> Result<AnchoredSearchProjectionV3, AnchoredSearchValidationRefusalV3> {
+    #[cfg(test)]
+    count_reconcile();
     if value.policy.resolved_rungs == 0 {
         return Err(AnchoredSearchValidationRefusalV3::ZeroResolvedRungs);
     }
@@ -4570,7 +4688,7 @@ fn walk_forward_core(
         // that is trivial beside the pricing it compares.
         //
         // DETERMINISM (CLAUDE.md S3 rule 5) IS HELD BY SHAPE, the same argument
-        // `rank::walk` and `batch::sweep_under` already make: rayon's INDEXED
+        // `rank::offer_part` and `cli::batch::sweep_under` already make: rayon's INDEXED
         // `collect` preserves order, so `scored` is the identical sequence
         // whatever order the threads finish in. `best` is then chosen by
         // scanning that ordered vector with the same strict `>` the sequential
@@ -4610,7 +4728,10 @@ fn walk_forward_core(
         //
         // Hoisted beside `facts` because it too is a fact about `train` and
         // does not vary by candidate. One pass, shared by every thread.
-        let forward = crate::outcome::forward(trade_train, train_column, horizon);
+        //
+        // Over `facts` (D-1185): `forward` built a second, identical
+        // `SliceFacts::of(trade_train, train_column)` on entry.
+        let forward = crate::outcome::forward_over(trade_train, horizon, &facts);
         // THE RUNG COUNT WAS RESOLVED BY THE CALLER, ONCE. It is the same
         // already-clamped value the caller records in run identity; no lane
         // reads `std::env`, and no fold can reinterpret the memory bound.
@@ -4628,27 +4749,30 @@ fn walk_forward_core(
                 let own = direction_from_training_edge(
                     crate::outcome::edge(train_column, &forward, &item.mask).mean_paisa,
                 );
-                let g = crate::grid::evaluate_over(
-                    trade_train,
-                    train_column,
-                    &item.mask,
-                    horizon,
-                    side_of(own),
-                    crate::grid::Levels::derived(rungs),
-                    &facts,
-                );
-                let cell = g.sharpest().or_else(|| g.best())?;
-                if cell.trades == 0 {
-                    return None;
-                }
-                let s = Summary::of(&crate::trade::walk_over(
+                // ONE WALK, NOT TWO (D-1146). `evaluate_over` walked the mask
+                // on `side_of(own)` -- direction `own` -- to seed its grid, and
+                // the summary below walked the identical arguments again. The
+                // walk is taken once and both read it.
+                let timed = crate::trade::walk_over(
                     trade_train,
                     train_column,
                     &item.mask,
                     horizon,
                     own,
                     &facts,
-                ));
+                );
+                let g = crate::grid::evaluate_from_walk(
+                    trade_train,
+                    side_of(own),
+                    crate::grid::Levels::derived(rungs),
+                    &timed,
+                    &facts,
+                );
+                let cell = g.sharpest().or_else(|| g.best())?;
+                if cell.trades == 0 {
+                    return None;
+                }
+                let s = Summary::of(&timed);
                 // The pick is built ONCE and used twice: by the out-of-sample pass,
                 // so it can apply this candidate's TRAINING exit to the test bars,
                 // and by the fold's own winner. Built before the `best` comparison
@@ -4691,7 +4815,14 @@ fn walk_forward_core(
         // The side rides in this vector too, so `oos_all` prices every candidate
         // on the side its own training evidence chose.
         let mut scored: Vec<Scored> = Vec::with_capacity(assessed.len());
-        let priced: u64 = u64::try_from(closed.kept.len()).unwrap_or(u64::MAX);
+        // COUNTED FROM WHAT THE LOOP RETURNED, NOT FROM ITS INPUT (D-1144).
+        //
+        // This read `closed.kept.len()` -- the expression `considered` is built
+        // from -- so `priced == considered` held by construction and R-01's
+        // test could not see a `.take(N)` reintroduced on the `par_iter`.
+        // `assessed` has one entry per candidate the indexed `collect`
+        // actually visited, priceable or not, so a cap shrinks it and only it.
+        let priced: u64 = u64::try_from(assessed.len()).unwrap_or(u64::MAX);
         for Assessed {
             mask,
             summary: s,
@@ -4863,6 +4994,28 @@ fn walk_forward_core(
                 // `trade_test` and `confined`, both borrowed immutably here and
                 // unchanged by the loop.
                 let test_facts = crate::trade::SliceFacts::of(trade_test, confined);
+                // THE FIRST ROW THAT CAN FIRE, FOUND ONCE PER FOLD (D-1186).
+                //
+                // `restricted` blanks every training row rather than cutting
+                // it, so the column still runs from row 0 and each candidate's
+                // walk visited every training row only to find it could not
+                // fire. A row whose bits are all zero cannot hit a mask with any
+                // bit set, so the walk starts at the first row with a set bit.
+                // The empty mask DOES hit a blank row and keeps row 0, so its
+                // answer is unchanged too. One linear scan here, none per
+                // candidate.
+                let first_live = confined
+                    .bits()
+                    .iter()
+                    .position(|bits| *bits != ConditionMask::ZERO)
+                    .unwrap_or(confined.bits().len());
+                let start_for = |mask: &ConditionMask| {
+                    if *mask == ConditionMask::ZERO {
+                        0
+                    } else {
+                        first_live
+                    }
+                };
                 oos_exact = scored
                     .par_iter()
                     .map(|candidate| {
@@ -4884,7 +5037,7 @@ fn walk_forward_core(
                         // window scores 0, exactly as before: `with_levels`
                         // returns `None` on an empty trade set, and 0 is the
                         // level-less total of no trades rather than a sentinel.
-                        let pessimistic = crate::grid::with_levels_over(
+                        let pessimistic = crate::grid::with_levels_over_from(
                             trade_test,
                             confined,
                             &candidate.mask,
@@ -4898,6 +5051,7 @@ fn walk_forward_core(
                             },
                             candidate.pick.rungs,
                             &test_facts,
+                            start_for(&candidate.mask),
                         )
                         .map(|cell| cell.pessimistic);
                         CandidateOosV2 { pessimistic }
@@ -4908,7 +5062,18 @@ fn walk_forward_core(
                     .map(|outcome| outcome.pessimistic.unwrap_or_default())
                     .collect();
                 // THE SIDE TRAINING CHOSE, not the one a whole-span rank did.
-                let plain = Summary::of(&walk(trade_test, confined, &mask, horizon, chosen_side));
+                //
+                // Over `test_facts` (D-1145): `walk` rebuilt the identical
+                // `SliceFacts::of(trade_test, confined)` built above.
+                let plain = Summary::of(&crate::trade::walk_over_from(
+                    trade_test,
+                    confined,
+                    &mask,
+                    horizon,
+                    chosen_side,
+                    &test_facts,
+                    start_for(&mask),
+                ));
 
                 // THE CHOSEN EXIT, APPLIED. `docs/06-limits.md` §70 recorded
                 // that this fold reported a chosen stop beside an out-of-sample
@@ -5005,7 +5170,26 @@ fn restricted(column: &Column, from: usize) -> Column {
     clippy::expect_used,
     reason = "the exception every test module in this workspace takes."
 )]
-mod tests {
+pub(crate) mod tests {
+
+    /// A MALFORMED OR ZERO `BRUTEX_GRID_RUNGS` IS REFUSED BY NAME, NOT REPLACED.
+    /// D-1547 (audit-20261003 errpaths-9).
+    ///
+    /// The doc above `fold_rungs` says a zero is refused rather than obeyed;
+    /// the code fell back to `DEFAULT_RUNGS` for a zero, for garbage and for a
+    /// negative, so the walk priced a ladder nobody asked for and said nothing.
+    #[test]
+    fn a_malformed_or_zero_rung_count_is_refused_and_unset_is_the_default() {
+        use std::ffi::OsStr;
+        assert_eq!(super::fold_rungs_from(None), Ok(DEFAULT_RUNGS));
+        assert_eq!(super::fold_rungs_from(Some(OsStr::new(" 6 "))), Ok(6));
+        for bad in ["0", "", "four", "-3", "4.5"] {
+            let refused = super::fold_rungs_from(Some(OsStr::new(bad)));
+            let why = refused.expect_err(bad);
+            assert!(why.contains("BRUTEX_GRID_RUNGS"), "{bad:?}: {why}");
+        }
+    }
+
     use super::{
         AnchoredAdmissionValidationRefusalV2, AnchoredAdmissionValidationV2,
         AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, MonotonicExecutionPrefix,
@@ -5271,7 +5455,7 @@ mod tests {
             .expect("the exact causal V4 fixture issues opaque authority")
     }
 
-    fn anchored_search_fixture_v4() -> super::AnchoredSearchValidationV4 {
+    pub(crate) fn anchored_search_fixture_v4() -> super::AnchoredSearchValidationV4 {
         static FIXTURE: OnceLock<super::AnchoredSearchValidationV4> = OnceLock::new();
         FIXTURE.get_or_init(anchored_search_run_v4).clone()
     }
@@ -5583,7 +5767,7 @@ mod tests {
     fn a_coarse_fold_projects_exactly_and_cannot_read_its_test_execution_bar() {
         let execution = crate::synthetic::sessions(120);
         let period = crate::resample::Period::minutes(60).expect("sixty minutes is coarse");
-        let signal = crate::resample::resample(&execution, period);
+        let signal = crate::resample::resample(&execution, period).expect("market values resample");
         let fold = Shape::Anchored
             .folds(signal.len(), h(15), 2)
             .into_iter()
@@ -5884,8 +6068,10 @@ mod tests {
     ///
     /// # Why the second half is asserted on `side_of` and not on the folds
     ///
-    /// The row also asks that "a direction accepted and then ignored fails it",
-    /// and the obvious reading — compare the two walks' folds — cannot express
+    /// The row used to ask that "a direction accepted and then ignored fails
+    /// it". Since D-0387 the walk ignores the caller's direction by design
+    /// (WF-01), so the row was corrected by D-1448 to what this asserts. The
+    /// obvious reading — compare the two walks' folds — could never express
     /// it. Measured: on `sessions(12)` the long and short walks return fold for
     /// fold IDENTICAL results, with 12,531 candidates considered and priced in
     /// fold 1 and an exit chosen in both.
@@ -6080,6 +6266,53 @@ mod tests {
         );
     }
 
+    /// D-1144 (AC-whp-tb-1). `held_up` must read the chosen exit's own
+    /// out-of-sample total when there is one, and the level-less walk only
+    /// when there is none. Every fold here makes the two rules disagree in one
+    /// direction or the other, and the expected count is a literal, so
+    /// reverting `held_up` to `out_of_sample.worst_case_positive()` fails, and
+    /// so does dropping the fallback, counting unchosen folds, or flipping `>`
+    /// to `>=`.
+    #[test]
+    fn held_up_counts_the_chosen_exit_and_not_the_level_less_walk() {
+        let chosen = Some(ConditionMask::ZERO.with_bit(1));
+        let walk = |worst| super::Summary {
+            trades: 1,
+            worst,
+            ..super::Summary::default()
+        };
+        let fold = |chosen, exit, level_less| super::FoldResult {
+            chosen,
+            out_of_sample_exit: exit,
+            out_of_sample: walk(level_less),
+            ..super::FoldResult::default()
+        };
+        let folds = vec![
+            fold(chosen, Some(6_900), -50), // exit won, walk lost: counted
+            fold(chosen, Some(-10), 400),   // exit lost, walk won: not counted
+            fold(chosen, Some(0), 400),     // exactly zero is not a win
+            fold(chosen, None, 1),          // no exit figure: walk decides, won
+            fold(chosen, None, 0),          // no exit figure: walk decides, flat
+            fold(None, Some(9_000), 9_000), // nothing chosen: never counted
+        ];
+        let v = Validated {
+            folds,
+            refused: None,
+        };
+        assert_eq!(v.held_up(), 2);
+        // Empty and one-fold edges.
+        let none = Validated {
+            folds: Vec::new(),
+            refused: None,
+        };
+        assert_eq!(none.held_up(), 0);
+        let one = Validated {
+            folds: vec![fold(chosen, Some(i64::MAX), i64::MIN)],
+            refused: None,
+        };
+        assert_eq!(one.held_up(), 1);
+    }
+
     #[test]
     fn held_up_judges_the_strategy_that_was_chosen() {
         // It counted `out_of_sample.worst_case_positive()` — the chosen
@@ -6119,15 +6352,13 @@ mod tests {
         // What IS asserted: the counts are reported honestly against each
         // other, so a future change that reverts `held_up` to the level-less
         // reading has to make this equality false to pass.
-        let old_rule = v
-            .folds
-            .iter()
-            .filter(|f| f.chosen.is_some() && f.out_of_sample.worst_case_positive())
-            .count();
-        assert!(
-            counted >= old_rule || old_rule > counted,
-            "unreachable: the two counts are always comparable"
-        );
+        //
+        // D-1144: what stood here was `counted >= old_rule || old_rule >
+        // counted`, true for any two integers, and `by_hand` above is a copy of
+        // `held_up`'s own filter, so neither could fail on a revert. The
+        // revert-sensitive check is
+        // `held_up_counts_the_chosen_exit_and_not_the_level_less_walk`, over
+        // folds built by hand so the expected count is a literal.
         // A fold the OLD rule counted must still be counted, unless its chosen
         // exit genuinely lost — a levelled strategy that loses where the
         // level-less one won is a real outcome and not a bug, but it must come
@@ -6303,6 +6534,60 @@ mod tests {
         assert!(
             seen_any,
             "every fold was handed zero candidates, so the equality above is vacuous"
+        );
+    }
+
+    /// D-1144. The equality above binds only if `priced` is counted from the
+    /// loop's output. It was `closed.kept.len()`, the same expression as
+    /// `considered`, so a reintroduced cap kept it green. Source shape, because
+    /// no fixture can tell a count-of-input from a count-of-output while the
+    /// two are equal.
+    /// D-1146 (W3-runner5-4). The in-sample pricing body walks each candidate
+    /// once and reads both the grid and the summary from that walk. Source
+    /// shape, because the doubled walk gave the same answer.
+    #[test]
+    fn the_in_sample_pass_walks_each_candidate_once() {
+        let source = include_str!("validate.rs");
+        let start = source.find(concat!("let assessed: Vec<Option<Assessed>>", " = closed"));
+        assert!(start.is_some(), "the in-sample pricing loop must exist");
+        let rest = source.get(start.unwrap_or_default()..).unwrap_or_default();
+        let end = rest.find(".collect();");
+        assert!(end.is_some(), "the loop must end in its indexed collect");
+        let body = rest.get(..end.unwrap_or_default()).unwrap_or_default();
+        assert_eq!(body.matches("walk_over(").count(), 1, "exactly one walk");
+        assert!(body.contains("evaluate_from_walk("));
+        assert!(body.contains("Summary::of(&timed)"));
+        assert!(
+            !body.contains("evaluate_over("),
+            "evaluate_over walks again"
+        );
+    }
+
+    #[test]
+    fn priced_is_counted_from_what_the_pricing_loop_returned() {
+        let source = include_str!("validate.rs");
+        let considered = concat!(
+            "let considered = u64::try_from(",
+            "closed.kept.len()).unwrap_or(u64::MAX);"
+        );
+        let from_input = concat!(
+            "let priced: u64 = u64::try_from(",
+            "closed.kept.len()).unwrap_or(u64::MAX);"
+        );
+        let from_output = concat!(
+            "let priced: u64 = u64::try_from(",
+            "assessed.len()).unwrap_or(u64::MAX);"
+        );
+        assert!(source.contains(considered), "the anchor moved");
+        assert!(
+            !source.contains(from_input),
+            "priced must not count the input"
+        );
+        let at = source.find(from_output);
+        let collect = source.find(concat!("let assessed: Vec<Option<Assessed>>", " = closed"));
+        assert!(
+            at.is_some() && collect.is_some() && collect < at,
+            "priced must count `assessed`, after the pricing loop built it"
         );
     }
 
@@ -7344,6 +7629,31 @@ mod tests {
     ///
     /// Scoped to the `par_iter` body rather than the file, so an unrelated
     /// `with_levels` elsewhere in this module does not fail it.
+    /// D-1145 (o1runner-4). The chosen candidate's level-less OOS walk reuses
+    /// the fold's `test_facts` instead of `trade::walk`, which rebuilt the same
+    /// facts. Source shape: both forms give the same `Trades`.
+    #[test]
+    fn the_chosen_oos_walk_reuses_the_folds_test_facts() {
+        let source = include_str!("validate.rs");
+        let anchor = "let test_facts = crate::trade::SliceFacts::of(trade_test, confined);";
+        let at = source.find(anchor);
+        assert!(at.is_some(), "the OOS pass must build its facts once");
+        let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+        let end = rest.find("THE CHOSEN EXIT, APPLIED");
+        assert!(
+            end.is_some(),
+            "the scanned region must end before the levelled pass"
+        );
+        let region = rest
+            .get(anchor.len()..end.unwrap_or_default())
+            .unwrap_or_default();
+        let plain = region.find("let plain = Summary::of(");
+        assert!(plain.is_some(), "the level-less walk must be in the region");
+        let tail = region.get(plain.unwrap_or_default()..).unwrap_or_default();
+        assert!(tail.contains("walk_over_from(") && tail.contains("&test_facts,"));
+        assert!(!tail.contains("SliceFacts::of(") && !tail.contains("&walk("));
+    }
+
     #[test]
     fn the_out_of_sample_pass_hoists_the_slice_facts_out_of_its_candidate_loop() {
         let source = include_str!("validate.rs");
@@ -7364,7 +7674,7 @@ mod tests {
             body.len()
         );
         assert!(
-            body.contains("with_levels_over("),
+            body.contains("with_levels_over_from("),
             "the loop must call the hoisted door"
         );
         // EVERYTHING AFTER THE ANCHOR is the loop. The convenience form
@@ -7405,8 +7715,7 @@ mod tests {
     #[test]
     fn the_population_loop_hoists_its_data_digest_out_of_the_candidate_loop() {
         let source = include_str!("validate.rs");
-        let anchor =
-            "let train_data_digest = data_digest_with_execution(train, Some(trade_train));";
+        let anchor = "let train_digests = ExecutionDigestsV1::of(train, Some(trade_train));";
         let at = source.find(anchor).expect(
             "the V4 population pass must build its data digest ONCE, before the \
              candidate loop",
@@ -7448,6 +7757,80 @@ mod tests {
              whole loop, and recomputing it per candidate per side is the \
              O(C x 2 x B) term this hoist removed"
         );
+        // D-1143: nor may it seal a run by re-hashing them. `ExecutionRunV1::new`
+        // hashes signal and execution bars; the per-run door is
+        // `with_digests` over the hoisted `ExecutionDigestsV1`.
+        assert!(
+            !inner.contains("ExecutionRunV1::new(")
+                && !inner.contains("ExecutionDigestsV1::of(")
+                && inner.contains("ExecutionRunV1::with_digests(&run, &train_digests)"),
+            "the candidate loop must seal each run against the hoisted digests"
+        );
+    }
+
+    /// D-1143: the V4 OOS replay loop seals each pending candidate's run
+    /// against digests built once per fold, not by hashing both slices three
+    /// times per candidate.
+    /// D-1186 (W3-runner5-3): the OOS pass finds the first row that can fire
+    /// once per fold and starts every candidate's walk there, so the blanked
+    /// training rows are not visited per candidate. The empty mask keeps row
+    /// 0 because it fires on a blank row.
+    #[test]
+    fn the_oos_pass_walks_from_the_first_live_row() {
+        let source = include_str!("validate.rs");
+        let anchor = "let test_facts = crate::trade::SliceFacts::of(trade_test, confined);";
+        let rest = source
+            .split_once(anchor)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let (head, body) = rest.split_once(".par_iter()").unwrap_or_default();
+        assert!(head.contains(".position(|bits| *bits != ConditionMask::ZERO)"));
+        assert!(head.contains("if *mask == ConditionMask::ZERO"));
+        let pass = body
+            .split_once("(plain, with)")
+            .map_or("", |(pass, _)| pass);
+        assert!(pass.contains("with_levels_over_from(") && pass.contains("walk_over_from("));
+        assert_eq!(pass.matches("start_for(&").count(), 2);
+        assert!(!pass.contains("with_levels_over(") && !pass.contains("walk_over("));
+    }
+
+    #[test]
+    fn the_training_fold_builds_its_slice_facts_once() {
+        // D-1185 (o1runner-5): the fold's `forward` reads the facts the
+        // candidate loop already shares, instead of building a second copy.
+        let source = include_str!("validate.rs");
+        let anchor = "let facts = crate::trade::SliceFacts::of(trade_train, train_column);";
+        let rest = source
+            .split_once(anchor)
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        let fold = rest.split_once(".par_iter()").map_or("", |(head, _)| head);
+        assert!(fold.contains("crate::outcome::forward_over(trade_train, horizon, &facts)"));
+        assert!(!fold.contains("crate::outcome::forward(trade_train"));
+    }
+
+    #[test]
+    fn the_oos_replay_loop_hashes_its_slices_once_per_fold() {
+        let source = include_str!("validate.rs");
+        let anchor = "let oos_digests = ExecutionDigestsV1::of(signal_upto, Some(trade_test));";
+        let at = source.find(anchor);
+        assert!(at.is_some(), "the OOS pass must hoist its digests");
+        let rest = source.get(at.unwrap_or_default()..).unwrap_or_default();
+        let end = rest.find("final_candidates.push(proof);");
+        assert!(
+            end.is_some(),
+            "the scanned region must end at the loop's push"
+        );
+        let inner = rest
+            .get(anchor.len()..end.unwrap_or_default())
+            .unwrap_or_default();
+        assert!(inner.contains("for (ordinal, candidate) in pending.iter().enumerate()"));
+        assert!(inner.contains("ExecutionRunV1::with_digests(&run, &oos_digests)"));
+        assert!(
+            !inner.contains("data_digest_with_execution(")
+                && !inner.contains("ExecutionRunV1::new("),
+            "nothing inside the pending loop may hash the fold's slices"
+        );
     }
 
     /// The V4 population loop attests its training slice once per side, not
@@ -7464,8 +7847,7 @@ mod tests {
     #[test]
     fn the_population_loop_attests_its_training_slice_once_per_side() {
         let source = include_str!("validate.rs");
-        let anchor =
-            "let train_data_digest = data_digest_with_execution(train, Some(trade_train));";
+        let anchor = "let train_digests = ExecutionDigestsV1::of(train, Some(trade_train));";
         let at = source
             .find(anchor)
             .expect("the V4 population pass must still hoist its data digest");
@@ -7496,5 +7878,32 @@ mod tests {
              loop, and repeating it per candidate per side is the whole-slice term this hoist \
              removed"
         );
+    }
+
+    /// W3-runner1-0 (D-0740): a value whose issuance projection is absent is
+    /// refused by the sealed-projection door, never answered from nothing.
+    #[test]
+    fn an_unissued_opaque_validation_refuses_the_sealed_projection() {
+        let mut v2 = anchored_admission_fixture_v2();
+        assert!(v2.issued_authority_projection().is_ok());
+        v2.issued = None;
+        assert!(matches!(
+            v2.issued_authority_projection(),
+            Err(AnchoredAdmissionValidationRefusalV2::SealMismatch)
+        ));
+        let mut v3 = anchored_search_fixture_v3();
+        assert!(v3.issued_authority_projection().is_ok());
+        v3.issued = None;
+        assert!(matches!(
+            v3.issued_authority_projection(),
+            Err(super::AnchoredSearchValidationRefusalV3::SealMismatch)
+        ));
+        let mut v4 = anchored_search_fixture_v4();
+        assert!(v4.issued_authority_projection().is_ok());
+        v4.issued = None;
+        assert!(matches!(
+            v4.issued_authority_projection(),
+            Err(super::AnchoredSearchValidationRefusalV4::SealMismatch)
+        ));
     }
 }

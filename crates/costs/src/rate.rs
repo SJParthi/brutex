@@ -237,7 +237,8 @@ pub const fn stamp_duty(side: OrderSide) -> BpsX100 {
 ///
 /// Stage 1 carries the rate and the rule. The arithmetic that applies them —
 /// which components go into the base, and where the single rounding lands — is
-/// stage 2's, and is deliberately not half-written here.
+/// `crate::trip::charge_stack`'s: the base is the sum of the already-rounded
+/// brokerage, exchange, SEBI and IPFT components, rounded once.
 pub const GST_ON_FEE_BASE: BpsX100 = BpsX100::new(1_800_000);
 
 // ---------------------------------------------------------------------------

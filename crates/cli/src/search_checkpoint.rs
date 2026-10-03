@@ -79,6 +79,7 @@ impl Snapshot {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"
@@ -135,6 +136,7 @@ impl Journal {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"
@@ -221,6 +223,17 @@ impl Journal {
             return Err("checkpoint publication exceeds its byte admission".to_owned());
         }
         let sequence = self.next;
+        // NEVER RESERVE WHAT COLD DISCOVERY CANNOT REOPEN. `discover_through`
+        // refuses a namespace of `DIRECTORY_LIMIT` entries, the owner lock
+        // being one of them, so reservation `DIRECTORY_LIMIT` would be written
+        // and acknowledged and then every later open of the search would
+        // refuse. Refused here, before the directory exists. audit-20261003
+        // W2-cli13-5, D-1563.
+        if !usize::try_from(sequence).is_ok_and(|at| at < DIRECTORY_LIMIT) {
+            return Err(format!(
+                "checkpoint directory admission limit reached: reservation {sequence} would exceed the {DIRECTORY_LIMIT}-entry namespace cold discovery admits"
+            ));
+        }
         self.next = self
             .next
             .checked_add(1)
@@ -259,11 +272,23 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
-        let mut marker = File::create_new(directory.join("complete")).map_err(error)?;
+        // THE MARKER APPEARS WHOLE OR NOT AT ALL. It was `create_new("complete")`
+        // then `write_all(seal)`: a kill between the two left a 0-byte
+        // `complete`, which discovery counts as acknowledged and every later
+        // `read` refuses as "marker width mismatch" -- for every consumer, for
+        // good. Now the seal is written and synced under a staging name and
+        // renamed into place; a kill before the rename leaves a reservation
+        // with no `complete`, which discovery already counts as interrupted.
+        // audit-20261003 GAP11-0, D-1563.
+        let staged = directory.join("complete.staged");
+        let mut marker = File::create_new(&staged).map_err(error)?;
+        #[cfg(test)]
+        tests::marker_created(&self.directory);
         marker
             .write_all(&seal)
             .and_then(|()| marker.sync_all())
             .map_err(error)?;
+        fs::rename(&staged, directory.join("complete")).map_err(error)?;
         File::open(&directory)
             .map_err(error)?
             .sync_all()
@@ -328,10 +353,7 @@ fn open_owner(path: &Path) -> Result<File, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100);
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20_000);
+        options.custom_flags(store::open_flags::O_NOFOLLOW);
     }
     // create_new never follows an existing symlink, including a dangling one.
     // The existing-file door deliberately has no create flag, so refusal can

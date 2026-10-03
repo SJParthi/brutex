@@ -83,6 +83,18 @@ pub const MAX_WINDOW_DAYS: u32 = 3_653;
 /// and the set's own size is the exchange's business rather than a caller's.
 pub const MAX_MEMBERS: usize = 2_000;
 
+/// The body `/pull/spot` and `/ingest/queue` read: room for [`MAX_MEMBERS`]
+/// `member` fields, each a symbol of at most
+/// `brutex_core::symbol::SYMBOL_CAPACITY` bytes percent-encoded at worst 3x,
+/// plus the other fields' ordinary [`crate::server::MAX_FORM_BYTES`].
+///
+/// 168,192 bytes. Under the shared 8 KiB bound, ticking all 750 of the widest
+/// set was a framework 413 and [`Refusal::TooManyMembers`] was unreachable
+/// (W1-api3-6, D-1499). Sized from `MAX_MEMBERS` so a request with one member
+/// too many reaches that named refusal rather than a 413.
+pub const MAX_MEMBER_FORM_BYTES: usize = crate::server::MAX_FORM_BYTES
+    + MAX_MEMBERS * ("member=".len() + 3 * brutex_core::symbol::SYMBOL_CAPACITY + 1);
+
 /// Which instruments a spot pull covers.
 ///
 /// Seven fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
@@ -1208,6 +1220,11 @@ pub fn parse_day(field: &'static str, text: &str) -> Result<Day, Refusal> {
         return Err(bad());
     };
     if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return Err(bad());
+    }
+    // Digits only. `u8::from_str("+8")` is `Ok(8)`, so the widths alone let
+    // `2024-+8-+6` through as 2024-08-06. D-0905.
+    if !text.bytes().all(|b| b == b'-' || b.is_ascii_digit()) {
         return Err(bad());
     }
     let (Ok(year), Ok(month), Ok(day)) = (y.parse::<u16>(), m.parse::<u8>(), d.parse::<u8>())
@@ -2400,6 +2417,9 @@ mod tests {
             "2022-01-08-1", // one part too many
             "yyyy-mm-dd",   // not digits
             "-001-01-01",   // a sign is not a digit
+            "2024-+8-+6",   // right widths, and `u8::from_str` takes the `+`
+            "+024-01-08",   // nor is a plus sign, which `u16::from_str` takes
+            "2024-08-+6",   // one signed piece is enough to refuse (D-0905)
             "20220-1-08",   // right length, wrong widths
         ] {
             assert_eq!(

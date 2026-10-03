@@ -69,12 +69,12 @@ use indicators::vwap::Availability;
 use pull::session::Day;
 use runner::excursion::Side;
 use runner::exit_grid_policy::{
-    ExecutionDispositionV1, ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1,
-    ExitGridSelectorV1, ForcedStopV1, GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1,
-    RangeResolutionV1, RationalPercentileV1, ResolvedExitGridV1, ValidatedExitGridV1,
-    column_digest_v1, instrument_digest_v1,
+    AttestedTrainingV1, ExecutionDigestsV1, ExecutionDispositionV1, ExecutionResolutionV1,
+    ExecutionRunV1, ExecutionSeriesV1, ExitGridSelectorV1, ForcedStopV1,
+    GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1, RangeResolutionV1, RationalPercentileV1,
+    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v1, instrument_digest_v1,
 };
-use runner::grid::{Cell, Chosen, Ttp, materialize_cell};
+use runner::grid::{Cell, CellReplay, Chosen, Ttp};
 use runner::identity::{DailyReferenceBinding, Direction, Params, Run};
 use runner::outcome::Horizon;
 use runner::validate::{
@@ -1559,12 +1559,8 @@ impl CandidateSearchColumnBuilderV1<'_> {
         }
         let final_close_minute = prefix
             .last()
-            .map(|bar| {
-                bar.ts_micros
-                    .saturating_add(signal_length_micros)
-                    .saturating_sub(60_000_000)
-            })
-            .ok_or_else(|| "candidate Search V4 requested an empty signal prefix".to_owned())?;
+            .ok_or_else(|| "candidate Search V4 requested an empty signal prefix".to_owned())
+            .and_then(|bar| session_close_minute_v1(bar.ts_micros, signal_length_micros))?;
         while self
             .reference_minute_context
             .get(cursor.minute_end)
@@ -1686,6 +1682,7 @@ fn build_candidate_signal_column(
         signal_length_micros,
         evaluation.widths,
         Calendar::charter(),
+        crate::stored::nse_session_close_minute,
         &mut signal_column,
     )
     .map_err(|why| {
@@ -2713,10 +2710,21 @@ pub(crate) fn pair_candidate_base_evidence_v2(
 /// # Cost
 ///
 /// The total is input-dependent: one naturally-extinct sweep plus one complete
-/// grid evaluation and validation per `(closed mask, direction)`. Every grid
-/// cell is then replayed over its exact execution series by `materialize_cell`;
-/// its resulting `TradeRow` sequence is folded once for Base Evidence and once
-/// for accepted-session observations before the rows are dropped. Only the
+/// grid evaluation and validation per `(closed mask, direction)`.
+///
+/// Everything that no mask can change is sealed ONCE, on the first closed
+/// mask, by `hoist_execution_series`: the three-stream data digest and the
+/// evaluated slice's digest (`ExecutionDigestsV1`, Θ(S + M + D + E)),
+/// and one attestation plus one `SliceFacts` derivation per resolved side
+/// (`AttestedTrainingV1`, Θ(E) each). Per `(closed mask, direction)` what remains
+/// is the O(1) run seal, two level-less column walks (one prices the grid, one
+/// is held by `runner::grid::CellReplay` with its crossing table for the
+/// cells), Θ(rows) each, and the grid's own work. Each grid cell is then
+/// replayed from that held walk, O(candidate paths) per cell (D-1141) and
+/// independent of the slice length; its resulting `TradeRow`
+/// sequence is folded once for Base Evidence and once for accepted-session
+/// observations before the rows are dropped. Retained rows grow geometrically
+/// (amortised O(1) per row). D-0990; `docs/06-limits.md` §147. Only the
 /// final Candidate/Base record projections are fixed-cost. Retained Candidate
 /// rows and fixed Base records are linear in the complete
 /// closed-frontier-by-grid population, observation space also depends on its
@@ -2808,20 +2816,25 @@ pub(crate) fn produce_candidate_universe_v1<'a>(
         .map_err(|why| why.to_string())?;
     let mut base_builder = BaseEvidenceBuilderV2::new(base_bounds);
     let mut rows = Vec::new();
+    let inputs = CandidateExecutionInputsV1 {
+        signal_bars,
+        reference_minute_context,
+        daily_reference,
+        execution_series,
+        execution_column: &execution_column,
+        long_exit_grid,
+        short_exit_grid,
+        horizon,
+    };
+    let mut hoisted = None;
     let population_run =
         sweeper.run_prepared_population_by_reporting(signal_column, on_level, |member| {
             expand_population_member(
                 member,
                 &descriptor,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                &execution_column,
-                long_exit_grid,
-                short_exit_grid,
-                horizon,
+                &inputs,
+                &mut hoisted,
                 rung_seconds,
                 bounds,
                 &mut rows,
@@ -3960,6 +3973,80 @@ fn require_exact_execution_subspan(
     Ok(())
 }
 
+/// The exact minute at which the signal bar opened at `bar_ts_micros` closes.
+///
+/// The store folds every intraday rung on a grid anchored at the 09:15 open,
+/// so a rung that does not divide the 375-minute session (2, 10, 30 and 60
+/// min) ends the day with a SHORT bar: the 60-minute bar stamped 15:15 holds
+/// only 15:15-15:29. Its close is therefore the last minute of the bucket that
+/// the measured session actually traded, not `ts + rung - 1min` (16:14), which
+/// no minute context can hold. D-1449.
+///
+/// The session comes from [`pull::calendar::kind_of`], the same authority the
+/// stored calendar receipt and bucket geometry use, never from a literal. The
+/// close is the latest minute of the bucket inside any measured window; that
+/// also covers a disaster-recovery Saturday whose bucket meets a window end.
+/// A day the calendar does not report open with measured windows, or a bucket
+/// that meets no window, is refused naming why.
+///
+/// O(1): one bounded calendar lookup plus a walk over at most
+/// [`pull::calendar::MAX_WINDOWS`] windows. Exercised at every rung and
+/// measured window end by
+/// `cli::candidate_universe::session_close_minute_clamps_to_every_measured_window_end`.
+fn session_close_minute_v1(
+    bar_ts_micros: i64,
+    signal_length_micros: i64,
+) -> Result<i64, CandidateUniverseRefusal> {
+    const MINUTE_MICROS: i64 = 60_000_000;
+    const DAY_MICROS: i64 = 86_400_000_000;
+    if signal_length_micros < MINUTE_MICROS || signal_length_micros % MINUTE_MICROS != 0 {
+        return Err(format!(
+            "candidate Search V4 signal length {signal_length_micros} micros is not a whole number of minutes"
+        ));
+    }
+    let day = indicators::ist_day(bar_ts_micros);
+    let day_start = day
+        .checked_mul(DAY_MICROS)
+        .and_then(|micros| micros.checked_sub(indicators::IST_OFFSET_MICROS))
+        .ok_or_else(|| format!("candidate Search V4 IST day {day} overflowed microseconds"))?;
+    let offset = bar_ts_micros
+        .checked_sub(day_start)
+        .filter(|offset| offset % MINUTE_MICROS == 0)
+        .ok_or_else(|| {
+            format!("candidate Search V4 signal bar {bar_ts_micros} is not on a whole IST minute")
+        })?;
+    let open_minute = offset / MINUTE_MICROS;
+    let bucket_last_minute = open_minute
+        .checked_add(signal_length_micros / MINUTE_MICROS - 1)
+        .ok_or_else(|| "candidate Search V4 signal bucket overflowed".to_owned())?;
+    let session = match pull::calendar::kind_of(day) {
+        pull::calendar::DayKind::Open(session) => session,
+        other => {
+            return Err(format!(
+                "candidate Search V4 signal bar {bar_ts_micros} is on IST day {day}, which has no measured session window ({other:?})"
+            ));
+        }
+    };
+    let close_minute = session
+        .windows
+        .iter()
+        .take(usize::from(session.count))
+        .filter(|window| {
+            i64::from(window.from) <= bucket_last_minute && i64::from(window.to) >= open_minute
+        })
+        .map(|window| i64::from(window.to).min(bucket_last_minute))
+        .max()
+        .ok_or_else(|| {
+            format!(
+                "candidate Search V4 signal bar {bar_ts_micros} opens a bucket that meets no measured session window on IST day {day}"
+            )
+        })?;
+    close_minute
+        .checked_mul(MINUTE_MICROS)
+        .and_then(|micros| day_start.checked_add(micros))
+        .ok_or_else(|| "candidate Search V4 closing minute overflowed".to_owned())
+}
+
 fn signal_length_micros(rung_seconds: u32) -> Result<i64, CandidateUniverseRefusal> {
     i64::from(rung_seconds)
         .checked_mul(1_000_000)
@@ -4348,11 +4435,25 @@ fn build_execution_v3_replay_authority(
                 authenticated.len()
             )
         })?;
+    let inputs = CandidateExecutionInputsV1 {
+        signal_bars: source.signal_bars,
+        reference_minute_context: source.reference_minute_context,
+        daily_reference: source.daily_reference,
+        execution_series: source.execution_series,
+        execution_column: &source.execution_column,
+        long_exit_grid: source.long_exit_grid,
+        short_exit_grid: source.short_exit_grid,
+        horizon: source.horizon,
+    };
+    let mut hoisted = None;
     let mut group_start = 0_usize;
     while group_start < rows.len() {
+        let series = hoisted_execution_series(&mut hoisted, &inputs)?;
         replay_execution_side(
             source,
             params,
+            &series.run_source,
+            &series.long,
             &rows,
             authenticated,
             group_start,
@@ -4368,6 +4469,8 @@ fn build_execution_v3_replay_authority(
         replay_execution_side(
             source,
             params,
+            &series.run_source,
+            &series.short,
             &rows,
             authenticated,
             short_start,
@@ -4502,13 +4605,11 @@ fn try_clone_percentiles(
     clippy::too_many_arguments,
     reason = "one exact directional replay keeps the authenticated row slice, side resolution and append target explicit"
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one directional fold keeps row identity, exact evaluation and disposition append in a single fail-closed sequence"
-)]
 fn replay_execution_side(
     source: &CandidateUniverseProductionSourceV1<'_>,
     params: Params,
+    run_source: &ExecutionDigestsV1,
+    attested: &AttestedTrainingV1<'_>,
     rows: &[CandidateUniverseRowV1],
     authenticated: &[AuthenticatedCandidatePopulationRowV1],
     start: usize,
@@ -4545,21 +4646,10 @@ fn replay_execution_side(
         commit: source.execution_series.commit(),
         feed: source.execution_series.feed(),
     };
-    let execution_run = ExecutionRunV1::new_with_daily_reference(
-        &run,
-        source.signal_bars,
-        source.reference_minute_context,
-        source.execution_series.bars(),
-        source.daily_reference,
-    )
-    .map_err(|why| format!("Candidate Execution V3 exact run refused: {why:?}"))?;
+    let execution_run = ExecutionRunV1::with_digests(&run, run_source)
+        .map_err(|why| format!("Candidate Execution V3 exact run refused: {why:?}"))?;
     let evaluated = resolved
-        .evaluate_training_grid_attested(
-            source.execution_series,
-            &source.execution_column,
-            source.horizon,
-            execution_run,
-        )
+        .evaluate_with_attested(attested, execution_run)
         .map_err(|why| format!("Candidate Execution V3 complete grid refused: {why:?}"))?;
     let validated = resolved
         .validate_evaluation(&evaluated)
@@ -4646,22 +4736,118 @@ fn rung_label(rung_seconds: u32) -> Result<&'static str, CandidateUniverseRefusa
     }
 }
 
+/// The exact streams, slice and resolutions every `(closed mask, side)` grid
+/// of one Candidate block is priced against. No mask can change any of them.
+#[derive(Clone, Copy)]
+struct CandidateExecutionInputsV1<'s> {
+    signal_bars: &'s [Candle],
+    reference_minute_context: &'s [Candle],
+    daily_reference: DailyReferenceBinding<'s>,
+    execution_series: ExecutionSeriesV1<'s>,
+    execution_column: &'s Column,
+    long_exit_grid: &'s ResolvedExitGridV1,
+    short_exit_grid: &'s ResolvedExitGridV1,
+    horizon: Horizon,
+}
+
+/// The series-invariant execution authority, sealed once per Candidate block.
+///
+/// Before D-0990 every `(closed mask, side)` re-hashed the signal, minute
+/// context and daily streams (`ExecutionRunV1::new_with_daily_reference`),
+/// re-attested the execution slice (`evaluate_training_grid_attested`) and
+/// rebuilt the slice facts once for the grid and once more for every cell
+/// (`materialize_cell`). All of that is a function of the streams alone.
+struct HoistedExecutionV1<'s> {
+    run_source: ExecutionDigestsV1,
+    long: AttestedTrainingV1<'s>,
+    short: AttestedTrainingV1<'s>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`hoist_execution_series`] calls on this thread.
+    static SERIES_HOISTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Θ(S + M + D + E) for the sealed run source plus, per side, one attestation
+/// and one `SliceFacts` derivation. Called once per Candidate block.
+fn hoist_execution_series<'s>(
+    inputs: &CandidateExecutionInputsV1<'s>,
+) -> Result<HoistedExecutionV1<'s>, CandidateUniverseRefusal> {
+    #[cfg(test)]
+    SERIES_HOISTS.with(|count| count.set(count.get().saturating_add(1)));
+    let run_source = ExecutionDigestsV1::of_daily_reference(
+        inputs.signal_bars,
+        inputs.reference_minute_context,
+        inputs.execution_series.bars(),
+        inputs.daily_reference,
+    )
+    .map_err(|why| format!("candidate execution run sources refused: {why:?}"))?;
+    let long = inputs
+        .long_exit_grid
+        .attest_training(
+            inputs.execution_series,
+            inputs.execution_column,
+            inputs.horizon,
+        )
+        .map_err(|why| format!("candidate Long execution slice attestation refused: {why:?}"))?;
+    let short = inputs
+        .short_exit_grid
+        .attest_training(
+            inputs.execution_series,
+            inputs.execution_column,
+            inputs.horizon,
+        )
+        .map_err(|why| format!("candidate Short execution slice attestation refused: {why:?}"))?;
+    Ok(HoistedExecutionV1 {
+        run_source,
+        long,
+        short,
+    })
+}
+
+/// The hoisted authority, sealed on first use so a block that retires no
+/// closed mask (or replays no row) refuses exactly what it refused before.
+fn hoisted_execution_series<'h, 's>(
+    slot: &'h mut Option<HoistedExecutionV1<'s>>,
+    inputs: &CandidateExecutionInputsV1<'s>,
+) -> Result<&'h HoistedExecutionV1<'s>, CandidateUniverseRefusal> {
+    let hoisted = match slot.take() {
+        Some(hoisted) => hoisted,
+        None => hoist_execution_series(inputs)?,
+    };
+    Ok(slot.insert(hoisted))
+}
+
+/// Reserves one directional grid's rows with geometric growth.
+///
+/// `try_reserve_exact` grew the retained buffer by exactly one grid width per
+/// `(closed mask, side)`, so every grid moved the whole buffer. `try_reserve`
+/// keeps `Vec`'s amortised-O(1) append (`CLAUDE.md` §3 rule 4); the configured
+/// `max_rows` bound is checked by the caller before this runs. D-0990, proven by
+/// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`
+/// (CUH-04).
+fn reserve_directional_grid_rows<T>(
+    rows: &mut Vec<T>,
+    additional: usize,
+) -> Result<(), CandidateUniverseRefusal> {
+    rows.try_reserve(additional).map_err(|why| {
+        format!(
+            "candidate could not reserve {additional} rows for one complete directional grid: {why}"
+        )
+    })
+}
+
 #[expect(
     clippy::too_many_arguments,
-    reason = "both complete side resolutions and all canonical execution-run identity sources remain explicit"
+    reason = "the hoisted series authority and every append target remain explicit"
 )]
-fn expand_population_member(
+fn expand_population_member<'s>(
     member: PopulationMember,
     descriptor: &CandidateUniverseDescriptorV1,
     params: Params,
-    signal_bars: &[Candle],
-    reference_minute_context: &[Candle],
-    daily_reference: DailyReferenceBinding<'_>,
-    execution_series: ExecutionSeriesV1<'_>,
-    execution_column: &Column,
-    long_exit_grid: &ResolvedExitGridV1,
-    short_exit_grid: &ResolvedExitGridV1,
-    horizon: Horizon,
+    inputs: &CandidateExecutionInputsV1<'s>,
+    hoisted: &mut Option<HoistedExecutionV1<'s>>,
     rung_seconds: u32,
     bounds: CandidateUniverseBoundsV1,
     rows: &mut Vec<CandidateUniverseRowV1>,
@@ -4680,24 +4866,23 @@ fn expand_population_member(
             let support = measure_mask_support_v2(
                 runner::replay_mask::stored_words(&member.item.mask),
                 member.item.hits,
-                signal_bars,
+                inputs.signal_bars,
                 support_signal_column,
                 base_bounds,
             )
             .map_err(|why| why.to_string())?;
+            let series = hoisted_execution_series(hoisted, inputs)?;
             expand_population_side(
                 member,
                 descriptor,
                 TradeDirectionV1::Long,
                 Direction::Long,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                execution_column,
-                long_exit_grid,
-                horizon,
+                &series.run_source,
+                inputs.execution_series,
+                &series.long,
+                inputs.long_exit_grid,
+                inputs.horizon,
                 rung_seconds,
                 bounds,
                 rows,
@@ -4711,13 +4896,11 @@ fn expand_population_member(
                 TradeDirectionV1::Short,
                 Direction::Short,
                 params,
-                signal_bars,
-                reference_minute_context,
-                daily_reference,
-                execution_series,
-                execution_column,
-                short_exit_grid,
-                horizon,
+                &series.run_source,
+                inputs.execution_series,
+                &series.short,
+                inputs.short_exit_grid,
+                inputs.horizon,
                 rung_seconds,
                 bounds,
                 rows,
@@ -4739,11 +4922,9 @@ fn expand_population_side(
     trade_direction: TradeDirectionV1,
     run_direction: Direction,
     params: Params,
-    signal_bars: &[Candle],
-    reference_minute_context: &[Candle],
-    daily_reference: DailyReferenceBinding<'_>,
+    run_source: &ExecutionDigestsV1,
     execution_series: ExecutionSeriesV1<'_>,
-    execution_column: &Column,
+    attested: &AttestedTrainingV1<'_>,
     resolved: &ResolvedExitGridV1,
     horizon: Horizon,
     rung_seconds: u32,
@@ -4766,11 +4947,7 @@ fn expand_population_side(
     }
     let additional = usize::try_from(resolved.cell_count())
         .map_err(|_| "candidate resolved grid width does not fit usize".to_owned())?;
-    rows.try_reserve_exact(additional).map_err(|why| {
-        format!(
-            "candidate could not reserve {additional} rows for one complete directional grid: {why}"
-        )
-    })?;
+    reserve_directional_grid_rows(rows, additional)?;
 
     let run = Run {
         mask: member.item.mask,
@@ -4782,14 +4959,7 @@ fn expand_population_side(
         commit: execution_series.commit(),
         feed: execution_series.feed(),
     };
-    let execution_run = ExecutionRunV1::new_with_daily_reference(
-        &run,
-        signal_bars,
-        reference_minute_context,
-        execution_series.bars(),
-        daily_reference,
-    )
-    .map_err(|why| {
+    let execution_run = ExecutionRunV1::with_digests(&run, run_source).map_err(|why| {
         format!(
             "candidate {:?} execution run refused mask {:?}: {why:?}",
             trade_direction,
@@ -4797,7 +4967,7 @@ fn expand_population_side(
         )
     })?;
     let evaluated = resolved
-        .evaluate_training_grid_attested(execution_series, execution_column, horizon, execution_run)
+        .evaluate_with_attested(attested, execution_run)
         .map_err(|why| {
             format!(
                 "candidate {:?} complete grid evaluation refused mask {:?}: {why:?}",
@@ -4826,6 +4996,9 @@ fn expand_population_side(
     let validated = resolved.validate_evaluation(&evaluated).map_err(|why| {
         format!("candidate {trade_direction:?} complete grid integrity refused: {why:?}")
     })?;
+    let cells = attested
+        .cell_replay(&evaluated)
+        .map_err(|why| format!("candidate {trade_direction:?} cell replay refused: {why:?}"))?;
     append_validated_grid_rows(
         member,
         descriptor,
@@ -4833,7 +5006,7 @@ fn expand_population_side(
         &evaluated,
         &validated,
         execution_series.bars(),
-        execution_column,
+        &cells,
         rows,
         observations,
         support,
@@ -4852,12 +5025,17 @@ fn append_validated_grid_rows(
     evaluated: &runner::exit_grid_policy::EvaluatedExitGridV1,
     validated: &ValidatedExitGridV1<'_>,
     execution_bars: &[Candle],
-    execution_column: &Column,
+    cells: &CellReplay<'_>,
     rows: &mut Vec<CandidateUniverseRowV1>,
     observations: &mut CandidateObservationBuilderV1,
     support: MaskSupportEvidenceV2,
     base_builder: &mut BaseEvidenceBuilderV2,
 ) -> Result<(), CandidateUniverseRefusal> {
+    // `cells` holds one walk and one crossing table for the whole grid, over
+    // the slice facts the block's attestation derived once, so each cell is
+    // O(C) (D-1141, D-0990). `materialize_cell` per cell rebuilt the slice
+    // facts, the walk and the crossings for every cell: O(cells x B) per
+    // member-side.
     for ordinal in 0..evaluated.grid().cells.len() {
         let cell = validated.cell(ordinal).ok_or_else(|| {
             format!(
@@ -4887,16 +5065,7 @@ fn append_validated_grid_rows(
         };
         row.candidate_semantic_digest = candidate_semantic_digest(descriptor, &row);
         row.validate(Some(descriptor))?;
-        let trades = materialize_cell(
-            execution_bars,
-            execution_column,
-            &member.item.mask,
-            evaluated.horizon(),
-            evaluated.side(),
-            evaluated.grid(),
-            cell,
-        )
-        .map_err(|why| {
+        let trades = cells.materialize(cell).map_err(|why| {
             format!("candidate {direction:?} cell {ordinal} exact trade replay refused: {why}")
         })?;
         base_builder
@@ -7685,18 +7854,22 @@ mod tests {
         )
         .expect("fixture Base Evidence bounds are explicit");
         let mut expanded_base_builder = BaseEvidenceBuilderV2::new(expanded_base_bounds);
+        let inputs = CandidateExecutionInputsV1 {
+            signal_bars: source.signal_bars,
+            reference_minute_context: source.reference_minute_context,
+            daily_reference: source.daily_reference,
+            execution_series: source.execution_series,
+            execution_column: &source.execution_column,
+            long_exit_grid: source.long_exit_grid,
+            short_exit_grid: source.short_exit_grid,
+            horizon: source.horizon,
+        };
         expand_population_member(
             member,
             &descriptor,
             execution_run_params(&sweeper, &source),
-            source.signal_bars,
-            source.reference_minute_context,
-            source.daily_reference,
-            source.execution_series,
-            &source.execution_column,
-            source.long_exit_grid,
-            source.short_exit_grid,
-            source.horizon,
+            &inputs,
+            &mut None,
             source.rung_seconds,
             bounds,
             &mut expanded,
@@ -8163,6 +8336,272 @@ mod tests {
         }
     }
 
+    /// Folds exact minutes into open-anchored rung bars the way the store's
+    /// `pull::fold` does: buckets start at 09:15 IST, so a rung that does not
+    /// divide 375 leaves a SHORT final bar (60min: 15:15 holds 15:15-15:29).
+    fn open_anchored_rung_bars(minutes: &[Candle], rung_minutes: i64) -> Vec<Candle> {
+        let mut bars: Vec<Candle> = Vec::new();
+        let mut key = None;
+        for minute in minutes {
+            let day = indicators::ist_day(minute.ts_micros);
+            let day_start = day
+                .saturating_mul(DAY_MICROS)
+                .saturating_sub(indicators::IST_OFFSET_MICROS);
+            let of_day = minute.ts_micros.saturating_sub(day_start) / MINUTE_MICROS;
+            let bucket = (of_day - 555).div_euclid(rung_minutes);
+            if key == Some((day, bucket)) {
+                let last = bars.last_mut().expect("an open bucket has a bar");
+                last.high = last.high.max(minute.high);
+                last.low = last.low.min(minute.low);
+                last.close = minute.close;
+                last.volume = last.volume.saturating_add(minute.volume);
+            } else {
+                key = Some((day, bucket));
+                bars.push(Candle {
+                    ts_micros: day_start
+                        .saturating_add((555 + bucket * rung_minutes) * MINUTE_MICROS),
+                    ..*minute
+                });
+            }
+        }
+        bars
+    }
+
+    fn search_builder_over<'a>(
+        signal: &'a [Candle],
+        daily_references: &'a [DailyReference],
+        context: &'a [Candle],
+        rung_seconds: u32,
+    ) -> CandidateSearchColumnBuilderV1<'a> {
+        CandidateSearchColumnBuilderV1 {
+            full_signal: signal,
+            daily_references,
+            reference_minute_context: context,
+            rung_seconds,
+            evaluation: CandidateEvaluationInputsV1 {
+                widths: Widths::pinned().expect("fixture uses measured widths"),
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+            },
+            cursors: [CandidateCausalPrefixCursorV1::default(); 2],
+        }
+    }
+
+    fn two_open_days_in_january_2025() -> (i64, i64) {
+        let start = i64::from(
+            Day::new(2025, 1, 1)
+                .expect("fixture day is valid")
+                .days_from_epoch(),
+        );
+        let mut open = (start..start + 20).filter(|day| matches!(kind_of(*day), DayKind::Open(_)));
+        let prior = open.next().expect("January 2025 has an open day");
+        let day = open.next().expect("January 2025 has a second open day");
+        assert_eq!(
+            kind_of(day),
+            DayKind::Open(pull::calendar::Session::full()),
+            "the fixture day is a standard 09:15-15:29 session"
+        );
+        (prior, day)
+    }
+
+    /// D-1449. A Search V4 prefix ending on the store's short final bar of a
+    /// session (rungs 2, 10, 30 and 60 min) demands its close at the session's
+    /// last minute, 15:29, not at `ts + rung - 1min`, which lies after the close.
+    #[test]
+    fn search_v4_prefix_ending_on_the_short_final_bar_closes_at_the_session_last_minute() {
+        let (prior, day) = two_open_days_in_january_2025();
+        let (_, _, references) = daily_reference_fixture(prior, day);
+        let context = minute_bars(day, day);
+        let session_last = context.last().expect("the day has minutes").ts_micros;
+        let day_start = day
+            .saturating_mul(DAY_MICROS)
+            .saturating_sub(indicators::IST_OFFSET_MICROS);
+        assert_eq!(
+            session_last,
+            day_start + i64::from(pull::calendar::LAST_MINUTE) * MINUTE_MICROS
+        );
+        // (rung minutes, bars in the day, stamp of the final bar as IST minute)
+        for (rung, bars, final_stamp) in [
+            (60_i64, 7_usize, 15 * 60 + 15),
+            (30, 13, 15 * 60 + 15),
+            (10, 38, 15 * 60 + 25),
+            (2, 188, 15 * 60 + 29),
+            (15, 25, 15 * 60 + 15),
+            (5, 75, 15 * 60 + 25),
+            (1, 375, 15 * 60 + 29),
+        ] {
+            let signal = open_anchored_rung_bars(&context, rung);
+            assert_eq!(signal.len(), bars, "rung {rung} bar count");
+            assert_eq!(
+                signal.last().expect("bars").ts_micros,
+                day_start + final_stamp * MINUTE_MICROS,
+                "rung {rung} final stamp"
+            );
+            let rung_seconds = u32::try_from(rung * 60).expect("rung fits");
+            let mut builder = search_builder_over(&signal, &references, &context, rung_seconds);
+            builder
+                .build(&signal)
+                .unwrap_or_else(|why| panic!("rung {rung} prefix refused: {why}"));
+            assert_eq!(
+                builder.cursors[0].minute_end,
+                context.len(),
+                "rung {rung} binds the minute context through 15:29 and no further"
+            );
+            assert_eq!(builder.cursors[0].last_signal_len, signal.len());
+
+            // The bar before the final one is a full bucket: its close is exact
+            // and unclamped, so the cursor stops a whole final bucket short.
+            let mut earlier = search_builder_over(&signal, &references, &context, rung_seconds);
+            let prefix = &signal[..signal.len() - 1];
+            earlier
+                .build(prefix)
+                .unwrap_or_else(|why| panic!("rung {rung} earlier prefix refused: {why}"));
+            let final_open = signal.last().expect("bars").ts_micros;
+            let bound = context
+                .iter()
+                .position(|bar| bar.ts_micros >= final_open)
+                .expect("final bucket has minutes");
+            assert_eq!(
+                earlier.cursors[0].minute_end, bound,
+                "rung {rung} earlier bound"
+            );
+        }
+    }
+
+    /// A short final bar whose 15:29 minute is absent is still refused: the
+    /// clamp moves the demanded close to the session's end, it never relaxes it.
+    #[test]
+    fn search_v4_short_final_bar_without_its_1529_minute_is_still_refused() {
+        let (prior, day) = two_open_days_in_january_2025();
+        let (_, _, references) = daily_reference_fixture(prior, day);
+        let full = minute_bars(day, day);
+        let signal = open_anchored_rung_bars(&full, 60);
+        let truncated = &full[..full.len() - 1];
+        let mut builder = search_builder_over(&signal, &references, truncated, 3_600);
+        let why = builder
+            .build(&signal)
+            .expect_err("a missing 15:29 minute must refuse");
+        let expected = full.last().expect("minutes").ts_micros;
+        assert_eq!(
+            why,
+            format!(
+                "candidate Search V4 lacks exact closing minute {expected} for its signal prefix"
+            )
+        );
+        assert_eq!(
+            builder.cursors[0].last_signal_len, 0,
+            "a refusal commits nothing"
+        );
+    }
+
+    fn ist_minute_micros(day: i64, minute: i64) -> i64 {
+        day * DAY_MICROS - indicators::IST_OFFSET_MICROS + minute * MINUTE_MICROS
+    }
+
+    /// D-1449: the close is the latest minute of the open-anchored bucket that
+    /// the measured session traded, on standard, irregular and Muhurat days.
+    #[test]
+    fn session_close_minute_clamps_to_every_measured_window_end() {
+        let (_, standard) = two_open_days_in_january_2025();
+        let cases = [
+            // (day, bucket open minute, rung minutes, expected close minute)
+            (standard, 915, 60, 929),
+            (standard, 855, 60, 914),
+            (standard, 915, 30, 929),
+            (standard, 925, 10, 929),
+            (standard, 915, 10, 924),
+            (standard, 928, 2, 929),
+            (standard, 915, 15, 929),
+            (standard, 925, 5, 929),
+            (standard, 929, 1, 929),
+            (standard, 555, 1, 555),
+            // 2024-03-02 disaster-recovery Saturday: 09:15-09:59 and 11:30-12:29.
+            (19_784, 555, 60, 599),
+            (19_784, 675, 60, 734),
+            (19_784, 735, 60, 749),
+            // 2021-02-24 outage: 09:15-11:39 and 15:45-16:59.
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 675, 60, 699),
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 915, 60, 974),
+            (pull::calendar::SYSTEMS_OUTAGE_DAY, 975, 60, 1_019),
+            // 2025-10-21 Muhurat, 13:45-14:44 on the 09:15-anchored grid.
+            (20_382, 795, 60, 854),
+            (20_382, 855, 60, 884),
+        ];
+        for (day, open, rung, close) in cases {
+            assert_eq!(
+                session_close_minute_v1(ist_minute_micros(day, open), rung * MINUTE_MICROS),
+                Ok(ist_minute_micros(day, close)),
+                "day {day} bucket {open} rung {rung}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_close_minute_refuses_without_a_measured_window() {
+        let (_, standard) = two_open_days_in_january_2025();
+        let sunday = i64::from(
+            Day::new(2025, 1, 5)
+                .expect("fixture day is valid")
+                .days_from_epoch(),
+        );
+        assert_eq!(kind_of(sunday), DayKind::Closed);
+        for (day, kind) in [
+            (sunday, "Closed"),
+            (18_580, "OpenLengthUnmeasured"),
+            (pull::calendar::LAST_DAY + 1, "Unmeasured"),
+        ] {
+            let ts = ist_minute_micros(day, 915);
+            assert_eq!(
+                session_close_minute_v1(ts, 60 * MINUTE_MICROS),
+                Err(format!(
+                    "candidate Search V4 signal bar {ts} is on IST day {day}, which has no measured session window ({kind})"
+                ))
+            );
+        }
+        // A bucket wholly between the two windows of a two-window day.
+        let gap = ist_minute_micros(19_784, 615);
+        assert_eq!(
+            session_close_minute_v1(gap, 60 * MINUTE_MICROS),
+            Err(format!(
+                "candidate Search V4 signal bar {gap} opens a bucket that meets no measured session window on IST day 19784"
+            ))
+        );
+        // Before the open and after the close of a standard day.
+        for minute in [554, 930] {
+            assert!(
+                session_close_minute_v1(ist_minute_micros(standard, minute), MINUTE_MICROS)
+                    .expect_err("outside the session")
+                    .contains("meets no measured session window")
+            );
+        }
+        // Malformed lengths and a timestamp off the minute grid.
+        let ts = ist_minute_micros(standard, 915);
+        for length in [0, MINUTE_MICROS - 1, MINUTE_MICROS + 1, -MINUTE_MICROS] {
+            assert_eq!(
+                session_close_minute_v1(ts, length),
+                Err(format!(
+                    "candidate Search V4 signal length {length} micros is not a whole number of minutes"
+                ))
+            );
+        }
+        assert_eq!(
+            session_close_minute_v1(ts + 1, MINUTE_MICROS),
+            Err(format!(
+                "candidate Search V4 signal bar {} is not on a whole IST minute",
+                ts + 1
+            ))
+        );
+        // Extremes: neither end of i64 panics or wraps into a session.
+        for extreme in [i64::MIN, i64::MAX] {
+            assert!(session_close_minute_v1(extreme, MINUTE_MICROS).is_err());
+        }
+        assert_eq!(
+            session_close_minute_v1(ts, i64::MAX - i64::MAX % MINUTE_MICROS),
+            Ok(ist_minute_micros(standard, 929)),
+            "the widest whole-minute length still closes at 15:29"
+        );
+    }
+
     #[test]
     fn complete_population_rows_returns_only_the_exact_audited_canonical_family() {
         let root = test_dir();
@@ -8520,5 +8959,267 @@ mod tests {
                 "replacement of {name} did not fail closed"
             );
         }
+    }
+
+    fn production_body(name: &str) -> &'static str {
+        let source = include_str!("candidate_universe.rs");
+        let tests_start = source
+            .find("\nmod tests {")
+            .expect("the test module exists");
+        let production = &source[..tests_start];
+        let start = production
+            .find(&format!("\nfn {name}("))
+            .or_else(|| production.find(&format!("\nfn {name}<")))
+            .or_else(|| production.find(&format!("\npub(crate) fn {name}<")))
+            .unwrap_or_else(|| panic!("{name} exists"));
+        let rest = &production[start + 1..];
+        let end = rest.find("\n}\n").expect("the function closes");
+        &rest[..end]
+    }
+
+    /// D-0990: every series-invariant term on the per-(closed mask, side) path
+    /// is hoisted. The per-mask bodies may not re-hash the streams, re-attest
+    /// the slice, rebuild the slice facts through the one-off replay door, or
+    /// grow the retained row vector by an exact increment.
+    #[test]
+    fn candidate_grid_paths_hoist_every_series_invariant_out_of_the_mask_loop() {
+        for name in [
+            "expand_population_side",
+            "append_validated_grid_rows",
+            "replay_execution_side",
+        ] {
+            let body = production_body(name);
+            for banned in [
+                "new_with_daily_reference(",
+                "evaluate_training_grid_attested(",
+                "attest_training",
+                "ExecutionDigestsV1::of_daily_reference(",
+                "= materialize_cell(",
+                "SliceFacts::of(",
+                "try_reserve_exact(",
+            ] {
+                assert!(
+                    !body.contains(banned),
+                    "{name} repeats a series-invariant term per mask: {banned}"
+                );
+            }
+        }
+        for (name, required) in [
+            ("expand_population_side", "with_digests("),
+            ("expand_population_side", "evaluate_with_attested("),
+            ("expand_population_side", ".cell_replay("),
+            ("append_validated_grid_rows", "cells.materialize("),
+            ("replay_execution_side", "with_digests("),
+            ("replay_execution_side", "evaluate_with_attested("),
+        ] {
+            assert!(
+                production_body(name).contains(required),
+                "{name} must use the hoisted door {required}"
+            );
+        }
+        let hoist = production_body("hoist_execution_series");
+        assert!(hoist.contains("ExecutionDigestsV1::of_daily_reference("));
+        assert_eq!(hoist.matches("attest_training(").count(), 2);
+    }
+
+    /// D-0990: one directional grid's rows are reserved with GEOMETRIC growth.
+    ///
+    /// `try_reserve_exact` grew the retained buffer by exactly one grid width
+    /// per `(closed mask, side)`, so every append of a new grid moved the whole
+    /// buffer: Θ(rows retained) per grid, the amortised-O(1) guarantee of
+    /// `CLAUDE.md` §3 rule 4 lost. Sixty-four one-row grids must therefore
+    /// change capacity at most ⌈log2 64⌉ + 1 times, never sixty-four; it is
+    /// `cli::candidate_universe::retained_candidate_rows_grow_geometrically_per_directional_grid`,
+    /// invariant
+    /// row CUH-04.
+    #[test]
+    fn retained_candidate_rows_grow_geometrically_per_directional_grid() {
+        let mut rows: Vec<u64> = Vec::new();
+        let mut reallocations = 0_u32;
+        let mut capacity = rows.capacity();
+        for value in 0..64_u64 {
+            reserve_directional_grid_rows(&mut rows, 1).expect("one row reserves");
+            if rows.capacity() != capacity {
+                reallocations += 1;
+                capacity = rows.capacity();
+            }
+            rows.push(value);
+        }
+        assert_eq!(rows.len(), 64);
+        assert!(
+            reallocations <= 7,
+            "{reallocations} reallocations for 64 one-row grids is exact, not geometric, growth"
+        );
+        // A grid wider than the spare capacity still reserves all of it.
+        reserve_directional_grid_rows(&mut rows, 1_000).expect("a wide grid reserves");
+        assert!(rows.capacity() - rows.len() >= 1_000);
+        // An impossible reservation is a named refusal, not an abort.
+        let refused = reserve_directional_grid_rows(&mut rows, usize::MAX)
+            .expect_err("usize::MAX rows cannot be reserved");
+        assert!(refused.contains("could not reserve"), "{refused}");
+    }
+
+    /// D-0990: the series-invariant execution authority is sealed exactly once
+    /// per Candidate block, however many closed masks are expanded through it,
+    /// for production and for Execution V3 replay; a rerun is byte-identical.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture proves the per-member reuse, the production count, the rerun and the replay count together"
+    )]
+    #[test]
+    fn candidate_production_seals_the_execution_series_once_for_every_closed_mask() {
+        let fixture = ProductionFixture::new();
+        let source = fixture.source();
+        let (frequent_bit, max_singleton_support, _) =
+            maximum_nontrivial_live_singleton_support(&source.signal_column);
+        let ladder = engine::Ladder::with_min_hits(max_singleton_support);
+        let sweeper = Sweeper::new(ladder);
+        let bounds = CandidateUniverseBoundsV1::new(1_000_000, 4)
+            .expect("production fixture bounds are explicit");
+
+        // Several closed members through ONE hoisted slot: one seal in total,
+        // and every member's rows identical to the first's.
+        let identities = production_identities(&source, &sweeper).expect("typed identities");
+        let descriptor = CandidateUniverseDescriptorV1::new(
+            source.family,
+            source.rung_seconds,
+            source.horizon,
+            source.requested_span,
+            &identities,
+            source.signal_calendar,
+            source.execution_calendar,
+            source.signal_bars,
+            &source.signal_column,
+            source.execution_series,
+            &source.execution_column,
+        )
+        .expect("production descriptor");
+        let member = PopulationMember {
+            item: engine::Itemset {
+                mask: vocab::ConditionMask::ZERO.with_bit(frequent_bit),
+                hits: max_singleton_support,
+            },
+            closure: ClosureVerdict::Closed,
+        };
+        let inputs = CandidateExecutionInputsV1 {
+            signal_bars: source.signal_bars,
+            reference_minute_context: source.reference_minute_context,
+            daily_reference: source.daily_reference,
+            execution_series: source.execution_series,
+            execution_column: &source.execution_column,
+            long_exit_grid: source.long_exit_grid,
+            short_exit_grid: source.short_exit_grid,
+            horizon: source.horizon,
+        };
+        let base_bounds = BaseEvidenceBoundsV2::new(
+            bounds.max_rows(),
+            source.minute_load_bound.max_records(),
+            source.signal_load_bound.max_records(),
+            source.signal_load_bound.max_records(),
+        )
+        .expect("fixture Base Evidence bounds");
+        SERIES_HOISTS.with(|count| count.set(0));
+        let mut hoisted = None;
+        let mut expansions = Vec::new();
+        for _ in 0..4 {
+            let mut rows = Vec::new();
+            let mut observations = CandidateObservationBuilderV1::from_exact_execution(
+                source.execution_calendar,
+                source.execution_series.bars(),
+                &source.execution_column,
+            )
+            .expect("fixture observations");
+            let mut base_builder = BaseEvidenceBuilderV2::new(base_bounds);
+            expand_population_member(
+                member,
+                &descriptor,
+                execution_run_params(&sweeper, &source),
+                &inputs,
+                &mut hoisted,
+                source.rung_seconds,
+                bounds,
+                &mut rows,
+                &mut observations,
+                &source.signal_column,
+                base_bounds,
+                &mut base_builder,
+            )
+            .expect("a closed member expands through the hoisted authority");
+            expansions.push(rows);
+        }
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "four closed members on two sides seal the streams and attest each side once"
+        );
+        let first = expansions.first().expect("one expansion");
+        assert!(!first.is_empty());
+        assert!(expansions.iter().all(|rows| rows == first));
+        // A redundant member never seals anything.
+        SERIES_HOISTS.with(|count| count.set(0));
+        let mut untouched = None;
+        expand_population_member(
+            PopulationMember {
+                closure: ClosureVerdict::Redundant,
+                ..member
+            },
+            &descriptor,
+            execution_run_params(&sweeper, &source),
+            &inputs,
+            &mut untouched,
+            source.rung_seconds,
+            bounds,
+            &mut Vec::new(),
+            &mut CandidateObservationBuilderV1::from_exact_execution(
+                source.execution_calendar,
+                source.execution_series.bars(),
+                &source.execution_column,
+            )
+            .expect("fixture observations"),
+            &source.signal_column,
+            base_bounds,
+            &mut BaseEvidenceBuilderV2::new(base_bounds),
+        )
+        .expect("a redundant member is skipped");
+        assert!(untouched.is_none());
+        assert_eq!(SERIES_HOISTS.with(std::cell::Cell::get), 0);
+
+        SERIES_HOISTS.with(|count| count.set(0));
+        let produced = produce_candidate_universe_v1(&sweeper, source, bounds, &|_, _, _| {})
+            .expect("an uncapped naturally-extinct production walk completes");
+        assert!(produced.population_run().closed >= 1);
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "production seals the series once"
+        );
+        let rerun =
+            produce_candidate_universe_v1(&sweeper, fixture.source(), bounds, &|_, _, _| {})
+                .expect("the exact rerun completes");
+        assert_eq!(
+            rerun.receipt(),
+            produced.receipt(),
+            "a rerun is byte-identical"
+        );
+
+        let root = test_dir();
+        let written = produced
+            .append_and_reopen(root.path(), bounds)
+            .expect("typed production writes rows then receipt and reopens");
+        let ledger = CandidateUniverseLedgerV1::open_read(root.path(), bounds)
+            .expect("the completed Candidate ledger reopens read-only");
+        let authenticated = ledger
+            .complete_population_rows(&written.audit())
+            .expect("the completed Candidate rows authenticate");
+        SERIES_HOISTS.with(|count| count.set(0));
+        fixture
+            .source()
+            .execution_v3_replay_authority(ladder, written.audit().receipt(), &authenticated)
+            .expect("the retained source reproduces exact Runner terminal dispositions");
+        assert_eq!(
+            SERIES_HOISTS.with(std::cell::Cell::get),
+            1,
+            "Execution V3 replay seals the series once for every authenticated group"
+        );
     }
 }

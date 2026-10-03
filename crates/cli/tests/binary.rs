@@ -225,3 +225,84 @@ fn a_missing_store_refuses_before_logging_or_dispatch() {
     assert!(!root.exists(), "the missing store was not created");
     assert!(!logs.exists(), "the log sink was not installed");
 }
+
+/// **An argument that is not UTF-8 is refused as a misuse, not a panic.**
+/// probeapi-3, D-0998.
+///
+/// `main` collected `std::env::args()`, which panics on the first argument
+/// that is not valid Unicode: exit 101, a Rust backtrace hint on stderr, and
+/// none of the normal exit lines. It now reads `args_os`, refuses by name with
+/// `MISUSED`, prints where its events went as every run does, and records the
+/// refusal in the log.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_is_refused_by_name_not_a_panic() {
+    use std::os::unix::ffi::OsStrExt;
+    let logs = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-log-nonutf8-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&logs);
+    let out = command("nonutf8")
+        .arg("sweep")
+        .arg(std::ffi::OsStr::from_bytes(b"6\xff"))
+        .arg("200")
+        .output()
+        .expect("the binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(cli::MISUSED)),
+        "a word that is not text is a misuse:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(
+        stdout.contains("refused: argument 2 is not valid UTF-8"),
+        "the refusal names which argument:\n{stdout}"
+    );
+    assert!(stdout.contains("usage:"), "and prints the usage:\n{stdout}");
+    assert!(
+        stdout.contains("events ->"),
+        "the normal exit line still says where events went:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("THESE BARS ARE GENERATED"),
+        "nothing was dispatched:\n{stdout}"
+    );
+    let logged = std::fs::read_dir(&logs)
+        .expect("the log directory exists")
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<String>();
+    assert!(
+        logged.contains("not valid UTF-8"),
+        "the refusal is in the log:\n{logged}"
+    );
+}
+
+/// **A closed stdout is said on stderr, never a panic.** v53-2, D-1484.
+///
+/// `cli sweep 6 100 | true` exited 101 with a panic backtrace. The pipe's
+/// read end is closed BEFORE the child starts, so the first write fails with
+/// EPIPE every time rather than when a race happens to lose.
+#[test]
+fn a_closed_stdout_is_said_on_stderr_and_never_panics() {
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let out = command("closed-stdout")
+        .args(["sweep", "6", "200"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(cli::OK)),
+        "a reader that closed the pipe leaves the run's own code:\n{said}"
+    );
+    assert!(!said.contains("panicked"), "{said}");
+    assert!(said.contains("stdout is not writable"), "{said}");
+    assert!(said.contains("closed the pipe"), "{said}");
+}

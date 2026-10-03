@@ -141,11 +141,16 @@ struct Pooled {
     fired: u64,
     trades: u64,
     wins: u64,
-    net: i64,
+    /// The three money totals are `i128`, summed exactly. They were `i64`
+    /// `saturating_add`s, so a pooled sum past either end was printed and
+    /// ranked as `i64::MAX` or `i64::MIN` as if it were the real total
+    /// (h-cli-3). Each addend is one instrument's `i64` cell, and at most
+    /// `usize::MAX` of them cannot leave `i128`'s range (D-1852).
+    net: i128,
     worst: i64,
     min_win: i64,
-    gross_win: i64,
-    gross_loss: i64,
+    gross_win: i128,
+    gross_loss: i128,
     /// The largest single-instrument drawdown among those pooled. A LOWER
     /// BOUND on the pooled drawdown — see the module documentation.
     dd_bound: i64,
@@ -154,12 +159,17 @@ struct Pooled {
 }
 
 impl Pooled {
-    /// Gross wins over gross losses, in hundredths. [`i64::MAX`] when nothing
-    /// was lost, which is a fact and is demoted by [`crate::ranked`] exactly as
-    /// a cell's is.
-    const fn profit_factor_bp(&self) -> i64 {
+    /// Gross wins over gross losses, in hundredths. [`NEVER_LOST`] when
+    /// nothing was lost, which is a fact and is demoted by [`ranked`] exactly
+    /// as a cell's is by [`crate::ranked`].
+    ///
+    /// In `i128` from the exact `i128` totals (D-1852). The `saturating_mul`
+    /// is unreachable short of pooling some 10^17 instruments: `gross_win` is
+    /// at most that many `i64::MAX` cells, and `i128::MAX / 100` is about
+    /// 1.8 x 10^17 of them.
+    const fn profit_factor_bp(&self) -> i128 {
         if self.gross_loss == 0 {
-            return i64::MAX;
+            return NEVER_LOST;
         }
         // `gross_loss` is negative or zero; the magnitude is what divides.
         // HUNDREDTHS, as `grid::Cell::profit_factor_bp` is: 125 is 1.25x.
@@ -167,33 +177,51 @@ impl Pooled {
     }
 
     /// The smallest win over the largest loss, in hundredths — the operator's
-    /// own rule, `min(win) >= k × max(loss)`, as a ratio. [`i64::MAX`] when
+    /// own rule, `min(win) >= k × max(loss)`, as a ratio. [`NEVER_LOST`] when
     /// nothing was lost.
-    const fn tail_bp(&self) -> i64 {
+    ///
+    /// In `i128` so `min_win × 100` is exact for every `i64` win: it was an
+    /// `i64` `saturating_mul`, which clamped a win above `i64::MAX / 100`
+    /// (D-1852). `i64::MAX × 100` is far inside `i128`, so this is exact.
+    fn tail_bp(&self) -> i128 {
         if self.worst == 0 {
-            return i64::MAX;
+            return NEVER_LOST;
         }
         // HUNDREDTHS, as `grid::Cell::reward_to_risk_bp` is, so it compares
         // directly with `Rules::min_rr_bp`.
-        self.min_win.saturating_mul(100) / self.worst.saturating_abs()
+        i128::from(self.min_win) * 100 / i128::from(self.worst).abs()
     }
 
     /// Whether the tail rule holds at the operator's multiple.
-    const fn meets(&self, rule_bp: i64) -> bool {
-        self.fired > 0 && self.tail_bp() >= rule_bp
+    fn meets(&self, rule_bp: i64) -> bool {
+        self.fired > 0 && self.tail_bp() >= i128::from(rule_bp)
     }
 
     /// The sort key, largest first: the rule met, then the SMALLEST drawdown
     /// bound, then the profit factor with its never-lost sentinel demoted, then
     /// the net. The drawdown leads because the objective is "very very less max
     /// drawdown" before it is anything else.
-    fn key(&self, rule_bp: i64) -> (bool, i64, i64, i64) {
+    fn key(&self, rule_bp: i64) -> (bool, i64, i128, i128) {
         (
             self.meets(rule_bp),
             self.dd_bound.saturating_neg(),
-            crate::ranked(self.profit_factor_bp()),
+            ranked(self.profit_factor_bp()),
             self.net,
         )
+    }
+}
+
+/// The never-lost sentinel of a pooled ratio. No finite ratio reaches it: the
+/// largest is `i64::MAX × 100` for the tail and, for the profit factor, the
+/// unreachable saturation [`Pooled::profit_factor_bp`] names.
+const NEVER_LOST: i128 = i128::MAX;
+
+/// [`crate::ranked`] for a pooled ratio: the never-lost sentinel sorts last.
+const fn ranked(ratio: i128) -> i128 {
+    if ratio == NEVER_LOST {
+        i128::MIN
+    } else {
+        ratio
     }
 }
 
@@ -392,10 +420,12 @@ fn head_under(
         symbols: surface,
         elsewhere,
         unrecognised,
+        unoffered,
     } = surface_under(root, vendor, rung)?;
     let mut unread = String::new();
     not_on_the_surface(&mut unread, &elsewhere);
     not_catalogued(&mut unread, unrecognised);
+    not_walked(&mut unread, &unoffered);
     if surface.is_empty() && !elsewhere.is_empty() {
         return Err(format!(
             "no instrument is on the surface for {vendor_word} at {rung}; the catalog \
@@ -443,6 +473,19 @@ fn not_catalogued(out: &mut String, (feeds, rungs): (u64, u64)) {
          volume a directory spelt as a feed or rung in another case is the one a load\n  \
          opens, so a month counted here can be one this page reads or says is not held.\n"
     );
+}
+
+/// The catalog's `unoffered_report`, indented like the other blocks the pool
+/// names without reading, under a blank line. Nothing when it is empty.
+/// D-0769.
+fn not_walked(out: &mut String, unoffered: &str) {
+    if unoffered.is_empty() {
+        return;
+    }
+    out.push('\n');
+    for line in unoffered.lines() {
+        let _ = writeln!(out, "  {line}");
+    }
 }
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
@@ -564,6 +607,7 @@ fn surface_under(
         symbols: symbols.into_iter().collect(),
         elsewhere: elsewhere.into_values().collect(),
         unrecognised: (holdings.census.unknown_vendor, holdings.census.unknown_rung),
+        unoffered: holdings.census.unoffered_report(),
     })
 }
 
@@ -581,6 +625,9 @@ struct Surface {
     /// directory, that is spelt as no feed or rung this engine knows: the
     /// catalog census's `unknown_vendor` and `unknown_rung`, store-wide.
     unrecognised: (u64, u64),
+    /// The catalog's own `unoffered_report`, store-wide: the entries it saw
+    /// below `bars/` and offered to nobody, or empty. D-0769.
+    unoffered: String,
 }
 
 /// The holdings the surface names and does not read, under the opening they
@@ -654,12 +701,8 @@ fn opening(
 }
 
 fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+    use crate::columns::{left, right};
     let _ = writeln!(out, "\n  PASS 1 -- PER SYMBOL, each on its own bars");
-    let _ = writeln!(
-        out,
-        "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD"
-    );
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
     // worst trade closest to zero, then the net. Refusals sort last and are
     // named, never dropped.
@@ -674,25 +717,49 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
         Err(_) => (true, i64::MIN, i64::MIN, i64::MIN),
     });
     rows.reverse();
-    for s in rows {
+    // LAID OUT TOGETHER (D-1420). Raw paisa at `i64::MIN` is 20 characters
+    // in a 12-character column, and a 14-character symbol filled its column,
+    // so `worst`, `net` and `max_dd` could read as one number.
+    let columns = [
+        left(14),
+        right(9),
+        right(9),
+        right(6),
+        right(8),
+        right(12),
+        right(12),
+        right(12),
+        right(10),
+    ];
+    let header = [
+        "symbol", "bars", "min_hits", "depth", "trades", "worst", "net", "max_dd", "ret/DD",
+    ];
+    let mut cells: Vec<Vec<String>> = Vec::new();
+    for s in &rows {
+        cells.push(match &s.outcome {
+            Err(_) => vec![s.symbol.clone()],
+            Ok(r) => vec![
+                s.symbol.clone(),
+                r.bars.to_string(),
+                r.min_hits.to_string(),
+                r.depth.to_string(),
+                r.trades.to_string(),
+                r.worst_trade.to_string(),
+                r.pessimistic.to_string(),
+                r.max_drawdown.to_string(),
+                crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
+            ],
+        });
+    }
+    let laid = crate::columns::with_header(&columns, &header, cells);
+    let _ = writeln!(out, "  {}", laid.header);
+    for (s, line) in rows.iter().zip(&laid.rows) {
         match &s.outcome {
             Err(why) => {
-                let _ = writeln!(out, "  {:<14}REFUSED: {why}", s.symbol);
+                let _ = writeln!(out, "  {line}REFUSED: {why}");
             }
-            Ok(r) => {
-                let _ = writeln!(
-                    out,
-                    "  {:<14}{:>9}{:>9}{:>6}{:>8}{:>12}{:>12}{:>12}{:>10}",
-                    s.symbol,
-                    r.bars,
-                    r.min_hits,
-                    r.depth,
-                    r.trades,
-                    r.worst_trade,
-                    r.pessimistic,
-                    r.max_drawdown,
-                    crate::return_over_drawdown_cell(r.pessimistic, r.max_drawdown),
-                );
+            Ok(_) => {
+                let _ = writeln!(out, "  {line}");
             }
         }
     }
@@ -881,13 +948,14 @@ fn fold(
             p.fired = p.fired.saturating_add(1);
             p.trades = p.trades.saturating_add(cell.trades);
             p.wins = p.wins.saturating_add(cell.wins);
-            p.net = p.net.saturating_add(cell.pessimistic);
+            // Unreachable saturation: see `Pooled::net`.
+            p.net = p.net.saturating_add(i128::from(cell.pessimistic));
             p.worst = p.worst.min(cell.worst_trade);
             if cell.wins > 0 {
                 p.min_win = p.min_win.min(cell.min_win);
             }
-            p.gross_win = p.gross_win.saturating_add(cell.gross_win);
-            p.gross_loss = p.gross_loss.saturating_add(cell.gross_loss);
+            p.gross_win = p.gross_win.saturating_add(i128::from(cell.gross_win));
+            p.gross_loss = p.gross_loss.saturating_add(i128::from(cell.gross_loss));
             p.dd_bound = p.dd_bound.max(cell.max_drawdown);
             if p.names.len() < NAMED {
                 p.names.push(symbol.clone());
@@ -934,13 +1002,18 @@ fn render_pooled(
         rule_bp / 100,
         rule_bp % 100
     );
-    let _ = writeln!(
-        out,
-        "  {:>4} {:<5}{:>6}{:>8}{:>6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>5}  fired on",
-        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>="
-    );
-    for (rank, p) in pooled.iter().take(rules.top.max(1)).enumerate() {
-        let Some(candidate) = union.get(p.candidate) else {
+    let shown: Vec<(usize, &Pooled, Option<&Candidate>)> = pooled
+        .iter()
+        .take(rules.top.max(1))
+        .enumerate()
+        .map(|(rank, p)| (rank, p, union.get(p.candidate)))
+        .collect();
+    let laid = laid_pooled(&shown);
+    let _ = writeln!(out, "  {}  fired on", laid.header);
+    let mut lines = laid.rows.iter();
+    for &(rank, p, candidate) in &shown {
+        let (Some(candidate), Some(line)) = (candidate, candidate.and_then(|_| lines.next()))
+        else {
             let _ = writeln!(
                 out,
                 "refused: pooled rank {} names missing candidate {}; no row was fabricated",
@@ -951,21 +1024,7 @@ fn render_pooled(
         };
         let _ = writeln!(
             out,
-            "  {:>4} {:<5}{:>6}{:>8}{:>6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>5}  {}{}",
-            rank + 1,
-            match candidate.direction {
-                Direction::Long => "long",
-                Direction::Short => "short",
-            },
-            p.fired,
-            p.trades,
-            p.wins,
-            p.worst,
-            p.min_win,
-            ratio_cell(p.tail_bp()),
-            ratio_cell(p.profit_factor_bp()),
-            p.net,
-            p.dd_bound,
+            "  {line}  {}{}",
             p.names.join(" "),
             if p.fired > count(p.names.len()) {
                 format!(" +{} more", p.fired.saturating_sub(count(p.names.len())))
@@ -1000,9 +1059,62 @@ fn render_pooled(
     out.push_str(crate::IN_SAMPLE_WARNING);
 }
 
+/// The pass-2 rows whose candidate exists, laid out under their header.
+///
+/// LAID OUT TOGETHER (v4-2, GAP13-16, D-1487). This was one `format!` of
+/// adjacent width specifiers, the shape D-1420 removed from every other cli
+/// table and left here: a 12-wide `net` beside a 5-wide `dd>=`, or raw paisa
+/// at `i64::MIN` (20 characters) in `worst`, `min_win` or `net`, ran into its
+/// neighbour and slid every column after it off its header. The widths stay as
+/// minimums, so a table whose figures fit renders as it did.
+fn laid_pooled(shown: &[(usize, &Pooled, Option<&Candidate>)]) -> crate::columns::Laid {
+    use crate::columns::{left, right};
+    let columns = [
+        right(4),
+        left(5).after(1),
+        right(6),
+        right(8),
+        right(6),
+        right(12),
+        right(12),
+        right(10),
+        right(10),
+        right(12),
+        right(5),
+    ];
+    let header = [
+        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>=",
+    ];
+    let cells: Vec<Vec<String>> = shown
+        .iter()
+        .filter_map(|&(rank, p, candidate)| {
+            candidate.map(|candidate| {
+                vec![
+                    (rank + 1).to_string(),
+                    match candidate.direction {
+                        Direction::Long => "long",
+                        Direction::Short => "short",
+                    }
+                    .to_owned(),
+                    p.fired.to_string(),
+                    p.trades.to_string(),
+                    p.wins.to_string(),
+                    p.worst.to_string(),
+                    p.min_win.to_string(),
+                    ratio_cell(p.tail_bp()),
+                    ratio_cell(p.profit_factor_bp()),
+                    p.net.to_string(),
+                    p.dd_bound.to_string(),
+                ]
+            })
+        })
+        .collect();
+    crate::columns::with_header(&columns, &header, cells)
+}
+
 /// A ratio in hundredths as `12.34x`, or `never lost` for the sentinel.
-fn ratio_cell(bp: i64) -> String {
-    if bp == i64::MAX {
+fn ratio_cell(bp: i128) -> String {
+    if bp == NEVER_LOST {
         "never lost".to_owned()
     } else {
         format!("{}.{:02}x", bp / 100, bp % 100)
@@ -1174,10 +1286,10 @@ mod tests {
         assert!(meets.meets(rule_bp));
         assert_eq!(smaller_dd_but_fails.tail_bp(), 10, "10 over 100 is 0.10x");
         assert!(!smaller_dd_but_fails.meets(rule_bp));
-        assert_eq!(never_lost.profit_factor_bp(), i64::MAX);
+        assert_eq!(never_lost.profit_factor_bp(), super::NEVER_LOST);
         assert_eq!(
-            crate::ranked(never_lost.profit_factor_bp()),
-            i64::MIN,
+            super::ranked(never_lost.profit_factor_bp()),
+            i128::MIN,
             "never lost is demoted, as a cell's is"
         );
         assert!(
@@ -1195,6 +1307,79 @@ mod tests {
         );
     }
 
+    /// h-cli-3, D-1852: pooled money totals past either end of `i64` are the
+    /// exact sums, printed and ranked as such, and both ratios are exact where
+    /// an `i64` multiply clamped them. Before, three `i64::MAX` nets pooled to
+    /// `i64::MAX`, and a tail of `i64::MAX × 100` hundredths clamped to
+    /// `i64::MAX` -- the never-lost sentinel -- so a measured ratio rendered as
+    /// "never lost" and was demoted.
+    #[test]
+    fn pooled_money_totals_past_i64_are_exact_not_clamped() {
+        let union = candidates(2);
+        let surface = vec!["AAA".to_owned(), "BBB".to_owned(), "CCC".to_owned()];
+        let rich = grid::Cell {
+            trades: 1,
+            wins: 1,
+            pessimistic: i64::MAX,
+            worst_trade: -1,
+            min_win: i64::MAX,
+            gross_win: i64::MAX,
+            gross_loss: i64::MIN,
+            max_drawdown: 1,
+            ..grid::Cell::default()
+        };
+        let poor = grid::Cell {
+            trades: 1,
+            wins: 0,
+            pessimistic: i64::MIN,
+            worst_trade: i64::MIN,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: i64::MIN,
+            max_drawdown: 2,
+            ..grid::Cell::default()
+        };
+        let priced = vec![Ok(vec![Some(rich), Some(poor)]); 3];
+        let pooled = fold(&union, &surface, &priced, rules_at(300));
+        let by = |candidate: usize| {
+            pooled
+                .iter()
+                .find(|p| p.candidate == candidate)
+                .expect("pooled candidate")
+        };
+        let up = by(0);
+        assert_eq!(up.net, 3 * i128::from(i64::MAX));
+        assert_eq!(up.gross_win, 3 * i128::from(i64::MAX));
+        assert_eq!(up.gross_loss, 3 * i128::from(i64::MIN));
+        // 300 x (2^63 - 1) over 3 x 2^63 is 99.99..., floored.
+        assert_eq!(up.profit_factor_bp(), 99);
+        assert_eq!(up.tail_bp(), i128::from(i64::MAX) * 100);
+        assert_ne!(up.tail_bp(), super::NEVER_LOST);
+        assert!(up.meets(i64::MAX), "the exact tail clears the largest rule");
+        let unfired = Pooled {
+            fired: 0,
+            ..up.clone()
+        };
+        assert!(
+            !unfired.meets(0),
+            "a candidate that fired nowhere meets no rule, whatever its tail"
+        );
+        let down = by(1);
+        assert_eq!(down.net, 3 * i128::from(i64::MIN));
+        assert_eq!(down.gross_loss, 3 * i128::from(i64::MIN));
+        assert_eq!(down.profit_factor_bp(), 0);
+        assert!(up.key(300) > down.key(300));
+
+        let mut rules = rules_at(300);
+        rules.top = 2;
+        let mut out = String::new();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        for total in [3 * i128::from(i64::MAX), 3 * i128::from(i64::MIN)] {
+            assert!(out.contains(&total.to_string()), "{total} missing:\n{out}");
+        }
+        assert!(out.contains("9223372036854775807.00x"), "{out}");
+    }
+
     /// **The tail and profit-factor cells render as multiples, and the
     /// sentinel as words.**
     #[test]
@@ -1206,7 +1391,10 @@ mod tests {
             "the default `min_rr_bp` renders as itself"
         );
         assert_eq!(ratio_cell(0), "0.00x");
-        assert_eq!(ratio_cell(i64::MAX), "never lost");
+        assert_eq!(ratio_cell(super::NEVER_LOST), "never lost");
+        // `i64::MAX` was the sentinel while the ratio was an `i64`; it is now a
+        // finite ratio and renders as one (D-1852).
+        assert_eq!(ratio_cell(i128::from(i64::MAX)), "92233720368547758.07x");
         let p = Pooled {
             candidate: 0,
             fired: 1,
@@ -1677,6 +1865,47 @@ mod tests {
             super::not_catalogued(&mut one, counts);
             assert!(one.contains("NOT CATALOGUED"), "{counts:?}: {one}");
         }
+    }
+
+    /// **The pool page names what the catalog saw and offered to nobody.**
+    /// D-0769.
+    ///
+    /// The surface read only `unknown_vendor` and `unknown_rung` from the
+    /// census, so a linked symbol directory, which the catalog stops
+    /// offering at D-0766, was absent from the page without a line (found by a
+    /// review). A store with none of those entries gets no block.
+    #[test]
+    fn the_pool_page_names_the_entries_the_catalog_did_not_offer() {
+        let root =
+            std::env::temp_dir().join(format!("brutex-pool-unoffered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cash = root.join("bars/zerodha/NSE/CASH");
+        std::fs::create_dir_all(cash.join("RELIANCE/60min")).expect("dirs");
+        std::fs::write(cash.join("RELIANCE/60min/2026-07.bin"), b"").expect("a month");
+        std::os::unix::fs::symlink(cash.join("RELIANCE"), cash.join("TCS")).expect("a link");
+        let head = super::head_under(&root, "zerodha", "60min", (2026, 7), (2026, 7), None);
+        let _ = std::fs::remove_dir_all(&root);
+        let (page, _, unread) = head.expect("the head renders");
+        let census = store::catalog::Census {
+            seen: 2,
+            spot: 1,
+            linked: 1,
+            ..store::catalog::Census::default()
+        };
+        let mut block = String::new();
+        super::not_walked(&mut block, &census.unoffered_report());
+        assert_eq!(unread, block, "`unread` is the block alone");
+        assert!(
+            block.starts_with(
+                "\n  NOT OFFERED: below bars/ the catalog could not read 0 director(ies) or \
+                 entr(ies), did not follow 1 symbolic link(s)"
+            ) && block.ends_with(".\n"),
+            "{block}"
+        );
+        assert!(page.contains(&block), "{page}");
+        let mut quiet = String::new();
+        super::not_walked(&mut quiet, "");
+        assert!(quiet.is_empty(), "no block when nothing went unoffered");
     }
 
     #[test]
@@ -2484,5 +2713,130 @@ mod tests {
             last_pool = in_pool.expect("asserted above");
             last_screen = in_screen.expect("asserted above");
         }
+    }
+
+    /// D-1420: the pass-1 table at the extremes a row can carry. Raw paisa at
+    /// `i64::MIN` is 20 characters in a 12-character column, so before the
+    /// columns were laid out together `worst`, `net` and `max_dd` ran into one
+    /// another and every column after them left its header.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_per_symbol_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let record = |extreme: i64, count: u64| crate::results::Record {
+            bars: count,
+            min_hits: count,
+            depth: u32::MAX,
+            trades: count,
+            pessimistic: extreme,
+            worst_trade: extreme,
+            max_drawdown: extreme,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let screened = [
+            super::Screened {
+                symbol: "WAAREEENERGY_X".to_owned(),
+                outcome: Ok(record(i64::MIN, u64::MAX)),
+            },
+            super::Screened {
+                symbol: "NIFTY".to_owned(),
+                outcome: Ok(record(i64::MAX, 0)),
+            },
+            super::Screened {
+                symbol: "TORNTPHARM".to_owned(),
+                outcome: Ok(record(-1, 1)),
+            },
+            super::Screened {
+                symbol: "SIXTEEN_CHARS_XY".to_owned(),
+                outcome: Err("its month could not be read".to_owned()),
+            },
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("symbol"))
+            .expect("a header");
+        for row in &lines[at + 1..] {
+            if let Some(refused) = row.find("REFUSED:") {
+                assert!(
+                    row[..refused].ends_with(' '),
+                    "a refusal touches its symbol: {row}"
+                );
+                continue;
+            }
+            crate::columns::assert_under(lines[at], row, &[L, R, R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+        }
+        assert_eq!(lines.len() - at - 1, screened.len(), "{out}");
+    }
+
+    /// v4-2, GAP13-16, D-1487: the pooled pass-2 table at the extremes a row
+    /// can carry. Raw paisa at `i64::MIN` is 20 characters in a 12-character
+    /// column; before the table was laid out together `worst`, `min_win`,
+    /// `net` and `dd>=` ran into one another and slid off their headers.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_pooled_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let union = candidates(3);
+        let pooled_at = |candidate: usize, extreme: i64, count: u64| Pooled {
+            candidate,
+            fired: count,
+            trades: count,
+            wins: count,
+            net: i128::from(extreme),
+            // `worst` and `gross_loss` at `i64::MIN` keep both ratios finite,
+            // so every cell is one word; `min_win` and `gross_win` are never
+            // negative in a real fold.
+            worst: i64::MIN,
+            min_win: extreme.max(0),
+            gross_win: i128::from(extreme.max(0)),
+            gross_loss: i128::from(i64::MIN),
+            dd_bound: extreme,
+            names: vec!["AAA".to_owned()],
+        };
+        let pooled = vec![
+            pooled_at(0, i64::MIN, u64::MAX),
+            pooled_at(1, i64::MAX, u64::MAX),
+            pooled_at(2, -1, 1),
+            pooled_at(7, 0, 1),
+        ];
+        let mut rules = rules_at(300);
+        rules.top = pooled.len();
+        let surface = vec!["AAA".to_owned()];
+        let priced: Vec<Result<Vec<super::Priced>, String>> = vec![Ok(Vec::new())];
+        let mut out = String::new();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("rank"))
+            .expect("a header");
+        let header = lines[at]
+            .strip_suffix("  fired on")
+            .expect("the trailing label");
+        let mut rows = 0;
+        for row in &lines[at + 1..] {
+            if row.trim_start().starts_with("mask ") || row.is_empty() {
+                continue;
+            }
+            if row.starts_with("refused: pooled rank 4 names missing candidate 7") {
+                rows += 1;
+                continue;
+            }
+            let Some(row) = row
+                .strip_suffix("  AAA +18446744073709551614 more")
+                .or_else(|| row.strip_suffix("  AAA"))
+            else {
+                break;
+            };
+            crate::columns::assert_under(header, row, &[R, L, R, R, R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+            rows += 1;
+        }
+        assert_eq!(rows, pooled.len(), "{out}");
+        assert!(out.contains(&i64::MIN.to_string()), "{out}");
     }
 }

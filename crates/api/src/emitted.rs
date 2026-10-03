@@ -218,7 +218,9 @@ struct Case {
 /// all three browser engine entry points. The marker is driven directly here;
 /// proving an audit site must not require launching the expensive sweep it
 /// brackets.
-const ROWS: usize = 30;
+/// 30 -> 31 at D-1443: `api.calendar withheld`, a calendar month inside the
+/// span whose daily rung was not read, driven over two daily bars on disk.
+const ROWS: usize = 31;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -281,6 +283,55 @@ fn cases() -> Vec<Case> {
             },
             mine: Box::new(|record| {
                 says(record, "path", "emit-census") && says(record, "state", "absent")
+            }),
+        });
+    }
+
+    // crates/api/src/calendar_of.rs — a month inside the span whose daily
+    // rung was not read is withheld, and said so once per derivation. D-1443.
+    {
+        let root = fixture("emit-calendar-withheld");
+        cases.push(Case {
+            site: "calendar_of.rs api.calendar withheld",
+            target: "api.calendar",
+            message: "withheld",
+            level: telemetry::Level::Warn,
+            drive: {
+                let root = root.clone();
+                Box::new(move || {
+                    use crate::calendar_of::tests::{OPEN, epoch_day, stamp, write_bars_for};
+                    let month = |m| store::path::YearMonth::new(2026, m).expect("a real month");
+                    let (january, february, march) = (month(1), month(2), month(3));
+                    write_bars_for(
+                        &root,
+                        "EMITWITHHELD",
+                        store::path::Timeframe::DAY_1,
+                        january,
+                        &[stamp(epoch_day(2026, 1, 6), OPEN)],
+                    );
+                    write_bars_for(
+                        &root,
+                        "EMITWITHHELD",
+                        store::path::Timeframe::DAY_1,
+                        march,
+                        &[stamp(epoch_day(2026, 3, 2), OPEN)],
+                    );
+                    let derived = crate::calendar_of::cached(
+                        &crate::calendar_of::Cache::default(),
+                        &root,
+                        Vendor::Zerodha,
+                        "NSE",
+                        "INDEX",
+                        "EMITWITHHELD",
+                        None,
+                        &[january, february, march],
+                        |_, _| false,
+                    );
+                    assert!(derived.unopened.is_empty(), "nothing held failed to open");
+                })
+            },
+            mine: Box::new(|record| {
+                says(record, "symbol", "EMITWITHHELD") && counts(record, "months_withheld", 1)
             }),
         });
     }
@@ -761,7 +812,7 @@ fn cases() -> Vec<Case> {
                 2,
             );
             progress.finished_micros = Some(2);
-            progress.refusal = Some("no result was recorded".to_owned());
+            progress.refusal = Some("no result was recorded".into());
             crate::sweeprun::emit_completion(&progress, "sweep", 1);
         }),
         mine: Box::new(|record| {
@@ -1121,7 +1172,9 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1350,7 +1403,9 @@ fn clean_month_reads_every_row(root: &std::path::Path) {
     let mut writer = BarFile::open_or_create(root, path, symbol_id).expect("a fresh month");
     writer
         .append(&[Bar {
-            ts_micros: 1_786_000_000_000_000,
+            // On the minute grid the 1min path names (D-0915): 1_786_000_000
+            // seconds is 40 s past a minute.
+            ts_micros: 1_786_000_020_000_000,
             open: 2_450_000,
             high: 2_451_000,
             low: 2_449_000,
@@ -1528,7 +1583,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `server::census_request_tests::an_absence_its_stamps_contradict_is_logged_at_warn`.
     // Four additional refusal sites are read back by the partial/interrupted
     // broker basket, recovery resume refusal, and partial cash replay tests.
-    const REACHED_IN_SERVER_TESTS: usize = 19;
+    // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
+    // driven and read back by `server::credential_law_tests::
+    // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
+    const REACHED_IN_SERVER_TESTS: usize = 20;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1604,10 +1662,28 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// own tests cover the landing and the transport pairing against a
     /// recording transport, which is the half that has no network in it.
     ///
+    /// AND ONE MORE, added with D-1481 (v3b-2): `api.serve the serve lock is
+    /// held but could not be stamped`. It fires only when writing the stamp
+    /// into a lock file this process holds fails while emptying that same file
+    /// succeeds — a disk that fills between two calls on one descriptor. No
+    /// fixture produces that split: `/dev/full` fails both, which is the
+    /// refusal arm `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+    /// drives end to end, and the decision between the two arms is driven
+    /// directly through `stamp_outcome` with the host's own errors.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the seven
+    /// `pull.fno discovery refused`, the three named before it and the eight
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 8;
+    ///
+    /// AND TWO MORE, added with D-1582 and D-1583 (audit-20261003):
+    /// `api.main engine tasks abandoned at shutdown`, whose arm
+    /// `sweeprun::tests::stopping_does_not_wait_out_a_running_engine_task`
+    /// drives, but which only ever writes into the sink of a process that is
+    /// ending; and `api.request failed-request lines suppressed in the
+    /// previous window`, which needs more than fifty cross-site failures and
+    /// then a minute's wait — the ration it reports is proven by
+    /// `logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`.
+    const UNREACHABLE: usize = 11;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1620,9 +1696,18 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 57 -> 58 at D-0695's ninth repair: a census row served unreadable
     // because its stamps contradict its absence, driven in `server`'s census
     // request tests.
+    //
+    // 58 -> 59 at D-0948: the credential re-read in `credential_law::note`.
+    //
+    // 59 -> 60 at D-1443: `api.calendar withheld`, driven in the table above.
+    //
+    // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
+    // unreachable list above.
+    //
+    // 61 -> 63 at D-1582 and D-1583: the two unreachable sites named above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 58,
+        lib_sites, 63,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

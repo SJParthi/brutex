@@ -733,6 +733,13 @@ impl Column {
     }
 
     /// Both callers supply fixed vocabulary families: 11 or 31 positions.
+    ///
+    /// The family is folded into one mask once per call, and each row is then
+    /// merged with whole six-word mask operations by [`overlay_exact`]: O(1)
+    /// per row, independent of how many positions the family names. It used
+    /// to walk the family's positions one bit at a time on every row.
+    /// Proved by
+    /// `indicators::column::the_exact_minute_merge_is_whole_mask_and_agrees_with_the_per_bit_walk`.
     fn replace_exact_positions(
         &mut self,
         exact: &[(ConditionMask, ConditionMask)],
@@ -741,28 +748,18 @@ impl Column {
         if exact.len() != self.bits.len() {
             return false;
         }
+        let family = (*positions)
+            .clone()
+            .fold(ConditionMask::ZERO, |family, position| {
+                family.with_bit(u32::from(position))
+            });
         for ((mask, known), evidence) in self
             .bits
             .iter_mut()
             .zip(self.known.iter_mut())
             .zip(exact.iter())
         {
-            let mut without_local = *mask;
-            let mut only_exact = ConditionMask::ZERO;
-            let mut only_known = ConditionMask::ZERO;
-            for position in (*positions).clone() {
-                let position = u32::from(position);
-                without_local = without_local.without_bit(position);
-                *known = known.without_bit(position);
-                if evidence.0.get(position) {
-                    only_exact = only_exact.with_bit(position);
-                }
-                if evidence.1.get(position) {
-                    only_known = only_known.with_bit(position);
-                }
-            }
-            *mask = without_local.union(&only_exact);
-            *known = known.union(&only_known).union(&only_exact);
+            (*mask, *known) = overlay_exact(*mask, *known, *evidence, family);
         }
         true
     }
@@ -823,6 +820,12 @@ impl Column {
     /// and not a data condition, so it refuses rather than truncating to the
     /// shorter of the two.
     ///
+    /// `None` also when `onto` steps back — a kept target below the one before
+    /// it — or names an index at or past `onto_len`. The collision guard below
+    /// compares each target with the last kept one only, so it is exact only
+    /// for a non-decreasing map inside the series, and this door refuses any
+    /// other rather than filing two rows on one bar uncounted.
+    ///
     /// # Cost
     ///
     /// One pass, one copy per kept row. `O(len)`, called once per run and never
@@ -843,8 +846,10 @@ impl Column {
     /// once per execution bar and stores one bool; every later lookup is one
     /// bounds-checked read.
     ///
-    /// `None` when `onto` is not parallel to this column or this column has no
-    /// evaluator specification (only [`Column::default`] has none).
+    /// `None` when `onto` is not parallel to this column, steps back, or names
+    /// an index at or past `execution.len()` (as [`Self::reproject`]), or when
+    /// this column has no evaluator specification (only [`Column::default`] has
+    /// none).
     #[must_use]
     pub fn reproject_checked(
         &self,
@@ -909,6 +914,16 @@ impl Column {
                 // monotonically non-decreasing, so comparing against the last
                 // pushed index is exact and costs one compare per row -- no set,
                 // no allocation, and the pass stays O(len).
+                //
+                // That adjacency is a precondition of this public door, so it is
+                // checked rather than assumed: a target behind the last kept one,
+                // or at or past `onto_len`, refuses the whole projection. Each is
+                // one compare per row (ET-indicators-3).
+                Some(index)
+                    if index >= onto_len || source.last().is_some_and(|&last| index < last) =>
+                {
+                    return None;
+                }
                 Some(index) if source.last().copied() == Some(index) => {
                     collided = collided.saturating_add(1);
                 }
@@ -1074,6 +1089,33 @@ impl Column {
     pub fn is_empty(&self) -> bool {
         self.bits.is_empty()
     }
+}
+
+/// One row's exact-minute merge over `family`, in whole-mask operations.
+///
+/// Outside `family` the row's truth and availability are kept unchanged.
+/// Inside it, the local bits are cleared and replaced by the evidence:
+/// truth is the evidence's truth, and availability is the evidence's
+/// availability plus its truth, since a bit that is true is known. Evidence
+/// outside `family` is ignored.
+fn overlay_exact(
+    mask: ConditionMask,
+    known: ConditionMask,
+    evidence: (ConditionMask, ConditionMask),
+    family: ConditionMask,
+) -> (ConditionMask, ConditionMask) {
+    let outside = |m: ConditionMask| {
+        let (words, family) = (m.words(), family.words());
+        ConditionMask::from_words(std::array::from_fn(|w| {
+            words.get(w).copied().unwrap_or(0) & !family.get(w).copied().unwrap_or(0)
+        }))
+    };
+    let exact_truth = evidence.0.intersect(&family);
+    let exact_known = evidence.1.intersect(&family);
+    (
+        outside(mask).union(&exact_truth),
+        outside(known).union(&exact_known).union(&exact_truth),
+    )
 }
 
 #[cfg(test)]
@@ -1410,6 +1452,94 @@ pub(super) mod tests {
             still_firing > 0,
             "no row after the boundary carries a bit, so the test window is dead too and \
              `clear_before` cannot be distinguished from zeroing the whole column"
+        );
+    }
+
+    /// THE ROW MERGE IS WHOLE-MASK AND AGREES WITH THE PER-BIT WALK IT
+    /// REPLACED. Audit o1engine-40.
+    ///
+    /// `replace_exact_positions` walked the family's 11 or 31 positions one
+    /// bit at a time on every row. `overlay_exact` must give, for every row,
+    /// what that walk gave: checked against an independent per-bit reference
+    /// over all 384 positions for both real families and the empty and
+    /// all-ones families, on zero, all-ones, alternating-word and
+    /// single-bit rows and evidence, including evidence outside the family
+    /// (ignored) and truth without availability (known anyway). The method's
+    /// per-row loop must name no per-position loop.
+    #[test]
+    fn the_exact_minute_merge_is_whole_mask_and_agrees_with_the_per_bit_walk() {
+        fn reference(
+            mut mask: ConditionMask,
+            mut known: ConditionMask,
+            evidence: (ConditionMask, ConditionMask),
+            family: &[u16],
+        ) -> (ConditionMask, ConditionMask) {
+            let (mut only_exact, mut only_known) = (ConditionMask::ZERO, ConditionMask::ZERO);
+            for &position in family {
+                let position = u32::from(position);
+                mask = mask.without_bit(position);
+                known = known.without_bit(position);
+                if evidence.0.get(position) {
+                    only_exact = only_exact.with_bit(position);
+                }
+                if evidence.1.get(position) {
+                    only_known = only_known.with_bit(position);
+                }
+            }
+            (
+                mask.union(&only_exact),
+                known.union(&only_known).union(&only_exact),
+            )
+        }
+        let all = ConditionMask::from_words([u64::MAX; vocab::mask::WORDS]);
+        let odd = ConditionMask::from_words([0x5555_5555_5555_5555; vocab::mask::WORDS]);
+        let even = ConditionMask::from_words([0xAAAA_AAAA_AAAA_AAAA; vocab::mask::WORDS]);
+        let rows = [
+            ConditionMask::ZERO,
+            all,
+            odd,
+            even,
+            ConditionMask::ZERO.with_bit(86).with_bit(142).with_bit(2),
+            ConditionMask::ZERO.with_bit(383),
+        ];
+        let gap = crate::gap::GapFib::positions().to_vec();
+        let both: Vec<u16> = crate::orb::positions()
+            .into_iter()
+            .chain(gap.clone())
+            .collect();
+        let every: Vec<u16> = (0..384).collect();
+        for family in [&gap, &both, &Vec::new(), &every] {
+            let folded = family
+                .iter()
+                .fold(ConditionMask::ZERO, |m, &p| m.with_bit(u32::from(p)));
+            for &mask in &rows {
+                for &known in &rows {
+                    for &truth in &rows {
+                        for &avail in &rows {
+                            assert_eq!(
+                                overlay_exact(mask, known, (truth, avail), folded),
+                                reference(mask, known, (truth, avail), family),
+                                "family of {} positions",
+                                family.len()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let source = include_str!("column.rs");
+        let body = source
+            .split_once("    fn replace_exact_positions(")
+            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+            .expect("the method is in column.rs")
+            .0;
+        let per_row = body
+            .split_once("for ((mask, known), evidence)")
+            .expect("the per-row loop")
+            .1;
+        assert!(
+            !per_row.contains("for position"),
+            "the per-row loop walks positions again: {per_row}"
         );
     }
 
@@ -2019,6 +2149,76 @@ pub(super) mod tests {
         assert_eq!(column.census().refused(), 0);
         assert!(first > 0, "a run cannot be warm on its first bar");
     }
+
+    /// The ordinary and the anchored path admit the same bars but one: the first
+    /// warm bar (ET-indicators-6, recorded not fixed by D-0782).
+    ///
+    /// The ordinary path reads warmth before `step`, and the fifth completed
+    /// session is installed by the rollover inside `step`, so it drops the first
+    /// bar of the first warm session -- the "one lost warm bar per run" this
+    /// module's doc prices. The anchored path installs every daily reference
+    /// strictly before the bar's IST day and then reads warmth, so it admits that
+    /// bar. Given daily references aggregated from the same sessions, every row
+    /// both columns hold is identical, and the anchored column is one row longer
+    /// at its head.
+    #[test]
+    fn the_anchored_column_admits_the_first_warm_bar_the_ordinary_one_drops() {
+        use crate::anchored::{DailyEligibility, DailyReference};
+
+        let bars = warm_run();
+        let references: Vec<DailyReference> = bars
+            .chunks(BARS_PER_SESSION)
+            .map(|session| {
+                let first = session.first().expect("a session has bars");
+                let last = session.last().expect("a session has bars");
+                let daily = Candle::new(
+                    first.ts_micros,
+                    first.open,
+                    session.iter().map(|b| b.high).max().unwrap_or(first.high),
+                    session.iter().map(|b| b.low).min().unwrap_or(first.low),
+                    last.close,
+                    session.iter().map(|b| b.volume).sum(),
+                    OI_NULL,
+                );
+                DailyReference::new(daily, DailyEligibility::Eligible)
+                    .expect("an aggregated fixture session is a usable daily bar")
+            })
+            .collect();
+
+        let mut ordinary_ev = evaluator(Availability::Absent);
+        let ordinary = Column::build(&bars, &mut ordinary_ev);
+        let mut anchored_ev = AnchoredEvaluator::new(
+            widths(),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+            &references,
+        )
+        .expect("one reference per strictly increasing day");
+        let anchored = AnchoredColumn::build(&bars, &mut anchored_ev);
+        let anchored = anchored.column();
+
+        let first = ordinary
+            .first_swept()
+            .expect("eight sessions warm the ordinary run");
+        assert_eq!(
+            anchored.first_swept(),
+            Some(first - 1),
+            "the anchored path admits the bar before the ordinary path's first"
+        );
+        assert_eq!(
+            anchored.len(),
+            ordinary.len() + 1,
+            "exactly one row differs"
+        );
+        assert_eq!(
+            first % BARS_PER_SESSION,
+            1,
+            "the dropped bar is the first bar of the first warm session"
+        );
+        assert_eq!(anchored.sources().get(1..), Some(ordinary.sources()));
+        assert_eq!(anchored.bits().get(1..), Some(ordinary.bits()));
+        assert_eq!(anchored.known().get(1..), Some(ordinary.known()));
+    }
 }
 
 #[cfg(test)]
@@ -2100,20 +2300,21 @@ mod reproject_tests {
         let column = Column::build(&bars, &mut ev);
         assert!(column.len() >= 4, "the fixture must give enough rows");
 
-        // A hole in the execution series: rows 1 and 2 both resolve to bar 7,
-        // and rows 3 and 4 both resolve to bar 9. Everything else is distinct.
+        // A hole in the execution series: rows 1 and 2 both resolve to bar 22,
+        // and rows 3 and 4 both resolve to bar 24. Everything else is distinct,
+        // and the map stays non-decreasing as `align::onto_execution` returns it.
         let mut onto: Vec<Option<usize>> = (0..column.len()).map(|i| Some(i + 20)).collect();
         if let Some(slot) = onto.get_mut(1) {
-            *slot = Some(7);
+            *slot = Some(22);
         }
         if let Some(slot) = onto.get_mut(2) {
-            *slot = Some(7);
+            *slot = Some(22);
         }
         if let Some(slot) = onto.get_mut(3) {
-            *slot = Some(9);
+            *slot = Some(24);
         }
         if let Some(slot) = onto.get_mut(4) {
-            *slot = Some(9);
+            *slot = Some(24);
         }
 
         let (projected, dropped) = column
@@ -2149,7 +2350,7 @@ mod reproject_tests {
 
         // And the survivor is the FIRST of each pair, not the last.
         assert!(
-            projected.sources().contains(&7) && projected.sources().contains(&9),
+            projected.sources().contains(&22) && projected.sources().contains(&24),
             "the fill bars themselves are kept; it is the second claimant on \
              each that is refused"
         );
@@ -2186,6 +2387,80 @@ mod reproject_tests {
         assert!(
             column.reproject(&[Some(0)], 10).is_none(),
             "a caller bug refuses rather than silently taking the shorter of two"
+        );
+    }
+
+    /// A map that goes backwards, or past the series it names, refuses.
+    ///
+    /// The one-compare collision guard only sees a duplicate that is ADJACENT
+    /// to the last kept row. A map that steps back puts a second row on an
+    /// earlier fill bar with nothing counted in `collided`, and a target at or
+    /// past `onto_len` names a bar the series does not have (ET-indicators-3).
+    /// Both are caller bugs on a public door, so both refuse.
+    #[test]
+    fn a_map_that_steps_back_or_past_its_series_refuses() {
+        let bars = run(6);
+        let mut ev = build_evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        let len = column.len();
+        assert!(len >= 4, "the fixture must give enough rows");
+        let identity: Vec<Option<usize>> = (0..len).map(Some).collect();
+
+        let (projected, _) = column
+            .reproject(&identity, len)
+            .expect("the last target one short of onto_len is inside the series");
+        assert_eq!(
+            projected.len(),
+            len,
+            "an in-range monotone map keeps every row"
+        );
+
+        let mut backwards = identity.clone();
+        backwards.swap(1, 2);
+        assert!(
+            column.reproject(&backwards, len).is_none(),
+            "row 2 steps back to bar 1 after row 1 took bar 2"
+        );
+
+        // A dropped row between two kept rows does not excuse a step back:
+        // the guard compares with the last KEPT target, not the last row.
+        let mut across_a_gap = identity.clone();
+        if let Some(slot) = across_a_gap.get_mut(1) {
+            *slot = Some(3);
+        }
+        if let Some(slot) = across_a_gap.get_mut(2) {
+            *slot = None;
+        }
+        if let Some(slot) = across_a_gap.get_mut(3) {
+            *slot = Some(2);
+        }
+        assert!(
+            column.reproject(&across_a_gap, len).is_none(),
+            "row 3 steps back to bar 2 after row 1 took bar 3, with a dropped row between"
+        );
+
+        // Re-taking the SAME bar across that gap is the adjacent duplicate the
+        // guard counts, not a step back, so it still projects.
+        if let Some(slot) = across_a_gap.get_mut(3) {
+            *slot = Some(3);
+        }
+        let (repeated, dropped) = column
+            .reproject(&across_a_gap, len)
+            .expect("a repeated target is non-decreasing");
+        assert_eq!(dropped, 1, "row 2 is the one dropped row");
+        assert_eq!(repeated.collided(), 1, "row 3 collides with row 1 on bar 3");
+        assert_eq!(repeated.len(), len - 2, "one dropped and one collided row");
+
+        assert!(
+            column.reproject(&identity, len - 1).is_none(),
+            "the last row targets bar len-1, which a series of len-1 bars does not have"
+        );
+        let short = bars
+            .get(..len - 1)
+            .expect("the column is no longer than the bars it was built from");
+        assert!(
+            column.reproject_checked(&identity, short).is_none(),
+            "the checked door refuses the same out-of-range target"
         );
     }
 }

@@ -3669,7 +3669,7 @@ impl AnchoredWalkForwardAuthorityV2 {
         anchored: &crate::validate::AnchoredAdmissionValidationV2,
     ) -> Result<Self, AnchoredWalkForwardRefusalV2> {
         let projection = anchored
-            .search_authority_projection()
+            .issued_authority_projection()
             .map_err(|_| AnchoredWalkForwardRefusalV2::OpaqueProvenanceMismatch)?;
         Ok(Self {
             validation_policy_digest: projection.policy_identity().digest(),
@@ -3833,7 +3833,7 @@ impl AnchoredWalkForwardAuthorityV3 {
         anchored: &crate::validate::AnchoredSearchValidationV3,
     ) -> Result<Self, AnchoredWalkForwardRefusalV3> {
         let projection = anchored
-            .search_authority_projection()
+            .issued_authority_projection()
             .map_err(|_| AnchoredWalkForwardRefusalV3::OpaqueProvenanceMismatch)?;
         Ok(Self {
             validation_policy_digest: projection.policy_identity().digest(),
@@ -3861,7 +3861,7 @@ impl AnchoredWalkForwardAuthorityV3 {
         anchored: &crate::validate::AnchoredSearchValidationV4,
     ) -> Result<Self, AnchoredWalkForwardRefusalV3> {
         let projection = anchored
-            .search_authority_projection()
+            .issued_authority_projection()
             .map_err(|_| AnchoredWalkForwardRefusalV3::OpaqueProvenanceMismatch)?;
         Ok(Self {
             validation_policy_digest: projection.policy_identity().digest(),
@@ -4042,6 +4042,11 @@ pub enum AdmissionV2ArithmeticRefusal {
     WalkForward(AnchoredWalkForwardRefusalV2),
     /// The two detached arithmetic sources could not be joined.
     Evidence(AdmissionEvidenceRefusalV2),
+    /// A max-gated probability whose floor ppm projection is within the
+    /// policy ceiling while its exact fraction is above it (GAP5-49, D-0743).
+    /// The stored projection cannot carry that comparison, so no record is
+    /// produced.
+    ProbabilityProjection(AdmissionReasonV1),
 }
 
 /// Admission Evidence V2 retaining both independent authorities and their
@@ -4157,6 +4162,61 @@ impl AdmissionEvidenceV2 {
     #[must_use]
     pub fn digest(self) -> [u8; 32] {
         brutex_core::blake3::hash(&self.canonical_bytes())
+    }
+}
+
+/// The first max-gated probability whose floor ppm projection is within its
+/// policy ceiling while the exact fraction is above it (GAP5-49, D-0743).
+///
+/// The fixed policy compares the stored floor projection, so such a value
+/// would pass a gate its exact fraction fails. The five are checked in this
+/// order: PBO, family-wise Romano--Wolf, SPA, White and candidate
+/// Romano--Wolf.
+fn floor_hidden_ceiling_v2(
+    policy: &AdmissionPolicyValuesV1,
+    pbo: AdmissionExactProbabilityV2,
+    fwer: AdmissionExactProbabilityV2,
+    spa: AdmissionExactProbabilityV2,
+    white: AdmissionExactProbabilityV2,
+    romano_wolf: AdmissionExactProbabilityV2,
+) -> Option<AdmissionReasonV1> {
+    [
+        (AdmissionReasonV1::Pbo, pbo, policy.max_pbo_ppm),
+        (AdmissionReasonV1::Fwer, fwer, policy.max_fwer_p_value_ppm),
+        (AdmissionReasonV1::Spa, spa, policy.max_spa_p_value_ppm),
+        (
+            AdmissionReasonV1::WhiteRealityPValue,
+            white,
+            policy.max_white_reality_p_value_ppm,
+        ),
+        (
+            AdmissionReasonV1::RomanoWolfPValue,
+            romano_wolf,
+            policy.max_romano_wolf_p_value_ppm,
+        ),
+    ]
+    .into_iter()
+    .find_map(|(reason, probability, ceiling)| {
+        (probability.ppm() <= ceiling && !probability.rejects_at_ppm(ceiling)).then_some(reason)
+    })
+}
+
+/// [`floor_hidden_ceiling_v2`] over verified V3 Statistics fields.
+fn floor_hidden_ceiling_v3(
+    policy: &AdmissionPolicyValuesV1,
+    fields: &AdmissionStatisticsFieldsV3,
+) -> Result<(), AdmissionV3ArithmeticRefusal> {
+    let s = fields.values();
+    match floor_hidden_ceiling_v2(
+        policy,
+        s.pbo_probability,
+        s.familywise_romano_wolf_probability,
+        s.spa_probability,
+        s.white_probability,
+        s.candidate_romano_wolf_probability,
+    ) {
+        Some(reason) => Err(AdmissionV3ArithmeticRefusal::ProbabilityProjection(reason)),
+        None => Ok(()),
     }
 }
 
@@ -4344,6 +4404,9 @@ pub enum AdmissionV3ArithmeticRefusal {
     WalkForward(AnchoredWalkForwardRefusalV3),
     /// The two arithmetic sources could not be joined.
     Evidence(AdmissionEvidenceRefusalV3),
+    /// A max-gated probability whose floor ppm projection is within the
+    /// policy ceiling while its exact fraction is above it (GAP5-49, D-0743).
+    ProbabilityProjection(AdmissionReasonV1),
 }
 
 /// Admission Evidence V3 with only provable Statistics identities and the
@@ -4688,6 +4751,8 @@ impl AdmissionPolicyV1 {
     /// # Errors
     ///
     /// Returns the first Statistics, walk-forward, or evidence-join refusal.
+    ///
+    /// **No production caller (D-1544).** Only this module's tests call it.
     pub fn evaluate_v2_projection(
         self,
         base: &AdmissionEvidenceValuesV1,
@@ -4700,6 +4765,17 @@ impl AdmissionPolicyV1 {
             .map_err(AdmissionV2ArithmeticRefusal::WalkForward)?;
         let evidence = AdmissionEvidenceV2::new(*base, &fields, walk_forward)
             .map_err(AdmissionV2ArithmeticRefusal::Evidence)?;
+        let s = fields.values();
+        if let Some(reason) = floor_hidden_ceiling_v2(
+            &self.values,
+            s.pbo_probability,
+            s.familywise_romano_wolf_probability,
+            s.spa_probability,
+            s.white_probability,
+            s.candidate_romano_wolf_probability,
+        ) {
+            return Err(AdmissionV2ArithmeticRefusal::ProbabilityProjection(reason));
+        }
         Ok(AdmissionV2ArithmeticProjection::from_decision(
             &self.evaluate_v2_record(&evidence),
         ))
@@ -4737,6 +4813,8 @@ impl AdmissionPolicyV1 {
     /// # Errors
     ///
     /// Returns the first Statistics, walk-forward, or evidence-join refusal.
+    ///
+    /// **No production caller (D-1544).** Only this module's tests call it.
     pub fn evaluate_v3_projection(
         self,
         base: &AdmissionEvidenceValuesV1,
@@ -4749,6 +4827,7 @@ impl AdmissionPolicyV1 {
             .map_err(AdmissionV3ArithmeticRefusal::WalkForward)?;
         let evidence = AdmissionEvidenceV3::new(*base, &fields, walk_forward)
             .map_err(AdmissionV3ArithmeticRefusal::Evidence)?;
+        floor_hidden_ceiling_v3(&self.values, &fields)?;
         Ok(AdmissionV3ArithmeticProjection::from_decision(
             &self.evaluate_v3_record(&evidence),
         ))
@@ -4779,6 +4858,7 @@ impl AdmissionPolicyV1 {
             .map_err(AdmissionV3ArithmeticRefusal::WalkForward)?;
         let evidence = AdmissionEvidenceV3::new(*base, &fields, walk_forward)
             .map_err(AdmissionV3ArithmeticRefusal::Evidence)?;
+        floor_hidden_ceiling_v3(&self.values, &fields)?;
         Ok(AdmissionV3ArithmeticProjection::from_decision(
             &self.evaluate_v3_record(&evidence),
         ))
@@ -6036,10 +6116,11 @@ mod tests {
         AdmissionReasonV1, AdmissionStatisticsDraftV2, AdmissionStatisticsDraftV3,
         AdmissionStatisticsFieldsV2, AdmissionStatisticsFieldsV3, AdmissionStatisticsIdentityV3,
         AdmissionStatisticsRefusalV2, AdmissionStatisticsRefusalV3, AdmissionStatusV1,
-        AdmissionV2ArithmeticProjection, AdmissionV3ArithmeticProjection,
-        AdmissionVerdictPartitionV1, AdmissionVerdictV1, AnchoredWalkForwardAuthorityV2,
-        AnchoredWalkForwardAuthorityV3, AnchoredWalkForwardRefusalV2, AnchoredWalkForwardRefusalV3,
-        CompletenessV1, HypothesisDecisionV1, ObservedI64V1, ObservedU64V1, PPM, ReasonBits,
+        AdmissionV2ArithmeticProjection, AdmissionV2ArithmeticRefusal,
+        AdmissionV3ArithmeticProjection, AdmissionV3ArithmeticRefusal, AdmissionVerdictPartitionV1,
+        AdmissionVerdictV1, AnchoredWalkForwardAuthorityV2, AnchoredWalkForwardAuthorityV3,
+        AnchoredWalkForwardRefusalV2, AnchoredWalkForwardRefusalV3, CompletenessV1,
+        HypothesisDecisionV1, ObservedI64V1, ObservedU64V1, PPM, ReasonBits,
         canonical_wilson_projection_v2, hypothesis_decision_v2,
     };
     use costs::fill::Direction;
@@ -9115,5 +9196,163 @@ mod tests {
             ),
             Err(AdmissionCanonicalRefusalV3::VerdictMismatch)
         );
+    }
+    /// W3-runner1-0 (D-0740): one admission decision per candidate reads the
+    /// projection its opaque validation sealed when it was issued, so the
+    /// fold-wide private-seal reconciliation is not repeated per candidate.
+    #[test]
+    fn per_candidate_admission_never_re_reconciles_the_opaque_validation() {
+        let (policy, base, anchored_v2, statistics_v2) = v2_parts();
+        let anchored_v3 = anchored_v3();
+        let anchored_v4 = crate::validate::tests::anchored_search_fixture_v4();
+        let statistics_v3 = statistics_v3(1);
+        let first_v2 = policy
+            .evaluate_v2_projection(&base, &statistics_v2, &anchored_v2)
+            .expect("V2 fixture arithmetic reconciles");
+        let first_v3 = policy
+            .evaluate_v3_projection(&base, &statistics_v3, &anchored_v3)
+            .expect("V3 fixture arithmetic reconciles");
+        let first_v4 = policy
+            .evaluate_v3_exact_grid_projection(&base, &statistics_v3, &anchored_v4)
+            .expect("exact-grid fixture arithmetic reconciles");
+
+        let before = crate::validate::reconciles_on_this_thread();
+        for _ in 0..7 {
+            assert_eq!(
+                policy.evaluate_v2_projection(&base, &statistics_v2, &anchored_v2),
+                Ok(first_v2)
+            );
+            assert_eq!(
+                policy.evaluate_v3_projection(&base, &statistics_v3, &anchored_v3),
+                Ok(first_v3)
+            );
+            assert_eq!(
+                policy.evaluate_v3_exact_grid_projection(&base, &statistics_v3, &anchored_v4),
+                Ok(first_v4)
+            );
+        }
+        assert_eq!(
+            crate::validate::reconciles_on_this_thread() - before,
+            0,
+            "21 admission decisions must not re-run any fold-wide reconciliation"
+        );
+
+        // Control: the counter does see the full revalidating door, and the
+        // sealed projection is the one that door still derives.
+        let projection = anchored_v4
+            .search_authority_projection()
+            .expect("the exact-grid fixture revalidates");
+        assert_eq!(crate::validate::reconciles_on_this_thread() - before, 1);
+        assert_eq!(
+            first_v4.comparison_values().decided_folds,
+            ObservedU64V1::Measured(projection.decided_folds())
+        );
+    }
+
+    /// GAP5-49 (D-0743): the fixed policy compares each max-gated probability
+    /// by its floor ppm projection, so an exact fraction just above a ceiling
+    /// floored onto it and passed. Every V2, V3 and exact-grid door now
+    /// refuses that value, naming the gate, and still decides a value exactly
+    /// at the ceiling or clearly above it.
+    #[test]
+    fn a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it() {
+        let (policy, base, anchored_v2, statistics_v2) = v2_parts();
+        let anchored_v3 = anchored_v3();
+        let anchored_v4 = crate::validate::tests::anchored_search_fixture_v4();
+        let at = |numerator, denominator| {
+            AdmissionExactProbabilityV2::new(numerator, denominator).expect("exact fixture")
+        };
+        // 2_501 / 50_019 floors to 50_000 ppm, the fixture's 5% ceiling, and is
+        // above it; 2_500 / 50_019 is within it.
+        let above = at(2_501, 50_019);
+        let within = at(2_500, 50_019);
+        assert_eq!(policy.values().max_spa_p_value_ppm, 50_000);
+        assert_eq!(above.ppm(), 50_000);
+        assert!(!above.rejects_at_ppm(50_000));
+        assert!(within.rejects_at_ppm(50_000));
+        let mut resampled = statistics_v2;
+        resampled.bootstrap_draws = 50_018;
+        resampled.white_probability = within;
+        resampled.spa_probability = within;
+        resampled.familywise_romano_wolf_probability = within;
+        resampled.candidate_romano_wolf_probability = within;
+
+        let mut cases = Vec::new();
+        let mut pbo = resampled;
+        // 100_001 / 1_000_009 floors to 100_000 ppm, the fixture's PBO ceiling.
+        pbo.cscv_split_count = 1_000_011;
+        pbo.pbo_contributing_splits = 1_000_009;
+        pbo.pbo_probability = at(100_001, 1_000_009);
+        assert_eq!(pbo.pbo_probability.ppm(), policy.values().max_pbo_ppm);
+        cases.push((pbo, AdmissionReasonV1::Pbo));
+        let mut fwer = resampled;
+        fwer.familywise_romano_wolf_probability = above;
+        fwer.candidate_romano_wolf_probability = above;
+        cases.push((fwer, AdmissionReasonV1::Fwer));
+        let mut spa = resampled;
+        spa.spa_probability = above;
+        cases.push((spa, AdmissionReasonV1::Spa));
+        let mut white = resampled;
+        white.white_probability = above;
+        cases.push((white, AdmissionReasonV1::WhiteRealityPValue));
+        let mut romano_wolf = resampled;
+        romano_wolf.candidate_romano_wolf_probability = above;
+        cases.push((romano_wolf, AdmissionReasonV1::RomanoWolfPValue));
+
+        for (statistics, reason) in cases {
+            assert_eq!(
+                policy.evaluate_v2_projection(&base, &statistics, &anchored_v2),
+                Err(AdmissionV2ArithmeticRefusal::ProbabilityProjection(reason)),
+                "V2 {reason:?}"
+            );
+            let v3 = v3_of(&statistics);
+            assert_eq!(
+                policy.evaluate_v3_projection(&base, &v3, &anchored_v3),
+                Err(AdmissionV3ArithmeticRefusal::ProbabilityProjection(reason)),
+                "V3 {reason:?}"
+            );
+            assert_eq!(
+                policy.evaluate_v3_exact_grid_projection(&base, &v3, &anchored_v4),
+                Err(AdmissionV3ArithmeticRefusal::ProbabilityProjection(reason)),
+                "exact grid {reason:?}"
+            );
+        }
+
+        // Within every ceiling, and PBO exactly on its own (1 / 10), decides.
+        assert!(
+            policy
+                .evaluate_v2_projection(&base, &resampled, &anchored_v2)
+                .is_ok()
+        );
+        assert!(
+            policy
+                .evaluate_v3_projection(&base, &v3_of(&resampled), &anchored_v3)
+                .is_ok()
+        );
+        assert!(
+            policy
+                .evaluate_v3_exact_grid_projection(&base, &v3_of(&resampled), &anchored_v4)
+                .is_ok()
+        );
+        // Clearly above the ceiling is still a measured failure, not a refusal.
+        let mut failing = resampled;
+        failing.spa_probability = at(2_600, 50_019);
+        let decided = policy
+            .evaluate_v2_projection(&base, &failing, &anchored_v2)
+            .expect("a floor above the ceiling is decided by the policy");
+        assert!(decided.verdict.failed().contains(AdmissionReasonV1::Spa));
+    }
+
+    fn v3_of(legacy: &AdmissionStatisticsDraftV2) -> AdmissionStatisticsDraftV3 {
+        let mut v3 = statistics_v3(1);
+        v3.cscv_split_count = legacy.cscv_split_count;
+        v3.pbo_contributing_splits = legacy.pbo_contributing_splits;
+        v3.pbo_probability = legacy.pbo_probability;
+        v3.white_probability = legacy.white_probability;
+        v3.spa_probability = legacy.spa_probability;
+        v3.familywise_romano_wolf_probability = legacy.familywise_romano_wolf_probability;
+        v3.candidate_romano_wolf_probability = legacy.candidate_romano_wolf_probability;
+        v3.bootstrap_draws = legacy.bootstrap_draws;
+        v3
     }
 }

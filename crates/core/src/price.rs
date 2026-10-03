@@ -6,10 +6,15 @@
 //! float price is how a rounding difference becomes a divergent result set six
 //! months later, and integers are exact, comparable, hashable and free.
 //!
-//! A float appears in exactly one place — the vendor sends rupees as a
-//! floating-point number, so the conversion has to accept one. That conversion
-//! is [`Paisa::from_rupees_half_up`], it happens once at the ingest boundary,
-//! and it is the only function in this crate that touches an `f64`.
+//! Two conversions take rupees to paisa, and both snap half-up once.
+//! [`Paisa::from_rupee_text_half_up`] reads decimal TEXT and is what `pull`
+//! uses for every vendor price: a JSON number is rendered back to its shortest
+//! round-tripping text and that text is read digit by digit. (The JSON parser
+//! itself does hold the number as an `f64` first; `docs/06-limits.md` D-1494
+//! states when that is exact.) [`Paisa::from_rupees_half_up`] takes an `f64`
+//! and is the only function in this crate that does; its one non-test caller is
+//! `lake`'s bar reader. This said the `f64` conversion was the one ingest
+//! conversion until D-1494 corrected it (GAP16-28).
 
 use crate::error::PriceError;
 
@@ -18,6 +23,16 @@ use crate::error::PriceError;
 /// This is the only place the number 100 means "rupee to paisa". Anywhere else
 /// it would be a magic constant that a reader has to infer.
 pub const PAISA_PER_RUPEE: i64 = 100;
+
+/// The longest rupee text [`Paisa::from_rupee_text_half_up`] reads, in bytes,
+/// ASCII padding included.
+///
+/// The widest price that fits `i64` paisa, `-92233720368547758.07`, is 21 bytes,
+/// and the shortest round-tripping text of any `f64` (what `pull` renders a JSON
+/// number back to) is at most 24. Sixty-four leaves room for padding and trailing
+/// zeros and still bounds the reader's cost by a constant. Longer text is refused
+/// with [`PriceError::TooLong`], never truncated.
+pub const MAX_PRICE_TEXT: usize = 64;
 
 /// A price, as a count of paisa.
 ///
@@ -114,10 +129,30 @@ impl Paisa {
             return Err(PriceError::NotFinite);
         }
 
-        // Scale, bias, floor. Adding 0.5 then flooring is half-up for every
-        // sign; `f64::round` is half-away-from-zero and would disagree with
-        // this function's own doc comment on a negative tie.
-        let floored = (rupees * SCALE + 0.5).floor();
+        // Scale, floor, then compare the fraction with one half. That is
+        // half-up for every sign; `f64::round` is half-away-from-zero and would
+        // disagree with this function's own doc comment on a negative tie.
+        //
+        // NOT `(scaled + 0.5).floor()`, which it was until D-0786: the ADDITION
+        // rounds before the floor sees it. A scaled value of
+        // 0.49999999999999994 plus 0.5 rounds to exactly 1.0, and the odd
+        // integer 4_503_599_627_370_497.0 plus 0.5 rounds to ...498.0, so both
+        // came back one paisa high although neither is a tie. The
+        // multiplication by 100 still rounds; that is the limit
+        // `a_decimal_tie_is_usually_not_a_binary_tie` records.
+        //
+        // The remainder is exact: a double minus its floor is exact under
+        // 2^52, and at or above it every double is an integer and the
+        // remainder is zero. An overflowed product is infinite, its remainder
+        // is NaN, the comparison is false, and the range check below refuses
+        // it. (Found again as probestore-6.)
+        let scaled = rupees * SCALE;
+        let whole = scaled.floor();
+        let floored = if scaled - whole >= 0.5 {
+            whole + 1.0
+        } else {
+            whole
+        };
 
         // EXCLUSIVE at both ends. `(NEG_LIMIT..LIMIT)` was inclusive at the low end, so
         // `from_rupees_half_up(-92_233_720_368_547_758.08)` returned
@@ -153,8 +188,8 @@ impl Paisa {
     /// # Rounding
     ///
     /// Half-up means ties toward positive infinity, which is what
-    /// [`Self::from_rupees_half_up`] does and why it adds `0.5` and floors rather than
-    /// calling `round`. So the third fractional digit decides, and the two signs decide
+    /// [`Self::from_rupees_half_up`] does and why it floors and compares the fraction with
+    /// one half rather than calling `round`. So the third fractional digit decides, and the two signs decide
     /// differently at an exact tie:
     ///
     /// * positive: round up when the remainder is `>= 0.5`, i.e. the third digit is `>= 5`
@@ -166,8 +201,15 @@ impl Paisa {
     ///
     /// # Errors
     ///
-    /// [`PriceError::NotDecimal`] for text that is not an optionally-signed decimal, and
-    /// [`PriceError::OutOfRange`] when the value does not fit `i64` paisa.
+    /// [`PriceError::TooLong`] for text longer than [`MAX_PRICE_TEXT`] bytes, padding
+    /// included, [`PriceError::NotDecimal`] for text that is not an optionally-signed
+    /// decimal, and [`PriceError::OutOfRange`] when the value does not fit `i64` paisa.
+    ///
+    /// # Cost
+    ///
+    /// At most [`MAX_PRICE_TEXT`] bytes are read, a few passes over them, so the cost
+    /// is bounded by that constant whatever the caller hands in. The length is refused
+    /// before the first byte is looked at.
     ///
     /// # Examples
     ///
@@ -179,6 +221,13 @@ impl Paisa {
     /// ```
     pub fn from_rupee_text_half_up(text: &str) -> Result<Self, PriceError> {
         const _: () = assert!(PAISA_PER_RUPEE == 100);
+
+        // THE LENGTH IS REFUSED FIRST, so every pass below walks a bounded slice.
+        // Without it the reader's cost was whatever its caller handed it: `pull`
+        // passes the `to_string()` of a decoded cell, and nothing upstream bounds that.
+        if text.len() > MAX_PRICE_TEXT {
+            return Err(PriceError::TooLong);
+        }
 
         // ASCII whitespace only. `str::trim` is Unicode-aware and strips U+00A0, so a
         // non-breaking space smuggled into a master-file column would read as padding and
@@ -335,8 +384,8 @@ mod tests {
 
     /// A negative tie rounds toward POSITIVE infinity, which is what half-up means here.
     ///
-    /// [`Paisa::from_rupees_half_up`]'s own comment says so: adding `0.5` then flooring is
-    /// half-up for every sign, and `round` would disagree on exactly this input. So `-0.145`
+    /// [`Paisa::from_rupees_half_up`]'s own comment says so: flooring and comparing the
+    /// fraction with one half is half-up for every sign, and `round` would disagree on exactly this input. So `-0.145`
     /// is `-14`, not `-15`. The two signs need different comparisons against the half, and
     /// getting it wrong is a one-paisa error in the direction that flatters a short.
     #[test]
@@ -389,6 +438,56 @@ mod tests {
         );
         assert_eq!(Paisa::from_rupee_text_half_up(".5").map(Paisa::raw), Ok(50));
         assert_eq!(Paisa::from_rupee_text_half_up("7").map(Paisa::raw), Ok(700));
+    }
+
+    /// Text past [`MAX_PRICE_TEXT`] is refused before it is read, and text at it is read.
+    ///
+    /// The reader walks its input several times, so without the bound its cost is the
+    /// caller's input length. The boundary is exact: 64 bytes reads and 65 does not,
+    /// for digits and for padding alike, and a mebibyte of digits is refused with the
+    /// same error rather than walked. The widest `i64` paisa price fits well inside.
+    #[test]
+    fn text_longer_than_the_bound_is_refused_before_it_is_read() {
+        let at = format!("1.{}", "0".repeat(MAX_PRICE_TEXT - 2));
+        assert_eq!(at.len(), MAX_PRICE_TEXT);
+        assert_eq!(Paisa::from_rupee_text_half_up(&at).map(Paisa::raw), Ok(100));
+        let past = format!("{at}0");
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&past),
+            Err(PriceError::TooLong)
+        );
+
+        let padded = format!("{:>width$}", "7", width = MAX_PRICE_TEXT);
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&padded).map(Paisa::raw),
+            Ok(700)
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&format!(" {padded}")),
+            Err(PriceError::TooLong)
+        );
+
+        let huge = format!("0.{}1", "0".repeat(1 << 20));
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&huge),
+            Err(PriceError::TooLong)
+        );
+        // Malformed AND long is refused for its length: nothing is read.
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(&"x".repeat(MAX_PRICE_TEXT + 1)),
+            Err(PriceError::TooLong)
+        );
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(""),
+            Err(PriceError::NotDecimal)
+        );
+
+        let widest = "-92233720368547758.07";
+        assert!(widest.len() < MAX_PRICE_TEXT);
+        assert_eq!(
+            Paisa::from_rupee_text_half_up(widest).map(Paisa::raw),
+            Ok(-9_223_372_036_854_775_807)
+        );
     }
 
     /// `i64::MIN` is not a price, because it is the open-interest null sentinel.
@@ -583,5 +682,131 @@ mod tests {
             let got = Paisa::from_rupees_half_up(rupees).expect("finite, in range");
             assert_eq!(got.raw(), want, "{rupees} rupees");
         }
+    }
+
+    // C4 core batch 1 — D-0786.
+    #[test]
+    fn the_half_up_decision_reads_the_scaled_value_not_a_biased_sum() {
+        // Just below a tie. The scaled product is 0.49999999999999994, which
+        // is under half a paisa, so half-up gives 0. Adding 0.5 before the
+        // floor rounded that sum to exactly 1.0 and returned 1.
+        let scaled = 0.004_999_999_999_999_999_f64 * 100.0;
+        assert!(scaled < 0.5, "the witness is below a tie: {scaled}");
+        assert_eq!(
+            Paisa::from_rupees_half_up(0.004_999_999_999_999_999)
+                .expect("finite")
+                .raw(),
+            0
+        );
+
+        // An odd integer at 2^52 or above. The scaled product is exactly
+        // 4_503_599_627_370_497, with no fraction to round, but the biased sum
+        // 4_503_599_627_370_497.5 is not representable and rounded to ...498.
+        let scaled = 45_035_996_273_704.97_f64 * 100.0;
+        assert_eq!(
+            scaled.to_bits(),
+            4_503_599_627_370_497.0_f64.to_bits(),
+            "the witness is an integer"
+        );
+        assert_eq!(
+            Paisa::from_rupees_half_up(45_035_996_273_704.97)
+                .expect("in range")
+                .raw(),
+            4_503_599_627_370_497
+        );
+
+        // The decision's own boundary: the largest double below a genuine tie
+        // rounds down, the tie itself rounds up, on both signs.
+        let under = 0.125_f64.next_down();
+        assert!(under * 100.0 < 12.5, "the witness is below a tie");
+        assert_eq!(Paisa::from_rupees_half_up(under).expect("finite").raw(), 12);
+        assert_eq!(Paisa::from_rupees_half_up(0.125).expect("finite").raw(), 13);
+        assert_eq!(
+            Paisa::from_rupees_half_up(-0.125).expect("finite").raw(),
+            -12
+        );
+        assert_eq!(Paisa::from_rupees_half_up(1.0).expect("finite").raw(), 100);
+
+        // Negative values below one paisa in size: half-up takes each toward
+        // zero, and the negative tie -0.5 paisa to zero as well.
+        assert_eq!(Paisa::from_rupees_half_up(-1e-20).expect("finite").raw(), 0);
+        assert_eq!(
+            Paisa::from_rupees_half_up(-0.004_999_999_999_999_999)
+                .expect("finite")
+                .raw(),
+            0
+        );
+        assert_eq!(Paisa::from_rupees_half_up(-0.005).expect("finite").raw(), 0);
+        assert_eq!(Paisa::from_rupees_half_up(-0.3).expect("finite").raw(), -30);
+    }
+
+    // C4 core batch 1 — D-0786. What the change does NOT move.
+    /// Every two-decimal price from ₹0.00 to ₹1,00,000.00 snaps to its own paisa, and so do
+    /// the doubles one step above and one step below it.
+    ///
+    /// The double is made by parsing the decimal text, so the test holds no float
+    /// arithmetic of its own. Run against the biased-sum rule this function used before
+    /// D-0786 it passes as well, which is the measurement D-0786 cites for "no paisa on
+    /// this grid changes".
+    #[test]
+    fn every_two_decimal_price_and_its_neighbours_snaps_to_its_own_paisa() {
+        let mut checked = 0_u64;
+        for n in 0_i64..=10_000_000 {
+            let text = format!("{}.{:02}", n / 100, n % 100);
+            let rupees: f64 = text.parse().expect("decimal text parses");
+            for r in [rupees.next_down(), rupees, rupees.next_up()] {
+                assert_eq!(
+                    Paisa::from_rupees_half_up(r).map(Paisa::raw),
+                    Ok(n),
+                    "{text} rupees, as the double {r:e}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 30_000_003, "every grid point and both neighbours");
+    }
+
+    /// HALF-UP ON THE SCALED VALUE, WITH NO SECOND ROUNDING. Audit probestore-6.
+    ///
+    /// The conversion added 0.5 and floored, and the addition rounds. Just
+    /// below a half-paisa, `0.004999999999999999` scales to
+    /// `0.49999999999999994`, which plus 0.5 rounds to 1.0: it gave 1 paisa
+    /// where the text path gives 0. From 2^52 an odd scaled integer plus 0.5 is
+    /// a tie that rounds to even, so `45035996273704.97` (exactly
+    /// `4503599627370497` paisa once scaled) gave `...498`, and its negative
+    /// gave `...496`. Each scaled value below is what the product actually is;
+    /// the tie at a half still rounds toward positive infinity.
+    #[test]
+    fn a_scaled_value_is_rounded_half_up_without_a_second_rounding() {
+        for (rupees, paisa) in [
+            (0.004_999_999_999_999_999, 0),
+            (-0.004_999_999_999_999_999, 0),
+            (45_035_996_273_704.97, 4_503_599_627_370_497),
+            (-45_035_996_273_704.97, -4_503_599_627_370_497),
+            (45_035_996_273_704.99, 4_503_599_627_370_499),
+            (90_071_992_547_409.9, 9_007_199_254_740_991),
+            // Ties, unchanged: a half rounds toward positive infinity.
+            (0.005, 1),
+            (-0.005, 0),
+            (45_035_996_273_704.95, 4_503_599_627_370_496),
+            (0.0, 0),
+            (-0.0, 0),
+            (23_109.55, 2_310_955),
+        ] {
+            assert_eq!(
+                Paisa::from_rupees_half_up(rupees).map(Paisa::raw),
+                Ok(paisa),
+                "{rupees:?}"
+            );
+        }
+        // A product that overflows to infinity is refused, not converted.
+        assert_eq!(
+            Paisa::from_rupees_half_up(f64::MAX),
+            Err(PriceError::OutOfRange)
+        );
+        assert_eq!(
+            Paisa::from_rupees_half_up(f64::MIN),
+            Err(PriceError::OutOfRange)
+        );
     }
 }

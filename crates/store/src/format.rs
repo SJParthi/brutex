@@ -702,12 +702,23 @@ impl Row for Greek {
     /// The overlay answers `true` because a spot and a volatility constrain
     /// nothing about one another. A greeks row is different: a non-finite
     /// derivative is not a reading, and it must never reach the disk.
+    ///
+    /// **AND INSIDE THE DOMAIN THE PRICER ACCEPTS.** `greeks` refuses a spot or
+    /// a volatility that is not positive (`NotPositive`), so a row carrying one
+    /// was not produced by it: a spot of -5 paisa or a volatility of zero was
+    /// committed as a reading. Only those two, because they are the two the
+    /// pricer itself refuses; no range is invented for the derivatives.
+    /// audit-20261003 attackdata-2, D-1524.
     fn is_sane(&self) -> bool {
-        self.is_finite()
+        self.is_finite() && self.spot > 0 && self.volatility > 0.0
     }
 
     fn bad_counts(&self) -> Option<(i64, i64)> {
         None
+    }
+
+    fn same_bytes(&self, other: &Self) -> bool {
+        self.image() == other.image()
     }
 }
 
@@ -959,6 +970,16 @@ pub trait Row: Copy + PartialEq {
     /// `None` when the counts are fine, and `None` for an [`Overlay`], which
     /// carries no counts to be wrong about.
     fn bad_counts(&self) -> Option<(i64, i64)>;
+
+    /// Whether `other` has exactly this record's bytes.
+    ///
+    /// The writer's duplicate check, and NOT `PartialEq`: a [`Greek`]'s fields
+    /// are `f64`, where `-0.0 == 0.0` although the two images differ, so a
+    /// re-run with different bytes was answered "already present, byte for
+    /// byte". Required rather than defaulted, so a new record kind cannot
+    /// inherit the float comparison by omission. audit-20261003 attackdata-2,
+    /// D-1524.
+    fn same_bytes(&self, other: &Self) -> bool;
 }
 
 impl Row for Bar {
@@ -987,6 +1008,10 @@ impl Row for Bar {
             Some((self.volume, self.open_interest))
         }
     }
+
+    fn same_bytes(&self, other: &Self) -> bool {
+        self.image() == other.image()
+    }
 }
 
 impl Row for Overlay {
@@ -1010,6 +1035,10 @@ impl Row for Overlay {
 
     fn bad_counts(&self) -> Option<(i64, i64)> {
         None
+    }
+
+    fn same_bytes(&self, other: &Self) -> bool {
+        self.image() == other.image()
     }
 }
 
@@ -1197,6 +1226,22 @@ pub enum FormatError {
         /// Which field of the declaration is impossible.
         field: &'static str,
     },
+    /// A slot's reserved tail, bytes `60..64`, is not zero.
+    ///
+    /// `docs/02-store-format.md` §2: reserved bytes are zero and stay zero, and
+    /// a future field takes reserved space in a **new version**, never by
+    /// reinterpreting this one. The checksum covers those bytes, so a slot that
+    /// reaches this refusal was *written* that way: by a writer that broke the
+    /// format, not by a flipped bit. Carries the four bytes, little-endian.
+    /// D-1353.
+    ReservedNotZero(u32),
+    /// A slot's `flags` sets a bit its version does not define.
+    ///
+    /// Bit 0 ([`FLAG_CHECKSUMS`]) is the only one. A file declaring a property
+    /// this build has never heard of cannot be read as if it declared none.
+    /// Refused on the write side too, so no slot this build commits can reach
+    /// it. D-1354.
+    UnknownFlags(u32),
     /// No slot in the header region decoded.
     ///
     /// Not a torn tail — a torn tail is unobservable. This means every copy of
@@ -1263,6 +1308,14 @@ impl std::fmt::Display for FormatError {
             Self::DegenerateLayout { field } => {
                 write!(f, "layout field {field} is not a geometry a file can have")
             }
+            Self::ReservedNotZero(bytes) => write!(
+                f,
+                "header slot reserved bytes are {bytes:#010x}, must be zero"
+            ),
+            Self::UnknownFlags(flags) => write!(
+                f,
+                "header flags {flags:#010x} set a bit this version does not define"
+            ),
             Self::NoValidHeader => f.write_str("no header slot survived; the header is unreadable"),
         }
     }

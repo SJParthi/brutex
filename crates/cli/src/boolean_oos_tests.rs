@@ -443,3 +443,58 @@ fn optional_fold_proof_refuses_foreign_month_partitions_and_additional_memory_bo
     );
     Ok(())
 }
+
+/// D-1188 (o1runner-2), source shape: the later-period loop checks, hashes and
+/// fold-indexes the later series once, before it iterates, and every program
+/// and side is priced and bound over that one slice and map. The answers are
+/// byte-identical either way (`runner`'s
+/// `one_later_slice_prices_every_program_as_the_per_call_path_does` and
+/// `one_fold_map_binds_every_program_exactly_as_bind_does`), so only the
+/// source tells the two apart.
+#[test]
+fn the_later_loop_attests_its_slice_and_fold_index_once() {
+    let source = include_str!("boolean_oos_v1.rs");
+    let body = source
+        .split_once("fn compute(")
+        .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+        .unwrap_or_default();
+    let (before, inside) = body
+        .split_once("for (group, anchor) in training.anchors.iter().enumerate() {")
+        .unwrap_or_default();
+    assert!(before.contains("LaterExpressionSliceV1::new(series, &column)"));
+    assert!(before.contains("LaterFoldMapV1::new("));
+    assert!(inside.contains("evaluate_expression_oos_on(anchor, &later, &run)"));
+    assert!(inside.contains("plan.bind_with(&evaluated, map,"));
+    assert!(!inside.contains("evaluate_expression_oos(") && !inside.contains("plan.bind(&"));
+}
+
+/// cli's own pass over a later comparison's source: one
+/// [`super::super::SourceDigest`] digest across these three programs' six
+/// groups, where cli used to hash the three streams afresh for each group. It
+/// attests nothing through [`super::super::PricedSide`]. W2-cli2-3.
+///
+/// **This counts cli's pass, not the comparison's.** Each group's run is still
+/// minted through `ExpressionExecutionRunV1::new_with_daily_reference`, whose
+/// runner constructor hashes the same three streams again (`let
+/// expected_data_digest = crate::identity::data_digest_with_daily_reference(`),
+/// and `evaluate_expression_oos` hashes the later bars for each group (`let
+/// execution = crate::identity::data_digest(bars);`). Both are runner passes,
+/// W3-runner2-3 and W3-runner2-4, recorded in D-0711.
+#[test]
+fn cli_digests_a_later_comparisons_source_once() -> Result<(), String> {
+    use super::super::tests::{passes, programs};
+    let fixture = Fixture::new()?;
+    let training = fixture.produce("NIFTY", &programs()?)?;
+    let inputs = config(&fixture)?;
+    let before = passes();
+    let observed = produce_identified(
+        &training,
+        later(&fixture, &inputs),
+        "generated-boolean-candidate-fixture",
+    )?;
+    let after = passes();
+    assert_eq!(training.anchors.len(), 6, "three programs, both sides");
+    assert_eq!(observed.rows().len(), training.rows().len());
+    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 0));
+    Ok(())
+}

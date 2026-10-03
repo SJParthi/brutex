@@ -666,9 +666,12 @@ pub struct Landed {
 /// Converts a vendor price to paisa.
 ///
 /// A vendor quoting rupees is multiplied by 100; one already quoting paisa is
-/// taken as is. **There is no rounding here and that is deliberate** —
-/// `CLAUDE.md` §7 puts the single snap on the tick grid at the write boundary,
-/// and a second rounding site is a second answer.
+/// taken as is. **There is no rounding here and that is deliberate.** The
+/// single half-up snap onto the tick grid (`CLAUDE.md` §7) has already happened
+/// where the vendor's text was decoded — `http::one_price` and `rolling`'s
+/// `paisa`, through `Paisa::from_rupee_text_half_up` — and a second rounding
+/// site here would be a second answer. (This said the snap was at the write
+/// boundary until D-1494; the store's append snaps nothing.)
 const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
     match scale {
         PriceScale::Paisa => Some(raw),
@@ -744,11 +747,34 @@ pub fn land_with_cash_schedule(
     scale: PriceScale,
     cash_schedule: Option<&crate::cash_auction::Schedule>,
 ) -> Result<Landed, FetchError> {
-    let mut bars = Vec::with_capacity(raw.rows.len());
+    land_rows(&raw.rows, request, encoding, scale, cash_schedule)
+}
+
+/// [`land_with_cash_schedule`] over BORROWED rows, for a caller that holds
+/// them somewhere other than a [`RawWindow`].
+///
+/// # Why it exists
+///
+/// `crate::ingest` holds each fetched member's rows in its own `Member`, and
+/// used to clone the whole vector into a `RawWindow` only to hand this
+/// function a reference to it — one full copy of every row of every member,
+/// made and dropped within the same call. o1api-36, D-1203. Every landing path
+/// now runs through this one body, so the two entry points cannot drift.
+///
+/// # Errors
+/// Returns timestamp, price, or unresolved cash-session errors.
+pub fn land_rows(
+    rows: &[RawRow],
+    request: &BarRequest,
+    encoding: TimestampEncoding,
+    scale: PriceScale,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+) -> Result<Landed, FetchError> {
+    let mut bars = Vec::with_capacity(rows.len());
     let mut census = DropCensus::default();
     let mut outside_session = 0u32;
 
-    for (i, row) in raw.rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         // W1 LIVES HERE. The encoding is dispatched, never assumed. A vendor
         // stamping IST wall-clock seconds into a field read as UTC epoch
         // produced 45 bars at wrong timestamps that passed every check and
@@ -952,7 +978,7 @@ pub fn land_with_cash_schedule(
     // different places — the caller's chunking and the vendor's clock.
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::debug("pull.land", "window decoded")
-            .with("rows_in", telemetry::Value::Uint(raw.rows.len() as u64))
+            .with("rows_in", telemetry::Value::Uint(rows.len() as u64))
             .with("bars_out", telemetry::Value::Uint(bars.len() as u64))
             .with(
                 "before_window",

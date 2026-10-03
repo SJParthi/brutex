@@ -38,12 +38,48 @@
 //!
 //! # Cost
 //!
-//! One pass per line, splitting on a byte. No allocation per row: fields are
-//! borrowed from the input and parsed into integers in place. The row vector is
-//! reserved from a caller-supplied bound — `docs/07-o1-architecture.md` law 2.
+//! One pass per line, splitting on a byte. **No allocation per row:** a row's
+//! fields are borrowed from the input into a fixed [`MAX_FIELDS`]-slot array by
+//! [`fields_of`], however many commas the line holds, and parsed into integers
+//! in place. Until D-0721 this paragraph said the same while every row collected
+//! its fields into a vector sized to its commas, before the field count was
+//! checked. Held by counting the allocator's calls, in
+//! `crates/pull/tests/allocation.rs`:
+//! `pull::allocation::twice_the_rows_cost_no_allocation_per_row` decodes 4,096
+//! and then 8,192 rows and allows the second at most four more allocating
+//! calls, and
+//! `pull::allocation::a_line_of_a_million_commas_is_refused_without_allocating_for_its_fields`
+//! refuses such a line having allocated fewer bytes than the line holds. The
+//! array itself is held by
+//! `pull::csv::a_lines_fields_land_in_a_fixed_array_and_are_counted_whole`.
+//! D-0724.
+//!
+//! **A row costs time linear in its line's bytes, and no line-length cap
+//! exists.** `body.lines()` finds the line's end and `line.split(',')` in
+//! [`fields_of`] counts every field, so each reads the whole line. A line may be
+//! as long as its member, and `crate::archive` reads a member whole, with
+//! `fs::read` and no byte cap. `docs/06-limits.md` records both.
+//!
+//! **The row vector is reserved ONCE, before the first line**, from a bound
+//! the body itself supplies — one more than its newline count, capped at
+//! [`MAX_ROWS`] — so a decode that succeeds never reallocates it
+//! (`docs/07-o1-architecture.md` law 2). Until o1api-34 (D-1203) this
+//! paragraph said the vector was unreserved, after an earlier version claimed a
+//! caller-supplied bound no caller supplied. Counting the body's newlines is one
+//! extra linear pass over bytes already in memory, the same order as the decode
+//! pass it sizes. Held by `pull::csv::the_row_vector_is_reserved_once_from_the_body`.
 
 use crate::fetch::{FetchError, MAX_ROWS, RawRow};
 use crate::vendor::DateFormat;
+
+/// GDFL's observed header row, character for character —
+/// `docs/08-vendor-samples.md`, the `GFDLNFO_TICK_01072025` sample.
+///
+/// The one copy. `crate::vendor`'s GDFL descriptor names this constant rather
+/// than spelling the row a second time, so the descriptor's `HeaderRow` and
+/// the decoder's check cannot drift apart.
+pub const GDFL_HEADER: &str =
+    "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
 
 /// Which columns a vendor's CSV carries, in order.
 ///
@@ -77,6 +113,20 @@ pub enum Columns {
     TrueDataFno,
 }
 
+/// The widest row any [`Columns`] layout carries — GDFL's ten.
+///
+/// The decoder splits each line into a fixed array of this many slots rather
+/// than a `Vec`, so no row allocates. Pinned to every layout's
+/// [`Columns::count`] at compile time below.
+pub const MAX_FIELDS: usize = 10;
+
+const _: () = assert!(
+    Columns::TrueDataIndex.count() <= MAX_FIELDS
+        && Columns::TrueDataFutures.count() <= MAX_FIELDS
+        && Columns::Gdfl.count() <= MAX_FIELDS
+        && Columns::TrueDataFno.count() <= MAX_FIELDS
+);
+
 impl Columns {
     /// How many fields a row of this shape has.
     #[must_use]
@@ -91,7 +141,23 @@ impl Columns {
     /// Whether the file opens with a header row naming the columns.
     #[must_use]
     pub const fn has_header(self) -> bool {
-        matches!(self, Self::Gdfl)
+        self.header().is_some()
+    }
+
+    /// The header row this shape opens with, character for character, or
+    /// `None` for a shape whose first line is already data.
+    ///
+    /// The decoder compares line one against this and refuses the file when
+    /// they differ. It used to skip line one unread, so a GDFL member that
+    /// arrived without its header silently lost its first trade, and a header
+    /// naming the same ten columns in another order would have been decoded
+    /// against the wrong offsets. D-1360.
+    #[must_use]
+    pub const fn header(self) -> Option<&'static str> {
+        match self {
+            Self::Gdfl => Some(GDFL_HEADER),
+            Self::TrueDataIndex | Self::TrueDataFutures | Self::TrueDataFno => None,
+        }
     }
 
     /// The date format this shape carries.
@@ -202,6 +268,18 @@ pub enum CsvError {
         /// What was there, as the file spells it.
         got: String,
     },
+    /// Line one is not the header row the declared shape opens with.
+    ///
+    /// Refused rather than skipped: a file without its header would lose its
+    /// first data row as if it were one, and a header naming the declared
+    /// columns in another order would be decoded against the wrong offsets —
+    /// plausible numbers in the wrong fields. D-1360.
+    HeaderMismatch {
+        /// Line one as the file spells it, trimmed.
+        got: String,
+        /// The header the declared shape carries.
+        want: &'static str,
+    },
     /// More rows than [`MAX_ROWS`].
     TooManyRows {
         /// How many were found before stopping.
@@ -237,6 +315,13 @@ impl core::fmt::Display for CsvError {
                  `CLAUDE.md` §7 spends i64::MIN on an ABSENT open interest, so \
                  a vendor that sends it could not be told apart from one that \
                  sent no open interest at all"
+            ),
+            Self::HeaderMismatch { ref got, want } => write!(
+                f,
+                "line 1: header {got:?} is not the declared header {want:?}. \
+                 A file without its header would lose its first row, and one \
+                 naming the columns in another order would be read against \
+                 the wrong offsets, so the file is refused"
             ),
             Self::TooManyRows { rows, cap } => {
                 write!(f, "the file holds at least {rows} rows; the cap is {cap}")
@@ -282,8 +367,10 @@ pub fn is_ghost(member: &str) -> bool {
 ///
 /// Rejects a third decimal place rather than rounding it: the tick grid is two
 /// places (`CLAUDE.md` §7), so a third digit is the vendor sending something
-/// this build does not understand, and rounding it here would be a second
-/// snapping site competing with the one at the write boundary.
+/// this build does not understand. The JSON decoders snap a third decimal
+/// half-up instead, through `Paisa::from_rupee_text_half_up` (D-0321), because
+/// there it is measured vendor float error; this reader is for archive text and
+/// for counts, where it is not, so the two rules differ on purpose (D-1494).
 pub(crate) fn paisa(text: &str) -> Option<i64> {
     let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
     if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
@@ -305,6 +392,20 @@ pub(crate) fn paisa(text: &str) -> Option<i64> {
     Some(if negative { -total } else { total })
 }
 
+/// A date or clock field that is ASCII digits and nothing else, parsed.
+///
+/// `str::parse` for an integer accepts a leading `+`, and for a signed one a
+/// leading `-`, so a two-byte field `-9` or `+1` used to pass a length check
+/// and be read as a number. A time of `-9:15:00` was stored as 15:15 on the
+/// previous day (probestore-1, D-1201). Every byte is checked first; the
+/// callers hand it two- or four-byte fields only.
+fn digits<T: core::str::FromStr>(text: &str) -> Option<T> {
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 /// Seconds since IST midnight, from `HH:MM:SS`.
 fn ist_seconds(text: &str) -> Option<i64> {
     let mut parts = text.split(':');
@@ -312,11 +413,18 @@ fn ist_seconds(text: &str) -> Option<i64> {
     if parts.next().is_some() || h.len() != 2 || m.len() != 2 || s.len() != 2 {
         return None;
     }
-    let (h, m, s): (i64, i64, i64) = (h.parse().ok()?, m.parse().ok()?, s.parse().ok()?);
+    let (h, m, s): (i64, i64, i64) = (digits(h)?, digits(m)?, digits(s)?);
     if h > 23 || m > 59 || s > 59 {
         return None;
     }
     Some(h * 3_600 + m * 60 + s)
+}
+
+/// Whether `text` is `len` bytes long with exactly `separator` at both `at`
+/// offsets. The digit fields between them are checked by [`digits`].
+fn separated(text: &str, len: usize, at: [usize; 2], separator: u8) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == len && at.iter().all(|&i| bytes.get(i) == Some(&separator))
 }
 
 /// A calendar date from a vendor's date field.
@@ -324,27 +432,29 @@ fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
     let (y, m, d) = match format {
         // `20221003`
         DateFormat::CompactYmd if text.len() == 8 => (
-            text.get(0..4)?.parse().ok()?,
-            text.get(4..6)?.parse().ok()?,
-            text.get(6..8)?.parse().ok()?,
+            digits(text.get(0..4)?)?,
+            digits(text.get(4..6)?)?,
+            digits(text.get(6..8)?)?,
         ),
-        // `2022-10-03`
-        DateFormat::DashedYmd if text.len() == 10 => (
-            text.get(0..4)?.parse().ok()?,
-            text.get(5..7)?.parse().ok()?,
-            text.get(8..10)?.parse().ok()?,
+        // `2022-10-03`. The separators are bytes too, checked exactly: the
+        // digit fields alone accepted `2022x10x03` (v53-1, D-1483).
+        DateFormat::DashedYmd if separated(text, 10, [4, 7], b'-') => (
+            digits(text.get(0..4)?)?,
+            digits(text.get(5..7)?)?,
+            digits(text.get(8..10)?)?,
         ),
         // `01/07/2025` — DAY first. 1 July, not 7 January.
-        DateFormat::SlashedDmy if text.len() == 10 => (
-            text.get(6..10)?.parse().ok()?,
-            text.get(3..5)?.parse().ok()?,
-            text.get(0..2)?.parse().ok()?,
+        // `01-07-2025` and `01x07x2025` were read as 1 July too (v53-1).
+        DateFormat::SlashedDmy if separated(text, 10, [2, 5], b'/') => (
+            digits(text.get(6..10)?)?,
+            digits(text.get(3..5)?)?,
+            digits(text.get(0..2)?)?,
         ),
         // `01072025`
         DateFormat::CompactDmy if text.len() == 8 => (
-            text.get(4..8)?.parse().ok()?,
-            text.get(2..4)?.parse().ok()?,
-            text.get(0..2)?.parse().ok()?,
+            digits(text.get(4..8)?)?,
+            digits(text.get(2..4)?)?,
+            digits(text.get(0..2)?)?,
         ),
         _ => return None,
     };
@@ -551,6 +661,45 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
     }
 }
 
+/// One line's fields, borrowed into a fixed array, when it has exactly `want`
+/// of them; otherwise how many it has.
+///
+/// Every field is counted, so a refusal reports the line's true width, the
+/// count [`CsvError::FieldCount`] has always carried. Only the first
+/// [`MAX_FIELDS`] are kept, and nothing is allocated for the rest. A `want`
+/// wider than the array is refused rather than read short, because the slots
+/// past the tenth would read as empty fields.
+///
+/// # Errors
+///
+/// The line's field count, when it is not `want` or `want` does not fit.
+fn fields_of(line: &str, want: usize) -> Result<[&str; MAX_FIELDS], usize> {
+    let mut fields = [""; MAX_FIELDS];
+    let mut got: usize = 0;
+    for field in line.split(',') {
+        if let Some(slot) = fields.get_mut(got) {
+            *slot = field;
+        }
+        got = got.saturating_add(1);
+    }
+    if got == want && want <= MAX_FIELDS {
+        Ok(fields)
+    } else {
+        Err(got)
+    }
+}
+
+/// Line one against the header the shape declares, already trimmed. D-1360.
+fn check_header(columns: Columns, line: &str) -> Result<(), CsvError> {
+    match columns.header() {
+        Some(want) if line != want => Err(CsvError::HeaderMismatch {
+            got: line.to_owned(),
+            want,
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// [`decode`]'s pass over the body, split out for one reason: the two `note_*`
 /// helpers must report what it counted whether it finished or refused, and a
 /// `?` inside it cannot do that on the way past.
@@ -560,7 +709,17 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
 fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<RawRow>, CsvError> {
     let at = columns.offsets();
     let want = columns.count();
-    let mut rows: Vec<RawRow> = Vec::new();
+    // RESERVED ONCE, FROM THE BODY. Every row is one line, so the line count
+    // bounds the row count; `lines()` yields at most one more line than there
+    // are newlines. Capped at `MAX_ROWS`, the most this decoder ever keeps
+    // before it refuses, so a huge body cannot reserve past the refusal.
+    let bound = body
+        .bytes()
+        .filter(|&byte| byte == b'\n')
+        .count()
+        .saturating_add(1)
+        .min(MAX_ROWS);
+    let mut rows: Vec<RawRow> = Vec::with_capacity(bound);
 
     for (i, raw_line) in body.lines().enumerate() {
         let line_no = i + 1;
@@ -570,11 +729,15 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         // turns the last field into a number that will not parse. Observed in
         // vendor files, so trimmed rather than assumed absent.
         let line = raw_line.trim_end_matches('\r').trim();
-        if line.is_empty() {
+        // THE HEADER IS READ, NOT MERELY SKIPPED, and it is checked before the
+        // blank-line skip so that a blank line one is not mistaken for a file
+        // whose header simply moved down a line. D-1360.
+        if i == 0 && columns.has_header() {
+            check_header(columns, line)?;
             tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
-        if i == 0 && columns.has_header() {
+        if line.is_empty() {
             tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
@@ -585,14 +748,15 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             });
         }
 
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() != want {
-            return Err(CsvError::FieldCount {
-                line: line_no,
-                got: fields.len(),
-                want,
-            });
-        }
+        // A FIXED ARRAY, NOT A VECTOR PER ROW. D-0721: this collected every
+        // line into a vector of string slices sized to its commas before the
+        // count was checked, one heap allocation per row as large as the line
+        // made it. o1api-34 (D-1203) found the same defect; one fix holds both.
+        let fields = fields_of(line, want).map_err(|got| CsvError::FieldCount {
+            line: line_no,
+            got,
+            want,
+        })?;
 
         let date_text = fields.get(at.date).copied().unwrap_or_default();
         let day =
@@ -1028,6 +1192,115 @@ mod tests {
         }
     }
 
+    /// **A SIGN IS NOT A DIGIT.** probestore-1, D-1201.
+    ///
+    /// `str::parse` reads a leading `+`, and `-` for a signed type, so a
+    /// two-byte field `-9` passed the length check. On main
+    /// `20240103,-9:15:00,...` decoded to 2024-01-02 15:15 IST, a bar on the
+    /// previous day that the window filter then kept. Every clock field and
+    /// every date field, either sign, through `decode` as well as directly.
+    #[test]
+    fn a_signed_clock_or_date_field_is_refused_not_shifted() {
+        let rows = |line: &str| decode(&format!("{line}\n"), Columns::TrueDataIndex);
+        assert!(rows("20240103,09:15:00,100.00,5,0").is_ok(), "the control");
+        for time in [
+            "-9:15:00", "+9:15:00", "09:-5:00", "09:+5:00", "09:15:-1", "09:15:+1", "-0:00:00",
+            "+0:00:00", "00:-0:00", "00:00:-0", " 9:15:00", "09:15: 1", "-1:-1:-1",
+        ] {
+            assert_eq!(ist_seconds(time), None, "{time:?} carries a sign");
+            assert_eq!(
+                rows(&format!("20240103,{time},100.00,5,0")),
+                Err(CsvError::TimeMalformed {
+                    line: 1,
+                    got: time.to_owned(),
+                }),
+                "{time:?} is refused, never stored on another minute or day"
+            );
+        }
+        for (format, text) in [
+            (DateFormat::CompactYmd, "2024+103"),
+            (DateFormat::CompactYmd, "202401+3"),
+            (DateFormat::CompactYmd, "+0240103"),
+            (DateFormat::DashedYmd, "2024-+1-03"),
+            (DateFormat::DashedYmd, "2024-01-+3"),
+            (DateFormat::DashedYmd, "+024-01-03"),
+            (DateFormat::SlashedDmy, "+3/01/2024"),
+            (DateFormat::SlashedDmy, "03/+1/2024"),
+            (DateFormat::SlashedDmy, "03/01/+024"),
+            (DateFormat::CompactDmy, "+3012024"),
+            (DateFormat::CompactDmy, "03+12024"),
+            (DateFormat::CompactDmy, "0301+024"),
+        ] {
+            assert_eq!(day_of(text, format), None, "{text:?} as {format:?}");
+        }
+        assert_eq!(
+            rows("2024+103,09:15:00,100.00,5,0"),
+            Err(CsvError::DateMalformed {
+                line: 1,
+                got: "2024+103".to_owned(),
+                format: DateFormat::CompactYmd,
+            })
+        );
+        // The digits helper itself, at its edges.
+        assert_eq!(digits::<u8>(""), None);
+        assert_eq!(digits::<u8>("+"), None);
+        assert_eq!(digits::<i64>("-0"), None);
+        assert_eq!(
+            digits::<u8>(&(u16::from(u8::MAX) + 1).to_string()),
+            None,
+            "all digits and still no u8"
+        );
+        assert_eq!(digits::<u8>(&format!("{:02}", 0)), Some(0));
+        assert_eq!(digits::<u16>("9999"), Some(9_999));
+    }
+
+    /// **A separated date's separators are bytes that are checked.** v53-1,
+    /// D-1483. The digit fields were checked and the bytes between them were
+    /// never read, so a GDFL date `01-07-2025` or `01x07x2025` was stored as
+    /// 1 July 2025 and a Dhan-shaped `2025/07/01` as the same day. Every byte
+    /// a separator may not be, at each separator offset, in both separated
+    /// formats, directly and through `decode`.
+    #[test]
+    fn a_date_whose_separator_is_not_the_declared_byte_is_refused() {
+        for (format, wanted, at) in [
+            (DateFormat::DashedYmd, b'-', [4, 7]),
+            (DateFormat::SlashedDmy, b'/', [2, 5]),
+        ] {
+            let whole = rendered(2025, 7, 1, format);
+            assert!(day_of(&whole, format).is_some(), "the control: {whole}");
+            for offset in at {
+                for byte in (0..=0x7f_u8).filter(|&byte| byte != wanted) {
+                    let mut bytes = whole.clone().into_bytes();
+                    bytes[offset] = byte;
+                    let text = String::from_utf8(bytes).expect("ASCII");
+                    assert_eq!(day_of(&text, format), None, "{text:?} as {format:?}");
+                }
+            }
+            // Both separators swapped for the other format's.
+            let other = if wanted == b'-' { '/' } else { '-' };
+            let swapped = whole.replace(char::from(wanted), &other.to_string());
+            assert_eq!(day_of(&swapped, format), None, "{swapped:?} as {format:?}");
+        }
+        for (first, second) in [('-', '-'), ('x', 'x'), ('+', '+'), ('/', '-'), ('.', '/')] {
+            let date = format!("01{first}07{second}2025");
+            let line = format!("{GDFL_HEADER}\nNIFTY,{date},09:15:00,100.00,0,0,0,0,5,0\n");
+            assert_eq!(
+                decode(&line, Columns::Gdfl),
+                Err(CsvError::DateMalformed {
+                    line: 2,
+                    got: date.clone(),
+                    format: DateFormat::SlashedDmy,
+                }),
+                "{date:?} is refused, never read as 1 July"
+            );
+        }
+        // The helper itself at its edges: a wrong length is refused before an
+        // offset is read, and an offset past the end is never a match.
+        assert!(!separated(&format!("{}-0", "2025-07"), 10, [4, 7], b'-'));
+        assert!(!separated("2025-07", 7, [4, 7], b'-'));
+        assert!(separated("2025-07-01", 10, [4, 7], b'-'));
+    }
+
     /// The byte ranges each format reads its year, month and day from, in the
     /// order [`day_of`] evaluates them.
     const fn ranges(format: DateFormat) -> [(usize, usize); 3] {
@@ -1382,5 +1655,281 @@ mod tests {
                  can be found again"
             );
         }
+    }
+
+    /// **A LINE'S FIELDS LAND IN A FIXED ARRAY, AND ARE COUNTED WHOLE.**
+    /// D-0721.
+    ///
+    /// The count is what `CsvError::FieldCount` reports, so it must still be
+    /// the line's true width however wide the line is. What is kept is the
+    /// first `MAX_FIELDS`, and a layout wider than that is refused rather than
+    /// read with empty fields past the tenth.
+    ///
+    /// The kept fields are compared by joining them back into the line, not
+    /// against an array of one-character literals: Gate 1d reads every quoted
+    /// lower-case token in `crates/pull` as a possible path segment, and the
+    /// join checks the same thing, every field in its own slot and in order.
+    #[test]
+    fn a_lines_fields_land_in_a_fixed_array_and_are_counted_whole() {
+        let line = "a,b,c,d,e";
+        let five = fields_of(line, 5).expect("five fields for five");
+        assert_eq!(five.len(), MAX_FIELDS, "the array is the fixed width");
+        assert_eq!(
+            five.get(..5).map(|kept| kept.join(",")),
+            Some(line.to_owned()),
+            "each field in its own slot, in order"
+        );
+        assert!(
+            five.iter().skip(5).all(|field| field.is_empty()),
+            "the slots past the count stay empty"
+        );
+        assert_eq!(fields_of("a,b,c,d", 5), Err(4), "one short");
+        assert_eq!(fields_of("a,b,c,d,e,f", 5), Err(6), "one long");
+        assert_eq!(fields_of("", 1).map(|f| f.len()), Ok(MAX_FIELDS));
+        assert_eq!(
+            fields_of(&",".repeat(1_000_000), 5),
+            Err(1_000_001),
+            "a line of a million commas is counted whole"
+        );
+
+        // THE FULL WIDTH, and one past it.
+        let ten = "0,1,2,3,4,5,6,7,8,9";
+        let all = fields_of(ten, MAX_FIELDS).expect("ten fields fill the array");
+        assert_eq!(all.join(","), ten, "every slot holds its own field");
+        assert!(
+            all.iter().all(|field| field.len() == 1),
+            "one field per slot, none merged with its neighbour"
+        );
+        assert_eq!(
+            fields_of("0,1,2,3,4,5,6,7,8,9,10", MAX_FIELDS + 1),
+            Err(11),
+            "a layout wider than the array is refused, never read short"
+        );
+        assert_eq!(fields_of(ten, MAX_FIELDS + 1), Err(10));
+    }
+
+    /// Every layout this decoder reads fits the fixed field array, and the
+    /// widest fills it. D-0721.
+    ///
+    /// **THE LAYOUTS ARE WALKED THROUGH A MATCH, NOT LISTED BY HAND.** A list
+    /// written here would not grow when `Columns` did, and a fifth layout
+    /// wider than `MAX_FIELDS` would have every row refused as a
+    /// `FieldCount` whose `got` equals its `want`. `after` matches every
+    /// variant with no wildcard arm, so a variant added to `Columns` does not
+    /// compile until `after` gives it an arm. `Columns` is
+    /// `#[non_exhaustive]`, which binds other crates and not this one.
+    ///
+    /// The walk also checks each layout's discriminant against its place, so
+    /// a variant declared anywhere but last and left off the walk shifts a
+    /// discriminant and fails here. One declared last whose predecessor's arm
+    /// still returns `None` is not walked; its own `None` arm, beside
+    /// another, is what shows it.
+    #[test]
+    fn every_layout_fits_the_fixed_field_array() {
+        /// The layout declared after `columns`, or `None` after the last.
+        const fn after(columns: Columns) -> Option<Columns> {
+            match columns {
+                Columns::TrueDataIndex => Some(Columns::TrueDataFutures),
+                Columns::TrueDataFutures => Some(Columns::Gdfl),
+                Columns::Gdfl => Some(Columns::TrueDataFno),
+                Columns::TrueDataFno => None,
+            }
+        }
+
+        let mut widest = 0;
+        let mut place: usize = 0;
+        let mut next = Some(Columns::TrueDataIndex);
+        while let Some(columns) = next {
+            assert_eq!(
+                columns as usize, place,
+                "{columns:?} is walked in the order it is declared"
+            );
+            assert!(
+                columns.count() <= MAX_FIELDS,
+                "{columns:?} has {} fields and the array holds {MAX_FIELDS}",
+                columns.count()
+            );
+            widest = widest.max(columns.count());
+            place = place.saturating_add(1);
+            next = after(columns);
+        }
+        assert_eq!(widest, MAX_FIELDS, "the widest layout fills it");
+    }
+
+    /// THE HEADER ROW IS READ, NOT MERELY SKIPPED.
+    ///
+    /// `Columns::Gdfl` declares a header, and the decoder used to drop line one
+    /// without looking at it. A GDFL member that arrived WITHOUT its header
+    /// therefore lost its first trade in silence — `Ok` with one row short —
+    /// and a member whose header named the same ten columns in another order
+    /// would have read `OpenInterest` as `LTQ` with nothing objecting. D-1360.
+    #[test]
+    fn a_gdfl_header_that_is_not_the_declared_one_refuses_the_file() {
+        let dmy = rendered(2025, 7, 1, DateFormat::SlashedDmy);
+        let first = format!("FINNIFTY-III.NFO,{dmy},09:16:16,27674,0,0,0,0,65,65");
+        let second = format!("FINNIFTY-III.NFO,{dmy},09:16:17,27675,0,0,0,0,10,65");
+
+        // The declared header, as observed: both rows land.
+        let good = format!("{GDFL_HEADER}\n{first}\n{second}\n");
+        assert_eq!(decode(&good, Columns::Gdfl).unwrap().len(), 2);
+        // CRLF and surrounding blanks on the header line are tolerated exactly
+        // as they are on a data line.
+        let crlf = format!("{GDFL_HEADER}\r\n{first}\r\n{second}\r\n");
+        assert_eq!(decode(&crlf, Columns::Gdfl).unwrap().len(), 2);
+
+        // No header at all: the first DATA row used to be dropped as one.
+        let headless = format!("{first}\n{second}\n");
+        assert_eq!(
+            decode(&headless, Columns::Gdfl),
+            Err(CsvError::HeaderMismatch {
+                got: first.clone(),
+                want: GDFL_HEADER,
+            }),
+            "a missing header is a refusal, never a silently lost first row"
+        );
+
+        // The same ten names with LTQ and OpenInterest swapped.
+        let swapped = GDFL_HEADER.replace("LTQ,OpenInterest", "OpenInterest,LTQ");
+        let body = format!("{swapped}\n{first}\n");
+        assert!(
+            matches!(
+                decode(&body, Columns::Gdfl),
+                Err(CsvError::HeaderMismatch { ref got, .. }) if *got == swapped
+            ),
+            "a header naming the declared columns in another order is refused"
+        );
+
+        // A blank first line is not the header either.
+        let blank_first = format!("\n{GDFL_HEADER}\n{first}\n");
+        assert!(matches!(
+            decode(&blank_first, Columns::Gdfl),
+            Err(CsvError::HeaderMismatch { ref got, .. }) if got.is_empty()
+        ));
+
+        // An empty body has no header to check and no rows: unchanged.
+        assert_eq!(decode("", Columns::Gdfl), Ok(Vec::new()));
+
+        // Headerless layouts are untouched: their line one is data.
+        assert_eq!(Columns::TrueDataIndex.header(), None);
+        assert_eq!(Columns::TrueDataFno.header(), None);
+        assert_eq!(Columns::TrueDataFutures.header(), None);
+        assert_eq!(Columns::Gdfl.header(), Some(GDFL_HEADER));
+        let refusal = CsvError::HeaderMismatch {
+            got: "x".to_owned(),
+            want: GDFL_HEADER,
+        }
+        .to_string();
+        assert!(refusal.starts_with("line 1: header"), "{refusal}");
+        assert!(refusal.contains(GDFL_HEADER), "{refusal}");
+    }
+
+    /// **THE ROW VECTOR IS RESERVED ONCE, FROM THE BODY.** o1api-34, D-1203.
+    ///
+    /// The module header said the vector was reserved from a bound; the code
+    /// started it empty and doubled. `Vec::with_capacity` documents that it
+    /// produces EXACTLY the requested capacity for a non-zero-sized element, so
+    /// the capacity is the observable proof: one more than the newline count,
+    /// where doubling would show a power of two. On main 1,000 rows came back
+    /// with capacity 1,024 and an empty body with capacity 0.
+    #[test]
+    fn the_row_vector_is_reserved_once_from_the_body() {
+        let line = |n: u32| format!("20240103,09:{:02}:{:02},100.00,5,0", 15 + n / 60, n % 60);
+        for count in [1_u32, 2, 3, 7, 64, 1_000] {
+            let mut body = String::new();
+            for n in 0..count {
+                body.push_str(&line(n));
+                body.push('\n');
+            }
+            let rows = decode(&body, Columns::TrueDataIndex).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(
+                rows.capacity(),
+                count as usize + 1,
+                "{count} newline-terminated rows reserve {count} + 1, once"
+            );
+            // No trailing newline: one fewer newline, the same rows, an exact fit.
+            let rows = decode(body.trim_end(), Columns::TrueDataIndex).unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(rows.capacity(), count as usize);
+        }
+        // EMPTY. Zero newlines reserve one slot and keep nothing.
+        let rows = decode("", Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, 1));
+        // BLANK LINES ARE COUNTED IN THE BOUND AND SKIPPED IN THE DECODE.
+        let rows = decode(&"\n".repeat(9), Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, 10));
+        // THE CAP. A body with more newlines than `MAX_ROWS` reserves exactly
+        // `MAX_ROWS`, the most the decoder keeps before it refuses.
+        let rows = decode(&"\n".repeat(MAX_ROWS + 5), Columns::TrueDataIndex).unwrap();
+        assert_eq!((rows.len(), rows.capacity()), (0, MAX_ROWS));
+    }
+
+    /// **A LINE WIDER THAN EVERY LAYOUT IS COUNTED, NOT STORED.** o1api-34.
+    ///
+    /// The fields now land in a fixed [`MAX_FIELDS`]-slot array. A line past
+    /// that width must still be refused with the number of fields it really
+    /// carried, or the refusal would misreport the very column count it is
+    /// about.
+    #[test]
+    fn a_line_wider_than_the_field_array_reports_its_true_width() {
+        for (columns, got) in [
+            (Columns::TrueDataIndex, 1_usize),
+            (Columns::TrueDataIndex, 4),
+            (Columns::TrueDataIndex, 6),
+            (Columns::TrueDataIndex, MAX_FIELDS),
+            (Columns::TrueDataIndex, MAX_FIELDS + 1),
+            (Columns::TrueDataIndex, 64),
+            (Columns::TrueDataFutures, MAX_FIELDS + 1),
+            (Columns::TrueDataFno, 9),
+        ] {
+            let line = vec!["X"; got].join(",");
+            assert_eq!(
+                decode(&format!("{line}\n"), columns),
+                Err(CsvError::FieldCount {
+                    line: 1,
+                    got,
+                    want: columns.count(),
+                }),
+                "{got} fields for {columns:?}"
+            );
+        }
+        // GDFL, the widest layout, one past it: the header is line 1.
+        let wide = ["X"; MAX_FIELDS + 1].join(",");
+        assert_eq!(
+            decode(&format!("{GDFL_HEADER}\n{wide}\n"), Columns::Gdfl),
+            Err(CsvError::FieldCount {
+                line: 2,
+                got: MAX_FIELDS + 1,
+                want: MAX_FIELDS,
+            })
+        );
+        assert_eq!(Columns::Gdfl.count(), MAX_FIELDS, "GDFL is the widest");
+    }
+
+    /// **NO ROW ALLOCATES A FIELD LIST.** o1api-34, D-1203.
+    ///
+    /// The per-row `Vec<&str>` has no observable output to assert on, so its
+    /// absence is asserted on the source of [`decode_rows`]. The needles are
+    /// assembled at run time so this test cannot match its own text.
+    #[test]
+    fn the_decode_loop_collects_no_field_vector() {
+        let source = include_str!("csv.rs");
+        let start = source
+            .find(&format!("{}{}", "fn decode_", "rows("))
+            .expect("decode_rows exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("decode_rows ends")];
+        for needle in [
+            format!("{}{}", "Vec<&", "str>"),
+            format!("{}{}", ".coll", "ect()"),
+            format!("{}{}", "Vec::", "new()"),
+        ] {
+            assert!(
+                !body.contains(&needle),
+                "decode_rows holds {needle:?}: a per-row allocation or an \
+                 unreserved row vector is back"
+            );
+        }
+        assert!(body.contains(&format!("{}{}", "with_capacity(", "bound)")));
     }
 }

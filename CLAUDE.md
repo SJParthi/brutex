@@ -149,16 +149,17 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
    former candidate `seen` set was removed: there is no dedup operation on that
    path to call O(1).
 
-   *Result append* is `Vec::push` **at k=1 and `Vec::extend` at k≥2, and the
-   difference is the live path rather than a detail.** `engine::drain` hands each
-   support lane its own pre-sized `kept`, pushes into that, and then folds the
-   lanes into `out` with one `extend` per chunk — so the per-candidate `push`
-   happens into a lane-local vector and the result vector is appended in batches.
-   Same amortised class, different operation from the one this rule named for as
-   long as it has existed. k=1 reserves the offered width and later levels
-   reserve a capped previous-frontier heuristic. Appends within that reservation
-   allocate nothing; an expanding level can outgrow it, so the unconditional
-   bound is amortised O(1), not worst-case O(1) for every append.
+   *Result append* is one `Vec::push` per surviving candidate, through
+   `engine::primitives::append`, at every k. At k≥2 `engine::drain` reserves room
+   in `out` for the whole batch before any worker runs, the support lanes write
+   counts into disjoint slices of one `counts` vector, and one serial loop then
+   pushes each survivor in candidate order — so no push on that path allocates.
+   (This paragraph described lane-local `kept` vectors folded with one `extend`
+   per chunk; that design was replaced and the paragraph was not. D-1440.) k=1
+   reserves the offered width; the join's `exhausted` check reserves for every
+   pending batch candidate before admitting one. Where a reservation is not
+   already held, `Vec`'s guarantee is amortised O(1), not worst-case O(1).
+   `C-E-11` times `engine::primitives::append` itself.
 
    These qualifications do not widen the rule: they identify where its named
    primitive exists, where injectivity removes the need for one, and where
@@ -314,9 +315,14 @@ any kind — not the file it opened, not the bars it read, not a refusal — so 
 `/logs` page covered the pull half of the data path and nothing of the read half.
 Gate 17 silences `vocab engine indicators runner`, because those hold the loops
 and its rule is not "each call is cheap" but "the innermost loop calls nothing at
-all". `cli` holds no loop over bars and none over candidates: it is the
-structural boundary, one event per run and one per instrument-month, which is the
-granularity gate 17's own comment prescribes as the affordable one. D-0226.
+all". `cli` is not on that list, and it is NOT loop-free: it walks bars (for
+example `window_range_percentile`) and `screen` walks every candidate in
+`by_evidence.par_iter()`, calling `GridProgress::tick` per candidate — one
+relaxed `fetch_add`, with an event only on every `stride`-th candidate. Its
+events are emitted at structural boundaries — per run, per instrument-month, and
+that `stride` — which is the granularity gate 17's own comment prescribes as the
+affordable one. This said `cli` held no loop over bars or candidates until
+D-1448 corrected it. D-0226.
 
 `cli` once deliberately had no `store` arrow, on the reasoning that the
 operator's standing rule forbade both a vendor pull and the bars already on

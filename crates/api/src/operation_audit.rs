@@ -43,35 +43,50 @@ fn read_failure(why: &str, busy: bool) -> Response {
     )
 }
 
-/// Only these fixed public route names enter audit labels. Unknown paths,
-/// assets, queries, request bodies and headers are never copied into records.
-/// The server's admission layer reads the same list, so a cross-site read of
-/// any of these is refused before [`note_request`] can journal it. D-0687.
+/// Every route the invocation journal records, and the only names that enter
+/// its labels. Unknown paths, assets, queries, request bodies and headers are
+/// never copied into records.
+///
+/// **One list, read by everything that must agree.** [`audited_route`] answers
+/// from it, the server's admission layer refuses a cross-site read of any path
+/// it holds before [`note_request`] can journal it (D-0687), and the tests read
+/// it to prove each entry is registered, journaled and refused cross-site. It
+/// used to be a `match` with 21 arms and a test that named 10 of them, so
+/// deleting the `/frontier.json` arm dropped both its audit record and its
+/// cross-site refusal and every `api` test still passed. The length is in the
+/// type: removing an entry without changing the count does not compile.
+/// D-1445.
+pub(crate) const AUDITED: [&str; 21] = [
+    "/backtest/run",
+    "/backtest/descend",
+    "/engine/command",
+    "/engine/boolean-launch.json",
+    "/backtest.json",
+    "/backtest/run.json",
+    "/trades.json",
+    "/frontier.json",
+    "/candidate-trades.json",
+    "/sweep-evidence.json",
+    "/boolean-candidates.json",
+    "/boolean-statistics.json",
+    "/boolean-admission.json",
+    "/boolean-qualification.json",
+    "/boolean-qualified-search.json",
+    "/boolean-campaign.json",
+    "/boolean-qualified-campaign.json",
+    "/boolean-oos.json",
+    "/expression-search.json",
+    "/engine/top.json",
+    "/live.json",
+];
+
+/// The [`AUDITED`] entry equal to `path`, or `None`.
+///
+/// At most 21 whole-string comparisons, a bound fixed by the type of
+/// [`AUDITED`] and independent of the request; proven by
+/// `crate::operation_audit::tests::every_registered_route_is_audited_or_exempt_by_name`.
 pub(crate) fn audited_route(path: &str) -> Option<&'static str> {
-    match path {
-        "/backtest/run" => Some("/backtest/run"),
-        "/backtest/descend" => Some("/backtest/descend"),
-        "/engine/command" => Some("/engine/command"),
-        "/engine/boolean-launch.json" => Some("/engine/boolean-launch.json"),
-        "/backtest.json" => Some("/backtest.json"),
-        "/backtest/run.json" => Some("/backtest/run.json"),
-        "/trades.json" => Some("/trades.json"),
-        "/frontier.json" => Some("/frontier.json"),
-        "/candidate-trades.json" => Some("/candidate-trades.json"),
-        "/sweep-evidence.json" => Some("/sweep-evidence.json"),
-        "/boolean-candidates.json" => Some("/boolean-candidates.json"),
-        "/boolean-statistics.json" => Some("/boolean-statistics.json"),
-        "/boolean-admission.json" => Some("/boolean-admission.json"),
-        "/boolean-qualification.json" => Some("/boolean-qualification.json"),
-        "/boolean-qualified-search.json" => Some("/boolean-qualified-search.json"),
-        "/boolean-campaign.json" => Some("/boolean-campaign.json"),
-        "/boolean-qualified-campaign.json" => Some("/boolean-qualified-campaign.json"),
-        "/boolean-oos.json" => Some("/boolean-oos.json"),
-        "/expression-search.json" => Some("/expression-search.json"),
-        "/engine/top.json" => Some("/engine/top.json"),
-        "/live.json" => Some("/live.json"),
-        _ => None,
-    }
+    AUDITED.iter().copied().find(|route| *route == path)
 }
 
 fn public_method(method: &axum::http::Method) -> &'static str {
@@ -153,7 +168,12 @@ pub(crate) async fn request_audited(
     } else {
         Phase::Completed
     };
-    match crate::detail::run(move || {
+    // THE TERMINAL IS OWED, NOT ADMITTED. The handler has already run, so a
+    // full detail pool must not refuse this write: refusing dropped the armed
+    // attempt, whose `Drop` then wrote `Cancelled`/0 synchronously on this
+    // Tokio worker and replaced the handler's real answer with a 503. The owed
+    // slot still counts against new detail work. D-1445.
+    match crate::detail::run_owed(move || {
         let mut attempt = attempt;
         attempt.finish(phase, status.as_u16())
     })
@@ -310,4 +330,4 @@ pub(crate) fn persisted_status(root: &std::path::Path, id: u64) -> Result<Option
 
 #[cfg(test)]
 #[path = "operation_audit_tests.rs"]
-mod tests;
+pub(crate) mod tests;

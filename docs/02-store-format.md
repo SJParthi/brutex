@@ -64,7 +64,7 @@ differently on each (§3 rule 5).
 | 0 | 8 | `magic` | `b"BRUTEXB2"` |
 | 8 | 2 | `format_version` | `2` |
 | 10 | 2 | `record_stride` | `56`. Read it; never assume it. |
-| 12 | 4 | `flags` | bit 0: block checksums present |
+| 12 | 4 | `flags` | bit 0: block checksums present. Every other bit is zero; a set one is refused on read and on commit (D-1354) |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | **the commit counter.** See §5. |
 | 32 | 8 | `first_ts_micros` | of record 0. Meaningful only when `n_valid > 0`. |
@@ -72,7 +72,7 @@ differently on each (§3 rule 5).
 | 48 | 4 | `symbol_id` | resolved from the path; a cross-check, not the index |
 | 52 | 4 | `timeframe_secs` | 60 for 1-minute |
 | 56 | 4 | `slot_crc` | CRC-32C over bytes 0..56 **and** 60..64 |
-| 60 | 4 | reserved | zero |
+| 60 | 4 | reserved | zero; a non-zero value is refused (D-1353) |
 
 The checksum covers every byte of the slot except the four it occupies, so a
 flipped bit anywhere in the 64 is detected — there is no window a corruption
@@ -121,12 +121,18 @@ it is why the checksum flag is not decoration.
 
 ---
 
-## 4. Reading — read-only mapping
+## 4. Reading — one positional read, no mapping
 
-The file is mapped **read-only**. Reads are pointer arithmetic against
-resident pages.
+**No crate maps a bar file.** This section used to say the file was mapped
+read-only and that a read was pointer arithmetic over resident pages. No build
+has done that: `crates/store/src/lib.rs` carries `#![forbid(unsafe_code)]`,
+which a memory mapping needs, and `crates/store/Cargo.toml` does not name
+`memmap2`. A read is `BarFile::read_record` → `read_row` → `read_fully` →
+`Positional::get`, which is `FileExt::read_at` — one `pread` of one record's
+bytes. `store::docs::section_4_names_the_positional_read_and_claims_no_mapping`
+reads this paragraph and those source lines together. D-0790.
 
-**Writes never go through the mapping.** They use positional writes
+**Writes never go through a mapping either.** They use positional writes
 (`pwrite`), which return an error on a full disk.
 
 This is not a preference. A writable mapping that runs out of space raises
@@ -137,8 +143,7 @@ halted correctly on a full disk; a naive port to a writable mapping would have
 been strictly worse, and that is the single most valuable thing the failure
 audit produced.
 
-A header decoder over a shared mapping copies its 64 bytes **once** before it
-checks anything, so the checksum covers exactly the bytes the decoded header
+`Header::decode` copies a slot's 64 bytes **once** before it checks anything, so the checksum covers exactly the bytes the decoded header
 carries. A copy that caught a concurrent `pwrite` mid-flight fails that
 checksum rather than returning half of each image.
 
@@ -168,6 +173,22 @@ sidecar's own `fsync` makes its bytes durable, not its name, and a sealed month
 that loses the name after its first commit is refused forever: a writer may
 not recreate proof for existing records (§8). D-0688.
 
+**And every directory the writer creates has its entry flushed in its parent**
+(D-1522). Creating a month can make up to six directories below the store root
+(vendor .. rung); before D-1522 only the month's own directory was synced, so a
+crash could lose a directory whose month had returned `Committed`. **The store
+root itself is never created by the writer**: a missing root is refused by
+name, so a store on an unmounted volume cannot silently grow a second root on
+the parent filesystem (D-1522, the bar-writer half of D-0954).
+
+**A month whose header region is gone is re-initialised only when nothing was
+ever committed** (D-1520, D-1521). The writer repairs a file of at most 32,768
+bytes whose bytes past the first slot are zero and whose first slot does not
+decode — what an interrupted `initialise` leaves, all zeros or a torn genesis
+slot — and only when the checksum sidecar beside it is absent or empty. A
+sidecar with entries proves an append committed records, so such a file is
+refused as `CommittedRecordsLost` instead of being reopened empty.
+
 Consequences:
 
 * **A torn record is never served, and it is not always unobservable.** This
@@ -184,10 +205,19 @@ Consequences:
   64-byte unit, into the slot that does *not* hold the previous commit. A crash
   during it leaves a slot that fails its own checksum, and the reader takes the
   previous generation.
-* **A header that outran its data loses the tail, not the file.** If the slot
+* **A header that outran its data is refused, not served short.** If the slot
   becomes durable and the records do not, the counter names records the length
-  cannot support; the reader falls back to the previous generation rather than
-  refusing the whole file.
+  cannot support. `Header::read_region` walks back to an older generation, and
+  `BarFile::validated` — which every open door goes through — then compares
+  that generation's counter with the highest counter any surviving slot still
+  decodes, and refuses with `FormatError::CounterExceedsFile` when a slot
+  claims more. This bullet used to promise the fallback: that the file would
+  open one generation short. `append` makes records durable before it writes
+  a slot that names them, so the case needs a truncation or a lost write, and
+  opening short would drop committed bars without a word.
+  `store::write::a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted`
+  and `store::write::a_counter_behind_its_bytes_opens_and_a_counter_ahead_of_them_is_refused`
+  assert the refusal. D-0790.
 
 `Commit::durable_through` is the byte offset step 2 must cover. **It states the
 offset; `crates/store/src/file.rs` issues the barrier** — `sync_all` on the
@@ -204,6 +234,15 @@ enforce that — an exclusive lock is I/O" stood in front of that sentence and
 contradicted it; the lock is real, and what it does *not* provide is
 cross-machine exclusion on a network filesystem, which is the honest limit and
 the one worth stating.
+
+**A stamp the path rules out is refused before step 1 (D-0915).** The path's
+`<yyyy-mm>` and `<tf>` segments bind the records: every offered stamp must lie
+in `[00:00 IST on the 1st, 00:00 IST on the 1st of the next month)` and on the
+rung's grid — intraday rungs anchored at 09:15 IST as `pull::fold` cuts them,
+the `1day` rung any whole second. A refusal (`OutsideMonth`, `OffGrid`) writes
+nothing. Session hours are not part of this check; `docs/06-limits.md` records
+why. No byte of the format changes, and files written before the check are
+read exactly as before.
 
 ---
 
@@ -290,9 +329,13 @@ A file whose `flags` bit 0 is clear carries no sidecar, and a verification
 request against it is **refused** rather than answered — "verified" and "there
 was nothing to verify against" are different answers.
 
-Verification is O(1) per read: one block CRC, not a file scan. Enforced by
-`docs/04-invariants.md` C-07 — sealing one block costs the same at 1×, 10× and
-100× the file's record count.
+Verification on the read path is one block CRC per read, not a file scan:
+`read_row` calls `verify_block_of` for the record's own block. What C-07
+measures is `block::seal` over a block held in memory — sealing one block
+costs the same at 1×, 10× and 100× the file's record count. This paragraph used
+to cite C-07 as enforcing the per-read bound; C-07 does not read a file, so the
+read path's check is the source's shape, and C-28 and C-29 time
+`read_record` end to end. D-0790.
 
 **Read "O(1)" precisely.** The *operation* is constant because a block is a
 fixed 4,088 bytes; the CRC inside it still reads every one of them, and always
@@ -306,14 +349,19 @@ states what is not claimed.
 ## 7. Opening — boundary check
 
 ```
-if (len - 32768) % 56 != 0 {
-    // truncate to the last whole record, log loudly, continue
+if len > offset_of(n_valid) {
+    // bytes past the commit: log loudly with the count, open, do NOT truncate
 }
 ```
 
-A file whose length does not divide by the stride was interrupted. The tail is
-truncated to the last whole record and the event is logged with the byte count
-discarded. Never silently, never by ignoring the remainder.
+A file holding bytes past the extent its commit counter covers — a ragged
+record, or whole records an append wrote before it died — was interrupted. The
+month opens, and the event is logged (`store.open`, "bytes past the commit
+counter") with the byte count discarded. **The file is not truncated** (D-0189):
+no reader can reach those bytes, and the next append writes at exactly
+`offset_of(n_valid)` and overwrites them, so a destructive write at open buys
+nothing. Never silently, never by counting the remainder as records. This
+section said "truncated" until D-1527 corrected it to what D-0189 decided.
 
 A file shorter than the header region is all tail, and is reported as such.
 

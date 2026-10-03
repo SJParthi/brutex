@@ -22,18 +22,24 @@
 //! Keeps `k` and throws the rest away as it goes. Memory becomes a function of
 //! how many results you want to LOOK at, not of how many exist.
 //!
-//! **A `Scored` is 120 bytes** -- `ConditionMask` 48, `hits` 8, `Edge` 64. This
-//! header said 80, pricing `Edge` at 24 for three fields when it has EIGHT:
-//! `n`, `mean_paisa`, `wins`, `win_sum`, `loss_sum`, `mismatched`, `refused`,
-//! `t`. It drifted when the payoff fields landed and nothing re-measured it --
-//! the second time this one paragraph has carried a stale width, the first being
-//! the 212 an earlier audit caught.
+//! **A `Scored` is 184 bytes** -- `ConditionMask` 48, `hits` 8, `Edge` 128.
+//! `Edge` is sixteen eight-byte fields: `n`, `mean_paisa`, `wins`, `win_sum`,
+//! `adverse_sum`, `favourable_sum`, `losses`, `loss_sum`, `min_win_paisa`,
+//! `max_win_paisa`, `max_loss_paisa`, `min_loss_paisa`, `mismatched`,
+//! `refused`, `missing`, `t`. A heap row,
+//! `Marked<Scored>`, is 192 bytes with its closure flag and padding, and every
+//! lens wrapper has the same width. This header said 80, then 120 with `Edge` at
+//! 64 for eight fields; each time a field landed and nothing re-measured it.
+//! These figures are no longer counted by hand:
+//! `the_header_widths_and_peak_are_the_measured_type_widths` builds them from
+//! `size_of` and fails when this paragraph drifts from the types (D-0976).
 //!
 //! **The peak is `chunks x keep`, not `keep`.** The walk is chunked across the
 //! cores, each chunk holding its own bounded heap, so the bound moved when the
-//! parallel form landed and this paragraph did not move with it. Chunks are
-//! `4 x threads` per level, so on fourteen cores at `keep = 10_000` the peak is
-//! about **67 MB**, not the 0.80 MB written here before. Each chunk's heap is
+//! parallel form landed and this paragraph did not move with it. Chunks are at
+//! most `4 x threads` per level, so on fourteen cores at `keep = 10_000` the
+//! chunk heaps peak at about **107.5 MB** (56 x 10,000 x 192 bytes), not the 67 MB
+//! or the 0.80 MB written here before. Each chunk's heap is
 //! now reserved at `keep.min(part.len())`, so a SHORT chunk costs what it can
 //! hold rather than what the caller might have wanted.
 //!
@@ -545,8 +551,9 @@ impl Ord for ByAsymmetry {
     /// preferring the one whose wins are *smaller and more uniform*, which is
     /// the opposite of the question being asked.
     ///
-    /// `max_win_paisa` breaks that tie on the thing the operator is hunting —
-    /// how much it pays when it pays — and `|t|` remains the LAST term so the
+    /// `Edge::largest_gain_paisa` breaks that tie on the thing the operator is
+    /// hunting — how much it pays when it pays, on the side it is traded
+    /// (D-1178) — and `|t|` remains the LAST term so the
     /// order is still total and reproducible under §3 rule 5.
     fn cmp(&self, other: &Self) -> Ordering {
         let (mine, theirs) = (
@@ -557,8 +564,8 @@ impl Ord for ByAsymmetry {
             .then_with(|| {
                 self.0
                     .edge
-                    .max_win_paisa
-                    .total_cmp(&other.0.edge.max_win_paisa)
+                    .largest_gain_paisa()
+                    .total_cmp(&other.0.edge.largest_gain_paisa())
             })
             .then_with(|| self.0.cmp(&other.0))
     }
@@ -638,9 +645,10 @@ fn top_of<K: Ranked1>(
     //
     // Measured against the defaults: `chunk_size` collapses to a width of 1 when
     // the frequent set is smaller than four per thread, so a 40-survivor sweep on
-    // fourteen cores is FORTY chunks. At `keep = 10_000` and 120 bytes a
-    // `Scored`, reserving `keep` each was 48 MB to rank forty rows, against the
-    // 1.2 MB the single heap this replaced would have used.
+    // fourteen cores is FORTY chunks. At `keep = 10_000` and
+    // 192 bytes a heap row, reserving `keep` each was 76.8 MB to rank forty
+    // rows, against the 1.9 MB the single heap this replaced would have used
+    // (widths pinned by `the_header_widths_and_peak_are_the_measured_type_widths`).
     let mut heap: Heap<Marked<K>> = Heap::with_capacity(keep.min(part.len()));
     for itemset in part {
         admit(
@@ -746,7 +754,7 @@ fn ordered<K: Ranked1>(heap: Heap<Marked<K>>) -> (Vec<Scored>, Vec<Scored>) {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Accumulator, ByAsymmetry, Lens, Scored, rank, rank_by};
+    use super::{Accumulator, ByAsymmetry, ByPath, ByPayoff, Lens, Marked, Scored, rank, rank_by};
     use crate::outcome::{Edge, Horizon, forward};
     use crate::{Sweeper, synthetic};
     use engine::Ladder;
@@ -965,7 +973,9 @@ mod tests {
     }
 
     /// Feeding levels as the engine retires them is the same EDGE cut as
-    /// ranking a retained sweep afterwards, under both public lenses.
+    /// ranking a retained sweep afterwards, under every lens. `Lens::Path` and
+    /// `Lens::Asymmetry` were missing from this loop (AC-whp-tb-2, D-1498), so
+    /// their incremental paths were never compared with their retained ones.
     #[test]
     fn an_incremental_ranker_matches_the_retained_ranker_under_both_lenses() {
         let bars = synthetic::sessions(8);
@@ -974,7 +984,12 @@ mod tests {
         let column = Column::build(&bars, &mut evaluator());
         let f = forward(&bars, &column, Horizon::DEFAULT);
 
-        for lens in [Lens::Detectability, Lens::Payoff] {
+        for lens in [
+            Lens::Detectability,
+            Lens::Payoff,
+            Lens::Path,
+            Lens::Asymmetry,
+        ] {
             for keep in [0_usize, 25] {
                 let expected = rank_by(&out.sweep, &column, &f, keep, lens);
                 let mut incremental = Accumulator::new(keep, lens);
@@ -1293,5 +1308,172 @@ mod tests {
             0,
             "nothing won is the floor -- it is not asymmetric, it is absent"
         );
+    }
+
+    /// AC-whp-cx-1: the asymmetry and path keys are read on the side the
+    /// combination is TRADED. A combination whose mean is negative is traded
+    /// short, so its wins are the down moves.
+    ///
+    /// The audit's worked example: moves of [-300, -300, -300, +10]. As a short
+    /// the smallest win is 300 and the largest give-back 10, so 3000 bp. Read
+    /// long it scored 10/300 = 3 bp, near the floor.
+    #[test]
+    fn a_short_is_scored_on_the_moves_that_go_its_way() {
+        let short = Edge {
+            n: 4,
+            mean_paisa: -222.5,
+            wins: 1,
+            win_sum: 10.0,
+            losses: 3,
+            loss_sum: -900.0,
+            min_win_paisa: 10.0,
+            max_win_paisa: 10.0,
+            max_loss_paisa: 300.0,
+            min_loss_paisa: 300.0,
+            adverse_sum: 900.0,
+            favourable_sum: 10.0,
+            t: -3.0,
+            ..Edge::default()
+        };
+        assert_eq!(short.worst_reward_risk_bp(), 3_000, "300 over 10 is 30.00x");
+        assert_eq!(
+            short.path_ratio_bp(),
+            9_000,
+            "900 down over 10 up is 90.00x"
+        );
+        assert_eq!(short.largest_gain_paisa().to_bits(), 300.0_f64.to_bits());
+
+        // THE MIRROR: the same moves negated, traded long, scores the same.
+        let long = Edge {
+            mean_paisa: 222.5,
+            wins: 3,
+            win_sum: 900.0,
+            losses: 1,
+            loss_sum: -10.0,
+            min_win_paisa: 300.0,
+            max_win_paisa: 300.0,
+            max_loss_paisa: 10.0,
+            min_loss_paisa: 10.0,
+            adverse_sum: 10.0,
+            favourable_sum: 900.0,
+            t: 3.0,
+            ..short
+        };
+        assert_eq!(long.worst_reward_risk_bp(), short.worst_reward_risk_bp());
+        assert_eq!(long.path_ratio_bp(), short.path_ratio_bp());
+        assert_eq!(
+            long.largest_gain_paisa().to_bits(),
+            short.largest_gain_paisa().to_bits()
+        );
+
+        // THE IDEAL SHORT: every move down. It never gave anything back, so it
+        // is unbounded, not the floor it scored when read long.
+        let always_down = Edge {
+            n: 3,
+            mean_paisa: -50.0,
+            losses: 3,
+            loss_sum: -150.0,
+            min_loss_paisa: 40.0,
+            max_loss_paisa: 60.0,
+            adverse_sum: 150.0,
+            ..Edge::default()
+        };
+        assert_eq!(always_down.worst_reward_risk_bp(), i64::MAX);
+        assert_eq!(always_down.path_ratio_bp(), i64::MAX);
+
+        // A flat sample has a zero mean, is read long, and scores the floor on
+        // both keys.
+        let flat = Edge {
+            n: 2,
+            ..Edge::default()
+        };
+        assert_eq!((flat.worst_reward_risk_bp(), flat.path_ratio_bp()), (0, 0));
+    }
+
+    /// The asymmetry lens breaks ties on the largest move IN THE TRADED
+    /// DIRECTION. Two shorts that never gave anything back tie at `i64::MAX`;
+    /// the one whose largest down move is bigger pays more and comes first,
+    /// even when its `|t|` is smaller. It read `max_win_paisa`, a short's worst
+    /// loss, which is zero for both, so `|t|` decided.
+    #[test]
+    fn the_asymmetry_tie_break_reads_the_traded_side() {
+        let big = Edge {
+            n: 5,
+            mean_paisa: -300.0,
+            losses: 5,
+            min_loss_paisa: 50.0,
+            max_loss_paisa: 1_000.0,
+            t: -1.5,
+            ..Edge::default()
+        };
+        let small = Edge {
+            max_loss_paisa: 100.0,
+            t: -9.0,
+            ..big
+        };
+        assert_eq!(big.worst_reward_risk_bp(), small.worst_reward_risk_bp());
+        let (b, s) = (shaped(1, big), shaped(2, small));
+        assert!(
+            s > b,
+            "on |t| alone the small payer leads -- the case this is about"
+        );
+        assert!(
+            ByAsymmetry(b) > ByAsymmetry(s),
+            "the short that pays 1,000 when it pays must come first"
+        );
+    }
+
+    /// Bytes as megabytes (10^6) to one decimal place, rounded half up.
+    fn megabytes(bytes: usize) -> String {
+        let tenths = bytes.saturating_add(50_000) / 100_000;
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
+
+    /// The module header and the `top_of` comment price a row and the peak from
+    /// the widths the compiler lays out (W3-runner4-3).
+    ///
+    /// They said a `Scored` was 120 bytes with `Edge` at 64 when `Edge` holds
+    /// fourteen eight-byte fields. Every expected phrase below is BUILT from
+    /// `size_of`, so this test's own text cannot satisfy the search: a header
+    /// that drifts from the types fails here.
+    #[test]
+    fn the_header_widths_and_peak_are_the_measured_type_widths() {
+        let scored = core::mem::size_of::<Scored>();
+        let mask = core::mem::size_of::<ConditionMask>();
+        let edge = core::mem::size_of::<Edge>();
+        let row = core::mem::size_of::<Marked<Scored>>();
+        assert_eq!(
+            scored,
+            mask + core::mem::size_of::<u64>() + edge,
+            "`Scored` is its three fields and no padding"
+        );
+        for lens_row in [
+            core::mem::size_of::<Marked<ByPayoff>>(),
+            core::mem::size_of::<Marked<ByPath>>(),
+            core::mem::size_of::<Marked<ByAsymmetry>>(),
+        ] {
+            assert_eq!(lens_row, row, "every lens holds the same row width");
+        }
+        let source = include_str!("rank.rs");
+        let expected = [
+            format!(
+                "**A `Scored` is {scored} bytes** -- `ConditionMask` {mask}, `hits` 8, `Edge` {edge}."
+            ),
+            format!("`Marked<Scored>`, is {row} bytes"),
+            // Fourteen cores, four chunks a thread, `keep = 10_000`.
+            format!("about **{}**", megabytes(4 * 14 * 10_000 * row)),
+            // The `top_of` comment's forty-chunk example and the one heap it replaced.
+            format!(
+                "{row} bytes a heap row, reserving `keep` each was {}",
+                megabytes(40 * 10_000 * row)
+            ),
+            format!("against the {} the single heap", megabytes(10_000 * row)),
+        ];
+        for phrase in expected {
+            assert!(
+                source.contains(&phrase),
+                "stale width in rank.rs: expected {phrase:?}"
+            );
+        }
     }
 }

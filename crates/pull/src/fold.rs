@@ -99,14 +99,25 @@ impl Bucket {
     /// One trading day. Wide enough that a whole session lands in one bucket.
     pub const DAY: Self = Self(86_400);
 
-    /// A bucket of `secs` seconds, or [`None`] for zero.
+    /// A bucket of `secs` seconds, or [`None`] for zero or for a width wider
+    /// than one day.
     ///
     /// Zero is refused rather than clamped: a zero-width bucket would divide by
     /// zero, and a bucket silently widened to one second is a different answer
     /// to the question that was asked.
+    ///
+    /// **Wider than [`Self::DAY`] is refused too** (audit-20261003
+    /// attackdata-5, D-1532). Such a bucket folds two trading days into one
+    /// bar, no store rung is wider than a day, and a `u32::MAX` width stamped a
+    /// 2024 snapshot at 1969-12-31. Every width from one second to one day is
+    /// still accepted, which is what folding from snapshots promises.
     #[must_use]
     pub const fn of_secs(secs: u32) -> Option<Self> {
-        if secs == 0 { None } else { Some(Self(secs)) }
+        if secs == 0 || secs > Self::DAY.0 {
+            None
+        } else {
+            Some(Self(secs))
+        }
     }
 
     /// The width in seconds.
@@ -173,11 +184,19 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     //
     // THE FAULT IS THE ANCHOR, NOT THE RUNG. Anchored at the OPEN, every rung's
     // first bar of the day begins exactly at 09:15. What is left over is a
-    // SHORT LAST BAR, because 375 session-minutes does not divide by 2, 10, 30
-    // or 60 either — and a trailing stub is a different object from a leading
-    // one. The last bar covers 15:15-15:30, is stamped correctly, and holds the
-    // trades that happened in it. The leading stub was mislabelled. One is a
-    // short final bar; the other is a lie.
+    // SHORT LAST BAR wherever the VENUE's session length does not divide by the
+    // rung — and that is a property of the venue row, not of the rung. The
+    // 375-minute index session leaves one at 2, 10, 30 and 60; the 385-minute
+    // equity-derivatives session from 2026-08-03 leaves one at 2, 3, 10, 15, 30
+    // and 60 (a 1-minute 3min bar and a 10-minute 15min bar at 15:39 and
+    // 15:30); the 360-minute continuous session of a cash security eligible
+    // for the closing auction leaves none. Pinned against
+    // `complete_minutes_for_venue` by
+    // `pull::anchor::derived_rung_stub_minutes_follow_the_venue_session`
+    // (D-1447). A trailing stub is a different object from a leading one: it
+    // is stamped correctly and holds the trades that happened in it. The
+    // leading stub was mislabelled. One is a short final bar; the other is a
+    // lie.
     //
     // THE DAILY RUNG KEEPS MIDNIGHT, and that is not a special case for its own
     // sake. A day-wide bucket anchored at the open would run 09:15 to 09:15 —
@@ -264,6 +283,13 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     let mut previous: Option<i64> = None;
 
     for (i, snap) in snapshots.iter().enumerate() {
+        // A NEGATIVE COUNT IS REFUSED BEFORE IT CAN BE NETTED. D-1532.
+        if snap.volume < 0 {
+            return Err(FoldError::NegativeVolume {
+                at: i,
+                volume: snap.volume,
+            });
+        }
         if let Some(prev) = previous
             && snap.ts_micros < prev
         {
@@ -330,7 +356,17 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
             // sharing a second have no tiebreaker, so file order is the only
             // order there is and sorting would invent one.
             bar.close = snap.close;
-            bar.volume = bar.volume.saturating_add(snap.volume);
+            // CHECKED, for the reason the stamp above is: a saturated sum is a
+            // bar whose volume is i64::MAX however much more traded, filed as if
+            // it were measured. Refused instead (ET-bars-candles-store-4,
+            // D-0955).
+            bar.volume = bar
+                .volume
+                .checked_add(snap.volume)
+                .ok_or(FoldError::VolumeOverflow {
+                    at: i,
+                    bucket: start,
+                })?;
             if snap.open_interest != i64::MIN {
                 bar.open_interest = snap.open_interest;
             }
@@ -401,6 +437,31 @@ pub enum FoldError {
         /// The snapshot's own stamp, before the shift.
         ts_micros: i64,
     },
+    /// A bucket's summed volume leaves the range an `i64` can hold.
+    ///
+    /// Refused rather than saturated, for the reason [`Self::AnchorOverflow`]
+    /// is: a capped sum is a wrong volume filed as a measured one. Unreachable
+    /// from any real exchange print and stated anyway (ET-bars-candles-store-4,
+    /// D-0955).
+    VolumeOverflow {
+        /// Zero-based position of the snapshot whose volume overflowed.
+        at: usize,
+        /// The start of the bucket it was being added to.
+        bucket: i64,
+    },
+    /// A snapshot whose volume is below zero. audit-20261003 attackdata-5,
+    /// D-1532.
+    ///
+    /// The sum was checked for overflow and not for sign, so a negative
+    /// snapshot was netted into a plausible positive bucket (10 + -7 = 3) that
+    /// then passed the store's count gate, which sees only the sum. A count of
+    /// trades cannot be negative; refused here, where the row is still named.
+    NegativeVolume {
+        /// Zero-based position of the snapshot.
+        at: usize,
+        /// Its volume as offered.
+        volume: i64,
+    },
     /// A snapshot's timestamp precedes the one before it.
     ///
     /// Refused rather than sorted. Rows sharing a second carry no tiebreaker,
@@ -443,6 +504,18 @@ impl core::fmt::Display for FoldError {
                  Refused rather than saturated: a saturated instant lands in a \
                  bucket that is not its own, which files the bar under the \
                  wrong month."
+            ),
+            Self::VolumeOverflow { at, bucket } => write!(
+                f,
+                "snapshot {at} takes the volume of the bucket at {bucket} past \
+                 what an i64 can hold. Refused rather than saturated: a capped \
+                 sum is a wrong volume filed as a measured one."
+            ),
+            Self::NegativeVolume { at, volume } => write!(
+                f,
+                "snapshot {at} carries a negative volume of {volume}. A count of \
+                 trades cannot be below zero, and summed into its bucket it \
+                 would hide as a smaller plausible volume."
             ),
             Self::OutOfOrder {
                 at,
@@ -790,8 +863,6 @@ pub fn complete_minutes_with_calendar(
     runtime: crate::calendar::Runtime<'_>,
 ) -> Result<(Vec<Bar>, Vec<String>), FoldError> {
     const MINUTE: i64 = 60_000_000;
-    const DAY: i64 = 86_400_000_000;
-    const OFFSET: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
     let candidates = fold_from_bars(bars, bucket, Bucket::MINUTE)?;
     let mut complete = Vec::with_capacity(candidates.len());
     let mut diagnostics = Vec::new();
@@ -804,14 +875,8 @@ pub fn complete_minutes_with_calendar(
         let end = start
             .checked_add(i64::from(bucket.secs()) * 1_000_000)
             .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
-        let day = start
-            .checked_add(OFFSET)
-            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?
-            .div_euclid(DAY);
-        let midnight = day
-            .checked_mul(DAY)
-            .and_then(|t| t.checked_sub(OFFSET))
-            .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
+        let (day, midnight) = ist_day_of(start)?;
+        let new_day = previous_day != Some(day);
         let calendar = runtime.kind_of(day);
         let exceptional = matches!(calendar, crate::calendar::DayKind::Open(s) if s != crate::calendar::Session::full());
         let session = match minute_session(day, calendar, venue, cash_schedule) {
@@ -831,11 +896,8 @@ pub fn complete_minutes_with_calendar(
             let expected = (i128::from(close) - i128::from(missing)) / i128::from(MINUTE);
             diagnostics.push(format!("bucket range [{missing}, {close}): absent: observed 0, scheduled {expected}; observed-day tail withheld; historical gap refill requires a versioned store repair"));
         }
-        if calendar == crate::calendar::DayKind::Unmeasured && previous_day != Some(day) {
-            diagnostics.push(format!(
-                "day {day}: UNVERIFIED: {}; derived buckets withheld",
-                runtime.unverified_reason(day)
-            ));
+        if previous_day != Some(day) {
+            diagnostics.extend(day_note(day, calendar, session, runtime));
         }
         // Entirely absent buckets never become fold candidates. Name those
         // between observed buckets too; do not treat session breaks as gaps.
@@ -885,15 +947,74 @@ pub fn complete_minutes_with_calendar(
             cursor += 1;
         }
         let expected = scheduled_minutes(session, midnight, start, end);
+        // AN UNMEASURED DAY IS NAMED ONCE, NOT ONCE PER BUCKET (o1api-44,
+        // D-1201). The day sentence above already says every derived bucket
+        // of it is withheld and why. No bucket of a day outside the calendar
+        // can complete, so a per-bucket "incomplete coverage" line restated
+        // that sentence once per bucket: 900 lines for five days at two
+        // minutes, each one a `pull.derive` warning and a clause of the rung's
+        // refusal, and `derive` rewrote each into a source repair that cannot
+        // help. The minutes are still consumed above; nothing is certified.
+        if calendar == crate::calendar::DayKind::Unmeasured {
+            continue;
+        }
+        // AN EXCEPTIONAL SESSION IS NAMED ONCE PER DAY TOO (hunt-pull-3,
+        // D-1533), for o1api-44's reason above: every bucket of it is withheld
+        // for the same sentence, and one line per bucket was one `pull.derive`
+        // warning and one refusal clause per bucket.
         if exceptional {
-            diagnostics.push(format!("bucket {start}: exceptional session {session:?} withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
+            if new_day {
+                diagnostics.push(format!("day {day}: exceptional session {session:?}: every derived bucket of it withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
+            }
         } else if valid && expected > 0 && i128::from(count) == expected {
             complete.push(bar);
-        } else {
+        } else if !day_is_withheld(session) {
             diagnostics.push(format!("bucket {start}: incomplete or invalid minute coverage: observed {count}, scheduled {expected}, calendar {session:?}; withheld; historical gap refill requires a versioned store repair"));
         }
     }
     Ok((complete, diagnostics))
+}
+
+/// The one sentence a day gets before its buckets, if it gets one.
+///
+/// A day outside the measured calendar says so, as it always did. The two new
+/// arms are ONCE PER DAY, AND NOT A COVERAGE FAULT (GAP12-12, D-0955). An
+/// `OpenLengthUnmeasured` day traded for a length the calendar does not state,
+/// so no minute count could ever complete a bucket; each bucket used to be
+/// reported as incomplete coverage, which `ingest::derive` rewrote into
+/// "restore complete minute source", a repair that does not exist, once per
+/// bucket. Bars on a measured `Closed` day are a defect in what was stored, not
+/// a hole in it. Neither sentence ends in the suffix `derive` rewrites.
+fn day_note(
+    day: i64,
+    calendar: crate::calendar::DayKind,
+    session: crate::calendar::DayKind,
+    runtime: crate::calendar::Runtime<'_>,
+) -> Option<String> {
+    use crate::calendar::DayKind;
+    if calendar == DayKind::Unmeasured {
+        return Some(format!(
+            "day {day}: UNVERIFIED: {}; derived buckets withheld",
+            runtime.unverified_reason(day)
+        ));
+    }
+    match session {
+        DayKind::OpenLengthUnmeasured => Some(format!(
+            "day {day}: session length unmeasured (a traded non-regular session whose minute length the calendar does not state); derived buckets withheld; nothing to repair in the minute source"
+        )),
+        DayKind::Closed => Some(format!(
+            "day {day}: minute bars on a day the calendar measures as closed; store defect; derived buckets withheld"
+        )),
+        DayKind::Open(_) | DayKind::Unmeasured => None,
+    }
+}
+
+/// Whether [`day_note`] already named every bucket of this day.
+const fn day_is_withheld(session: crate::calendar::DayKind) -> bool {
+    matches!(
+        session,
+        crate::calendar::DayKind::OpenLengthUnmeasured | crate::calendar::DayKind::Closed
+    )
 }
 
 fn session_minutes(session: crate::calendar::DayKind) -> i64 {
@@ -901,6 +1022,28 @@ fn session_minutes(session: crate::calendar::DayKind) -> i64 {
         crate::calendar::DayKind::Open(s) => i64::from(s.bars()),
         _ => 0,
     }
+}
+
+/// The IST civil day a bucket starting at `start` falls on, as days since the
+/// epoch, and that day's midnight as UTC microseconds.
+///
+/// Split out of [`complete_minutes_with_calendar`] so that function stays under
+/// the workspace's line limit once it skips an unmeasured day's buckets
+/// (o1api-44, D-1201). The arithmetic is the one it did inline: checked, and an
+/// overflow is the same `AnchorOverflow` naming the bucket's start.
+fn ist_day_of(start: i64) -> Result<(i64, i64), FoldError> {
+    const DAY: i64 = 86_400_000_000;
+    const OFFSET: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
+    let overflow = || FoldError::AnchorOverflow { ts_micros: start };
+    let day = start
+        .checked_add(OFFSET)
+        .ok_or_else(overflow)?
+        .div_euclid(DAY);
+    let midnight = day
+        .checked_mul(DAY)
+        .and_then(|t| t.checked_sub(OFFSET))
+        .ok_or_else(overflow)?;
+    Ok((day, midnight))
 }
 
 /// The calendar decides which days are regular; the venue decides their hours.
@@ -984,6 +1127,165 @@ fn scheduled_minutes(
 )]
 mod guard {
     use super::{Bucket, FoldError, fold_from_bars, fold_from_snapshots};
+    use crate::calendar::{DayKind, Runtime};
+    use crate::session::{Day, IST_OFFSET_SECS};
+    use crate::vendor::Venue;
+    use store::format::Bar;
+
+    /// The first one-minute bar of a regular session on `day`, 09:15 IST, as
+    /// a UTC epoch second.
+    fn open_of(day: Day) -> i64 {
+        i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60
+    }
+
+    /// `n` one-minute bars from `from`, a second apart by `step`.
+    fn minutes(from: i64, n: i64, step: i64) -> Vec<Bar> {
+        (0..n)
+            .map(|m| Bar {
+                ts_micros: (from + m * step) * 1_000_000,
+                open: 100,
+                high: 100,
+                low: 100,
+                close: 100,
+                volume: 1,
+                open_interest: i64::MIN,
+            })
+            .collect()
+    }
+
+    /// **A DAY OUTSIDE THE CALENDAR IS ONE SENTENCE, AT EVERY WIDTH.**
+    /// o1api-44, D-1201.
+    ///
+    /// Measured on main before the fix: five weekdays from 2026-09-07, 1,800
+    /// minute bars, two-minute rung, gave `complete = 0` and 905 diagnostics,
+    /// 158,085 bytes: one day sentence each and one "incomplete or invalid
+    /// minute coverage" line per bucket, every one a `pull.derive` warning.
+    /// Checked here at every derived rung width, after the calendar's last day
+    /// and before its first, with a full session, a single bar, misaligned
+    /// seconds and duplicate stamps on the unmeasured days, and with measured
+    /// days either side whose own coverage faults must still be named.
+    #[test]
+    fn an_unmeasured_day_is_one_diagnostic_and_not_one_per_bucket() {
+        let after: Vec<Day> = (7..=11).map(|d| Day::new(2026, 9, d).unwrap()).collect();
+        for day in &after {
+            assert_eq!(
+                Runtime::default().kind_of(i64::from(day.days_from_epoch())),
+                DayKind::Unmeasured,
+                "the premise: {day:?} is past the calendar's last day"
+            );
+        }
+        let mut bars = Vec::new();
+        for day in &after {
+            bars.extend(minutes(open_of(*day), 375, 60));
+        }
+        let widths = [60_u32, 120, 180, 300, 900, 2_700, 3_600, 14_400, 86_400];
+        for secs in widths {
+            let bucket = Bucket::of_secs(secs).unwrap();
+            for venue in Venue::ALL {
+                let (complete, diagnostics) = super::complete_minutes_with_calendar(
+                    &bars,
+                    bucket,
+                    venue,
+                    None,
+                    Runtime::default(),
+                )
+                .unwrap();
+                assert!(complete.is_empty(), "{secs}s {venue}: nothing certified");
+                assert_eq!(
+                    diagnostics.len(),
+                    after.len(),
+                    "{secs}s {venue}: one sentence per day, not one per bucket: {} \
+                     lines, first {:?}",
+                    diagnostics.len(),
+                    diagnostics.iter().take(7).collect::<Vec<_>>()
+                );
+                for (why, day) in diagnostics.iter().zip(&after) {
+                    assert!(
+                        why.starts_with(&format!("day {}: UNVERIFIED", day.days_from_epoch())),
+                        "{secs}s {venue}: {why}"
+                    );
+                }
+                let bytes: usize = diagnostics.iter().map(String::len).sum();
+                assert!(bytes < 1_000, "{secs}s {venue}: {bytes} bytes");
+            }
+        }
+
+        // One bar, misaligned seconds and a duplicated stamp on an unmeasured
+        // day are each still that day's one sentence, not a coverage fault.
+        let day = after[0];
+        let mut odd = minutes(open_of(day), 1, 60);
+        odd.extend(minutes(open_of(day) + 61, 3, 17));
+        odd.extend(minutes(open_of(day) + 600, 2, 0));
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &odd,
+            Bucket::of_secs(120).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert!(complete.is_empty());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+
+        // Before the calendar's first day as well as after its last.
+        let early = Day::new(2019, 11, 29).unwrap();
+        assert_eq!(
+            Runtime::default().kind_of(i64::from(early.days_from_epoch())),
+            DayKind::Unmeasured
+        );
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &minutes(open_of(early), 375, 60),
+            Bucket::of_secs(120).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert!(complete.is_empty());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    }
+
+    /// **A MEASURED DAY BESIDE AN UNMEASURED ONE KEEPS EVERY LINE OF ITS OWN.**
+    /// o1api-44, D-1201: the skip is for the unmeasured day only. A whole
+    /// session on 2026-09-04, the calendar's last day, still completes, and a
+    /// hole in it is still named bucket by bucket, ahead of the next day's one
+    /// sentence.
+    #[test]
+    fn a_measured_day_beside_an_unmeasured_one_keeps_its_own_lines() {
+        let after = [Day::new(2026, 9, 7).unwrap()];
+        let last = Day::new(2026, 9, 4).unwrap();
+        assert!(matches!(
+            Runtime::default().kind_of(i64::from(last.days_from_epoch())),
+            DayKind::Open(_)
+        ));
+        let mut mixed = minutes(open_of(last), 375, 60);
+        mixed.extend(minutes(open_of(after[0]), 375, 60));
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &mixed,
+            Bucket::of_secs(300).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert_eq!(complete.len(), 75, "the measured day completes whole");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let mut holed = minutes(open_of(last), 375, 60);
+        holed.remove(100);
+        holed.extend(minutes(open_of(after[0]), 375, 60));
+        let (complete, diagnostics) = super::complete_minutes_with_calendar(
+            &holed,
+            Bucket::of_secs(300).unwrap(),
+            Venue::NseIndex,
+            None,
+            Runtime::default(),
+        )
+        .unwrap();
+        assert_eq!(complete.len(), 74, "only the holed bucket is withheld");
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("incomplete or invalid minute coverage: observed 4"));
+        assert!(diagnostics[1].contains("UNVERIFIED"));
+    }
 
     /// Every timeframe the operator named is a whole number of minutes, and
     /// every one of them is exact from stored one-minute bars.

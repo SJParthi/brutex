@@ -1,7 +1,7 @@
 //! Moving averages, swing levels, `SuperTrend` and market structure.
 //!
-//! **14 vocabulary positions**: 0–5, 56–59, 64–65 and 72–73 — the last of the 232
-//! live positions that had no computation behind them.
+//! **14 vocabulary positions**: 0–5, 56–59, 64–65 and 72–73 — when written, the
+//! last of the then 232 live positions that had no computation behind them.
 //!
 //! # Every threshold here is UNVERIFIED, and that is stated rather than hidden
 //!
@@ -169,6 +169,9 @@ const _: () = assert!(RING % 2 == 1, "a fractal window needs a middle");
 pub struct Ema {
     period: i128,
     scaled: i128,
+    /// The scaled sum of the prices folded so far, read only while the first
+    /// `period` are being folded: the seed is their simple mean (D-1542).
+    seed_sum: i128,
     /// Candles folded, saturating. Read only by [`Ema::warm`], which is what keeps a
     /// two-candle seed from being emitted as a 200-period measurement.
     folded: u64,
@@ -182,6 +185,7 @@ impl Ema {
         Self {
             period,
             scaled: 0,
+            seed_sum: 0,
             folded: 0,
             seeded: false,
         }
@@ -189,12 +193,17 @@ impl Ema {
 
     /// Fold one price in.
     ///
-    /// Seeded with the first price rather than a simple average of the first `period`.
-    /// That is a convention and it is stated: seeding with an SMA needs `period`
-    /// candles of buffer, which would make the state grow with the period and cost the
-    /// constant-space property for no gain in a long run. The two agree to within the
-    /// smoothing constant after a few periods — which is why [`Ema::warm`] exists and
-    /// why no vocabulary position is emitted before it is true.
+    /// **Seeded with the simple mean of the first `period` prices**, then the
+    /// recursion, which is the standard (TA-Lib) seed. Until `period` prices have
+    /// been folded the value is the running mean of those folded so far.
+    ///
+    /// This was seeded with the FIRST price, on the argument that an SMA seed
+    /// "needs `period` candles of buffer". It does not: a running sum is one
+    /// `i128`, so the state stays constant-size. With the one-price seed the warm
+    /// gate opened while that price still carried `(1 - 2/(n+1))^(n-1)` of the
+    /// weight, about 13.8% of an EMA200, so a warm `close_below_ema200` could
+    /// be set against a level that was mostly where the run started
+    /// (hunt-indicators-1, D-1542).
     pub fn fold(&mut self, price: i64) {
         // Counted before either early return below, because both of them absorb the
         // candle: the seeding branch and the degenerate-period branch each `return`, and
@@ -202,8 +211,12 @@ impl Ema {
         // seed — which is exactly the run of candles this counter has to measure.
         self.folded = self.folded.saturating_add(1);
         let target = i128::from(price).saturating_mul(SCALE);
-        if !self.seeded {
-            self.scaled = target;
+        let count = i128::from(self.folded);
+        if !self.seeded || count <= self.period {
+            // THE SEED, A RUNNING MEAN. `count` is at least one here: it was
+            // incremented above.
+            self.seed_sum = self.seed_sum.saturating_add(target);
+            self.scaled = self.seed_sum.div_euclid(count.max(1));
             self.seeded = true;
             return;
         }
@@ -230,9 +243,9 @@ impl Ema {
 
     /// True once `period` candles have been folded.
     ///
-    /// The seed is the first price, so until then the average is that price plus a
-    /// handful of steps — a fact about where the run started rather than about the
-    /// market. Measured: a state fed 10,000 paisa and then 20,000 set
+    /// Until then the average is the mean of fewer than `period` prices — a fact
+    /// about where the run started rather than about the market. At warm it is
+    /// exactly the simple mean of the first `period` (D-1542). Measured: a state fed 10,000 paisa and then 20,000 set
     /// `close_above_ema200`, where the "200-period average" was the previous close.
     ///
     /// **Separate from [`Ema::value`] on purpose, and this is the part a fix gets
@@ -252,6 +265,9 @@ impl Ema {
 pub struct Atr {
     period: i128,
     scaled: i128,
+    /// The scaled sum of the true ranges folded so far, read only while the
+    /// first `period` are being folded: Wilder's seed is their mean (D-1542).
+    seed_sum: i128,
     previous_close: Option<i64>,
     /// Candles folded, saturating. Read only by [`Atr::warm`].
     folded: u64,
@@ -265,6 +281,7 @@ impl Atr {
         Self {
             period,
             scaled: 0,
+            seed_sum: 0,
             previous_close: None,
             folded: 0,
             seeded: false,
@@ -297,22 +314,27 @@ impl Atr {
 
     /// Fold one candle in.
     ///
-    /// The first candle seeds the range at its own high-low span — there is no previous
-    /// close to gap from — so the seed is a one-candle range wearing a `period`-candle
-    /// label until [`Atr::warm`] is true.
+    /// The first candle's true range is its own high-low span — there is no previous
+    /// close to gap from. **Wilder's seed is the mean of the first `period` true
+    /// ranges**, then `1/n` smoothing; until `period` are folded the value is the
+    /// running mean of those so far. It was seeded from the first candle's range
+    /// alone, which still carried about 38.7% of an ATR10 at warm
+    /// (hunt-indicators-1, D-1542).
     pub fn fold(&mut self, candle: &Candle) {
         // Counted first, for the same reason as in `Ema::fold`: the seeding branch below
         // absorbs a candle without reaching the smoothing step.
         self.folded = self.folded.saturating_add(1);
         let tr = self.true_range(candle).saturating_mul(SCALE);
-        if self.seeded {
+        let count = i128::from(self.folded);
+        if self.seeded && count > self.period {
             let denominator = self.period;
             if denominator > 0 {
                 let delta = tr.saturating_sub(self.scaled);
                 self.scaled = self.scaled.saturating_add(delta.div_euclid(denominator));
             }
         } else {
-            self.scaled = tr;
+            self.seed_sum = self.seed_sum.saturating_add(tr);
+            self.scaled = self.seed_sum.div_euclid(count.max(1));
             self.seeded = true;
         }
         self.previous_close = Some(candle.close);
@@ -437,9 +459,10 @@ impl SuperTrend {
             }
         };
         self.trend = trend;
-        if let Ok(next) = i64::try_from(stop) {
-            self.stop = Some(next);
-        }
+        // Same policy as the seed: a stop `i64` cannot hold is absent, not the previous
+        // leg's level kept under the new trend. The next candle then reseeds, exactly as
+        // it does after an unrepresentable seed.
+        self.stop = i64::try_from(stop).ok();
     }
 }
 
@@ -742,7 +765,9 @@ pub struct TrendState {
     thresholds: TrendThresholds,
 }
 
-const _: () = assert!(core::mem::size_of::<TrendState>() <= 512);
+// 544 bytes since D-1542 gave each `Ema` (and the `Atr` inside `SuperTrend`) a
+// running seed sum; the ceiling moved from 512 to 576, 32 bytes of slack.
+const _: () = assert!(core::mem::size_of::<TrendState>() <= 576);
 
 impl Default for TrendState {
     fn default() -> Self {
@@ -1142,6 +1167,53 @@ mod tests {
 
     fn tol() -> Tolerance {
         vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
+    }
+
+    /// AN AVERAGE IS WARM ON THE SIMPLE MEAN OF ITS FIRST `period` PRICES, NOT
+    /// ON A ONE-PRICE SEED. hunt-indicators-1, D-1542.
+    ///
+    /// Seeded from one price and declared warm after `period` folds, an EMA200
+    /// still carried about 13.8% of its first price at warm. The standard seed
+    /// is the SMA of the first `period` values, then the recursion.
+    #[test]
+    fn an_average_is_warm_on_the_simple_mean_of_its_first_period() {
+        let mut e = Ema::new(4);
+        for price in [10_000, 20_000, 30_000] {
+            e.fold(price);
+            assert!(!e.warm(), "three of four prices folded");
+        }
+        e.fold(40_000);
+        assert!(e.warm());
+        assert_eq!(e.value(), Some(25_000), "the SMA of the first four prices");
+        e.fold(50_000);
+        // 25,000 + (50,000 - 25,000) * 2 / 5
+        assert_eq!(
+            e.value(),
+            Some(35_000),
+            "then the recursion, from that seed"
+        );
+    }
+
+    /// THE SAME FOR WILDER'S ATR: THE MEAN OF THE FIRST `period` TRUE RANGES,
+    /// THEN 1/n SMOOTHING. hunt-indicators-1, D-1542.
+    #[test]
+    fn a_range_is_warm_on_the_mean_of_its_first_period_of_true_ranges() {
+        let mut a = Atr::new(3);
+        // True ranges 100 (high-low, no previous close), 300, 200.
+        a.fold(&candle(0, 1_100, 1_000, 1_050));
+        a.fold(&candle(1, 1_300, 1_000, 1_200));
+        assert!(!a.warm());
+        a.fold(&candle(2, 1_250, 1_050, 1_100));
+        assert!(a.warm());
+        assert_eq!(a.value(), Some(200), "the mean of 100, 300 and 200");
+        // True range 500 (previous close 1,100 to a high of 1,600).
+        a.fold(&candle(3, 1_600, 1_300, 1_500));
+        // 200 + (500 - 200) / 3
+        assert_eq!(
+            a.value(),
+            Some(300),
+            "then Wilder smoothing, from that seed"
+        );
     }
 
     /// A series at one price leaves the average exactly on that price — no float drift.
@@ -2252,15 +2324,17 @@ mod the_stop_on_both_sides {
         );
     }
 
-    /// A stop that will not fit `i64` is refused, and the last good one stands.
+    /// A flip whose new stop will not fit `i64` leaves the stop absent, never stale.
     ///
     /// `supertrend_mult` is a public `i128` with no ceiling, so the band is only as
     /// bounded as its caller. The multiplier below is not one any operator would set: it
     /// is the coarse thing that puts `mid + band` past the top of `i64` while every price
     /// stays ordinary paisa, which is the only way to reach the conversion's failing arm.
-    /// A wrapped stop would be a plausible wrong price, which §4 bans outright.
+    /// A wrapped stop would be a plausible wrong price, which §4 bans outright; so would
+    /// the previous leg's stop kept under the new trend, which is on the wrong side of
+    /// price and would decide positions 64/65 and the next bar's flip (ET-indicators-4).
     #[test]
-    fn a_stop_that_will_not_fit_i64_is_refused_and_the_last_good_one_stands() {
+    fn a_flip_whose_stop_will_not_fit_i64_leaves_the_stop_absent_not_stale() {
         let mut s = SuperTrend::new(TrendThresholds {
             supertrend_mult: 1_000_000_000_000_000_000_000,
             ..TrendThresholds::CLASSICAL
@@ -2285,8 +2359,17 @@ mod the_stop_on_both_sides {
         assert_eq!(s.trend(), Trend::Down, "the flip itself is still recorded");
         assert_eq!(
             s.stop(),
-            Some(2_500_000),
-            "an unrepresentable band must leave the last good stop in place, never wrap it"
+            None,
+            "an unrepresentable flip must leave no stop, not the long leg's stop under a short trend"
+        );
+        // Under the stale stop this close above 2_500_000 would flip straight back to
+        // long on the old leg's level. With the stop absent the candle reseeds instead,
+        // and that band is out of range too, so the stop stays absent.
+        s.fold(&bar(120_000_000, 2_501_000, 2_499_000, 2_500_500));
+        assert_eq!(
+            s.stop(),
+            None,
+            "an out-of-range band keeps the stop absent on the next candle as well"
         );
     }
 

@@ -89,7 +89,7 @@ fn publish(root: &Path, body: &[u8]) {
 #[test]
 fn native_roundtrip_retains_complete_program_both_sides_fills_and_all_events() {
     let evaluations = evaluations();
-    let body = encode(ID, &evaluations, BUDGET).unwrap();
+    let body = encode(ID, &evaluations, BUDGET, 100_000).unwrap();
     let rows = decode(&body, ID, 100_000).unwrap();
     assert_eq!(rows.len(), 2);
     for (row, native) in rows.iter().zip(&evaluations) {
@@ -104,17 +104,17 @@ fn native_roundtrip_retains_complete_program_both_sides_fills_and_all_events() {
         assert_eq!(row.periods(), native.periods());
         assert_eq!(row.timeframe(), "1min");
     }
-    assert_eq!(body, encode(ID, &evaluations, BUDGET).unwrap());
+    assert_eq!(body, encode(ID, &evaluations, BUDGET, 100_000).unwrap());
     assert!(rows.iter().any(|r| !r.trades().is_empty()));
 }
 #[test]
 fn publisher_and_cold_reader_refuse_partial_pairs_counts_truncation_and_mutated_rows() {
     let evaluations = evaluations();
-    let body = encode(ID, &evaluations, BUDGET).unwrap();
-    assert!(encode(ID, &[], BUDGET).is_err());
-    assert!(encode(ID, evaluations.get(..1).unwrap(), BUDGET).is_err());
-    assert!(encode([0; 32], &evaluations, BUDGET).is_err());
-    assert!(encode(ID, &evaluations, body.len() as u64 + 111).is_err());
+    let body = encode(ID, &evaluations, BUDGET, 100_000).unwrap();
+    assert!(encode(ID, &[], BUDGET, 100_000).is_err());
+    assert!(encode(ID, evaluations.get(..1).unwrap(), BUDGET, 100_000).is_err());
+    assert!(encode([0; 32], &evaluations, BUDGET, 100_000).is_err());
+    assert!(encode(ID, &evaluations, body.len() as u64 + 111, 100_000).is_err());
     assert!(decode(&body, ID, 1).is_err());
     assert!(decode(&body, [12; 32], 100_000).is_err());
     for cut in [0, 7, 39, 127, 128, body.len() - 1] {
@@ -150,7 +150,7 @@ fn publisher_and_cold_reader_refuse_partial_pairs_counts_truncation_and_mutated_
 #[test]
 fn cold_read_and_warm_pins_refuse_changed_body_receipt_or_owner_without_substitution() {
     let dir = Temp::new();
-    let body = encode(ID, &evaluations(), BUDGET).unwrap();
+    let body = encode(ID, &evaluations(), BUDGET, 100_000).unwrap();
     publish(&dir.0, &body);
     let reader = Reader::open(&dir.0, ID, BUDGET, 100_000).unwrap();
     let pin = reader.completion_digest();
@@ -191,7 +191,7 @@ fn cold_read_and_warm_pins_refuse_changed_body_receipt_or_owner_without_substitu
 }
 #[test]
 fn immutable_receipt_owner_and_byte_identical_replacement_revoke_old_pins() {
-    let body = encode(ID, &evaluations(), BUDGET).unwrap();
+    let body = encode(ID, &evaluations(), BUDGET, 100_000).unwrap();
     for file in ["body.bin", "complete.bin", "owner.lock"] {
         let dir = Temp::new();
         publish(&dir.0, &body);
@@ -239,7 +239,7 @@ fn immutable_receipt_owner_and_byte_identical_replacement_revoke_old_pins() {
 #[test]
 fn reconciliation_rejects_changed_direction_duplicate_trade_links_daily_totals_and_observation_digest()
  {
-    let body = encode(ID, &evaluations(), BUDGET).unwrap();
+    let body = encode(ID, &evaluations(), BUDGET, 100_000).unwrap();
     let rows = decode(&body, ID, 100_000).unwrap();
     let row = rows.first().unwrap();
     for change in [0, 1, 2, 3, 4] {
@@ -265,7 +265,7 @@ fn reconciliation_rejects_changed_direction_duplicate_trade_links_daily_totals_a
 }
 #[test]
 fn reconciliation_checks_underlying_rows_even_after_the_observation_digest_is_updated() {
-    let body = encode(ID, &evaluations(), BUDGET).unwrap();
+    let body = encode(ID, &evaluations(), BUDGET, 100_000).unwrap();
     let rows = decode(&body, ID, 100_000).unwrap();
     let row = rows.first().unwrap();
     let priced = row
@@ -313,7 +313,7 @@ fn reconciliation_checks_underlying_rows_even_after_the_observation_digest_is_up
 fn only_a_data_hole_or_a_provably_late_signal_may_lack_an_entry() {
     // D-0603. Each generated session's 15:29 signal closes at 15:30, where no
     // minute exists: it is stored as late without an entry, and must round-trip.
-    let body = encode(ID, &evaluations(), BUDGET).unwrap();
+    let body = encode(ID, &evaluations(), BUDGET, 100_000).unwrap();
     let rows = decode(&body, ID, 100_000).unwrap();
     assert!(
         rows.iter()
@@ -353,4 +353,26 @@ fn only_a_data_hole_or_a_provably_late_signal_may_lack_an_entry() {
             "{reason:?} {entry:?} at minute {minute}"
         );
     }
+}
+/// W2-cli6-3, D-1628: the pre-publication decode applies the cold reader's
+/// RECORD limit, so the publisher refuses exactly what `Reader::open` refuses.
+#[test]
+fn the_publisher_applies_the_cold_readers_record_limit() {
+    let evaluations = evaluations();
+    let body = encode(ID, &evaluations, BUDGET, 100_000).unwrap();
+    let least = (0..=100_000_u64)
+        .find(|limit| decode(&body, ID, *limit).is_ok())
+        .unwrap();
+    assert!(least >= 2, "two records are charged before any child row");
+    assert_eq!(encode(ID, &evaluations, BUDGET, least).unwrap(), body);
+    for limit in [least - 1, 1, 0] {
+        assert!(decode(&body, ID, limit).is_err());
+        assert!(
+            encode(ID, &evaluations, BUDGET, limit).is_err(),
+            "a record limit of {limit} must refuse before publication"
+        );
+    }
+    // The byte budget is no longer read as a record limit: a byte budget far
+    // above the record count does not admit a body over the record limit.
+    assert!(encode(ID, &evaluations, u64::MAX, least - 1).is_err());
 }

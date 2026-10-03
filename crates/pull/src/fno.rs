@@ -657,6 +657,92 @@ mod tests {
         }
     }
 
+    /// **AN UNDERLYING THAT CARRIES A HYPHEN IS READ WHOLE.** D-0722.
+    ///
+    /// `read_contract` split the name on every `-` and took the second piece
+    /// as the underlying, so `BAJAJ-AUTO` came back as `BAJAJ` with `AUTO` in
+    /// the expiry's place, the expiry check refused it, and every contract of
+    /// the two hyphenated F&O underlyings went to `Chain::unreadable`. Their
+    /// expired contracts could never be discovered.
+    ///
+    /// Every underlying `core::universe::FNO_UNDERLYINGS` names is read back
+    /// whole here, as a weekly future, a monthly future and an option, so the
+    /// rule is held for the whole universe and not for the two names alone.
+    /// The universe's hyphenated underlyings are asserted too, so the pair
+    /// the decision names is counted rather than recalled.
+    ///
+    /// The vendor's spelling of these contract names is not observed. It is
+    /// UNVERIFIED whether Groww writes `NSE-BAJAJ-AUTO-…`; this holds only that
+    /// a name spelled that way reads as the underlying it names.
+    #[test]
+    fn every_fno_underlying_reads_back_whole_hyphen_and_all() {
+        let march = brutex_core::instrument::Expiry::new(2025, 3, 27).expect("a real expiry");
+        let mut hyphenated = Vec::new();
+        for underlying in brutex_core::universe::FNO_UNDERLYINGS {
+            if underlying.contains('-') {
+                hyphenated.push(underlying);
+            }
+            for (name, contract, option) in [
+                (
+                    format!("NSE-{underlying}-27Mar25-FUT"),
+                    "2025-03-27-FUT",
+                    None,
+                ),
+                (
+                    format!("NSE-{underlying}-Mar25-FUT"),
+                    "2025-03-27-FUT",
+                    None,
+                ),
+                (
+                    format!("NSE-{underlying}-27Mar25-1000.5-CE"),
+                    "2025-03-27-100050-CE",
+                    Some((
+                        brutex_core::price::Paisa::from_raw(100_050),
+                        brutex_core::instrument::OptionSide::Call,
+                    )),
+                ),
+            ] {
+                let found =
+                    read_contract(&name, march).unwrap_or_else(|| panic!("{name} must read"));
+                assert_eq!(found.underlying, underlying, "{name}");
+                assert_eq!(found.contract.as_str(), contract, "{name}");
+                assert_eq!(found.option, option, "{name}");
+                assert_eq!(found.expiry, march, "{name}");
+                assert_eq!(found.vendor_symbol, name, "the vendor's name, whole");
+            }
+        }
+        assert_eq!(
+            hyphenated,
+            ["BAJAJ-AUTO", "NAM-INDIA"],
+            "the F&O underlyings that carry a hyphen"
+        );
+    }
+
+    /// A HYPHENATED UNDERLYING DOES NOT LOOSEN WHAT IS REFUSED. D-0722.
+    ///
+    /// Reading the underlying as everything between the exchange and the
+    /// expiry must not turn a malformed tail into part of a name. Each of
+    /// these is refused exactly as its unhyphenated twin is above.
+    #[test]
+    fn a_hyphenated_name_with_a_malformed_tail_is_still_refused() {
+        let march = brutex_core::instrument::Expiry::new(2025, 3, 27).expect("a real expiry");
+        for bad in [
+            "NSE-BAJAJ-AUTO-27Mar25",         // nothing after the expiry
+            "NSE-BAJAJ-AUTO-27Mar25-8000",    // a strike and no side
+            "NSE-BAJAJ-AUTO-27Mar25-8000-XX", // not a side
+            "NSE-BAJAJ-AUTO-27Mar25-abc-PE",  // strike not a number
+            "NSE-BAJAJ-AUTO-28Mar25-FUT",     // the wrong day
+            "NSE-BAJAJ-AUTO-FUT",             // no expiry at all
+            "NSE-NAM-INDIA-Apr25-FUT",        // the wrong month
+            "NSE-NAM-INDIA-Mar25-8000-CE-X",  // one field too many
+            "NSE--Mar25-FUT",                 // no underlying
+            "NSE-FUT",                        // nothing but the word
+            "NSE-",                           // nothing after the exchange
+        ] {
+            assert_eq!(read_contract(bad, march), None, "must refuse: {bad}");
+        }
+    }
+
     /// EVERY DISCOVERED NAME ROUND-TRIPS INTO A PATH SEGMENT.
     ///
     /// The contract this produces is the same type `store::path` files bars
@@ -950,6 +1036,11 @@ const MONTHS: [&str; 12] = [
 /// `<EXCHANGE>-<UNDERLYING>-<DDMmmYY>-FUT` for a future, which is the grammar
 /// the vendor documents and the only one it answers with.
 ///
+/// `<UNDERLYING>` may carry a hyphen of its own: `core::universe` names
+/// `BAJAJ-AUTO` and `NAM-INDIA`. It is read as everything between the exchange
+/// and the expiry, because every other piece of the grammar is fixed at one
+/// end or the other. D-0722.
+///
 /// # The strike is rupees on the wire and paisa in the store
 ///
 /// `19200` becomes `1920000`. A fractional strike — `19200.5` — is read the
@@ -959,9 +1050,31 @@ const MONTHS: [&str; 12] = [
 /// places, so a third is a name this build does not understand.
 #[must_use]
 pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Option<Found> {
-    let mut parts = name.split('-');
-    let _exchange = parts.next()?;
-    let underlying = parts.next()?;
+    // THE UNDERLYING IS READ FROM BOTH ENDS, BECAUSE IT MAY CARRY A HYPHEN.
+    //
+    // This split the name on every `-` and took the second piece as the
+    // underlying. `NSE-BAJAJ-AUTO-27Mar25-FUT` read as `BAJAJ`, with `AUTO`
+    // where the expiry belongs, the expiry check refused it, and every contract
+    // of `BAJAJ-AUTO` and `NAM-INDIA` went to `Chain::unreadable`. D-0722.
+    //
+    // The rest of the grammar is fixed at one end or the other: the exchange
+    // is the first piece, the name ends `-FUT` or with a strike and a side, and
+    // the expiry token is the piece before that tail. So each is cut from its
+    // own end and the underlying is what lies between, hyphens included. A
+    // name with an extra piece in its middle therefore reads as an underlying
+    // nobody asked for, and `crate::chain::month` refuses it by name, because
+    // it compares every underlying read here with the one it asked for.
+    let (_exchange, rest) = name.split_once('-')?;
+    // A FUTURE: nothing after the expiry but the word. AN OPTION: a strike
+    // and a side, the last two pieces.
+    let (head, strike_and_side) = if let Some(head) = rest.strip_suffix("-FUT") {
+        (head, None)
+    } else {
+        let (rest, side) = rest.rsplit_once('-')?;
+        let (head, strike) = rest.rsplit_once('-')?;
+        (head, Some((strike, side)))
+    };
+    let (underlying, token) = head.rsplit_once('-')?;
     if underlying.is_empty() {
         return None;
     }
@@ -986,22 +1099,19 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
     // input to identity. The token is still CHECKED below, because a name that
     // disagrees with the expiry it was returned under is a vendor answer this
     // build should refuse rather than file.
-    let token = parts.next()?;
     if !expiry_token_agrees(token, known) {
         return None;
     }
     let expiry = known;
-    let tail: Vec<&str> = parts.collect();
-    let (contract, option) = match tail.as_slice() {
-        // A FUTURE: nothing after the expiry but the word.
-        ["FUT"] => (
+    let (contract, option) = match strike_and_side {
+        None => (
             brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future {
                 expiry,
             })?,
             None,
         ),
-        [strike, side] => {
-            let side = match *side {
+        Some((strike, side)) => {
+            let side = match side {
                 "CE" => brutex_core::instrument::OptionSide::Call,
                 "PE" => brutex_core::instrument::OptionSide::Put,
                 _ => return None,
@@ -1016,7 +1126,6 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
                 Some((strike, side)),
             )
         }
-        _ => return None,
     };
     Some(Found {
         vendor_symbol: name.to_owned(),
@@ -1090,10 +1199,11 @@ fn paisa_of(text: &str) -> Option<i64> {
     // half and then ADDED the unsigned fractional part, so `"-19200.05"` came
     // back as -1_919_995 (Rs -19,199.95) instead of -1_920_005. `crate::csv::paisa`
     // strips the sign, combines the halves, and applies the sign to the total,
-    // which is the same order `Paisa::from_rupees_half_up` uses.
+    // which is the same order `Paisa::from_rupee_text_half_up` uses.
     //
-    // `CLAUDE.md` s7 fixes ONE law for rupees to paisa. A second spelling of it
-    // is a second thing to get wrong, and this one already had been -- so the
-    // repair is to delete the spelling rather than to correct it in place.
+    // A second spelling of the conversion is a second thing to get wrong, and
+    // this one already had been -- so the repair was to delete the spelling
+    // rather than correct it in place. `csv::paisa` refuses a third decimal
+    // where the JSON decoders snap it; that difference is deliberate (D-1494).
     crate::csv::paisa(text)
 }

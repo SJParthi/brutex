@@ -469,6 +469,7 @@ async fn credentialed_zerodha() -> Result<pull::http::HttpSource, String> {
     crate::server::credentialed_source(feed, &spec)
         .await
         .map(|(source, _vendor)| source)
+        .map_err(|unread| unread.why)
 }
 
 /// `POST /masters/refresh` — download every master, public and credentialed.
@@ -648,10 +649,10 @@ pub async fn refresh(
 /// `GET /masters/status.json` — what is on disk, and whether it is newer than
 /// the parse this process is answering from.
 ///
-/// **The staleness answer, which is the one an operator needs after a refresh.**
-/// `Site::load` parses the masters once at startup and there is no reload path,
-/// so a master refreshed while the server runs is new bytes behind an old
-/// universe. Nothing said so before this route; the page looked identical.
+/// **The staleness answer.** `POST /masters/refresh` re-parses what it writes
+/// ([`reload`]), but a master changed on disk any other way while the server
+/// runs is new bytes behind an old universe, and so is one whose re-parse was
+/// refused. Nothing said so before this route; the page looked identical.
 pub async fn status_json(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
@@ -804,12 +805,13 @@ fn page_html() -> String {
          <th>On disk</th><th>Last refresh</th></tr></thead><tbody>{rows}</tbody></table>\
          <div id=\"ledger\"></div>\
          <div id=\"xverify\" class=\"att\"></div>\
-         <p class=\"foot\">A refresh writes new bytes to disk and does <b>not</b> reload the \
-         parsed universe: <code>Site::load</code> parses the masters once, at startup. When a \
-         file changes under a running server this page says a restart is required. Restart the server \
-         after a refresh, because \
-         saying nothing would leave every other page answering from the boot parse with \
-         nothing to indicate it.</p>\
+         <p class=\"foot\">A refresh writes new bytes to disk and then re-parses them into the \
+         running server, so every page answers from the new masters. If that re-parse is \
+         refused, the previous universe stays in force and the refresh says so, with the \
+         reason. When a file changes under a running server some other way, its row says a \
+         restart is required. Restart the server in either case once the cause is fixed, \
+         because saying nothing would leave every other page answering from an old parse \
+         with nothing to indicate it.</p>\
          <script src=\"/masters.js\" defer></script>",
         // THE REAL NAV, NOT A SECOND COPY OF IT. This page was self-contained
         // following `crate::logs`, and inherited its defect with it: a page
@@ -1524,6 +1526,11 @@ mod tests {
         let html = super::page_html();
         assert!(html.contains("restart is required"), "on the row");
         assert!(html.contains("Restart the server"), "and after a refresh");
+        // audit-20261003 webcontract-3, D-1585: AND IT DOES NOT CONTRADICT
+        // `reload`. The footer said a refresh "does not reload the parsed
+        // universe" while the route re-parses every refresh.
+        assert!(!html.contains("does <b>not</b> reload"), "stale footer");
+        assert!(html.contains("re-parses them into the running server"));
     }
 
     #[test]

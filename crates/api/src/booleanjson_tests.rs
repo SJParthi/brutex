@@ -374,3 +374,176 @@ fn a_stock_catalog_carries_the_equity_note_and_an_index_catalog_does_not() {
     fs::remove_dir_all(index).unwrap();
     fs::remove_dir_all(stock).unwrap();
 }
+
+/// Cold authentications this thread has run so far.
+fn cold() -> usize {
+    COLD_ADMISSIONS.with(std::cell::Cell::get)
+}
+
+/// **A first page with no completion pin reuses a held catalog that is still
+/// current, and authenticates afresh only when the key differs or the held
+/// files changed.** W1-api1-5, D-1444.
+///
+/// Until D-1444 every request without `completion` -- every first page --
+/// dropped the cached reader and hashed and decoded the whole body again,
+/// under the one process-wide mutex. Here 64 first pages in a row cost one
+/// cold authentication and are byte-identical. Then each way the held reader
+/// can stop being the right one is tried, and each must reopen or refuse
+/// rather than serve the held copy: the body renamed over with the same
+/// bytes (a new generation, reopened and served), the receipt emptied
+/// (refused, pinned or not), a busy publisher (refused, not served from the
+/// cache), a smaller budget, and a second root alternating with the first,
+/// which is the single slot's stated cost: every switch is cold.
+#[test]
+fn an_unpinned_first_page_reuses_a_current_catalog_and_reopens_only_on_change() {
+    let _cache = CACHE_TEST.lock().unwrap();
+    let root = fixture("boolean-api-unpinned-warm");
+    let other = fixture("boolean-api-unpinned-warm-other");
+    let first = Asked::parse(&format!("identity={ID}")).unwrap();
+    // A different root is a different key, so the slot starts cold whatever
+    // an earlier test left in it.
+    let start = cold();
+    let opening = render(&root, &first).unwrap();
+    assert_eq!(cold(), start + 1, "the first page of a new key is cold");
+    for n in 0..64 {
+        let again = render(&root, &first).unwrap();
+        assert_eq!(again, opening, "page {n} is the same page, byte for byte");
+    }
+    assert_eq!(
+        cold(),
+        start + 1,
+        "64 unpinned first pages over an unchanged catalog cost no second authentication"
+    );
+    let pin = opening["completion"].as_str().unwrap();
+    let pinned = Asked::parse(&format!("identity={ID}&completion={pin}&kind=programs")).unwrap();
+    assert_eq!(render(&root, &pinned).unwrap()["total"], "1");
+    assert_eq!(cold(), start + 1, "a pinned later page stays warm too");
+
+    // A busy publisher: the held reader cannot prove it is current, so the
+    // page is refused rather than served from memory.
+    let directory = root.join("boolean-candidates-v1").join(ID);
+    let owner = fs::File::open(directory.join("owner.lock")).unwrap();
+    owner.try_lock().unwrap();
+    assert!(render(&root, &first).is_err(), "busy owner, unpinned");
+    owner.unlock().unwrap();
+    let after_busy = cold();
+    assert_eq!(render(&root, &first).unwrap(), opening);
+
+    // The body renamed over with identical bytes: a new generation. The
+    // unpinned page reopens and serves the same completion.
+    let path = directory.join("body.bin");
+    let replacement = path.with_extension("replacement");
+    fs::copy(&path, &replacement).unwrap();
+    fs::rename(replacement, &path).unwrap();
+    let before = cold();
+    assert_eq!(render(&root, &first).unwrap()["completion"], pin);
+    assert_eq!(
+        cold(),
+        before + 1,
+        "a changed generation authenticates again"
+    );
+    assert!(after_busy <= before);
+
+    // Alternating roots: the single slot makes every switch cold. That is the
+    // bound docs/06-limits.md states, not a defect this change removes.
+    let before = cold();
+    for _ in 0..3 {
+        render(&other, &first).unwrap();
+        render(&root, &first).unwrap();
+    }
+    assert_eq!(
+        cold(),
+        before + 6,
+        "each alternation is one cold authentication"
+    );
+
+    // A smaller budget is a different key and is refused, never served warm.
+    let tiny = crate::detail::BooleanObservationBudget::from_value(Some(std::ffi::OsStr::new("1")))
+        .unwrap();
+    assert!(render_with_budget(&root, &first, tiny).is_err());
+
+    // A corrupt receipt: neither an unpinned nor a pinned page is served
+    // from the held reader.
+    render(&root, &first).unwrap();
+    fs::write(directory.join("complete.bin"), []).unwrap();
+    assert!(
+        render(&root, &first).is_err(),
+        "unpinned over an empty receipt"
+    );
+    assert!(
+        render(&root, &pinned).is_err(),
+        "pinned over an empty receipt"
+    );
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(other).unwrap();
+}
+
+/// `docs/06-limits.md`'s D-1444 section, which states the JSON renderers'
+/// cold and per-request costs, with its line wrapping collapsed to single
+/// spaces so a phrase is found wherever the paragraph happens to break.
+pub(crate) fn d0951_limits() -> String {
+    let limits = include_str!("../../../docs/06-limits.md");
+    let start = limits.find("\n## JSON renderers: cold admissions and per-request walks — D-1444");
+    assert!(
+        start.is_some(),
+        "docs/06-limits.md carries the D-1444 section"
+    );
+    let rest = &limits[start.unwrap_or(limits.len()) + 1..];
+    let section = rest.find("\n## ").map_or(rest, |end| &rest[..end]);
+    section.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The bullet of the D-1444 section that names `id`, collapsed as
+/// [`d0951_limits`] is.
+pub(crate) fn d0951_bullet(id: &str) -> String {
+    let section = d0951_limits();
+    let bullet = section
+        .split(" - **")
+        .skip(1)
+        .find(|bullet| bullet.contains(&format!("({id})")));
+    assert!(
+        bullet.is_some(),
+        "the D-1444 section has a bullet for {id}: {section}"
+    );
+    bullet.unwrap_or_default().to_owned()
+}
+
+/// **What an unpinned first page still costs is written where the limits
+/// live, and the code it describes is the code that runs.** W1-api1-5, D-1444.
+#[test]
+fn the_cold_admission_bound_is_stated_and_both_renderers_take_the_shared_decision() {
+    let bullet = d0951_bullet("W1-api1-5");
+    for word in [
+        "booleanjson::render_with_budget",
+        "booleanevidencejson::render_with_budget",
+        "detail::must_admit",
+        "require_current",
+        "O(saved body bytes)",
+        "ONE identity",
+        "booleanoosjson",
+        "indexstopjson",
+    ] {
+        assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+    }
+    assert!(d0951_limits().contains("UNVERIFIED as a measurement"));
+    for (file, source) in [
+        ("booleanjson.rs", include_str!("booleanjson.rs")),
+        (
+            "booleanevidencejson.rs",
+            include_str!("booleanevidencejson.rs"),
+        ),
+    ] {
+        let found = source.split_once("\nfn render_with_budget(");
+        assert!(found.is_some(), "{file} has render_with_budget");
+        let body = found.unwrap_or_default().1;
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.contains("crate::detail::must_admit(held.is_some(), asked.completion.is_some(),"),
+            "{file} decides through must_admit: {body}"
+        );
+        assert!(
+            !body.contains("asked.completion.is_none()"),
+            "{file} no longer reopens on every unpinned page: {body}"
+        );
+    }
+}

@@ -103,9 +103,19 @@ pub struct Progress {
     /// When it ended, or [`None`] while it is still going.
     pub finished_micros: Option<i64>,
     /// The report `cli` produced, once there is one.
-    pub report: Option<String>,
-    /// Why it could not run, when that is the answer.
-    pub refusal: Option<String>,
+    ///
+    /// SHARED, NOT OWNED: every `/backtest/run.json` poll clones the whole
+    /// [`Progress`] while it holds the slot's std mutex on an async worker, and
+    /// a `sweep-all` report grows by a line per instrument-month. As a `String`
+    /// that clone copied every byte of the report under the lock on every poll;
+    /// as an `Arc<str>` it is one reference-count increment whatever the
+    /// report's length, as
+    /// `api::sweeprun::a_poll_snapshot_shares_the_report_and_refusal_bytes_with_the_slot`
+    /// shows. W1-api6-1, D-0954.
+    pub report: Option<std::sync::Arc<str>>,
+    /// Why it could not run, when that is the answer. Shared for the reason
+    /// [`Self::report`] is: a refusal can carry the report it replaced.
+    pub refusal: Option<std::sync::Arc<str>>,
     /// Exact declared Boolean request and journal observations, when applicable.
     pub boolean_search: Option<Box<crate::booleanlaunch::Status>>,
     /// Additive single-stop request and pinned journal progress, when applicable.
@@ -1184,6 +1194,36 @@ struct TaskFinisher {
     audit: Option<cli::operation_audit::Attempt>,
     /// Excludes cooperating CLI/HTTP writers until this guard is dropped.
     lease: Option<cli::execution_lease::Lease>,
+    /// This task's place in [`engine_tasks_running`], given back on drop.
+    _counted: EngineTaskCount,
+}
+
+/// How many [`TaskFinisher`]s exist: engine tasks queued or running on a
+/// blocking thread. audit-20261003 hunt-api-2, D-1582: the stopping process
+/// reads it to bound and to name what it abandons
+/// ([`crate::server::end_runtime`]).
+static ENGINE_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Engine tasks (sweeps, descents, commands) not yet finished.
+pub(crate) fn engine_tasks_running() -> usize {
+    ENGINE_TASKS.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// One count in [`ENGINE_TASKS`], held for exactly as long as its finisher.
+#[derive(Debug)]
+struct EngineTaskCount;
+
+impl EngineTaskCount {
+    fn take() -> Self {
+        ENGINE_TASKS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for EngineTaskCount {
+    fn drop(&mut self) {
+        ENGINE_TASKS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 impl TaskFinisher {
@@ -1191,6 +1231,7 @@ impl TaskFinisher {
     #[cfg(test)]
     fn new(site: crate::server::Loaded) -> Self {
         Self {
+            _counted: EngineTaskCount::take(),
             site,
             armed: true,
             audit: None,
@@ -1200,6 +1241,7 @@ impl TaskFinisher {
 
     fn audited(site: crate::server::Loaded, audit: cli::operation_audit::Attempt) -> Self {
         Self {
+            _counted: EngineTaskCount::take(),
             site,
             armed: true,
             audit: Some(audit),
@@ -1232,12 +1274,15 @@ impl TaskFinisher {
         {
             let original = done.refusal.take().or_else(|| done.report.take());
             done.report = None;
-            done.refusal = Some(format!(
-                "refused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed.\n{}",
-                original
-                    .as_deref()
-                    .unwrap_or("No final report was returned.")
-            ));
+            done.refusal = Some(
+                format!(
+                    "refused: required terminal invocation audit is unconfirmed: {why}. Existing computation evidence was not removed.\n{}",
+                    original
+                        .as_deref()
+                        .unwrap_or("No final report was returned.")
+                )
+                .into(),
+            );
         }
         let mut slot = self
             .site
@@ -1272,7 +1317,7 @@ impl Drop for TaskFinisher {
         };
         progress.finished_micros = Some(now_micros());
         progress.report = None;
-        progress.refusal = Some(audit_failure.map_or_else(|| ABNORMAL_END.to_owned(), |why| format!("{ABNORMAL_END}\nThe required terminal invocation audit is also unconfirmed: {why}")));
+        progress.refusal = Some(audit_failure.map_or_else(|| ABNORMAL_END.into(), |why| format!("{ABNORMAL_END}\nThe required terminal invocation audit is also unconfirmed: {why}").into()));
     }
 }
 
@@ -1299,9 +1344,9 @@ impl Drop for TaskFinisher {
 /// shaped to provoke it. This takes the text and is total over both shapes.
 fn settle(progress: &mut Progress, text: String, finished_micros: i64) {
     if text.starts_with(REFUSED) {
-        progress.refusal = Some(text);
+        progress.refusal = Some(text.into());
     } else {
-        progress.report = Some(text);
+        progress.report = Some(text.into());
     }
     progress.finished_micros = Some(finished_micros);
 }
@@ -1629,6 +1674,61 @@ fn marker_refusal(outcome: telemetry::Emitted) -> Option<Refusal> {
 /// The JSON content type both routes answer with.
 type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 
+/// One route answer, as [`refused`] and the handlers build it.
+type Answer = (axum::http::StatusCode, JsonHeaders, String);
+
+/// Serialises browser ADMISSIONS, so the slot's own mutex never has to.
+///
+/// Admission does file-system work no constant bounds: two canonicalizations,
+/// the execution lease, an external-log walk of up to 8 MiB, a launch
+/// preparation, a durable audit `begin` with its syncs, and a telemetry marker.
+/// All three POST handlers used to do it while holding `site.sweep`, and
+/// `run_json` takes that same std mutex ON AN ASYNC WORKER for every poll, so a
+/// poll waited out a stranger's admission I/O with a Tokio worker blocked
+/// (W1-api6-2, D-0954). Admissions still exclude each other, which is what the
+/// slot lock was doing there; the slot itself is now held only for one read
+/// and one write.
+///
+/// Process-wide rather than per-`Site`: a process serves one `Site`, and two
+/// test sites admitting at once only wait for each other, never deadlock,
+/// because nothing takes this lock while holding the slot.
+static ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Admits one run: refuses while one is in flight, prepares it with the slot
+/// UNLOCKED, and installs it.
+///
+/// `prepare` does every fallible, I/O-bound admission step and returns the
+/// accepted [`Progress`] with whatever the caller keeps. Under [`ADMISSION`]
+/// nothing else installs into the slot between the busy check and the install,
+/// and a [`TaskFinisher`] only writes a slot whose run is in flight, which the
+/// busy check has just ruled out. A refusal from `prepare` leaves the slot as
+/// it was. The slot's own lock is taken twice, each time for O(1) work:
+/// `api::sweeprun::admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`.
+fn admit<T>(
+    site: &crate::server::Loaded,
+    busy: impl FnOnce() -> Answer,
+    prepare: impl FnOnce() -> Result<(Progress, T), Answer>,
+) -> Result<T, Answer> {
+    let _admitting = ADMISSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let in_flight = site
+        .sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(Progress::in_flight);
+    if in_flight {
+        return Err(busy());
+    }
+    let (accepted, kept) = prepare()?;
+    *site
+        .sweep
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(accepted);
+    Ok(kept)
+}
+
 fn json_headers() -> JsonHeaders {
     [(
         axum::http::header::CONTENT_TYPE,
@@ -1781,32 +1881,22 @@ pub(crate) fn run_with(
     // THE SLOT IS CLAIMED UNDER THE LOCK AND THE WORK STARTS OUTSIDE IT.
     // Holding a std mutex across an await is the deadlock this pattern exists
     // to avoid, so the guard is dropped before anything is spawned.
-    let (started, attempt, audit, lease) = {
-        let mut held = match site.sweep.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if held.as_ref().is_some_and(Progress::in_flight) {
-            let why = "a sweep is already running in this process. It appends to the same \
-                       append-only ledger, and two of them finishing together can interleave \
-                       two records, so the second press is refused rather than queued."
-                .to_owned();
-            let _ = telemetry::emit_if!(
-                telemetry::Level::Warn,
-                "api.sweep",
-                "a second sweep was refused while one was in flight",
-                "why" => telemetry::Value::Str(&why),
-            );
-            return refused(&Refusal::Busy(why));
-        }
-        let lease = match claim_execution(site, true) {
-            Ok(lease) => lease,
-            Err(why) => return refused(&why),
-        };
-        let mut audit = match reserve_invocation(site, "sweep") {
-            Ok(audit) => audit,
-            Err(why) => return refused(&why),
-        };
+    let busy = || {
+        let why = "a sweep is already running in this process. It appends to the same \
+                   append-only ledger, and two of them finishing together can interleave \
+                   two records, so the second press is refused rather than queued."
+            .to_owned();
+        let _ = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            "api.sweep",
+            "a second sweep was refused while one was in flight",
+            "why" => telemetry::Value::Str(&why),
+        );
+        refused(&Refusal::Busy(why))
+    };
+    let admitted = admit(site, busy, || {
+        let lease = claim_execution(site, true).map_err(|why| refused(&why))?;
+        let mut audit = reserve_invocation(site, "sweep").map_err(|why| refused(&why))?;
         let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
@@ -1820,10 +1910,13 @@ pub(crate) fn run_with(
         );
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return refused(&why);
+            return Err(refused(&why));
         }
-        *held = Some(accepted.clone());
-        (started, attempt, audit, lease)
+        Ok((accepted, (started, attempt, audit, lease)))
+    });
+    let (started, attempt, audit, lease) = match admitted {
+        Ok(admitted) => admitted,
+        Err(answer) => return answer,
     };
 
     // ONE EVENT PER RUN, NOT ONE PER BAR. Gate 17 silences `vocab engine
@@ -1941,27 +2034,18 @@ pub(crate) fn descend_with(
         return refused(&why);
     }
 
-    let (started, attempt, audit, lease) = {
-        let mut held = match site.sweep.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if held.as_ref().is_some_and(Progress::in_flight) {
-            let why = "a sweep or descent is already running in this process. \
-                       Both append to the same append-only ledger, and two of \
-                       them finishing together can interleave two records, so \
-                       the second press is refused rather than queued."
-                .to_owned();
-            return refused(&Refusal::Busy(why));
-        }
-        let lease = match claim_execution(site, true) {
-            Ok(lease) => lease,
-            Err(why) => return refused(&why),
-        };
-        let mut audit = match reserve_invocation(site, "descent") {
-            Ok(audit) => audit,
-            Err(why) => return refused(&why),
-        };
+    let busy = || {
+        refused(&Refusal::Busy(
+            "a sweep or descent is already running in this process. \
+             Both append to the same append-only ledger, and two of \
+             them finishing together can interleave two records, so \
+             the second press is refused rather than queued."
+                .to_owned(),
+        ))
+    };
+    let admitted = admit(site, busy, || {
+        let lease = claim_execution(site, true).map_err(|why| refused(&why))?;
+        let mut audit = reserve_invocation(site, "descent").map_err(|why| refused(&why))?;
         let attempt = audit.id();
         let started = now_micros();
         let accepted = Progress::started(
@@ -1976,10 +2060,13 @@ pub(crate) fn descend_with(
         .of_kind(Kind::Descent);
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return refused(&why);
+            return Err(refused(&why));
         }
-        *held = Some(accepted.clone());
-        (started, attempt, audit, lease)
+        Ok((accepted, (started, attempt, audit, lease)))
+    });
+    let (started, attempt, audit, lease) = match admitted {
+        Ok(admitted) => admitted,
+        Err(answer) => return answer,
     };
 
     let _ = telemetry::emit_if!(
@@ -2269,6 +2356,22 @@ fn status_tail(
 }
 
 fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
+    tail_fault_unless_answered(tail, false)
+}
+
+/// [`tail_fault`], for a caller that already holds the record it searched for.
+///
+/// THE SCAN CAP IS A FAULT ONLY WHEN THE ANSWER WAS NOT FOUND. The walk runs
+/// newest first, so a record it returned is the newest of its kind whatever
+/// lies past the cap: the cap says older bytes went unread, and nothing older
+/// can outrank what was found. Treating it as damage regardless made every
+/// browser launch refuse, and `/backtest/run.json` say `unknown`, whenever the
+/// newest 4 MiB of a healthy CLI log held fewer than 256 lifecycle records, a
+/// sweep's own marker among them (W1-api6-4, D-0954). Every other fault —
+/// unreadable files, malformed or clipped records, a partial tail — still
+/// counts, answered or not, because each can hide a record NEWER than the one
+/// found.
+fn tail_fault_unless_answered(tail: &telemetry::Tail, answered: bool) -> Option<String> {
     let clipped = tail
         .records
         .iter()
@@ -2276,7 +2379,7 @@ fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
     if !tail.errors.is_empty()
         || tail.malformed > 0
         || tail.partial_tail
-        || tail.hit_scan_cap
+        || (tail.hit_scan_cap && !answered)
         || clipped
     {
         Some(format!(
@@ -2298,16 +2401,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // replace a whole-command marker, nor can its uncorrelated token refresh
     // that command's activity. Search a bounded retained window explicitly.
     let lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
-    if let Some(why) = tail_fault(&lifecycle) {
-        return ExternalObservation {
-            at_millis: None,
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            body: unknown_status(&why),
-        };
-    }
-    let Some(marker) = lifecycle.records.iter().find(|record| {
+    let marker = lifecycle.records.iter().find(|record| {
         matches!(
             record.message.as_str(),
             "command started" | "command finished"
@@ -2318,7 +2412,20 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             // older sweep's successful completion.
             _ => true,
         }
-    }) else {
+    });
+    // A marker found inside the scanned window is the newest one, so the scan
+    // cap cannot hide a newer one. With no marker found the cap is still the
+    // answer: the latest sweep's marker may lie in the bytes it left unread.
+    if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
+        return ExternalObservation {
+            at_millis: None,
+            uncertain: true,
+            in_flight: false,
+            launch_clear: false,
+            body: unknown_status(&why),
+        };
+    }
+    let Some(marker) = marker else {
         let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
         let fault = tail_fault(&legacy);
         let launch_clear = fault.is_none();
@@ -2334,7 +2441,12 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
         };
     };
     let activity = status_tail(dir, CLI_SWEEP_TARGET, Some(marker.run), 1);
-    if let Some(why) = tail_fault(&activity) {
+    // ANSWERED BY THE MARKER when the walk found no activity. The marker lies
+    // inside the window this walk also reads from its newest end, and a run's
+    // activity follows its `command started`, so any activity newer than the
+    // marker is found before the cap. Reaching the cap empty-handed means none
+    // is newer, and `last` falls back to the marker, the newest fact there is.
+    if let Some(why) = tail_fault_unless_answered(&activity, true) {
         return ExternalObservation {
             at_millis: Some(marker.at_unix_millis),
             uncertain: true,
@@ -2910,7 +3022,8 @@ pub async fn command(
 
 /// [`command`], with the build's commit stamp passed in.
 ///
-/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why/// that reason survived `build.rs` changing which arm is the reachable one.
+/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why
+/// that reason survived `build.rs` changing which arm is the reachable one.
 pub(crate) fn command_with(
     site: &crate::server::Loaded,
     body: &str,
@@ -2979,30 +3092,23 @@ fn command_with_configuration(
         None
     };
 
-    let (started, attempt, audit, launch, lease) = {
-        let mut held = match site.sweep.lock() {
-            Ok(held) => held,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if held.as_ref().is_some_and(Progress::in_flight) {
-            return refused(&Refusal::Busy(
-                "a sweep, descent or command is already running in this \
-                 process. All of them append to the same append-only ledger, \
-                 and two finishing together can interleave two records, so the \
-                 second press is refused rather than queued."
-                    .to_owned(),
-            ));
-        }
+    let busy = || {
+        refused(&Refusal::Busy(
+            "a sweep, descent or command is already running in this \
+             process. All of them append to the same append-only ledger, \
+             and two finishing together can interleave two records, so the \
+             second press is refused rather than queued."
+                .to_owned(),
+        ))
+    };
+    let admitted = admit(site, busy, || {
         let uses_configured_store = !matches!(
             asked,
             Command::AuditAuditedRange { .. }
                 | Command::BooleanQualifiedSearch { .. }
                 | Command::IndexStopQualifiedSearch { .. }
         );
-        let lease = match claim_execution(site, uses_configured_store) {
-            Ok(lease) => lease,
-            Err(why) => return refused(&why),
-        };
+        let lease = claim_execution(site, uses_configured_store).map_err(|why| refused(&why))?;
         let launch = match &asked {
             Command::BooleanQualifiedSearch { request } => {
                 crate::booleanlaunch::prepare(request, &site.store_root)
@@ -3013,16 +3119,10 @@ fn command_with_configuration(
                     .map(|value| Some(PreparedCommand::IndexStop(value)))
             }
             _ => Ok(None),
-        };
-        let launch = match launch {
-            Ok(value) => value,
-            Err(why) => return refused(&Refusal::Unobservable(why)),
-        };
+        }
+        .map_err(|why| refused(&Refusal::Unobservable(why)))?;
         let (from, to) = asked.window();
-        let mut audit = match reserve_invocation(site, asked.word()) {
-            Ok(audit) => audit,
-            Err(why) => return refused(&why),
-        };
+        let mut audit = reserve_invocation(site, asked.word()).map_err(|why| refused(&why))?;
         let attempt = audit.id();
         let started = now_micros();
         let mut accepted = Progress::started(
@@ -3043,10 +3143,13 @@ fn command_with_configuration(
         }
         if let Some(why) = marker_refusal(emit_attempt_started(&accepted)) {
             let _terminal = audit.finish(cli::operation_audit::Phase::Refused, 0);
-            return refused(&why);
+            return Err(refused(&why));
         }
-        *held = Some(accepted.clone());
-        (started, attempt, audit, launch, lease)
+        Ok((accepted, (started, attempt, audit, launch, lease)))
+    });
+    let (started, attempt, audit, launch, lease) = match admitted {
+        Ok(admitted) => admitted,
+        Err(answer) => return answer,
     };
 
     let _ = telemetry::emit_if!(
@@ -3128,12 +3231,15 @@ fn strict_terminal_audit(progress: &mut Progress, emitted: telemetry::Emitted) {
     };
     let original = progress.refusal.take().or_else(|| progress.report.take());
     progress.report = None;
-    progress.refusal = Some(format!(
-        "refused: strict command terminal audit is missing: {reason}. Existing result evidence was not removed. This refusal is visible in this process; it cannot assert a durable terminal event.\n{}",
-        original
-            .as_deref()
-            .unwrap_or("No computation report or refusal was returned.")
-    ));
+    progress.refusal = Some(
+        format!(
+            "refused: strict command terminal audit is missing: {reason}. Existing result evidence was not removed. This refusal is visible in this process; it cannot assert a durable terminal event.\n{}",
+            original
+                .as_deref()
+                .unwrap_or("No computation report or refusal was returned.")
+        )
+        .into(),
+    );
 }
 
 fn strict_configuration_refused(
@@ -3281,8 +3387,8 @@ fn settle_strict_result(progress: &mut Progress, result: Result<String, String>,
     progress.report = None;
     progress.refusal = None;
     match result {
-        Ok(report) => progress.report = Some(report),
-        Err(why) => progress.refusal = Some(format!("refused: {why}")),
+        Ok(report) => progress.report = Some(report.into()),
+        Err(why) => progress.refusal = Some(format!("refused: {why}").into()),
     }
     progress.finished_micros = Some(finished);
 }
@@ -3317,6 +3423,222 @@ mod tests {
         Refusal, TaskFinisher, asked_from, attempt_started_event, command_from, completion_audit,
         conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
     };
+
+    /// audit-20261003 hunt-api-2, D-1582: CTRL-C ENDS THE PROCESS WHILE A
+    /// SWEEP RUNS. A blocking task holding an engine-task count sleeps far past
+    /// the grace; dropping a runtime would wait for all of it (tokio's
+    /// documented `Drop`), while `end_runtime` returns within the grace and
+    /// names at least that one task as abandoned.
+    #[test]
+    fn stopping_does_not_wait_out_a_running_engine_task() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let _sweep = runtime.spawn_blocking(move || {
+            let _counted = super::EngineTaskCount::take();
+            let _told = started.send(());
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        running
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the task started");
+        assert!(super::engine_tasks_running() >= 1);
+        let began = std::time::Instant::now();
+        let abandoned = crate::server::end_runtime(runtime, std::time::Duration::from_millis(300));
+        let took = began.elapsed();
+        assert!(abandoned >= 1, "the running sweep was not named");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "shutdown waited {took:?} for a sweep"
+        );
+        assert!(took >= std::time::Duration::from_millis(250), "{took:?}");
+        assert!(crate::server::SHUTDOWN_GRACE <= std::time::Duration::from_secs(30));
+    }
+
+    /// **Admission I/O runs with the slot UNLOCKED, and admissions still
+    /// exclude each other.** W1-api6-2, D-0954.
+    ///
+    /// A first admission is parked inside its `prepare`, where the lease, the
+    /// log walk, the audit `begin` and the marker run. While it is parked: a
+    /// poll takes the slot at once (it used to wait out the whole admission on
+    /// an async worker); a second admission does not reach its own `prepare`
+    /// and has not answered 50 ms later, because admissions are still one at a
+    /// time. Released, the first installs its in-flight run and the second
+    /// then answers `Busy` without ever preparing. A refusing `prepare` leaves
+    /// a finished slot exactly as it was, and a busy slot never runs `prepare`.
+    #[test]
+    fn admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let site = finisher_site("admission-unlocked");
+        let running =
+            |attempt| Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 1, attempt);
+        let busy = || super::refused(&Refusal::Busy("busy".to_owned()));
+        let (parked, parked_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let second_prepared = AtomicBool::new(false);
+        let first_busy = AtomicBool::new(false);
+        let (site_ref, first_busy_ref) = (&site, &first_busy);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(move || {
+                super::admit(
+                    site_ref,
+                    || {
+                        first_busy_ref.store(true, Ordering::SeqCst);
+                        busy()
+                    },
+                    || {
+                        parked.send(()).expect("the test is listening");
+                        release_rx.recv().expect("the test releases");
+                        Ok((running(1), "first"))
+                    },
+                )
+            });
+            parked_rx
+                .recv()
+                .expect("the first admission is inside prepare");
+            let polled = site.sweep.try_lock().map(|slot| slot.clone());
+            assert!(
+                polled.is_ok_and(|slot| slot.is_none()),
+                "a poll during admission I/O must take the slot at once and see no run yet"
+            );
+            let second = scope.spawn(|| {
+                super::admit(&site, busy, || {
+                    second_prepared.store(true, Ordering::SeqCst);
+                    Ok((running(2), "second"))
+                })
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(
+                !second.is_finished(),
+                "a second admission waits for the first"
+            );
+            assert!(!second_prepared.load(Ordering::SeqCst));
+            release.send(()).expect("the first admission is waiting");
+            assert_eq!(first.join().expect("first").ok(), Some("first"));
+            let (status, _, body) = second
+                .join()
+                .expect("second")
+                .expect_err("the first run is in flight");
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+        });
+        assert!(!first_busy.load(Ordering::SeqCst));
+        assert!(
+            !second_prepared.load(Ordering::SeqCst),
+            "Busy never prepares"
+        );
+        let installed = site.sweep.lock().expect("slot").clone().expect("installed");
+        assert!(installed.in_flight() && installed.attempt == 1);
+
+        let mut finished = running(3);
+        finished.finished_micros = Some(9);
+        finished.report = Some("kept".to_owned().into());
+        *site.sweep.lock().expect("slot") = Some(finished);
+        let refusal = super::admit(&site, busy, || {
+            Err::<(Progress, ()), _>(super::refused(&Refusal::Unobservable(
+                "no lease".to_owned(),
+            )))
+        })
+        .expect_err("prepare refused");
+        assert_eq!(refusal.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let kept = site.sweep.lock().expect("slot").clone().expect("kept");
+        assert_eq!(
+            (kept.attempt, kept.finished_micros, kept.report.as_deref()),
+            (3, Some(9), Some("kept"))
+        );
+    }
+
+    /// **No POST handler holds the slot across admission.** W1-api6-2, D-0954.
+    ///
+    /// `run_with`, `descend_with` and `command_with_configuration` each took
+    /// `site.sweep.lock()` and kept it through every admission step. Each body
+    /// must now name `admit(` and must not lock the slot itself, so a fourth
+    /// copy of the old block fails here, not in a poll that hangs.
+    #[test]
+    fn no_post_handler_locks_the_slot_across_its_admission() {
+        let production = include_str!("sweeprun.rs")
+            .split_once("\nmod tests {")
+            .expect("this file declares its tests module")
+            .0;
+        for name in [
+            "pub(crate) fn run_with(",
+            "pub(crate) fn descend_with(",
+            "fn command_with_configuration(",
+        ] {
+            let body = production
+                .split_once(name)
+                .expect("the handler exists")
+                .1
+                .split_once("\n}\n")
+                .expect("the handler ends")
+                .0;
+            assert!(
+                body.contains("admit(site,"),
+                "{name} admits through `admit`"
+            );
+            assert!(
+                !body.contains("sweep.lock()") && !body.contains(".sweep\n"),
+                "{name} locks the slot itself"
+            );
+        }
+    }
+
+    /// **A poll's snapshot of the slot shares the report; it does not copy
+    /// it.** W1-api6-1, D-0954.
+    ///
+    /// `run_json` clones the whole `Progress` while it holds the slot's std
+    /// mutex on an async worker. With the report a `String` that clone copied
+    /// every byte of it on every poll, and a `sweep-all` report grows by a line
+    /// per instrument-month. An 8 MiB report and an 8 MiB refusal, each with a
+    /// quote, a backslash, a newline and a multibyte character at its ends,
+    /// are cloned the way the poll clones them: both clones point at the SAME
+    /// bytes as the slot, and the serialised status is byte-identical to the
+    /// slot's own, so sharing changed nothing a reader sees.
+    #[test]
+    fn a_poll_snapshot_shares_the_report_and_refusal_bytes_with_the_slot() {
+        let edge = |fill: char| {
+            let mut text = String::from("\"\\\n\u{20b9}");
+            text.extend(std::iter::repeat_n(fill, 8 << 20));
+            text.push_str("\u{20b9}\n\\\"");
+            text
+        };
+        let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 12), None, 1, 7);
+        done.finished_micros = Some(2);
+        done.report = Some(edge('r').into());
+        done.refusal = Some(edge('f').into());
+        let slot = std::sync::Mutex::new(Some(done));
+        let snapshot = slot.lock().expect("private slot").clone();
+        let held = slot.lock().expect("private slot");
+        let (held, snapshot) = (
+            held.as_ref().expect("held"),
+            snapshot.as_ref().expect("snapshot"),
+        );
+        for (name, slot_text, poll_text) in [
+            ("report", held.report.as_deref(), snapshot.report.as_deref()),
+            (
+                "refusal",
+                held.refusal.as_deref(),
+                snapshot.refusal.as_deref(),
+            ),
+        ] {
+            let (slot_text, poll_text) = (slot_text.expect(name), poll_text.expect(name));
+            assert_eq!(poll_text.len(), slot_text.len(), "{name}");
+            assert!(
+                std::ptr::eq(slot_text.as_ptr(), poll_text.as_ptr()),
+                "{name}: the poll's snapshot copied {} bytes under the slot lock",
+                poll_text.len()
+            );
+        }
+        assert_eq!(snapshot.to_json(), held.to_json());
+        let json: serde_json::Value =
+            serde_json::from_str(&held.to_json()).expect("a valid status");
+        assert_eq!(
+            json.get("report").and_then(serde_json::Value::as_str),
+            held.report.as_deref()
+        );
+    }
 
     fn elsewhere_over(dir: &std::path::Path, now_millis: i64) -> String {
         super::observe_elsewhere(dir, now_millis).body
@@ -4836,7 +5158,7 @@ mod tests {
 
         let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, 70);
         done.finished_micros = Some(8);
-        done.report = Some("STORED_PROVENANCE\ncomplete".to_owned());
+        done.report = Some("STORED_PROVENANCE\ncomplete".into());
         TaskFinisher::new(std::sync::Arc::clone(&site)).finish(done);
 
         {
@@ -4883,7 +5205,7 @@ mod tests {
         let site = finisher_site("already-finished");
         let mut done = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 7, 70);
         done.finished_micros = Some(8);
-        done.refusal = Some("the engine gave its own refusal".to_owned());
+        done.refusal = Some("the engine gave its own refusal".into());
         *site
             .sweep
             .lock()
@@ -5032,7 +5354,7 @@ mod tests {
     fn a_finished_run_carries_its_report_and_its_stamp() {
         let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1, 2);
         p.finished_micros = Some(500);
-        p.report = Some("STORED_PROVENANCE\nrows".to_owned());
+        p.report = Some("STORED_PROVENANCE\nrows".into());
         let json = p.to_json();
         assert!(json.contains(r#""in_flight":false"#), "{json}");
         assert!(json.contains(r#""finished_micros":500"#), "{json}");
@@ -5044,7 +5366,7 @@ mod tests {
     #[test]
     fn a_refusal_reaches_the_progress_json_as_a_sentence() {
         let mut p = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), Some(50_000), 1, 2);
-        p.refusal = Some("the store held no bars".to_owned());
+        p.refusal = Some("the store held no bars".into());
         assert!(p.to_json().contains("the store held no bars"));
     }
 
@@ -5184,7 +5506,7 @@ mod tests {
     #[test]
     fn contradictory_or_missing_completion_state_is_an_error() {
         let mut both = settled(REPORT);
-        both.refusal = Some(REFUSAL.to_owned());
+        both.refusal = Some(REFUSAL.into());
         let contradiction = completion_audit(&both);
         assert_eq!(contradiction.level, telemetry::Level::Error);
         assert_eq!(contradiction.outcome, "invalid");
@@ -5727,7 +6049,7 @@ mod tests {
         let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
         let mut local = Progress::started("zerodha", "NIFTY", (2020, 1), (2020, 1), None, 1, 1);
         local.finished_micros = Some(2);
-        local.report = Some("old completed browser run".to_owned());
+        local.report = Some("old completed browser run".into());
         let emit = |message, phase| {
             assert_eq!(
                 sink.emit_for_run(
@@ -5856,6 +6178,116 @@ mod tests {
         latest.cut = false;
         latest.dropped_fields = 1;
         assert!(super::tail_fault(&tail).is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// **A sweep marker inside the scanned window is the answer, however large
+    /// the log behind it.** W1-api6-4, D-0954.
+    ///
+    /// The lifecycle walk asks for 256 records under a 4 MiB scan cap, and a
+    /// healthy log whose newest 4 MiB held fewer than 256 lifecycle records
+    /// hit the cap every time. The cap was read as damage, so every browser
+    /// run, descent and command refused and the status said `unknown`, even
+    /// with the newest sweep's own terminal marker in hand. Driven over 5 MiB
+    /// of other targets' records: a newest `command finished` is `completed`
+    /// and clears launch; a newest `command started` with no activity is
+    /// `running` (the activity walk's own cap is answered by the marker) and
+    /// blocks launch; then the boundaries that must stay refused: a marker
+    /// pushed past the window by 5 MiB of newer records is `unknown` and blocks
+    /// launch, and a malformed line inside the window still blocks launch
+    /// with the marker found.
+    #[test]
+    fn a_marker_inside_the_scan_window_answers_however_large_the_log_behind_it() {
+        let dir = crate::scratch::path("sweep-external-scan-cap");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let pad = "P".repeat(500);
+        let fill = |bytes: u64| {
+            let mut written = 0_u64;
+            while written < bytes {
+                let mut event = telemetry::Event::info("api.serve", "unrelated traffic");
+                for key in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+                    event = event.with(key, pad.as_str());
+                }
+                assert_eq!(sink.emit(&event), telemetry::Emitted::Written);
+                written += 8 * 500;
+            }
+        };
+        let marker = |message, phase| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(61, &event), telemetry::Emitted::Written);
+        };
+        let over_cap = crate::logs::SCAN_BYTES + (1 << 20);
+        fill(over_cap);
+        marker("command finished", "completed");
+        let tail = super::status_tail(&dir, "cli.lifecycle", None, 256);
+        assert!(tail.hit_scan_cap, "premise: the walk reaches the cap");
+        assert_eq!(
+            tail.records.len(),
+            1,
+            "premise: one lifecycle record in the window"
+        );
+        let done = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            done.body.contains(r#""status":"completed""#),
+            "{}",
+            done.body
+        );
+        assert!(
+            done.launch_clear && !done.uncertain && !done.in_flight,
+            "{}",
+            done.body
+        );
+
+        marker("command started", "running");
+        let running = super::observe_elsewhere(&dir, 0);
+        assert!(
+            running.body.contains(r#""status":"running""#),
+            "{}",
+            running.body
+        );
+        assert!(running.body.contains(r#""attempt":61"#), "{}", running.body);
+        assert!(
+            running.in_flight && !running.launch_clear,
+            "{}",
+            running.body
+        );
+
+        // PAST THE WINDOW: newer traffic pushes the marker out of the newest
+        // 4 MiB, and no marker found means the cap still answers `unknown`.
+        fill(over_cap);
+        let lost = super::observe_elsewhere(&dir, 0);
+        assert!(lost.body.contains(r#""status":"unknown""#), "{}", lost.body);
+        assert!(lost.body.contains("scan cap true"), "{}", lost.body);
+        assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
+
+        // OTHER DAMAGE STILL COUNTS WITH THE MARKER FOUND: a malformed line
+        // could be a newer marker this reader cannot decode.
+        marker("command finished", "completed");
+        assert!(super::observe_elsewhere(&dir, i64::MAX).launch_clear);
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(telemetry::current_path(&dir))
+                .expect("the current log"),
+            b"not a record\n",
+        )
+        .expect("one malformed line");
+        let damaged = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            damaged.body.contains(r#""status":"unknown""#),
+            "{}",
+            damaged.body
+        );
+        assert!(
+            damaged.body.contains("1 malformed records"),
+            "{}",
+            damaged.body
+        );
+        assert!(!damaged.launch_clear, "{}", damaged.body);
+        drop(sink);
         let _ = std::fs::remove_dir_all(dir);
     }
 

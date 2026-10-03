@@ -60,8 +60,13 @@
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 
-/// Seconds per step. RFC 6238 §4 default, and what every broker documented in
-/// `docs/00-charter.md` uses.
+/// Seconds per step. RFC 6238 §4's default (`X = 30`).
+///
+/// It used to add *"and what every broker documented in `docs/00-charter.md`
+/// uses"*. The charter records no step length for any broker — its only TOTP
+/// row is Groww's *"TOTP-derived daily token, reset 06:00 IST"* — so that half
+/// was a vendor claim with no source, which `CLAUDE.md` §3 rule 1 forbids.
+/// Whether a given broker uses 30 s is **UNVERIFIED** here. D-1374.
 pub const STEP_SECONDS: u64 = 30;
 
 /// Digits in the code. RFC 6238 §5.3 default.
@@ -139,8 +144,9 @@ impl core::error::Error for TotpError {}
 ///
 /// # Why hand-written
 ///
-/// One alphabet, one bit-packing loop, and no padding to handle — a shared
-/// secret is written without `=`. A dependency for twenty lines is the trade
+/// One alphabet and one bit-packing loop. A shared secret is usually written
+/// without `=`; trailing RFC 4648 padding is accepted and skipped, and a `=`
+/// anywhere but the tail is refused (D-1373). A dependency for twenty lines is the trade
 /// `CLAUDE.md` §2's spirit refuses, and `crates/pull` already hand-rolls `SigV4`
 /// for the same reason.
 ///
@@ -224,11 +230,27 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
     let mut out = Vec::with_capacity(secret.len() * 5 / 8 + 1);
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
+    // Whether padding has begun. RFC 4648 §6 padding is a TAIL: once a `=` has
+    // been read, only more `=` (or a display separator) may follow.
+    let mut padded = false;
 
     for byte in secret.bytes() {
-        // Separators as displayed. `=` is padding and carries no bits.
-        if matches!(byte, b' ' | b'-' | b'=') {
+        // Separators as displayed.
+        if matches!(byte, b' ' | b'-') {
             continue;
+        }
+        // `=` is padding and carries no bits — at the END. It used to be
+        // skipped wherever it stood, so `GEZD=GNBV` decoded to the same key as
+        // `GEZDGNBV` and produced a valid-looking code from a secret that was
+        // mis-transcribed: the exact failure `a_bad_character_is_refused_and_
+        // not_skipped` names. A data character after padding is refused, and
+        // the byte reported is the `=` that broke the tail. D-1373.
+        if byte == b'=' {
+            padded = true;
+            continue;
+        }
+        if padded {
+            return Err(TotpError::NotBase32 { byte: b'=' });
         }
         let value = match byte {
             b'A'..=b'Z' => byte - b'A',
@@ -524,6 +546,42 @@ mod tests {
         assert!(base32_decode("GEZD0GNBV").is_err());
     }
 
+    /// Padding is a tail, never a separator.
+    ///
+    /// Before D-1373 a `=` was skipped wherever it stood, so a secret with one
+    /// mis-keyed into its middle decoded to a shorter, DIFFERENT key and
+    /// produced a valid-looking code — refused at the vendor with nothing
+    /// here to say why.
+    #[test]
+    fn padding_inside_the_secret_is_refused_and_only_a_tail_is_skipped() {
+        for inside in [
+            "GEZD=GNBV",
+            "=GEZDGNBV",
+            "GEZDGNBV=A",
+            "GEZDGNBV==A==",
+            "GE=-ZD",
+        ] {
+            assert_eq!(
+                base32_decode(inside),
+                Err(TotpError::NotBase32 { byte: b'=' }),
+                "{inside:?} has data after padding"
+            );
+            assert!(code_at(inside, 59).is_err(), "{inside:?} mints no code");
+        }
+        // A tail of padding, with or without display separators after it, is
+        // still the canonical secret.
+        let canonical = base32_decode("GEZDGNBV").expect("legal");
+        for tail in ["GEZDGNBV=", "GEZDGNBV======", "GEZDGNBV== ", "GEZDGNBV=-="] {
+            assert_eq!(
+                base32_decode(tail).expect("legal tail"),
+                canonical,
+                "{tail:?}"
+            );
+        }
+        // And a secret that is ALL padding carries no key.
+        assert_eq!(base32_decode("===="), Err(TotpError::Empty));
+    }
+
     /// The length bound is checked BEFORE a character is decoded, which is what
     /// makes the only loop here bounded by a constant.
     ///
@@ -556,6 +614,83 @@ mod tests {
             key.len(),
             MAX_SECRET_LEN * 5 / 8,
             "128 base32 characters are 80 key bytes"
+        );
+    }
+
+    /// **NO PATH OUTSIDE THIS MODULE COMPUTES A CODE.** D-1447.
+    ///
+    /// Two comments said otherwise: `pull::vendor`'s Groww `Auth` row said the
+    /// vendor's `api-key` "is spent by `pull::totp` to MINT the daily token",
+    /// and CI's group-18 note said this module exists "so a stale broker token
+    /// can be RECOGNISED". Neither was ever wired. `CLAUDE.md` §8 forbids the
+    /// first outright, and a stale token is re-read from Parameter Store, not
+    /// recognised by a code. This walks every `.rs` file under `crates/*/src`
+    /// and fails on any that names this module's two code functions or
+    /// glob-imports it, so the day something trades a code for a token it has
+    /// to delete this test, in the open, to do it.
+    ///
+    /// Strict on purpose: it does not try to tell a `#[cfg(test)]` module from
+    /// production code. A test elsewhere that needs a code computes it here.
+    #[test]
+    fn no_path_outside_this_module_computes_a_code() {
+        use std::path::{Path, PathBuf};
+
+        // Upper-case and lowered at run time so this file adds no lower-case
+        // segment-shaped literal to `crates/pull` (CI gate 1d).
+        let needle = "CODE_AT".to_ascii_lowercase();
+        let glob = "TOTP::*".to_ascii_lowercase();
+        let source = "SRC".to_ascii_lowercase();
+
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates = manifest.parent().expect("crates/pull sits under crates/");
+        let workspace = crates
+            .parent()
+            .expect("crates/ sits under the workspace root");
+        let this = workspace.join(file!());
+        assert!(this.is_file(), "file!() resolves from the workspace root");
+
+        let mut stack: Vec<PathBuf> = std::fs::read_dir(crates)
+            .expect("crates/ is readable")
+            .map(|entry| entry.expect("a directory entry").path().join(&source))
+            .filter(|dir| dir.is_dir())
+            .collect();
+        let mut scanned = 0_usize;
+        let mut offenders = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a source directory is readable") {
+                let path = entry.expect("a directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("RS"))
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).expect("a source file is UTF-8");
+                if path == this {
+                    // The module's own text is the control: it must contain the
+                    // needle, or the needle is wrong and the walk proves nothing.
+                    assert!(
+                        text.contains(&needle),
+                        "the needle names this module's functions"
+                    );
+                    continue;
+                }
+                scanned += 1;
+                if text.contains(&needle) || text.contains(&glob) {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        // Not vacuous: thirteen crates' sources were read, not an empty walk.
+        assert!(scanned > 100, "only {scanned} source files were read");
+        assert!(
+            offenders.is_empty(),
+            "a TOTP code is computed outside pull::totp — CLAUDE.md section 8 \
+             forbids minting a token here, and nothing else needs one: {offenders:?}"
         );
     }
 }

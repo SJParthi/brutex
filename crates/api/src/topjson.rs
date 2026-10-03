@@ -417,4 +417,69 @@ mod tests {
         assert_eq!(report(&dir, None), Ok(canonical));
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// **A refusal that persists costs a cold open on every request, and
+    /// that is stated.** W1-api6-3, D-1444.
+    ///
+    /// `with_verified` drops a handle whose refresh refuses and caches no
+    /// refusal, so while the damage stays on disk each request runs `open`
+    /// again and answers its error. Driven here over 100 requests with an
+    /// `open` that always refuses: 100 opens, 100 identical refusals, and the
+    /// first open after the damage is repaired is served. Caching the refusal
+    /// would have made that last request refuse too, which is why the cost is
+    /// stated rather than removed.
+    #[test]
+    fn a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated() {
+        let cache = crate::detail::Cached::<u32>::new();
+        let root = std::path::Path::new("/top-persistent-refusal");
+        assert_eq!(
+            cache.with_verified(root, || Ok(1), |_| Ok(()), |v| *v),
+            Ok(1)
+        );
+        assert_eq!(
+            cache.with_verified(root, || Ok(2), |_| Err("seal damaged".to_owned()), |v| *v),
+            Err("seal damaged".to_owned()),
+            "the refresh refusal is the response and the handle is dropped"
+        );
+        let mut opens = 0;
+        for _ in 0..100 {
+            let answer = cache.with_verified(
+                root,
+                || {
+                    opens += 1;
+                    Err::<u32, _>("seal damaged".to_owned())
+                },
+                |_| Ok(()),
+                |v| *v,
+            );
+            assert_eq!(answer, Err("seal damaged".to_owned()));
+        }
+        assert_eq!(
+            opens, 100,
+            "every request while the damage persists is cold"
+        );
+        assert_eq!(
+            cache.with_verified(root, || Ok(3), |_| Ok(()), |v| *v),
+            Ok(3),
+            "the first request after a repair is served"
+        );
+
+        let bullet = crate::booleanjson::tests::d0951_bullet("W1-api6-3");
+        for word in [
+            "topjson::report",
+            "SELECTION.with_verified",
+            "does not cache the",
+            "Selection::open",
+            "O(history)",
+            "MAX_SCAN_BYTES",
+            "every request while a refusal",
+        ] {
+            assert!(bullet.contains(word), "the bullet names {word}: {bullet}");
+        }
+        let source = include_str!("topjson.rs");
+        assert!(source.contains("let selected = SELECTION.with_verified("));
+        let detail = include_str!("detail.rs");
+        let verified = detail.split_once("pub fn with_verified<R>(").unwrap().1;
+        assert!(verified.contains("*held = None;\n                return Err(why);"));
+    }
 }

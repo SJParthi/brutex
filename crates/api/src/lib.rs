@@ -64,6 +64,9 @@ pub mod catalog;
 pub mod census;
 pub mod constituents;
 pub mod coverage;
+/// `CLAUDE.md` §8 on the shipped pull: one re-read per rejection, compared by
+/// fingerprint, and a loud halt when the value did not change. D-0948.
+pub mod credential_law;
 /// The shared blocking-work, concurrency and byte/row/page bounds for result details.
 pub mod detail;
 pub mod expressionsearchjson;

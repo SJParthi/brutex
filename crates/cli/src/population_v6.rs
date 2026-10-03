@@ -19,7 +19,7 @@
 
 #![expect(
     dead_code,
-    reason = "Population V6 source retention and fixed receipt-last codec await their all-rung production caller"
+    reason = "the all-rung production caller exists (`ledger_v6::commit_stored_population_v6_route`); some source-retention and codec items are still reached only from tests"
 )]
 
 use std::collections::{HashMap, HashSet};
@@ -105,12 +105,29 @@ const POLICY_DOMAIN: &[u8] = b"brutex-population-admission-v4-policy\0";
 const GENERATION_DOMAIN: &[u8] = b"brutex-population-v6-generation\0";
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
+
+/// Records every block holds beside its Candidates: a complete block is
+/// `candidate_count + BLOCK_MANIFEST_RECORDS` records, so no file can hold
+/// more complete blocks than `record_count / BLOCK_MANIFEST_RECORDS`.
+const BLOCK_MANIFEST_RECORDS: u64 = 4;
+
+/// Receipt-index slots one scan reserves: the most complete blocks the file's
+/// records can hold, capped by the authority bound.
+///
+/// Reserving the authority bound itself made every open and every append pay
+/// allocation and control-byte initialisation proportional to the configured
+/// ceiling rather than to the data. W2-cli13-2.
+fn receipt_index_capacity(
+    record_count: u64,
+    authorities: u64,
+) -> Result<usize, PopulationV6Refusal> {
+    usize::try_from((record_count / BLOCK_MANIFEST_RECORDS).min(authorities))
+        .map_err(|_| "Population V6 receipt index capacity does not fit usize".to_owned())
+}
 
 /// Explicit nonzero authority, Candidate-row and file ceilings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1918,7 +1935,29 @@ impl PopulationV6Ledger {
         }
         let opened = (|| {
             let (mut data_file, data_created) = open_child(&data_path, writable)?;
-            if data_created {
+            // A ZERO-LENGTH FILE IS UNINITIALISED, WHOEVER CREATED IT. The header
+            // was written only when THIS call created the file, so a writer
+            // killed or refused between `create` and the header write left a
+            // 0-byte file that every later open refused with "cannot read
+            // Population V6 header". The exclusive writer lock is held here,
+            // so no other writer is mid-header. A reader never initialises,
+            // and a non-empty file still goes through `verify_header`. D-0918.
+            //
+            // LOUDLY WHEN THIS CALL DID NOT CREATE IT. A zero-length file is
+            // also what committed history truncated to nothing looks like, and
+            // no byte left in it can tell the two apart. So initialising a file
+            // some earlier process left empty emits a named `Warn` event
+            // (`REINITIALISED_EMPTY`) before the header is written.
+            let empty = data_file
+                .metadata()
+                .map_err(|why| format!("cannot stat Population V6 data: {why}"))?
+                .len()
+                == 0;
+            if writable && empty {
+                if !data_created {
+                    let shown = data_path.display().to_string();
+                    crate::note(&reinitialised_empty_event(&shown));
+                }
                 data_file
                     .write_all(&header())
                     .and_then(|()| data_file.sync_all())
@@ -1982,10 +2021,10 @@ impl PopulationV6Ledger {
         self.record_count = body / RECORD_BYTES as u64;
         self.receipts = HashMap::new();
         self.receipts
-            .try_reserve(
-                usize::try_from(self.bounds.authorities)
-                    .map_err(|_| "Population V6 authority bound does not fit usize".to_owned())?,
-            )
+            .try_reserve(receipt_index_capacity(
+                self.record_count,
+                self.bounds.authorities,
+            )?)
             .map_err(|why| format!("cannot reserve Population V6 receipt index: {why}"))?;
         self.trailing = None;
         let mut cursor = 0_u64;
@@ -2001,7 +2040,7 @@ impl PopulationV6Ledger {
             let block_records = data
                 .source
                 .candidate_count
-                .checked_add(4)
+                .checked_add(BLOCK_MANIFEST_RECORDS)
                 .ok_or_else(|| "Population V6 block record count overflowed".to_owned())?;
             if data.source.candidate_count > self.bounds.candidates_per_authority {
                 return Err("Population V6 block exceeds Candidate bound".to_owned());
@@ -2402,10 +2441,11 @@ fn read_record_at(file: &mut File, index: u64) -> Result<[u8; RECORD_BYTES], Pop
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Population V6 record";
+
 fn append_raw(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PopulationV6Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Population V6 record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root(root: &Path) -> Result<(PathBuf, File, PlatformIdentity), PopulationV6Refusal> {
@@ -2427,6 +2467,26 @@ fn open_root(root: &Path) -> Result<(PathBuf, File, PlatformIdentity), Populatio
         return Err("Population V6 root changed while opening".to_owned());
     }
     Ok((canonical, file, identity))
+}
+
+/// The telemetry target Population V6 ledger events are written under.
+const TARGET: &str = "cli.population_v6";
+
+/// The message of the event a writer emits when it initialises a zero-length
+/// data file it did not create. D-0918.
+const REINITIALISED_EMPTY: &str = "Population V6 zero-length data file reinitialised";
+
+/// The `Warn` event naming a zero-length data file an earlier process left and
+/// this writer is about to give a header: either a writer stopped before its
+/// header or committed history truncated to nothing, which no byte left in the
+/// file can distinguish.
+fn reinitialised_empty_event(path: &str) -> telemetry::Event<'_> {
+    telemetry::Event::warn(TARGET, REINITIALISED_EMPTY)
+        .with("path", path)
+        .with(
+            "cause",
+            "a writer stopped before its header, or committed history truncated to zero; the file cannot tell which",
+        )
 }
 
 fn open_child(path: &Path, writable: bool) -> Result<(File, bool), PopulationV6Refusal> {
@@ -3158,6 +3218,16 @@ impl CommittedStoredPopulationV6 {
     /// Mints later stored replay evidence only for exact admitted, authorized
     /// members of this retained population. Selection determines the requested
     /// prefix; this boundary supplies the live dispositions and source facts.
+    ///
+    /// # Cost
+    ///
+    /// Not O(1) per strategy. Each requested strategy is resolved by a linear
+    /// `find` over the C rows of the exact source, so resolution is O(C) per
+    /// strategy and O(25 * C) per call at the Top-25 cap. The call already
+    /// runs `execution_v4_source` twice, before and after the replay, and each
+    /// run re-authenticates the whole retained source and projects all C rows,
+    /// so the lookup does not change the call's class. W2-cli13-3. UNVERIFIED:
+    /// the O(C) bound is read from the code and has not been measured.
     pub(crate) fn selected_stored_oos_witnesses(
         &mut self,
         request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
@@ -3531,6 +3601,42 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() -> Result<(), String> {
+        with_evaluated_prepared(|_source, prepared, root| {
+            let records = encoded_block(&prepared, 0, bounds())?;
+            let rollback_root = root.join("append-rollback");
+            std::fs::create_dir(&rollback_root)
+                .map_err(|why| format!("cannot create rollback root: {why}"))?;
+            drop(PopulationV6Ledger::open_write(&rollback_root, bounds())?);
+            let data_path = rollback_root.join(DATA_FILE);
+            crate::append_rollback::tests::inject_short_write(
+                &data_path,
+                APPEND_LABEL,
+                RECORD_BYTES,
+            );
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&data_path)
+                .map_err(|why| format!("cannot open rollback file: {why}"))?;
+            file.write_all(&records[0])
+                .and_then(|()| file.sync_all())
+                .map_err(|why| format!("cannot write rollback prefix: {why}"))?;
+            drop(file);
+            crate::append_rollback::tests::inject_short_write(
+                &data_path,
+                APPEND_LABEL,
+                RECORD_BYTES,
+            );
+            let mut writer = PopulationV6Ledger::open_write(&rollback_root, bounds())?;
+            let (written, receipt) = writer.append(&prepared)?;
+            assert!(written);
+            drop(writer);
+            PopulationV6Ledger::open_read(&rollback_root, bounds())?.read_complete(receipt)?;
+            Ok(())
+        })
+    }
+
+    #[test]
     fn every_exact_prefix_recovers_but_foreign_and_ragged_prefixes_refuse() -> Result<(), String> {
         with_evaluated_prepared(|_source, prepared, root| {
             let records = encoded_block(&prepared, 0, bounds())?;
@@ -3729,5 +3835,227 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    /// A ZERO-LENGTH FILE THIS WRITER DID NOT CREATE IS REINITIALISED LOUDLY.
+    ///
+    /// Committed history truncated to zero and a writer stopped before its
+    /// header leave the same zero bytes. The writer still initialises it, and
+    /// names the file in a `Warn` event; a file this call creates is not news.
+    #[test]
+    fn a_writer_names_an_empty_data_file_it_did_not_create_before_initialising_it()
+    -> Result<(), String> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|why| why.to_string())?
+            .as_nanos();
+        let fresh = std::env::temp_dir().join(format!(
+            "brutex-population-v6-loud-fresh-{}-{stamp}",
+            std::process::id()
+        ));
+        let truncated = std::env::temp_dir().join(format!(
+            "brutex-population-v6-loud-truncated-{}-{stamp}",
+            std::process::id()
+        ));
+        let landed = |from: u64, root: &Path| -> Vec<telemetry::Record> {
+            let sink = crate::ledger_all::tests::sink();
+            let dir = sink
+                .path()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let needle = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            let query = telemetry::Query::last(telemetry::MAX_LIMIT).from_target(super::TARGET);
+            telemetry::tail(&dir, sink.keep_files(), &query)
+                .records
+                .into_iter()
+                .filter(|record| {
+                    record.seq >= from
+                        && record.message == super::REINITIALISED_EMPTY
+                        && crate::ledger_all::tests::says(record, "path", &needle)
+                })
+                .collect()
+        };
+
+        std::fs::create_dir_all(&fresh).map_err(|why| why.to_string())?;
+        let from = crate::ledger_all::tests::mark();
+        drop(PopulationV6Ledger::open_write(&fresh, bounds())?);
+        assert_eq!(
+            std::fs::read(fresh.join(DATA_FILE)).map_err(|why| why.to_string())?,
+            header().to_vec()
+        );
+        assert!(
+            landed(from, &fresh).is_empty(),
+            "a file this writer created is not reported"
+        );
+
+        std::fs::create_dir_all(&truncated).map_err(|why| why.to_string())?;
+        std::fs::write(truncated.join(LOCK_FILE), b"").map_err(|why| why.to_string())?;
+        std::fs::write(truncated.join(DATA_FILE), b"").map_err(|why| why.to_string())?;
+        let from = crate::ledger_all::tests::mark();
+        let writer = PopulationV6Ledger::open_write(&truncated, bounds())?;
+        assert_eq!(writer.record_count, 0);
+        drop(writer);
+        let events = landed(from, &truncated);
+        assert_eq!(events.len(), 1, "one named event: {events:?}");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.level == telemetry::Level::Warn)
+        );
+        assert!(
+            events.iter().all(|event| crate::ledger_all::tests::says(
+                event,
+                "cause",
+                "truncated to zero"
+            )),
+            "{events:?}"
+        );
+        drop(PopulationV6Ledger::open_write(&truncated, bounds())?);
+        assert_eq!(
+            landed(from, &truncated).len(),
+            1,
+            "a header, once written, is not news"
+        );
+
+        std::fs::remove_dir_all(&fresh).map_err(|why| why.to_string())?;
+        std::fs::remove_dir_all(&truncated).map_err(|why| why.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_zero_length_data_file_left_by_a_failed_header_write_is_initialised_by_the_writer()
+    -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-population-v6-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|why| why.to_string())?
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).map_err(|why| format!("cannot create root: {why}"))?;
+        std::fs::write(root.join(LOCK_FILE), b"").map_err(|why| why.to_string())?;
+        std::fs::write(root.join(DATA_FILE), b"").map_err(|why| why.to_string())?;
+        let reader = PopulationV6Ledger::open_read(&root, bounds());
+        assert!(
+            matches!(&reader, Err(why) if why.contains("cannot read Population V6 header")),
+            "a reader never initialises: {:?}",
+            reader.as_ref().err()
+        );
+        let writer = PopulationV6Ledger::open_write(&root, bounds())?;
+        assert_eq!(writer.record_count, 0);
+        drop(writer);
+        let bytes = std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?;
+        assert_eq!(bytes, header().to_vec());
+        drop(PopulationV6Ledger::open_read(&root, bounds())?);
+
+        std::fs::write(root.join(DATA_FILE), [header()[0]]).map_err(|why| why.to_string())?;
+        let short = PopulationV6Ledger::open_write(&root, bounds());
+        assert!(
+            matches!(&short, Err(why) if why.contains("cannot read Population V6 header")),
+            "a one-byte header still refuses: {:?}",
+            short.as_ref().err()
+        );
+        assert_eq!(
+            std::fs::read(root.join(DATA_FILE)).map_err(|why| why.to_string())?,
+            vec![header()[0]]
+        );
+        std::fs::remove_dir_all(&root).map_err(|why| why.to_string())?;
+        Ok(())
+    }
+
+    /// W2-cli13-3: the replay lookup's cost section names the live linear
+    /// `find`, the Top-25 cap and the two whole-source reads it sits between.
+    #[test]
+    fn replay_lookup_cost_doc_names_the_live_linear_find() {
+        let source = include_str!("population_v6.rs");
+        let production = source
+            .split("\nmod tests {\n")
+            .next()
+            .expect("production source precedes the test module");
+        let (doc, body) = production
+            .split_once("    pub(crate) fn selected_stored_oos_witnesses(\n")
+            .expect("replay lookup is present");
+        let doc = doc
+            .rsplit("    /// Mints later stored replay evidence")
+            .next()
+            .expect("replay lookup doc");
+        assert!(doc.contains("Not O(1) per strategy."), "{doc}");
+        assert!(
+            doc.contains("linear\n    /// `find` over the C rows"),
+            "{doc}"
+        );
+        assert!(doc.contains("O(25 * C) per call"), "{doc}");
+        let body = body.split("\n    }\n").next().expect("replay lookup body");
+        assert!(body.contains("if strategies.len() > 25 {"), "{body}");
+        assert!(body.contains("let before = self.execution_v4_source()?;"));
+        assert!(body.contains("let after = self.execution_v4_source()?;"));
+        assert!(
+            body.contains(".find(|row| row.population().candidate_semantic_id() == *strategy)")
+        );
+        let source_read = production
+            .split(concat!("    pub(crate) fn ", "execution_v4_source(\n"))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("execution_v4_source body");
+        assert!(source_read.contains("let before = self.upstream.authenticate()?;"));
+        assert!(source_read.contains("self.population.projection()?;"));
+        assert!(source_read.contains(".try_reserve_exact(population_rows.len())"));
+    }
+
+    /// W2-cli13-2: the reservation is the most complete blocks the records
+    /// can hold, capped by the authority bound, and never the bound alone.
+    #[test]
+    fn receipt_index_capacity_is_records_over_four_capped_by_authorities() {
+        assert_eq!(receipt_index_capacity(0, 1 << 24), Ok(0));
+        assert_eq!(receipt_index_capacity(3, 1 << 24), Ok(0));
+        assert_eq!(receipt_index_capacity(4, 1 << 24), Ok(1));
+        assert_eq!(receipt_index_capacity(9, 1 << 24), Ok(2));
+        assert_eq!(receipt_index_capacity(400, 8), Ok(8));
+        assert_eq!(receipt_index_capacity(32, 8), Ok(8));
+        assert_eq!(receipt_index_capacity(31, 8), Ok(7));
+    }
+
+    /// W2-cli13-2: a wide authority bound does not size the receipt index of
+    /// an empty or one-block ledger, on open, on append, or on reopen.
+    #[test]
+    fn scan_sizes_the_receipt_index_by_records_not_by_the_authority_bound() -> Result<(), String> {
+        let wide = PopulationV6Bounds::new(1 << 16, 1_000_000, 512 * 1_024 * 1_024)?;
+        with_evaluated_prepared(|_source, prepared, root| {
+            let wide_root = root.join("wide-authority-bound");
+            std::fs::create_dir(&wide_root)
+                .map_err(|why| format!("cannot create wide-bound root: {why}"))?;
+            let empty = PopulationV6Ledger::open_write(&wide_root, wide)?;
+            assert_eq!(empty.record_count, 0);
+            assert_eq!(empty.receipts.capacity(), 0);
+            drop(empty);
+
+            let mut writer = PopulationV6Ledger::open_write(&wide_root, wide)?;
+            let (written, _) = writer.append(&prepared)?;
+            assert!(written);
+            assert_eq!(writer.receipts.len(), 1);
+            assert!(
+                writer.receipts.capacity() < 1 << 16,
+                "append rescan reserved {} slots for {} records",
+                writer.receipts.capacity(),
+                writer.record_count
+            );
+            drop(writer);
+
+            let reopened = PopulationV6Ledger::open_read(&wide_root, wide)?;
+            assert_eq!(reopened.receipts.len(), 1);
+            assert!(
+                reopened.receipts.capacity() < 1 << 16,
+                "open reserved {} slots for {} records",
+                reopened.receipts.capacity(),
+                reopened.record_count
+            );
+            Ok(())
+        })
     }
 }

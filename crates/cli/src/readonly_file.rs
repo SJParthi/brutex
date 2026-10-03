@@ -5,16 +5,18 @@
 use std::fs::File;
 use std::path::Path;
 
-#[cfg(target_os = "macos")]
-// Local macOS SDK sys/fcntl.h: O_NOFOLLOW=0x100, O_NONBLOCK=0x4.
-const FLAGS: i32 = 0x100 | 0x4;
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+// Per-architecture values live in store::open_flags: O_NOFOLLOW is bit 17 on
+// x86_64 Linux but 0x8000 on aarch64, where bit 17 is O_LARGEFILE (D-0980).
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
 ))]
-// Linux UAPI asm-generic/fcntl.h: O_NOFOLLOW=(1<<17), O_NONBLOCK=(1<<11).
-// https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/fcntl.h
-const FLAGS: i32 = 0x20_000 | 0x800;
+// One literal per target, not an `|` of the two: over disjoint bits `|` and `^`
+// agree, so that expression carried an equivalent mutant (D-0192).
+const FLAGS: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 #[cfg(any(
     target_os = "macos",

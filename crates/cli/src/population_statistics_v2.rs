@@ -106,10 +106,8 @@ const STATISTICS_V3_SINGLE_SPLIT_ORDER_DOMAIN: &[u8] =
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 const LOCK_FILE_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + SEAL_BYTES == RECORD_BYTES);
 
@@ -5478,13 +5476,14 @@ fn read_raw_record(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "population-statistics record";
+
 fn append_raw_record(
     file: &mut File,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationStatisticsV2Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append population-statistics record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_file(
@@ -6761,6 +6760,34 @@ mod tests {
         drop(orphaned);
         PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
             .expect("completed orphan reopens");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TempRoot::new("append-rollback");
+        let prepared = fixture(4);
+        drop(
+            PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+                .expect("empty fixture ledger opens"),
+        );
+        let planned = prepared.records(0, 0).expect("planned bytes build");
+        let data_path = root.path().join(DATA_FILE);
+        for raw in planned.get(..1).expect("fixture prefix is inside plan") {
+            write_bytes(&data_path, raw);
+        }
+        crate::append_rollback::tests::inject_short_write(&data_path, APPEND_LABEL, RECORD_BYTES);
+        let mut ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+            .expect("the rolled-back prefix is still recoverable");
+        let completed = ledger
+            .append(&prepared)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(
+            completed,
+            PopulationStatisticsV2Append::Written(_)
+        ));
+        drop(ledger);
+        PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+            .expect("the ledger stays readable");
     }
 
     #[test]

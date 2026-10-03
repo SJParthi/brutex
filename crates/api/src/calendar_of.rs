@@ -47,7 +47,17 @@
 //! sixty-seven months cost one header read each.
 //!
 //! The daily rung is always walked, and is cheap by construction: 1,671 records
-//! across the whole window, ~94 KiB.
+//! across the whole window, ~94 KiB. Every walk is one positional read per
+//! record, counted in [`Report::records_read`]; `docs/06-limits.md` states the
+//! O(records) bound under D-1443.
+//!
+//! # A month whose daily rung was not read is withheld, not closed
+//!
+//! Only a daily rung that was read can say a day was shut. A month in the span
+//! the census holds at another rung only, or whose daily records failed their
+//! checks, is `Unmeasured` day by day and named in `withheld` on the wire,
+//! rather than filled with `Closed` between the days on either side of it.
+//! D-1443.
 //!
 //! # What ONE instrument's bars cannot tell you, measured
 //!
@@ -108,12 +118,116 @@ type DayRuns = Vec<(i64, Vec<(u16, u16)>)>;
 /// under the mutex."* The fix there was `Arc::clone`; the same cache one door
 /// along kept the memcpy. A hit is now a refcount bump, and the lock is held
 /// for a pointer copy rather than an allocation.
-pub type Cache = std::sync::Mutex<
-    std::collections::HashMap<
-        (Vendor, String, String, String),
-        (std::time::SystemTime, std::sync::Arc<Calendar>),
+///
+/// # Concurrent misses derive once, and wait for that one
+///
+/// [`cached`] released the map's lock before deriving, so every request that
+/// missed the same key at the same stamp derived it again: a manifest rewrite
+/// under a polling page, or a flood of `/calendar.json`, multiplied a
+/// derivation documented at 0.28 s by the number of requests in flight
+/// (W1-api2-11). A miss now registers a flight for its key and stamp; a
+/// request that finds one waits for it and is answered what it derived. A
+/// leader that panics abandons its flight, and each waiter then tries again,
+/// one of them as the new leader. D-1443.
+#[derive(Default)]
+pub struct Cache {
+    /// The kept calendars, keyed by series, each under the stamp it was
+    /// derived from.
+    held: std::sync::Mutex<
+        std::collections::HashMap<Key, (std::time::SystemTime, std::sync::Arc<Calendar>)>,
     >,
->;
+    /// Derivations in progress, by series and stamp.
+    flights: std::sync::Mutex<
+        std::collections::HashMap<(Key, std::time::SystemTime), std::sync::Arc<Flight>>,
+    >,
+    /// Requests waiting on another's derivation right now. A gauge, for the
+    /// single-flight test to know every follower has joined before the
+    /// leader finishes; nothing in production reads it.
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+/// The kept calendars' map, as [`Cache::lock`] hands it out.
+pub type Held = std::collections::HashMap<Key, (std::time::SystemTime, std::sync::Arc<Calendar>)>;
+
+/// One series' address: vendor, exchange, segment and symbol.
+pub type Key = (Vendor, String, String, String);
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache")
+            .field("waiting", &self.waiting())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Cache {
+    /// The kept calendars, locked.
+    ///
+    /// # Errors
+    ///
+    /// A poisoned lock, exactly as [`std::sync::Mutex::lock`] reports it.
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, Held>> {
+        self.held.lock()
+    }
+
+    /// Requests waiting on another request's derivation at this moment.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// One derivation in progress, and what it answered once it has.
+#[derive(Default)]
+struct Flight {
+    /// Where its leader has got to.
+    landed: std::sync::Mutex<Landed>,
+    /// Signalled once, when `landed` is set.
+    ready: std::sync::Condvar,
+}
+
+/// Where one [`Flight`]'s leader has got to.
+#[derive(Default, Clone)]
+enum Landed {
+    /// Still deriving.
+    #[default]
+    Deriving,
+    /// Answered, and this is the answer.
+    Answered(Derived),
+    /// Unwound without answering.
+    Abandoned,
+}
+
+/// The leader's side of a [`Flight`]: removes the flight and wakes every
+/// follower when dropped, answered or not, so a panic mid-derivation cannot
+/// strand a waiter.
+struct Landing<'a> {
+    cache: &'a Cache,
+    key: Option<(Key, std::time::SystemTime)>,
+    flight: std::sync::Arc<Flight>,
+    answer: Option<Derived>,
+}
+
+impl Drop for Landing<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.cache
+                .flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+        }
+        *self
+            .flight
+            .landed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self
+            .answer
+            .take()
+            .map_or(Landed::Abandoned, Landed::Answered);
+        self.flight.ready.notify_all();
+    }
+}
 
 /// Bars a full NSE equity session holds.
 ///
@@ -146,6 +260,35 @@ pub struct Report {
     /// file the census holds and a derivation could not open is a read that
     /// did not reach the store, and its calendar is not kept. D-0695.
     pub unopened: Vec<Unopened>,
+    /// Every month inside the calendar's span whose daily rung was not read
+    /// whole, in order, and whose days are therefore `Unmeasured` rather than
+    /// `Closed`.
+    ///
+    /// A month the census holds only at the minute rung, one it does not hold
+    /// at all, and one whose daily records failed their checks prove nothing
+    /// about which of their days the exchange was shut. Before D-1443 every
+    /// such day inside the span was `Closed`, and `/calendar.json` served the
+    /// month as a run of holidays. R9-api-law-0, W1-api2-9.
+    pub withheld: Vec<YearMonth>,
+    /// Bar records this derivation read, one positional read each: every
+    /// record of every daily month that opened, plus every record of every
+    /// minute month whose counter did not match. Not O(1); the bound is in
+    /// `docs/06-limits.md` under D-1443, and the count is pinned by
+    /// `api::calendar_of::a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked`.
+    /// W1-api2-1.
+    pub records_read: u64,
+}
+
+impl Report {
+    /// Whether this derivation withheld a month or could not read one — the
+    /// condition under which [`derived_and_kept`] warns the operator.
+    ///
+    /// A method rather than an inline condition so the decision is tested on
+    /// its own: the warning it guards goes to the process-wide sink, which a
+    /// unit test cannot read without racing every other test. D-1454.
+    fn says_what_it_lacks(&self) -> bool {
+        !self.withheld.is_empty() || !self.unreadable.is_empty()
+    }
 }
 
 /// One file [`derive`] asked for and could not open.
@@ -185,6 +328,23 @@ pub fn derive(
     // contradicting itself, and inventing a session for it is the one thing
     // this module must not do.
     let mut traded: BTreeMap<i64, Vec<(u16, u16)>> = BTreeMap::new();
+    // EACH TRADED DAY IS FILED UNDER ITS CIVIL MONTH ONCE, AS IT IS FIRST SEEN.
+    //
+    // The minute pass below asked `in_month` of every traded day in the whole
+    // span for every month: once to count the month's sessions and once more
+    // to mark them full when the counter matched. That is `O(M × D)` calls to
+    // `Day::from_days`, quadratic in the history's length, on every cache miss
+    // and once per spot series on the exchange branch (W1-api2-0). Filing the
+    // day here costs one classification per distinct day, and each month then
+    // reads only its own days. D-1443.
+    let mut by_month: BTreeMap<(u16, u8), Vec<i64>> = BTreeMap::new();
+    // THE MONTHS WHOSE DAILY RUNG WAS READ WHOLE, and only those may call a day
+    // `Closed`. A month the census holds at another rung only, or whose daily
+    // records failed their checks, proves nothing about which of its days the
+    // exchange was shut, and `Calendar::from_observed` would otherwise fill it
+    // with `Closed` because it sits between two observed days. Those months are
+    // withheld below. R9-api-law-0, W1-api2-9, D-1443.
+    let mut proved: std::collections::BTreeSet<(u16, u8)> = std::collections::BTreeSet::new();
     for month in months {
         // OPENED HERE, AND READ BELOW, so a file that did not open is told
         // apart from one that opened and would not read. Both are named in
@@ -206,11 +366,20 @@ pub fn derive(
                 reason: reason.clone(),
             });
         })
-        .and_then(|file| read_days(&file, *month));
+        .and_then(|file| {
+            report.records_read = report.records_read.saturating_add(file.records());
+            read_days(&file, *month)
+        });
         match days {
             Ok(days) => {
+                proved.insert((month.year(), month.month()));
                 for (day, _) in days {
-                    traded.entry(day).or_default();
+                    if let std::collections::btree_map::Entry::Vacant(slot) = traded.entry(day) {
+                        slot.insert(Vec::new());
+                        if let Some(civil) = day_month(day) {
+                            by_month.entry(civil).or_default().push(day);
+                        }
+                    }
                 }
             }
             Err(why) => report.unreadable.push(why),
@@ -219,8 +388,10 @@ pub fn derive(
 
     // THE MINUTE RUNG SECOND, AND ONLY WHERE THE COUNTER SAYS IT IS WORTH IT.
     for month in months {
-        let sessions = traded.keys().filter(|day| in_month(**day, *month)).count();
-        let expected = (sessions as u64).saturating_mul(FULL);
+        let own: &[i64] = by_month
+            .get(&(month.year(), month.month()))
+            .map_or(&[], Vec::as_slice);
+        let expected = (own.len() as u64).saturating_mul(FULL);
         // ONE OPEN FOR THE COUNTER AND THE WALK. The walk opened the month a
         // second time, so a file could count and then fail to open for the walk.
         // Its refusal was recorded, but not as a file that did not open.
@@ -238,8 +409,8 @@ pub fn derive(
                 // walk could find nothing a subtraction has not already proved,
                 // so it is not made.
                 report.months_by_counter = report.months_by_counter.saturating_add(1);
-                for (day, slot) in &mut traded {
-                    if in_month(*day, *month) {
+                for day in own {
+                    if let Some(slot) = traded.get_mut(day) {
                         *slot = vec![(pull::calendar::OPEN_MINUTE, pull::calendar::LAST_MINUTE)];
                     }
                 }
@@ -257,6 +428,7 @@ pub fn derive(
                 // been incremented, so the report claimed a walk that never
                 // happened and every day in the month fell to
                 // `OpenLengthUnmeasured` with nothing saying why.
+                report.records_read = report.records_read.saturating_add(file.records());
                 match read_minute_spans(&file, *month) {
                     Ok(days) => {
                         for (day, runs) in days {
@@ -289,12 +461,64 @@ pub fn derive(
         .into_iter()
         .map(|(day, runs)| Observed::from_runs(day, &runs))
         .collect();
-    (Calendar::from_observed(&observed), report)
+    let mut calendar = Calendar::from_observed(&observed);
+    withhold_unproved(&mut calendar, &proved, &mut report);
+    (calendar, report)
 }
 
-/// Whether `epoch_day` falls inside `month`.
-fn in_month(epoch_day: i64, month: YearMonth) -> bool {
-    day_month(epoch_day).is_some_and(|(y, m)| y == month.year() && m == month.month())
+/// Withhold every month inside `calendar`'s span whose daily rung was not read
+/// whole, so none of its days reads as `Closed`. R9-api-law-0, W1-api2-9,
+/// D-1443.
+///
+/// `from_observed` fills every unobserved day between the first and last
+/// observed day with `Closed`. That is a claim the daily rung makes, and only
+/// for a month whose daily file was read: a month held at the minute rung
+/// alone, one the census does not hold at all, and one whose daily records
+/// failed their checks have no daily reading, and the days in them were served
+/// as a run of exchange holidays. They are now `Unmeasured`, the answer the
+/// calendar already gives outside its span, and each month withheld is named
+/// in [`Report::withheld`].
+///
+/// Cost: one step per civil month in the span and one slot per day withheld.
+/// `proved` is walked in lockstep with the months, both ascending, so each
+/// proved month is passed exactly once and no month pays a membership probe.
+fn withhold_unproved(
+    calendar: &mut Calendar,
+    proved: &std::collections::BTreeSet<(u16, u8)>,
+    report: &mut Report,
+) {
+    if calendar.span() == 0 {
+        return;
+    }
+    let last = calendar.last_day();
+    let Some(mut month) = u32::try_from(calendar.first_day())
+        .ok()
+        .and_then(|days| pull::session::Day::from_days(days).ok())
+        .and_then(|day| pull::session::Day::new(day.year(), day.month(), 1).ok())
+    else {
+        return;
+    };
+    let mut ahead = proved.iter().peekable();
+    while i64::from(month.days_from_epoch()) <= last {
+        let end = month.end_of_month();
+        let key = (month.year(), month.month());
+        while ahead.next_if(|held| **held < key).is_some() {}
+        if ahead.next_if_eq(&&key).is_none() {
+            let changed = calendar.withhold_closed(
+                i64::from(month.days_from_epoch()),
+                i64::from(end.days_from_epoch()),
+            );
+            if changed > 0
+                && let Ok(named) = YearMonth::new(month.year(), month.month())
+            {
+                report.withheld.push(named);
+            }
+        }
+        let Ok(next) = end.succ() else {
+            return;
+        };
+        month = next;
+    }
 }
 
 /// The civil year and month of an epoch day, in IST.
@@ -302,11 +526,18 @@ fn in_month(epoch_day: i64, month: YearMonth) -> bool {
 /// Days are already IST-dated by the readers below, so this is calendar
 /// arithmetic with no zone in it.
 fn day_month(epoch_day: i64) -> Option<(u16, u8)> {
+    #[cfg(test)]
+    DAY_MONTH_CALLS.with(|calls| calls.set(calls.get() + 1));
     // `try_from` RATHER THAN `as`, and a pre-epoch day answers `None` rather
     // than wrapping into a plausible date. `Day::from_days` takes a `u32`
     // because the store holds no bar before 1970 and never will.
     let day = pull::session::Day::from_days(u32::try_from(epoch_day).ok()?).ok()?;
     Some((day.year(), day.month()))
+}
+
+#[cfg(test)]
+thread_local! {
+    static DAY_MONTH_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// One rung's file for one month, opened for reading and not yet read.
@@ -451,9 +682,51 @@ fn ist(ts_micros: i64) -> (i64, u16) {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic, reason = "test-only assertions")]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pull::calendar::{DayKind, Session};
+
+    /// **THE WARNING FIRES ON EITHER LACK, AND ONLY ON A LACK.** A month
+    /// withheld and a month unreadable are each enough on their own; a clean
+    /// derivation says nothing. All four corners, so neither half of the `||`
+    /// and neither negation can change without a failure here. D-1454.
+    #[test]
+    fn a_report_warns_on_a_withheld_or_unreadable_month_and_never_otherwise() {
+        let month = YearMonth::new(2026, 1).expect("a real month");
+        let clean = Report::default();
+        let withheld = Report {
+            withheld: vec![month],
+            ..Report::default()
+        };
+        let unreadable = Report {
+            unreadable: vec![String::from("2026-01: no such file")],
+            ..Report::default()
+        };
+        let both = Report {
+            withheld: vec![month],
+            unreadable: vec![String::from("2026-02: checksum mismatch")],
+            ..Report::default()
+        };
+        assert!(!clean.says_what_it_lacks(), "a clean derivation is silent");
+        assert!(withheld.says_what_it_lacks(), "a withheld month is said");
+        assert!(
+            unreadable.says_what_it_lacks(),
+            "an unreadable month is said"
+        );
+        assert!(both.says_what_it_lacks(), "both at once is said");
+    }
+
+    /// **THE CACHE DEBUGS AS ITSELF.** Its maps hold whole calendars, so the
+    /// hand-written `Debug` names the type and the one gauge and elides the
+    /// rest; a formatter that wrote nothing would make a panic message or a
+    /// log line about a `Cache` an empty string. D-1454.
+    #[test]
+    fn the_cache_debugs_as_its_name_and_its_waiting_gauge() {
+        let cache = Cache::default();
+        assert_eq!(format!("{cache:?}"), "Cache { waiting: 0, .. }");
+        cache.waiting.store(3, std::sync::atomic::Ordering::Release);
+        assert_eq!(format!("{cache:?}"), "Cache { waiting: 3, .. }");
+    }
 
     /// **THE COUNTER SHORT-CIRCUIT IS THE WHOLE COST ARGUMENT, SO IT IS TESTED.**
     ///
@@ -864,13 +1137,13 @@ mod tests {
     }
 
     /// 09:15 IST, the first minute of a session.
-    const OPEN: u16 = pull::calendar::OPEN_MINUTE;
+    pub(crate) const OPEN: u16 = pull::calendar::OPEN_MINUTE;
     /// 15:29 IST, the last.
     const LAST: u16 = pull::calendar::LAST_MINUTE;
 
     /// Days since the epoch of a civil date, by the `Day` the store's months
     /// are named from.
-    fn epoch_day(year: u16, month: u8, day: u8) -> i64 {
+    pub(crate) fn epoch_day(year: u16, month: u8, day: u8) -> i64 {
         i64::from(
             pull::session::Day::new(year, month, day)
                 .expect("a real date")
@@ -880,7 +1153,7 @@ mod tests {
 
     /// The UTC micros stamp of minute-of-day `minute` on IST day `day` — the
     /// inverse of [`ist`], which is the reading `derive` applies.
-    fn stamp(day: i64, minute: u16) -> i64 {
+    pub(crate) fn stamp(day: i64, minute: u16) -> i64 {
         const IST_OFFSET_SECS: i64 = 5 * 3600 + 30 * 60;
         (day * 86_400 + i64::from(minute) * 60 - IST_OFFSET_SECS) * 1_000_000
     }
@@ -908,11 +1181,22 @@ mod tests {
     /// Appends one legal bar per stamp to `NSE/INDEX/NIFTY`'s `rung` file for
     /// `month`, the way `segments::write_day` writes its one daily bar.
     fn write_bars(root: &Path, rung: Timeframe, month: YearMonth, stamps: &[i64]) {
+        write_bars_for(root, "NIFTY", rung, month, stamps);
+    }
+
+    /// [`write_bars`], for `NSE/INDEX/<symbol>`.
+    pub(crate) fn write_bars_for(
+        root: &Path,
+        symbol: &str,
+        rung: Timeframe,
+        month: YearMonth,
+        stamps: &[i64],
+    ) {
         let path = store::path::StorePath::new(store::path::PathParts {
             vendor: Vendor::Zerodha,
             exchange: "NSE",
             segment: "INDEX",
-            symbol: "NIFTY",
+            symbol,
             contract: None,
             timeframe: rung,
             month,
@@ -923,7 +1207,9 @@ mod tests {
             clippy::cast_possible_truncation,
             reason = "the id is the cross-check `open` folds; any 32 bits serve"
         )]
-        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let symbol_id = brutex_core::universe::fnv1a(symbol) as u32;
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(root).expect("the store root");
         let mut file =
             store::file::BarFile::open_or_create(root, path, symbol_id).expect("a bar file");
         let rows: Vec<store::format::Bar> = stamps
@@ -939,6 +1225,640 @@ mod tests {
             })
             .collect();
         file.append(&rows).expect("legal bars in timestamp order");
+    }
+
+    /// Flips one byte inside record `index` of `NSE/INDEX/NIFTY`'s `rung` file
+    /// for `month`, so its checksum block no longer verifies.
+    fn corrupt_record(root: &Path, rung: Timeframe, month: YearMonth, index: u64) {
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+        let path = store::path::StorePath::new(store::path::PathParts {
+            vendor: Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe: rung,
+            month,
+            file: store::path::FileKind::Bars,
+        })
+        .expect("a legal path")
+        .to_path_buf(root);
+        let at = store::format::HEADER_LEN + index * store::format::RECORD_STRIDE + 9;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the bar file exists");
+        let mut byte = [0_u8; 1];
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.read_exact(&mut byte).expect("read");
+        byte[0] ^= 0x5A;
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.write_all(&byte).expect("write");
+    }
+
+    /// Every day of `month` as epoch days, first to last.
+    fn days_of(month: YearMonth) -> std::ops::RangeInclusive<i64> {
+        let first = pull::session::Day::new(month.year(), month.month(), 1).expect("a real month");
+        i64::from(first.days_from_epoch())..=i64::from(first.end_of_month().days_from_epoch())
+    }
+
+    /// **AN UNPROVED MONTH IS NAMED WITHHELD ONLY WHEN A DAY WAS WITHHELD.**
+    /// D-1443.
+    ///
+    /// The span 5-6 January 2026 holds two open days and no closed one, and
+    /// no month is proved, so `withhold_closed` changes nothing: January must
+    /// NOT be reported withheld, because no day of it was. The span 2-5
+    /// January holds a weekend (3-4 January, closed) in the same unproved
+    /// month: both days turn `Unmeasured` and January IS named, once.
+    #[test]
+    fn an_unproved_month_with_nothing_closed_is_not_reported_withheld() {
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let open = |day| pull::calendar::Observed { day, session: None };
+        let none = std::collections::BTreeSet::new();
+
+        let mut calendar =
+            Calendar::from_observed(&[open(epoch_day(2026, 1, 5)), open(epoch_day(2026, 1, 6))]);
+        let mut report = Report::default();
+        withhold_unproved(&mut calendar, &none, &mut report);
+        assert_eq!(report.withheld, Vec::<YearMonth>::new());
+        for day in epoch_day(2026, 1, 5)..=epoch_day(2026, 1, 6) {
+            assert_ne!(calendar.kind_of(day), DayKind::Unmeasured, "day {day}");
+        }
+
+        let mut calendar =
+            Calendar::from_observed(&[open(epoch_day(2026, 1, 2)), open(epoch_day(2026, 1, 5))]);
+        let mut report = Report::default();
+        withhold_unproved(&mut calendar, &none, &mut report);
+        assert_eq!(report.withheld, vec![january]);
+        for day in epoch_day(2026, 1, 3)..=epoch_day(2026, 1, 4) {
+            assert_eq!(calendar.kind_of(day), DayKind::Unmeasured, "day {day}");
+        }
+    }
+
+    /// **A MONTH THE DAILY RUNG DID NOT PROVE IS WITHHELD, NOT A RUN OF
+    /// HOLIDAYS.** R9-api-law-0, D-1443.
+    ///
+    /// January and March hold daily bars; February is held only at the minute
+    /// rung, with a full session on 2 February. Before D-1443 every February
+    /// day came out `Closed` and `/calendar.json` answered 200 with the month
+    /// simply missing, while January's genuine closure (7 January, no daily bar
+    /// in a month whose daily file was read) is still `Closed`.
+    #[test]
+    fn a_month_held_only_at_the_minute_rung_is_withheld_not_closed() {
+        let root = crate::scratch::path("calendar-of-minute-only-month");
+        let _ = std::fs::remove_dir_all(&root);
+        let (january, february, march) = (
+            YearMonth::new(2026, 1).expect("a real month"),
+            YearMonth::new(2026, 2).expect("a real month"),
+            YearMonth::new(2026, 3).expect("a real month"),
+        );
+        let (jan6, jan8, feb2, mar2) = (
+            epoch_day(2026, 1, 6),
+            epoch_day(2026, 1, 8),
+            epoch_day(2026, 2, 2),
+            epoch_day(2026, 3, 2),
+        );
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            january,
+            &[stamp(jan6, OPEN), stamp(jan8, OPEN)],
+        );
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            february,
+            &minutes_of(feb2, &[(OPEN, LAST)]),
+        );
+        write_bars(&root, Timeframe::DAY_1, march, &[stamp(mar2, OPEN)]);
+
+        let (cal, report) = derive(
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            &[january, february, march],
+        );
+        assert_eq!((cal.first_day(), cal.last_day()), (jan6, mar2));
+        assert_eq!(
+            cal.kind_of(epoch_day(2026, 1, 7)),
+            DayKind::Closed,
+            "January was read"
+        );
+        for day in days_of(february) {
+            assert_eq!(
+                cal.kind_of(day),
+                DayKind::Unmeasured,
+                "Feb day {day} is not proved shut"
+            );
+            assert_eq!(
+                cal.expected_bars(day),
+                None,
+                "Feb day {day} owes an unknown count"
+            );
+        }
+        assert_eq!(report.withheld, vec![february]);
+        assert_eq!(cal.sessions(), 3);
+        let wire = json(&cal);
+        let (from, to) = (
+            days_of(february).start().to_owned(),
+            days_of(february).end().to_owned(),
+        );
+        assert!(
+            wire.contains(&format!("\"withheld\":[{{\"from\":{from},\"to\":{to}}}]")),
+            "the wire names the withheld stretch: {wire}"
+        );
+
+        // THROUGH THE CACHE TOO: kept (nothing held failed to open), and kept
+        // honest.
+        let cache = Cache::default();
+        let derived = cached(
+            &cache,
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            Some(std::time::SystemTime::UNIX_EPOCH),
+            &[january, february, march],
+            // The census as written above: daily January and March, minute
+            // February, and nothing else.
+            |rung, month| (rung == Timeframe::DAY_1) == (month != february),
+        );
+        assert!(derived.unopened.is_empty(), "{:?}", derived.unopened);
+        assert!(
+            cache.lock().expect("unpoisoned").contains_key(&(
+                Vendor::Zerodha,
+                "NSE".to_owned(),
+                "INDEX".to_owned(),
+                "NIFTY".to_owned()
+            )),
+            "kept under the stamp"
+        );
+        assert_eq!(derived.calendar.kind_of(feb2), DayKind::Unmeasured);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A DAILY MONTH WHOSE RECORDS FAIL THEIR CHECKS IS WITHHELD, NOT SERVED
+    /// AS HOLIDAYS.** W1-api2-9, D-1443.
+    ///
+    /// Three cases over calendar edges: a corrupt February in a leap year
+    /// (2024, so 29 days withheld), a corrupt December across a year boundary,
+    /// and a corrupt month at the very start of the span, which lies outside
+    /// the span and claims nothing either way.
+    #[test]
+    fn a_corrupt_daily_month_is_withheld_not_served_as_holidays() {
+        type Month = (u16, u8);
+        let cases: [(Month, Month, Month, u8); 3] = [
+            ((2024, 1), (2024, 2), (2024, 3), 29),
+            ((2025, 11), (2025, 12), (2026, 1), 31),
+            ((2026, 1), (2026, 2), (2026, 3), 0),
+        ];
+        for (n, (before, damaged, after, withheld_days)) in cases.into_iter().enumerate() {
+            let root = crate::scratch::path(&format!("calendar-of-corrupt-daily-{n}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let month = |(y, m): (u16, u8)| YearMonth::new(y, m).expect("a real month");
+            let (before, damaged, after) = (month(before), month(damaged), month(after));
+            let day_in = |month: YearMonth, day: u8| epoch_day(month.year(), month.month(), day);
+            let edge = withheld_days == 0;
+            if !edge {
+                write_bars(
+                    &root,
+                    Timeframe::DAY_1,
+                    before,
+                    &[stamp(day_in(before, 10), OPEN)],
+                );
+            }
+            write_bars(
+                &root,
+                Timeframe::DAY_1,
+                damaged,
+                &[
+                    stamp(day_in(damaged, 2), OPEN),
+                    stamp(day_in(damaged, 3), OPEN),
+                ],
+            );
+            corrupt_record(&root, Timeframe::DAY_1, damaged, 0);
+            write_bars(
+                &root,
+                Timeframe::DAY_1,
+                after,
+                &[stamp(day_in(after, 5), OPEN)],
+            );
+            let months: Vec<YearMonth> = if edge {
+                vec![damaged, after]
+            } else {
+                vec![before, damaged, after]
+            };
+
+            let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+            assert_eq!(
+                report.unreadable.len(),
+                1,
+                "case {n}: named: {:?}",
+                report.unreadable
+            );
+            let named = report.unreadable.first().cloned().unwrap_or_default();
+            assert!(named.contains(&damaged.to_string()), "case {n}: {named}");
+            let unmeasured = days_of(damaged)
+                .filter(|day| cal.kind_of(*day) == DayKind::Unmeasured)
+                .count();
+            assert_eq!(
+                unmeasured,
+                days_of(damaged).count(),
+                "case {n}: not one day of the damaged month is claimed shut"
+            );
+            let closed = days_of(damaged)
+                .filter(|day| cal.kind_of(*day) == DayKind::Closed)
+                .count();
+            assert_eq!(closed, 0, "case {n}");
+            if edge {
+                assert_eq!(report.withheld, Vec::<YearMonth>::new(), "outside the span");
+                assert!(json(&cal).contains("\"withheld\":[]"), "case {n}");
+            } else {
+                assert_eq!(report.withheld, vec![damaged], "case {n}");
+                let wire = json(&cal);
+                let (from, to) = (*days_of(damaged).start(), *days_of(damaged).end());
+                assert_eq!(
+                    usize::try_from(to - from + 1).ok(),
+                    Some(usize::from(withheld_days)),
+                    "case {n}: the calendar edge under test"
+                );
+                assert!(
+                    wire.contains(&format!("{{\"from\":{from},\"to\":{to}}}")),
+                    "case {n}: {wire}"
+                );
+                // The neighbouring months were read, so their gaps stay closed.
+                assert_eq!(
+                    cal.kind_of(day_in(before, 10) + 1),
+                    DayKind::Closed,
+                    "case {n}"
+                );
+            }
+            // RERUN: same inputs, same answer, byte for byte.
+            let (again, _) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+            assert_eq!(json(&again), json(&cal), "case {n}: idempotent");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// **ONE CIVIL-MONTH CLASSIFICATION PER TRADED DAY, NOT ONE PER MONTH PER
+    /// DAY.** W1-api2-0, D-1443.
+    ///
+    /// `derive` asked `in_month` of every traded day for every month, twice on
+    /// a month whose counter matched, so a span of M months and D days cost
+    /// `O(M × D)` calls to `Day::from_days`. Counted here, deterministically:
+    /// 24 months, two daily bars each, no minute files (the counter cannot
+    /// match, so only the classification is at stake), then the same with
+    /// counter-matching minute files on the first two months.
+    #[test]
+    fn derive_classifies_each_traded_day_once_not_once_per_month() {
+        let root = crate::scratch::path("calendar-of-classify-once");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut months = Vec::new();
+        let mut days = Vec::new();
+        for offset in 0_u8..24 {
+            let year = 2024 + u16::from(offset / 12);
+            let month = YearMonth::new(year, offset % 12 + 1).expect("a real month");
+            let pair = [
+                epoch_day(year, offset % 12 + 1, 10),
+                epoch_day(year, offset % 12 + 1, 11),
+            ];
+            write_bars(
+                &root,
+                Timeframe::DAY_1,
+                month,
+                &[stamp(pair[0], OPEN), stamp(pair[1], OPEN)],
+            );
+            months.push(month);
+            days.extend(pair);
+        }
+        DAY_MONTH_CALLS.with(|calls| calls.set(0));
+        let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+        let calls = DAY_MONTH_CALLS.with(std::cell::Cell::get);
+        assert_eq!(cal.sessions(), 48);
+        assert_eq!(report.months_by_counter, 0);
+        assert!(
+            calls <= 48,
+            "{calls} civil-month classifications for 48 traded days over 24 months; \
+             one per day is the bound, {} is the quadratic shape",
+            24 * 48
+        );
+
+        for month in months.iter().take(2) {
+            let mut minutes = Vec::new();
+            for day in days_of(*month) {
+                if cal.kind_of(day) == DayKind::OpenLengthUnmeasured {
+                    minutes.extend(minutes_of(day, &[(OPEN, LAST)]));
+                }
+            }
+            write_bars(&root, Timeframe::MINUTE_1, *month, &minutes);
+        }
+        DAY_MONTH_CALLS.with(|calls| calls.set(0));
+        let (cal, report) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &months);
+        let calls = DAY_MONTH_CALLS.with(std::cell::Cell::get);
+        assert_eq!(report.months_by_counter, 2);
+        assert_eq!(
+            cal.expected_bars(*days.first().expect("five days")),
+            Some(375)
+        );
+        assert_eq!(
+            cal.expected_bars(*days.get(3).expect("five days")),
+            Some(375)
+        );
+        assert_eq!(
+            cal.expected_bars(*days.get(4).expect("five days")),
+            None,
+            "March has no minute file"
+        );
+        assert!(
+            calls <= 48,
+            "{calls} classifications with two counter-matched months"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **WHAT A DERIVATION READS IS COUNTED, RECORD BY RECORD.** W1-api2-1,
+    /// D-1443.
+    ///
+    /// The reads are one positional read per record and are not O(1): the
+    /// bound is the records of every daily month plus the records of every
+    /// minute month whose counter did not match, stated in
+    /// `docs/06-limits.md`. Pinned here exactly, so a change that walks a
+    /// counter-matched month, or reads a record twice, fails: this test is
+    /// `api::calendar_of::a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked`.
+    #[test]
+    fn a_derivation_reads_each_daily_record_once_and_minutes_only_when_walked() {
+        let root = crate::scratch::path("calendar-of-records-read");
+        let _ = std::fs::remove_dir_all(&root);
+        let (january, february) = (
+            YearMonth::new(2026, 1).expect("a real month"),
+            YearMonth::new(2026, 2).expect("a real month"),
+        );
+        let (jan5, feb2, feb3) = (
+            epoch_day(2026, 1, 5),
+            epoch_day(2026, 2, 2),
+            epoch_day(2026, 2, 3),
+        );
+        write_bars(&root, Timeframe::DAY_1, january, &[stamp(jan5, OPEN)]);
+        write_bars(
+            &root,
+            Timeframe::MINUTE_1,
+            january,
+            &minutes_of(jan5, &[(OPEN, LAST)]),
+        );
+        write_bars(
+            &root,
+            Timeframe::DAY_1,
+            february,
+            &[stamp(feb2, OPEN), stamp(feb3, OPEN)],
+        );
+        // February is short by one minute, so it is walked: 749 records.
+        write_bars(&root, Timeframe::MINUTE_1, february, &{
+            let mut m = minutes_of(feb2, &[(OPEN, LAST)]);
+            m.extend(minutes_of(feb3, &[(OPEN, LAST - 1)]));
+            m
+        });
+
+        let (_, report) = derive(
+            &root,
+            Vendor::Zerodha,
+            "NSE",
+            "INDEX",
+            "NIFTY",
+            &[january, february],
+        );
+        assert_eq!((report.months_by_counter, report.months_walked), (1, 1));
+        assert_eq!(
+            report.records_read,
+            1 + 2 + 749,
+            "daily 1 + 2, walked minutes 749"
+        );
+
+        // Empty: nothing asked, nothing read.
+        let (_, empty) = derive(&root, Vendor::Zerodha, "NSE", "INDEX", "NIFTY", &[]);
+        assert_eq!(empty.records_read, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **THE LIMIT IS WRITTEN WHERE `CLAUDE.md` §10 SAYS LIMITS LIVE.**
+    /// W1-api2-1, D-1443: the per-record walk was documented only in this
+    /// module's header.
+    #[test]
+    fn the_derivation_walk_is_named_in_the_limits_document() {
+        let limits = include_str!("../../../docs/06-limits.md");
+        let section = limits
+            .split("## The calendar derivation reads records, one positional read each — D-1443")
+            .nth(1)
+            .expect("docs/06-limits.md carries the D-1443 section");
+        for named in [
+            "read_days",
+            "read_minute_spans",
+            "records_read",
+            "O(records)",
+        ] {
+            assert!(section.contains(named), "the D-1443 limit names `{named}`");
+        }
+    }
+
+    /// The series every single-flight test asks for.
+    fn nifty_key() -> Key {
+        (
+            Vendor::Zerodha,
+            "NSE".to_owned(),
+            "INDEX".to_owned(),
+            "NIFTY".to_owned(),
+        )
+    }
+
+    /// A one-session calendar, as a stand-in derivation's answer.
+    fn one_session() -> (Calendar, Report) {
+        (
+            Calendar::from_observed(&[Observed::from_runs(100, &[(OPEN, LAST)])]),
+            Report::default(),
+        )
+    }
+
+    /// Holds a derivation open until `followers` requests wait on it, bounded
+    /// so a broken single-flight fails its count rather than hanging.
+    fn until_joined(cache: &Cache, followers: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while cache.waiting() < followers && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// **CONCURRENT MISSES ON ONE KEY DERIVE ONCE AND SHARE THE ANSWER.**
+    /// W1-api2-11, D-1443.
+    ///
+    /// Eight requests miss the same series at the same stamp. The derivation
+    /// is held open until the other seven are waiting on it, so the count is
+    /// decided by the code and not by a clock: one derivation, eight answers
+    /// sharing one `Arc`, nobody left waiting, no flight left behind, and a
+    /// ninth request afterwards is a hit that derives nothing.
+    #[test]
+    fn concurrent_misses_on_one_key_derive_once_and_share_the_answer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const FOLLOWERS: usize = 7;
+        let cache = Cache::default();
+        let runs = AtomicUsize::new(0);
+        let now = Some(std::time::SystemTime::UNIX_EPOCH);
+        let derive = || {
+            runs.fetch_add(1, Ordering::SeqCst);
+            until_joined(&cache, FOLLOWERS);
+            one_session()
+        };
+        let answers: Vec<Derived> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..=FOLLOWERS)
+                .map(|_| scope.spawn(|| cached_by(&cache, &nifty_key(), now, derive, |_, _| false)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("no request panicked"))
+                .collect()
+        });
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "eight concurrent misses on one key and stamp are one derivation"
+        );
+        let first = answers.first().expect("eight answers");
+        assert!(
+            answers
+                .iter()
+                .all(|answer| std::sync::Arc::ptr_eq(&answer.calendar, &first.calendar)),
+            "every request is answered the one derivation"
+        );
+        assert_eq!(cache.waiting(), 0, "nobody left waiting");
+        assert!(
+            cache.flights.lock().is_ok_and(|flights| flights.is_empty()),
+            "no flight left behind"
+        );
+        let hit = cached_by(&cache, &nifty_key(), now, derive, |_, _| false);
+        assert!(std::sync::Arc::ptr_eq(&hit.calendar, &first.calendar));
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "a hit derives nothing");
+
+        // ANOTHER STAMP IS ANOTHER FLIGHT: it derives, once.
+        let later = Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+        let moved = cached_by(
+            &cache,
+            &nifty_key(),
+            later,
+            one_session_counted(&runs),
+            |_, _| false,
+        );
+        assert!(!std::sync::Arc::ptr_eq(&moved.calendar, &first.calendar));
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    /// [`one_session`], counting each call on `runs`.
+    fn one_session_counted(
+        runs: &std::sync::atomic::AtomicUsize,
+    ) -> impl Fn() -> (Calendar, Report) + '_ {
+        move || {
+            runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            one_session()
+        }
+    }
+
+    /// **A LEADER THAT UNWINDS STRANDS NO FOLLOWER AND KEEPS NOTHING.**
+    /// W1-api2-11, D-1443.
+    ///
+    /// Alone: the panic reaches its own caller, no flight and no calendar are
+    /// left, and the next request derives normally. With three followers
+    /// waiting on it: each is woken, one leads a fresh derivation, and all
+    /// three are answered by it, so the count is the failed derivation plus
+    /// exactly one.
+    #[test]
+    fn a_leader_that_unwinds_strands_no_follower_and_keeps_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const FOLLOWERS: usize = 3;
+        let now = Some(std::time::SystemTime::UNIX_EPOCH);
+
+        let cache = Cache::default();
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cached_by(
+                &cache,
+                &nifty_key(),
+                now,
+                || -> (Calendar, Report) { panic!("the derivation died") },
+                |_, _| false,
+            )
+        }));
+        assert!(died.is_err(), "the panic reaches the request that led");
+        assert!(cache.flights.lock().is_ok_and(|flights| flights.is_empty()));
+        assert_eq!(cache.lock().map_or(1, |held| held.len()), 0, "nothing kept");
+        let runs = AtomicUsize::new(0);
+        let after = cached_by(
+            &cache,
+            &nifty_key(),
+            now,
+            one_session_counted(&runs),
+            |_, _| false,
+        );
+        assert_eq!(after.calendar.sessions(), 1);
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        let cache = Cache::default();
+        let runs = AtomicUsize::new(0);
+        let derive = || {
+            if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                until_joined(&cache, FOLLOWERS);
+                panic!("the first derivation died with three requests waiting on it");
+            }
+            one_session()
+        };
+        let outcomes: Vec<Option<Derived>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..=FOLLOWERS)
+                .map(|_| scope.spawn(|| cached_by(&cache, &nifty_key(), now, derive, |_, _| false)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().ok())
+                .collect()
+        });
+        let answered: Vec<&Derived> = outcomes.iter().flatten().collect();
+        assert_eq!(
+            outcomes.len() - answered.len(),
+            1,
+            "only the leader's request failed"
+        );
+        assert_eq!(answered.len(), FOLLOWERS);
+        assert!(
+            answered
+                .iter()
+                .all(|answer| answer.calendar.sessions() == 1)
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the derivation that died, and exactly one that answered the followers"
+        );
+        assert_eq!(cache.waiting(), 0);
+        assert!(cache.flights.lock().is_ok_and(|flights| flights.is_empty()));
+    }
+
+    /// **NO STAMP, NO FLIGHT.** A derivation that is never kept is never
+    /// shared either: each unstamped request derives for itself, and leaves
+    /// no flight behind.
+    #[test]
+    fn an_unstamped_request_derives_for_itself_and_registers_no_flight() {
+        let cache = Cache::default();
+        let runs = std::sync::atomic::AtomicUsize::new(0);
+        for _ in 0..3 {
+            let _ = cached_by(
+                &cache,
+                &nifty_key(),
+                None,
+                one_session_counted(&runs),
+                |_, _| false,
+            );
+        }
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(cache.flights.lock().is_ok_and(|flights| flights.is_empty()));
+        assert_eq!(cache.lock().map_or(1, |held| held.len()), 0);
     }
 
     /// **A MONTH THAT WILL NOT OPEN IS NAMED, NOT COUNTED AS HOLIDAYS.**
@@ -1146,7 +2066,9 @@ pub struct Derived {
 /// file it could not open is one `holds` says the store does not hold. A month
 /// held at the minute rung and not the daily one opens no daily file and is
 /// still kept, because the census says so, and so is a minute file the store
-/// never held. A held file whose records fail their checks did open, and is
+/// never held. Kept, and since D-1443 no longer kept as holidays: such a
+/// month's days are withheld (`Unmeasured`, named in `withheld` on the wire),
+/// because a daily rung that was not read proves no day shut. R9-api-law-0. A held file whose records fail their checks did open, and is
 /// kept too, as the census cache keeps a manifest whose bytes do not decode:
 /// damaged bytes do not heal between two requests, and a pull that rewrites
 /// them moves the manifest. Anything else answers the request that derived it,
@@ -1188,26 +2110,139 @@ pub fn cached(
         segment.to_owned(),
         symbol.to_owned(),
     );
-    if let Some(now) = stamp {
-        // READ THROUGH A POISONED LOCK rather than around it. A panic while
-        // holding it means some other request died; the map is still readable,
-        // and refusing to look would make one panicked request cost every later
-        // one a 0.28 s re-derivation for the life of the process.
-        let held = site_calendars
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, calendar)) = held.get(&key)
-            && *at == now
-        {
-            // A REFCOUNT BUMP, NOT A COPY. See [`Cache`].
-            return Derived {
-                calendar: std::sync::Arc::clone(calendar),
-                unopened: Vec::new(),
-            };
-        }
-    }
+    cached_by(
+        site_calendars,
+        &key,
+        stamp,
+        || derive(store_root, vendor, exchange, segment, symbol, months),
+        holds,
+    )
+}
 
-    let (calendar, report) = derive(store_root, vendor, exchange, segment, symbol, months);
+/// [`cached`], with the derivation passed in.
+///
+/// Production passes [`derive`] over the request's series and months and
+/// nothing else. The parameter is here so a test can hold a derivation open
+/// until every concurrent request has joined it, and count how many times it
+/// ran: the single-flight claim is a count, and a count needs no clock.
+fn cached_by(
+    site_calendars: &Cache,
+    key: &Key,
+    stamp: Option<std::time::SystemTime>,
+    derive: impl Fn() -> (Calendar, Report),
+    holds: impl Fn(Timeframe, YearMonth) -> bool,
+) -> Derived {
+    // NO STAMP, NO KEEPING, AND SO NOTHING TO SHARE: such a derivation answers
+    // its own request only. See the doc above.
+    let Some(now) = stamp else {
+        return derived_and_kept(site_calendars, key, None, &derive, &holds);
+    };
+    loop {
+        if let Some(hit) = kept(site_calendars, key, now) {
+            return hit;
+        }
+        let flight_key = (key.clone(), now);
+        let (flight, leads) = {
+            let mut flights = site_calendars
+                .flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(flight) = flights.get(&flight_key) {
+                (std::sync::Arc::clone(flight), false)
+            } else {
+                let flight = std::sync::Arc::new(Flight::default());
+                flights.insert(flight_key.clone(), std::sync::Arc::clone(&flight));
+                (flight, true)
+            }
+        };
+        if leads {
+            let mut landing = Landing {
+                cache: site_calendars,
+                key: Some(flight_key),
+                flight,
+                answer: None,
+            };
+            // A FLIGHT THAT LANDED between the probe above and this one's
+            // registration kept its calendar first: answer that, not a second
+            // derivation.
+            let answer = kept(site_calendars, key, now).unwrap_or_else(|| {
+                derived_and_kept(site_calendars, key, Some(now), &derive, &holds)
+            });
+            landing.answer = Some(answer.clone());
+            return answer;
+        }
+        site_calendars
+            .waiting
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let landed = {
+            let mut landed = flight
+                .landed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while matches!(*landed, Landed::Deriving) {
+                landed = flight
+                    .ready
+                    .wait(landed)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            landed.clone()
+        };
+        site_calendars
+            .waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if let Landed::Answered(answer) = landed {
+            return answer;
+        }
+        // THE LEADER UNWOUND WITHOUT ANSWERING. Go round again: the flight is
+        // gone, so one waiter becomes the new leader and the rest join it.
+    }
+}
+
+/// The calendar kept for `key` under exactly `now`, if there is one.
+fn kept(site_calendars: &Cache, key: &Key, now: std::time::SystemTime) -> Option<Derived> {
+    // READ THROUGH A POISONED LOCK rather than around it. A panic while
+    // holding it means some other request died; the map is still readable,
+    // and refusing to look would make one panicked request cost every later
+    // one a 0.28 s re-derivation for the life of the process.
+    let held = site_calendars
+        .held
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.get(key)
+        .filter(|(at, _)| *at == now)
+        // A REFCOUNT BUMP, NOT A COPY. See [`Cache`].
+        .map(|(_, calendar)| Derived {
+            calendar: std::sync::Arc::clone(calendar),
+            unopened: Vec::new(),
+        })
+}
+
+/// Derive once, keep it when it may be kept, and say what was withheld.
+fn derived_and_kept(
+    site_calendars: &Cache,
+    key: &Key,
+    stamp: Option<std::time::SystemTime>,
+    derive: &impl Fn() -> (Calendar, Report),
+    holds: &impl Fn(Timeframe, YearMonth) -> bool,
+) -> Derived {
+    let (calendar, report) = derive();
+    // A MONTH WITHHELD OR UNREADABLE IS SAID WHERE THE OPERATOR READS, once
+    // per derivation. `read_days` refused such a month and nothing was logged,
+    // so the only trace of it was a month missing from a 200. W1-api2-9,
+    // D-1443.
+    if report.says_what_it_lacks() {
+        let first = report.unreadable.first().map_or("", String::as_str);
+        let _dropped_when_filtered = telemetry::emit_if!(
+            telemetry::Level::Warn,
+            "api.calendar",
+            "withheld",
+            "vendor" => telemetry::Value::Str(key.0.as_str()),
+            "symbol" => telemetry::Value::Str(&key.3),
+            "months_withheld" => telemetry::Value::Uint(report.withheld.len() as u64),
+            "months_unreadable" => telemetry::Value::Uint(report.unreadable.len() as u64),
+            "first_unreadable" => telemetry::Value::Str(first),
+        );
+    }
     // WHAT THE DISK DID NOT GIVE, HELD AGAINST WHAT THE CENSUS SAYS IT HOLDS.
     let unopened: Vec<String> = report
         .unopened
@@ -1220,9 +2255,10 @@ pub fn cached(
         && unopened.is_empty()
     {
         let mut held = site_calendars
+            .held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.insert(key, (now, std::sync::Arc::clone(&calendar)));
+        held.insert(key.clone(), (now, std::sync::Arc::clone(&calendar)));
     }
     Derived { calendar, unopened }
 }
@@ -1291,6 +2327,34 @@ pub fn json(calendar: &Calendar) -> String {
             }
         }
         out.push('}');
+    }
+    // THE DAYS INSIDE THE SPAN THAT ARE NEITHER SESSIONS NOR CLOSED, AS RUNS.
+    //
+    // `days` omits them as it omits closed days, so without this a month whose
+    // daily rung was not read was indistinguishable on the wire from a month
+    // of holidays: 200, the month simply missing, and nothing saying why.
+    // `withheld` names each stretch the store cannot speak for, so a reader
+    // can tell "the exchange was shut" from "this was not measured".
+    // R9-api-law-0, W1-api2-9, D-1443.
+    out.push_str("],\"withheld\":[");
+    let mut run: Option<(i64, i64)> = None;
+    let mut first = true;
+    let mut flush = |out: &mut String, run: (i64, i64)| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        let _ = write!(out, "{{\"from\":{},\"to\":{}}}", run.0, run.1);
+    };
+    for day in calendar.first_day()..=calendar.last_day() {
+        if calendar.kind_of(day) == pull::calendar::DayKind::Unmeasured {
+            run = Some(run.map_or((day, day), |(from, _)| (from, day)));
+        } else if let Some(done) = run.take() {
+            flush(&mut out, done);
+        }
+    }
+    if let Some(done) = run {
+        flush(&mut out, done);
     }
     out.push_str("]}");
     out
@@ -1438,7 +2502,9 @@ pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
 
     let mut observed: Vec<Observed> = Vec::new();
     let mut clashes: Vec<Disagreement> = Vec::new();
+    let mut withheld: Vec<i64> = Vec::new();
     for day in first..=last {
+        let mut shut = false;
         let mut longest: Option<pull::calendar::Session> = None;
         let mut seen_by: Vec<String> = Vec::new();
         let mut silent: Vec<String> = Vec::new();
@@ -1461,10 +2527,25 @@ pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
                 // SEEN, BUT NOT SIZED. It votes for the day existing and not for its
                 // length, which is what leaving `longest` alone means.
                 DayKind::OpenLengthUnmeasured => seen_by.push(name.clone()),
-                DayKind::Closed | DayKind::Unmeasured => silent.push(name.clone()),
+                DayKind::Closed => {
+                    shut = true;
+                    silent.push(name.clone());
+                }
+                // NOT MEASURED IS NOT A VOTE EITHER WAY. A reading whose daily
+                // rung was not read for this day's month withheld it (D-1443):
+                // it is no more silent about the day than a reading whose span
+                // does not reach it.
+                DayKind::Unmeasured => {}
             }
         }
         if seen_by.is_empty() {
+            // NOBODY SAW A SESSION, AND NOBODY PROVED THE DAY SHUT EITHER: every
+            // reading in range withheld it, or none reaches it (a gap between
+            // two readings' spans). `from_observed` would fill it with `Closed`,
+            // so it is withheld below instead. D-1443.
+            if !shut {
+                withheld.push(day);
+            }
             continue;
         }
         observed.push(Observed {
@@ -1486,7 +2567,11 @@ pub fn agree(readings: &[(String, Calendar)]) -> (Calendar, Vec<Disagreement>) {
             });
         }
     }
-    (Calendar::from_observed(&observed), clashes)
+    let mut agreed = Calendar::from_observed(&observed);
+    for day in withheld {
+        agreed.withhold_closed(day, day);
+    }
+    (agreed, clashes)
 }
 
 /// The exchange calendar on the wire, with the evidence behind it.
@@ -1558,6 +2643,79 @@ mod agreement {
     const FULL_RUN: [(u16, u16); 1] = [(555, 929)];
     /// A 60-minute Muhurat session.
     const SHORT_RUN: [(u16, u16); 1] = [(555, 614)];
+
+    /// **A DAY NO READING PROVED SHUT IS WITHHELD FROM THE AGREEMENT, AND A
+    /// WITHHELD READING IS NOT SILENT.** D-1443.
+    ///
+    /// NIFTY covers days 100-110 and withheld 104-106 (its daily rung was not
+    /// read there); BANKNIFTY covers 100-102 and 108-110 only, as two readings
+    /// whose spans leave a gap. Day 101 is shut by both: still `Closed`. Day 105
+    /// is withheld by NIFTY and outside both BANKNIFTY readings: nobody proved
+    /// it shut, so it is withheld, where `from_observed` alone made it a
+    /// holiday. Day 103 is shut by NIFTY: `Closed`. No reading that withheld a
+    /// day is named silent about it.
+    #[test]
+    fn a_day_no_reading_proved_shut_is_withheld_and_withholding_is_not_silence() {
+        use pull::calendar::DayKind;
+        let mut nifty = Calendar::from_observed(&[
+            Observed::from_runs(100, &FULL_RUN),
+            Observed::from_runs(102, &FULL_RUN),
+            Observed::from_runs(107, &FULL_RUN),
+            Observed::from_runs(110, &FULL_RUN),
+        ]);
+        assert_eq!(nifty.withhold_closed(104, 106), 3);
+        let early = Calendar::from_observed(&[
+            Observed::from_runs(100, &FULL_RUN),
+            Observed::from_runs(102, &FULL_RUN),
+        ]);
+        let late = Calendar::from_observed(&[
+            Observed::from_runs(108, &FULL_RUN),
+            Observed::from_runs(110, &FULL_RUN),
+        ]);
+        let (exchange, clashes) = agree(&[
+            ("NIFTY".to_owned(), nifty),
+            ("BANKNIFTY-A".to_owned(), early),
+            ("BANKNIFTY-B".to_owned(), late),
+        ]);
+        let kind = |day| exchange.kind_of(day);
+        assert_eq!(kind(101), DayKind::Closed, "shut by every reading in range");
+        assert_eq!(
+            kind(103),
+            DayKind::Closed,
+            "shut by NIFTY's read daily rung"
+        );
+        for day in 104..=106 {
+            assert_eq!(
+                kind(day),
+                DayKind::Unmeasured,
+                "day {day}: nobody proved it shut"
+            );
+        }
+        assert_eq!(kind(107), DayKind::Open(pull::calendar::Session::full()));
+        assert_eq!(kind(108), DayKind::Open(pull::calendar::Session::full()));
+        assert!(
+            clashes
+                .iter()
+                .all(|clash| !(104..=106).contains(&clash.day)),
+            "a withheld day is no reading's silence: {clashes:?}"
+        );
+        assert!(
+            json(&exchange).contains("\"withheld\":[{\"from\":104,\"to\":106}]"),
+            "{}",
+            json(&exchange)
+        );
+
+        // ALL READINGS WITHHOLD: nothing is claimed shut, nothing invented.
+        let mut only = Calendar::from_observed(&[
+            Observed::from_runs(200, &FULL_RUN),
+            Observed::from_runs(203, &FULL_RUN),
+        ]);
+        only.withhold_closed(i64::MIN, i64::MAX);
+        let (exchange, clashes) = agree(&[("NIFTY".to_owned(), only)]);
+        assert_eq!(exchange.sessions(), 2);
+        assert_eq!(exchange.kind_of(201), DayKind::Unmeasured);
+        assert!(clashes.is_empty(), "{clashes:?}");
+    }
 
     /// **A BAR IS PROOF; SILENCE IS NOT.**
     ///

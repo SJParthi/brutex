@@ -96,6 +96,40 @@ impl Widths {
         vocab::tolerance::pinned_fib()
             .and_then(|fib| vocab::tolerance::pinned_pivot().map(|pivot| Self { fib, pivot }))
     }
+
+    /// The two widths, refused unless each is measured on its own family's base.
+    ///
+    /// `fib` must be measured on [`Base::SessionRange`] and `pivot` on
+    /// [`Base::CprWidth`]. A swapped or baseless pair used to be accepted: every
+    /// `near_*` call then got `WrongBand` from `vocab::table::set_near`, the
+    /// callers discard that error by design, and the run withheld every band
+    /// position of the mismatched family while refusing nothing (errpaths-4,
+    /// D-1546). This is the checked door; the public fields remain for the
+    /// readiness suites that prove a mismatched width is withheld as unknown and
+    /// never answered false.
+    ///
+    /// # Errors
+    ///
+    /// [`vocab::VocabError::WrongBand`], naming the first table position of the
+    /// family whose width is wrong, the base it expects and the base offered.
+    pub fn new(fib: Tolerance, pivot: Tolerance) -> Result<Self, vocab::VocabError> {
+        for (offered, expected) in [(fib, Base::SessionRange), (pivot, Base::CprWidth)] {
+            if offered.base() != Some(expected) {
+                let index = vocab::table::TABLE
+                    .iter()
+                    .filter(|row| row.band == Some(expected))
+                    .map(|row| row.index)
+                    .next()
+                    .unwrap_or(0);
+                return Err(vocab::VocabError::WrongBand {
+                    index,
+                    expected,
+                    got: offered.base(),
+                });
+            }
+        }
+        Ok(Self { fib, pivot })
+    }
 }
 
 /// Set `above` or `below`, and neither when the two are equal.
@@ -146,18 +180,24 @@ fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16)
 /// announces it, and until then the engine treats it as a regular session, which is the
 /// honest failure: wrong in the same direction as before, on one day, and visible.
 ///
-/// # Why the exposure is smaller than it looks, and still real
+/// # What the pull keeps, and why that is not what protects the anchor
 ///
-/// Five of the six Muhurats never reach disk. `pull::fetch::land` drops every minute bar
-/// whose IST minute-of-day falls outside `[09:15, 15:30)`, and the 2020–2024 sessions are
-/// all **evening** sessions at 18:00 or later — so the pull accidentally implements this
-/// rule, for the unrelated reason that it hardcodes a 15:30 close.
+/// `pull::fetch::land` asks `session::Window::verdict` for each minute bar, and `verdict`
+/// reads the hours from the listing's venue table (`Venue::hours_on`), not from one
+/// hardcoded close. A bar outside those hours is counted in the receipt and dropped. For
+/// the index and cash venues on every date in this list the table says 09:15–15:30, so an
+/// **evening** Muhurat minute (18:00 or later) is dropped and an **afternoon** one is kept.
 ///
-/// **2025-10-21 is the exception and it is why this is not merely tidiness.** The charter
-/// records it as "an afternoon session, not an evening one", 13:45–14:45 IST: every one of
-/// its 60 bars sits inside the pull's window, so it lands, it becomes the previous-day
-/// anchor, and the prohibition is broken on it. Afternoon Muhurats are now the live
-/// pattern, which makes this forward-looking rather than historical.
+/// That does NOT mean five of the six Muhurat days are absent from every store, and this
+/// header used to say it did. What lands is whatever the vendor sent inside the venue's
+/// hours. Cloud audit GAP12-10 reported that one vendor's (dhan) store holds **43 bars on
+/// 2021-11-04, 14:47–15:29 IST** — the audit's measurement, not one this repository took —
+/// all inside the window, so they are kept. 2025-10-21's 60 bars, 13:45–14:45, land the
+/// same way. On any such day the pull has no opinion about Muhurat: this list is the only
+/// thing that keeps that day's OHLC out of the previous-day anchor, `Prev5` and the
+/// previous-session edge. `a_muhurat_session_inside_the_pull_window_does_not_become_yesterday`
+/// pins it for the 43-bar shape. Afternoon Muhurats are now the live pattern, which makes
+/// this forward-looking as well as historical.
 ///
 /// # It is nine now, and the ninth is not a ceremony either
 ///
@@ -166,18 +206,22 @@ fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16)
 /// and the mechanism is the only thing the list is about.
 pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 9] = [
     18_580, // 2020-11-14, 18:15–19:15 IST
-    18_935, // 2021-11-04, 18:15–19:15
+    // 2021-11-04: the ceremony itself, 18:15–19:15, is outside the venue's hours and the
+    // pull drops it. Cloud audit GAP12-10 reported 43 bars dated this day in one vendor's
+    // (dhan) store, 14:47–15:29 IST, inside the hours and therefore kept, so this day IS on
+    // disk there. The audit measured that shape; this repository did not.
+    18_935, // 2021-11-04, 18:15–19:15; 43 in-hours bars reported on disk (above)
     19_289, // 2022-10-24, 18:15–19:15
     19_673, // 2023-11-12, 18:00–19:00
     20_028, // 2024-11-01, 18:00–19:00
-    20_382, // 2025-10-21, 13:45–14:45 — an AFTERNOON session, and the one that lands
+    20_382, // 2025-10-21, 13:45–14:45 — an AFTERNOON session; all 60 bars land
     // THE TWO DISASTER-RECOVERY SATURDAYS, and they are not Muhurat at all.
     //
     // NSE runs a live-trading DR drill on a Saturday: a short session out of the
     // secondary site, to prove the site works. It is not a market day in any
     // sense the previous-day anchor means, and both land squarely inside the
-    // pull's 09:15-15:30 window, so neither is saved by the accident that keeps
-    // the evening Muhurats off disk. MEASURED in the operator's own store:
+    // pull's 09:15-15:30 window, so the pull keeps every one of their bars, as it
+    // keeps any in-hours bar of a Muhurat day. MEASURED in the operator's own store:
     // 105 bars each, 09:15-09:59 then 11:30-12:29, with a 90-minute hole.
     //
     // WHAT THEY COST WHILE THEY WERE ABSENT FROM THIS LIST, measured by folding
@@ -537,8 +581,13 @@ enum Side {
 // a per-bar collection. The bound is still a CONSTANT and the assertion is still
 // what catches a module that starts accumulating; it moved because one more
 // fixed-size field was added, which is the only reason it is ever allowed to
-// move.
-const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1824);
+// move. D-1441 then took 64 bytes OUT: `GapFib`'s three-slot ring and bar count
+// became one running 3-minute candle, 160 bytes to 96, so the evaluator measures
+// 1728 and the ceiling came down from 1824 to keep the same 32 bytes of slack.
+// D-1542 put 48 back: the two EMAs and the ATR each carry one `i128` running
+// sum for the simple-mean seed, so the evaluator measures 1776 and the ceiling
+// moved from 1760 to 1808, the same 32 bytes of slack.
+const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1808);
 
 impl Evaluator {
     /// Snapshot the four caller choices, without any running indicator state.
@@ -713,8 +762,8 @@ impl Evaluator {
         // after them. The entry was right about the fix it described and wrong that the
         // fix was complete.
         //
-        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1792
-        // bytes by the const assertion above -- a 1,664-byte memcpy per bar against a
+        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1808
+        // bytes by the const assertion above -- a 1,728-byte memcpy per bar against a
         // fold that already costs ~320 ns.
         let (next, mask) = self.stepped(bar)?;
         let known = self.known_after(&next, mask, bar);
@@ -752,7 +801,12 @@ impl Evaluator {
         ));
         if self.day == next.day {
             known = known.union(&self.curday.known(self.widths.fib));
-            known = known.union(&self.gap.known(self.widths.fib));
+            // `next`, not `self`: the gap leg is settled BEFORE its emit, when a bar
+            // of a later 3-minute span closes the opening candle, and its fold never
+            // moves it (D-1441). So the post-step leg is exactly the one this bar's
+            // truth read, and the pre-step one is a bar stale on the bar that closes
+            // the candle.
+            known = known.union(&next.gap.known(self.widths.fib));
         }
         known = self.crossings_known(next, known);
         // A cold, absent or overflowing reference still cannot satisfy NOT.
@@ -1016,6 +1070,20 @@ impl Evaluator {
     /// * **A close landing exactly ON the level** — D-0109's three-state rule
     ///   clears both sides. That bar reports no crossing; the bar that leaves
     ///   the level reports one, which is the honest reading of a touch-and-go.
+    ///
+    /// # Where this is proved, and through which path
+    ///
+    /// `crates/indicators/tests/crossing_known_readiness.rs` drives the public
+    /// `Evaluator::step_known` and so reaches this function. Two of its tests
+    /// fail if the rule goes back to reading the previous bar (an `Unknown` bar
+    /// clearing the remembered side):
+    /// `a_touch_is_known_false_but_cannot_erase_the_side_or_count_across_it` and
+    /// `every_crossing_and_ordinal_matches_a_last_definite_side_oracle_including_known_non_events`.
+    /// All three of its tests fail if a session's first definite side is
+    /// reported as a crossing. Both mutations were run by hand for D-0945. An
+    /// earlier in-file module, `band_crossing_tests`, re-implemented this loop
+    /// locally and called no production code, so neither mutation could fail
+    /// it; D-0945 removed it.
     ///
     /// # Cost
     ///
@@ -1359,10 +1427,13 @@ impl Evaluator {
 
     /// Every position this evaluator can ever set.
     ///
-    /// The union of nine sources' own `positions()` — eight modules and the current-day
-    /// Fibonacci rung range — so it cannot drift from them: adding a position to a
-    /// module adds it here, plus the four this type computes itself. 238 positions today,
-    /// which is every live bit in the table.
+    /// The union of eight modules' own `positions()` and the current-day Fibonacci rung
+    /// range, so it cannot drift from them, plus three sets this type claims itself:
+    /// 276–279, the five weekday rows, and every position `vocab::table::CROSSINGS`
+    /// names. That is 328 positions today,
+    /// which is every live bit in the table. `tests/evaluator_position_count.rs` reads
+    /// that count against this list and the live mask; the crate header states it once
+    /// more and `tests/module_doc_counts.rs` checks the header.
     #[must_use]
     pub fn positions() -> Vec<u16> {
         let mut all: Vec<u16> = Vec::new();
@@ -1444,6 +1515,36 @@ mod tests {
                 evaluator.spec().availability,
                 verdict,
                 "the getter and the reprojection spec read the same field"
+            );
+        }
+    }
+
+    /// SWAPPED OR BASELESS WIDTHS ARE REFUSED BY THE CHECKED CONSTRUCTOR.
+    /// errpaths-4, D-1546.
+    ///
+    /// Every `near_*` caller discards `set_near`'s `WrongBand`, so a pivot
+    /// width on the Fibonacci side, or the reverse, withheld every band
+    /// position in the run and refused nothing. `Widths::new` refuses the
+    /// pair before an evaluator can be built from it, naming the base.
+    #[test]
+    fn swapped_or_baseless_widths_are_refused_by_name() {
+        let fib = vocab::tolerance::pinned_fib().expect("pinned fib");
+        let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot");
+        assert_eq!(Widths::new(fib, pivot), Widths::pinned());
+        let baseless = Tolerance::from_milli(10).expect("a width with no base");
+        for (fib_side, pivot_side, expected) in [
+            (pivot, fib, Base::SessionRange),
+            (fib, fib, Base::CprWidth),
+            (baseless, pivot, Base::SessionRange),
+            (fib, baseless, Base::CprWidth),
+        ] {
+            let refused = Widths::new(fib_side, pivot_side);
+            assert!(
+                matches!(
+                    refused,
+                    Err(vocab::VocabError::WrongBand { expected: e, .. }) if e == expected
+                ),
+                "{fib_side:?} / {pivot_side:?}: {refused:?}"
             );
         }
     }
@@ -1704,7 +1805,7 @@ mod tests {
         // arithmetic moving.
         const WEEKDAYS: usize = 5;
         let all = Evaluator::positions();
-        // 323 = 238 measured by a module + 85 derived from the mask. NOT a
+        // 328 = 238 measured by a module + 85 derived from the mask + 5 weekdays. NOT a
         // literal beside a different literal: the derived half is spelled from
         // `CROSSINGS` so the two cannot drift, which is the same reason
         // `positions()` reads that table rather than listing indices.
@@ -2570,8 +2671,9 @@ mod tests {
     /// vacuous.
     #[test]
     fn a_non_regular_session_never_becomes_the_previous_day_anchor() {
-        // Day 20_382 is 2025-10-21, the afternoon Muhurat, and the one of the charter's nine
-        // whose bars pass the pull's 09:15–15:30 window and therefore reach disk.
+        // Day 20_382 is 2025-10-21, the afternoon Muhurat, whose whole session sits inside the
+        // pull's 09:15–15:30 window. It is not the only listed day with bars on disk: see
+        // `a_muhurat_session_inside_the_pull_window_does_not_become_yesterday`.
         let short_day = 20_382_i64;
         let session = |day: i64, bars: i64, base: i64| -> Vec<Candle> {
             (0..bars)
@@ -2661,6 +2763,128 @@ mod tests {
             "declaring the short day regular changed no pivot position, so the calendar is \
              not being consulted and the assertion above would pass with the fix removed"
         );
+    }
+
+    /// **A Muhurat day whose bars land INSIDE the pull's window is still not yesterday.**
+    ///
+    /// # Why this exists (D-1442, cloud audit GAP12-10)
+    ///
+    /// This module's header used to say five of the six Muhurats "never reach disk"
+    /// because the pull drops everything outside 09:15–15:30, so the list only mattered
+    /// for 2025-10-21. The audit reported a vendor store holding **43 bars of the
+    /// 2021-11-04 Muhurat day, 14:47–15:29 IST** — that is the audit's measurement, not
+    /// one taken here — and every one of those minutes is inside the venue's hours, so
+    /// `pull::fetch::land` keeps them. The list, not the pull, is what keeps that day out
+    /// of the anchors.
+    ///
+    /// The fixture is that on-disk shape: a regular session, the 43-bar stub on day
+    /// `18_935`, then a regular session. The day after must report the same previous-day
+    /// pivot ladder and previous-day Fibonacci rungs as the same fixture without the stub,
+    /// and the rolling window must advance once, not twice. The same stub declared regular
+    /// must move them, or the first half would pass with the calendar ignored. Two
+    /// one-bar stubs, at the last minute of the window (15:29) and at its first (09:15),
+    /// cover the boundaries.
+    ///
+    /// It passes on the code it was written against: the defect was the header's claim,
+    /// not the calendar. It is a guard against someone believing the old header and
+    /// dropping `18_935` from the list.
+    #[test]
+    fn a_muhurat_session_inside_the_pull_window_does_not_become_yesterday() {
+        let muhurat_day = 18_935_i64;
+        // One candle at an IST minute-of-day; 330 is the IST offset in minutes.
+        let at = |day: i64, ist_minute: i64, base: i64, m: i64| -> Candle {
+            let p = base + (m % 37) * 100;
+            Candle {
+                ts_micros: day * DAY_MICROS + (ist_minute - 330) * MINUTE_MICROS,
+                open: p,
+                high: p + 400,
+                low: p - 400,
+                close: p + 100,
+                volume: 0,
+                open_interest: i64::MIN,
+            }
+        };
+        let regular = |day: i64, base: i64| -> Vec<Candle> {
+            (0..375).map(|m| at(day, 555 + m, base, m)).collect()
+        };
+        let before = regular(muhurat_day - 1, 2_500_000);
+        let after = regular(muhurat_day + 1, 2_500_000);
+
+        // 14:47 is minute 887 and 15:29 is minute 929: 43 bars, the last one the
+        // window's own last minute.
+        let stub_43: Vec<Candle> = (887..=929)
+            .map(|minute| at(muhurat_day, minute, 2_900_000, minute))
+            .collect();
+        assert_eq!(stub_43.len(), 43, "the fixture is the 43-bar shape");
+        let stub_last = vec![at(muhurat_day, 929, 2_900_000, 0)];
+        let stub_first = vec![at(muhurat_day, 555, 2_900_000, 0)];
+
+        let anchored: Vec<u16> = crate::daily::positions()
+            .iter()
+            .copied()
+            .chain(
+                crate::fib::PREV_DAY_DOWN
+                    .into_iter()
+                    .chain(crate::fib::PREV_DAY_UP)
+                    .map(|(_, p)| p),
+            )
+            .collect();
+
+        // (anchor bits of every bar of the day after, sessions completed, has yesterday)
+        let run = |calendar: Calendar, stub: &[Candle]| -> (Vec<Vec<u16>>, usize, bool) {
+            let mut e = Evaluator::with_calendar(
+                widths(),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+                calendar,
+            );
+            for c in before.iter().chain(stub) {
+                e.step(c).expect("a sane candle");
+            }
+            let bits = after
+                .iter()
+                .map(|c| {
+                    let m = e.step(c).expect("a sane candle");
+                    anchored
+                        .iter()
+                        .copied()
+                        .filter(|p| m.get(u32::from(*p)))
+                        .collect()
+                })
+                .collect();
+            (bits, e.sessions_completed(), e.has_yesterday())
+        };
+
+        let without = run(Calendar::charter(), &[]);
+        assert!(
+            without.2,
+            "premise: the regular day before installs a yesterday"
+        );
+        assert!(
+            without.0.iter().any(|bits| !bits.is_empty()),
+            "premise: the day after sets some previous-day position, or equality below \
+             would compare two empty sets"
+        );
+
+        for (name, stub) in [
+            ("43 bars 14:47-15:29", &stub_43),
+            ("one bar at 15:29", &stub_last),
+            ("one bar at 09:15", &stub_first),
+        ] {
+            let with = run(Calendar::charter(), stub);
+            assert_eq!(
+                with, without,
+                "{name} on 2021-11-04 changed the next day's previous-day pivot or \
+                 Fibonacci bits, the rolling-window count or yesterday: the Muhurat day \
+                 became an anchor, which charter §3 forbids"
+            );
+            let contaminated = run(Calendar::all_regular(), stub);
+            assert_ne!(
+                contaminated.0, without.0,
+                "{name} declared regular moved no previous-day bit, so the assertion \
+                 above would pass with 18_935 removed from the list"
+            );
+        }
     }
 
     /// A non-regular session does not advance the five-session rolling window.
@@ -3619,126 +3843,8 @@ mod tests {
         // something else that does not.
         assert!(
             d.is_non_regular(20_382),
-            "the default calendar does not recognise 2025-10-21, the one Muhurat session whose \
-             bars reach disk"
-        );
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    reason = "the exception every test module in this workspace takes."
-)]
-mod band_crossing_tests {
-    use super::Side;
-
-    /// A CLOSE THAT WALKS THROUGH A BAND STILL CROSSED IT.
-    ///
-    /// # The defect this pins, which shipped in the first version
-    ///
-    /// The crossing family compared against the PREVIOUS BAR and required it to
-    /// have had a definite side. That is right for the day-open pair — 276/277
-    /// are gated on `seeded`, so a session's first bar has no side and the naive
-    /// test reported a crossing on bar 1 of every session — and wrong for every
-    /// BANDED level.
-    ///
-    /// `close_above_pivot_r1_band` is true above the band's TOP edge and
-    /// `close_below_` below its BOTTOM edge, so the gap between them is the
-    /// whole band: half the CPR width either way, a real price interval. A close
-    /// walking through it spends bars with neither bit set, so the bar before
-    /// the emergence had no side and the guard refused.
-    ///
-    /// **Fifty of the eighty-five new positions could fire only on a bar that
-    /// jumped the entire band in one step.** An adversarial fleet measured it
-    /// twice, independently.
-    ///
-    /// # Why this is a state-machine test and not a bar fixture
-    ///
-    /// The band's width is a function of the previous session's CPR, so driving
-    /// a real close through a real `pivot_r1_band` needs a two-session fixture
-    /// whose CPR is wide enough to hold a bar — which makes the test about the
-    /// fixture rather than about the rule. The rule is: an `Unknown` bar records
-    /// nothing over the remembered side. That is exactly what this asserts, and
-    /// it fails the moment the code goes back to reading the previous bar.
-    #[test]
-    fn an_unknown_side_does_not_erase_the_side_before_it() {
-        // The sequence a close makes walking down through a band: definitely
-        // above, then inside for three bars, then definitely below.
-        let walk = [
-            Side::Above,
-            Side::Unknown,
-            Side::Unknown,
-            Side::Unknown,
-            Side::Below,
-        ];
-
-        // The rule, applied exactly as `crossings_of` applies it.
-        let mut last = Side::Unknown;
-        let mut crossings = 0_u32;
-        for now in walk {
-            if matches!(now, Side::Unknown) {
-                continue;
-            }
-            let was = last;
-            last = now;
-            if matches!(was, Side::Unknown) || was == now {
-                continue;
-            }
-            crossings = crossings.saturating_add(1);
-        }
-        assert_eq!(
-            crossings, 1,
-            "a close that was above, spent three bars inside the band, and came \
-             out below has crossed the level once. Comparing against the \
-             PREVIOUS bar sees `Unknown -> Below` and reports nothing"
-        );
-
-        // AND THE PREVIOUS-BAR RULE REALLY DOES MISS IT, so the assertion above
-        // is discriminating rather than merely true.
-        let mut previous = Side::Unknown;
-        let mut naive = 0_u32;
-        for now in walk {
-            let was = previous;
-            previous = now;
-            if matches!(was, Side::Unknown) || matches!(now, Side::Unknown) || was == now {
-                continue;
-            }
-            naive = naive.saturating_add(1);
-        }
-        assert_eq!(
-            naive, 0,
-            "the previous-bar rule reports NO crossing on this walk, which is \
-             the defect: 50 of the 85 new positions could fire only on a bar \
-             that jumped the whole band in one step"
-        );
-    }
-
-    /// A SESSION'S FIRST BAR STILL REPORTS NOTHING.
-    ///
-    /// The fix must not reintroduce the defect it replaced. `last_side` starts
-    /// and is cleared to `Unknown`, so the first bar that HAS a side records it
-    /// and reports no crossing — which is what kept `crossed_up_day_open` from
-    /// firing on the second bar of every session.
-    #[test]
-    fn the_first_definite_side_of_a_session_is_recorded_and_not_reported() {
-        let mut last = Side::Unknown;
-        let mut crossings = 0_u32;
-        for now in [Side::Unknown, Side::Above, Side::Above, Side::Below] {
-            if matches!(now, Side::Unknown) {
-                continue;
-            }
-            let was = last;
-            last = now;
-            if matches!(was, Side::Unknown) || was == now {
-                continue;
-            }
-            crossings = crossings.saturating_add(1);
-        }
-        assert_eq!(
-            crossings, 1,
-            "the first Above is recorded and reports nothing; only the later \
-             Below is a crossing"
+            "the default calendar does not recognise 2025-10-21, the Muhurat session that lies \
+             wholly inside the pull's window"
         );
     }
 }

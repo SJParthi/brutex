@@ -58,7 +58,14 @@ impl Drop for Fixture {
 }
 fn bar(index: usize) -> Bar {
     Bar {
-        ts_micros: i64::try_from(index + 1).expect("small fixture") * 60_000_000,
+        // Inside the fixture's own month, 2025-05 IST: the write boundary
+        // refuses a stamp outside the month its path names (D-0915), and these
+        // were 1970 minutes in a 2025-05 file.
+        ts_micros: YearMonth::new(2025, 5)
+            .expect("month")
+            .ist_bounds_micros()
+            .0
+            + i64::try_from(index + 1).expect("small fixture") * 60_000_000,
         open: 100,
         high: 120,
         low: 90,

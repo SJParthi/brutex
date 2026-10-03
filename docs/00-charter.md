@@ -82,8 +82,10 @@ Sources are Indian exchange publications and the vendor documentation cited in
   recorded in `crates/pull/src/calendar.rs`. **A drill is not a market day**
   and its OHLC never becomes the previous-day anchor — it is in
   `CHARTER_NON_REGULAR_IST_DAYS` for exactly the reason the Muhurats are.
-  Unlike five of the six Muhurats, both land squarely inside the pull's
-  09:15–15:30 window, so nothing keeps them off disk by accident. What this
+  Both land squarely inside the pull's 09:15–15:30 window, so the pull keeps
+  them, as it keeps any in-hours bar of a Muhurat day (cloud audit GAP12-10
+  reported 43 bars dated 2021-11-04, 14:47–15:29, in one vendor's store; D-1442).
+  Only this list keeps them out of the anchor. What this
   cost while they were absent from that list, measured on the store's own
   bars: for Monday 2024-03-04 the anchor was the 105-bar Saturday rather than
   the 375-bar Friday, moving the pivot **144.5 index points** and the CPR width
@@ -583,7 +585,7 @@ into a guarantee about this dataset.
 
 | Procedure fact | Primary source | What is and is not carried |
 |---|---|---|
-| CSCV begins with one synchronous `T × N` performance matrix, partitions its rows into an even number `S` of equal-sized disjoint blocks, visits every canonical half-block training set with its exact complement as test, chooses the in-sample maximum under one fixed performance measure, and estimates PBO from how often that winner ranks below the out-of-sample median | Bailey, Borwein, López de Prado and Zhu (2015/2017), *The Probability of Backtest Overfitting*, [author-hosted PDF](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf), Algorithm 2.3 and §3.1; [journal abstract](https://www.risk.net/journal-of-computational-finance/2471206/the-probability-of-backtest-overfitting) | The synchronous complete-family construction, equal-block complementary enumeration and rank event are carried. The paper says different trading frequencies must be aggregated to one common index, but it does **not** choose this repository's IST observation unit, empty-session treatment, segment count, tie policy, pessimistic-return score, bootstrap seed/draw count or block length. Those remain explicit versioned implementation decisions and cannot be smuggled in as facts from the paper. |
+| CSCV begins with one synchronous `T × N` performance matrix, partitions its rows into an even number `S` of equal-sized disjoint blocks, visits every canonical half-block training set with its exact complement as test, chooses the in-sample maximum under one fixed performance measure, and estimates PBO from how often that winner ranks below the out-of-sample median | Bailey, Borwein, López de Prado and Zhu (2015/2017), *The Probability of Backtest Overfitting*, [author-hosted PDF](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf), Algorithm 2.3 and §3.1; [journal abstract](https://www.risk.net/journal-of-computational-finance/2471206/the-probability-of-backtest-overfitting) | The synchronous complete-family construction, the equal-block partition and the rank event are carried. **The enumeration is not.** Algorithm 2.3 forms every one of the `C(S,S/2)` half-block training sets, so each complementary pair is visited in both orientations. This repository's CSCV (D-0476, `cli::population_statistics_v2::canonical_split_count`) keeps segment 0 on the test side and visits exactly `C(S-1,S/2)` = `C(S,S/2)/2` splits, one orientation per pair: the swapped orientation, whose in-sample winner can differ, is never scored. That is a deviation from the paper, not a reading of it, and it bites hardest at small `S` — at `S = 2` the paper scores two splits and this scores one, so the estimate can only be 0 or 1. D-1448. The paper says different trading frequencies must be aggregated to one common index, but it does **not** choose this repository's IST observation unit, empty-session treatment, segment count, tie policy, pessimistic-return score, bootstrap seed/draw count or block length. Those remain explicit versioned implementation decisions and cannot be smuggled in as facts from the paper. |
 | Romano--Wolf stepdown controls family-wise error by testing maxima over successively smaller surviving hypothesis sets; a fixed bootstrap distribution makes those critical values monotone | Romano and Wolf (2005), *Exact and Approximate Stepdown Methods for Multiple Hypothesis Testing*, JASA 100(469), 94--108, [publisher DOI](https://doi.org/10.1198/016214504000000539), [author-hosted PDF](https://www.econ.uzh.ch/dam/jcr:ffffffff-935a-b0d6-ffff-ffffd823d949/jasa.pdf), especially §4.2 and Theorem 6 | The construction and its stated asymptotic conditions are carried. It is **not** a distribution-free finite-sample promise for arbitrary strategy returns. The paper explicitly directs dependent data to block bootstrap methods; it does not select this repository's block length. |
 | Candidate adjusted p-values order observed statistics from largest to smallest, count strict exceedances of each surviving-suffix resample maximum with the finite-resample `(+1)/(M+1)` correction, then apply a cumulative maximum; that monotonicity step is essential | Romano and Wolf (2016), *Efficient Computation of Adjusted p-Values for Resampling-Based Stepdown Multiple Testing*, [University of Zurich Working Paper 219](https://www.econ.uzh.ch/apps/workingpapers/wp/econwp219.pdf), Algorithms 3.1 and 4.1 and Remark 4.1 | `runner::bootstrap::romano_wolf_adjusted_p_values_v1` implements that exact-count algorithm over one shared stationary-bootstrap matrix. Exact observed-statistic ties use ascending caller position, and any zero-variance candidate refuses the complete adjusted receipt rather than receiving the strict-exceedance floor. Those two discrete-data rules are D-0460 implementation choices, not claims made by the paper. |
 
@@ -596,6 +598,67 @@ into a guarantee about this dataset.
 | Wilson intervals incorporate sample size when estimating a binomial proportion | [NIST confidence intervals](https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm) | Does not establish independent trading outcomes or choose a minimum sample size for this repository. |
 | White's Reality Check addresses data snooping; Hansen's SPA uses studentization and a sample-dependent null distribution | [White (2000)](https://users.ssc.wisc.edu/~behansen/718/White2000.pdf), [Hansen (2005), primary publisher abstract](https://www.tandfonline.com/doi/abs/10.1198/073500105000000063) | These methods motivate complete-population evidence. Their assumptions remain material; they do not select this repository's acceptance thresholds. |
 | P-values do not measure the probability a hypothesis is true; decisions should not rest solely on a threshold | [American Statistical Association statement](https://www.amstat.org/asa/files/pdfs/p-valuestatement.pdf) | The delegated37-field profile contains explicit research choices. No cited source prescribes its5%p-value cutoff,20%PBO limit, sample floors or loss caps. See [the explanation](22-research-policy.md). |
+
+## 4g. GDFL — what D-0802 depends on, and how little of it is recorded
+
+D-0802 (1 October 2026) records the operator's design that every entry, exit
+and exit combination, and the ranking that reads those fills, is to be priced
+from GDFL one-second data, at each second's worst-case high or low, on the
+underlying spot. Nothing of it is built. **This section records no GDFL fact
+from a vendor source.** It records one operator statement, one day measured
+from GDFL files outside this repository, and what must still be read from a
+source and written here, with its lane, before any code relies on it.
+
+**Operator statement.**
+
+| Fact | Value | Lane |
+|---|---|---|
+| GDFL coverage for this design | GDFL second-level snapshot data covers everything D-0802 needs. Excerpt of message 5, whose whole text D-0802 quotes: *"... for gdfl entilrey we have seconds level snapshot dude so you don't need to worry we have all the data ..."* | operator-stated 1 Oct 2026, no vendor page states it |
+
+**Measured on one day only.** Read on 1 October 2026 (IST) from an extracted
+GDFL copy outside this repository, a directory on the operator's own storage
+named `NSE_Tick_2018-09-01_to_2026-09-24` (where it is mounted is machine
+layout and is not recorded; its name ends at 24 September 2026, though its
+folder names run to 30 September 2026; why is not recorded), by `awk` over the
+files named. Anyone
+with that copy can repeat each figure. Each row is a
+measurement of those files on 26 May 2026 and no more; it is not a vendor
+statement and does not say what any other day holds.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Index file path | `INDICES/<yyyy>/<MON_yyyy>/GFDLCM_INDICES_TICK_<ddmmyyyy>/<NAME>.NSE_IDX.csv`; 141 files on 26 May 2026, among them `NIFTY 50.NSE_IDX.csv` and `NIFTY BANK.NSE_IDX.csv` | measured, one day |
+| Index columns | `Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest`, header present, date `dd/mm/yyyy`, time `hh:mm:ss` with no sub-second field, in every row | measured, one day, two files |
+| Index fields beyond the level | every column after `LTP` is zero in every row, so the volume columns carry nothing | measured, one day, two files |
+| Rows per session second (09:15:00 to 15:29:59) | NIFTY 50 about 4.0 (90,360 rows over 22,499 seconds, up to 10 in one); NIFTY BANK about 2.0 (45,272 over 22,498, up to 5); no tiebreaker among rows sharing a second | measured, one day |
+| Session seconds with no row | NIFTY 50 one (14:16:23); NIFTY BANK two (10:48:06, 14:16:23) | measured, one day |
+| Rows outside the session (26 May 2026 is a regular 09:15–15:29 session in `pull::calendar`) | present: first rows 09:07:03 and 09:07:04, last 16:09:13; 1,908 and 955 rows before 09:15:00, 9,418 and 4,709 from 15:30:00 on | measured, one day |
+| Row order | the time column steps **backward** 25 times in each index file, by one or two seconds, roughly every fifteen minutes; `pull::fold` refuses such a step rather than sorting (D-0802 consequence 5) | measured, one day; what a backward step means UNVERIFIED |
+| Range, minute against second | mean `LTP` high minus low over the session: NIFTY 50 8.68 points per minute, 1.03 per second; NIFTY BANK 29.74 per minute, 2.27 per second | measured, one day |
+| One cash-equity file | `STOCKS/2026/MAY_2026/GFDLCM_STOCK_TICK_26052026/RELIANCE.NSE.csv` (3,429 files in that folder): the same ten-name header, 17,626 rows, a nonzero `BuyPrice` or `SellPrice` on all but one row, a nonzero `LTQ` on 15,816 | measured, one day, one file |
+| Folder names present | 2,001 `GFDLCM_INDICES_TICK_<ddmmyyyy>` folders whose names run from 3 Sep 2018 to 30 Sep 2026, each with both index files, and 2,001 `GFDLCM_STOCK_TICK_<ddmmyyyy>` folders | counted by name only; contents of every other day unread |
+
+**Still UNVERIFIED.**
+
+| Needed fact | Lane |
+|---|---|
+| Whether the layout, density, gaps and backward steps above hold on every other day, for every needed series | UNVERIFIED — one day read |
+| Whether every needed day is present and non-empty across the tested history | operator-stated (above); per day UNVERIFIED, so a window with no GDFL seconds still refuses at run time |
+| Clock basis of the CSV `Time` column (exchange time, vendor receive time or other), and whether `hh:mm:ss` means `[ss, ss+1)` | UNVERIFIED — D-0015 records GDFL epoch-second fields `LastTradeTime` and `ServerTime` (documented); neither name is in the CSV |
+| Alignment of GDFL seconds with Zerodha minutes and folded rungs | UNVERIFIED — no day has been read from both |
+| GDFL's naming for every F&O underlying's cash series, and its mapping to `InstrumentKey` | UNVERIFIED — three tickers seen on one day: `NIFTY 50.NSE_IDX`, `NIFTY BANK.NSE_IDX`, `RELIANCE.NSE` |
+| Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | UNVERIFIED |
+| The price of the data | not recorded; the operator states it is in hand |
+| Licence terms for this use | UNVERIFIED |
+
+Two untracked files in the main checkout, `GFDLNFO_TICK_06012019.zip` and
+`GFDLNFO_TICK_07012019.zip`, were seen on 1 October 2026 at 450 bytes each with
+one 18-byte two-column `ts,ltp` member. They are outside version control, so no
+reader of this repository can re-check them, and they may no longer exist.
+Nothing records where they came from, and they are not evidence for any row
+above. D-0045 first recorded that GDFL appears nowhere in this charter, and
+D-0118 named the same gap for GDFL's granularity floor; the operator statement
+and the one measured day above narrow that gap and do not close it.
 
 ## 5. Run identity
 

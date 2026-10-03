@@ -53,11 +53,18 @@
 //! | append a run's trades | O(rows) | one seek to the end, one write |
 //! | find a run's trades | **O(1)** | one hash probe into the block index |
 //! | read one row | **O(1)** | seek to `HEADER + index * STRIDE` |
-//! | open | O(rows) | one pass to rebuild the index, once per process |
+//! | open | O(rows) | one pass to rebuild the index, on every open |
 //!
 //! The open-time pass is the only non-constant term and it is the same one
 //! `results` and `frontier` pay, for the same reason: an index that is not on
 //! disk must be rebuilt from what is.
+//!
+//! **It is paid per open, not once per process.** This table said "once per
+//! process", and the writer is not held for a process: `ensure_trade_rows`
+//! opens it for every recorded run (and reopens it to verify), so recording a
+//! run costs O(H + T) for H rows every earlier run recorded plus the run's own
+//! T, and N recorded runs cost Θ(N·H) cumulatively. The writer open has no byte
+//! ceiling. `docs/06-limits.md` (D-1634).
 //!
 //! A read-only [`Trades::of_run`] also opens/indexes `runs.bin` and
 //! `detail-sets.bin` to prove the parent and exact cardinality. A fresh HTTP
@@ -201,7 +208,7 @@ impl Row {
     #[allow(
         clippy::indexing_slicing,
         reason = "every write is at a compile-time offset into an array whose \
-                  length is asserted above; `PAYLOAD_BYTES` is checked to be 96 \
+                  length is asserted above; `PAYLOAD_BYTES` is checked to be 128 \
                   and the writes below sum to exactly that."
     )]
     pub fn to_bytes(&self) -> [u8; STRIDE_BYTES] {
@@ -714,6 +721,7 @@ impl Trades {
     /// Absorbs blocks another writer has appended since this handle last looked.
     ///
     /// O(rows appended by others), which is zero on the one-writer path.
+    /// Proved by `cli::trades::a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows`.
     /// Bring a HELD handle up to date, in O(rows appended since it was opened).
     ///
     /// # The scan this exists to stop repeating
@@ -725,10 +733,11 @@ impl Trades {
     /// *"A `BufReader` does not change the O(rows) walk — only a persisted or
     /// cached index does that, and it is the right fix."*
     ///
-    /// The incremental machinery was already here. [`Self::absorb_new_rows`]
-    /// resumes from `self.scanned` rather than rescanning, precisely so a writer
-    /// that appended since this handle opened costs O(delta) — it was simply
-    /// never available to a reader, because a reader never kept its handle.
+    /// A refresh resumes from `self.scanned` rather than rescanning, and hands
+    /// each new row to `index_row`, the per-row step the cold walk in
+    /// `index_of` also takes, so a held handle pays O(rows appended since it
+    /// last looked) rather than O(every row). Writers resume the same way
+    /// through `absorb_new_rows`, which additionally refuses on damage.
     ///
     /// # Why this is a refresh and not a reopen
     ///
@@ -738,17 +747,111 @@ impl Trades {
     /// that SHRANK is refused rather than reindexed — append-only history was
     /// replaced, and silently re-walking it would hide that.
     ///
+    /// # A damaged row is recorded, not refused
+    ///
+    /// A refresh indexes each new row exactly as the cold walk in `index_of`
+    /// does: a bad seal, an invalid schema or a non-contiguous duplicate is
+    /// recorded as this handle's first integrity failure and indexing goes on.
+    /// It used to refuse on any recorded failure before reading the file, so
+    /// one damaged row anywhere made `/trades.json` drop its cached handle,
+    /// re-walk every row on the next request, and refuse the request after.
+    /// Refreshing promotes nothing; `append_all` and `confirm_durable` still
+    /// refuse past a recorded failure. D-0919.
+    ///
+    /// # A replaced file is refused, so the holder reopens it
+    ///
+    /// The documented remedy for damage is a reviewed replacement installed
+    /// under the same name. The held descriptor still names the old file, and
+    /// measuring only that descriptor would index the old bytes for as long as
+    /// the process lives, refusing every run the replacement adds with a wrong
+    /// cause. So each refresh compares the held file's device and inode with
+    /// what the path names now, and refuses by name on a mismatch; a caller
+    /// such as `/trades.json`'s cache drops the handle on that refusal and the
+    /// next request opens the replacement. One `symlink_metadata`, O(1).
+    ///
+    /// # Under a shared lock, as `confirm_durable` reads
+    ///
+    /// `append_all` writes under the exclusive lock, so a refresh that takes
+    /// the shared lock never indexes a row a writer is still putting down. A
+    /// row indexed once is never read again, so without the lock a torn row
+    /// seen mid-append would stay recorded as damage on this handle.
+    ///
     /// # Errors
     ///
-    /// The same refusals `absorb_new_rows` makes: a shrunken file, a ragged
-    /// tail, an unreadable row, or a duplicate identity whose blocks are not
-    /// contiguous.
+    /// A lock that cannot be taken or released, a file replaced or removed
+    /// under its path, a shrunken file, a ragged tail, or a row that cannot be
+    /// read.
     pub fn refresh(&mut self) -> Result<(), Refusal> {
-        self.absorb_new_rows()
+        self.file.lock_shared().map_err(|why| {
+            format!(
+                "{} could not be locked for a refresh: {why}",
+                self.path.display()
+            )
+        })?;
+        let refreshed = self.refresh_locked();
+        let released = self.file.unlock().map_err(|why| {
+            format!(
+                "{} could not be unlocked after a refresh: {why}",
+                self.path.display()
+            )
+        });
+        match (refreshed, released) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(why), _) | (Ok(()), Err(why)) => Err(why),
+        }
     }
 
-    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
-        self.refuse_integrity_failure_for_write()?;
+    /// [`Self::refresh`]'s body, with the shared lock already held.
+    fn refresh_locked(&mut self) -> Result<(), Refusal> {
+        self.require_named_file()?;
+        let len = self.grown_length()?;
+        let at = self.scanned;
+        self.file
+            .seek(SeekFrom::Start(at))
+            .map_err(|why| format!("the trade row at byte {at} could not be sought: {why}"))?;
+        let mut buffered = std::io::BufReader::new(&mut self.file);
+        let mut raw = [0_u8; STRIDE_BYTES];
+        while self.scanned.saturating_add(STRIDE) <= len {
+            let at = self.scanned;
+            buffered
+                .read_exact(&mut raw)
+                .map_err(|why| format!("the trade row at byte {at} could not be read: {why}"))?;
+            let index = at.saturating_sub(HEADER) / STRIDE;
+            index_row(&mut self.blocks, &mut self.write_refusal, index, &raw);
+            self.scanned = at.saturating_add(STRIDE);
+        }
+        Ok(())
+    }
+
+    /// Refuses when the path no longer names the file this handle holds.
+    fn require_named_file(&self) -> Result<(), Refusal> {
+        use std::os::unix::fs::MetadataExt as _;
+        let held = self
+            .file
+            .metadata()
+            .map_err(|why| format!("{} could not be measured: {why}", self.path.display()))?;
+        let named = std::fs::symlink_metadata(&self.path).map_err(|why| {
+            format!(
+                "{} could not be measured by name: {why}. The file this handle holds is no longer the one its path names, so the handle no longer describes the store",
+                self.path.display()
+            )
+        })?;
+        if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+            return Err(format!(
+                "{} was replaced since this handle opened (held device {} inode {}, named device {} inode {}). The handle no longer describes the store, so it is refused rather than refreshed; a fresh open reads the replacement",
+                self.path.display(),
+                held.dev(),
+                held.ino(),
+                named.dev(),
+                named.ino()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The file's length, refused when it shrank below what this handle has
+    /// indexed or is not a header plus whole rows.
+    fn grown_length(&self) -> Result<u64, Refusal> {
         let len = self
             .file
             .metadata()
@@ -767,6 +870,12 @@ impl Trades {
                 self.path.display()
             ));
         }
+        Ok(len)
+    }
+
+    fn absorb_new_rows(&mut self) -> Result<(), Refusal> {
+        self.refuse_integrity_failure_for_write()?;
+        let len = self.grown_length()?;
         let mut raw = [0_u8; STRIDE_BYTES];
         while self.scanned.saturating_add(STRIDE) <= len {
             let at = self.scanned;
@@ -1151,47 +1260,59 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
         buffered.read_exact(&mut raw).map_err(|why| {
             format!("chosen-trade row {index} could not be read while indexing: {why}")
         })?;
-        if !Row::seal_matches(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("whole chosen-trade row {index} whose integrity seal failed")
-            });
-            continue;
-        }
-        let mut identity = [0_u8; 32];
-        identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
-        if let Err(why) = Row::from_bytes(&raw) {
-            write_refusal.get_or_insert_with(|| {
-                format!("chosen-trade row {index} is sealed but its schema is invalid: {why}")
-            });
-        }
-
-        match blocks.get_mut(&identity) {
-            Some(block) if block.first.saturating_add(block.count) == index => {
-                block.count = block.count.saturating_add(1);
-            }
-            Some(_) => {
-                write_refusal.get_or_insert_with(|| {
-                    format!(
-                        "chosen-trade row {index} starts a non-contiguous duplicate block for run {}",
-                        hex32(&identity)
-                    )
-                });
-            }
-            None => {
-                blocks.insert(
-                    identity,
-                    Block {
-                        first: index,
-                        count: 1,
-                    },
-                );
-            }
-        }
+        index_row(&mut blocks, &mut write_refusal, index, &raw);
     }
     Ok(Indexed {
         blocks,
         write_refusal,
     })
+}
+
+/// Indexes one whole row, recording its first integrity failure rather than
+/// refusing. The cold walk (`index_of`) and a warm `Trades::refresh` both call
+/// this, so a refreshed handle indexes exactly what a fresh open would.
+fn index_row(
+    blocks: &mut std::collections::HashMap<[u8; 32], Block>,
+    write_refusal: &mut Option<Refusal>,
+    index: u64,
+    raw: &[u8; STRIDE_BYTES],
+) {
+    if !Row::seal_matches(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("whole chosen-trade row {index} whose integrity seal failed")
+        });
+        return;
+    }
+    let mut identity = [0_u8; 32];
+    identity.copy_from_slice(raw.get(..32).unwrap_or(&[0_u8; 32]));
+    if let Err(why) = Row::from_bytes(raw) {
+        write_refusal.get_or_insert_with(|| {
+            format!("chosen-trade row {index} is sealed but its schema is invalid: {why}")
+        });
+    }
+
+    match blocks.get_mut(&identity) {
+        Some(block) if block.first.saturating_add(block.count) == index => {
+            block.count = block.count.saturating_add(1);
+        }
+        Some(_) => {
+            write_refusal.get_or_insert_with(|| {
+                format!(
+                    "chosen-trade row {index} starts a non-contiguous duplicate block for run {}",
+                    hex32(&identity)
+                )
+            });
+        }
+        None => {
+            blocks.insert(
+                identity,
+                Block {
+                    first: index,
+                    count: 1,
+                },
+            );
+        }
+    }
 }
 
 /// A run identity as lowercase hex, for a message a reader can search the
@@ -1691,6 +1812,261 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A handle's identity index as sorted `(identity, first, count)` triples.
+    fn sorted_blocks(trades: &Trades) -> Vec<([u8; 32], u64, u64)> {
+        let mut blocks: Vec<_> = trades
+            .blocks
+            .iter()
+            .map(|(id, block)| (*id, block.first, block.count))
+            .collect();
+        blocks.sort_unstable();
+        blocks
+    }
+
+    /// An adversarial peer rewrites row 0 in place, keeping the file's length.
+    fn rewrite_row_zero(path: &std::path::Path, raw: &[u8; STRIDE_BYTES]) {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let mut peer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the adversarial peer opens");
+        peer.seek(SeekFrom::Start(super::HEADER))
+            .expect("seek to row 0");
+        peer.write_all(raw).expect("row 0 is overwritten");
+        peer.sync_all().expect("the overwrite is durable");
+    }
+
+    /// ONE DAMAGED ROW MUST NOT REFUSE EVERY LATER READ, NOR MAKE EACH ONE COLD.
+    ///
+    /// `/trades.json` holds one read handle and calls `refresh` per request. A
+    /// read handle that opened over a bad-seal row carried that fact as a writer
+    /// refusal, and `refresh` refused on it before looking at the file -- so the
+    /// cached handle was dropped, the next request re-walked every row, and the
+    /// request after that refused again. A read-side refresh records a defect
+    /// the way the cold walk does and keeps indexing; writers still refuse.
+    #[test]
+    fn a_read_refresh_over_a_damaged_row_keeps_indexing_only_the_new_rows() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-read-refresh-damaged-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Trades::path(&dir);
+        let healthy = row([0x71; 32], 0);
+        {
+            let mut store = Trades::open(&dir).expect("a fresh file opens");
+            store.append_all(&[healthy]).expect("the healthy block");
+        }
+        let mut corrupt = row([0x72; 32], 0).to_bytes();
+        corrupt[40] ^= 0x80;
+        append_raw(&path, &[corrupt]);
+
+        let mut reader =
+            Trades::open_read_bounded(&dir, u64::MAX).expect("a read handle opens over damage");
+        for _ in 0..2 {
+            reader
+                .refresh()
+                .expect("a recorded defect does not refuse a read-side refresh");
+        }
+
+        // Rows a peer appends later: one healthy block, then each defect kind.
+        let later = row([0x73; 32], 0);
+        let mut invalid = row([0x74; 32], 0).to_bytes();
+        invalid[36] = 9;
+        reseal(&mut invalid);
+        append_raw(
+            &path,
+            &[later.to_bytes(), invalid, corrupt, healthy.to_bytes()],
+        );
+        reader
+            .refresh()
+            .expect("new rows, damaged or not, are indexed rather than refused");
+        let cold = Trades::open_read_bounded(&dir, u64::MAX).expect("a cold reader opens");
+        assert_eq!(reader.scanned, cold.scanned);
+        assert_eq!(reader.write_refusal, cold.write_refusal);
+        assert!(
+            reader
+                .write_refusal
+                .as_deref()
+                .is_some_and(|why| why.contains("row 1") && why.contains("seal failed")),
+            "{:?}",
+            reader.write_refusal
+        );
+        let walked = sorted_blocks(&cold);
+        assert_eq!(
+            sorted_blocks(&reader),
+            walked,
+            "refresh and the cold walk index alike"
+        );
+        let Some(Block { first, count }) = reader.block(&later.identity) else {
+            panic!("the healthy later block is indexed");
+        };
+        assert_eq!((first, count), (2, 1));
+        let Some(Block { first, count }) = reader.block(&healthy.identity) else {
+            panic!("the first healthy block stays indexed");
+        };
+        assert_eq!(
+            (first, count),
+            (0, 1),
+            "the repeated identity at row 5 never widens the first block"
+        );
+
+        // O(new rows): rewrite an already-indexed row in place with a VALIDLY
+        // SEALED row of an identity nothing else holds. A refresh that re-walked
+        // history -- with or without resetting its state -- would index 0x76 at
+        // row 0; one that resumes at `scanned` never reads row 0 again.
+        let rewritten = row([0x76; 32], 0);
+        rewrite_row_zero(&path, &rewritten.to_bytes());
+        assert!(
+            Trades::open_read(&dir)
+                .expect("a cold reader sees the rewrite")
+                .holds(&rewritten.identity),
+            "control: the rewritten row is whole, so any walk over row 0 indexes it"
+        );
+        reader
+            .refresh()
+            .expect("an unchanged length refreshes nothing");
+        assert!(
+            !reader.holds(&rewritten.identity),
+            "a refresh never reads a row behind `scanned`"
+        );
+        assert_eq!(
+            sorted_blocks(&reader),
+            walked,
+            "the index is the pre-rewrite snapshot"
+        );
+        assert_eq!(reader.scanned, cold.scanned);
+        assert_eq!(reader.write_refusal, cold.write_refusal);
+
+        let mut writer = Trades::open(&dir).expect("a writer opens to diagnose");
+        writer
+            .refresh()
+            .expect("refresh never promotes anything, so it does not refuse");
+        let why = writer
+            .append_all(&[row([0x75; 32], 0)])
+            .expect_err("a writer still refuses past damage");
+        assert!(why.contains("integrity seal failed"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A REPAIRED FILE INSTALLED UNDER THE SAME NAME MUST NOT BE HIDDEN BY A
+    /// HELD HANDLE. The remedy for damage is a reviewed replacement renamed into
+    /// place; a refresh that measured only its own descriptor kept indexing the
+    /// unlinked old file forever. D-0919.
+    #[test]
+    fn a_refresh_refuses_a_file_replaced_or_removed_under_its_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-refresh-replaced-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let side = dir.join("side");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Trades::path(&dir);
+        let first = row([0x77; 32], 0);
+        let repaired = row([0x78; 32], 0);
+        Trades::open(&dir)
+            .expect("a fresh file opens")
+            .append_all(&[first])
+            .expect("the first block");
+        let mut reader = Trades::open_read(&dir).expect("a read handle opens");
+        reader
+            .refresh()
+            .expect("control: the named file is the held one");
+
+        let mut replacement = Trades::open(&side).expect("the side file opens");
+        replacement.append_all(&[first]).expect("the kept block");
+        replacement
+            .append_all(&[repaired])
+            .expect("the repaired block");
+        drop(replacement);
+        std::fs::rename(Trades::path(&side), &path).expect("the repair is installed");
+
+        let why = reader
+            .refresh()
+            .expect_err("a handle on the replaced file is refused, not refreshed");
+        assert!(
+            why.contains("was replaced since this handle opened"),
+            "{why}"
+        );
+        assert!(!reader.holds(&repaired.identity), "nothing was indexed");
+        assert!(
+            Trades::open_read(&dir)
+                .expect("a fresh open reads the replacement")
+                .holds(&repaired.identity)
+        );
+
+        let mut reader = Trades::open_read(&dir).expect("a handle on the replacement");
+        std::fs::remove_file(&path).expect("the file is removed");
+        let why = reader
+            .refresh()
+            .expect_err("a handle whose path names nothing is refused");
+        assert!(why.contains("could not be measured by name"), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A REFRESH NEVER INDEXES A ROW A WRITER IS STILL PUTTING DOWN. A row a
+    /// refresh indexes is never read again, so it waits for the writer's
+    /// exclusive lock and then sees only whole rows. D-0919.
+    #[test]
+    fn a_refresh_waits_for_a_writer_holding_the_exclusive_lock() {
+        let dir = std::env::temp_dir().join(format!(
+            "brutex-trades-refresh-locked-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = Trades::path(&dir);
+        let first = row([0x79; 32], 0);
+        let later = row([0x7a; 32], 0);
+        Trades::open(&dir)
+            .expect("a fresh file opens")
+            .append_all(&[first])
+            .expect("the first block");
+        let mut reader = Trades::open_read(&dir).expect("a read handle opens");
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the peer writer opens");
+        writer
+            .lock()
+            .expect("the peer writer takes the exclusive lock");
+
+        let (done, finished) = std::sync::mpsc::channel();
+        let refreshing = std::thread::spawn(move || {
+            let refreshed = reader.refresh();
+            let _ = done.send(());
+            (reader, refreshed)
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "the refresh waits while a writer holds the exclusive lock"
+        );
+        let torn = later.to_bytes();
+        {
+            use std::io::Write as _;
+            let mut peer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("the peer appends");
+            peer.write_all(&torn[..STRIDE_BYTES / 2])
+                .expect("half a row");
+            peer.sync_all().expect("the half is durable");
+            peer.write_all(&torn[STRIDE_BYTES / 2..]).expect("the rest");
+            peer.sync_all().expect("the row is durable");
+        }
+        writer.unlock().expect("the peer writer releases");
+        let (reader, refreshed) = refreshing.join().expect("the refresh thread ends");
+        refreshed.expect("the refresh ran after the writer finished");
+        assert!(reader.holds(&later.identity), "the whole row is indexed");
+        assert_eq!(reader.write_refusal, None, "no torn row was recorded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// READING MUST NEVER CREATE. A GET on a store that has never been swept
     /// would otherwise answer "no trades" by making that true.
     #[test]
@@ -1837,9 +2213,14 @@ pub struct Bucket {
     /// And at the WORST fill — never more than [`Self::wins`].
     pub worst_wins: u64,
     /// Total paisa per unit at the best fill.
-    pub best_paisa: i64,
-    /// Total paisa per unit at the worst fill.
-    pub worst_paisa: i64,
+    ///
+    /// `i128`, not `i64`: an `i64` total was `saturating_add`ed, so a sum past
+    /// `i64::MAX` was served clamped as if it were the real total — the hidden
+    /// fallback `CLAUDE.md` §4 bans. Every `i64` addend fits, and `2^64` of them
+    /// cannot reach `i128::MAX`, so this total is exact for any slice (D-1625).
+    pub best_paisa: i128,
+    /// Total paisa per unit at the worst fill. `i128` for the same reason.
+    pub worst_paisa: i128,
     /// The single best round trip in this bucket, at the worst fill.
     pub largest_win: i64,
     /// The single worst round trip in this bucket, at the worst fill.
@@ -1861,8 +2242,10 @@ impl Bucket {
         if row.worst > 0 {
             self.worst_wins = self.worst_wins.saturating_add(1);
         }
-        self.best_paisa = self.best_paisa.saturating_add(row.best);
-        self.worst_paisa = self.worst_paisa.saturating_add(row.worst);
+        // Exact: at most `usize::MAX` addends each within `i64`, whose sum
+        // magnitude is below `2^127`, so the saturation is unreachable (D-1625).
+        self.best_paisa = self.best_paisa.saturating_add(i128::from(row.best));
+        self.worst_paisa = self.worst_paisa.saturating_add(i128::from(row.worst));
         // SEEDED FROM THE FIRST TRADE, not from zero. A bucket whose every trade
         // lost would report a `largest_win` of 0 if this started at zero, and
         // zero is a better result than every trade it actually holds -- the
@@ -1915,7 +2298,9 @@ pub enum Period {
     /// [`Self::Day`] says *which dates*, and with eighty-one months of data that
     /// is 1,700 rows nobody can read. Seven rows can be read at a glance.
     Weekday,
-    /// Minutes from midnight IST, rounded down to the clock hour.
+    /// The IST clock hour the trade entered in, `0..=23`. (This said "minutes
+    /// from midnight IST, rounded down to the clock hour", which the key never
+    /// was; the web reader expects `0..=23`. D-1624.)
     ///
     /// Epoch microseconds are the storage representation, not the trading
     /// calendar. Applying the shared IST offset here keeps hour, weekday and
@@ -2130,6 +2515,35 @@ mod period_tests {
         assert_eq!(got[0].worst_wins, 1, "only one survives the worst fill");
         assert_eq!(got[0].best_paisa, 400);
         assert_eq!(got[0].worst_paisa, -800);
+    }
+
+    /// c4b-6, D-1625: totals past `i64` are exact, never clamped.
+    #[test]
+    fn bucket_totals_past_i64_are_exact_not_clamped() {
+        let rows = [
+            trade(MONDAY, i64::MAX, i64::MIN),
+            trade(MONDAY, i64::MAX, i64::MIN),
+            trade(MONDAY, i64::MAX, i64::MIN),
+        ];
+        let got = of(&rows, Period::Day);
+        assert_eq!(got[0].best_paisa, 3 * i128::from(i64::MAX));
+        assert_eq!(got[0].worst_paisa, 3 * i128::from(i64::MIN));
+    }
+
+    /// c4b-3, D-1624: the Hour key is the IST clock hour, `0..=23`.
+    #[test]
+    fn the_hour_key_is_the_ist_clock_hour() {
+        // 2024-01-15 03:50 UTC is 09:20 IST.
+        let nine_twenty_ist = 1_705_290_600_000_000;
+        assert_eq!(Period::Hour.bucket(nine_twenty_ist), 9);
+        assert_eq!(
+            Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000 - 1),
+            9
+        );
+        assert_eq!(
+            Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000),
+            10
+        );
     }
 
     /// The extremes are seeded from the first trade, not from zero.

@@ -867,6 +867,99 @@ impl Governor {
         Verdict::Admit
     }
 
+    /// Reserves the next permit and returns the instant it is good from.
+    ///
+    /// # Why this exists beside [`Self::admit`]
+    ///
+    /// A caller that must WAIT used to loop: `admit`, and on `Deny` drop the
+    /// lock, sleep the named wait, and ask again. Every waiter that slept the
+    /// same wait woke at the same instant and raced for one permit, so service
+    /// was not first-come-first-served; the transport's loop had no bound at
+    /// all, and the server's gave up after 64 losses with a message blaming a
+    /// ceiling below one request per span when the cause was losing a race.
+    /// o1api-54, D-1203.
+    ///
+    /// A reservation is ONE call. The permit is charged now, against the
+    /// instant the bucket will afford it, and the cursor moves to that instant,
+    /// so the next caller's reservation is computed from after this one's. The
+    /// order permits are granted in is the order callers took the lock, and no
+    /// caller ever asks twice.
+    ///
+    /// # The returned instant
+    ///
+    /// **`now_micros` itself when no window has a shortfall** — the permit is
+    /// affordable, so the caller goes now, wherever the cursor stands. With a
+    /// shortfall it is `max(now_micros, cursor) + w`, where `w` is the wait
+    /// [`Self::admit`] would have named at that cursor. The caller sleeps
+    /// `instant - now_micros` and then issues, without calling again. Because
+    /// the cursor is forward-only, a caller holding a reading BELOW the cursor
+    /// that finds the bucket empty (one queued behind earlier reservations) is
+    /// scheduled after them.
+    ///
+    /// Until the fix to D-1203 the no-shortfall case answered `cursor + 0`
+    /// too, so a cursor AHEAD of the clock — a governor pinned with
+    /// `admit(u64::MAX)`, or any reading behind the highest one seen — made a
+    /// caller sleep the whole gap with a permit already free. Pinned at
+    /// `u64::MAX` that sleep never ended: lane 1 found
+    /// `api::fno_boundary_tests::rolling_requests_spend_one_shared_permit_per_network_attempt`
+    /// hung on exactly that.
+    ///
+    /// A clock reading must therefore be MONOTONIC: a wall clock stepped back
+    /// an hour would leave an hour between `now_micros` and the cursor, and a
+    /// reservation would sleep it. [`monotonic_micros`] is the reading both
+    /// callers in this workspace use.
+    ///
+    /// # What a refusal does to reservations already granted
+    ///
+    /// [`Self::record_throttled`] drains every bucket, so a reservation made
+    /// AFTER it waits for the reduced allowance. One already granted is not
+    /// revoked: at most one request per waiter that held a reservation at the
+    /// instant of the refusal goes out at the old schedule. That is the same
+    /// exposure the retry loop had — a waiter already past its `admit` was
+    /// never recalled either.
+    ///
+    /// # The far end of the clock
+    ///
+    /// If `cursor + w` would pass `u64::MAX`, no permit is charged and `None`
+    /// is returned. Charging there would subtract a cost the bucket had not
+    /// earned, and answering `u64::MAX` — as this did until the fix to D-1203 —
+    /// handed the caller an instant it would sleep toward forever. `None` is a
+    /// refusal each caller must name: both callers in this workspace refuse
+    /// the request with the saturated cursor in the reason (`CLAUDE.md` §4).
+    ///
+    /// # Cost
+    ///
+    /// Two [`Self::advance_to`] calls and two walks of [`WINDOW_COUNT`]
+    /// windows, a constant — O(1) per acquire, never a retry.
+    ///
+    /// **UNVERIFIED as a measurement.** The bound is argued from the
+    /// shape of the code and no bench in this workspace times it.
+    /// `CLAUDE.md` §3 rule 6: a structural argument is not a
+    /// measurement, however sound it is.
+    #[must_use]
+    pub fn reserve(&mut self, now_micros: u64) -> Option<u64> {
+        self.advance_to(now_micros);
+        let mut wait = 0_u64;
+        for window in self.windows.iter().flatten() {
+            if let Some(short) = window.shortfall() {
+                wait = wait.max(short);
+            }
+        }
+        // NO SHORTFALL: GO NOW, wherever the cursor stands. The permit is
+        // already earned, so the caller has nothing to wait for.
+        let at = if wait == 0 {
+            now_micros
+        } else {
+            let at = self.cursor_micros.checked_add(wait)?;
+            self.advance_to(at);
+            at
+        };
+        for window in self.windows.iter_mut().flatten() {
+            window.charge();
+        }
+        Some(at)
+    }
+
     /// Moves the cursor forward and earns the elapsed micro-permits.
     ///
     /// **Forward only.** A `now` below the cursor is an NTP step, a resumed
@@ -1150,8 +1243,16 @@ impl Pools {
 ///
 /// # Cost
 ///
-/// One `fetch_add` on the wait path and one `load` per status publish. Both are
-/// O(1) and neither allocates. `Relaxed` is correct because no other memory is
+/// One `fetch_update` on the wait path and one `load` per status publish.
+/// Neither allocates. The `load` is one atomic read. The `fetch_update` is
+/// **not** one `fetch_add`: the pinned toolchain's `core` implements it,
+/// through `try_update`, as a `compare_exchange_weak`
+/// loop (`while let Some(next) = f(prev) { match
+/// self.compare_exchange_weak(prev, next, ...)`), so it is lock-free, not
+/// wait-free, and each attempt that loses a race to another thread recording
+/// a wait at the same moment, or fails spuriously, runs the closure again. The
+/// number of attempts is therefore not a constant; it grows with that
+/// contention. D-0961. `Relaxed` is correct because no other memory is
 /// ordered against this: it is a monotonic counter read for display, never a
 /// flag another thread branches on.
 ///
@@ -1168,12 +1269,41 @@ static ABSORBED_MICROS: core::sync::atomic::AtomicU64 = core::sync::atomic::Atom
 /// and `CLAUDE.md` §3 rule 6 prefers the honest bound.
 pub fn note_absorbed(micros: u64) {
     // `fetch_update` rather than `fetch_add` so the saturation is real. The
-    // closure returns `Some` unconditionally, so this never spins in practice.
+    // closure returns `Some` unconditionally, so the loop ends on the first
+    // compare-exchange that succeeds; it retries when another thread changed
+    // the counter in between, or on a spurious weak failure. See `# Cost` on
+    // `ABSORBED_MICROS`. D-0961.
     let _ = ABSORBED_MICROS.fetch_update(
         core::sync::atomic::Ordering::Relaxed,
         core::sync::atomic::Ordering::Relaxed,
         |held| Some(held.saturating_add(micros)),
     );
+}
+
+/// A monotonic microsecond reading, for [`Governor::admit`] and
+/// [`Governor::reserve`].
+///
+/// The governor takes the clock as an argument so a test can drive it without
+/// sleeping; this is the real one. Microseconds since the first call in this
+/// process, from [`std::time::Instant`], so it never steps backwards.
+///
+/// The transport read the WALL clock here until D-1203. A forward-only cursor
+/// made a backward step harmless to [`Governor::admit`], but a reservation
+/// measured from that cursor would sleep the whole step — and the server
+/// already used an `Instant` for the same governor type, so one governor could
+/// be shown two clocks with different origins. One reading now serves both.
+///
+/// Saturating: a `u128` of microseconds exceeds `u64` after ~584,000 years,
+/// and a wrapped reading would hand the governor an instant in the past.
+#[must_use]
+pub fn monotonic_micros() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 /// Microseconds of throttling absorbed since this process started.

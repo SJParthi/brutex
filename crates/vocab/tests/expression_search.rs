@@ -152,3 +152,184 @@ fn malformed_alphabets_and_checkpoint_fields_are_refused() {
     // A valid exact checkpoint must still be bound by the caller's identity and
     // seal. Structural validation alone cannot authenticate an arbitrary file.
 }
+
+/// ET-expressions-3 (D-0750): a cursor's equality is exactly its encoded
+/// state. The unencoded instruction scratch that `advance` leaves behind at
+/// `at` after a candidate, and above `at` after a backtrack, is not state:
+/// every slot is rewritten before it is read. A decoded checkpoint therefore
+/// equals the cursor it was saved from, and a real change of state does not.
+#[test]
+fn cursor_equality_is_the_encoded_state_and_ignores_unencoded_scratch() {
+    let mut cursor = Cursor::new(&[0, 369]).unwrap();
+    let mut work = 0;
+    let mut saw_candidate = false;
+    let mut saw_backtrack = false;
+    for _ in 0..400 {
+        let before = cursor.clone();
+        let step = cursor.advance(1, &mut work).unwrap();
+        let bytes = cursor.encode();
+        let reopened = Cursor::decode(&bytes).unwrap();
+        assert_eq!(reopened.encode(), bytes);
+        assert!(
+            reopened == cursor,
+            "a reopened checkpoint equals its source"
+        );
+        assert!(cursor == reopened, "equality is symmetric");
+        if matches!(step, Step::Candidate(_)) {
+            saw_candidate = true;
+        }
+        // Consecutive positions of one traversal are different states, and
+        // equality must say so.
+        assert!(
+            before != cursor,
+            "each driven node step changes the encoded state"
+        );
+        assert_ne!(before.encode(), bytes);
+        let at = |b: &[u8; CURSOR_BYTES]| u16::from_le_bytes([b[12], b[13]]);
+        if at(&bytes) < at(&before.encode()) {
+            saw_backtrack = true;
+        }
+    }
+    assert!(saw_candidate && saw_backtrack);
+    // Two different alphabets at the same progress are different states.
+    assert!(
+        Cursor::new(&[0, 369]).unwrap() != Cursor::new(&[0, 63]).unwrap(),
+        "two alphabets are different states"
+    );
+    // The one step that changes nothing: an exhausted cursor answers
+    // `Exhausted` before it writes, so its state and the work counter stay put.
+    let mut finished = Cursor::new(&[0, 369]).unwrap().encode();
+    finished[10..12].copy_from_slice(&u16::try_from(MAX_INSTRUCTIONS).unwrap().to_le_bytes());
+    finished[14] = 1;
+    let mut cursor = Cursor::decode(&finished).unwrap();
+    let before = cursor.clone();
+    let mut work = 7;
+    assert_eq!(cursor.advance(1, &mut work), Ok(Step::Exhausted));
+    assert_eq!((cursor.encode(), work), (finished, 7));
+    assert!(before == cursor, "an exhausted step is not a new state");
+}
+
+fn first_live(n: usize) -> Vec<u32> {
+    vocab::table::TABLE
+        .iter()
+        .filter(|row| row.status == vocab::table::BitStatus::Live)
+        .take(n)
+        .map(|row| u32::from(row.index))
+        .collect()
+}
+
+fn cursor_length(cursor: &Cursor) -> u16 {
+    let bytes = cursor.encode();
+    u16::from_le_bytes([bytes[10], bytes[11]])
+}
+
+/// ET-expressions-5 (D-0752): a node budget bounds grammar choices, not
+/// progress between candidates. Every rank is tried at every position,
+/// including leaves that cannot fit and reversed siblings rejected only at
+/// their operator, so nodes per emitted candidate grow with the alphabet and a
+/// run of more than 4,096 nodes can pass with no candidate at all. Counted, not
+/// timed.
+#[test]
+fn grammar_nodes_per_candidate_grow_with_the_alphabet_and_gaps_exceed_one_replay() {
+    let mut per_alphabet = Vec::new();
+    for n in [2, 8, 32] {
+        let mut cursor = Cursor::new(&first_live(n)).unwrap();
+        let (mut work, mut candidates) = (0_u64, 0_u64);
+        while cursor_length(&cursor) < 4 {
+            if matches!(cursor.advance(1, &mut work).unwrap(), Step::Candidate(_)) {
+                candidates += 1;
+            }
+        }
+        // Programs of one to three instructions: c leaves, c single NOTs,
+        // c double NOTs and c(c+1) ordered AND/OR pairs.
+        let c = u64::try_from(n).unwrap();
+        assert_eq!(candidates, 3 * c + c * (c + 1));
+        per_alphabet.push((n, work, candidates));
+    }
+    assert_eq!(
+        per_alphabet,
+        [(2, 78, 12), (8, 1_092, 96), (32, 40_428, 1_152)]
+    );
+
+    let mut cursor = Cursor::new(&first_live(2)).unwrap();
+    let (mut work, mut candidates, mut last) = (0_u64, 0_u64, 0_u64);
+    let gap = loop {
+        if matches!(cursor.advance(1, &mut work).unwrap(), Step::Candidate(_)) {
+            candidates += 1;
+            if work - last > 4_096 {
+                break work - last;
+            }
+            last = work;
+        }
+        assert!(work < 100_000, "no gap above 4,096 nodes was reached");
+    };
+    assert_eq!((gap, candidates, work), (6_577, 7_116, 73_130));
+    assert_eq!(cursor_length(&cursor), 9);
+}
+
+/// `W3-vocab1-3`: equality is checkpoint equality.
+///
+/// The derived `PartialEq` compared the cursor's scratch program, which `encode`
+/// does not write and `decode` rebuilds only below `at`. Right after a candidate
+/// the slot at `at` still held the emitted instruction, so a cursor and the
+/// decode of its own bytes compared unequal while their encodings were equal.
+/// Checked after every single grammar node, and in both directions: equal bytes
+/// compare equal, and different progress compares unequal.
+#[test]
+fn a_cursor_equals_the_decode_of_its_own_bytes_after_every_node() {
+    let start = Cursor::new(&[0, 369]).unwrap();
+    let mut cursor = start.clone();
+    let mut work = 0;
+    let mut candidates = 0_u32;
+    for node in 0..64 {
+        let step = cursor.advance(1, &mut work).unwrap();
+        if matches!(step, Step::Candidate(_)) {
+            candidates += 1;
+        }
+        assert_eq!(
+            Cursor::decode(&cursor.encode()),
+            Ok(cursor.clone()),
+            "node {node}: equal bytes must compare equal"
+        );
+        assert_ne!(cursor, start, "node {node}: progress must compare unequal");
+    }
+    assert!(
+        candidates > 0,
+        "no candidate was emitted, so the defect's path was not taken"
+    );
+}
+
+/// `W3-vocab1-0`: what one grammar node costs, and `docs/06-limits.md` says so.
+///
+/// The limit (D-0983, restated when o1engine-23 made the step incremental)
+/// quotes these lines as its evidence. If the node step or the test-only
+/// reference validator changes, this fails and the limit must be restated
+/// rather than left describing code that no longer exists.
+#[test]
+fn the_per_node_prefix_scan_the_limit_names_is_the_code() {
+    const SOURCE: &str = include_str!("../src/expression_search.rs");
+    const LIMITS: &str = include_str!("../../../docs/06-limits.md");
+    for line in [
+        "let Some((start, depth)) = self.place(at) else {",
+        "if self.code.get(left..right)? > self.code.get(right..at)? {",
+        "let mut starts = [0_usize; MAX_INSTRUCTIONS];",
+        "for (index, op) in code.iter().enumerate() {",
+        "if code.get(left..right) > code.get(right..index) {",
+    ] {
+        assert!(
+            SOURCE.contains(line),
+            "expression_search.rs no longer has `{line}`"
+        );
+        assert!(
+            LIMITS.contains(line),
+            "docs/06-limits.md no longer quotes `{line}`"
+        );
+    }
+    assert_eq!(
+        MAX_INSTRUCTIONS, 1151,
+        "the limit states a 1,151-entry stack"
+    );
+    assert!(LIMITS.contains(
+        "### One expression-grammar node checks only its new instruction (D-0983, o1engine-23)"
+    ));
+}

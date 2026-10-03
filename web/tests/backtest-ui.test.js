@@ -91,12 +91,19 @@ test('narrow scroll strips keep focus rings and the period dialog inside the pan
   );
 });
 
-test('known commission is shown as zero and its unmodeled spread stays visible', () => {
+// The zero-commission claim holds for a spot-index run only; a cash-equity
+// run is gross of every charge (CLAUDE.md §1). The breakdown prints whatever
+// `$lib/charge-scope.js` decides for the open run, and both of its wordings
+// keep the unmodeled spread visible (`tests/charge-scope.test.js`). D-0946.
+test('commission load comes from the run\'s charge scope and its unmodeled spread stays visible', async () => {
   const breakdown = between(page, '<span class="tt-k">Commission load</span>', '<div class="tt-hrow tight">');
-  assert.match(breakdown, /0\.00%/);
-  assert.match(breakdown, /statutory charges are zero for spot indices/);
-  assert.match(breakdown, /spread is not modeled/);
+  assert.match(breakdown, /\{openCharges\.load\}/);
+  assert.match(breakdown, /\{openCharges\.note\}/);
+  assert.doesNotMatch(breakdown, /0\.00%/);
   assert.doesNotMatch(breakdown, /<Lock/);
+  const { chargeScope } = await import('../src/lib/charge-scope.js');
+  assert.match(chargeScope({ underlying: 'NIFTY' }).note, /spread is not modeled/);
+  assert.match(chargeScope({ underlying: 'RELIANCE' }).note, /spread is not modeled/);
 });
 
 test('the chosen-grid trade ledger exposes every durable row fact without inventing prices or causes', () => {

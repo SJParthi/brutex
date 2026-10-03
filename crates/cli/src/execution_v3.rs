@@ -41,7 +41,7 @@
 )]
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -127,10 +127,8 @@ const FORCED_STOP_DISABLED_TAG: u8 = 0;
 const FORCED_STOP_INCLUDE_TAG: u8 = 1;
 const FORCED_STOP_REQUIRE_TAG: u8 = 2;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PARAMETER_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V3_PARAMETER_BYTES);
 const _: () = assert!(PERCENTILE_PAYLOAD_BYTES + SEAL_BYTES == EXECUTION_V3_PERCENTILE_BYTES);
@@ -352,7 +350,7 @@ impl ExecutionV3ParameterRecord {
         }
         let [min_hits, ceiling, pair_budget, _policy] = self.run_params;
         if !matches!(self.range_policy_tag, 1 | 2)
-            || !matches!(self.selector_policy_tag, 1..=3)
+            || !matches!(self.selector_policy_tag, 1..=4)
             || self.rung == 0
             || self.horizon_bars == 0
             || min_hits == 0
@@ -1513,16 +1511,20 @@ impl PreparedExecutionV3 {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "ONE struct literal, 44 fields named once each in declaration \
-              order. The length is the record's width, not branching: there are \
-              no early returns and the eight `match` arms are per-field \
-              conversions. Splitting it would put fields that must agree with \
-              the on-disk stride into two functions, and the stride is checked \
-              against the writer in one place precisely so it can be READ in one \
-              place"
-)]
+/// The one-based selector tag this codec stores. The validator admits exactly
+/// the tags this function returns, and the test
+/// `every_exit_grid_selector_tag_the_encoder_writes_is_admitted` walks every
+/// selector through both. W2-cli4-1, `docs/04-invariants.md` C4-CLI-03-01.
+const fn selector_policy_tag(selector: ExitGridSelectorV1) -> u8 {
+    match selector {
+        ExitGridSelectorV1::PessimisticTotal => 1,
+        ExitGridSelectorV1::EdgeThenPessimistic => 2,
+        ExitGridSelectorV1::GuaranteedFloor => 3,
+        // APPENDED AS 4; the three above keep their numbers. D-0594.
+        ExitGridSelectorV1::OperatorRule => 4,
+    }
+}
+
 fn parameter_from_population_source(
     receipt: &crate::population_v5::PopulationV5StructuralReceipt,
     facts: &CandidateExecutionParameterFactsV1,
@@ -1534,13 +1536,7 @@ fn parameter_from_population_source(
         RangeResolutionV1::PpmFloor => 1,
         RangeResolutionV1::PpmCeiling => 2,
     };
-    let selector_policy_tag = match facts.selector {
-        ExitGridSelectorV1::PessimisticTotal => 1,
-        ExitGridSelectorV1::EdgeThenPessimistic => 2,
-        ExitGridSelectorV1::GuaranteedFloor => 3,
-        // APPENDED AS 4; the three above keep their numbers. D-0594.
-        ExitGridSelectorV1::OperatorRule => 4,
-    };
+    let selector_policy_tag = selector_policy_tag(facts.selector);
     let forced_stop_policy_tag = match facts.forced_stop {
         ForcedStopV1::Disabled => FORCED_STOP_DISABLED_TAG,
         ForcedStopV1::IncludeExactObserved(_) => FORCED_STOP_INCLUDE_TAG,
@@ -4048,10 +4044,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Execution V3 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), ExecutionV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Execution V3 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn bounded_vec<T>(count: u64, max: u64, name: &str) -> Result<Vec<T>, ExecutionV3Refusal> {
@@ -4375,6 +4372,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+    use std::io::Write as _;
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -4682,6 +4680,50 @@ mod tests {
         parameter.parameter_core_id = parameter.derive_core_id();
         parameter.parameter_id = parameter.derive_parameter_id();
         parameter
+    }
+
+    /// W2-cli4-1, C4-CLI-03-01: the encoder writes tag 4 for `OperatorRule` (D-0594),
+    /// and the validator used to admit only 1..=3, so every `OperatorRule`
+    /// parameter was refused as "a zero required bound/policy". Every selector
+    /// the encoder can name must validate and survive a decode; the tags on
+    /// either side of the table must not.
+    #[test]
+    fn every_exit_grid_selector_tag_the_encoder_writes_is_admitted() {
+        let base = prepared(91)
+            .parameters
+            .first()
+            .expect("fixture has a parameter")
+            .clone();
+        for selector in [
+            ExitGridSelectorV1::PessimisticTotal,
+            ExitGridSelectorV1::EdgeThenPessimistic,
+            ExitGridSelectorV1::GuaranteedFloor,
+            ExitGridSelectorV1::OperatorRule,
+        ] {
+            let mut parameter = base.clone();
+            parameter.selector_policy_tag = selector_policy_tag(selector);
+            let parameter = reidentify_parameter(parameter);
+            let validated = parameter.validate();
+            assert!(
+                validated.is_ok(),
+                "{selector:?} must validate: {validated:?}"
+            );
+            let raw = parameter.encode().expect("parameter encode");
+            assert_eq!(
+                ExecutionV3ParameterRecord::decode(&raw).expect("parameter decode"),
+                parameter,
+                "{selector:?} must survive a decode"
+            );
+        }
+        assert_eq!(selector_policy_tag(ExitGridSelectorV1::OperatorRule), 4);
+        for outside in [0, 5] {
+            let mut parameter = base.clone();
+            parameter.selector_policy_tag = outside;
+            assert!(
+                reidentify_parameter(parameter).validate().is_err(),
+                "selector tag {outside} names no selector and must be refused"
+            );
+        }
     }
 
     fn rebind_disposition(
@@ -5295,6 +5337,34 @@ mod tests {
                 prepared.population_id
             );
         }
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let prepared = prepared(80);
+        let root = TestRoot::new("append-rollback");
+        append_exact_prefix(&root.path, &prepared, 2, 0, 0);
+        for (name, width) in [
+            (PARAMETER_FILE, EXECUTION_V3_PARAMETER_BYTES),
+            (PERCENTILE_FILE, EXECUTION_V3_PERCENTILE_BYTES),
+            (DISPOSITION_FILE, EXECUTION_V3_DISPOSITION_BYTES),
+            (COMPLETION_FILE, EXECUTION_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path.join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let committed = commit_prepared_for_test(&root.path, bounds(), &prepared)
+            .expect("the next append continues the exact prefix after the rollback");
+        assert!(committed.was_written());
+        assert_eq!(
+            committed.authority().structural_receipt().population_id(),
+            prepared.population_id
+        );
+        drop(committed);
+        ExecutionV3Ledger::open_read(&root.path, bounds()).expect("the ledger stays readable");
     }
 
     #[test]

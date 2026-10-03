@@ -4,9 +4,17 @@
 //!
 //! `2min`, `3min`, `5min`, `10min`, `15min`, `30min` and `60min` are **never
 //! asked of a vendor**. `pull::ingest::derive_all` folds them from the
-//! one-minute file at ingest time — `crates/pull/src/ingest.rs:2206` calls
-//! `pull::fold::fold` and writes the result straight to the rung's own
-//! directory. `pull::fold`'s own doc names the failure that follows:
+//! one-minute file at ingest time. When this audit was written derive called
+//! the plain `pull::fold::fold`; it now calls
+//! `pull::fold::complete_minutes_with_calendar`, which writes only buckets
+//! whose every scheduled minute exists and withholds exceptional sessions
+//! outright. **The audit's reference is that same authority** (GAP12-4,
+//! D-0912): against the plain fold, a correctly derived month holding a
+//! disaster-recovery Saturday disagreed on every rung, and
+//! `fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday`
+//! pins the correction. What derive withheld is counted as withheld, neither
+//! agreement nor disagreement. `pull::fold`'s own doc names the failure that
+//! follows:
 //!
 //! > *"Folding a month whose one-minute pull was dirty produces coarse bars
 //! > built out of gaps, and nothing downstream can tell them from complete
@@ -53,6 +61,16 @@
 //! the whole check: the calendar proves the minutes are all there, and this
 //! proves the coarse rungs were folded from them.
 //!
+//! # What the reference cannot see: dated cash eligibility
+//!
+//! Derive passes a dated cash-session schedule for an NSE cash equity; this
+//! audit has none and passes `None`. On a cash day that requires dated
+//! eligibility (`pull::vendor::cash_auction_eligibility_required`) the
+//! reference therefore withholds every bucket, and a stored bar there is
+//! reported as a disagreement rather than silently agreed with.
+//! `a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees`
+//! pins that. It fails loud, not quiet; `docs/06-limits.md` records it.
+//!
 //! # Cost
 //!
 //! One `open_existing` and one `read_record` per bar of the minute file, plus
@@ -63,6 +81,7 @@
 
 use brutex_core::instrument::InstrumentKey;
 use brutex_core::vendor::Vendor;
+use std::cmp::Ordering;
 use std::path::Path;
 use store::file::BarFile;
 use store::format::Bar;
@@ -87,7 +106,8 @@ pub const DERIVED_RUNGS: [Timeframe; 7] = [
 /// One disagreement between a stored coarse bar and the fold of the minutes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Disagreement {
-    /// Index of the record in the coarse file.
+    /// Index of the record in the coarse file, or for a bucket the file lacks,
+    /// its index in the fold, which is the index it holds in a complete file.
     pub at: u64,
     /// The bar's opening timestamp, from whichever side has one.
     pub ts_micros: i64,
@@ -97,6 +117,29 @@ pub struct Disagreement {
     pub stored: i64,
     /// What folding the stored minutes produces.
     pub folded: i64,
+}
+
+/// The `field` of a bucket the fold holds and the coarse file lacks. Its `at`
+/// counts in the fold, not in the file.
+pub const ABSENT_FROM_STORE: &str = "absent from the store, present in the fold";
+
+impl Disagreement {
+    /// The report line for this disagreement, naming which sequence `at`
+    /// counts in: "fold record" for a bucket the file lacks, "stored record"
+    /// for everything else. Printing both as "record N" let one report name
+    /// two different bars with the same words.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let counted_in = if self.field == ABSENT_FROM_STORE {
+            "fold"
+        } else {
+            "stored"
+        };
+        format!(
+            "{counted_in} record {} ts {} field {} -- stored {}, folded {}",
+            self.at, self.ts_micros, self.field, self.stored, self.folded
+        )
+    }
 }
 
 /// One rung's verdict for one instrument-month.
@@ -112,6 +155,12 @@ pub struct RungVerdict {
     pub disagreements: Vec<Disagreement>,
     /// Disagreements beyond the cap, counted but not named.
     pub elided: u64,
+    /// Diagnostics the derive authority gave for what it did not write — an
+    /// exceptional session, an incomplete bucket, an unverified day. Neither
+    /// agreement nor disagreement: [`RungVerdict::agrees`] does not read it.
+    pub withheld: u64,
+    /// The first [`MAX_REPORTED`] of those diagnostics, in derive's words.
+    pub withheld_named: Vec<String>,
 }
 
 impl RungVerdict {
@@ -128,18 +177,32 @@ impl RungVerdict {
 /// disagreement per bar, and a report nobody can read is a report nobody reads.
 pub const MAX_REPORTED: usize = 8;
 
-/// Compare one coarse rung against the fold of the supplied minutes.
+/// Compare one coarse rung against what derive writes from the supplied
+/// minutes for `venue`.
 ///
-/// Pure, so the comparison itself is testable without a store on disk.
+/// The reference is `pull::fold::complete_minutes_for_venue`, which is
+/// `complete_minutes_with_calendar` with no cash schedule and the default
+/// runtime calendar — the authority `pull::ingest::derive` calls. The runtime
+/// calendar's observations change only diagnostic wording, never which bars
+/// are written (`pull::calendar::Runtime::kind_of` returns the static
+/// `kind_of`). Pure, so the comparison itself is testable without a store on
+/// disk.
 ///
 /// # Errors
 ///
 /// Refuses an invalid fold width or malformed minute sequence. A folding error
 /// cannot become an empty series that appears to agree with an empty file.
-pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungVerdict, String> {
+/// Refuses a stored sequence whose opening times do not strictly increase,
+/// naming the first record that does not follow, before pairing any bar.
+pub fn compare(
+    rung: Timeframe,
+    venue: pull::vendor::Venue,
+    minutes: &[Bar],
+    stored: &[Bar],
+) -> Result<RungVerdict, String> {
     let bucket =
         store_bucket(rung).ok_or_else(|| format!("{} has no valid fold width", rung.as_str()))?;
-    let folded = pull::fold::fold(minutes, bucket)
+    let (folded, diagnostics) = pull::fold::complete_minutes_for_venue(minutes, bucket, venue)
         .map_err(|why| format!("{} minute fold refused: {why}", rung.as_str()))?;
     let mut disagreements = Vec::new();
     let mut elided = 0_u64;
@@ -151,64 +214,109 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
         }
     };
 
-    for index in 0..stored.len().max(folded.len()) {
-        let at = u64::try_from(index).unwrap_or(u64::MAX);
-        match (stored.get(index), folded.get(index)) {
-            (Some(s), Some(f)) => {
-                // EVERY FIELD, IN RECORD ORDER, AND THE FIRST ONE ONLY.
-                //
-                // Naming all seven for one bar would bury the next bar's
-                // disagreement under six restatements of the same fault: a
-                // bucket folded over a hole typically disagrees on high, low,
-                // close AND volume at once.
-                for (field, sv, fv) in [
-                    ("ts_micros", s.ts_micros, f.ts_micros),
-                    ("open", s.open, f.open),
-                    ("high", s.high, f.high),
-                    ("low", s.low, f.low),
-                    ("close", s.close, f.close),
-                    ("volume", s.volume, f.volume),
-                    ("open_interest", s.open_interest, f.open_interest),
-                ] {
-                    if sv != fv {
-                        push(
-                            Disagreement {
-                                at,
-                                ts_micros: s.ts_micros,
-                                field,
-                                stored: sv,
-                                folded: fv,
-                            },
-                            &mut disagreements,
-                            &mut elided,
-                        );
-                        break;
-                    }
+    // PAIRED BY OPENING TIMESTAMP WHERE A BAR IS MISSING OR EXTRA.
+    //
+    // Pairing record i with record i turned one missing middle bucket into a
+    // `ts_micros` disagreement on every later record, because each stored bar
+    // was compared with the fold's NEXT bucket. Two cursors walk the two
+    // sequences instead. When the heads open at different times, one bar is
+    // named absent from its side if the other side's head is at or beyond the
+    // NEXT bar on this side: the fold holds a bucket the store skipped, or the
+    // store holds one the fold does not. Otherwise the two heads are one bar
+    // whose timestamp differs, and that is still named as the `ts_micros`
+    // field. Every step advances at least one cursor, so the walk ends after
+    // at most stored + folded steps, and a verdict agrees only when every step
+    // paired two identical records. A stored file out of order is refused
+    // before any pairing, because those labels assume it is not.
+    require_strictly_increasing(rung, stored)?;
+    let only_stored = |at: u64, s: &Bar| Disagreement {
+        at,
+        ts_micros: s.ts_micros,
+        field: "present in the store, absent from the fold",
+        stored: s.ts_micros,
+        folded: 0,
+    };
+    let only_folded = |fi: usize, f: &Bar| Disagreement {
+        at: u64::try_from(fi).unwrap_or(u64::MAX),
+        ts_micros: f.ts_micros,
+        field: ABSENT_FROM_STORE,
+        stored: 0,
+        folded: f.ts_micros,
+    };
+    // THE CURSORS ARE THE UNREAD SUFFIXES, NOT COUNTERS. Each step replaces a
+    // suffix with its own tail, so a step that advances a side shortens it by
+    // one by construction. With `si += 1` a mistyped step (`si *= 1`) left
+    // the walk on the same pair for ever, and the gate saw a hang rather than
+    // a wrong answer. The index a disagreement names is derived from what is
+    // left, so it can be wrong without the walk failing to end -- and a wrong
+    // index is something a test can see.
+    let (mut s_rest, mut f_rest) = (stored, folded.as_slice());
+    loop {
+        let at = u64::try_from(stored.len() - s_rest.len()).unwrap_or(u64::MAX);
+        let fi = folded.len() - f_rest.len();
+        let found = match (s_rest.split_first(), f_rest.split_first()) {
+            (Some((s, s_tail)), Some((f, f_tail))) => match s.ts_micros.cmp(&f.ts_micros) {
+                // The store is ahead and the fold's next bucket opens no later
+                // than the stored bar: the store skipped this bucket.
+                Ordering::Greater
+                    if f_tail
+                        .first()
+                        .is_some_and(|next| next.ts_micros <= s.ts_micros) =>
+                {
+                    f_rest = f_tail;
+                    Some(only_folded(fi, f))
                 }
+                // The fold is ahead and the store's next bar opens no later
+                // than the folded bucket: the store holds an extra bar.
+                Ordering::Less
+                    if s_tail
+                        .first()
+                        .is_some_and(|next| next.ts_micros <= f.ts_micros) =>
+                {
+                    s_rest = s_tail;
+                    Some(only_stored(at, s))
+                }
+                _ => {
+                    s_rest = s_tail;
+                    f_rest = f_tail;
+                    // EVERY FIELD, IN RECORD ORDER, AND THE FIRST ONE ONLY.
+                    //
+                    // Naming all seven for one bar would bury the next bar's
+                    // disagreement under six restatements of the same fault:
+                    // a bucket folded over a hole typically disagrees on high,
+                    // low, close AND volume at once.
+                    [
+                        ("ts_micros", s.ts_micros, f.ts_micros),
+                        ("open", s.open, f.open),
+                        ("high", s.high, f.high),
+                        ("low", s.low, f.low),
+                        ("close", s.close, f.close),
+                        ("volume", s.volume, f.volume),
+                        ("open_interest", s.open_interest, f.open_interest),
+                    ]
+                    .into_iter()
+                    .find(|(_, sv, fv)| sv != fv)
+                    .map(|(field, sv, fv)| Disagreement {
+                        at,
+                        ts_micros: s.ts_micros,
+                        field,
+                        stored: sv,
+                        folded: fv,
+                    })
+                }
+            },
+            (Some((s, s_tail)), None) => {
+                s_rest = s_tail;
+                Some(only_stored(at, s))
             }
-            (Some(s), None) => push(
-                Disagreement {
-                    at,
-                    ts_micros: s.ts_micros,
-                    field: "present in the store, absent from the fold",
-                    stored: s.ts_micros,
-                    folded: 0,
-                },
-                &mut disagreements,
-                &mut elided,
-            ),
-            (None, Some(f)) => push(
-                Disagreement {
-                    at,
-                    ts_micros: f.ts_micros,
-                    field: "absent from the store, present in the fold",
-                    stored: 0,
-                    folded: f.ts_micros,
-                },
-                &mut disagreements,
-                &mut elided,
-            ),
+            (None, Some((f, f_tail))) => {
+                f_rest = f_tail;
+                Some(only_folded(fi, f))
+            }
             (None, None) => break,
+        };
+        if let Some(d) = found {
+            push(d, &mut disagreements, &mut elided);
         }
     }
 
@@ -218,7 +326,43 @@ pub fn compare(rung: Timeframe, minutes: &[Bar], stored: &[Bar]) -> Result<RungV
         folded_bars: u64::try_from(folded.len()).unwrap_or(u64::MAX),
         disagreements,
         elided,
+        withheld: u64::try_from(diagnostics.len()).unwrap_or(u64::MAX),
+        withheld_named: diagnostics.into_iter().take(MAX_REPORTED).collect(),
     })
+}
+
+/// Refuse a stored sequence whose opening times do not strictly increase,
+/// naming the first record that does not follow.
+///
+/// The absent and present labels hold only for a stored file whose opening
+/// times strictly increase, as the fold's do. The store's writer refuses
+/// any other batch (`BatchNotOrdered`, `TimestampsOutOfOrder`), so a file
+/// that is not is one damaged after writing, and pairing it by time named a
+/// bar both sides hold as absent from one AND present only in the other. It
+/// is refused here, in one pass, before any pairing.
+fn require_strictly_increasing(rung: Timeframe, stored: &[Bar]) -> Result<(), String> {
+    if let Some((at, before, after)) =
+        stored
+            .windows(2)
+            .enumerate()
+            .find_map(|(index, pair)| match pair {
+                [before, after] if after.ts_micros <= before.ts_micros => {
+                    Some((index + 1, before, after))
+                }
+                _ => None,
+            })
+    {
+        return Err(format!(
+            "{} stored file is not in strictly increasing opening-time order at record {} \
+             (ts {} after ts {}); the store's writer refuses such a batch, so this file \
+             changed after it was written and cannot be paired with the fold",
+            rung.as_str(),
+            at,
+            after.ts_micros,
+            before.ts_micros,
+        ));
+    }
+    Ok(())
 }
 
 /// The fold bucket for a rung, or `None` for a width of zero seconds.
@@ -291,13 +435,22 @@ pub fn audit_month(
     key: &InstrumentKey,
     ym: YearMonth,
 ) -> Result<Vec<Result<RungVerdict, String>>, String> {
+    // The venue derive used, from the key's own segment, exactly as
+    // `pull::ingest::derive` takes it; a key with none was never derived.
+    let venue = pull::vendor::Venue::for_segment(key.exchange, key.segment).ok_or_else(|| {
+        format!(
+            "no verified minute-completeness venue for {} {}; derive writes no coarse rung for it",
+            key.exchange.as_str(),
+            key.segment.as_str()
+        )
+    })?;
     let minutes = read_month(root, vendor, key, Timeframe::MINUTE_1, ym)
         .map_err(|why| format!("the one-minute file is the authority here and {why}"))?;
     Ok(DERIVED_RUNGS
         .iter()
         .map(|rung| {
             read_month(root, vendor, key, *rung, ym)
-                .and_then(|stored| compare(*rung, &minutes, &stored))
+                .and_then(|stored| compare(*rung, venue, &minutes, &stored))
         })
         .collect())
 }
@@ -319,6 +472,9 @@ mod io_tests;
 mod tests {
     use super::*;
 
+    /// The venue every NIFTY/BANKNIFTY fixture here is derived for.
+    const INDEX: pull::vendor::Venue = pull::vendor::Venue::NseIndex;
+
     #[test]
     fn malformed_minutes_cannot_agree_with_an_empty_derived_file() {
         let minutes = [
@@ -327,7 +483,7 @@ mod tests {
         ];
         for rung in DERIVED_RUNGS {
             for stored in [&[][..], &minutes[..1]] {
-                let why = compare(rung, &minutes, stored).expect_err("malformed source");
+                let why = compare(rung, INDEX, &minutes, stored).expect_err("malformed source");
                 assert!(why.contains(rung.as_str()), "{why}");
                 assert!(why.contains("minute fold refused"), "{why}");
                 assert!(why.contains("snapshot 1"), "{why}");
@@ -336,17 +492,18 @@ mod tests {
                 ts_micros: i64::MIN,
                 ..minutes[0]
             }];
-            let why = compare(rung, &extremes, &[]).expect_err("unrepresentable intraday grid");
+            let why =
+                compare(rung, INDEX, &extremes, &[]).expect_err("unrepresentable intraday grid");
             assert!(why.contains("minute fold refused"), "{why}");
         }
         let extremes = [Bar {
             ts_micros: i64::MAX,
             ..minutes[0]
         }];
-        let why =
-            compare(Timeframe::DAY_1, &extremes, &[]).expect_err("unrepresentable daily grid");
+        let why = compare(Timeframe::DAY_1, INDEX, &extremes, &[])
+            .expect_err("unrepresentable daily grid");
         assert!(why.contains("minute fold refused"), "{why}");
-        let empty = compare(Timeframe::MINUTE_5, &[], &[]).expect("empty valid input");
+        let empty = compare(Timeframe::MINUTE_5, INDEX, &[], &[]).expect("empty valid input");
         assert!(empty.agrees());
         assert_eq!(
             (empty.stored_bars, empty.folded_bars, empty.elided),
@@ -370,16 +527,187 @@ mod tests {
         }
     }
 
+    /// IST midnight of 2024-03-01 in micros.
+    const MIDNIGHT_2024_03_01: i64 = 1_709_231_400_000_000;
+
+    /// One minute bar, all four prices equal, `minute` minutes past IST midnight of `day` days
+    /// after 2024-03-01.
+    fn dated_minute(day: i64, minute: i64) -> Bar {
+        Bar {
+            ts_micros: MIDNIGHT_2024_03_01 + day * 86_400_000_000 + minute * 60_000_000,
+            open: 100 + minute,
+            high: 110 + minute,
+            low: 90 + minute,
+            close: 105 + minute,
+            volume: 10,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// Friday 2024-03-01 and Monday 2024-03-04 in full (09:15..15:30), and
+    /// the disaster-recovery Saturday 2024-03-02 between them in its two
+    /// windows, 09:15..10:00 and 11:30..12:30.
+    fn month_with_a_dr_saturday() -> Vec<Bar> {
+        let regular = 555..930;
+        let saturday = (555..600).chain(690..750);
+        regular
+            .clone()
+            .map(|m| dated_minute(0, m))
+            .chain(saturday.map(|m| dated_minute(1, m)))
+            .chain(regular.map(|m| dated_minute(3, m)))
+            .collect()
+    }
+
+    /// GAP12-4, D-0912: the reference is the derive authority, so a month that
+    /// `pull` derived correctly agrees, and the buckets derive withheld are
+    /// counted as withheld rather than as store defects. The exceptional DR
+    /// Saturday is ONE diagnostic per rung, not one per bucket: derive names an
+    /// exceptional session once per day (audit-20261003 hunt-pull-3, D-1533).
+    #[test]
+    fn fold_audit_agrees_with_a_correctly_derived_month_holding_a_dr_saturday() {
+        let minutes = month_with_a_dr_saturday();
+        for (rung, withheld) in DERIVED_RUNGS.into_iter().zip([1; 7]) {
+            let bucket = store_bucket(rung).expect("derived width");
+            let (stored, _) = pull::fold::complete_minutes_for_venue(
+                &minutes,
+                bucket,
+                pull::vendor::Venue::NseIndex,
+            )
+            .expect("derive policy folds the fixture");
+            let verdict = compare(rung, INDEX, &minutes, &stored).expect("valid fold");
+            assert!(
+                verdict.agrees(),
+                "{} disagreed with what derive writes: {:?}",
+                rung.as_str(),
+                verdict.disagreements
+            );
+            assert_eq!(verdict.withheld, withheld, "{}", rung.as_str());
+            assert_eq!(
+                verdict.withheld_named.len(),
+                MAX_REPORTED.min(usize::try_from(withheld).expect("small")),
+                "{}",
+                rung.as_str()
+            );
+            assert!(
+                verdict
+                    .withheld_named
+                    .iter()
+                    .all(|why| why.contains("exceptional session")),
+                "{}: {:?}",
+                rung.as_str(),
+                verdict.withheld_named
+            );
+        }
+    }
+
+    /// The reference names no withheld diagnostic for a complete regular day.
+    #[test]
+    fn a_complete_regular_day_withholds_nothing() {
+        let minutes: Vec<Bar> = (555..930).map(|m| dated_minute(0, m)).collect();
+        for rung in DERIVED_RUNGS {
+            let bucket = store_bucket(rung).expect("derived width");
+            let plain = pull::fold::fold(&minutes, bucket).expect("plain fold");
+            let verdict = compare(rung, INDEX, &minutes, &plain).expect("valid fold");
+            assert!(verdict.agrees(), "{}", rung.as_str());
+            assert_eq!(
+                (verdict.withheld, verdict.withheld_named.len()),
+                (0, 0),
+                "{}",
+                rung.as_str()
+            );
+        }
+    }
+
+    /// The audit has no dated cash schedule, so on a cash day that needs one
+    /// the reference writes nothing and a stored bar is a disagreement, never
+    /// a silent agreement. `docs/06-limits.md` records this limit.
+    #[test]
+    fn a_cash_day_needing_dated_eligibility_is_withheld_and_never_silently_agrees() {
+        const MIDNIGHT_2026_08_03: i64 = 1_785_695_400_000_000;
+        let minutes: Vec<Bar> = (555..930)
+            .map(|m| Bar {
+                ts_micros: MIDNIGHT_2026_08_03 + m * 60_000_000,
+                ..dated_minute(0, m)
+            })
+            .collect();
+        let bucket = store_bucket(Timeframe::MINUTE_5).expect("derived width");
+        let stored = pull::fold::fold(&minutes, bucket).expect("plain fold");
+        let verdict = compare(
+            Timeframe::MINUTE_5,
+            pull::vendor::Venue::NseCash,
+            &minutes,
+            &stored,
+        )
+        .expect("valid fold");
+        assert!(!verdict.agrees());
+        assert_eq!(verdict.folded_bars, 0);
+        assert!(verdict.withheld > 0);
+        assert!(
+            verdict
+                .withheld_named
+                .iter()
+                .any(|why| why.contains("dated eligibility required")),
+            "{:?}",
+            verdict.withheld_named
+        );
+        let index = compare(Timeframe::MINUTE_5, INDEX, &minutes, &stored).expect("valid fold");
+        assert!(index.agrees(), "the same day on the index venue is regular");
+    }
+
+    /// A key whose segment has no minute-completeness venue was never derived,
+    /// and the month is refused before any file is read.
+    #[test]
+    fn a_key_with_no_derive_venue_is_refused_before_any_read() {
+        let key = InstrumentKey::index(brutex_core::instrument::Exchange::Bse, "SENSEX")
+            .expect("a BSE index key");
+        let root =
+            std::env::temp_dir().join(format!("brutex-fold-no-venue-{}", std::process::id()));
+        let why = audit_month(
+            &root,
+            Vendor::Zerodha,
+            &key,
+            YearMonth::new(2024, 3).expect("a month"),
+        )
+        .expect_err("BSE has no derive venue");
+        assert!(
+            why.contains("no verified minute-completeness venue"),
+            "{why}"
+        );
+        assert!(!root.exists(), "nothing was created or read");
+    }
+
+    /// A month derived by the plain fold before derive withheld exceptional
+    /// sessions holds bars the derive authority does not write, and the audit
+    /// names that as a disagreement.
+    #[test]
+    fn a_legacy_plain_fold_of_a_withheld_session_disagrees() {
+        let minutes = month_with_a_dr_saturday();
+        for rung in DERIVED_RUNGS {
+            let bucket = store_bucket(rung).expect("derived width");
+            let legacy = pull::fold::fold(&minutes, bucket).expect("plain fold");
+            let verdict = compare(rung, INDEX, &minutes, &legacy).expect("valid fold");
+            assert!(!verdict.agrees(), "{}", rung.as_str());
+            assert!(
+                verdict.stored_bars > verdict.folded_bars,
+                "{}",
+                rung.as_str()
+            );
+        }
+    }
     /// A complete minute series folds to a coarse file that agrees exactly.
+    ///
+    /// Sixty minutes from 09:15, so every rung's buckets are whole: the derive
+    /// authority withholds a partial bucket, and thirty minutes left the
+    /// `60min` bucket partial.
     #[test]
     fn a_complete_minute_series_agrees_with_its_own_fold() {
-        let minutes: Vec<Bar> = (0..30)
+        let minutes: Vec<Bar> = (0..60)
             .map(|m| minute_bar(m, 100 + m, 110 + m, 90 + m, 105 + m))
             .collect();
         for rung in DERIVED_RUNGS {
             let bucket = store_bucket(rung).expect("every derived rung has a bucket");
             let folded = pull::fold::fold(&minutes, bucket).expect("a clean series folds");
-            let verdict = compare(rung, &minutes, &folded).expect("valid fold");
+            let verdict = compare(rung, INDEX, &minutes, &folded).expect("valid fold");
             assert!(
                 verdict.agrees(),
                 "{} disagreed with its own fold: {:?}",
@@ -415,7 +743,7 @@ mod tests {
         assert_eq!(stored.len(), 1, "the bucket still exists");
         assert_eq!(truth.len(), 1, "and so does the correct one");
 
-        let verdict = compare(Timeframe::MINUTE_5, &complete, &stored).expect("valid fold");
+        let verdict = compare(Timeframe::MINUTE_5, INDEX, &complete, &stored).expect("valid fold");
         assert_eq!(
             verdict.stored_bars, verdict.folded_bars,
             "THE COUNT AGREES, which is the whole reason a count check cannot \
@@ -449,7 +777,7 @@ mod tests {
         assert_eq!(full.len(), 2, "ten minutes make two five-minute buckets");
 
         let short = vec![full[0]];
-        let verdict = compare(Timeframe::MINUTE_5, &minutes, &short).expect("valid fold");
+        let verdict = compare(Timeframe::MINUTE_5, INDEX, &minutes, &short).expect("valid fold");
         assert!(!verdict.agrees());
         assert_eq!(verdict.stored_bars, 1);
         assert_eq!(verdict.folded_bars, 2);
@@ -464,11 +792,276 @@ mod tests {
 
         let mut long = full.clone();
         long.push(minute_bar(99, 1, 1, 1, 1));
-        let other = compare(Timeframe::MINUTE_5, &minutes, &long).expect("valid fold");
+        let other = compare(Timeframe::MINUTE_5, INDEX, &minutes, &long).expect("valid fold");
         assert!(!other.agrees());
         assert_eq!(
             other.disagreements.first().expect("one disagreement").field,
             "present in the store, absent from the fold"
+        );
+    }
+
+    /// Thirty minutes and their six five-minute buckets.
+    fn thirty_minutes_and_their_fold() -> (Vec<Bar>, Vec<Bar>) {
+        let minutes: Vec<Bar> = (0..30)
+            .map(|m| minute_bar(m, 100 + m, 110 + m, 90 + m, 105 + m))
+            .collect();
+        let bucket = store_bucket(Timeframe::MINUTE_5).expect("5min has a bucket");
+        let full = pull::fold::fold(&minutes, bucket).expect("thirty minutes fold");
+        assert_eq!(full.len(), 6, "thirty minutes make six five-minute buckets");
+        (minutes, full)
+    }
+
+    /// A coarse file missing a MIDDLE bucket names that one bucket as absent,
+    /// at its index in the fold, and names nothing else; one stray middle
+    /// bucket is named present only in the store, at its own index. Pairing
+    /// records by position instead reported every later bucket as a
+    /// `ts_micros` field disagreement.
+    #[test]
+    fn a_missing_or_extra_middle_record_names_only_that_record() {
+        let (minutes, full) = thirty_minutes_and_their_fold();
+
+        let mut holed = full.clone();
+        let missing = holed.remove(2);
+        let verdict = compare(Timeframe::MINUTE_5, INDEX, &minutes, &holed).expect("valid fold");
+        assert!(!verdict.agrees());
+        assert_eq!((verdict.stored_bars, verdict.folded_bars), (5, 6));
+        assert_eq!(verdict.elided, 0);
+        assert_eq!(
+            verdict.disagreements,
+            vec![Disagreement {
+                at: 2,
+                ts_micros: missing.ts_micros,
+                field: "absent from the store, present in the fold",
+                stored: 0,
+                folded: missing.ts_micros,
+            }]
+        );
+
+        // The mirror case: one stray bucket inside the file.
+        let stray = Bar {
+            ts_micros: full[3].ts_micros - 60_000_000,
+            ..full[3]
+        };
+        let mut padded = full.clone();
+        padded.insert(3, stray);
+        let other = compare(Timeframe::MINUTE_5, INDEX, &minutes, &padded).expect("valid fold");
+        assert!(!other.agrees());
+        assert_eq!((other.stored_bars, other.folded_bars), (7, 6));
+        assert_eq!(other.elided, 0);
+        assert_eq!(
+            other.disagreements,
+            vec![Disagreement {
+                at: 3,
+                ts_micros: stray.ts_micros,
+                field: "present in the store, absent from the fold",
+                stored: stray.ts_micros,
+                folded: 0,
+            }]
+        );
+
+        // A paired bar still names its first differing field, and a bar with
+        // an equal timestamp is paired, never named absent.
+        let mut bent = full.clone();
+        bent[4].close += 1;
+        let changed = compare(Timeframe::MINUTE_5, INDEX, &minutes, &bent).expect("valid fold");
+        assert_eq!(
+            changed.disagreements,
+            vec![Disagreement {
+                at: 4,
+                ts_micros: full[4].ts_micros,
+                field: "close",
+                stored: full[4].close + 1,
+                folded: full[4].close,
+            }]
+        );
+        assert!(
+            compare(Timeframe::MINUTE_5, INDEX, &minutes, &full)
+                .expect("valid fold")
+                .agrees()
+        );
+    }
+
+    /// Two missing middle buckets in a row are each named absent at their
+    /// index in the fold, as are two missing from the end, two stray
+    /// middle bars in a row are each named present only in the store, and a
+    /// middle bar moved earlier or later is one `ts_micros` disagreement.
+    #[test]
+    fn two_missing_or_stray_middle_records_and_a_moved_bar_are_each_named_once() {
+        let (minutes, full) = thirty_minutes_and_their_fold();
+        let stray = Bar {
+            ts_micros: full[3].ts_micros - 60_000_000,
+            ..full[3]
+        };
+
+        // Two consecutive missing buckets are each named absent, and the bars
+        // after them still pair.
+        let mut gap = full.clone();
+        gap.drain(1..3);
+        let gapped = compare(Timeframe::MINUTE_5, INDEX, &minutes, &gap).expect("valid fold");
+        assert_eq!(
+            gapped.disagreements,
+            vec![
+                Disagreement {
+                    at: 1,
+                    ts_micros: full[1].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[1].ts_micros,
+                },
+                Disagreement {
+                    at: 2,
+                    ts_micros: full[2].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[2].ts_micros,
+                },
+            ]
+        );
+
+        // The same two buckets missing from the END keep the index each holds
+        // in the fold, as the positional pairing reported them.
+        let cut = compare(Timeframe::MINUTE_5, INDEX, &minutes, &full[..4]).expect("valid fold");
+        assert_eq!(
+            cut.disagreements,
+            vec![
+                Disagreement {
+                    at: 4,
+                    ts_micros: full[4].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[4].ts_micros,
+                },
+                Disagreement {
+                    at: 5,
+                    ts_micros: full[5].ts_micros,
+                    field: "absent from the store, present in the fold",
+                    stored: 0,
+                    folded: full[5].ts_micros,
+                },
+            ]
+        );
+
+        // Two consecutive stray bars are each named present only in the store.
+        let early = Bar {
+            ts_micros: full[3].ts_micros - 120_000_000,
+            ..full[3]
+        };
+        let mut strays = full.clone();
+        strays.splice(3..3, [early, stray]);
+        let doubled = compare(Timeframe::MINUTE_5, INDEX, &minutes, &strays).expect("valid fold");
+        assert_eq!(
+            doubled.disagreements,
+            vec![
+                Disagreement {
+                    at: 3,
+                    ts_micros: early.ts_micros,
+                    field: "present in the store, absent from the fold",
+                    stored: early.ts_micros,
+                    folded: 0,
+                },
+                Disagreement {
+                    at: 4,
+                    ts_micros: stray.ts_micros,
+                    field: "present in the store, absent from the fold",
+                    stored: stray.ts_micros,
+                    folded: 0,
+                },
+            ]
+        );
+
+        // A middle bar REPLACED by one opening earlier, or later, is one bar
+        // whose timestamp differs, and is named as that field.
+        for shift in [-60_000_000, 60_000_000] {
+            let mut moved = full.clone();
+            moved[3].ts_micros += shift;
+            let shifted =
+                compare(Timeframe::MINUTE_5, INDEX, &minutes, &moved).expect("valid fold");
+            assert_eq!(
+                shifted.disagreements,
+                vec![Disagreement {
+                    at: 3,
+                    ts_micros: moved[3].ts_micros,
+                    field: "ts_micros",
+                    stored: moved[3].ts_micros,
+                    folded: full[3].ts_micros,
+                }],
+                "shift {shift}"
+            );
+        }
+    }
+
+    /// A stored file whose opening times do not strictly increase is refused
+    /// before any pairing, naming the first record that does not follow. The
+    /// store's writer refuses such a batch, so only a file damaged after
+    /// writing reaches this. Pairing it by timestamp named a bar both files
+    /// hold as "absent from the store" and again as "present in the store".
+    #[test]
+    fn a_stored_file_out_of_opening_time_order_is_refused_before_pairing() {
+        let (minutes, full) = thirty_minutes_and_their_fold();
+
+        let mut swapped = full.clone();
+        swapped.swap(1, 2);
+        let why = compare(Timeframe::MINUTE_5, INDEX, &minutes, &swapped)
+            .expect_err("a swapped file cannot be paired");
+        assert_eq!(
+            why,
+            format!(
+                "5min stored file is not in strictly increasing opening-time order at \
+                 record 2 (ts {} after ts {}); the store's writer refuses such a batch, \
+                 so this file changed after it was written and cannot be paired with \
+                 the fold",
+                full[1].ts_micros, full[2].ts_micros
+            )
+        );
+
+        // A repeated bar is not strictly increasing either, even at the end.
+        let mut repeated = full.clone();
+        repeated.push(full[5]);
+        let why = compare(Timeframe::MINUTE_5, INDEX, &minutes, &repeated)
+            .expect_err("a repeated bar cannot be paired");
+        assert!(why.contains("at record 6 (ts"), "{why}");
+
+        // Two repeats at i64::MAX are refused at the second, not wrapped.
+        let top = Bar {
+            ts_micros: i64::MAX,
+            ..full[0]
+        };
+        let why = compare(Timeframe::MINUTE_5, INDEX, &minutes, &[full[0], top, top])
+            .expect_err("repeated i64::MAX");
+        assert!(why.contains("at record 2"), "{why}");
+
+        // Strictly increasing files, including one bar and none, still pair.
+        for stored in [&full[..], &full[..1], &[][..]] {
+            compare(Timeframe::MINUTE_5, INDEX, &minutes, stored).expect("an ordered file pairs");
+        }
+    }
+
+    /// A rendered disagreement says which sequence its index counts in: the
+    /// fold for a bucket the file lacks, the stored file for everything else,
+    /// so two lines naming index 2 cannot both read "record 2".
+    #[test]
+    fn a_rendered_disagreement_names_which_file_its_index_counts_in() {
+        let absent = Disagreement {
+            at: 2,
+            ts_micros: 11,
+            field: ABSENT_FROM_STORE,
+            stored: 0,
+            folded: 11,
+        };
+        assert_eq!(
+            absent.line(),
+            "fold record 2 ts 11 field absent from the store, present in the fold -- stored 0, folded 11"
+        );
+        let changed = Disagreement {
+            at: 2,
+            ts_micros: 12,
+            field: "close",
+            stored: 131,
+            folded: 124,
+        };
+        assert_eq!(
+            changed.line(),
+            "stored record 2 ts 12 field close -- stored 131, folded 124"
         );
     }
 
@@ -489,7 +1082,7 @@ mod tests {
                 ..*bar
             })
             .collect();
-        let verdict = compare(Timeframe::MINUTE_2, &minutes, &wrong).expect("valid fold");
+        let verdict = compare(Timeframe::MINUTE_2, INDEX, &minutes, &wrong).expect("valid fold");
         assert!(!verdict.agrees());
         assert_eq!(verdict.disagreements.len(), MAX_REPORTED);
         assert_eq!(
@@ -500,8 +1093,11 @@ mod tests {
 
     #[test]
     fn every_stored_field_disagreement_retains_its_exact_position_and_values() {
-        let minutes = [minute_bar(0, 100, 110, 90, 105)];
-        let truth = minutes[0];
+        // One whole five-minute bucket: the derive authority withholds a
+        // bucket with fewer than its five scheduled minutes.
+        let minutes: Vec<Bar> = (0..5).map(|m| minute_bar(m, 100, 110, 90, 105)).collect();
+        let bucket = store_bucket(Timeframe::MINUTE_5).expect("5min has a bucket");
+        let truth = pull::fold::fold(&minutes, bucket).expect("five minutes fold")[0];
         for field in [
             "ts_micros",
             "open",
@@ -542,7 +1138,8 @@ mod tests {
                     (changed.open_interest, truth.open_interest)
                 }
             };
-            let verdict = compare(Timeframe::MINUTE_5, &minutes, &[changed]).expect("valid fold");
+            let verdict =
+                compare(Timeframe::MINUTE_5, INDEX, &minutes, &[changed]).expect("valid fold");
             assert!(!verdict.agrees());
             assert_eq!(
                 (verdict.stored_bars, verdict.folded_bars, verdict.elided),

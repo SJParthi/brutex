@@ -168,3 +168,62 @@ fn batch_publication_failure_is_durable_refusal_and_a_repaired_retry_can_complet
     });
     crate::knobs::clear_all();
 }
+
+/// The identities a report prints, in the order it prints them.
+fn report_identities(report: &str) -> Vec<String> {
+    report
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("identity "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// audit-20261003 hunt-conc-1 (GAP13-13): a whole-store sweep writes its
+/// ledger rows, and allocates its evidence attempts, in the walk's own order
+/// rather than in the order worker threads happen to finish. Eight months
+/// sweep in parallel; the ledger must list them exactly as the report does,
+/// and the newest evidence attempt must belong to the last month offered.
+#[test]
+fn a_whole_store_sweep_files_its_rows_in_walk_order_not_thread_order() {
+    const SYMBOLS: [&str; 8] = [
+        "NIFTY",
+        "BANKNIFTY",
+        "RELIANCE",
+        "TCS",
+        "INFY",
+        "SBIN",
+        "HDFCBANK",
+        "ITC",
+    ];
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for round in 0..3 {
+        crate::audited_stored::with_warmed_symbols(&SYMBOLS, |root| {
+            let report = rayon::ThreadPoolBuilder::new()
+                .num_threads(8)
+                .build()
+                .expect("an eight-worker pool")
+                .install(|| sweep_under(root, "zerodha", "5min", u64::MAX, COMMIT))
+                .expect("the walk completes");
+            let printed = report_identities(&report);
+            assert_eq!(printed.len(), SYMBOLS.len(), "round {round}: {report}");
+            let mut ledger = Results::open_read(root).expect("recorded ledger");
+            let filed: Vec<String> = (0..ledger.len().expect("rows"))
+                .map(|index| crate::identity_hex(&ledger.read(index).expect("row").identity))
+                .collect();
+            assert_eq!(
+                filed, printed,
+                "round {round}: ledger order follows threads"
+            );
+            let newest = sweep_evidence::latest(root, 1_048_576)
+                .expect("evidence")
+                .expect("an attempt");
+            assert_eq!(
+                Some(&crate::identity_hex(&newest.identity)),
+                printed.last(),
+                "round {round}: the last attempt token went to another month"
+            );
+        });
+    }
+    crate::knobs::clear_all();
+}

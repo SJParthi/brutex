@@ -85,10 +85,8 @@ const ADMISSION_V4_CSCV_POLICY_DOMAIN: &[u8] =
 const READ_CHUNK_BYTES: usize = 16 * 1_024;
 const LOCK_FILE_MAX_BYTES: u64 = 0;
 
-#[cfg(any(target_os = "android", target_os = "linux"))]
-const O_NOFOLLOW_FLAG: i32 = 0x20_000;
-#[cfg(target_os = "macos")]
-const O_NOFOLLOW_FLAG: i32 = 0x100;
+#[cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))]
+const O_NOFOLLOW_FLAG: i32 = store::open_flags::O_NOFOLLOW;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == RECORD_BYTES);
 
@@ -2902,13 +2900,14 @@ fn read_raw(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Statistics V3 record";
+
 fn append_raw(
     file: &mut File,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationStatisticsV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Statistics V3 record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_file(
@@ -3821,6 +3820,36 @@ mod tests {
                 source.authority_projection().completion_digest()
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() -> Result<(), String> {
+        let root = TestDir::new()?;
+        let rollback_root = root.child("rollback")?;
+        let produced = produced_fixture(
+            StatisticsFamilyTerminalV3::Evaluated,
+            StatisticsFamilyTerminalV3::NaturallyExtinct,
+            31,
+        )?;
+        let planned = produced.records(0, 0)?;
+        let mut file = File::create(rollback_root.join(DATA_FILE))
+            .map_err(|why| format!("cannot create rollback Statistics V3 file: {why}"))?;
+        file.write_all(&header()?)
+            .and_then(|()| file.write_all(&planned[0]))
+            .and_then(|()| file.sync_all())
+            .map_err(|why| format!("cannot write rollback Statistics V3 prefix: {why}"))?;
+        drop(file);
+        crate::append_rollback::tests::inject_short_write(
+            &rollback_root.join(DATA_FILE),
+            APPEND_LABEL,
+            RECORD_BYTES,
+        );
+        let completed = produced.append_and_reopen(&rollback_root, bounds()?)?;
+        assert!(matches!(
+            completed,
+            PopulationStatisticsV3Commit::Written(_)
+        ));
         Ok(())
     }
 

@@ -1707,12 +1707,10 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     } = plan;
     // THE ONE CONVERSION FROM RUNG TO DIRECTORY. See `Plan::timeframe`.
     let timeframe = plan.timeframe()?;
-    let raw = fetch::RawWindow {
-        rows: member.rows.clone(),
-    };
-    let mut landed =
-        fetch::land_with_cash_schedule(&raw, request, encoding, scale, plan.cash_schedule)
-            .map_err(|why| why.to_string())?;
+    // BORROWED, NOT CLONED. o1api-36, D-1203: this used to copy every row
+    // into a `RawWindow` only to pass a reference to it.
+    let mut landed = fetch::land_rows(&member.rows, request, encoding, scale, plan.cash_schedule)
+        .map_err(|why| why.to_string())?;
     // Bound once so the three returns below cannot disagree. See the field.
     let outside_session = landed.outside_session;
     if landed.bars.is_empty() {
@@ -2074,6 +2072,18 @@ fn identify(instrument: &str, exchange: &str, segment: &str) -> Result<Identity,
         .map_err(|why| format!("{instrument}: {why}"))?;
     let exchange = Exchange::parse(exchange)
         .map_err(|why| format!("{instrument}: exchange {exchange:?}: {why}"))?;
+    // NSE ONLY ON THE WRITE PATH (GAP2-41, D-0955). `CLAUDE.md` §1: BSE is
+    // not swept and not pulled (D-0017). Every caller of this function is about
+    // to write bars or read the NSE cash rung, so a plan naming BSE stores
+    // nothing. BSE files already on disk are untouched: reading them does not
+    // come through here.
+    if exchange != Exchange::Nse {
+        return Err(format!(
+            "{instrument}: exchange {}: not pulled; D-0017 narrows ingest to \
+             NSE, so nothing is written for this member",
+            exchange.as_str()
+        ));
+    }
     let segment = Segment::parse(segment)
         .map_err(|why| format!("{instrument}: segment {segment:?}: {why}"))?;
     // The symbol id is a CROSS-CHECK the store stamps into the header and
@@ -3024,9 +3034,14 @@ impl CensusLock {
         // is no third option, and a silent un-locked run is the fallback that
         // hides a failure — the loser's receipt still reads "every row
         // accounted for", because its own books balanced.
+        // READ AND WRITE, never write alone (R9-csr-cx-0, D-0955). A write-only
+        // open of a FIFO blocks in open(2) until a reader appears, so a FIFO
+        // misfiled at this name hung the ingest: it neither refused nor ran.
+        // Read-write does not wait on a FIFO, and the type is refused below.
         let lock = match fs::OpenOptions::new()
             .create(true)
             .truncate(false)
+            .read(true)
             .write(true)
             .open(&lock_path)
         {
@@ -3085,20 +3100,121 @@ impl CensusLock {
                     lock_path.display()
                 ));
             }
-            // Every other cause is the path's, and the install reports it.
-            Err(_) => return Ok(Self { _held: None }),
+            // Every other cause is the path's, and the install reports it --
+            // UNLESS SOMETHING THAT IS NOT A FILE OCCUPIES THE NAME (v3b-1,
+            // D-1480). A UNIX socket at this name fails the open with ENXIO,
+            // which is neither kind above, so it deferred here and the run went
+            // unserialised with nothing said: the install never touches this
+            // path. The kind cannot tell a socket from a path failure, but the
+            // name can: `symlink_metadata` that SUCCEEDS on a non-regular entry
+            // means the directory is sound and this one name is misfiled -- a
+            // socket, a device that would not open, a symlink that leads
+            // nowhere or loops. Refused, naming the type. A genuine path
+            // failure (no directory, a file where the directory belongs, a name
+            // past the host's limit) fails `symlink_metadata` too, so it still
+            // defers to the install's wording. A REGULAR file that would not
+            // open for another reason also still defers: its directory is the
+            // install's directory, and the install fails on the same host.
+            Err(why) => match fs::symlink_metadata(&lock_path) {
+                Ok(found) if !found.is_file() => {
+                    return Err(format!(
+                        "the census lock at {} is not a regular file ({}) and \
+                         cannot be opened: {why}. Refused rather than run \
+                         without it: the census beside it is still writable. \
+                         Remove what occupies that name and try again.",
+                        lock_path.display(),
+                        entry_kind(found.file_type())
+                    ));
+                }
+                _ => return Ok(Self { _held: None }),
+            },
         };
-        match Flock::try_lock(lock, lock_path.clone()) {
-            Ok(held) => Ok(Self { _held: Some(held) }),
-            Err(_) => Err(format!(
-                "another ingest holds the census lock at {}. Refused rather \
-                 than queued: two runs installing at once silently discard one, and \
-                 the loser's receipt still reads 'every row accounted for' \
-                 because its own books balanced. Wait for the other run and try \
-                 again.",
-                lock_path.display()
-            )),
+        // A LOCK THAT OPENED BUT IS NOT A REGULAR FILE IS REFUSED BY NAME. A
+        // FIFO or a device that opens at this name is a misfiled path, the same
+        // class as the directory refused above, and nothing downstream reports
+        // it. A socket never opens, so it is refused in the arm above instead.
+        match lock.metadata() {
+            Ok(found) if found.is_file() => {}
+            Ok(found) => {
+                return Err(format!(
+                    "the census lock at {} is not a regular file ({}). \
+                     Refused rather than run without it: the census beside it \
+                     is still writable. Remove what occupies that name and try \
+                     again.",
+                    lock_path.display(),
+                    entry_kind(found.file_type())
+                ));
+            }
+            Err(why) => {
+                return Err(format!(
+                    "the census lock at {} opened but cannot be measured: {why}. \
+                     Refused rather than run without it.",
+                    lock_path.display()
+                ));
+            }
         }
+        Flock::try_lock(lock, lock_path.clone())
+            .map(|held| Self { _held: Some(held) })
+            .map_err(|refusal| lock_refusal(&lock_path, refusal))
+    }
+}
+
+/// What occupies a name, in words an operator can act on (v3b-1, D-1480).
+///
+/// `FileType`'s `Debug` prints only `is_file`, `is_dir` and `is_symlink`, so a
+/// socket and a FIFO both read as three `false`s and the refusal named nothing.
+fn entry_kind(found: fs::FileType) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        if found.is_socket() {
+            return "a UNIX socket";
+        }
+        if found.is_fifo() {
+            return "a FIFO";
+        }
+        if found.is_char_device() {
+            return "a character device";
+        }
+        if found.is_block_device() {
+            return "a block device";
+        }
+    }
+    if found.is_symlink() {
+        "a symbolic link that does not lead to an openable file"
+    } else if found.is_dir() {
+        "a directory"
+    } else if found.is_file() {
+        "a regular file"
+    } else {
+        "an entry of a kind this host does not name"
+    }
+}
+
+/// The sentence for a census lock that could not be taken.
+///
+/// Only [`TryLockError::WouldBlock`] means another run holds it. Every other
+/// refusal is the host declining `flock` itself (`ENOLCK` on an NFS mount
+/// without a lock daemon, `ENOTSUP` for a lock file the host cannot lock), and
+/// waiting for "the other run" never helps when there is none. Both arms used
+/// to say there was one (R9-csr-cx-1, D-0955).
+fn lock_refusal(lock_path: &Path, refusal: std::fs::TryLockError) -> String {
+    match refusal {
+        std::fs::TryLockError::WouldBlock => format!(
+            "another ingest holds the census lock at {}. Refused rather \
+             than queued: two runs installing at once silently discard one, and \
+             the loser's receipt still reads 'every row accounted for' \
+             because its own books balanced. Wait for the other run and try \
+             again.",
+            lock_path.display()
+        ),
+        std::fs::TryLockError::Error(host) => format!(
+            "the host refused to lock the census lock at {}: {host}. No other \
+             run is implied, so waiting will not help; refused rather than run \
+             without the lock. Put the store on a filesystem that supports \
+             advisory locks.",
+            lock_path.display()
+        ),
     }
 }
 
@@ -3275,8 +3391,31 @@ mod tests {
 
     use super::{
         CensusLock, EntryKey, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked,
-        write_and_count,
+        lock_refusal, write_and_count,
     };
+
+    /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
+    ///
+    /// `one` copied every row of every member into a `RawWindow` only to pass
+    /// a reference to it. The copy had no output of its own to assert on, so
+    /// its absence is asserted on the source, with needles assembled at run
+    /// time so this test cannot match its own text. The landing itself is
+    /// proved equal through both entry points in
+    /// `pull::pipeline::borrowed_rows_land_exactly_as_a_window_does`.
+    #[test]
+    fn a_member_is_landed_from_its_own_rows_without_a_copy() {
+        let source = include_str!("ingest.rs");
+        let start = source
+            .find(&format!("{}{}", "fn one(member: &", "Member,"))
+            .expect("ingest::one exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").expect("ingest::one ends")];
+        assert!(
+            !body.contains(&format!("{}{}", "member.rows", ".clone()")),
+            "ingest::one clones a member's rows again"
+        );
+        assert!(body.contains(&format!("{}{}", "land_rows(&", "member.rows,")));
+    }
 
     /// A scratch directory of this test's own, named after the line that asked
     /// for it so two tests cannot collide in a shared `TMPDIR`.
@@ -3505,6 +3644,167 @@ mod tests {
         drop(second);
         drop(child);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A FIFO AT THE LOCK'S NAME IS REFUSED, NOT WAITED ON.** R9-csr-cx-0,
+    /// D-0955.
+    ///
+    /// The lock was opened write-only, and a write-only open of a FIFO blocks
+    /// in open(2) until some process opens it for reading. The ingest neither
+    /// refused nor ran. `take` runs on a thread here so a regression is a
+    /// failed assertion after five seconds rather than a hung suite; the FIFO
+    /// is then opened for reading, which is what releases a blocked writer.
+    ///
+    /// `mkfifo` is the external program, run from a test only: `CLAUDE.md` §2
+    /// forbids a binding, and `std` has no FIFO constructor.
+    #[test]
+    fn a_fifo_at_the_lock_path_is_refused_rather_than_waited_on() {
+        let root = scratch("LOCK-FIFO");
+        let census = root.join("manifest").join("dhan.man");
+        let lock_path = census.with_extension("man.lock");
+        let made = std::process::Command::new("/usr/bin/mkfifo")
+            .arg(&lock_path)
+            .status()
+            .expect("the FIFO this test is about can be made");
+        assert!(made.success(), "the premise: a FIFO at the lock's name");
+
+        let (tell, heard) = std::sync::mpsc::channel();
+        let asked = census.clone();
+        std::thread::spawn(move || {
+            let answer = CensusLock::take(&asked).map(drop);
+            let _gone = tell.send(answer);
+        });
+        let answer = heard.recv_timeout(std::time::Duration::from_secs(5));
+        if answer.is_err() {
+            // Release the writer blocked in open(2) before failing.
+            let _reader = std::fs::File::open(&lock_path);
+        }
+        let Ok(Err(why)) = answer else {
+            panic!("a FIFO at the lock path must refuse promptly, got {answer:?}")
+        };
+        assert!(why.contains("man.lock"), "the path is named: {why}");
+        assert!(why.contains("not a regular file"), "and so is why: {why}");
+        assert!(why.contains("(a FIFO)"), "and the type, in words: {why}");
+
+        // A regular lock file at the same name is taken as before.
+        std::fs::remove_file(&lock_path).expect("the FIFO is removable");
+        let held = CensusLock::take(&census).map_err(|why| why.clone());
+        assert!(held.is_ok(), "{:?}", held.map(drop));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A SOCKET AT THE LOCK'S NAME IS REFUSED, NOT RUN WITHOUT A LOCK.**
+    /// v3b-1, D-1480. Opening a UNIX socket fails with ENXIO, a kind that is
+    /// neither `PermissionDenied` nor `IsADirectory`, so it fell into the
+    /// path-failure arm and the ingest ran unserialised in silence. A dangling
+    /// symlink whose target directory is missing fails the open with
+    /// `NotFound`, the path-failure kind itself, and is the same misfiled name.
+    #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "whether the guard holds a lock is the fact under test, and the \
+                  field is underscored because production never reads it"
+    )]
+    fn a_socket_at_the_lock_path_is_refused_rather_than_run_unlocked() {
+        let root = scratch("LOCK-SOCKET");
+        let census = root.join("manifest").join("dhan.man");
+        let lock_path = census.with_extension("man.lock");
+        let listener = std::os::unix::net::UnixListener::bind(&lock_path)
+            .expect("the socket this test is about can be bound");
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path);
+        let premise = opened.map(drop).map_err(|why| why.kind());
+        assert!(
+            !matches!(
+                premise,
+                Ok(())
+                    | Err(std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::IsADirectory)
+            ),
+            "the premise: a socket fails the open with a kind the refusal arm \
+             did not name, got {premise:?}"
+        );
+        let refused = CensusLock::take(&census).map(drop);
+        let Err(why) = refused else {
+            panic!("a socket at the lock path must refuse, got {refused:?}")
+        };
+        assert!(why.contains("man.lock"), "the path is named: {why}");
+        assert!(why.contains("not a regular file"), "and so is why: {why}");
+        assert!(why.contains("a UNIX socket"), "and the type: {why}");
+        drop(listener);
+        std::fs::remove_file(&lock_path).expect("the socket is removable");
+
+        // A dangling symlink into a directory that does not exist.
+        std::os::unix::fs::symlink(root.join("nested").join("elsewhere"), &lock_path)
+            .expect("the dangling symlink");
+        let refused = CensusLock::take(&census).map(drop);
+        let Err(why) = refused else {
+            panic!("a dangling symlink at the lock path must refuse, got {refused:?}")
+        };
+        assert!(why.contains("a symbolic link"), "{why}");
+        std::fs::remove_file(&lock_path).expect("the symlink is removable");
+
+        // A genuine path failure still defers: the directory is gone, so
+        // nothing occupies the name and the install will say why.
+        let elsewhere = root.join("dir-is-a-file").join("manifest").join("dhan.man");
+        std::fs::write(
+            root.join("dir-is-a-file"),
+            b"a file where the directory belongs",
+        )
+        .expect("the blocking file");
+        let deferred = CensusLock::take(&elsewhere).map(|held| held._held.is_none());
+        assert_eq!(
+            deferred,
+            Ok(true),
+            "a path failure is the install's to report"
+        );
+
+        // With the name cleared, the lock is taken as before.
+        let held = CensusLock::take(&census).map(|held| held._held.is_some());
+        assert_eq!(held, Ok(true));
+
+        // Every kind the refusal can meet is named in words.
+        let kind = |at: &std::path::Path| {
+            std::fs::symlink_metadata(at).map(|found| super::entry_kind(found.file_type()))
+        };
+        assert_eq!(kind(&root).ok(), Some("a directory"));
+        assert_eq!(kind(&lock_path).ok(), Some("a regular file"));
+        assert_eq!(
+            kind(std::path::Path::new("/dev/null")).ok(),
+            Some("a character device")
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **ONLY A HELD LOCK IS REPORTED AS ANOTHER RUN.** R9-csr-cx-1, D-0955.
+    ///
+    /// Both refusals of `try_lock` became "another ingest holds the census
+    /// lock". When the host refuses `flock` itself (`ENOLCK` on NFS without a
+    /// lock daemon, `ENOTSUP` for a lock file it cannot lock) no other run
+    /// exists and waiting never helps. Linux gives no regular file that refuses
+    /// `flock`, so the mapping is driven directly, with each host error.
+    #[test]
+    fn a_host_refusal_to_lock_is_not_reported_as_another_run() {
+        let path = std::path::Path::new("/store/manifest/dhan.man.lock");
+        let busy = lock_refusal(path, std::fs::TryLockError::WouldBlock);
+        assert!(busy.contains("another ingest holds"), "{busy}");
+        for host in [
+            std::io::Error::from(std::io::ErrorKind::Unsupported),
+            std::io::Error::other("No locks available"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        ] {
+            let words = host.to_string();
+            let why = lock_refusal(path, std::fs::TryLockError::Error(host));
+            assert!(
+                !why.contains("another ingest") && !why.contains("Wait for the other run"),
+                "a host refusal names no other run: {why}"
+            );
+            assert!(why.contains(&words), "the host's own words: {why}");
+            assert!(why.contains("man.lock"), "and the path: {why}");
+        }
     }
 
     /// A bar at one instant with one close. Every other field is zero, which

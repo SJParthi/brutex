@@ -65,8 +65,12 @@ pub enum GreeksError {
     ///
     /// Reachable at the extremes of the accepted ranges — a spot of `1e-300`
     /// with a maturity of `1e-300` divides one underflowed quantity by
-    /// another. Refused rather than returned, because a `NaN` delta looks
-    /// exactly like a real one until it is multiplied by something.
+    /// another. So is `rate` or `carry` at `-7.1` with a maturity of `100`,
+    /// which makes a discount factor infinite inside every accepted bound;
+    /// that one is refused on the way in, before the solver reads its
+    /// arbitrage bounds, so it never arrives as an infinite intrinsic value.
+    /// Refused rather than returned, because a `NaN` delta looks exactly like
+    /// a real one until it is multiplied by something.
     NotRepresentable,
     /// The market price is at or below the option's discounted intrinsic
     /// value, so no positive volatility produces it.

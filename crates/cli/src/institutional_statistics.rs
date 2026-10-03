@@ -766,16 +766,27 @@ impl InstitutionalStatisticsAuthorityV1 {
         self.record.spa_p_value()
     }
 
-    /// Exact-count-derived full-family probability projection.
+    /// Exact-count-derived full-family probability projection, rounded up.
+    ///
+    /// # Why this is not the stored field
+    ///
+    /// The V1 row stores `exact_ppm`, a FLOOR, and keeps storing it: its bytes
+    /// and its `validate` are a format version, never mutated in place. But this
+    /// value feeds `max_fwer_p_value_ppm`, a `<=` maximum, and a floor moves a
+    /// p-value toward passing: `50_001 / 1_000_001` floored to `50_000` passed a
+    /// `<= 50_000` gate that [`Self::romano_wolf_rejects_at_ppm`] refuses at the
+    /// same alpha. So the admission projection is recomputed from the retained
+    /// exact counts, rounding away from significance. W2-cli7-6, D-0930.
     #[must_use]
-    pub const fn fwer_p_value_ppm(&self) -> u64 {
-        self.record.fwer_p_value_ppm
+    pub fn fwer_p_value_ppm(&self) -> u64 {
+        ceiling_ppm(self.record.familywise_p_value)
     }
 
-    /// Exact-count-derived selected-candidate adjusted probability projection.
+    /// Exact-count-derived selected-candidate adjusted probability projection,
+    /// rounded up for the reason [`Self::fwer_p_value_ppm`] gives.
     #[must_use]
-    pub const fn romano_wolf_p_value_ppm(&self) -> u64 {
-        self.record.romano_wolf_p_value_ppm
+    pub fn romano_wolf_p_value_ppm(&self) -> u64 {
+        ceiling_ppm(self.record.adjusted_p_value)
     }
 
     /// Exact candidate decision at an operator-supplied ppm alpha.
@@ -859,10 +870,45 @@ struct StatisticsFilesV1 {
     completions: File,
 }
 
+/// One held file's content and, on Unix, which file it is. Content alone let a
+/// byte-identical replacement renamed over the path pass the staleness check,
+/// so an append landed in the unlinked inode the handle still held (D-1621).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileSnapshotV1 {
+    identity: FileIdentityV1,
     length: u64,
     digest: [u8; 32],
+}
+
+/// `(device, inode)` on Unix. Other targets have no portable stable file
+/// identity in `std`, and there the check is content-only, as before D-1621.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentityV1 {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentityV1 {
+    fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentityV1;
+
+#[cfg(not(unix))]
+impl FileIdentityV1 {
+    const fn of(_: &fs::Metadata) -> Self {
+        Self
+    }
 }
 
 /// Bounded append-only receipt-last ledger for exact institutional statistics.
@@ -1356,10 +1402,37 @@ fn open_read(path: &Path) -> Result<File, String> {
 }
 
 fn append_sync(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(bytes))
-        .and_then(|()| file.sync_all())
-        .map_err(|why| format!("{} append/sync failed: {why}", path.display()))
+    append_sync_with(file, path, bytes, std::io::Write::write_all)
+}
+
+/// Appends and syncs `bytes`; a write error (ENOSPC, EIO, a short write)
+/// truncates the file back to its length before the append, so a failed write
+/// leaves no torn tail for every later open to refuse (D-1622). A failed sync
+/// after a whole write leaves the whole record, which the next open treats as
+/// the orphan an exact retry continues.
+fn append_sync_with(
+    file: &mut File,
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("{} append seek failed: {why}", path.display()))?;
+    if let Err(why) = write(file, bytes) {
+        return Err(match file.set_len(end) {
+            Ok(()) => format!(
+                "{} append failed: {why}; truncated back to {end} bytes",
+                path.display()
+            ),
+            Err(rollback) => format!(
+                "{} append failed: {why}; truncation back to {end} bytes also failed: {rollback}",
+                path.display()
+            ),
+        });
+    }
+    file.sync_all()
+        .map_err(|why| format!("{} append sync failed: {why}", path.display()))
 }
 
 fn measured_len(file: &File, path: &Path) -> Result<u64, String> {
@@ -1379,7 +1452,11 @@ fn snapshots(
 }
 
 fn snapshot_file(file: &mut File, path: &Path) -> Result<FileSnapshotV1, String> {
-    let length = measured_len(file, path)?;
+    let metadata = file
+        .metadata()
+        .map_err(|why| format!("{} metadata could not be read: {why}", path.display()))?;
+    let identity = FileIdentityV1::of(&metadata);
+    let length = metadata.len();
     file.seek(SeekFrom::Start(0))
         .map_err(|why| format!("{} could not be seeked for hashing: {why}", path.display()))?;
     let mut hasher = Hasher::new();
@@ -1402,6 +1479,7 @@ fn snapshot_file(file: &mut File, path: &Path) -> Result<FileSnapshotV1, String>
             .map_err(|_| "institutional statistics hash window does not fit u64".to_owned())?;
     }
     Ok(FileSnapshotV1 {
+        identity,
         length,
         digest: hasher.finalize(),
     })
@@ -1479,6 +1557,25 @@ fn exact_ppm(probability: DurableExactProbabilityV1) -> Result<u64, String> {
         / u128::from(probability.denominator);
     u64::try_from(projected)
         .map_err(|_| "institutional statistics ppm projection does not fit u64".to_owned())
+}
+
+/// `ceil(numerator * PPM / denominator)` over a fraction a validated row holds.
+///
+/// `DurableExactProbabilityV1::validate` holds `1 <= numerator <= denominator`.
+fn ceiling_ppm(probability: DurableExactProbabilityV1) -> u64 {
+    ceiling_ppm_of(probability.numerator, probability.denominator)
+}
+
+/// `ceil(numerator * PPM / denominator)`, rounding AWAY from significance.
+///
+/// Every caller holds `numerator <= denominator` and `denominator >= 1`, so the
+/// quotient is at most `PPM` and the conversion cannot fail; were it ever to,
+/// `PPM` is certainty of non-significance, which fails every maximum.
+/// Shared by this module and `institutional_evidence` so the two projections
+/// cannot drift apart. D-0930.
+pub(crate) fn ceiling_ppm_of(numerator: u64, denominator: u64) -> u64 {
+    let projected = (u128::from(numerator) * u128::from(PPM)).div_ceil(u128::from(denominator));
+    u64::try_from(projected).unwrap_or(PPM)
 }
 
 fn usize_to_u64(name: &str, value: usize) -> Result<u64, String> {
@@ -1663,6 +1760,76 @@ mod tests {
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .expect("append raw institutional statistics fixture");
+    }
+
+    /// The admission-facing ppm projections round AWAY from significance.
+    ///
+    /// They feed `max_fwer_p_value_ppm` and `max_romano_wolf_p_value_ppm`,
+    /// which are `<=` maxima, so a floor moves a p-value toward passing:
+    /// `50_001 / 1_000_001` floored to `50_000` passed a `<= 50_000` gate that
+    /// the exact decision at the same alpha refuses. The row below is a valid
+    /// V1 row exactly as the V1 writer stores it (its ppm fields are the floor
+    /// `exact_ppm` projection); the getters must not hand that floor on.
+    /// W2-cli7-6, D-0930.
+    #[test]
+    fn ppm_projections_never_pass_a_maximum_the_exact_count_fails() {
+        let row = |draws: u64, adjusted: u64, familywise: u64| {
+            let mut record = prepared(1).record;
+            let denominator = draws + 1;
+            record.draws = draws;
+            record.strict_exceedances = 0;
+            record.initial_p_value = DurableExactProbabilityV1 {
+                numerator: 1,
+                denominator,
+            };
+            record.adjusted_p_value = DurableExactProbabilityV1 {
+                numerator: adjusted,
+                denominator,
+            };
+            record.familywise_p_value = DurableExactProbabilityV1 {
+                numerator: familywise,
+                denominator,
+            };
+            record.fwer_p_value_ppm = exact_ppm(record.familywise_p_value).expect("valid fraction");
+            record.romano_wolf_p_value_ppm =
+                exact_ppm(record.adjusted_p_value).expect("valid fraction");
+            record.validate().expect("a row the V1 writer would store");
+            InstitutionalStatisticsAuthorityV1 {
+                record,
+                completion_digest: digest(9),
+            }
+        };
+        let authority = row(1_000_000, 50_001, 50_001);
+        assert_eq!(
+            authority.record.romano_wolf_p_value_ppm, 50_000,
+            "the V1 row stores the floor, and stays byte-identical"
+        );
+        assert_eq!(
+            authority.romano_wolf_rejects_at_ppm(50_000),
+            Some(false),
+            "the exact count does not clear 5%"
+        );
+        assert_eq!(
+            authority.romano_wolf_p_value_ppm(),
+            50_001,
+            "so the selected-candidate projection must not read 50,000"
+        );
+        assert_eq!(
+            authority.fwer_p_value_ppm(),
+            50_001,
+            "and neither may the full-family projection"
+        );
+
+        // An exact boundary is not pushed over it: 50,000/1,000,000 is 50,000.
+        let exact = row(999_999, 50_000, 1);
+        assert_eq!(exact.romano_wolf_rejects_at_ppm(50_000), Some(true));
+        assert_eq!(exact.romano_wolf_p_value_ppm(), 50_000);
+        assert_eq!(exact.fwer_p_value_ppm(), 1);
+
+        // Certainty projects to exactly one million.
+        let certain = row(1_000_000, 1_000_001, 1_000_001);
+        assert_eq!(certain.romano_wolf_p_value_ppm(), PPM);
+        assert_eq!(certain.fwer_p_value_ppm(), PPM);
     }
 
     #[test]
@@ -1989,6 +2156,87 @@ mod tests {
                 .contains("changed behind")
         );
         cleanup(&content_root);
+    }
+
+    /// W2-cli7-5, D-1621: a byte-identical file renamed over the path is a
+    /// different file, and an append must not land in the unlinked one.
+    #[cfg(unix)]
+    #[test]
+    fn a_byte_identical_replacement_renamed_over_the_path_refuses() {
+        let root = root("identical-rename");
+        cleanup(&root);
+        let mut ledger =
+            InstitutionalStatisticsLedgerV1::open(&root, 4).expect("open rename handle");
+        ledger
+            .append_complete(&prepared(21))
+            .expect("append before replacement");
+        for path in [
+            InstitutionalStatisticsLedgerV1::statistics_path(&root),
+            InstitutionalStatisticsLedgerV1::completion_path(&root),
+        ] {
+            let mut ledger =
+                InstitutionalStatisticsLedgerV1::open(&root, 4).expect("open handle to replace");
+            let bytes = fs::read(&path).expect("read held bytes");
+            let staged = path.with_extension("staged");
+            fs::write(&staged, &bytes).expect("write identical copy");
+            fs::rename(&staged, &path).expect("rename identical copy over the path");
+            let refusal = ledger
+                .append_complete(&prepared(22))
+                .expect_err("an identical replacement must refuse");
+            assert!(
+                refusal.contains("no longer names the file held"),
+                "unexpected refusal {refusal}"
+            );
+            assert_eq!(fs::read(&path).expect("reread replacement"), bytes);
+        }
+        drop(ledger);
+        let mut fresh = InstitutionalStatisticsLedgerV1::open(&root, 4)
+            .expect("a fresh open over the replacement succeeds");
+        assert!(matches!(
+            fresh.append_complete(&prepared(22)),
+            Ok(InstitutionalStatisticsCommitV1::Appended(_))
+        ));
+        cleanup(&root);
+    }
+
+    /// c4b-5, D-1622: a short write truncates back, so the ledger stays open.
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = root("append-rollback");
+        cleanup(&root);
+        let mut ledger = InstitutionalStatisticsLedgerV1::open(&root, 4).expect("open");
+        ledger.append_complete(&prepared(31)).expect("commit one");
+        drop(ledger);
+        for path in [
+            InstitutionalStatisticsLedgerV1::statistics_path(&root),
+            InstitutionalStatisticsLedgerV1::completion_path(&root),
+        ] {
+            let before = fs::read(&path).expect("committed bytes");
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open committed file");
+            let refusal = append_sync_with(&mut file, &path, &[0x5a; 900], |file, bytes| {
+                file.write_all(bytes.get(..451).expect("half"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed write must refuse");
+            assert!(
+                refusal.contains("injected short write") && refusal.contains("truncated back"),
+                "refusal `{refusal}` must name the write error and the rollback"
+            );
+            drop(file);
+            assert_eq!(fs::read(&path).expect("reread"), before);
+            InstitutionalStatisticsLedgerV1::open_read(&root, 4)
+                .expect("committed authority stays readable");
+        }
+        let mut ledger = InstitutionalStatisticsLedgerV1::open(&root, 4).expect("reopen");
+        assert!(matches!(
+            ledger.append_complete(&prepared(31)),
+            Ok(InstitutionalStatisticsCommitV1::Reused(_))
+        ));
+        cleanup(&root);
     }
 
     fn flip_byte(path: &Path, offset: u64) {

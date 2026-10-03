@@ -1259,3 +1259,256 @@ fn a_short_chunk_on_a_required_column_names_the_shortfall_not_a_phantom_null() {
         "the old message said the file has a null here, which is the wrong fault: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// AUDIT probestore-7 — a STORED open-interest sentinel is refused by name, and
+// the values this reader does not judge are stated, not implied.
+// ---------------------------------------------------------------------------
+
+/// One cash row as the seven leaves hold it; `None` open interest is a null.
+#[derive(Clone, Copy)]
+struct Row {
+    timestamp: i64,
+    ohlc: [f64; 4],
+    volume: i64,
+    open_interest: Option<i64>,
+}
+
+/// A one-group, seven-column cash file holding exactly `rows`.
+fn cash_file_of(rows: &[Row]) -> Vec<u8> {
+    let fields: Vec<Arc<Type>> = CASH
+        .iter()
+        .map(|(name, ty)| {
+            Arc::new(
+                Type::primitive_type_builder(name, *ty)
+                    .with_repetition(Repetition::OPTIONAL)
+                    .build()
+                    .expect("field"),
+            )
+        })
+        .collect();
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let all = vec![1_i16; rows.len()];
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        let mut at = 0_usize;
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => match at {
+                    0 => {
+                        let v: Vec<i64> = rows.iter().map(|r| r.timestamp).collect();
+                        typed.write_batch(&v, Some(&all), None).expect("timestamp");
+                    }
+                    5 => {
+                        let v: Vec<i64> = rows.iter().map(|r| r.volume).collect();
+                        typed.write_batch(&v, Some(&all), None).expect("volume");
+                    }
+                    _ => {
+                        let v: Vec<i64> = rows.iter().filter_map(|r| r.open_interest).collect();
+                        let defs: Vec<i16> = rows
+                            .iter()
+                            .map(|r| i16::from(r.open_interest.is_some()))
+                            .collect();
+                        typed
+                            .write_batch(&v, Some(&defs), None)
+                            .expect("open interest");
+                    }
+                },
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    let v: Vec<f64> = rows.iter().map(|r| r.ohlc[at - 1]).collect();
+                    typed.write_batch(&v, Some(&all), None).expect("price");
+                }
+                _ => panic!("the cash layout has no other physical type"),
+            }
+            column.close().expect("close column");
+            at += 1;
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// A plain, sane row carrying `open_interest`.
+const fn sane(open_interest: Option<i64>) -> Row {
+    Row {
+        timestamp: 1_584_685_680_000_000,
+        ohlc: [100.0, 101.0, 99.0, 100.5],
+        volume: 5,
+        open_interest,
+    }
+}
+
+/// Opens `bytes` from a private file and reads group 0.
+fn read_back(name: &str, bytes: &[u8]) -> Result<lake::batch::Batch, LakeError> {
+    let path = std::env::temp_dir().join(format!(
+        "brutex-lake-sentinel-{name}-{}.parquet",
+        std::process::id()
+    ));
+    std::fs::write(&path, bytes).expect("the scratch file is writable");
+    let file = LakeFile::open(&path).expect("a well-formed cash file opens");
+    let read = file.read_row_group(0);
+    let _ = std::fs::remove_file(&path);
+    read
+}
+
+/// A STORED `i64::MIN` OPEN INTEREST IS REFUSED, NAMING ITS ROW.
+///
+/// The reader maps a null to `i64::MIN`, so a file storing `i64::MIN` read
+/// back as "the vendor reported none": a null the file never held. It is
+/// refused at the first, a middle and the last row; one above it, zero, a
+/// negative and a real null still read, the null as `None` and zero as zero.
+#[test]
+fn a_stored_open_interest_sentinel_is_refused_by_row() {
+    for (name, at) in [("first", 0), ("middle", 2), ("last", 4)] {
+        let mut rows = [sane(Some(7)); 5];
+        rows[at].open_interest = Some(i64::MIN);
+        let read = read_back(name, &cash_file_of(&rows)).map(|b| b.len());
+        assert!(
+            matches!(
+                read,
+                Err(LakeError::OpenInterestIsNullSentinel { row }) if row == at
+            ),
+            "a stored sentinel at row {at}: {read:?}"
+        );
+    }
+    let rows = [
+        sane(Some(i64::MIN + 1)),
+        sane(Some(0)),
+        sane(None),
+        sane(Some(-1)),
+        sane(Some(i64::MAX)),
+    ];
+    let batch = read_back("edges", &cash_file_of(&rows)).expect("no stored sentinel");
+    let got: Vec<Option<i64>> = (0..5)
+        .map(|i| batch.row(i).expect("five rows").open_interest())
+        .collect();
+    assert_eq!(
+        got,
+        [Some(i64::MIN + 1), Some(0), None, Some(-1), Some(i64::MAX)]
+    );
+}
+
+/// WHAT THIS READER DOES NOT JUDGE DECODES AS WRITTEN, AS ITS DOC NOW SAYS.
+///
+/// The crate header said every bad thing is refused, and an extreme
+/// timestamp, a `low` above the `high`, an `open` outside the range, a
+/// negative price, volume and open interest all decoded silently. They still
+/// decode, because judging a bar is the consumer's job, and the header and
+/// `read_row_group` now say so; this pins that statement to the behaviour.
+#[test]
+fn values_the_reader_does_not_judge_decode_as_written() {
+    let row = Row {
+        timestamp: i64::MIN,
+        ohlc: [100.0, 1.0, 200.0, -3.0],
+        volume: -7,
+        open_interest: Some(-9),
+    };
+    let batch = read_back("unjudged", &cash_file_of(&[row])).expect("not judged, so read");
+    let bar = batch.row(0).expect("one row");
+    assert_eq!(bar.timestamp_micros, i64::MIN);
+    assert_eq!(
+        [
+            bar.open.raw(),
+            bar.high.raw(),
+            bar.low.raw(),
+            bar.close.raw()
+        ],
+        [10_000, 100, 20_000, -300]
+    );
+    assert_eq!((bar.volume, bar.open_interest()), (-7, Some(-9)));
+    let header = include_str!("../src/lib.rs");
+    assert!(header.contains("not every implausible\n//! value in it."));
+    let reader = include_str!("../src/reader.rs");
+    assert!(reader.contains("/// # What is NOT checked"));
+}
+
+/// One cash file whose `timestamp` leaf declares `logical`, three rows.
+fn cash_file_with_timestamp(logical: Option<&parquet::basic::LogicalType>) -> Vec<u8> {
+    let mut fields: Vec<Arc<Type>> = Vec::new();
+    for (name, ty) in CASH {
+        let mut leaf = Type::primitive_type_builder(name, ty).with_repetition(Repetition::OPTIONAL);
+        if name == "timestamp" {
+            leaf = leaf.with_logical_type(logical.cloned());
+        }
+        fields.push(Arc::new(leaf.build().expect("leaf")));
+    }
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1_i64, 2, 3], Some(&[1, 1, 1]), None)
+                        .expect("i64");
+                }
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1.0_f64, 2.0, 3.0], Some(&[1, 1, 1]), None)
+                        .expect("f64");
+                }
+                _ => panic!("the cash layout has no other physical type"),
+            }
+            column.close().expect("close column");
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// audit-20261003 hunt-store-5 (D-1528). The `timestamp` leaf's LOGICAL type
+/// was never checked, so a NANOS or MILLIS timestamp, or a MICROS one that is
+/// not adjusted to UTC (a wall clock), decoded silently as "microseconds since
+/// the epoch, UTC": off by ×1000, ÷1000 or +5h30. Each is now refused by name
+/// at the schema gate. An undeclared INT64 and a UTC MICROS timestamp still
+/// open.
+#[test]
+fn a_timestamp_in_another_unit_or_not_in_utc_is_refused_by_name() {
+    use parquet::basic::{LogicalType, TimeUnit};
+    let stamp = |unit, utc| Some(LogicalType::timestamp(utc, unit));
+    for (logical, said) in [
+        (stamp(TimeUnit::NANOS, true), "NANOS"),
+        (stamp(TimeUnit::MILLIS, true), "MILLIS"),
+        (stamp(TimeUnit::MICROS, false), "not adjusted to UTC"),
+    ] {
+        match LakeFile::from_bytes(cash_file_with_timestamp(logical.as_ref())) {
+            Err(LakeError::UnsupportedTimestamp { declared }) => {
+                assert!(declared.contains(said), "{said}: {declared}");
+            }
+            Err(other) => panic!("{said}: refused as the wrong thing: {other:?}"),
+            Ok(_) => panic!("{said}: a timestamp this reader would misread was opened"),
+        }
+    }
+    for clean in [None, stamp(TimeUnit::MICROS, true)] {
+        assert!(
+            LakeFile::from_bytes(cash_file_with_timestamp(clean.as_ref())).is_ok(),
+            "{clean:?} is what this reader decodes"
+        );
+    }
+}

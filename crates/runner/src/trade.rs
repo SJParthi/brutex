@@ -128,7 +128,7 @@ use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
 
-use crate::outcome::{Horizon, SessionBounds, median_step_micros, median_step_micros_over};
+use crate::outcome::{Horizon, SessionBounds, prefix_median_steps_over};
 
 /// The authoritative execution cadence promised by this engine surface.
 ///
@@ -211,6 +211,19 @@ pub struct Occupancy {
     pub exit_bar: usize,
     /// Whether both legs were priceable and therefore have a [`Trade`].
     pub priceable: bool,
+    /// The first bar on `entry_bar..=exit_bar` whose record the evaluator refused,
+    /// as a slice index: [`SliceFacts::first_refused_within`] over this interval.
+    ///
+    /// Kept so a later reader can tell a hole BEFORE an exit from one after it
+    /// without re-reading the slice. Always `None` on a priceable path. No walk
+    /// or grid decision reads it yet (D-1191).
+    pub first_refused: Option<usize>,
+    /// The first bar on `entry_bar + 1..=exit_bar` that follows one or more
+    /// missing minutes, as a slice index: [`SliceFacts::first_missing_within`]
+    /// over this interval. A missing minute is the hole a crossing table
+    /// cannot see, so this is the location only the walk can record. Always
+    /// `None` on a priceable path. No walk or grid decision reads it yet (D-1191).
+    pub first_missing: Option<usize>,
 }
 
 /// Every trade one combination produced, and what was skipped to get there.
@@ -307,10 +320,15 @@ impl Trades {
 /// # Cost
 ///
 /// One pass over the column. Per signal: one mask test, one same-day comparison,
-/// two `costs::fill::Bar` constructions and two `worst_case_fills`, each a fixed
-/// count of integer operations. The forced-close index comes from a table built
-/// once in [`forced_exits`], so no per-signal search walks the session.
-/// `CLAUDE.md` §3 rule 4.
+/// one [`SliceFacts::at_timestamp`] probe in `horizon_bar` (a `HashMap` lookup,
+/// so EXPECTED O(1), not worst-case), and in `round_trip` two
+/// `costs::fill::Bar` constructions and two [`costs::fill::fills_at`] calls —
+/// one at `Anchor::Open`, one at `Anchor::PrintedExtreme`. A signal whose exit
+/// cannot be priced pays at most one more `Bar` and two more `fills_at` in
+/// `entry_is_priceable`. Each is a fixed count of integer operations. The
+/// forced-close index comes from a table built once in [`forced_exits`], so no
+/// per-signal search walks the session. `CLAUDE.md` §3 rule 4. This paragraph
+/// named `worst_case_fills`, which nothing here calls — D-1180.
 ///
 /// **This entry point derives [`SliceFacts`] on the way in, so it is O(bars) and
 /// allocates the median-step sample per CALL.** That is the right cost for a
@@ -347,8 +365,8 @@ pub fn walk(
 /// ratio gate can therefore see.
 ///
 /// **A second per-slice quantity was left in the loop, and it is the more
-/// expensive of the two.** `walk_with` called [`median_step_micros`] on every
-/// entry under a comment reading *"MEASURED ONCE: the bar spacing is a property
+/// expensive of the two.** `walk_with` called `median_step_micros` (test-only
+/// since D-1410) on every entry under a comment reading *"MEASURED ONCE: the bar spacing is a property
 /// of the slice, not of a signal"* — true of the quantity and false of the call,
 /// which happened once per CANDIDATE. That function allocates a `Vec<i64>` of
 /// `bars.len() − 1`; the version the audit found also sorted it. The selection
@@ -378,8 +396,9 @@ pub struct SliceFacts {
     /// [`forced_exits`] over the slice.
     exits: Vec<Option<SquareOff>>,
     /// The authoritative one-minute cadence for fill-sourced execution, or the
-    /// measured native rung cadence for a signal-sourced compatibility walk.
-    step_micros: i64,
+    /// measured native rung cadence for a signal-sourced compatibility walk —
+    /// measured PER BAR over bars `0..=i`, never over the whole slice (D-1410).
+    cadence: Cadence,
     /// The evaluator verdict plus exact whole-minute execution coordinates.
     /// A valid slice shares the column's bitmap through an [`Arc`] clone. An
     /// off-grid slice creates one stricter bitmap here, never per candidate.
@@ -396,15 +415,63 @@ pub struct SliceFacts {
     /// times this, so the shape above is read from the source rather
     /// than measured. `CLAUDE.md` §3 rule 6.
     broken_prefix: Vec<u64>,
+    /// For each bar `i`, the first bar `j >= i` whose record the evaluator
+    /// refused, or the bar count when none follows. One entry per bar plus that
+    /// trailing sentinel, derived from `refused_prefix` once. It turns "where is
+    /// this path's first refused record?" into one read -- D-1191.
+    next_refused: Vec<usize>,
+    /// For each bar `i`, the first bar `j >= i` whose timestamp gap from bar
+    /// `j - 1` is not `step_micros` (one or more minutes missing just before
+    /// it), or the bar count when none follows. Derived from `broken_prefix`
+    /// once, with the same shape as `next_refused` -- D-1191.
+    next_broken: Vec<usize>,
     /// Accepted bars by exact timestamp. Built once per slice so an exit at a
     /// wall-clock deadline is a lookup rather than an H-bar scan.
     at_timestamp: std::collections::HashMap<i64, usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`SliceFacts::of`] derivations run on this thread (test-only probe).
+    ///
+    /// The hoisting doors ([`crate::grid::CellReplayV1`] and
+    /// [`crate::exit_grid_policy::AttestedReplayV1`]) exist so a grid's cells and a
+    /// population's masks do not rebuild these facts; the count is how a test
+    /// proves that rather than reading it off the source. D-0990.
+    static DERIVATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`SliceFacts::of`] derivations run on the calling thread so far.
+#[cfg(test)]
+pub(crate) fn slice_facts_derived_on_this_thread() -> u64 {
+    DERIVATIONS.with(std::cell::Cell::get)
+}
+
+/// Where [`SliceFacts`] gets a bar's cadence from.
+pub(crate) enum Cadence {
+    /// The engine's authoritative cadence, the same at every bar.
+    Fixed(i64),
+    /// A native column's measured cadence, one entry per bar, each over bars
+    /// `0..=i` only ([`prefix_median_steps_over`]).
+    Prefix(Vec<i64>),
+}
+
+impl Cadence {
+    /// The cadence at bar `index`; `0` outside a prefix table.
+    fn at(&self, index: usize) -> i64 {
+        match self {
+            Self::Fixed(step) => *step,
+            Self::Prefix(steps) => steps.get(index).copied().unwrap_or(0),
+        }
+    }
 }
 
 impl SliceFacts {
     /// Derive every execution-slice fact from `bars` and its column, once.
     #[must_use]
     pub fn of(bars: &[Candle], column: &Column) -> Self {
+        #[cfg(test)]
+        DERIVATIONS.with(|count| count.set(count.get() + 1));
         let accepted = column
             .acceptance()
             .filter(|verdict| verdict.len() == bars.len())
@@ -424,10 +491,10 @@ impl SliceFacts {
                         .collect()
                 }
             });
-        let step_micros = match column.sourced() {
-            indicators::column::Sourced::Fill => EXECUTION_MINUTE_MICROS,
+        let cadence = match column.sourced() {
+            indicators::column::Sourced::Fill => Cadence::Fixed(EXECUTION_MINUTE_MICROS),
             indicators::column::Sourced::Signal => {
-                median_step_micros_over(bars, accepted.as_deref())
+                Cadence::Prefix(prefix_median_steps_over(bars, accepted.as_deref()))
             }
         };
         let mut at_timestamp = std::collections::HashMap::with_capacity(bars.len());
@@ -441,6 +508,7 @@ impl SliceFacts {
                 let is_accepted = verdict.get(index).copied().unwrap_or(false);
                 let refused = refused_prefix.last().copied().unwrap_or(0);
                 refused_prefix.push(refused.saturating_add(u64::from(!is_accepted)));
+                let step_micros = cadence.at(index);
                 let broken = prior_timestamp.is_some_and(|prior| {
                     step_micros <= 0 || bar.ts_micros.saturating_sub(prior) != step_micros
                 });
@@ -452,12 +520,16 @@ impl SliceFacts {
                 }
             }
         }
+        let next_refused = next_marked(&refused_prefix);
+        let next_broken = next_marked(&broken_prefix);
         Self {
-            exits: forced_exits_with_step(bars, step_micros, accepted.as_deref()),
-            step_micros,
+            exits: forced_exits_with_steps(bars, |index| cadence.at(index), accepted.as_deref()),
+            cadence,
             accepted,
             refused_prefix,
             broken_prefix,
+            next_refused,
+            next_broken,
             at_timestamp,
         }
     }
@@ -469,10 +541,27 @@ impl SliceFacts {
         &self.exits
     }
 
-    /// The execution/native cadence selected by [`Self::of`], in microseconds.
+    /// The execution/native cadence selected by [`Self::of`] at the slice's
+    /// LAST bar, in microseconds — the whole-slice median for a native column.
+    ///
+    /// A diagnostic of the slice, not a trade's clock: no walk reads it, because
+    /// at an earlier bar it is a look-ahead. Trades read [`Self::step_at`].
     #[must_use]
-    pub const fn step_micros(&self) -> i64 {
-        self.step_micros
+    pub fn step_micros(&self) -> i64 {
+        match &self.cadence {
+            Cadence::Fixed(step) => *step,
+            Cadence::Prefix(steps) => steps.last().copied().unwrap_or(0),
+        }
+    }
+
+    /// The cadence known at bar `index`, measured over bars `0..=index` only.
+    ///
+    /// `0` for an index the slice does not hold, under which every caller
+    /// refuses rather than inventing a timeframe. One bounds-checked read.
+    /// `CLAUDE.md` §3 rule 7, D-1410.
+    #[must_use]
+    pub fn step_at(&self, index: usize) -> i64 {
+        self.cadence.at(index)
     }
 
     /// Did the evaluator accept this exact row, with a whole-minute execution
@@ -510,6 +599,28 @@ impl SliceFacts {
         self.at_timestamp.get(&timestamp).copied()
     }
 
+    /// Does the inclusive range `from..=to` hold a record the evaluator refused?
+    ///
+    /// `to` past the slice is clamped to its last bar, and a reversed range
+    /// holds nothing. Two prefix reads and one subtraction. This is what
+    /// separates a REFUSED record from a MISSING minute when
+    /// [`Self::path_accepts`] says no -- D-1176.
+    #[must_use]
+    pub fn refused_within(&self, from: usize, to: usize) -> bool {
+        let last = self.refused_prefix.len().saturating_sub(2);
+        let to = to.min(last);
+        if from > to {
+            return false;
+        }
+        let before = self.refused_prefix.get(from).copied().unwrap_or(0);
+        let after = self
+            .refused_prefix
+            .get(to.saturating_add(1))
+            .copied()
+            .unwrap_or(before);
+        after > before
+    }
+
     /// Did every bar in the inclusive path `from..=to` pass the evaluator, and
     /// did every adjacent timestamp advance by exactly this slice's cadence?
     ///
@@ -534,6 +645,57 @@ impl SliceFacts {
         };
         after == before && gaps_after == gaps_before
     }
+
+    /// The first bar on the inclusive path `from..=to` whose record the evaluator
+    /// refused, as a slice index (D-1191).
+    ///
+    /// `None` when the path holds no refused record, when the range is reversed
+    /// or starts past the slice, and when no checked acceptance map exists. One
+    /// read. Agrees with [`Self::refused_within`] on whether a refused record is
+    /// there, and also says where.
+    #[must_use]
+    pub fn first_refused_within(&self, from: usize, to: usize) -> Option<usize> {
+        let none = self.next_refused.len().saturating_sub(1);
+        let at = self.next_refused.get(from).copied()?;
+        (at <= to && at < none).then_some(at)
+    }
+
+    /// The first bar on `from + 1..=to` whose timestamp gap from the bar before
+    /// it is not this slice's cadence, so one or more minutes are missing just
+    /// before it, as a slice index (D-1191).
+    ///
+    /// The gap into `from` itself is not on the path and is not reported. `None`
+    /// when every adjacent pair on the path advances by exactly one step, for a
+    /// reversed or out-of-range path, and when no checked acceptance map exists.
+    /// One read. With [`Self::first_refused_within`] it is `None` on both counts
+    /// exactly when [`Self::path_accepts`] holds for an in-range path.
+    #[must_use]
+    pub fn first_missing_within(&self, from: usize, to: usize) -> Option<usize> {
+        let none = self.next_broken.len().saturating_sub(1);
+        let at = self.next_broken.get(from.checked_add(1)?).copied()?;
+        (at <= to && at < none).then_some(at)
+    }
+}
+
+/// For each bar `i` of a prefix count over `bars + 1` entries, the first `j >= i`
+/// at which the count rises, or the bar count when it never does again.
+///
+/// One reverse pass and one in-place reversal, O(B) once per slice (D-1191).
+fn next_marked(prefix: &[u64]) -> Vec<usize> {
+    let bars = prefix.len().saturating_sub(1);
+    let mut next = Vec::with_capacity(prefix.len());
+    next.push(bars);
+    let mut nearest = bars;
+    for (index, pair) in prefix.windows(2).enumerate().rev() {
+        if let [before, after] = pair
+            && after > before
+        {
+            nearest = index;
+        }
+        next.push(nearest);
+    }
+    next.reverse();
+    next
 }
 
 /// [`walk`], over the per-slice facts the caller already derived.
@@ -554,6 +716,33 @@ pub fn walk_over(
     direction: Direction,
     facts: &SliceFacts,
 ) -> Trades {
+    walk_over_from(bars, column, mask, horizon, direction, facts, 0)
+}
+
+/// [`walk_over`], starting at column row `first_row` (D-1186).
+///
+/// Rows before `first_row` are not visited at all, so they contribute no
+/// signal, no block and no count. The answer equals [`walk_over`]'s exactly
+/// when no skipped row could fire: for a mask with at least one bit set, when
+/// every skipped row's bits are zero. That is the shape
+/// `crate::validate::restricted` gives a test fold, whose training rows are
+/// blanked rather than cut so that `sources` keep their meaning. Visiting them
+/// cost O(prefix rows) per candidate for rows that cannot fire. The caller
+/// picks `first_row` once per column and keeps `0` for the empty mask, which
+/// hits a blanked row.
+///
+/// A `first_row` past the column walks nothing. Every index the walk records
+/// (`signal_bar`, `entry_bar`, ...) is still a slice index, never an offset.
+#[must_use]
+pub fn walk_over_from(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    direction: Direction,
+    facts: &SliceFacts,
+    first_row: usize,
+) -> Trades {
     walk_core(
         bars,
         column,
@@ -562,6 +751,7 @@ pub fn walk_over(
         direction,
         facts.exits(),
         facts,
+        first_row,
     )
 }
 
@@ -594,6 +784,7 @@ pub fn walk_expression_over(
         direction,
         facts.exits(),
         facts,
+        0,
     ))
 }
 
@@ -620,11 +811,20 @@ pub fn walk_expression_over(
 ///
 /// # THIS ENTRY POINT IS SUPERSEDED AND STILL REALLOCATES
 ///
-/// It hoists the square-off table and NOT the bar spacing, so even the `Some`
-/// path pays one [`median_step_micros`] — a `Vec<i64>` of `bars.len() − 1` — on
-/// every call. That is another full-slice allocation beside the O(bars) table it
-/// was written to avoid rebuilding, and it is exactly the shape its own
-/// paragraph above warns cannot be seen by a ratio gate.
+/// It hoists the square-off table and NOT the rest of the slice facts, so even
+/// the `Some` path builds one whole [`SliceFacts::of`] on every call: a copy of
+/// the acceptance verdict when a bar is off the minute grid, the cadence (a
+/// per-bar prefix median for a native column, O(B log B), or a constant for a
+/// filled one), a `HashMap` of up to B accepted timestamps, two prefix
+/// vectors of B + 1 and their next-marked tables, and a square-off table of
+/// its own -- so the table passed in spares only the fallback
+/// [`forced_exits`], not the one `SliceFacts` builds. O(B) allocation and at
+/// least O(B) time per call, O(B log B) on a native column. This paragraph
+/// named a per-call `median_step_micros` until D-1486 (fold-1): that function
+/// is test-only since D-1410 and `SliceFacts::of` replaced it here.
+/// **UNVERIFIED as a measurement**: read off `SliceFacts::of`, not timed. It
+/// is exactly the shape the paragraph above warns cannot be seen by a ratio
+/// gate.
 ///
 /// It is kept so every existing caller compiles unchanged. **A per-candidate
 /// loop must move to [`walk_over`]**, which takes both facts and allocates
@@ -658,7 +858,30 @@ pub fn walk_with(
         direction,
         exits,
         &SliceFacts::of(bars, column),
+        0,
     )
+}
+
+/// One occupancy record, with where its path's first refused record and first
+/// missing minute are (D-1191). Two O(1) reads of `facts`; the walk's decisions
+/// do not depend on either. The reads are checked against a brute-force scan by
+/// `runner::trade::slice_facts_locate_the_first_refused_record_and_missing_minute`;
+/// their time is UNVERIFIED as a measurement.
+fn held(
+    signal_bar: usize,
+    entry_bar: usize,
+    exit_bar: usize,
+    priceable: bool,
+    facts: &SliceFacts,
+) -> Occupancy {
+    Occupancy {
+        signal_bar,
+        entry_bar,
+        exit_bar,
+        priceable,
+        first_refused: facts.first_refused_within(entry_bar, exit_bar),
+        first_missing: facts.first_missing_within(entry_bar, exit_bar),
+    }
 }
 
 /// The walk itself, over facts that have already been derived.
@@ -672,6 +895,11 @@ pub fn walk_with(
     reason = "one ordered signal-state machine; splitting its refusal branches \
               would obscure the one-position-at-a-time transition"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight, and the eighth is the D-1186 starting row; the seven before \
+              it are the walk's own inputs and per-slice facts"
+)]
 fn walk_core(
     bars: &[Candle],
     column: &Column,
@@ -680,15 +908,25 @@ fn walk_core(
     direction: Direction,
     exits: &[Option<SquareOff>],
     facts: &SliceFacts,
+    first_row: usize,
 ) -> Trades {
     let h = horizon.as_bars() as usize;
-    let step_micros = facts.step_micros();
     let mut out = Trades::default();
     // The bar the open position exits on. Until the first entry there is none,
     // and a new fill is eligible only strictly after it.
     let mut open_until: Option<usize> = None;
 
-    for (index, (bits, &signal)) in column.bits().iter().zip(column.sources()).enumerate() {
+    // FROM `first_row`, AS SLICES (D-1186). Rows before it are not visited;
+    // `index` stays the column row, so `fires` and every recorded bar are
+    // unchanged for the rows that are.
+    let rows = column
+        .bits()
+        .get(first_row..)
+        .unwrap_or_default()
+        .iter()
+        .zip(column.sources().get(first_row..).unwrap_or_default());
+    for (offset, (bits, &signal)) in rows.enumerate() {
+        let index = first_row.saturating_add(offset);
         if !fires(bits, index) {
             continue;
         }
@@ -778,6 +1016,10 @@ fn walk_core(
         // point unless they supplied one-minute execution. A
         // fill-sourced column already came through `onto_execution`, whose
         // exact timestamp equality selected the immediate one-minute bar.
+        // THE CADENCE KNOWN AT THE FILL BAR, measured on bars `0..=entry`.
+        // A whole-slice median here let bars after the trade decide whether it
+        // was immediate (D-1410).
+        let step_micros = facts.step_at(entry);
         let immediate = match column.sourced() {
             indicators::column::Sourced::Signal => bars
                 .get(signal)
@@ -915,12 +1157,8 @@ fn walk_core(
             if let Some(wanted) = horizon_bar(bars, entry, h, step_micros, facts) {
                 (wanted, false)
             } else {
-                out.occupancy.push(Occupancy {
-                    signal_bar: signal,
-                    entry_bar: entry,
-                    exit_bar: forced.bar,
-                    priceable: false,
-                });
+                out.occupancy
+                    .push(held(signal, entry, forced.bar, false, facts));
                 if !blocked {
                     open_until = Some(forced.bar);
                 }
@@ -932,12 +1170,8 @@ fn walk_core(
                 continue;
             }
         } else {
-            out.occupancy.push(Occupancy {
-                signal_bar: signal,
-                entry_bar: entry,
-                exit_bar: forced.bar,
-                priceable: false,
-            });
+            out.occupancy
+                .push(held(signal, entry, forced.bar, false, facts));
             if !blocked {
                 open_until = Some(forced.bar);
             }
@@ -960,12 +1194,7 @@ fn walk_core(
         // EXTREMUM UNKNOWABLE. Keep the occupied interval, but publish no
         // trade and let the grid retain it as block-only.
         if !facts.path_accepts(entry, exit) {
-            out.occupancy.push(Occupancy {
-                signal_bar: signal,
-                entry_bar: entry,
-                exit_bar: exit,
-                priceable: false,
-            });
+            out.occupancy.push(held(signal, entry, exit, false, facts));
             if !blocked {
                 open_until = Some(exit);
             }
@@ -988,12 +1217,7 @@ fn walk_core(
             // time exit, exactly as `grid::blocks_without_pricing` treats a
             // corrupt bar inside a path.
             if entry_is_priceable(bars, entry, direction, facts) {
-                out.occupancy.push(Occupancy {
-                    signal_bar: signal,
-                    entry_bar: entry,
-                    exit_bar: exit,
-                    priceable: false,
-                });
+                out.occupancy.push(held(signal, entry, exit, false, facts));
                 if !blocked {
                     open_until = Some(exit);
                 }
@@ -1012,12 +1236,7 @@ fn walk_core(
         // grid needs the signals a DIFFERENT exit would have freed -- see that
         // field for what its absence cost.
         out.eligible.push(trade);
-        out.occupancy.push(Occupancy {
-            signal_bar: signal,
-            entry_bar: entry,
-            exit_bar: exit,
-            priceable: true,
-        });
+        out.occupancy.push(held(signal, entry, exit, true, facts));
         if blocked {
             out.while_open = out.while_open.saturating_add(1);
             continue;
@@ -1344,19 +1563,20 @@ mod clock_contract_tests;
 /// not. Both modules read this table rather than keeping parallel spellings.
 #[must_use]
 pub fn forced_exits(bars: &[Candle]) -> Vec<Option<SquareOff>> {
-    forced_exits_with_step(bars, median_step_micros(bars), None)
+    let steps = prefix_median_steps_over(bars, None);
+    forced_exits_with_steps(bars, |index| steps.get(index).copied().unwrap_or(0), None)
 }
 
-/// [`forced_exits`] with the slice's median timeframe already measured.
+/// [`forced_exits`] with the slice's per-bar prefix cadence already measured.
 ///
 /// `SliceFacts` calls this form so its horizon clock and its square-off table
 /// cannot allocate or infer the same slice twice.
-fn forced_exits_with_step(
+fn forced_exits_with_steps(
     bars: &[Candle],
-    step_micros: i64,
+    step_at: impl Fn(usize) -> i64,
     accepted: Option<&[bool]>,
 ) -> Vec<Option<SquareOff>> {
-    let session = SessionBounds::with_step(bars, step_micros, accepted);
+    let session = SessionBounds::with_steps(bars, step_at, accepted);
     (0..bars.len())
         .map(|index| {
             session.last_fill_bar(index).map(|bar| SquareOff {
@@ -1652,6 +1872,168 @@ mod tests {
         );
     }
 
+    /// D-1186: a walk that starts at the first row with a set bit equals the
+    /// full walk for every mask with a bit set, on a column whose earlier rows
+    /// were blanked the way `validate::restricted` blanks a test fold. The
+    /// empty mask fires on a blank row, which is why its caller keeps row 0.
+    #[test]
+    fn a_walk_from_the_first_live_row_equals_the_full_walk() {
+        let (bars, mut column) = swept();
+        let from = column
+            .sources()
+            .get(column.len() / 2)
+            .copied()
+            .expect("a warm column");
+        column.clear_before(from);
+        let facts = super::SliceFacts::of(&bars, &column);
+        let first_live = column
+            .bits()
+            .iter()
+            .position(|bits| *bits != ConditionMask::ZERO)
+            .expect("the unblanked half has set bits");
+        assert!(first_live > 0, "the blanked prefix is skipped");
+        let mut compared = 0;
+        let width = u32::try_from(vocab::table::TABLE.len()).expect("a small table");
+        for bit in 0..width {
+            let mask = ConditionMask::ZERO.with_bit(bit);
+            for direction in [Direction::Long, Direction::Short] {
+                let full = super::walk_over(&bars, &column, &mask, h(5), direction, &facts);
+                let from_live = super::walk_over_from(
+                    &bars,
+                    &column,
+                    &mask,
+                    h(5),
+                    direction,
+                    &facts,
+                    first_live,
+                );
+                assert_eq!(full, from_live, "bit {bit} {direction:?}");
+                compared += usize::from(full.signals > 0);
+            }
+        }
+        assert!(compared > 0, "some mask must actually fire");
+        let empty_full = super::walk_over(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            &facts,
+        );
+        let empty_late = super::walk_over_from(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            &facts,
+            first_live,
+        );
+        assert!(
+            empty_full.signals > empty_late.signals,
+            "the empty mask hits blank rows"
+        );
+        let past = super::walk_over_from(
+            &bars,
+            &column,
+            &ConditionMask::ZERO,
+            h(5),
+            Direction::Long,
+            &facts,
+            usize::MAX,
+        );
+        assert_eq!(
+            past,
+            Trades::default(),
+            "a start past the column walks nothing"
+        );
+    }
+
+    /// THE LOOK-AHEAD D-1182 PINNED, NOW INVERTED — D-1410.
+    ///
+    /// A [`indicators::column::Sourced::Signal`] slice used to take its cadence
+    /// from the median gap over the WHOLE slice, so bars after a signal decided
+    /// whether that signal's next bar counted as "immediate": with fourteen
+    /// thinned two-minute sessions appended to six dense one-minute ones, the
+    /// dense-session signals were refused as `too_late`. D-1182 pinned that
+    /// violation with the instruction that this test be inverted once the
+    /// cadence stopped reading later bars. D-1410 measures it over bars
+    /// `0..=i` only ([`super::SliceFacts::step_at`]), so it is inverted here:
+    /// appending the later sessions changes no trade that completed inside the
+    /// dense prefix. The slice's LAST-bar diagnostic still reads two minutes.
+    #[test]
+    fn a_signal_sourced_cadence_is_not_read_from_bars_after_the_signal() {
+        // The evaluator's first signal falls in the sixth session, so six whole
+        // sessions stay dense and fourteen after them are thinned to two
+        // minutes: about 2,600 two-minute gaps outvote 2,244 one-minute ones.
+        let dense = crate::synthetic::sessions(20);
+        let mut day_starts = dense
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| {
+                let [before, after] = pair else {
+                    return false;
+                };
+                indicators::ist_day(before.ts_micros) != indicators::ist_day(after.ts_micros)
+            })
+            .map(|(index, _)| index + 1);
+        let split = day_starts.nth(5).expect("at least seven sessions");
+        let (dense_part, thinned_part) = dense.split_at(split);
+        let prefix: Vec<_> = dense_part.to_vec();
+        let mut full = prefix.clone();
+        full.extend(
+            thinned_part
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| index % 2 == 1)
+                .map(|(_, bar)| bar),
+        );
+        let alone_column = Column::build(&prefix, &mut evaluator());
+        let full_column = Column::build(&full, &mut evaluator());
+        assert_eq!(alone_column.sourced(), indicators::column::Sourced::Signal);
+        let alone = super::SliceFacts::of(&prefix, &alone_column);
+        let joined = super::SliceFacts::of(&full, &full_column);
+        assert_eq!(alone.step_micros(), 60_000_000);
+        assert_eq!(
+            joined.step_micros(),
+            120_000_000,
+            "premise: the whole slice's median is two minutes"
+        );
+        let last_dense = prefix.len() - 1;
+        assert_eq!(
+            joined.step_at(last_dense),
+            alone.step_at(last_dense),
+            "the cadence at a dense bar is the dense prefix's, whatever follows"
+        );
+        assert_eq!(joined.step_at(last_dense), 60_000_000);
+        for direction in [Direction::Long, Direction::Short] {
+            let on_its_own = walk(
+                &prefix,
+                &alone_column,
+                &ConditionMask::ZERO,
+                h(5),
+                direction,
+            );
+            let with_future = walk(&full, &full_column, &ConditionMask::ZERO, h(5), direction);
+            assert!(on_its_own.reconciles() && with_future.reconciles());
+            assert!(
+                !on_its_own.trades.is_empty(),
+                "the dense sessions trade alone"
+            );
+            let kept: Vec<_> = with_future
+                .trades
+                .iter()
+                .filter(|trade| trade.exit_bar < prefix.len())
+                .copied()
+                .collect();
+            assert_eq!(
+                kept, on_its_own.trades,
+                "{direction:?}: the dense-session trades survive the later bars unchanged"
+            );
+        }
+    }
+
     /// The cadence cannot be learned from damaged evidence. When most stored
     /// neighbours are two minutes apart, the median is two minutes; the engine
     /// still requires the missing one-minute bar and refuses every delayed row.
@@ -1665,7 +2047,7 @@ mod tests {
             .collect();
         let column = Column::build(&bars, &mut evaluator());
         assert_eq!(
-            super::median_step_micros(&bars),
+            crate::outcome::median_step_micros(&bars),
             120_000_000,
             "the adversarial slice must actually have a two-minute inferred cadence"
         );
@@ -2069,6 +2451,112 @@ mod tests {
         }
     }
 
+    /// A slice with one refused record and one missing minute, both a few bars
+    /// after the first signal so held paths cross them.
+    fn holed() -> (Vec<indicators::Candle>, Column, usize, usize) {
+        let mut bars = crate::synthetic::sessions(8);
+        let probe = Column::build(&bars, &mut evaluator());
+        let first = *probe.sources().first().expect("the fixture must sweep");
+        let refused = first.saturating_add(4);
+        let corrupt = bars.get_mut(refused).expect("the fixture is long enough");
+        corrupt.close = corrupt.high.saturating_add(1);
+        // Removing bar `refused + 6` leaves the bar after it at that index, one
+        // minute late.
+        let missing = refused.saturating_add(6);
+        bars.remove(missing);
+        let column = Column::build(&bars, &mut evaluator());
+        (bars, column, refused, missing)
+    }
+
+    /// D-1191. `first_refused_within` and `first_missing_within` are the first
+    /// refused record and the first bar after a missing minute on the path, as a
+    /// scan finds them, for every short path over a slice holding both. Both are
+    /// `None` exactly when `path_accepts` holds.
+    #[test]
+    fn slice_facts_locate_the_first_refused_record_and_missing_minute() {
+        let (bars, column, refused, missing) = holed();
+        let facts = super::SliceFacts::of(&bars, &column);
+        let last = bars.len().saturating_sub(1);
+        let scan_refused =
+            |from: usize, to: usize| (from..=to.min(last)).find(|&at| !facts.accepts(at));
+        let scan_missing = |from: usize, to: usize| {
+            (from.saturating_add(1)..=to.min(last)).find(|&at| {
+                let gap = bars.get(at).map(|bar| bar.ts_micros).unwrap_or_default()
+                    - bars
+                        .get(at.saturating_sub(1))
+                        .map(|bar| bar.ts_micros)
+                        .unwrap_or_default();
+                gap != facts.step_micros()
+            })
+        };
+        assert!(!facts.accepts(refused), "the corrupt record is refused");
+        assert_eq!(
+            scan_missing(missing.saturating_sub(1), missing),
+            Some(missing)
+        );
+        let (mut saw_refused, mut saw_missing) = (false, false);
+        for from in 0..bars.len().saturating_add(2) {
+            for to in from.saturating_sub(2)..from.saturating_add(40) {
+                let (r, m) = (
+                    facts.first_refused_within(from, to),
+                    facts.first_missing_within(from, to),
+                );
+                let expected_r = if from > to {
+                    None
+                } else {
+                    scan_refused(from, to)
+                };
+                let expected_m = if from > to {
+                    None
+                } else {
+                    scan_missing(from, to)
+                };
+                assert_eq!(r, expected_r, "first refused on {from}..={to}");
+                assert_eq!(m, expected_m, "first missing on {from}..={to}");
+                if to <= last && from <= to {
+                    assert_eq!(
+                        r.is_none() && m.is_none(),
+                        facts.path_accepts(from, to),
+                        "{from}..={to}"
+                    );
+                }
+                saw_refused |= r == Some(refused);
+                saw_missing |= m == Some(missing);
+            }
+        }
+        assert!(saw_refused && saw_missing, "both holes were located");
+    }
+
+    /// D-1191. Every occupancy record carries its path's first refused record
+    /// and first missing minute; a priceable path has neither. The walk's
+    /// trades, eligible list and counters are what they were.
+    #[test]
+    fn every_occupancy_record_says_where_its_holes_are() {
+        let (bars, column, refused, missing) = holed();
+        let facts = super::SliceFacts::of(&bars, &column);
+        for direction in [Direction::Long, Direction::Short] {
+            let walked = walk(&bars, &column, &ConditionMask::default(), h(15), direction);
+            assert!(walked.reconciles(), "{direction:?}");
+            let mut located = (false, false);
+            for path in &walked.occupancy {
+                assert_eq!(
+                    path.first_refused,
+                    facts.first_refused_within(path.entry_bar, path.exit_bar)
+                );
+                assert_eq!(
+                    path.first_missing,
+                    facts.first_missing_within(path.entry_bar, path.exit_bar)
+                );
+                if path.priceable {
+                    assert_eq!((path.first_refused, path.first_missing), (None, None));
+                }
+                located.0 |= path.first_refused == Some(refused);
+                located.1 |= path.first_missing == Some(missing);
+            }
+            assert_eq!(located, (true, true), "{direction:?}: both holes are held");
+        }
+    }
+
     /// Both stateful evaluator refusals gate every role a bar can play in a
     /// long or short trade. A refused interior/exit also leaves a conservative
     /// occupancy interval so the next signal cannot overlap an unresolved
@@ -2313,7 +2801,7 @@ mod tests {
         }
         assert_eq!(bars.len(), 105, "the fixture is the real day's bar count");
 
-        let step = super::median_step_micros(&bars);
+        let step = crate::outcome::median_step_micros(&bars);
         assert_eq!(
             step, 60_000_000,
             "one minute, taken as the MEDIAN so the \
@@ -2534,7 +3022,7 @@ mod tests {
         assert_eq!(facts.exits().len(), exits.len());
         assert_eq!(
             facts.step_micros(),
-            super::median_step_micros(&bars),
+            crate::outcome::median_step_micros(&bars),
             "the spacing a caller hoists is the spacing the walk would have \
              measured"
         );
@@ -2751,6 +3239,48 @@ mod tests {
         )
         .expect("the changed printed row remains valid");
         assert_ne!(changed, baseline, "the required 15:09 OHLCV was ignored");
+    }
+
+    /// `walk`'s `# Cost` paragraph names the fill calls the walk actually
+    /// makes. It named `worst_case_fills` while `round_trip` called `fills_at`
+    /// twice and `horizon_bar` probed a hash map it did not mention — D-1180.
+    #[test]
+    fn the_walk_cost_paragraph_names_the_calls_the_walk_makes() {
+        let source = include_str!("trade.rs");
+        let doc = source
+            .split_once("/// Walk one combination's signals into")
+            .and_then(|(_, rest)| rest.split_once("pub fn walk("))
+            .map(|(doc, _)| doc)
+            .expect("walk keeps its doc comment");
+        let cost = doc
+            .split_once("/// # Cost")
+            .map(|(_, cost)| cost)
+            .expect("walk keeps a cost section");
+        assert!(!cost.contains("two `worst_case_fills`"), "stale call named");
+        assert!(cost.contains("fills_at"));
+        assert!(cost.contains("Anchor::Open"));
+        assert!(cost.contains("Anchor::PrintedExtreme"));
+        assert!(cost.contains("at_timestamp"));
+        assert!(cost.contains("EXPECTED O(1)"));
+        // The calls the paragraph names are the calls the code makes.
+        let round_trip = source
+            .split_once("fn round_trip(")
+            .and_then(|(_, rest)| rest.split_once("fn entry_is_priceable("))
+            .map(|(body, _)| body)
+            .expect("round_trip remains bounded by entry_is_priceable");
+        let code: String = round_trip
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+        assert_eq!(code.matches("FillBar::new(").count(), 2);
+        assert_eq!(code.matches("fills_at(").count(), 2);
+        let horizon = source
+            .split_once("fn horizon_bar(")
+            .and_then(|(_, rest)| rest.split_once("fn actual_square_off("))
+            .map(|(body, _)| body)
+            .expect("horizon_bar remains bounded by actual_square_off");
+        assert_eq!(horizon.matches(".at_timestamp(").count(), 1);
     }
 
     /// The shipping sweep path brackets fills only by prices that actually

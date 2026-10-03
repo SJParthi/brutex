@@ -136,11 +136,15 @@ impl Bar {
     /// * [`CostError::InvertedBar`] when the low is above the high. That is not
     ///   a wide bar or a thin one, it is two numbers in the wrong order, and
     ///   swapping them silently would fill both legs off the wrong anchors.
+    /// * [`CostError::OpenOutsideBar`] when the low and the high are in order
+    ///   but the open is outside them.
     ///
     /// A **low** below one tick, or below zero, is deliberately allowed. The
     /// predecessor is explicit that a degenerate low is absorbed by the sell
     /// floor rather than refused, so that a single malformed bar in a backtest
-    /// is a conservative fill and not a crash.
+    /// is a conservative fill and not a crash. The floor belongs to
+    /// [`Anchor::AdverseExtreme`] alone: [`Anchor::PrintedExtreme`] fills AT the
+    /// low with nothing added, so it refuses a sub-tick sell anchor (D-1192).
     ///
     /// # Examples
     ///
@@ -175,10 +179,14 @@ impl Bar {
         // `low <= open <= high` and this module expressed it as `low <= high`,
         // on the grounds that the open never entered a computation. It does
         // now, so an open outside its own bar is refused rather than filled at.
+        // It is refused under its own name (W3-costs1-2, D-0772): the high and
+        // the low are in order here, so `InvertedBar` would put the open in
+        // the low's field and state a falsehood.
         if open.raw() < low.raw() || open.raw() > high.raw() {
-            return Err(CostError::InvertedBar {
+            return Err(CostError::OpenOutsideBar {
+                open: open.raw(),
                 high: high.raw(),
-                low: open.raw(),
+                low: low.raw(),
             });
         }
         Ok(Self { open, high, low })
@@ -372,7 +380,8 @@ impl Anchor {
 /// # Errors
 ///
 /// Every error [`worst_case_fills`] returns, plus one of its own:
-/// [`CostError::BelowTick`] when an open is under one [`TICK`].
+/// [`CostError::BelowTick`] when an open is under one [`TICK`], or when a
+/// [`Anchor::PrintedExtreme`] sell leg -- a printed low -- is (D-1192).
 ///
 /// **That refusal is deliberate and is the alternative to a silent floor.** The
 /// worst-case sell has a floor because its anchor is a bar LOW, which may
@@ -422,14 +431,32 @@ pub fn fills_at(
         // `worst_case_fills` picks the identical two prices and then moves each
         // one tick further against the position. That tick is a modelled cost;
         // here the anchors ARE the fills, so the pair is exactly two numbers the
-        // bar printed. No floor is applied and none is needed: `Bar::new` has
-        // already refused a sub-tick high, and a low it accepted is a price that
-        // traded.
+        // bar printed. No floor is applied: `Bar::new` has already refused a
+        // sub-tick high, so the buy leg is at least a tick.
+        //
+        // THE SELL LEG IS A LOW, AND `Bar::new` DELIBERATELY ACCEPTS ANY LOW.
+        // This arm used to say "a low it accepted is a price that traded", and
+        // that was false: `Bar::new` admits a low below a tick or below zero so
+        // the worst case can absorb it with its floor. Here there is no floor,
+        // so a low of -100 priced as a real fill at -₹1.00, and a low of
+        // `i64::MIN` reached `trip::position` and overflowed its subtraction
+        // (D-1192). Flooring it upward would flatter the seller -- the same
+        // reason the open arm below refuses -- so a sub-tick sell anchor is
+        // refused by name, which also makes `Fills`' "sell at least one tick"
+        // invariant true for every constructor. D-0771 (W3-costs1-1) fixed the
+        // same defect on a parallel branch by flooring the sell at one tick;
+        // the merged tree keeps this refusal instead, for the reason above.
         Anchor::PrintedExtreme => {
             let (buy, sell) = match direction {
                 Direction::Long => (entry.high, exit.low),
                 Direction::Short => (exit.high, entry.low),
             };
+            if sell.raw() < TICK.raw() {
+                return Err(CostError::BelowTick {
+                    quantity: "sell printed-extreme fill",
+                    value: sell.raw(),
+                });
+            }
             Ok(Fills::at_open(buy, sell))
         }
         Anchor::Open => {
@@ -1075,5 +1102,141 @@ mod tests {
     fn each_anchor_names_itself_for_the_audit() {
         assert_eq!(Anchor::Open.as_str(), "best");
         assert_eq!(Anchor::AdverseExtreme.as_str(), "worst");
+    }
+
+    /// D-1192. `PrintedExtreme` fills the sell leg AT the printed low with no
+    /// floor, and `Bar::new` admits any low. A sub-tick, zero, negative or
+    /// `i64::MIN` low must refuse by name rather than price a fill nobody
+    /// traded at -- or, at `i64::MIN`, panic downstream in `trip::position`.
+    #[test]
+    fn a_printed_extreme_sell_below_one_tick_refuses_by_name() {
+        let normal = Bar::flat(p(100_00)).expect("legal");
+        for low in [i64::MIN, i64::MIN + 1, -100, -1, 0, 1, 4] {
+            let degenerate = Bar::new(p(100_00), p(100_00), p(low)).expect("a legal low");
+            let refused = Err(CostError::BelowTick {
+                quantity: "sell printed-extreme fill",
+                value: low,
+            });
+            // Long sells the EXIT low; short sells the ENTRY low.
+            assert_eq!(
+                fills_at(normal, degenerate, Direction::Long, Anchor::PrintedExtreme),
+                refused
+            );
+            assert_eq!(
+                fills_at(degenerate, normal, Direction::Short, Anchor::PrintedExtreme),
+                refused
+            );
+            // The OTHER bar's low is not a fill leg and must not refuse.
+            assert!(fills_at(degenerate, normal, Direction::Long, Anchor::PrintedExtreme).is_ok());
+            assert!(fills_at(normal, degenerate, Direction::Short, Anchor::PrintedExtreme).is_ok());
+            // The worst case still ABSORBS a modest one with its floor; at the
+            // `i64` edge its realized slippage leaves `i64` and is refused as
+            // an overflow by name, which is unchanged by D-1192.
+            let worst = fills_at(normal, degenerate, Direction::Long, Anchor::AdverseExtreme);
+            if low >= -100 {
+                assert_eq!(worst.map(Fills::sell), Ok(TICK));
+            } else {
+                assert!(matches!(worst, Err(CostError::Overflow { .. })));
+            }
+        }
+        // Exactly one tick is the boundary and is a real fill, unchanged.
+        let at_tick = Bar::new(p(100_00), p(100_00), TICK).expect("legal");
+        let fills = fills_at(normal, at_tick, Direction::Long, Anchor::PrintedExtreme)
+            .expect("a one-tick low is a price");
+        assert_eq!(fills.sell(), TICK);
+        assert_eq!(fills.buy().raw(), 100_00);
+        assert_eq!(fills.realized_slip_per_unit().raw(), 0);
+        // Idempotent: the same inputs give the same answer twice.
+        assert_eq!(
+            fills_at(normal, at_tick, Direction::Long, Anchor::PrintedExtreme),
+            Ok(fills)
+        );
+    }
+
+    /// W3-costs1-1 and ET-strategies-trades-ranking-costs-4, as the merged
+    /// tree holds them: a low [`Bar::new`] admits below one tick is not a
+    /// price that traded, so the printed reading's sell REFUSES it by name
+    /// (D-1192 superseded D-0771's one-tick floor on this anchor), on both
+    /// directions, while the worst case still absorbs it with its floor. A low
+    /// of one tick or more is a print and is left exactly where it is.
+    #[test]
+    fn the_printed_extreme_sell_refuses_a_sub_tick_low_and_keeps_a_printed_one() {
+        let healthy = bar(125_00, 118_00);
+        for low in [TICK.raw() - 1, 0, -5_000, i64::MIN] {
+            let degenerate = bar(120_00, low);
+            for (direction, entry, exit) in [
+                (Direction::Long, healthy, degenerate),
+                (Direction::Short, degenerate, healthy),
+            ] {
+                assert_eq!(
+                    fills_at(entry, exit, direction, Anchor::PrintedExtreme),
+                    Err(CostError::BelowTick {
+                        quantity: "sell printed-extreme fill",
+                        value: low,
+                    }),
+                    "{direction:?}: low {low}"
+                );
+                // The worst case, where it computes at all, sells at its floor
+                // and never above it.
+                if let Ok(adverse) = fills_at(entry, exit, direction, Anchor::AdverseExtreme) {
+                    assert!(adverse.sell() <= TICK, "{direction:?}: low {low}");
+                }
+            }
+        }
+        for low in [TICK.raw(), TICK.raw() + 1, 118_00] {
+            let printed = fills_at(
+                healthy,
+                bar(120_00, low),
+                Direction::Long,
+                Anchor::PrintedExtreme,
+            )
+            .expect("legal bars");
+            assert_eq!(printed.sell(), p(low), "low {low}");
+            assert_eq!(printed.buy(), healthy.high(), "the buy is a print");
+            assert_eq!(printed.realized_slip_per_unit(), p(0));
+        }
+    }
+
+    /// W3-costs1-2: an open outside its own bar is refused under its own name,
+    /// with the open, the high and the low each in its own field, and not as
+    /// an inverted bar with the open in the low's place.
+    #[test]
+    fn an_open_outside_its_bar_is_reported_as_that_and_not_as_an_inverted_bar() {
+        let below = Bar::new(p(98_00), p(101_00), p(99_00)).expect_err("below the low");
+        assert_eq!(
+            below.to_string(),
+            "a bar's open 9800 is outside its own range 9900..=10100; \
+             it is refused rather than filled at"
+        );
+        let above = Bar::new(p(102_00), p(101_00), p(99_00)).expect_err("above the high");
+        assert_eq!(
+            above.to_string(),
+            "a bar's open 10200 is outside its own range 9900..=10100; \
+             it is refused rather than filled at"
+        );
+        assert_eq!(
+            below,
+            CostError::OpenOutsideBar {
+                open: 98_00,
+                high: 101_00,
+                low: 99_00
+            }
+        );
+        assert_eq!(
+            above,
+            CostError::OpenOutsideBar {
+                open: 102_00,
+                high: 101_00,
+                low: 99_00
+            }
+        );
+        // An inverted bar is still reported as one, whatever its open.
+        assert_eq!(
+            Bar::new(p(100_00), p(99_00), p(101_00)),
+            Err(CostError::InvertedBar {
+                high: 99_00,
+                low: 101_00
+            })
+        );
     }
 }

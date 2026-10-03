@@ -264,6 +264,30 @@ pub enum RollingError {
         /// Which field.
         field: &'static str,
     },
+    /// A count cell that is not a non-negative whole number, or that is the
+    /// store's own null sentinel. GAP16-22, D-0952.
+    Uncountable {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
+    /// A price cell that is negative, or is not zero and snaps to zero.
+    /// GAP16-23, D-1492.
+    NotAPrice {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
+    /// A timestamp cell that is not a whole number of seconds whose
+    /// microseconds fit `i64`, or is `i64::MIN`. c4a-3, D-1491.
+    Unstampable {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
 }
 
 impl core::fmt::Display for RollingError {
@@ -308,6 +332,25 @@ impl core::fmt::Display for RollingError {
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
             }
+            Self::Uncountable { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a non-negative whole \
+                 count, or is i64::MIN, the store's open-interest null sentinel \
+                 (CLAUDE.md §7). Refused rather than stored as a zero, a \
+                 truncation or an absence the vendor did not state"
+            ),
+            Self::NotAPrice { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is below zero or is not zero \
+                 and smaller than half a paisa. Neither is a price: stored, it \
+                 would read as a negative or as a zero the vendor did not send"
+            ),
+            Self::Unstampable { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a whole number of \
+                 epoch seconds whose microseconds fit an i64. Refused rather than \
+                 filed at the epoch or saturated to the end of time"
+            ),
         }
     }
 }
@@ -529,17 +572,31 @@ pub fn read(
 
     let mut rows = Vec::with_capacity(stamps.len());
     for at in 0..stamps.len() {
-        let ts_secs = number(stamps, at);
         let bar = Bar {
             // SECONDS ON THE WIRE, MICROSECONDS IN THE STORE. The same
             // conversion `TimestampEncoding::EpochSecondsUtc` names, done here
             // because this reader does not go through the CSV path that owns it.
-            ts_micros: ts_secs.saturating_mul(1_000_000),
+            //
+            // REFUSED, NEVER DEFAULTED OR SATURATED (c4a-3, W1-pull3-7,
+            // D-1491). This read `number`, which answered `0` for a `null` or
+            // text cell — a bar filed at the epoch — and `saturating_mul`
+            // turned a stamp past the microsecond range into `i64::MAX`.
+            ts_micros: stamp(stamps.get(at), f.timestamp)?,
             open: paisa(open, at, scale, "open")?,
             high: paisa(high, at, scale, "high")?,
             low: paisa(low, at, scale, "low")?,
             close: paisa(close, at, scale, "close")?,
-            volume: number(volume, at),
+            // A COUNT, READ THE WAY OPEN INTEREST IS (c4a-3, D-1491). `number`
+            // answered `0` for a text or `null` cell and passed a negative
+            // through. A `null` is refused too: the columnar intraday path for
+            // the same vendor refuses a null volume (`http::one_number`), and
+            // no vendor document says a null volume here means zero.
+            volume: count(
+                volume
+                    .get(at)
+                    .ok_or(RollingError::NotAnArray { field: f.volume })?,
+                f.volume,
+            )?,
             // A NULL OI **CELL** IS ABSENT, NOT ZERO.
             //
             // `map_or(OI_NULL, ..)` covers only the whole array being missing —
@@ -553,10 +610,16 @@ pub fn read(
             // sentinels it; open interest was the one of the three that
             // collapsed absence into a real number. `CLAUDE.md` §7 gives it a
             // sentinel precisely so the two can be told apart.
-            open_interest: oi.map_or(OI_NULL, |a| match a.get(at) {
+            //
+            // AND A CELL THAT IS PRESENT BUT NOT A COUNT IS REFUSED. `number`
+            // also answered `0` for `"4200"` or `true`, truncated `1234.5`, and
+            // passed `i64::MIN` straight through — which IS `OI_NULL`, so a
+            // number the vendor sent was filed as the absence it did not
+            // state. GAP16-22, D-0952.
+            open_interest: match oi.and_then(|a| a.get(at)) {
                 None | Some(serde_json::Value::Null) => OI_NULL,
-                Some(_) => number(a, at),
-            }),
+                Some(cell) => count(cell, f.open_interest)?,
+            },
         };
         let overlay = Overlay {
             ts_micros: bar.ts_micros,
@@ -627,23 +690,66 @@ fn optional<'a>(
     }
 }
 
-/// One integer out of an array, or zero.
+/// One timestamp cell, in microseconds, or a refusal naming it.
 ///
-/// Zero rather than a refusal because these are counts — a volume or an open
-/// interest — where the vendor writing nothing and writing zero mean the same
-/// thing, and the NULL case is handled one level up by the array being absent.
-fn number(list: &[serde_json::Value], at: usize) -> i64 {
-    let Some(cell) = list.get(at) else {
-        return 0;
+/// Seconds on the wire: an integer, or a decimal that is a whole number. A
+/// `null`, text, a fraction, `i64::MIN`, or a value whose microseconds do not
+/// fit `i64` is refused. A negative is NOT refused: `session::IstMoment`
+/// accepts `-19_800..0` as 1970-01-01 IST, and the session filter is the one
+/// authority on which stamps are sessions (`http::one_number` keeps the same
+/// rule). It replaced `number`, which answered `0` — the epoch — for every cell
+/// it could not read (c4a-3, W1-pull3-7, D-1491).
+fn stamp(cell: Option<&serde_json::Value>, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = || RollingError::Unstampable {
+        field,
+        text: cell.map_or_else(|| "an absent cell".to_owned(), serde_json::Value::to_string),
     };
-    if let Some(whole) = cell.as_i64() {
-        return whole;
+    let cell = cell.ok_or_else(refuse)?;
+    let seconds = if let Some(whole) = cell.as_i64() {
+        whole
+    } else {
+        let number = cell.as_number().ok_or_else(refuse)?;
+        let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
+        if hundredths % 100 != 0 {
+            return Err(refuse());
+        }
+        hundredths / 100
+    };
+    if seconds == i64::MIN {
+        return Err(refuse());
     }
-    // A COUNT WRITTEN WITH A DECIMAL POINT IS STILL A COUNT — `1234.0`. Read
-    // through its TEXT rather than through an `f64`, because `float_arithmetic`
-    // is denied workspace-wide and because the text is what the vendor sent:
-    // `csv::paisa` shifts two places and the count is the whole part of that.
-    crate::csv::paisa(&cell.to_string()).map_or(0, |hundredths| hundredths / 100)
+    seconds.checked_mul(1_000_000).ok_or_else(refuse)
+}
+
+/// One count cell — open interest or volume — as a count, or a refusal naming it.
+///
+/// The same rule `http::one_number` applies on the intraday path: an integer
+/// is the value, a decimal is accepted only when it is a whole number, and
+/// `i64::MIN` is refused because it is [`OI_NULL`]. A negative is refused too,
+/// because `store::format::Bar::counts_are_sane` would refuse it one crate
+/// later with no record of which cell it came from. GAP16-22, D-0952.
+///
+/// An open-interest `null` never reaches here: the caller reads it as the
+/// sentinel. A volume `null` does, and is refused (c4a-3, D-1491).
+fn count(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = || RollingError::Uncountable {
+        field,
+        text: cell.to_string(),
+    };
+    let whole = if let Some(whole) = cell.as_i64() {
+        whole
+    } else {
+        let number = cell.as_number().ok_or_else(refuse)?;
+        let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
+        if hundredths % 100 != 0 {
+            return Err(refuse());
+        }
+        hundredths / 100
+    };
+    if whole < 0 {
+        return Err(refuse());
+    }
+    Ok(whole)
 }
 
 /// One price out of an array, in paisa.
@@ -656,9 +762,15 @@ fn paisa(
     let cell = list
         .get(at)
         .ok_or(RollingError::Unrepresentable { field })?;
-    match scale {
+    let not_a_price = || RollingError::NotAPrice {
+        field,
+        text: cell.to_string(),
+    };
+    let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
-        PriceScale::Paisa => cell.as_i64().ok_or(RollingError::Unrepresentable { field }),
+        PriceScale::Paisa => cell
+            .as_i64()
+            .ok_or(RollingError::Unrepresentable { field })?,
         // THE TEXT IS THE TRUTH, and `core`'s half-up reader owns the rule —
         // the same sentence `http::one_price` writes over the same conversion.
         //
@@ -676,10 +788,31 @@ fn paisa(
         // as text has an exact decimal the vendor wrote, and routing it through
         // an f64 to shift two places introduces a representation error into a
         // value that had none. The reader below walks the text digit by digit.
-        PriceScale::Rupees => brutex_core::price::Paisa::from_rupee_text_half_up(&cell.to_string())
-            .map(brutex_core::price::Paisa::raw)
-            .map_err(|_| RollingError::Unrepresentable { field }),
+        PriceScale::Rupees => {
+            let text = cell.to_string();
+            let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
+                .map(brutex_core::price::Paisa::raw)
+                .map_err(|_| RollingError::Unrepresentable { field })?;
+            // A NON-ZERO VALUE THAT SNAPS TO ZERO IS REFUSED, the guard
+            // `http::one_price` has always had and this reader did not
+            // (GAP16-23, D-1492). `0.0001` and `-0.001` would otherwise be
+            // stored as a real zero price, and the negative one would pass the
+            // sign guard below because it is already zero. The test is on the
+            // text: a value written with a non-zero digit is not zero.
+            if snapped == 0 && text.bytes().any(|b| b.is_ascii_digit() && b != b'0') {
+                return Err(not_a_price());
+            }
+            snapped
+        }
+    };
+    // A NEGATIVE PRICE IS NOT A PRICE (GAP16-23, D-1492): the same refusal
+    // `http::one_price` makes, on both scales. Nothing this build reads trades
+    // below zero, so a negative names a wrong `PriceScale` or a field that is
+    // not a price. A spot or strike of zero is still accepted, as on that path.
+    if paisa < 0 {
+        return Err(not_a_price());
     }
+    Ok(paisa)
 }
 
 /// A volatility as millionths, or the null sentinel when it will not read.
@@ -812,6 +945,41 @@ mod tests {
         let call =
             read(body, &spec(), "CALL", PriceScale::Rupees).expect("the answered side reads");
         assert_eq!(call.len(), 1);
+    }
+
+    /// audit-20261003 hunt-pull-2 (D-1530). A rupee price that is not zero
+    /// and is smaller than half a paisa, or that is below zero, is refused
+    /// rather than snapped to a clean zero. `http::one_price` refuses exactly
+    /// this; the rolling decoder stored `0.004` and `-0.004` as a price of 0,
+    /// and the negative one thereby slipped past every below-zero check.
+    #[test]
+    fn a_sub_half_paisa_or_negative_rupee_price_is_refused_not_snapped_to_zero() {
+        for cell in ["0.004", "-0.004", "-0.01", "-354"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            // The refusal is D-1492's `NotAPrice`, which landed on the same
+            // guard from the other audit; this test pins that it names the cell.
+            assert_eq!(
+                read(&body, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+                Err(RollingError::NotAPrice {
+                    field: "open",
+                    text: cell.to_owned(),
+                }),
+                "{cell} is not a price this decoder may store"
+            );
+        }
+        // A real zero, however it is written, is still a price.
+        for cell in ["0", "0.0", "0.00", "-0.0"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
+                .unwrap_or_else(|why| panic!("{cell} is a real zero: {why}"));
+            assert_eq!(rows.len(), 1, "{cell}");
+        }
     }
 
     /// An absent side keeps its refusal.
@@ -1164,5 +1332,183 @@ mod tests {
             stock * s.sides.len() * s.expiry_flags.len() * s.expiry_codes.len(),
             84
         );
+    }
+
+    /// One rolling body whose single `oi` cell is `cell`, read as a CALL.
+    fn with_oi(cell: &str) -> Result<Vec<Row>, RollingError> {
+        let body = format!(
+            r#"{{"data":{{"ce":{{
+            "timestamp":[1700000000],
+            "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+            "volume":[1],"oi":[{cell}]
+        }}}}}}"#
+        );
+        read(&body, &spec(), "CALL", PriceScale::Rupees)
+    }
+
+    /// **AN OPEN-INTEREST CELL THAT IS NOT A COUNT IS REFUSED, NEVER STORED.**
+    ///
+    /// GAP16-22. `number` answered `0` for a cell it could not read, truncated
+    /// `1234.5` to `1234`, and passed the literal `i64::MIN` through — which is
+    /// `OI_NULL`, so a vendor's number was filed as the store's absence. Each
+    /// of those is a fabricated reading in a column `Bar::oi()` reports as
+    /// measured. The controls pin what must NOT change: `0` is a real zero,
+    /// `null` is the sentinel, and a whole count spelled `12345.0` is 12,345.
+    ///
+    /// `i64::MIN` and `u64::MAX` are spelled through `to_string`, and the
+    /// string and whole-count cells use `12345`, which Gate 1d already
+    /// declares: a quoted digit run under `crates/pull` that Gate 1d does not
+    /// declare fails it as a segment-shaped literal.
+    #[test]
+    fn an_open_interest_cell_that_is_not_a_count_is_refused() {
+        for (cell, why) in [
+            (r#""12345""#.to_owned(), "a string is not a count"),
+            ("1234.5".to_owned(), "a fraction is not a count"),
+            (i64::MIN.to_string(), "the store's own null sentinel"),
+            (u64::MAX.to_string(), "past i64"),
+            ("true".to_owned(), "a boolean is not a count"),
+            ("-5".to_owned(), "a count is never negative"),
+        ] {
+            let cell = cell.as_str();
+            let got = with_oi(cell);
+            assert!(
+                matches!(
+                    &got,
+                    Err(RollingError::Uncountable { field: "oi", text }) if text == cell
+                ),
+                "{why}: {cell} gave {got:?}"
+            );
+        }
+        let said = with_oi("1234.5").expect_err("refused").to_string();
+        assert!(said.contains("`oi`") && said.contains("1234.5"), "{said}");
+        let sentinel = with_oi(&i64::MIN.to_string())
+            .expect_err("refused")
+            .to_string();
+        assert!(sentinel.contains("null sentinel"), "{sentinel}");
+
+        for (cell, want) in [
+            ("0", 0),
+            ("12345", 12345),
+            ("12345.0", 12345),
+            ("null", OI_NULL),
+        ] {
+            let rows = with_oi(cell).unwrap_or_else(|e| panic!("{cell}: {e}"));
+            assert_eq!(rows[0].bar.open_interest, want, "{cell}");
+        }
+    }
+
+    /// An ordinary epoch-seconds stamp for the cell tests below.
+    const STAMP: i64 = 1_700_000_000;
+
+    /// One rolling CALL body built from the given timestamp, volume and close
+    /// cells, one row.
+    fn with_cells(stamp: &str, volume: &str, close: &str) -> Result<Vec<Row>, RollingError> {
+        let body = format!(
+            r#"{{"data":{{"ce":{{
+            "timestamp":[{stamp}],
+            "open":[100.0],"high":[100.0],"low":[0.0],"close":[{close}],
+            "volume":[{volume}]
+        }}}}}}"#
+        );
+        read(&body, &spec(), "CALL", PriceScale::Rupees)
+    }
+
+    /// **AN UNREADABLE TIMESTAMP OR VOLUME IS REFUSED, NEVER FILED AS ZERO**
+    /// (c4a-3, W1-pull3-7, D-1491).
+    ///
+    /// `number` answered `0` for a `null` or text stamp — a bar at the epoch —
+    /// and `saturating_mul` turned a stamp past the microsecond range into
+    /// `i64::MAX`. A text volume became `0` and a negative one was accepted.
+    /// The extremes: the largest stamp that fits and the first that does not,
+    /// `i64::MIN`, `-19_800` (a real 1970 IST moment, still accepted), and a
+    /// whole-number decimal, still accepted as on the intraday path.
+    #[test]
+    fn an_unreadable_stamp_or_volume_is_refused_and_never_filed_as_zero() {
+        let last = i64::MAX / 1_000_000;
+        for (stamp, why) in [
+            ("null".to_owned(), "a null stamp"),
+            (r#""x""#.to_owned(), "a text stamp"),
+            (format!("{STAMP}.5"), "a fractional second"),
+            ((last + 1).to_string(), "microseconds past i64"),
+            (9_999_999_999_999_i64.to_string(), "the probe's stamp"),
+            (i64::MIN.to_string(), "the null sentinel"),
+            (u64::MAX.to_string(), "past i64"),
+        ] {
+            let got = with_cells(&stamp, "1", "100.0");
+            assert!(
+                matches!(&got, Err(RollingError::Unstampable { field: "timestamp", text }) if *text == stamp),
+                "{why}: {stamp} gave {got:?}"
+            );
+        }
+        for (stamp, want) in [
+            (last.to_string(), last * 1_000_000),
+            ((-19_800_i64).to_string(), -19_800_000_000),
+            (format!("{STAMP}.0"), STAMP * 1_000_000),
+            ("0".to_owned(), 0),
+        ] {
+            let rows = with_cells(&stamp, "1", "100.0").unwrap_or_else(|e| panic!("{stamp}: {e}"));
+            assert_eq!(rows[0].bar.ts_micros, want, "{stamp}");
+        }
+        for (volume, why) in [
+            (r#""abc""#, "a text volume"),
+            ("-1", "a negative volume"),
+            ("null", "a null volume"),
+            ("2.5", "a fractional volume"),
+        ] {
+            let got = with_cells(&STAMP.to_string(), volume, "100.0");
+            assert!(
+                matches!(&got, Err(RollingError::Uncountable { field: "volume", text }) if text == volume),
+                "{why}: {volume} gave {got:?}"
+            );
+        }
+        let neg = i64::MIN.to_string();
+        assert!(matches!(
+            with_cells(&STAMP.to_string(), &neg, "100.0"),
+            Err(RollingError::Uncountable {
+                field: "volume",
+                ..
+            })
+        ));
+        for (volume, want) in [("0", 0), ("7.0", 7), (&*i64::MAX.to_string(), i64::MAX)] {
+            let rows = with_cells(&STAMP.to_string(), volume, "100.0")
+                .unwrap_or_else(|e| panic!("{volume}: {e}"));
+            assert_eq!(rows[0].bar.volume, want, "{volume}");
+        }
+        let said = with_cells("null", "1", "100.0")
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            said.contains("`timestamp`") && said.contains("null"),
+            "{said}"
+        );
+    }
+
+    /// **A NEGATIVE PRICE, OR ONE THAT SNAPS TO A ZERO IT IS NOT, IS REFUSED**
+    /// (GAP16-23, D-1492), the two guards `http::one_price` has. `0`, `0.00`
+    /// and `-0.0` are a real zero and stay one; half a paisa rounds up to one.
+    #[test]
+    fn a_rolling_price_below_zero_or_snapping_to_a_false_zero_is_refused() {
+        for close in ["-5", "-0.001", "0.0001", "0.004", "-100.25"] {
+            let got = with_cells(&STAMP.to_string(), "1", close);
+            assert!(
+                matches!(&got, Err(RollingError::NotAPrice { field: "close", text }) if text == close),
+                "{close} gave {got:?}"
+            );
+        }
+        for (close, want) in [
+            ("0", 0),
+            ("0.00", 0),
+            ("-0.0", 0),
+            ("0.005", 1),
+            ("100.25", 10_025),
+        ] {
+            let rows = with_cells(&STAMP.to_string(), "1", close)
+                .unwrap_or_else(|e| panic!("{close}: {e}"));
+            assert_eq!(rows[0].bar.close, want, "{close}");
+        }
+        let said = with_cells(&STAMP.to_string(), "1", "-5")
+            .expect_err("refused")
+            .to_string();
+        assert!(said.contains("`close`") && said.contains("-5"), "{said}");
     }
 }

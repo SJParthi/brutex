@@ -531,6 +531,59 @@ fn eligibility_does_not_certify_an_unmeasured_calendar_but_source_is_preserved()
     assert!(!again.failures.is_empty());
 }
 
+/// **A WINDOW PAST THE CALENDAR IS ONE CLAUSE PER DAY IN EACH RUNG'S
+/// REFUSAL, NOT ONE PER BUCKET.** o1api-44, D-1201.
+///
+/// Five weekdays from 2026-09-07, a whole session each. The minute bars are
+/// stored and no derived rung is. On main each rung's refusal joined one
+/// "incomplete or invalid minute coverage" clause per bucket (900 at two
+/// minutes, 1,875 at one) after the day sentences, and each clause was also a
+/// `pull.derive` warning. Now every rung's refusal names each day once.
+#[test]
+fn a_window_past_the_calendar_names_each_day_once_per_rung() {
+    use pull::session::{Day, IST_OFFSET_SECS, Window};
+    let scratch = Scratch::new("PAST-CALENDAR-WINDOW");
+    let first = Day::new(2026, 9, 7).unwrap();
+    let last = Day::new(2026, 9, 11).unwrap();
+    let mut req = request();
+    req.window = Window::new(first, last).unwrap();
+    let mut rows = Vec::new();
+    for d in 7..=11 {
+        let day = Day::new(2026, 9, d).unwrap();
+        let open = i64::from(day.days_from_epoch()) * 86_400 - IST_OFFSET_SECS + 555 * 60;
+        let mut member = session_member();
+        for (index, row) in member.rows.iter_mut().enumerate() {
+            row.timestamp = open + i64::try_from(index).unwrap() * 60;
+        }
+        rows.extend(member.rows);
+    }
+    let raw = pull::fetch::RawWindow { rows };
+    let done = pull::ingest::from_window(&raw, "NIFTY", "test", &scratch.0, plan(&req));
+    assert_eq!(done.bars_committed, 5 * 375, "the minute source is kept");
+    assert_eq!(done.derived_files, 0, "and nothing is derived from it");
+    let refusals: Vec<_> = done
+        .failures
+        .iter()
+        .filter(|f| f.why.contains("folded to no complete bars"))
+        .collect();
+    assert!(!refusals.is_empty(), "{:?}", done.failures);
+    for refusal in refusals {
+        assert!(
+            !refusal.why.contains("incomplete or invalid"),
+            "no per-bucket coverage clause: {} bytes, starting {:?}",
+            refusal.why.len(),
+            refusal.why.get(..300)
+        );
+        assert_eq!(
+            refusal.why.matches("UNVERIFIED").count(),
+            5,
+            "one clause per day: {}",
+            refusal.why
+        );
+        assert!(refusal.why.len() < 2_000, "{} bytes", refusal.why.len());
+    }
+}
+
 #[test]
 fn request_minutes_skip_closed_days_but_name_unverified_sessions() {
     use pull::session::{Day, Window};
@@ -1240,4 +1293,195 @@ fn future_derived_files_preserve_the_dated_regular_session() {
             );
         }
     }
+}
+
+// ===========================================================================
+// docs/06-limits.md's D-0955 section, held to the source it describes
+// ===========================================================================
+
+const LIMITS: &str = include_str!("../../../docs/06-limits.md");
+const INGEST: &str = include_str!("../src/ingest.rs");
+const CASH_CACHE: &str = include_str!("../src/cash_session_cache.rs");
+const SERVER: &str = include_str!("../../api/src/server.rs");
+
+/// The D-0955 section, from its heading to the next `## ` heading or the end.
+fn d_0955_section() -> &'static str {
+    let from = LIMITS
+        .split_once(
+            "## Pull ingest, fold and cache costs that grow with the month or the census — D-0955",
+        )
+        .expect("docs/06-limits.md has the D-0955 section")
+        .1;
+    from.split_once("\n## ").map_or(from, |(own, _)| own)
+}
+
+/// The bullet that opens with `* **{id} — `, whitespace collapsed.
+fn d_0955_bullet(id: &str) -> String {
+    let head = format!("* **{id} — ");
+    let from = d_0955_section()
+        .split_once(head.as_str())
+        .unwrap_or_else(|| panic!("the D-0955 section has a bullet for {id}"))
+        .1;
+    let end = ["\n* ", "\n### ", "\n## "]
+        .iter()
+        .filter_map(|stop| from.find(stop))
+        .min()
+        .unwrap_or(from.len());
+    from[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A top-level item's text in `source`, from `{head}` to its closing brace in
+/// the first column.
+fn item<'a>(source: &'a str, head: &str) -> &'a str {
+    source
+        .split_once(&format!("\n{head}"))
+        .unwrap_or_else(|| panic!("`{head}` is in the source"))
+        .1
+        .split_once("\n}\n")
+        .unwrap_or_else(|| panic!("`{head}` ends"))
+        .0
+}
+
+/// Every word in `words` is in the D-0955 bullet for `id`.
+fn d_0955_names(id: &str, words: &[&str]) {
+    let text = d_0955_bullet(id);
+    for word in words {
+        assert!(
+            text.contains(word),
+            "{id}'s bullet does not name `{word}`: {text}"
+        );
+    }
+}
+
+/// **DERIVATION RE-READS AND RE-FOLDS THE WHOLE MONTH, AND THE REGISTER SAYS
+/// SO.** ET-bars-candles-store-1 and -8, W1-pull2-3, D-0955.
+///
+/// Each bullet must name the function that pays the cost and the bound it
+/// pays, and the function must still have the shape that makes the bound true.
+/// A change that removes the cost fails here until its bullet is updated.
+#[test]
+fn d_0955_derivation_rereads_the_whole_month_and_the_register_says_so() {
+    let derive_all = item(INGEST, "fn derive_all(");
+    d_0955_names(
+        "ET-bars-candles-store-1",
+        &[
+            "`derive_all`",
+            "O(n_m + Σ h_r)",
+            "7 × O(n_m)",
+            "quadratic in `s`",
+            "`reconcile_derived`",
+        ],
+    );
+    assert!(
+        derive_all.contains("(0..file.header().n_valid)"),
+        "the whole month is read"
+    );
+    assert!(
+        derive_all.contains("for rung in derived_from(source)"),
+        "and folded per rung"
+    );
+    assert!(
+        item(INGEST, "fn derive(").contains("complete_minutes_with_calendar("),
+        "each rung folds the whole month it is handed"
+    );
+    assert!(
+        item(INGEST, "fn reconcile_derived(").contains("for index in 0..file.header().n_valid"),
+        "and every stored derived record is read back"
+    );
+    d_0955_names(
+        "ET-bars-candles-store-8",
+        &["`derive_all`", "O(month rows)"],
+    );
+    assert!(derive_all.contains("This is O(month rows) once per batch"));
+    d_0955_names(
+        "W1-pull2-3",
+        &["`derive_all`", "`AlreadyPresent`", "`write_and_count`"],
+    );
+    let (_, after_write) = item(INGEST, "fn one(")
+        .split_once("write_and_count(")
+        .expect("one writes the pulled rung");
+    assert!(
+        after_write.contains("failures.extend(derive_all("),
+        "derivation runs after the write, whatever it wrote"
+    );
+}
+
+/// **EVERY WINDOW AND EVERY ROLLING ANSWER READS THE WHOLE CENSUS, AND THE
+/// REGISTER SAYS SO.** W1-pull2-0 and W1-pull2-6, D-0955; the read half D-1446
+/// left to this crate.
+#[test]
+fn d_0955_each_census_write_reads_the_whole_census_and_the_register_says_so() {
+    d_0955_names(
+        "W1-pull2-0",
+        &[
+            "`from_members_inner`",
+            "`read_census`",
+            "O(manifest bytes + E_v)",
+            "W1-api5-1",
+            "D-0036",
+        ],
+    );
+    d_0955_names(
+        "W1-pull2-6",
+        &[
+            "`record_all`",
+            "`record_held`",
+            "O(manifest bytes + E_v)",
+            "O(offered)",
+        ],
+    );
+    for head in ["fn from_members_inner(", "fn record_all("] {
+        assert!(
+            item(INGEST, head).contains("read_census(&census_path, vendor)"),
+            "`{head}` reads the whole census on every call"
+        );
+    }
+    assert!(item(INGEST, "fn read_census(").contains("fs::read(path)"));
+    assert!(item(INGEST, "pub fn record_held(").contains("record_all(store_root, vendor, held)"));
+    assert!(
+        d_0955_section().contains("It is paid once per process.\" On the write path"),
+        "the §17 correction is stated"
+    );
+}
+
+/// **CASH DAYS ARE READ PER REQUEST AND CASH MASTERS PER BODY, AND THE
+/// REGISTER SAYS SO.** W1-pull2-5 and W1-pull1-0, D-0955.
+#[test]
+fn d_0955_cash_days_and_masters_are_read_per_request_and_the_register_says_so() {
+    d_0955_names(
+        "W1-pull2-5",
+        &[
+            "`committed_cash_days`",
+            "O(n_m)",
+            "`api::server::prepare_cash_schedule`",
+        ],
+    );
+    assert!(
+        item(INGEST, "pub fn committed_cash_days(")
+            .contains("for index in 0..file.header().n_valid"),
+        "every committed record of each month is read"
+    );
+    assert!(
+        item(SERVER, "async fn prepare_cash_schedule(")
+            .contains("pull::ingest::committed_cash_days("),
+        "and the api calls it per request"
+    );
+    d_0955_names(
+        "W1-pull1-0",
+        &[
+            "`prepare_observed_with`",
+            "O(D × B)",
+            "`MAX_COMPRESSED`",
+            "`MAX_EXPANDED`",
+            "250,000",
+        ],
+    );
+    let per_day = item(CASH_CACHE, "async fn prepare_observed_with<")
+        .split_once("for day in days {")
+        .expect("one pass per day")
+        .1;
+    assert!(
+        per_day.contains("read_entry(root, day)") && per_day.contains("decode(&bytes)"),
+        "each day reads and decodes its master, cached or not"
+    );
 }

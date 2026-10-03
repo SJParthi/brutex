@@ -18,10 +18,10 @@ same closure decisions and trial counts as an uninterrupted streamed run.
 | Can a partial frontier look complete? | Checkpoints preserve the halt; the rank adapter requires an extinction witness or a named halt. | Engine resource-halt regression; runner `checkpoint_rank_adapter_refuses_a_missing_terminal_or_mismatched_column` |
 | Are high condition bits retained? | Each mask remains six little-endian `u64` words. Test positions cross 63/64 and 127/128 and reach 369. | Independent exhaustive-subset oracle and codec round trip. |
 | Will reranking lose earlier combinations? | Every retained level feeds the existing `Accumulator::offer_retired` exactly once. A halted successor cannot prove its predecessor closed. | Runner `checkpoint_ranking_preserves_streamed_scores_trials_and_partial_closure` |
-| Can another input or policy reuse a checkpoint? | Engine compares the supplied identity, row count, exact offered sequence, threshold, candidate ceiling, pair budget and requested lane policy. The caller must additionally bind and verify the exact signal/scoring/data bytes. | `resumed_identity_column_offers_and_every_configuration_term_must_match` |
+| Can another input or policy reuse a checkpoint? | Engine compares the supplied identity, row count, exact offered sequence, threshold, candidate ceiling and pair budget. The support-lane count is scheduling only and is taken from the caller (D-1439). The caller must additionally bind and verify the exact signal/scoring/data bytes. | `resumed_identity_column_offers_and_every_configuration_term_must_match`; `a_checkpoint_resumes_under_any_support_lane_count_with_the_same_answer` |
 | Can malformed bytes become a plausible answer? | The codec refuses unsupported versions, foreign identity, truncated/trailing bytes, invalid sizes, malformed masks/order, excluded survivor positions, non-reconciling counters and inconsistent halts. Durable cryptographic integrity is the caller's separate obligation. | `truncated_trailing_foreign_and_malformed_payloads_are_refused` and the public resume corruption regressions. |
 | Does the stored command actually use recovery? | The stored single-month sweep calls the durable wrapper and the ordinary rank adapter. A fresh attempt restores prior rows and records the current boundary once. | Five passing `cli::and_checkpoint::tests`, including persisted restart and the actual ranked helper. |
-| Is memory bounded independently of the answer size? | No. Retaining all survivor history costs O(total survivors). Encoding uses fixed scratch space; decoding allocates the declared bounded history fallibly. | Source contract, not an O(1) claim. |
+| Is memory bounded independently of the answer size? | No. Retaining all survivor history costs O(total survivors). `engine::resume::CheckpointView::write_to` streams with fixed scratch, but its only production caller, `cli::and_checkpoint::encode`, collects the whole payload into a growing `BoundedBytes` `Vec` (doubling, capped at 64 MiB − 96) before publishing, so encoding holds O(payload) bytes. Recovery reads the full payload into memory (`Journal::latest`) and decoding then allocates the declared bounded history fallibly. D-1448. | Source contract, not an O(1) claim. |
 | Does this prove all historical and future inputs? | No. The tests are finite differential, corruption and resource-boundary evidence. | The matrix explicitly contains 120 input/configuration cases. |
 
 ## Integration contract
@@ -62,23 +62,40 @@ causal signal column and preparing the existing execution/forward series. The
 new `Checkpoint::validate_for` precheck runs before any historical depth evidence
 is copied into a new attempt.
 
-The CLI wrapper starts with `BRTXAN01`, an exact depth-row count and an exact
-engine-payload byte length. It then stores each original `DepthRow` as its ten
-existing 64-bit fields and the engine payload. Thus earlier per-depth admitted
-and pair counters survive exactly rather than being guessed from the final
-counter. A fallible buffer limits the complete journal record to 64 MiB. Exceeding
-that physical admission refuses the attempt before advancing; it is not called
+The CLI wrapper is version 2, `and-checkpoint-v2` (D-0712). Version 1
+(`BRTXAN01`) wrote the whole engine payload, every retained level, into one
+64 MiB journal entry at every boundary, so a history past that admission
+refused after building the level that crossed it, and a rerun rebuilt the same
+level and refused again. Version 2 writes, at the boundary for depth `k`, only
+level `k`'s engine bytes (`CheckpointView::write_current_to`) as chunk entries
+of at most 32 MiB, each headed by `BRTXAC02`, its depth, its index within the
+level and the sequence of the boundary before it. It then writes one boundary
+record, `BRTXAB02`: an exact depth-row count, engine-prefix length and chunk
+count, each original `DepthRow` as its ten existing 64-bit fields, this
+boundary's engine prefix (`CheckpointView::write_prefix_to`: header, offers,
+exclusions) and, per level, each chunk's sequence, length and seal. Thus
+earlier per-depth admitted and pair counters survive exactly rather than being
+guessed from the final counter. The prefix followed by every level in depth
+order is `write_to`'s payload byte for byte. A chunk or boundary record that
+cannot fit one entry refuses the attempt before advancing; it is not called
 extinction or silently truncated.
 
-The shared immutable checkpoint journal seals and acknowledges the complete
-wrapper before its corresponding attempt depth is appended. If that depth
-append fails, the new checkpoint remains recoverable, the attempt refuses, and
-no next depth starts. A new attempt restores only the prior depth rows; the
-engine's first resumed callback appends the current row exactly once. Replaying
-an unchanged terminal checkpoint adds no duplicate checkpoint reservation.
-The final self-contained checkpoint is reopened and compared with its exact
-acknowledged sequence and seal before a rankable run is returned. A test changes
-the checkpoint after its final callback and requires a refused attempt.
+The shared immutable checkpoint journal seals and acknowledges a boundary's
+chunks and then its record before its corresponding attempt depth is appended.
+If that depth append fails, the new checkpoint remains recoverable, the attempt
+refuses, and no next depth starts. Recovery reads the newest boundary record;
+when the newest entry is a chunk whose boundary never landed, it reads the
+boundary that chunk names, and that one level is rebuilt. A new attempt
+restores only the prior depth rows; the engine's first resumed callback appends
+the current row exactly once. Replaying an unchanged terminal checkpoint adds
+no duplicate checkpoint reservation. The final boundary record is reopened and
+compared with its exact acknowledged sequence and seal, and every chunk it
+names with its recorded seal, before a rankable run is returned. A test changes
+the boundary record, and another a chunk, after the final callback and requires
+a refused attempt. Another replaces each with a validly resealed entry, one the
+journal's own read accepts, and requires the refusal of the seal comparison
+itself: "AND final checkpoint differs from its acknowledged publication" for the
+record, "AND final checkpoint chunk differs from its acknowledgment" for a chunk.
 Only this stored single-month sweep entry point is wired here; other entry
 points do not inherit resumability from compiling the engine API.
 
@@ -105,22 +122,33 @@ not explicitly excluded. The
 accumulated generated count from levels two onward must equal the checkpoint's
 cumulative admitted count. These are validation rules, not a second search.
 
-A checkpoint without a named halt requires `pairs < pair_budget`. The shared
-join checks its budget once per outer row, including the final empty row. A
-named halt can therefore retain an overshoot, including a candidate or memory
-halt encountered within that row. Resuming preserves the original halt and
-counters; this is not a per-pair hard work or latency bound.
+A checkpoint without a named halt requires `pairs <= pair_budget`. The shared
+join checks its budget before every pair, so a walk whose pair need equals the
+budget exactly completes, and a pairs halt is recorded with `pairs ==
+pair_budget`. Until D-1438 the check ran once per outer row, including a block's
+final row, which has no pair to walk: a level that needed exactly the budget
+was reported halted with a partial frontier, and a halt could report up to one
+block width minus one pair past the budget. A checkpoint written before D-1438
+can therefore still carry `pairs > pair_budget` under a named pairs halt, and it
+remains readable: validation still requires only `pairs >= pair_budget` there.
+Resuming preserves the original halt and counters. The budget bounds pairs
+walked; it is not a latency bound.
 
 ## Resource and verification limits
 
 The checkpoint callback happens at level boundaries. Work in an interrupted
-in-progress level is repeated from the last durable completed level. A complete
-checkpoint rewrite costs O(retained history); saving every level can repeatedly
-write earlier levels. Neither serialization nor reading/ranking/searching a
-growing result set is claimed to have O(1) time or space.
+in-progress level is repeated from the last durable completed level. A boundary
+writes its own level's bytes and a boundary record that lists every depth row
+and every chunk so far; it no longer rewrites earlier levels (D-0712). Resuming
+and completing still read every chunk. Neither serialization nor
+reading/ranking/searching a growing result set is claimed to have O(1) time or
+space.
 
-The requested support-lane policy is matched exactly. Its existing runtime CPU
-upper bound can differ between hosts; successful support results remain
+The support-lane count is not compared on resume (D-1439): it is a scheduling
+sentinel outside the run identity, and the resumed walk uses the caller's
+lanes, so a checkpoint resumes on a host with a different core count. The lane
+count recorded in the checkpoint is the one in force when it was written. The
+runtime CPU upper bound can differ between hosts; successful support results remain
 deterministic, but OS scheduling, allocation refusal, worker refusal and latency
 are not identical-machine guarantees. Allocation refusal is explicit where
 fallible reservation is used. OS overcommit termination and power-loss durability
@@ -181,12 +209,14 @@ accounting, empty frontiers, zero-row and zero-policy states, and halt identity.
 One reproduced defect allowed an explicitly always-false bit 64 to survive in
 an otherwise consistent checkpoint; excluding those positions from the allowed
 survivor mask now refuses it. A second validation correction rejects an
-unhalted checkpoint at or beyond its pair budget. Valid version 1 bytes remain
+unhalted checkpoint beyond its pair budget (at or beyond, until D-1438 made a
+walk that needs exactly its budget complete). Valid version 1 bytes remain
 unchanged.
 
 The resource regression uses actual shared-engine outcomes: pair budget 1
-retains the outer-row overshoot, and candidate ceiling 2 with pair budget 1
-produces a candidate halt after three pairs. Both decode and resume unchanged.
+halts with exactly one pair walked (it retained an outer-row overshoot before
+D-1438), and candidate ceiling 2 with pair budget 3 produces a candidate halt
+after three pairs. Both decode and resume unchanged.
 Memory and worker halt tags also have codec tests; those tags do not establish
 that a physical allocator or operating-system thread failure was induced.
 

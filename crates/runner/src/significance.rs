@@ -91,9 +91,9 @@ pub fn trials(sweep: &Sweep) -> u64 {
 /// It is **not** the whole search for anything chosen through
 /// [`crate::grid`]. There, each surviving combination is evaluated at up to
 /// [`crate::grid::variants`] stop/target/trail/arm settings and the best of them
-/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 325
-/// cells at the shipped four rungs. Selecting a maximum over 325 variants is 325
-/// more chances to look good by luck, per combination, and none of it entered
+/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 625
+/// cells at the shipped four rungs (`grid::variants(4, 4, 4)`, pinned below).
+/// Selecting a maximum over 625 variants is 625 more chances to look good by luck, per combination, and none of it entered
 /// the bar. An audit
 /// measured the omission and named the consequence exactly: the reported
 /// Bonferroni and Bailey figures understate the true search size by roughly the
@@ -346,10 +346,27 @@ pub fn p_value(t: f64) -> f64 {
 ///
 /// Returns how many are rejected; the caller holds the ordering and can take
 /// that many from the front of its own sorted list.
+///
+/// # Refuses a value that is not a probability
+///
+/// Answers `None`, and leaves the slice unsorted, when any value is NaN of
+/// either sign, infinite, below zero or above one. Counting such a value
+/// broke the answer two ways (GAP5-53, D-0977): `f64::total_cmp` sorts `-NaN`
+/// first and `+NaN` last, so `[-NaN, 0.04]` rejected two while `[NaN, 0.04]`
+/// rejected none; and `-1` cleared every threshold, so `[-1, 0.9]` reported
+/// one finding. A p-value outside `[0, 1]` is a defect upstream, and a count
+/// that included it would be a fallback hiding that failure.
+///
+/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it,
+/// and [`p_value`]'s tail is too coarse to feed it at a search's scale
+/// (hunt-runner-3), so FDR control is not available to any report today.
 #[must_use]
-pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
+pub fn benjamini_hochberg(p_values: &mut [f64]) -> Option<usize> {
+    if p_values.iter().any(|p| !(0.0..=1.0).contains(p)) {
+        return None;
+    }
     if p_values.is_empty() {
-        return 0;
+        return Some(0);
     }
     p_values.sort_unstable_by(f64::total_cmp);
     #[allow(
@@ -373,7 +390,7 @@ pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
             largest = rank;
         }
     }
-    largest
+    Some(largest)
 }
 
 /// Standard normal CDF, from the error function's rational approximation.
@@ -504,7 +521,7 @@ fn tail_rational(tail: f64) -> f64 {
 /// # Not reachable at shipped defaults, and that is not the reason to fix it
 ///
 /// `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, so `trials` is bounded near
-/// `1.72e10`; times the 325-cell grid that is `5.58e12`, about **80x below the
+/// `1.72e10`; times the 625-cell grid that is `1.07e13`, about **40x below the
 /// cliff**. But `Ladder::with_pair_budget` is `pub` and takes any `u64`, and
 /// [`trials_with_grid`] is `pub` and takes a caller-supplied `u64`. Both return
 /// a wrong answer in the dangerous direction for inputs inside their declared
@@ -586,7 +603,7 @@ mod tests {
     /// # Why each assertion is here
     ///
     /// The first pins the MULTIPLICATION, which is the whole point: a report
-    /// that ran a 325-way grid over every surviving combination searched 325
+    /// that ran a 625-way grid over every surviving combination searched 625
     /// times as much as `trials` alone reports, and a bar computed from the
     /// smaller number admits noise while looking like a family-wise correction.
     ///
@@ -836,7 +853,7 @@ mod tests {
         let mut p = [0.001, 0.015, 0.035, 0.039, 0.9];
         assert_eq!(
             benjamini_hochberg(&mut p),
-            4,
+            Some(4),
             "0.035 exceeds its own threshold of 0.03, but 0.039 clears 0.04 -- \
              so everything up to rank four is rejected"
         );
@@ -847,7 +864,7 @@ mod tests {
         // The same p-values under both. BH must reject at least as many, or it
         // is not doing the job it exists for.
         let mut p: Vec<f64> = (1..=100).map(|i| f64::from(i) * 0.0004).collect();
-        let bh = benjamini_hochberg(&mut p);
+        let bh = benjamini_hochberg(&mut p).expect("every p is in [0, 1]");
         let bonferroni = p.iter().filter(|x| **x <= 0.05 / 100.0).count();
         assert!(
             bh > bonferroni,
@@ -859,12 +876,50 @@ mod tests {
 
     #[test]
     fn benjamini_hochberg_rejects_nothing_when_nothing_deserves_it() {
-        assert_eq!(benjamini_hochberg(&mut []), 0, "no hypotheses, no findings");
+        assert_eq!(
+            benjamini_hochberg(&mut []),
+            Some(0),
+            "no hypotheses, no findings"
+        );
         let mut noise = [0.6_f64, 0.7, 0.8, 0.99];
-        assert_eq!(benjamini_hochberg(&mut noise), 0, "pure noise yields none");
+        assert_eq!(
+            benjamini_hochberg(&mut noise),
+            Some(0),
+            "pure noise yields none"
+        );
         // And everything, when everything deserves it.
         let mut strong = [1e-12_f64; 20];
-        assert_eq!(benjamini_hochberg(&mut strong), 20);
+        assert_eq!(benjamini_hochberg(&mut strong), Some(20));
+    }
+
+    /// GAP5-53: a value that is not a probability is refused, whatever its
+    /// sign, rather than counted or silently dropped (D-0977).
+    #[test]
+    fn benjamini_hochberg_refuses_a_value_that_is_not_a_probability() {
+        // Before the fix these answered 2, 0 and 1: the sign of a NaN decided
+        // whether it was counted, and a negative p cleared every threshold.
+        for bad in [
+            -f64::NAN,
+            f64::NAN,
+            -1.0,
+            -f64::MIN_POSITIVE,
+            1.000_000_1,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let mut p = [0.9, bad, 0.04];
+            assert_eq!(
+                benjamini_hochberg(&mut p),
+                None,
+                "{bad} is not a probability and must be refused"
+            );
+            assert_eq!(p[0].to_bits(), 0.9_f64.to_bits(), "a refusal sorts nothing");
+            assert_eq!(p[1].to_bits(), bad.to_bits(), "a refusal sorts nothing");
+        }
+        // Both ends of [0, 1] are probabilities, and are answered.
+        assert_eq!(benjamini_hochberg(&mut [0.0, 0.04]), Some(2));
+        assert_eq!(benjamini_hochberg(&mut [1.0]), Some(0));
+        assert_eq!(benjamini_hochberg(&mut [0.05]), Some(1));
     }
 
     #[test]
@@ -1036,12 +1091,12 @@ mod tail_tests {
         }
 
         // THE SHIPPED CEILING, WHICH IS WHERE THIS ACTUALLY RUNS.
-        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 325
+        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 625
         // cells, so the largest family a default run can present is about
-        // 5.6e12 -- roughly 80x below where the old cliff sat. The fix is not
+        // 1.1e13 -- roughly 40x below where the old cliff sat. The fix is not
         // needed for the default path and is needed because both entry points
         // are `pub` and take any `u64`.
-        let shipped = (1_u64 << 34).saturating_mul(325);
+        let shipped = (1_u64 << 34).saturating_mul(625);
         let bar = bonferroni_t(shipped);
         assert!(
             bar > 7.0 && bar < 9.0,

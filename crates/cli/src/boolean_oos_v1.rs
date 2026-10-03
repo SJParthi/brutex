@@ -3,14 +3,16 @@
 use super::{
     BooleanCoordinateV1, Bounds, Chosen, CommittedBooleanFamilyV1, Completion, Direction,
     ExecutionSeriesV1, Expression, ExpressionExecutionRunV1, Hasher, Horizon, Operation, Params,
-    Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side, Source, StrictConfig,
-    catalog_words, cohort_digest, display, grid_context, hash, load_source, persistence,
-    prepare_column, reference, refuse, validate_request,
+    Path, PathBuf, Remaining, Request, RetainedSource, Run, Sessions, Side, Source, SourceDigest,
+    StrictConfig, catalog_words, cohort_digest, display, grid_context, hash, load_source,
+    persistence, prepare_column, reference, refuse, validate_request,
 };
-use runner::exit_grid_policy::expression_execution::later_period::EvaluatedExpressionOosV1;
 use runner::exit_grid_policy::expression_execution::later_period::validation::{
     BoundFixedTrainingFoldsV1, FixedTrainingFoldPlanV1, FixedTrainingFoldProjectionV1,
-    FixedTrainingFoldV1, LaterSessionWindowV1,
+    FixedTrainingFoldV1, LaterFoldMapV1, LaterSessionWindowV1,
+};
+use runner::exit_grid_policy::expression_execution::later_period::{
+    EvaluatedExpressionOosV1, LaterExpressionSliceV1,
 };
 
 #[path = "boolean_oos_reader.rs"]
@@ -422,6 +424,16 @@ fn compute(
     )
     .map_err(display)?;
     let (mut computed, mut remaining) = prepare_rows(training, request, sessions.days.len())?;
+    // ONE LATER SLICE AND ONE FOLD INDEX FOR EVERY PROGRAM AND SIDE (D-1188).
+    // Each iteration re-validated and re-hashed the same later bars and column,
+    // rebuilt their `SliceFacts` and re-indexed every bar into its fold. None
+    // of that depends on the program or the side, so it is done here once and
+    // each verdict is still reported where the per-call path reported it.
+    let later = LaterExpressionSliceV1::new(series, &column);
+    let fold_map = validation
+        .map(|asked| LaterFoldMapV1::new(asked.windows, execution, &column, asked.mapping_bytes))
+        .transpose()?;
+    let mut digest = SourceDigest::new(source);
     for (group, anchor) in training.anchors.iter().enumerate() {
         let program = training
             .programs
@@ -439,7 +451,18 @@ fn compute(
         {
             return Err("Boolean later anchor differs from original directional run".into());
         }
-        let run = execution_run(request, source, identity, commit, program, resolved.side())?;
+        let data_digest = digest
+            .get()
+            .map_err(|why| format!("Boolean later daily identity: {why:?}"))?;
+        let run = execution_run(
+            request,
+            source,
+            identity,
+            commit,
+            program,
+            resolved.side(),
+            data_digest,
+        )?;
         let attempt = crate::sweep_evidence::begin(
             request.output,
             run.run_id().bytes(),
@@ -457,11 +480,14 @@ fn compute(
                     )
                 })
                 .transpose()?;
-            let evaluated = resolved.evaluate_expression_oos(anchor, series, &column, &run)?;
+            let evaluated = resolved.evaluate_expression_oos_on(anchor, &later, &run)?;
             let bound = plan
                 .as_ref()
                 .zip(validation)
-                .map(|(plan, validation)| plan.bind(&evaluated, validation.mapping_bytes))
+                .zip(fold_map.as_ref())
+                .map(|((plan, validation), map)| {
+                    plan.bind_with(&evaluated, map, validation.mapping_bytes)
+                })
                 .transpose()?;
             append_rows(
                 training,
@@ -506,13 +532,8 @@ fn execution_run(
     commit: &str,
     program: &Expression,
     side: Side,
+    data_digest: [u8; 32],
 ) -> Result<ExpressionExecutionRunV1, String> {
-    let data_digest = runner::identity::data_digest_with_daily_reference(
-        &source.data.signal.bars,
-        &source.data.exact_minute.bars,
-        reference(source),
-    )
-    .map_err(|why| format!("Boolean later daily identity: {why:?}"))?;
     ExpressionExecutionRunV1::new_with_daily_reference(
         &Run {
             mask: program.referenced(),

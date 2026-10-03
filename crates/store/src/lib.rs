@@ -64,6 +64,8 @@ pub mod flock;
 pub mod format;
 pub mod header;
 pub mod layout;
+/// Per-architecture `O_NOFOLLOW` / `O_NONBLOCK`, written once (D-0980).
+pub mod open_flags;
 pub mod path;
 pub mod repair;
 
@@ -74,3 +76,9 @@ pub mod repair;
 /// and not of the store.
 #[cfg(test)]
 mod emits;
+
+/// Test-only: re-runs a test where the permission bits bind, even as root. The
+/// same file serves this crate's integration tests. D-0995, D-1485.
+#[cfg(all(test, unix))]
+#[path = "../tests/support/mod.rs"]
+mod support;

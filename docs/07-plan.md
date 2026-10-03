@@ -93,7 +93,7 @@ Restated here so the plan can be checked against it rather than against memory.
 | R-1 | Spot, **every instrument**, bounded at ~800 — 750 NIFTY Total Market + ~35 NSE indices | `catalog::tracked`, and `/instruments.json` shares that exact predicate |
 | R-2 | **2020-01-01 → yesterday**, never today | `finished_day_only` in `broker_window`, HTTP path only |
 | R-3 | Day-level first, then one-minute | Selectable and landing under `1day/` — D-0055. Open only for Groww, whose daily interval word is unrecorded; see §4 item 4a |
-| R-4 | F&O: **NIFTY only** as the first step | Not yet — **OPEN** |
+| R-4 | F&O: **NIFTY only** as the first step | Pull exists: `POST /pull/fno` is routed (`crates/api/src/server.rs`, `pull_fno`). Contracts are stored, never swept (CLAUDE.md §1). Re-stated 2026-10-03, D-1614 |
 | R-5 | TrueData / GDFL are **F&O CSVs from a folder**: no market hours, no rate limit, no token | `Transport::LocalArchive`, and every vendor rule keys off the transport |
 | R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
 | R-7 | **N feeds** appear everywhere with no edit | True of routing, the picker, budgets and `/feeds.json`. **Not** true of the descriptor table — see §5 for the measured number |
@@ -139,6 +139,7 @@ reader needs to recognise if it returns.
 | Wire the TOTP **mint** | Whether `tickvault` still calls Dhan | A broker issues one active token per client. Minting here kills whatever `tickvault` holds, and `tickvault` is not visible from this repository. `CLAUDE.md` §8 |
 | Dhan pulls at all | The same | The token in Parameter Store has not been refreshed since 2026-07-25 while Groww's is refreshed daily. This repository never mints, by rule |
 | `TrueData` descriptor: `Segment::Index` vs F&O-only | A real bought archive | The sample proved the layout; `MemberPattern::SymbolAtRoot` is wrong for the futures family, which nests under `Contract Futures/` |
+| Running the GDFL ingest job, which writes a converted copy of the GDFL files into the store (D-0802 consequences 10 and 12): the licence terms for this use | The operator | Building and testing the reader, resolver and ingest job do not wait on this; only running the job over the files does. The operator states the GDFL second-level data is already in hand (D-0802 message 5, `docs/00-charter.md` §4g), so no purchase blocks the design. D-0015 deferred the purchase without saying whose act it is; D-0802 supersedes that deferral for fill pricing on the operator's decision alone. The charter records no GDFL licence term, and no repository measurement can supply one |
 
 **Groww is not blocked.** The backfill can run single-sourced today.
 
@@ -154,6 +155,7 @@ reader needs to recognise if it returns.
 | 4 | ~~**Day-level mode before one-minute** (R-3)~~ — **selectable and landing under `1day/` as of D-0055.** What is left is one vendor fact, below | The operator's stated first step. The saving is smaller than this row used to claim; see the corrected arithmetic |
 | 4a | **Read Groww's daily `candle_interval` word off a live call and write it into one descriptor row** | Its request names the bar length in a parameter and the daily spelling is recorded nowhere — `1day`, `1d` and `day` are all plausible and only one is a request. A daily pull against that feed refuses by name until it is recorded. Dhan needs nothing: its request carries no interval field at all |
 | 5 | **The 2020 → yesterday backfill** | The goal |
+| 6 | **GDFL one-second fills (D-0802), the parts that need no permission:** read and record in `docs/00-charter.md` §4g whatever further GDFL facts the files in hand support (one day, 26 May 2026, is recorded); first build, with its own entry, D-0802 consequence 12: a reader for the measured `GFDLCM_INDICES_TICK_` and `GFDLCM_STOCK_TICK_` folder layout and its `<NAME>.NSE_IDX.csv` and `<NAME>.NSE.csv` files, a resolver from GDFL names to `InstrumentKey` that refuses what it cannot resolve, and the job that writes the one-second records (running that job over the GDFL files waits on the §3 row, building and testing it does not); then design, each with its own entry, D-0802 consequences 1 to 9, 11, 13 and 14: the run identity with a fill feed (`CLAUDE.md` §3 rule 3), no look-ahead with a bounded staleness for every fill (entry, horizon exit, forced exit, and a stop, target or trail crossed inside a gap) and whether the entry second can itself trigger an exit, the higher-rung entry rule, the O(1) bounds or their limits in `docs/06-limits.md`, the one-second store format (starting from D-0123's existing `1s` fold, format not fixed, weighed against D-0015's ~1.26 MB per instrument per day for a dense grid) with its `docs/02-store-format.md` page and rules for the backward-stamped and out-of-session rows the measured index files carry, the volume-less index fill and whether an equity fill may read volume, what is left of the optimistic/pessimistic bracket and the pessimistic-profit criterion when every fill is the second's worst case, idempotence and row order, the India VIX stamp at a fill instant, and how the existing charge stack attaches to a one-second fill (the stack itself is unchanged), and where exit levels are placed: the price a stop, target or trail is measured from now that the one-minute Open is no longer a fill, and whether the derived step, the quantile ladders, EG-01's training distribution and the stop floor come from GDFL seconds or from the signal's Zerodha minutes (no GDFL-priced exit grid is built or ranked before that is locked), and non-regular sessions: which calendar classifies a GDFL day and second (`CLAUDE.md` §5 names `pull::calendar::kind_of`), what a day it answers `Closed`, `Unmeasured` or `OpenLengthUnmeasured` does, and what the store, the out-of-session rule and the forced square-off do on a session that is not 09:15 to 15:30 (its compiled range is 2 Dec 2019 to 4 Sep 2026, the GDFL folder names run from 3 Sep 2018). The fill-engine entry supersedes D-0436's same-feed and pricing halves, rewrites UE-01, UE-02, UE-03's execution half (its signal-index selection is unchanged), UE-04, UE-05 and UE-06, and audits every other invariant that pins one-minute or bracketed execution (D-0802 names XP-02, the row its ranking contradicts most directly, CO-01, XM-01, XM-05, DR-02, SB-01, SB-02, EB-05, EB-07, EG-01, EG-02, the D-0581/D-0582 stop rows, OOS-01, SO-01 and GR3-02, and says that list is not exhaustive) | Nothing is built. Every fill takes the second's worst-case high or low (D-0802 B3), never the level. Format and density are measured for one day only, and the existing fold would refuse both measured index files on their backward steps; code that relies on an unrecorded vendor fact breaks `CLAUDE.md` §3 rule 1. The ranking reads GDFL fills, so it needs GDFL seconds across the whole tested history, which the operator states are in hand. The search stays on Zerodha minutes and their rungs and is not blocked by this |
 
 ### The arithmetic behind #5, corrected
 
@@ -426,7 +428,7 @@ Step 1 is where honesty is required, and it is the part with no code yet.
 | Question | Answer | Status |
 |---|---|---|
 | Which instruments? | The tracked universe, ~800 | ✅ `catalog::tracked` |
-| Which days? | Trading days between the instrument's floor and yesterday | ❌ **no trading calendar in this build** |
+| Which days? | Trading days between the instrument's floor and yesterday | ⚠️ `pull::calendar::kind_of` and `expected_bars` exist and are the canonical IST session authority (CLAUDE.md §5); the paragraph below predates them (D-1614) |
 | How many bars in a day? | 375 at one-minute, 09:15–15:29 inclusive (CAS, from 2026-08-03) | ⚠️ constant exists; holidays do not |
 | When does an instrument's history start? | Per feed, per RUNG, and per instrument. Groww's day rung from 2020 and its one-minute rung a rolling 3 months; Dhan a **rolling** ~5 years that moves daily | ⚠️ per-feed and per-rung floors are recorded and emitted — `pull::vendor::Descriptor::history`, `/feeds.json`, D-0113. **Per INSTRUMENT is still nowhere**: a scrip listed in 2024 has no bars in 2021 and nothing here knows that |
 
@@ -476,7 +478,7 @@ Enumerated because a 22,400-request run (daily) and a 129,600-request run
 | 8 | Bars outside the window | Dropped and counted by reason | ✅ |
 | 9 | Vendor restates history | Refused, not swallowed | ✅ |
 | 10 | Disk full | Returned, never signalled | ✅ |
-| 11 | **Token expires mid-run** | 401 for every later request; no re-read | ❌ **certain to fire** — daily reset 06:00 IST, and no 22,400-request run fits in one window |
+| 11 | **Token expires mid-run** | The pull re-reads the credential through `credential_law::Watch::reread` on the production path (`crates/api/src/server.rs`), and a re-read that returns the same dead value halts loudly (CLAUDE.md §8, D-0948) | ✅ re-read; this row said "no re-read" until D-1614 |
 | 12 | Network timeout or reset | Chunk errors, whole member fails, remaining chunks abandoned | ❌ retry with backoff |
 | 13 | Vendor 5xx | Same | ❌ same path |
 | 14 | One instrument fails | No loop yet; when there is one it must not abort the other 799 | ❌ per-instrument isolation |
@@ -493,6 +495,12 @@ one 24-hour token. It is a hard stop today.
 ---
 
 ## 11. Step 3 authority closure — measured through 2026-09-01
+
+**Status note, 2026-10-03 (D-1614, audit-20261003 gaps-13).** The rows below
+are the 2026-09-01 measurement. Since then `cli` dispatches `ledger-v6` and
+`ledger-v6-replay` (`crates/cli/src/lib.rs`, `crates/cli/src/ledger_v6.rs`),
+so the Selection V6 / Global Replay V4 path has a CLI caller; a row below that
+says no CLI caller exists describes that date, not the current tree.
 
 This section records the current drill-down work and does not rewrite the older
 pull plan above. The last complete locked workspace test/doctest measurement —
@@ -975,3 +983,22 @@ An initial implementation or previous release's green checks do not clear new
 source automatically. D-0548's seven exact allocation/guard mutation replays all
 failed their tests as intended; fresh campaign coverage remains395/412 lines and
 69/84 branches, so it does not close the whole-crate100% requirement.
+
+## Grammar search limits recorded but not changed — OPEN (D-0751 to D-0754)
+
+Three grammar-search defects were resolved by stating them, not by changing
+the code. Each stays open here so a recorded limit is not read as a closed one.
+
+* **One node is not O(1) (D-0753).** Each grammar choice revalidates its whole
+  prefix, so per-node cost grows with the prefix up to the 1,151-instruction
+  capacity. The time per node is UNMEASURED. Closing it needs an incremental
+  validator whose per-position state `decode` can rebuild, and a bench.
+* **A node budget does not bound progress (D-0752).** Nodes between two
+  candidates grow with the alphabet and can exceed one checkpoint replay.
+  Pruning refused leaves moves the node counts and pause points a saved search
+  depends on (the D-0752 test fails on its pinned counts under it), so it is
+  left for a decision of its own.
+* **Displayed text cannot always be re-entered (D-0751).** `cli
+  expression-stored` and the explicit program catalog both parse operator
+  text, and a displayed candidate can exceed the parser's nesting or byte
+  limit. The exact round trip is the wire encoding.
