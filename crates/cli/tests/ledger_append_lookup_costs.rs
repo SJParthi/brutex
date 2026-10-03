@@ -9,6 +9,9 @@
 //!   the Observation and Finalization V2 lookups hash a whole file per call
 //!   while §153, §157 and §161 said O(P) or average O(1). The page now checks
 //!   metadata only; the lookups keep their hash and the documents say so.
+//! * W2-cli12-0, W2-cli12-1 and W2-cli12-2 (D-1682): Statistics V2 filtered
+//!   whole vectors per candidate, reserved its audit ceiling on every open, and
+//!   its two-open append was stated nowhere.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -27,6 +30,7 @@ const LIMITS: &str = include_str!("../../../docs/06-limits.md");
 const CANDIDATE: &str = include_str!("../src/candidate_universe.rs");
 const PRE_ADMISSION: &str = include_str!("../src/pre_admission_data.rs");
 const OBSERVATIONS: &str = include_str!("../src/population_observations_v1.rs");
+const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
 
 /// The body of one `### §N —` section, up to the next `### ` heading.
 fn section(number: u32) -> &'static str {
@@ -176,5 +180,33 @@ fn observation_lookups_still_hash_the_whole_file_and_say_so() {
             chapter.contains(needed),
             "the chapter no longer says `{needed}`"
         );
+    }
+}
+
+#[test]
+fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() {
+    let build = function(STATISTICS, "fn build_raw_candidates(");
+    assert!(
+        !build.contains(".filter("),
+        "a per-candidate filter over the whole vectors is back; re-measure §154"
+    );
+    assert_eq!(build.matches("candidate_column(").count(), 2);
+    let column = function(STATISTICS, "fn candidate_column<");
+    assert!(column.contains(".skip(sequence).step_by(width)"));
+    let open = method(STATISTICS, "    fn open_inner(");
+    assert!(open.contains("bounds.audits.min(stored_records)"));
+    assert!(!open.contains("try_reserve(usize_of(bounds.audits,"));
+    let append = function(STATISTICS, "pub fn append_population_statistics_v2(");
+    assert!(append.contains("PopulationStatisticsV2Ledger::open_writer(root, bounds)?"));
+    assert!(append.contains("PopulationStatisticsV2Ledger::open_read(root, bounds)?"));
+
+    let text = flat(section(154));
+    for needed in [
+        "so the per-candidate summaries cost O(C·(P+S)) in total",
+        "never the configured `max_audits` ceiling",
+        "One append through `append_population_statistics_v2` runs two full opens",
+        "A appends to one root cost O(A²) block validations in total",
+    ] {
+        assert!(text.contains(needed), "§154 no longer says `{needed}`");
     }
 }

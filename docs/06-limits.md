@@ -7911,6 +7911,24 @@ and bootstrap resampling are not constant-time or constant-space operations.
 Explicit audit/candidate/period/split/file ceilings are refusal bounds; they do
 not sample rows, cap Apriori depth or turn an admitted input into a smaller one.
 
+Preparing one block reads each candidate's P periods and S splits by index
+arithmetic (`outer x C + candidate`) out of the period-major and split-major
+vectors, so the per-candidate summaries cost O(C·(P+S)) in total. Before D-1682
+each candidate filtered both whole vectors, O(C²·(P+S)). An open reserves its
+audit index for at most the records the file holds, never the configured
+`max_audits` ceiling: before D-1682 every open, empty or not, reserved
+`max_audits` slots (production passes 1<<24) before anything was counted.
+
+One append through `append_population_statistics_v2` runs two full opens: the
+writer's, then a fresh read-only reopen after the writer is dropped. Each full
+open validates every stored block and reruns every stored block's bootstrap
+procedures, so one append costs two passes of O(sum over the A stored audits of
+(C·(P+S) + bootstrap)) plus the new block, and A appends to one root cost
+O(A²) block validations in total. The step-3 orchestrator then opens the root
+once more for its Admission V3 projection. D-1682 keeps the fresh reopen,
+because the Observation link and every projection type name a freshly
+reopened audit as their source; the cost is stated here instead.
+
 The eight focused tests use controlled, test-private source rows. The public
 API can durably append and freshly reopen only an opaque prepared capability;
 it still cannot construct that capability or derive production statistics.

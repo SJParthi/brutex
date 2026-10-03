@@ -53494,3 +53494,50 @@ Tests: `cli::pre_admission_data::tests::pages_hash_no_file_and_reseal_only_the_r
 `cli::pre_admission_data::tests::replaced_lock_and_data_paths_refuse_cached_audits`,
 `cli::ledger_append_lookup_costs::a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes`,
 `cli::ledger_append_lookup_costs::observation_lookups_still_hash_the_whole_file_and_say_so`.
+
+### D-1682 — Statistics V2 reads each candidate's rows by index, reserves its index for stored records, and states its two-open append — 2026-10-03
+
+**What was wrong.** W2-cli12-0: `build_raw_candidates` filtered the whole
+period vector (C·P rows) and the whole split vector (C·S rows) once per
+candidate, so preparing one block was O(C²·(P+S)). W2-cli12-2: `open_inner`
+reserved `bounds.audits` map slots on every open before anything was counted;
+production passes `CEILING_RECORDS = 1 << 24`, so every open of every
+Statistics root, empty or not, allocated and initialised that many slots, and a
+`u64::MAX` ceiling could not open at all. W2-cli12-1:
+`append_population_statistics_v2` runs two full opens (the writer's and a
+fresh read-only reopen), each re-validating every stored block and rerunning
+every stored bootstrap, so A appends to one root cost O(A²) block validations;
+nothing said so.
+
+**The decision.** `candidate_column` reads candidate c's rows at
+`c, c + C, c + 2C, ...`, which is exactly the layout `build_raw_periods` and
+`build_raw_splits` write (period-major and split-major), so it returns the same
+rows in the same order as the filter at O(P + S) per candidate. It refuses a
+zero width, a sequence outside the width, a length that is not a multiple of
+the width, and any row whose candidate sequence is not the one its position
+names, so a layout change cannot select other rows silently. No digest,
+identity or byte changes: the equivalence test compares every column with the
+old filter over 50 candidates. `open_inner` reserves
+`min(bounds.audits, records the file holds)`, every audit occupying at least
+one record. The two-open append is kept and §154 states its cost.
+
+**Rejected.** Replacing the fresh reopen with a re-read through the writer's
+handle, as D-1680 does for Candidate Universe: here the fresh reopen is the
+named source of every projection type (`PopulationStatisticsV2ProjectionSource`,
+the Observation-to-Statistics link, "freshly reopened" in about twenty
+rustdoc items and the step-3 orchestrator), so removing it is a change of that
+authority's contract, not of a cost, and belongs in its own decision.
+Growing the index on demand with no reservation: it trades one bounded
+reservation for repeated rehashing during the scan.
+
+Tests: `cli::population_statistics_v2::tests::candidate_columns_equal_the_whole_vector_filter_and_visit_only_their_rows`,
+`cli::population_statistics_v2::tests::a_candidate_column_refuses_a_layout_it_cannot_index`,
+`cli::population_statistics_v2::tests::preparation_visits_each_candidate_row_once`
+(failed first with the filter restored and counted: 20 row visits for two
+candidates, expected 10),
+`cli::population_statistics_v2::tests::an_open_reserves_for_stored_records_not_the_audit_ceiling`
+(failed first with the ceiling reserve restored: "cannot reserve
+population-statistics index: memory allocation failed because the computed
+capacity exceeded the collection's maximum"),
+`cli::population_statistics_v2::tests::one_append_runs_two_full_scans_as_section_154_states`,
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
