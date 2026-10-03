@@ -1551,6 +1551,44 @@ mod tests {
         STRIDE, STRIDE_BYTES, STRIDE_V2, VERSION_V2, field, read_field,
     };
 
+    /// `docs/02-store-format.md` §27 states the ledger this build writes.
+    ///
+    /// The ledger had no byte layout in any document until P1-16-04 (D-1940),
+    /// so the bytes were described only by these constants. The section now
+    /// exists, and this binds its magic, both versions, both strides and both
+    /// seal rows to the constants, so a version or stride change that leaves
+    /// the document behind fails here.
+    #[test]
+    fn the_store_format_doc_states_the_ledger_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 27. Run ledger")
+            .expect("the run-ledger section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(
+            " — `results/runs.bin`, versions {VERSION_V2} and {}\n",
+            super::VERSION
+        )));
+        // Prose wraps at any space, so the claims are matched with every run
+        // of whitespace folded to one space.
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = core::str::from_utf8(&MAGIC).expect("the magic is ASCII");
+        assert!(section.contains(&format!("is `{magic}` at `0..8`")));
+        assert!(section.contains(&format!("written at version `{}`", super::VERSION)));
+        assert!(section.contains(&format!("Version `{VERSION_V2}` is READ")));
+        assert!(section.contains(&format!("Each version-3 record is {STRIDE} bytes.")));
+        assert!(section.contains(&format!(
+            "{STRIDE_V2} bytes, a {PAYLOAD_BYTES_V2}-byte payload and the seal at \
+             `{PAYLOAD_BYTES_V2}..{STRIDE_V2}`"
+        )));
+        assert!(section.contains(&format!(
+            "| {PAYLOAD_BYTES} | {SEAL_BYTES} | first eight BLAKE3 bytes over `0..{PAYLOAD_BYTES}` |"
+        )));
+        assert!(section.contains(&format!("| {PAYLOAD_BYTES_V2} | 48 | six condition-mask")));
+        assert_eq!(HEADER, 16, "the section states a 16-byte header");
+    }
+
     /// READING CREATES NOTHING, and the whole point is the DIRECTORY.
     ///
     /// `Results::open` calls `create_dir_all` before it opens, so a GET that

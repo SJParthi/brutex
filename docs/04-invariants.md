@@ -6306,3 +6306,18 @@ old line regex the same input and watched it pass.
 | ZR-27 | A master row cut short of a right-most vendor-id column is unreadable and names the shortfall, never a routine skip (D-1761, D-1766) | `api::master::tests::a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall` | ✓ |
 | ZR-28 | A caught-up autopilot feed stays on yesterday's month and fetches the next day of it; a stored place past that month is pulled back (D-1767) | `api::autopilot::tests::a_caught_up_feed_stays_on_the_month_still_being_written` | ✓ |
 | ZR-29 | A stop after the autopilot task returned keeps the halt, and a resume stays refused (D-1767) | `api::autopilot::tests::a_stop_after_the_task_returned_keeps_the_halt_and_resume_stays_refused` | ✓ |
+
+### Documents state what the code writes — zero-findings round (D-1940 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| ZD-01 | `docs/02-store-format.md` §27 states the run ledger's magic, both versions, both strides and both seal rows exactly as `cli::results` writes them (D-1940) | `cli::results::tests::the_store_format_doc_states_the_ledger_this_build_writes` | ✓ |
+| ZD-02 | §28 states the population row's magic, version, stride, payload width and seal row (D-1940) | `cli::population::tests::the_store_format_doc_states_the_population_row_this_build_writes` | ✓ |
+| ZD-03 | §29 states the live file's magic, version, count slot, row offset and row stride (D-1940) | `cli::live::tests::the_store_format_doc_states_the_live_file_this_build_writes` | ✓ |
+| ZD-04 | §30 states Pre-Admission Data V2's file names, header magic, version, kind and stride, record version, payload width, reconciliation offset and seal row (D-1940) | `cli::pre_admission_data::tests::the_store_format_doc_states_the_pre_admission_v2_this_build_writes` | ✓ |
+| ZD-05 | §31 names each Execution V3 file with its magic, domain and stride, the record layout number and the fingerprint width (D-1940) | `cli::execution_v3::tests::the_store_format_doc_states_the_execution_v3_layout_this_build_writes` | ✓ |
+| ZD-06 | §32 names each Execution V4 file with its magic, domain and stride, the fingerprint width, every seal offset and the parameter-ID slots (D-1940) | `cli::execution_v4::tests::the_store_format_doc_states_the_execution_v4_records_this_build_writes` | ✓ |
+| ZD-07 | §33 names each Global Replay V3 file with its magic and stride, the version and every seal offset (D-1940) | `cli::global_replay_v3::tests::the_store_format_doc_states_the_global_replay_v3_this_build_writes` | ✓ |
+| ZD-08 | §34 states Population Statistics V3's file name, header magic, version, kind and stride, payload and seal widths, record version and the four kind codes (D-1940) | `cli::population_statistics_v3::tests::the_store_format_doc_states_the_statistics_v3_this_build_writes` | ✓ |
+| ZD-09 | `docs/10-shared-core.md` states, in §1 and in §3, the position count `indicators::evaluator::Evaluator::positions()` returns (D-1942) | `indicators::evaluator_position_count::this_documents_position_counts_are_the_live_table` | ✓ |
+| ZD-10 | Every commit `docs/07-plan.md` cites is an ancestor of `main` or is listed with its reason, as for `docs/04-invariants.md` and `docs/06-limits.md` (D-1944) | `store::cited_commits::every_commit_the_store_records_cite_is_on_main_or_says_why_not` | ✓ |

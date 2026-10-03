@@ -5305,6 +5305,78 @@ mod tests {
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
+    /// `docs/02-store-format.md` §32 states the Execution V4 records this build
+    /// writes: one row per file naming its magic, domain and stride, the
+    /// version, the fingerprint width and each record's seal offset.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_execution_v4_records_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 32. Execution V4 authority")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — version {VERSION}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = |magic: [u8; 16]| String::from_utf8_lossy(&magic).replace('\0', "\\0");
+        let thousands = |bytes: usize| {
+            if bytes >= 1_000 {
+                format!("{},{:03}", bytes / 1_000, bytes % 1_000)
+            } else {
+                bytes.to_string()
+            }
+        };
+        for (file, magic, domain, stride) in [
+            (
+                PARAMETER_FILE,
+                PARAMETER_MAGIC,
+                PARAMETER_DOMAIN,
+                EXECUTION_V4_PARAMETER_BYTES,
+            ),
+            (
+                PERCENTILE_FILE,
+                PERCENTILE_MAGIC,
+                PERCENTILE_DOMAIN,
+                EXECUTION_V4_PERCENTILE_BYTES,
+            ),
+            (
+                DISPOSITION_FILE,
+                DISPOSITION_MAGIC,
+                DISPOSITION_DOMAIN,
+                EXECUTION_V4_DISPOSITION_BYTES,
+            ),
+            (
+                COMPLETION_FILE,
+                COMPLETION_MAGIC,
+                COMPLETION_DOMAIN,
+                EXECUTION_V4_COMPLETION_BYTES,
+            ),
+        ] {
+            let row = format!(
+                "| `{file}` | `{}` | {domain} | {} |",
+                shown(magic),
+                thousands(stride)
+            );
+            assert!(section.contains(&row), "§32 lacks the row {row}");
+        }
+        assert!(section.contains(&format!("| `{LOCK_FILE}` | none; must be empty |")));
+        assert!(section.contains(&format!(
+            "| 632 | {EVALUATION_FINGERPRINT_BYTES} | evaluation fingerprint |"
+        )));
+        for payload in [
+            PARAMETER_PAYLOAD_BYTES,
+            DISPOSITION_PAYLOAD_BYTES,
+            COMPLETION_PAYLOAD_BYTES,
+        ] {
+            assert!(section.contains(&format!("| {payload} | {SEAL_BYTES} | seal |")));
+        }
+        assert_eq!(MAX_PARAMETER_RECORDS_PER_BLOCK, 4, "§32 says four slots");
+        assert!(section.contains(&format!(
+            "| 720 | {} | four parameter-ID slots |",
+            MAX_PARAMETER_RECORDS_PER_BLOCK * 32
+        )));
+    }
+
     struct TestRoot {
         path: PathBuf,
     }

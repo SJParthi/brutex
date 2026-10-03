@@ -3246,6 +3246,39 @@ mod tests {
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+    /// `docs/02-store-format.md` §34 states the Statistics V3 bytes this build
+    /// writes: file names, magic, header version and kind, stride, the four
+    /// record kinds and the seal width. P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_statistics_v3_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 34. Population Statistics audit ledger")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — version {HEADER_VERSION}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = String::from_utf8_lossy(&HEADER_MAGIC).replace('\0', "\\0");
+        assert!(section.contains(&format!("`{DATA_FILE}` and its lock")));
+        assert!(section.contains(&format!(
+            "The {HEADER_BYTES}-byte header is `{magic}` at `0..16`, version `{HEADER_VERSION}` \
+             at `16..20`, kind `{HEADER_KIND}` at `20..24`, stride `1,024`"
+        )));
+        assert_eq!(POPULATION_STATISTICS_V3_RECORD_STRIDE, 1_024);
+        assert_eq!(RECORD_BYTES, 1_024);
+        assert!(section.contains(&format!(
+            "Every record is a {PAYLOAD_BYTES}-byte payload and a {}-byte seal",
+            RECORD_BYTES - PAYLOAD_BYTES
+        )));
+        assert!(section.contains(&format!(
+            "| 0 | 4 | record version `{RECORD_VERSION}`, `u32` |"
+        )));
+        assert!(section.contains(&format!(
+            "| 4 | 4 | kind: `{DATA_KIND}=Data`, `{FAMILY_KIND}=Family`, \
+             `{CANDIDATE_KIND}=Candidate`, `{COMPLETION_KIND}=Completion`, `u32` |"
+        )));
+    }
+
     struct TestDir(PathBuf);
 
     impl TestDir {

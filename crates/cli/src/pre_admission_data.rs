@@ -3939,6 +3939,42 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, String>;
 
+    /// `docs/02-store-format.md` §30 states the Pre-Admission Data V2 bytes
+    /// this build writes: magic, header version and kind, stride, payload
+    /// width, the reconciliation block and the seal row. P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_pre_admission_v2_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 30. Pre-Admission Data audit ledger")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — version {HEADER_VERSION_V2}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = String::from_utf8_lossy(&HEADER_MAGIC_V2).replace('\0', "\\0");
+        assert!(section.contains(&format!("`{DATA_FILE_V2}` and `{LOCK_FILE_V2}`")));
+        assert!(section.contains(&format!(
+            "The {HEADER_BYTES_V2}-byte header is `{magic}` at `0..16`, version \
+             `{HEADER_VERSION_V2}` at `16..20`, kind `{HEADER_KIND_V2}` at `20..24`, stride \
+             `{PRE_ADMISSION_RECORD_STRIDE_V2}`"
+        )));
+        assert!(section.contains(&format!(
+            "Each {RECORD_BYTES_V2}-byte record is a {PAYLOAD_BYTES_V2}-byte payload and a \
+             {SEAL_BYTES}-byte"
+        )));
+        assert!(section.contains(&format!(
+            "| 0 | 4 | record version `{RECORD_VERSION_V2}`, `u32` |"
+        )));
+        assert!(section.contains(&format!("| {CORE_PAYLOAD_BYTES_V2} | 64 | reconciliation:")));
+        assert!(section.contains(&format!(
+            "| {PAYLOAD_BYTES_V2} | {SEAL_BYTES} | seal over payload `0..{PAYLOAD_BYTES_V2}`"
+        )));
+        assert_eq!(
+            CORE_PAYLOAD_BYTES_V2 + RECONCILIATION_BYTES_V2,
+            PAYLOAD_BYTES_V2
+        );
+    }
+
     fn must<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> TestResult<T> {
         match result {
             Ok(value) => Ok(value),

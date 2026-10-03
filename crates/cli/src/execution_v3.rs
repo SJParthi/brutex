@@ -4374,6 +4374,68 @@ mod tests {
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
+    /// `docs/02-store-format.md` §31 states the Execution V3 records this build
+    /// writes: one row per file naming its magic, domain and stride, the
+    /// layout number, and the fingerprint width the parameter table assumes.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_execution_v3_layout_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 31. Execution V3 authority")
+            .map_or("", |(_, rest)| rest);
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — record layout {VERSION}\n")));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let shown = |magic: [u8; 16]| String::from_utf8_lossy(&magic).replace('\0', "\\0");
+        let thousands = |bytes: usize| {
+            if bytes >= 1_000 {
+                format!("{},{:03}", bytes / 1_000, bytes % 1_000)
+            } else {
+                bytes.to_string()
+            }
+        };
+        for (file, magic, domain, stride) in [
+            (
+                PARAMETER_FILE,
+                PARAMETER_MAGIC,
+                PARAMETER_DOMAIN,
+                EXECUTION_V3_PARAMETER_BYTES,
+            ),
+            (
+                PERCENTILE_FILE,
+                PERCENTILE_MAGIC,
+                PERCENTILE_DOMAIN,
+                EXECUTION_V3_PERCENTILE_BYTES,
+            ),
+            (
+                DISPOSITION_FILE,
+                DISPOSITION_MAGIC,
+                DISPOSITION_DOMAIN,
+                EXECUTION_V3_DISPOSITION_BYTES,
+            ),
+            (
+                COMPLETION_FILE,
+                COMPLETION_MAGIC,
+                COMPLETION_DOMAIN,
+                EXECUTION_V3_COMPLETION_BYTES,
+            ),
+        ] {
+            let row = format!(
+                "| `{file}` | `{}` | {domain} | {} |",
+                shown(magic),
+                thousands(stride)
+            );
+            assert!(section.contains(&row), "§31 lacks the row {row}");
+        }
+        assert!(section.contains(&format!("| `{LOCK_FILE}` | none; must be empty |")));
+        assert!(section.contains(&format!("| 16 | 4 | layout `{VERSION}`, `u32` |")));
+        assert!(section.contains(&format!(
+            "| 536 | {EVALUATION_FINGERPRINT_BYTES} | evaluation fingerprint |"
+        )));
+        assert!(section.contains(&format!("| stride − {SEAL_BYTES} | {SEAL_BYTES} | seal |")));
+    }
+
     struct TestRoot {
         path: PathBuf,
     }

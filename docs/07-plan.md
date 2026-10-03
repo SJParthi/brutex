@@ -13,7 +13,7 @@ Status words mean exactly one thing each:
 
 | Word | Means |
 |---|---|
-| **DONE** | Landed on `feat/pull`, gates green, and named here with its commit |
+| **DONE** | Landed, gates green, and named here with the decision that carried it — or, where no decision did, a plain statement that its commit is not in this repository's history |
 | **NEXT** | Nothing blocks it; no permission needed |
 | **BLOCKED** | Waiting on a decision or a fact this repository cannot see |
 | **OPEN** | Real, measured, not started |
@@ -98,7 +98,7 @@ Restated here so the plan can be checked against it rather than against memory.
 | R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
 | R-7 | **N feeds** appear everywhere with no edit | True of routing, the picker, budgets and `/feeds.json`. **Not** true of the descriptor table — see §5 for the measured number |
 | R-8 | Rust only, **except the front end** | `CLAUDE.md` §2, D-0052, D-0053. Gate 1 by path; gate 1e proves the engine builds with `web/` absent |
-| R-9 | **O(1)** everywhere it is claimed | Gate 8 measures at 1×/10×/100× and exits non-zero on a breach. **All eleven crates covered as of D-0103** — `vocab`, `indicators` and `engine` claimed bounds with no bench until 2026-08-11, and gate 14 was red for it. Two of the claims were false; see §6 |
+| R-9 | **O(1)** everywhere it is claimed | Gate 8 measures at 1×/10×/100× and exits non-zero on a breach. **All thirteen crates carry a `benches/ratio.rs`** (thirteen members, thirteen files, counted 2026-10-03). This said "all eleven crates covered as of D-0103"; the workspace has thirteen members. `vocab`, `indicators` and `engine` claimed bounds with no bench until 2026-08-11, and gate 14 was red for it. Two of the claims were false; see §6. P1-18-06, D-1946 |
 | R-10 | Feeds not owned must not be offered | `/feeds.json` reports `ready`; the picker disables. **Advisory only** — see §4 |
 
 ---
@@ -108,26 +108,42 @@ Restated here so the plan can be checked against it rather than against memory.
 Each line names the defect, not the feature, because the defect is what a
 reader needs to recognise if it returns.
 
-| Was | Now | Commit |
+| Was | Now | Carried by |
 |---|---|---|
-| Census re-imaged and renamed **per window** — 424 GB of writes to maintain a 5.75 MB file | One 64-byte positional append plus a header commit | `a8cadb4` |
-| `pull::rate::Governor` had **zero callers** | Held on the `Site`, charged **per request**, ahead of the credential read | `c1ea7ab` |
-| A multi-year window sent **whole** to a vendor capped at 30 days | Split to the descriptor's cap, per rung as of D-0055; 2020→yesterday is 126 legal requests at Groww's one-minute cap and 80 at either feed's day rung, credential read once. The 81 this row first claimed predates the month-boundary clamp | `bf8f86e`, `0596621` |
-| `read_dir` stripped two extensions unconditionally — **215 calls merged with their own puts per day** | The rule is the extension's *shape*, not a count | `a91026e` |
-| A blank `folder` textbox decided which **protocol** to speak | The feed's declared transport decides | `d2fa20c` |
-| The page offered two hardcoded feeds, so the archive arm was unreachable | Built from `Feed::ALL` | `f8be537` |
-| `run_local` hardcoded `Vendor::Dhan` — **194 instrument-months of GDFL futures filed under `bars/dhan/`** | Archive feeds have their own store prefixes | `44ce731` |
-| `/store` showed `Groww rows` beside `Dhan rows` | One feed, selected; cards follow the column | `2efdce7`, `6602a9a` |
-| Front end was server-rendered Rust HTML | Svelte 5 + `lightweight-charts` (TradingView's own), 375 real candles | `4a5953f`, `f34875b`, `6dd2e97` |
-| `totp` appeared **zero times** in the workspace | RFC 6238 generator, all six Appendix B vectors reproduce | `b96294f` |
-| `StoreFilter::keeps` allocated **two Strings per row**, and the comment said it did not | Neither side allocates; needle folded once at construction | `7661a61` |
-| `census::filtered` copied the **whole table** to draw 200 rows | `Cow`, borrowed when unfiltered | `7661a61` |
-| §32 asserted `/store` was constant-time **while two linear costs sat on it** | Corrected; both measurements recorded | `7661a61` |
-| A run that stored **nothing** reported `STORED` | `Outcome::Empty` — "STORED NOTHING", loud, code appended as 4 | `62274e0` |
+| Census re-imaged and renamed **per window** — 424 GB of writes to maintain a 5.75 MB file | One 64-byte positional append plus a header commit | no decision ¹ |
+| `pull::rate::Governor` had **zero callers** | Held on the `Site`, charged **per request**, ahead of the credential read | no decision ¹ |
+| A multi-year window sent **whole** to a vendor capped at 30 days | Split to the descriptor's cap, per rung as of D-0055; 2020→yesterday is 126 legal requests at Groww's one-minute cap and 80 at either feed's day rung, credential read once. The 81 this row first claimed predates the month-boundary clamp | no decision ¹ |
+| `read_dir` stripped two extensions unconditionally — **215 calls merged with their own puts per day** | The rule is the extension's *shape*, not a count | no decision ¹ |
+| A blank `folder` textbox decided which **protocol** to speak | The feed's declared transport decides | no decision ¹ |
+| The page offered two hardcoded feeds, so the archive arm was unreachable | Built from `Feed::ALL` | no decision ¹ |
+| `run_local` hardcoded `Vendor::Dhan` — **194 instrument-months of GDFL futures filed under `bars/dhan/`** | Archive feeds have their own store prefixes | no decision ¹ |
+| `/store` showed `Groww rows` beside `Dhan rows` | One feed, selected; cards follow the column | no decision ¹ |
+| Front end was server-rendered Rust HTML | Svelte 5 + `lightweight-charts` (TradingView's own), 375 real candles | D-0052, D-0053, D-0174 ¹ |
+| `totp` appeared **zero times** in the workspace | RFC 6238 generator, all six Appendix B vectors reproduce | no decision ¹ |
+| `StoreFilter::keeps` allocated **two Strings per row**, and the comment said it did not | Neither side allocates; needle folded once at construction | no decision ¹ |
+| `census::filtered` copied the **whole table** to draw 200 rows | `Cow`, borrowed when unfiltered | no decision ¹ |
+| §32 asserted `/store` was constant-time **while two linear costs sat on it** | Corrected; both measurements recorded | no decision ¹ |
+| A run that stored **nothing** reported `STORED` | `Outcome::Empty` — "STORED NOTHING", loud, code appended as 4 | no decision ¹ |
 | `Timeframe::DAY_1` existed in the store and **nothing could reach it** — the spot form had no bar-length control and `land_one` wrote `Timeframe::MINUTE_1` as a literal | The rung is a control on the form, built from the descriptors; it lands under `1day/` | D-0055 |
 | The window cap was **one scalar per feed**, qualified by a granularity in prose only | A lookup on (feed, rung). A daily window is no longer split at the one-minute cap | D-0055 |
 | A feed with no published cap sent the window **whole**, which `fetch::land` refuses for spanning two months | `split_window` takes an `Option` and the month boundary binds at every rung | D-0055 |
 | `BarRequest` stated the rung and the `Cadence` **independently**, and a daily pull left at `Cadence::Minute` drops every bar as `BeforeSessionOpen` and reports a clean zero | One field; the cadence is derived from it | D-0055 |
+
+¹ **Each row marked ¹ cited a commit hash, and no reader of `main` could check
+one out.** The sixteen hashes this table and §5 named were commits dated
+2026-08-08. They are not in this repository's history as a reader meets it: not
+in `main`'s, which took that work as squash merges and keeps no branch commit,
+and not in this branch's. (A full clone that fetches every remote branch can
+still resolve them through a branch other than `main`; no document may depend
+on that branch staying on the remote.) They are therefore not cited here, by the rule
+`crates/store/tests/cited_commits.rs` enforces, which now reads this file.
+Where a decision in `docs/05-decisions.md` carries the change, it is named
+instead; for the Svelte row that is D-0052 and D-0053, which permitted a
+framework under `web/`, and D-0174, which records the choice made that day. For
+every row marked "no decision", a search of `docs/05-decisions.md` for the
+row's own terms found no entry that carries it, and none is invented. The rows
+themselves describe the code as it was then and are not re-measured here.
+P1-18-04, D-1944.
 
 ---
 
@@ -208,23 +224,38 @@ compiled to green** on 2026-08-08. The result:
 number: `cargo test --workspace` then failed **29 tests across 7 targets**, and
 the compiler could not see the two worst problems.
 
-Three descriptor fields **cannot express an arbitrary broker at all**:
+Three descriptor fields **could not express an arbitrary broker at all** when
+this was measured. **All three are CLOSED**, each by the vendor this section
+predicted — Zerodha's Kite API — and each closure cites this section in its own
+code comment (P1-18-05, D-1945):
 
-* `HttpSpec::bars_path` is a fixed string concatenated with `base_url`. A vendor
-  whose instrument and granularity are *path segments* cannot be described.
-* `AuthScheme` is `Raw | Bearer`. A scheme carrying a prefix and a **second**
-  secret cannot be described.
-* `TimestampEncoding::IsoDateTimeText` documents itself as carrying no zone. A
-  vendor returning `+0530` cannot be described.
+* ~~`HttpSpec::bars_path` is a fixed string concatenated with `base_url`. A
+  vendor whose instrument and granularity are *path segments* cannot be
+  described.~~ **Closed by D-0133:** `bars_path` is a list of typed path
+  segments (`pull::vendor::PathSegment`), because Kite's
+  `/instruments/historical/:instrument_token/:interval` carries both.
+* ~~`AuthScheme` is `Raw | Bearer`. A scheme carrying a prefix and a **second**
+  secret cannot be described.~~ **Closed by D-0134:**
+  `AuthScheme::PrefixedPair { prefix, separator }` carries Kite's
+  `token api_key:access_token`.
+* ~~`TimestampEncoding::IsoDateTimeText` documents itself as carrying no zone. A
+  vendor returning `+0530` cannot be described.~~ **Closed by D-0135:**
+  `TimestampEncoding::IsoDateTimeOffset` reads the offset from the value and
+  applies it where it is read.
 
-All three compile as lies. **The table is genuinely N-feed for a vendor shaped
-like Dhan or Groww. It is not N-feed for an arbitrary broker**, and saying
-otherwise was overstatement.
+When they were open all three compiled as lies, and the table was N-feed only
+for a vendor shaped like Dhan or Groww. That is no longer the measured state of
+these three fields. Whether the table is N-feed for every *other* broker shape
+is not claimed here: the scratch-clone count above was taken once, on
+2026-08-08, and has not been re-run.
 
 Two costs that made this worse have since been removed: `pull::config` demanded
 a credential table from every vendor (an archive has none), and `api::merge`
 required every vendor to agree (an archive publishes no master). Both asked a
-question the wrong set could not answer. `44ce731`.
+question the wrong set could not answer. D-0123 later states the credential
+half as a rule (`crate::config` requires a credential table only of `Rest`
+feeds); no decision records the change itself, and the commit this paragraph
+cited is not in this repository's history — see §2's note ¹.
 
 ---
 
@@ -242,7 +273,9 @@ ensured":
 * Gate 14 separately proves the benches *exist and have the shape of a ratio
   measurement*, so deleting one to make gate 8 pass fails a different gate.
 
-Last run: **`rc=0`**, every ratio inside the ceiling at 100× input.
+This section does not restate a last run. The current measured figures, with
+their dates, are the tables in `docs/04-invariants.md`; a figure copied here is a
+second copy that goes stale, which is what the table below used to be.
 
 ### The prediction this section made came true, and is now closed
 
@@ -256,19 +289,29 @@ cost claims across the three crates, none measured. Closed 2026-08-11 by D-0103:
 three `benches/ratio.rs`, twelve invariant rows `C-V-01…04`, `C-I-01…04`,
 `C-E-01…04`, and three rows in gate 14's own coverage table.
 
-Four of the five operations rule 4 names are now measured:
+All five operations rule 4 names have a bench row. The figures are not copied
+here; read them in `docs/04-invariants.md` beside the row named:
 
-| Rule 4 operation | Measured | Ratio |
+| Rule 4 operation | Row in `docs/04-invariants.md` | What the row measures |
 |---|---|---|
-| Condition lookup | `C-V-04` | 0.965× popcount, 1 bit → 234 bits |
-| Mask evaluation | `C-V-01`, `C-V-02`, `C-V-03` | 0.998× hit→miss, **0.996× word 0 → word 5**, 1.037× k=1 → k=234 |
-| Duplicate rejection | `C-E-04` | 0.842× per bar, 10,000 → 100,000 bars |
-| Result append | **MEASURED** — `C-E-11` | 0.633×–0.811×. `C-04` still carried UNMEASURED long after this landed; both are corrected together |
-| Bar lookup | `C-01` | already measured in `store` |
+| Condition lookup | `C-V-04` | `popcount`, `union` and `intersect` against the bits set, up to every live bit (328 today) |
+| Mask evaluation | `C-V-01`, `C-V-02`, `C-V-03`, and the live path `C-E-02` | hit against miss; a miss in each of the six words; a 1-bit candidate against every live bit; the live `Column::support` from k=1 to k=8 |
+| Duplicate rejection | `C-E-04` | a **whole ladder walk** per bar, 10,000 → 100,000 bars — generate, subset-prune, reject repeated k=1 positions and count support together, not the rejection alone |
+| Result append | `C-E-11` | `engine::primitives::append`, the call `drain` makes per survivor |
+| Bar lookup | `C-01` | measured in `store` |
 
-The 0.996× is the one that matters: an early-exit loop would return sooner on a
-candidate failing in word 0, so a flat ratio across the six words is what says the
-branchless implementation is the one that actually runs.
+**A flat word-position ratio does not prove the branchless code is the one that
+runs, and this section used to say it did.** It read: *"an early-exit loop would
+return sooner on a candidate failing in word 0, so a flat ratio across the six
+words is what says the branchless implementation is the one that actually
+runs."* D-1436 withdrew that: audit findings ET-o1-proof-coverage-3 and -13
+replaced `hits` with an early-exit loop and measured 1.093× to 2.056× across
+words 1 to 5, under the 3.0× ceiling, so gate 8 passed it. `C-V-02` is evidence.
+The guard against an early-exit loop is the source-shape unit test
+`vocab::mask::hits_does_the_same_work_for_every_input`, which refuses a loop, a
+branch and an early return in the body. The table here also carried figures
+docs/04 has since replaced (`C-E-04` 0.842×, `C-E-11` 0.633×–0.811×) and the
+retired live count 234. P1-18-06, D-1946.
 
 **Two claims turned out to be false when measured**, which is the return on writing
 the benches at all. `isqrt_i128` was documented "O(1) for **every** `i128`" and its
@@ -277,7 +320,7 @@ flat, now stated as the bound it is with the spread in `06-limits.md` §51. And 
 candle's cost varies **1.87×** with its content, recorded in §52.
 
 **Where it still does not reach.** Peak memory (`E-08`) alone — result append was closed by `C-E-11` and this paragraph is corrected with it. `E-08`
-have no measurement, and both say so in `docs/04-invariants.md` with the word
+has no measurement, and says so in `docs/04-invariants.md` with the word
 UNMEASURED rather than a test name. `E-08` needs a declared budget before it needs a
 measurement, and inventing a budget is what §3 rule 1 forbids.
 
@@ -305,11 +348,17 @@ first:
 
 | Item | Evidence |
 |---|---|
-| The archive half of the descriptor table has **zero non-test consumers** | Every read of an `ArchiveSpec` field in `crates/pull/src/vendor.rs` is at a line inside the `#[cfg(test)]` module that opens at **2645** — `archive_spec` (3729), `member_suffix` (3754), `spec.layouts` (3794), `.layout(…)` (3919, 3928, 3933). `Descriptor::record` is the same: read at 4011–4014 and nowhere else. Outside that file **every** consumer matches `Transport::LocalArchive(_)` and discards the spec — `api/src/server.rs:838, 1710, 2330`, `api/src/render.rs:1566`, `pull/src/emit_sites.rs:761`. And the path that actually ingests an archive, `run_local` (`api/src/server.rs:3950`), never asks the descriptor anything: it hardcodes `Columns::Gdfl`, `TimestampEncoding::EpochSecondsUtc`, `PriceScale::Paisa`, `Exchange::Nse` and `Segment::Fno` at 3999–4005 |
+| ~~The archive half of the descriptor table has **zero non-test consumers**~~ **Partly CLOSED.** The column shape is now read from the descriptor; the timestamp encoding, price scale, exchange and segment are still literals | `run_local` (`api::server::run_local`) now asks the descriptor: it takes `feed.descriptor().transport`, refuses a feed that is not `Transport::LocalArchive`, and decodes with `archive.layout(Segment::Fno)`'s own `shape` instead of `Columns::Gdfl` for every archive feed — D-0344. `api::folder::shape_of` reads `spec.layouts` the same way. **Still literal in `run_local`:** `TimestampEncoding::EpochSecondsUtc`, `PriceScale::Paisa`, `Exchange::Nse` and `Segment::Fno`, the segment being a known defect recorded in `docs/06-limits.md` because it decides where bars are filed. `Descriptor::record` is still read only inside `crates/pull/src/vendor.rs`: by its `#[cfg(test)]` module and by a compile-time `const` block that checks it against each feed's granularity floor. No runtime path reads it |
 
-This row was already in the table and it was, if anything, **understated**. It
-is not one more defect beside the others; it is why the others divide the way
-they do.
+This row said the archive half had **zero** non-test consumers and that
+`run_local` hardcoded `Columns::Gdfl`. Both stopped being true with D-0344, and
+the row kept saying them (P1-18-05, D-1945). The line numbers it cited
+(`vendor.rs` 2645 to 4014, `server.rs` 838 to 4005) belonged to a file several
+thousand lines shorter and are dropped rather than refreshed: a line number in a
+plan is stale by the next commit, and the item names above are what a reader
+can search for. What remains is still why §7.3's rows are latent rather than
+live: the price scale and encoding the descriptors declare are not the ones
+`run_local` decodes with.
 
 ### 7.2 LIVE — reachable today, on the `run_local` path
 
@@ -346,9 +395,9 @@ would make them fire.
 
 | Item | Evidence |
 |---|---|
-| `PriceScale::Rupees` in both archive descriptors | **`vendor.rs:2517`** — TrueData's `ArchiveSpec` — and **`vendor.rs:2573`** — GDFL's. Re-verified line by line; the numbers this row was previously given were the broker rows and are corrected in §7.4. The decoder already emits paisa, so wiring these as they stand is a ×100 error, masked today only by `run_local` hardcoding `PriceScale::Paisa` at `server.rs:4002` |
+| `PriceScale::Rupees` in both archive descriptors | **`TRUE_DATA`** and **`GDFL`** in `crates/pull/src/vendor.rs` both still declare `prices: PriceScale::Rupees` (re-checked 2026-10-03; this row named lines 2517 and 2573, which have since moved); the numbers this row was previously given were the broker rows and are corrected in §7.4. The decoder already emits paisa, so wiring these as they stand is a ×100 error, masked today only by `api::server::run_local` hardcoding `PriceScale::Paisa` |
 | `MemberPattern` cannot express GDFL's futures depth | Three components against the four measured in §7.2. Nothing resolves a `MemberPattern` into a path outside `#[cfg(test)]`, so this is the descriptor half of the GDFL row and it is inert |
-| `RecordShape::Snapshot` unenforced | Its doc says a snapshot feed must refuse rather than be "stored as a bar with the price repeated four times — a lie written into the data itself". That is exactly what reaches disk — and `Descriptor::record` is read at `vendor.rs:4011–4014` **and nowhere else**, so nothing consults it before writing |
+| `RecordShape::Snapshot` unenforced | Its doc says a snapshot feed must refuse rather than be "stored as a bar with the price repeated four times — a lie written into the data itself". That is exactly what reaches disk — and `Descriptor::record` is read **only** by `vendor.rs`'s tests and a compile-time `const` check (this named lines 4011–4014, since moved), so nothing consults it before writing |
 
 ### 7.4 What these rows used to say, and why it was wrong
 
@@ -357,7 +406,7 @@ standing, and a corrected record is worth more here than a tidy one.
 
 | Row | Used to say | Why that was wrong |
 |---|---|---|
-| GDFL futures | "GDFL futures unreadable — `MemberPattern::SymbolAtRoot`, but they nest one level deeper. **All 642 files invisible**" | **The stated cause was never true.** `git log -S StemGroupSymbol -- crates/pull/src/vendor.rs` returns exactly two commits; the older, `dbaafd6`, is the one that created the descriptor table, and it introduced GDFL carrying `StemGroupSymbol { suffix: ".NFO.csv" }`. The newer, `10b11b2`, touches only test-side references and leaves the descriptor's value alone — so GDFL has carried it unchanged since the table was born. `SymbolAtRoot` is **TrueData's** value — §3's diagnosis, copied onto the wrong vendor. §3's row is correct and stands unchanged. The count 642 is right; "invisible" and "unreadable" are not, and the 194 misfiled months are the proof |
+| GDFL futures | "GDFL futures unreadable — `MemberPattern::SymbolAtRoot`, but they nest one level deeper. **All 642 files invisible**" | **The stated cause was never true.** On the history this row was written against (2026-08-10), `git log -S StemGroupSymbol -- crates/pull/src/vendor.rs` returned two commits: the older created the descriptor table with GDFL carrying `StemGroupSymbol { suffix: ".NFO.csv" }`, and the newer touched only test-side references — so GDFL carried it unchanged since the table was born. Neither commit is in this repository's history (§2 note ¹), and their hashes are no longer cited. Run on this branch on 2026-10-03, the same command returns one commit, `ffa41c6d`, the squash merge that brought the table into `main`, and `GDFL`'s descriptor in that commit's `vendor.rs` carries `MemberPattern::StemGroupSymbol { suffix: ".NFO.csv" }`; that is consistent with the row, and it cannot reproduce the two-commit count. P1-18-04, D-1944. `SymbolAtRoot` is **TrueData's** value — §3's diagnosis, copied onto the wrong vendor. §3's row is correct and stands unchanged. The count 642 is right; "invisible" and "unreadable" are not, and the 194 misfiled months are the proof |
 | 596 decimal strikes | "596 decimal-strike contracts per day **decode then vanish**" | The count is exact and reproduces. "Vanish" does not: it names the one shape `CLAUDE.md` §4 bans, and the five mechanisms above are the opposite of it. Half the row decided the severity and that half was wrong |
 | TrueData 2025 indices | "TrueData 2025 indices **store nothing**" | Literally true of the bars, but read beside "vanish" it said *silently*. It is the same loud refusal. The real defect is the message text, which this row never mentioned |
 | `PriceScale::Rupees` | The claim behind the row named **lines 2159 and 2324** | Neither is a `PriceScale` line at all. Each sits inside a **broker's** `HttpSpec` literal, seven lines above that broker's own `prices: PriceScale::Rupees` — 2166 for Dhan, 2331 for Groww — where `Rupees` is **correct**, because both vendors send decimal rupee text. A remedy aimed at those lines would have broken the two feeds that work and left the two that do not. No tracked file carried the numbers, which is why the row went unchecked; the archive lines are 2517 and 2573 |

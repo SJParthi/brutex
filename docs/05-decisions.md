@@ -54876,3 +54876,148 @@ older gap in the dev proxy.
   a Resume after a Stop was admitted and answered "running" with nothing behind
   it. A halted status now keeps its phase and reason; the pause flag is still
   set (CE-24).
+### D-1940 — Every production file format named in P1-16-04 has a byte layout in `docs/02-store-format.md` — 2026-10-03
+
+**The defect (P1-16-04).** `docs/02-store-format.md` claims to be the
+authority for bytes on disk, and eight formats this build writes or reads had
+no layout in any document: the run ledger `results/runs.bin` (`BRUTEXRS`,
+versions 2 and 3), the population rows (`BRUTEXPP`), the live top-N files
+(`BRUTEXLV`), Pre-Admission Data V2, Execution V3 and V4, Global Replay V3 and
+Population Statistics V3. D-1763 left this queued.
+
+**The choice.** New sections §27 to §34, one per format, placed after §26 and
+before the unnumbered successor sections. Every offset was counted from the
+encoder (`to_bytes`, `payload_bytes`, `publish`, `encode_v2_core`, the
+`encode` functions and the `put_*` calls), not from comments, and every table
+was checked for contiguity: each row's offset is the previous row's offset
+plus its size, and each table ends at its payload width or stride. Where a
+reader does not check a field — `runs.bin` header bytes `12..16` — the section
+says so rather than calling it reserved-and-refused.
+
+**Bound.** One test beside each encoder binds its section's magic, version and
+stride (and, where the section states them, seal offset, payload width, file
+names and kind codes) to the constants: ZD-01 to ZD-08. A constant that
+changes without the document now fails `cargo test -p cli`. The tests bind the
+anchoring numbers, not every field offset: a field moved inside an unchanged
+stride would leave a section wrong and these tests green. That limit is stated
+rather than closed here.
+
+**Rejected.** A linked sub-document. §11 to §26 already hold successor formats
+inline, so a reader looks in one file.
+
+### D-1941 — `docs/09-verify.md` runs at HEAD, and says where it does not — 2026-10-03
+
+**The defect (P1-18-01).** The page promised that its procedure exits clean,
+and at HEAD §2 printed `crates/cli/build.rs`, §4 and §5 read
+`web/src/routes/+page.svelte` (now a redirect `+page.js`), §4's pattern counted
+a `===` comparison as an assignment, and §4's `/db prints 2` printed 0.
+
+**The choice.** §2 excludes `crates/cli/build.rs` by name, with the reason
+(gate 13 layer 3's allowlisted escape, no process started). §4 checks
+`terminal`, `markets`, `ingest` and `db` with the assignment-only pattern
+`feeds\.active *=[^=]` and names the one writer, `feed-startup.js` behind
+`selectFeed`. §5 checks `markets` and `db`, and states that `terminal` (47,
+its own sampled palette) and `ingest` (3, `var()` fallbacks) do not pass, so
+the page does not claim a property two pages lack. §6 records the counts it
+printed. §1 records two measured limits: `npm --prefix web run build` exits
+127 (`vite: not found`) without an install, which this session could not do,
+and the `find -newer` check is meaningless in a fresh checkout because
+checkout sets modification times. Every command on the page was run for this
+entry except `cargo test --workspace --locked`, which was still running when this was committed; `cargo build --workspace`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exited 0.
+
+### D-1942 — `docs/10-shared-core.md` §3 says twelve sources and 328 positions, and a test reads it — 2026-10-03
+
+**The defect (P1-18-02).** §3 said `Evaluator::positions()` unions ELEVEN
+sources for **272** positions; §1 and the code say twelve and 328. §3's list
+omitted the five weekday rows the evaluator claims itself.
+
+**The choice.** §3 lists the twelve sources and states 328.
+`indicators::evaluator_position_count::this_documents_position_counts_are_the_live_table`
+(ZD-09) requires both §1 and §3 to state the number `positions()` returns, so
+the next position added fails the test until this file says it.
+
+### D-1943 — The `vocab-v0.1.0` snippet is marked not yet possible; no tag is created — 2026-10-03
+
+**The defect (P1-18-03).** `docs/10-shared-core.md` §2 told consumers to pin
+`tag = "vocab-v0.1.0"`. The repository has no tags (`git tag --list` and
+`git ls-remote --tags origin` print nothing), so the snippet cannot resolve.
+
+**The choice.** The snippet is kept as the intended shape under a statement
+that it is not yet possible, and the page gives what works today: a `rev` pin
+to a full commit hash, the same for all three crates. **No tag is created
+here.** Choosing the commit a shared contract is frozen at is the operator's
+decision; when one is cut it gets its own entry and the warning is removed.
+
+### D-1944 — `docs/07-plan.md` cites no commit a reader cannot check out, and `cited_commits.rs` reads it — 2026-10-03
+
+**The defect (P1-18-04).** The plan's DONE table named sixteen commits as each
+row's proof, §5 repeated one, and §7.4 named two more. None is an ancestor of
+`main` or of this branch (checked against `git rev-list` of both): `main`
+took that work as squash merges. They resolve in a full clone only through
+another remote branch, which no document may depend on.
+
+**The choice.** Each hash is removed. The column is now "Carried by": the
+Svelte row names D-0052, D-0053 and D-0174; every other row says "no decision",
+because a search of this ledger for each row's own terms found none, and a
+note under the table says plainly that the commits are not in this
+repository's history. §7.4's `git log -S StemGroupSymbol` argument is restated
+as what it was on the old history, with what the same command returns here
+today: one commit, `ffa41c6d`, the squash merge on `main`, whose GDFL
+descriptor carries `StemGroupSymbol { suffix: ".NFO.csv" }`. The legend's DONE
+definition no longer promises a commit.
+
+**Bound.** `docs/07-plan.md` joins `WHOLE` in
+`crates/store/tests/cited_commits.rs` (ZD-10). Probed: appending a sentence
+citing one of the removed hashes fails
+`every_commit_the_store_records_cite_is_on_main_or_says_why_not`, naming the
+file.
+
+### D-1945 — `docs/07-plan.md` §5 and §7.1 mark closed what the code closed — 2026-10-03
+
+**The defect (P1-18-05).** §5 listed three descriptor fields that "cannot
+express an arbitrary broker at all" — a fixed-string `bars_path`, a two-variant
+`AuthScheme`, a zone-less timestamp encoding — and §7.1 said the archive half
+of the descriptor table has zero non-test consumers and that `run_local`
+hardcodes `Columns::Gdfl`. The code closed all of it and cites §5 in its own
+comments.
+
+**The choice.** §5's three bullets are struck through and each names its
+closing decision: D-0133 (`PathSegment` list), D-0134
+(`AuthScheme::PrefixedPair`), D-0135 (`TimestampEncoding::IsoDateTimeOffset`).
+§5 no longer claims a fresh N-feed verdict for other broker shapes, because its
+scratch-clone count was taken once and not re-run. §7.1 is marked partly
+closed: `run_local` decodes with the feed's own FNO layout (D-0344) and
+`api::folder::shape_of` reads the layouts, while the encoding, price scale,
+exchange and segment stay literal. Its line numbers are dropped, and §7.3's two
+rows name items instead of moved lines.
+
+### D-1946 — `docs/07-plan.md` §6 points at docs/04 and no longer says a flat ratio proves branchless code — 2026-10-03
+
+**The defect (P1-18-06).** §6 said the flat C-V-02 word-position ratio "is what
+says the branchless implementation is the one that actually runs", which
+D-1436 withdrew; it copied figures docs/04 has replaced (C-E-04 0.842×, C-E-11
+0.633×–0.811×) and the retired live count 234; it asserted a "last run" it did
+not date. R-9 said "all eleven crates covered"; the workspace has thirteen
+members and thirteen `benches/ratio.rs`.
+
+**The choice.** The table names the docs/04 row for each rule-4 operation and
+what that row measures, with no figures; `C-E-04` is described as a whole
+ladder walk. The paragraph states D-1436: the guard is
+`vocab::mask::hits_does_the_same_work_for_every_input`, and C-V-02 is evidence.
+The undated "last run" line is replaced by a pointer to docs/04's dated
+tables. R-9 says thirteen.
+
+### D-1947 — `docs/07-o1-architecture.md` gives layer 4 both probe bounds — 2026-10-03
+
+**The defect (P1-18-07).** The layer-4 row, the measured table and "How a layer
+is proven" quoted the hit-only probe bound (`<= 8`, worst 6/7) as layer 4's
+bound. A miss runs on to the first empty slot, and `of_equity` on a name in no
+tier is six misses; `core::universe` corrected its own four quotes and this
+document was not.
+
+**The choice.** All three places state both bounds from `core::universe`'s
+tests and header: hit `<= 8` (worst 7), miss `<= 12` (worst 11, 10 on the
+213-member table), and `of_equity`'s six misses at most 54 steps measured, 72
+by the asserted bound. Probe counts are a property of the compiled tables, so
+the row says they do not depend on the machine the rest of that table was
+measured on.
