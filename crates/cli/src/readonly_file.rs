@@ -14,7 +14,9 @@ use std::path::Path;
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
-const FLAGS: i32 = store::open_flags::O_NOFOLLOW | store::open_flags::O_NONBLOCK;
+// One literal per target, not an `|` of the two: over disjoint bits `|` and `^`
+// agree, so that expression carried an equivalent mutant (D-0192).
+const FLAGS: i32 = store::open_flags::O_NOFOLLOW_NONBLOCK;
 
 #[cfg(any(
     target_os = "macos",
