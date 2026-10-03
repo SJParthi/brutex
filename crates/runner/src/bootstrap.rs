@@ -2031,8 +2031,18 @@ mod tests {
         let white = reality_check(&set, 19, 7, DEFAULT_BLOCK).expect("a verdict");
         let hansen = spa(&set, 19, 7, DEFAULT_BLOCK).expect("a verdict");
         let stepdown = romano_wolf(&set, 19, 7, DEFAULT_BLOCK, 50_000);
-        assert_eq!(white.p_value, 0.05, "premise: no draw beat the edge");
-        assert_eq!(hansen.p_value, 0.05, "premise: no draw beat the edge");
+        // Bit-exact on purpose: the boundary case is p EQUAL to 0.05.
+        let five = 0.05_f64.to_bits();
+        assert_eq!(
+            white.p_value.to_bits(),
+            five,
+            "premise: no draw beat the edge"
+        );
+        assert_eq!(
+            hansen.p_value.to_bits(),
+            five,
+            "premise: no draw beat the edge"
+        );
         assert_eq!(stepdown.len(), 1, "premise: the stepdown rejects at 5%");
         assert!(white.clears(), "White at p = 0.05");
         assert!(hansen.clears(), "SPA at p = 0.05");
