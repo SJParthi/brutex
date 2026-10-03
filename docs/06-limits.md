@@ -12451,6 +12451,18 @@ not:
   is the order `std::sync::Mutex` hands the lock out, and that order is not
   itself FIFO-guaranteed by the standard library.
 
+## Audit fixes — D-1480 onward, 3 October 2026
+
+**A credential watch's dead-value check is O(d), not O(1) (v3a-1, D-1482).**
+`api::credential_law::Watch` now remembers every fingerprint the vendor
+rejected and a later read replaced in one run, and both `admit` and `reread`
+ask whether a fresh value is among them. `pull::http::CredentialPrint` has a
+constant-time `PartialEq` and deliberately no `Hash`, so the question is a walk
+of the list: O(d) constant-time 32-byte comparisons, where d is the number of
+rotations this run has taken. Each rotation is bought by one vendor rejection
+and one Parameter Store read, so d is at most the number of rejections, and in
+practice zero or one. Not timed.
+
 ## Gate 11 allowlist reasons — moved from `.github/workflows/ci.yml`, D-1451, 2 October 2026
 
 Gate 11 declares, per rule, the files allowed a counted number of banned

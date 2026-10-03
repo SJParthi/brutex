@@ -53478,3 +53478,34 @@ taken at once with a regular lock file in its place. APIC-07.
 an emptied file is truthful, so refusing would turn an attribution problem
 into an outage. Truncating before the write: a refused reader would then see
 an empty file between the two calls on every start, not only on failure.
+
+### D-1482 — A credential re-read that returns any value already rejected in the run halts, on the F&O walks as on spot — 2026-10-03
+
+**What was observed (v3a-1).** `api::credential_law::Watch` remembered ONE
+dead fingerprint, overwritten on every rotation, and only `admit` read it --
+and only the spot loop calls `admit`. The F&O rolling walk (`roll_every`) and
+the named-contract walk (`fno_land`) take the source `reread` hands back as
+`Rotated` and send it without admitting it. `reread` decided "rotated" as
+`rejected != Some(fresh)`. So on a walk, A rejected, re-read B, B rejected,
+re-read A (a rotation undone, or Parameter Store answering from two replicas)
+was taken as a rotation, and the remaining cells were sent with A, a token
+the run had already seen rejected. Each flap bought one more dead request.
+
+**The decision.** `dead` is now every fingerprint rejected and replaced in the
+run, and `reread` itself refuses a fresh value found there: the run halts with
+`CredentialStop::SameValue` (the token is dead and this repository cannot
+replace it, `CLAUDE.md` §8), one WARN line on the rolling log naming the feed
+and the field, and a reason saying the re-read "returned a value the vendor
+already rejected in this run". `admit` asks the same list. The check is a walk
+of constant-time comparisons, O(d) in the run's rotations, because the print
+has no `Hash` by design; `docs/06-limits.md` "Audit fixes — D-1480 onward"
+states it.
+
+**Proof.** `server::credential_law_tests::an_undone_rotation_mid_rolling_walk_never_resends_a_rejected_token`
+and `server::credential_law_tests::an_undone_rotation_mid_contract_walk_never_resends_a_rejected_token`
+script `[fresh, stale]` after a walk that starts with `stale` against a vendor
+that rejects everything, and assert two requests on the wire (stale, fresh),
+two re-reads, a `SameValue` stop and the reason. Both fail on the previous
+code, which sent `stale` a second time. The spot test
+`a_read_that_returns_a_value_already_rejected_is_never_sent` still passes.
+APIC-08.
