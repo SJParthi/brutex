@@ -470,6 +470,29 @@ impl ExecutionRunV1 {
         )
     }
 
+    /// The run-identity checks against `series`, returning the bar digest
+    /// they computed so the caller does not hash the same bars again.
+    ///
+    /// `replay_selected_universe_with` called the digesting check and then
+    /// digested the same OOS bars for its own `oos_data_digest`: two BLAKE3
+    /// passes where one gives both answers (c4a-5, D-1495). The digest and the
+    /// order of checks are unchanged, so the refusal for a faulty input is too.
+    fn require_matches_digested(
+        self,
+        series: ExecutionSeriesV1<'_>,
+        side: crate::excursion::Side,
+    ) -> Result<[u8; 32], ExitGridErrorV1> {
+        let digest = crate::identity::data_digest(series.bars());
+        self.require_matches_terms(
+            series.instrument(),
+            hash(series.feed().as_bytes()),
+            hash(series.commit().as_bytes()),
+            digest,
+            side,
+        )?;
+        Ok(digest)
+    }
+
     /// The five run-identity checks, in their fixed order, against series
     /// terms the caller has already digested.
     ///
@@ -2777,20 +2800,9 @@ impl ResolvedExitGridV1 {
         }
         let series = oos.series();
         self.require_matching_series(series)?;
-        // ONE BLAKE3 PASS OVER THE OOS BARS, NOT TWO (c4a-5, D-1495). This
-        // called `require_matches`, which digests the bars, and then digested
-        // the same bars again for `oos_data_digest` below. The digest is the
-        // same value either way and the checks run in the same order, so the
-        // refusal reported for a faulty input does not change.
+        // ONE BLAKE3 PASS OVER THE OOS BARS, NOT TWO (c4a-5, D-1495).
+        let oos_data_digest = oos_run.require_matches_digested(series, selected.side)?;
         let bars = series.bars();
-        let oos_data_digest = crate::identity::data_digest(bars);
-        oos_run.require_matches_terms(
-            series.instrument(),
-            hash(series.feed().as_bytes()),
-            hash(series.commit().as_bytes()),
-            oos_data_digest,
-            selected.side,
-        )?;
         if oos_run.mask != selected.mask {
             return Err(ExitGridErrorV1::RunIdentityMismatch("mask"));
         }
@@ -7143,16 +7155,12 @@ mod tests {
         let universe = resolved
             .replay_selected_universe(oos, &execution_column, &selected, run)
             .expect("pricing refusals remain conservative occupancy evidence");
+        let passes = crate::identity::DATA_DIGESTS.with(std::cell::Cell::get);
+        assert_eq!(passes, 1, "one replay hashes its OOS bars once (c4a-5)");
+        let held = crate::identity::data_digest(&execution);
         assert_eq!(
-            crate::identity::DATA_DIGESTS.with(std::cell::Cell::get),
-            1,
-            "one replay hashes its OOS bars once, not once for the run check and \
-             again for the replay digest (c4a-5, D-1495)"
-        );
-        assert_eq!(
-            universe.oos_data_digest,
-            crate::identity::data_digest(&execution),
-            "and the digest it carries is still the digest of those bars"
+            universe.oos_data_digest, held,
+            "and still carries their digest"
         );
 
         assert!(universe.digest_is_valid());
