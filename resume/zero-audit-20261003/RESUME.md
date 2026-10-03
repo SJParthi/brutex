@@ -101,3 +101,16 @@ id, state (found / fixing / branch / merged), commit. All findings evidence is i
 - api::emitted counts every telemetry::emit site in the lib; a new emit needs a
   driven row (ROWS) and the lib_sites figure bumped.
 - Master fixtures must carry the right-most vendor-id column (D-1761).
+
+## Agent branch: zero/test-teeth (pushed, head 0ea46614, NOT merged into staging)
+Fixes all 31 "tests that cannot fail" findings (P1-10-01..04, P1-11-01..03,
+P1-12-01..05, P1-13-01..03, P1-14-01..07, P1-17-01..04). D-1920; invariants
+ZT-01..ZT-06; P-05 corrected. 28 of 31 break-tested (break code, see test fail,
+restore); P1-10-03, P1-11-03, P1-12-05 and the api P1-12 rows were not
+break-tested. Full tests run only on core, costs, lake, engine, indicators,
+pull, runner; for cli and api only touched tests. NOT run: clippy, CI gate
+scripts, mutants. Merge notes:
+- production changes: api `note_unstamped_lock` (emitted.rs counts 20/9 -> 21/8);
+  pull `signing_key_for`; ci.yml gate 1d declares literal `iam`.
+- Not fixed (production): `cli auto` exits 0 when it measured nothing — open
+  finding; the test now uses 6 sessions.
