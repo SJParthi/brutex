@@ -1,0 +1,11 @@
+crates/cli/src/stability.rs
+crates/cli/src/step3_comparison.rs
+crates/cli/src/step3_orchestrator.rs
+crates/cli/src/stored.rs
+crates/cli/src/stored_data_completeness.rs
+crates/cli/src/stored_family_v6.rs
+crates/cli/src/stored_post_training_oos.rs
+crates/cli/src/strict_range_config.rs
+crates/cli/src/strict_range_knobs.rs
+crates/cli/src/strict_v6_inputs.rs
+crates/cli/src/sweep_evidence.rs

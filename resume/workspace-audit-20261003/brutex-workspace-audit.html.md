@@ -53,10 +53,13 @@ td.what span{color:var(--muted)}
 .pill{display:inline-block;font:600 12px var(--sans);padding:2px 8px;border-radius:999px;white-space:nowrap}
 .s-high{color:var(--high);background:var(--high-bg)} .s-medium{color:var(--med);background:var(--med-bg)} .s-low{color:var(--low);background:var(--low-bg)} .s-info{color:var(--info);background:var(--info-bg)}
 .v-ok{color:var(--ok);background:var(--ok-bg)} .v-bounded{color:var(--accent);background:var(--accent-soft)} .v-not{color:var(--med);background:var(--med-bg)} .v-bad{color:var(--high);background:var(--high-bg)}
+.st-fixed{color:var(--ok);background:var(--ok-bg)} .st-partial{color:var(--accent);background:var(--accent-soft)} .st-documented{color:var(--info);background:var(--info-bg)} .st-open{color:var(--med);background:var(--med-bg)}
+td.note{color:var(--muted);font-size:13px;min-width:200px}
 .proof{font-size:12px;color:var(--muted);white-space:nowrap}
 .num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 .foot{color:var(--muted);font-size:13px;margin-top:22px;max-width:80ch}
 @media (max-width:640px){td.where{max-width:140px}}
+#panel h3{font-size:15px;margin:20px 0 8px}
 </style>
 
 <div class="wrap">
@@ -179,6 +182,8 @@ const F=[
 ["hunt-store-6","docs","info","code","Store doc says ragged tails are truncated","The code deliberately does not (D-0189).","docs/02-store-format.md §7"],
 ];
 
+const P=[["vocab::ConditionMask::hits [batch=256]", "1 bit set", "100000", 2.1, 2.4, 20.4, 298.9], ["vocab::ConditionMask::hits [batch=256]", "300 bits set", "100000", 2.1, 4.3, 67.5, 1851.0], ["vocab::table::definition [batch=256]", "bit 0", "100000", 0.7, 1.4, 1.9, 397.5], ["vocab::table::definition [batch=256]", "bit 369 (last)", "100000", 1.0, 1.8, 2.6, 592.0], ["vocab::table::index_of [batch=32]", "first name", "100000", 14.5, 24.6, 163.1, 3179.5], ["vocab::table::index_of [batch=32]", "last name", "100000", 11.7, 23.0, 188.2, 4991.5], ["vocab::table::index_of [batch=32]", "miss 'zzzz'", "100000", 15.1, 23.8, 575.7, 6237.1], ["engine::Column::support per BAR (call/bars)", "1k bars", "10000", 1.4, 5.1, 52.6, 479.6], ["engine::Column::support whole call", "1k bars", "10000", 1380.0, 5068.0, 52566.0, 479551.0], ["engine::Column::support per BAR (call/bars)", "1M bars", "2000", 7.2, 9.1, 12.5, 14.8], ["engine::Column::support whole call", "1M bars", "2000", 7202343.0, 9139812.0, 12521422.0, 14780559.0], ["engine::primitives::offer k=1 dedup [batch=8]", "100 offered", "10008", 24.0, 37.1, 67.1, 4738.4], ["engine::primitives::offer duplicate reject [batch=8]", "100 offered", "10000", 23.1, 55.2, 136.2, 4885.6], ["engine::primitives::offer k=1 dedup [batch=8]", "100,000 offered", "12500", 36.4, 104.0, 1316.5, 14072.6], ["engine::primitives::offer duplicate reject [batch=8]", "100,000 offered", "10000", 25.6, 32.1, 47.5, 3183.9], ["store::Layout::offset_of [batch=256]", "100 bars", "100000", 1.0, 1.8, 4.9, 331.4], ["store::BarFile::read_record warm same index", "100 bars", "10000", 43.0, 62.0, 206.0, 4763.0], ["store::BarFile::read_record scattered index", "100 bars", "10000", 57.0, 3878.0, 26136.0, 255984.0], ["store::BarFile::first_at_or_after (O(log n) by design)", "100 bars", "10000", 2713.0, 11392.0, 38499.0, 265343.0], ["store::Layout::offset_of [batch=256]", "2,592,000 bars (1s x 30d, max month)", "100000", 1.0, 1.4, 2.7, 420.5], ["store::BarFile::read_record warm same index", "2,592,000 bars (1s x 30d, max month)", "10000", 44.0, 164.0, 367.0, 30079.0], ["store::BarFile::read_record scattered index", "2,592,000 bars (1s x 30d, max month)", "10000", 4471.0, 11929.0, 54282.0, 138063.0], ["store::BarFile::first_at_or_after (O(log n) by design)", "2,592,000 bars (1s x 30d, max month)", "10000", 54820.0, 104171.0, 219895.0, 1142330.0], ["pull::calendar::kind_of [batch=256]", "early open day 18232", "100000", 2.7, 5.8, 92.6, 15303.6], ["pull::calendar::kind_of [batch=256]", "late open day 20700", "100000", 3.0, 6.6, 116.0, 3771.0], ["pull::calendar::kind_of [batch=256]", "late closed day 20695", "100000", 1.9, 4.3, 113.3, 1796.8], ["pull::calendar::kind_of [batch=256]", "outside table", "100000", 1.5, 3.3, 72.5, 862.9], ["core::InstrumentKey::is_sweepable [batch=256]", "first share 360ONE", "100000", 13.6, 34.2, 143.8, 5009.6], ["core::InstrumentKey::is_sweepable [batch=256]", "last share ZYDUSLIFE", "100000", 17.0, 67.0, 210.8, 10928.7], ["core::InstrumentKey::is_sweepable [batch=256]", "index NIFTY", "100000", 8.0, 11.5, 81.6, 6701.4], ["core::InstrumentKey::is_sweepable [batch=256]", "miss cash ZZZZZZ", "100000", 11.3, 26.5, 184.3, 3838.8], ["telemetry::Sink::emit written (write(2), no fsync)", "empty log (8 MiB bound)", "10000", 749.0, 3337.0, 21466.0, 61466.0], ["telemetry::Sink::emit filtered [batch=64]", "empty log (8 MiB bound)", "10000", 2.8, 5.4, 20.8, 1124.2], ["telemetry::Sink::emit written (write(2), no fsync)", "near rotation (6608646 of 8388608 bytes)", "10000", 753.0, 3381.0, 18929.0, 130388.0], ["telemetry::Sink::emit filtered [batch=64]", "near rotation (6608646 of 8388608 bytes)", "10000", 2.8, 5.1, 7.3, 936.2], ["telemetry::Sink::emit written", "64 KiB bound, 24 rolls in window", "10000", 750.0, 2880.0, 61509.0, 97974.0], ["api::server::param", "14 B, key last", "10000", 78.0, 135.0, 260.0, 37394.0], ["api::server::param", "8155 B, key first", "10000", 129.0, 205.0, 407.0, 31129.0], ["api::server::param", "8156 B, key last", "10000", 5864.0, 30208.0, 92193.0, 775097.0], ["api::census::held_page (200 rows)", "offset 0 of 248,000", "10000", 11142.0, 29040.0, 54751.0, 151803.0], ["api::census::held_page (200 rows)", "offset 247,800 of 248,000", "10000", 11168.0, 29398.0, 42498.0, 870801.0], ["cli::results::Results::open (full scan, n=200 calls)", "1,000 existing runs", "200", 2154725.0, 3473807.0, 3803936.0, 3803936.0], ["cli::results::Results::append (sync_all per call)", "1,000 existing runs", "10000", 205190.0, 474839.0, 1544019.0, 3625542.0], ["cli::results::Results::open (full scan, n=200 calls)", "50,000 existing runs", "200", 116965002.0, 153400064.0, 164208478.0, 164208478.0], ["cli::results::Results::append (sync_all per call)", "50,000 existing runs", "10000", 222828.0, 779748.0, 4007401.0, 22214081.0], ["vocab::Expression::evaluate per bar (runner path) [batch=64]", "short program, 4 instructions", "10000", 12.8, 25.4, 292.4, 1599.5], ["vocab::Expression::evaluate per bar (runner path) [batch=1]", "max program, 1151 instructions", "10000", 3015.0, 13668.0, 58711.0, 804366.0]];
+const PV=[["ConditionMask::hits", true, "flat (p50 2.1/2.1; p99 2.4/4.3)", "fixed 6-word branchless op; the p99.9 jump is noise (single-ns ops, batched)"], ["vocab table definition / index_of", true, "flat", "array index / bounded probe"], ["Column::support per bar", false, "NOT flat: 1.4 \u2192 7.2 ns/bar p50 (5x)", "same op count per bar, but 1k rows (48 KB) sit in cache and 1M rows (48 MB) stream from DRAM. It's O(1) in work and memory-bandwidth-bound in time. The 1k-bar tail (p99.9 52 ns/bar) is a scheduler preemption landing inside a 1.4 \u00b5s call"], ["store Layout::offset_of", true, "flat (1.0/1.0)", "multiply-add"], ["store read_record, warm same index", true, "p50 flat (43/44), p99 62\u2192164", "one pread syscall; tail = syscall/page-cache variance"], ["store read_record, scattered index", false, "NOT flat: p50 57 ns \u2192 4.5 \u00b5s", "a different checksum block each call means a block pread (\u22644 KB) + sidecar read + CRC every time. At 100 bars everything is one cached block. The O(1) holds in operation count; the wall cost is the cold-block verify (documented as UNVERIFIED in the code, now measured)"], ["store first_at_or_after", false, "NOT flat: 2.7 \u2192 55 \u00b5s p50 (documented O(log n))", "~7 vs ~22 probes, each one potentially a cold block verify, so it grows by more than the log ratio"], ["pull calendar::kind_of", true, "flat (2.7/3.0)", "bitmap + \u22649 compares"], ["core is_sweepable", true, "flat-ish (13.6 vs 17.0 p50; p99 34 vs 67)", "open-addressed probe length differs by symbol (worst case documented \u22648). Bounded, not identical"], ["engine k=1 dedup offer (new insert)", true, "p50 near-flat (24\u219236), p99 37\u2192104, p99.9 67\u21921,316", "pre-sized, so no rehash; a 100k-entry table falls out of L1/L2, so cache misses. Expected-O(1) hash with a memory-hierarchy tail"], ["engine dedup duplicate reject", true, "flat", ""], ["telemetry emit written", true, "flat (p50 749/753; p99 ~3.3 \u00b5s)", "one write(2), no fsync. The 64 KiB-bound case shows the rotation tail: p99.9 61 \u00b5s (rename chain + reopen, 24 rolls)"], ["telemetry emit filtered", true, "flat (2.8 ns)", "one relaxed atomic"], ["api held_page 200 rows", true, "flat (11.1/11.2 \u00b5s p50)", "slice skip is O(1); cost is the 200 Coverage rows + a Vec per row (allocation). Censuses were Absent, so no manifest probe was timed"], ["api param()", false, "NOT flat: 78 ns \u2192 5.9 \u00b5s when the key is last in an 8 KiB query", "linear scan of the query, bounded by MAX_REQUEST_TARGET_BYTES. That's O(bound), as documented, not O(1)"], ["cli Results::append", true, "p50 flat (205/223 \u00b5s, fsync), p99.9 1.5\u21924.0 ms, max 3.6\u219222 ms", "sync_all dominates. The large-ledger tail is fsync jitter plus `seen` HashMap growth (sized to the open-time count, so it rehashes while 10k appends land). These samples can't separate the two"], ["cli Results::open", false, "NOT flat: 2.2 ms \u2192 117 ms (53x for 50x)", "full scan, known O(n)"], ["Expression::evaluate per bar", false, "NOT flat: 12.8 ns (4 instr) \u2192 3.0 \u00b5s (1151 instr)", "\u0398(program length), as its doc states; bounded by MAX_INSTRUCTIONS"]];
 const O=[
 // [operation, where, unit, verdict class, verdict, measured, why / fix]
 ["Mask evaluation (hits)","vocab/src/mask.rs; engine/src/column.rs","bar × candidate","ok","O(1)","300 bits vs 1 bit: 0.998×","Six fixed 64-bit words, branchless."],
@@ -225,6 +230,8 @@ const G=[
 ["cargo clippy --workspace --all-targets --locked -- -D warnings","pass","Exit 0."],
 ["cargo test --workspace --locked --no-fail-fast","pass*","6,565 passed, 4 failed, 12 ignored. The 4 are store permission tests that fail only as root; all 4 pass as uid 65534."],
 ["Previously failing cli test (generated_search_recovers_same_ordinal…)","pass","Passed in the full run and twice alone (116 s, 150 s). The audit-run failure was load or environment, not logic."],
+["cargo test --workspace (fixes merged with PR #74, fd6df2c)","pass*","6,680 passed, 2 failed, 12 ignored. Both failures were clashes between the audit fixes and newer PR #74 code (an api body limit, a pull error kind); both fixed in a21d031 and passing alone. The full suite was not re-run after that fix; PR #74 CI re-runs it."],
+["Pushed to PR #74 branch final/all-fixes","pass","a21d031, a fast-forward from 331b05c. No new PR."],
 ["cargo deny check","not run","cargo-deny not installed here; CI Gate 3 runs it."],
 ["100% line and branch coverage","not run","CI enforces 90 / 89, not 100 (hunt-ci-10, documented D-0677)."],
 ["No surviving mutant","not run","CI Gate 18 runs it."],
@@ -254,19 +261,114 @@ const H=[
 ["Input-reachable panics in production code","None found; lints deny unwrap/expect/indexing, overflow-checks on"],
 ];
 
+const ST={
+"gaps-6":["partial","Proved a split moves no intraday trade's P&L but changes ~79 prior-day conditions. Every stored stock report now names its largest overnight move (D-1540). Refusing needs a charter-sourced threshold: UNVERIFIED."],
+"hunt-runner-1":["fixed","Time exit outranks a target on the time-exit bar in the pessimistic reading (D-1541)."],
+"hunt-indicators-1":["fixed","EMA and ATR seeded from the mean of their first period (D-1542)."],
+"hunt-pull-1":["fixed","Gap audit uses the venue's dated hours, 15:40 close included (D-1529)."],
+"hunt-pull-2":["fixed","Sub-paisa and negative prices refused (D-1530)."],
+"attackdata-1":["fixed","Sealed month refused when the file existed with a non-empty sidecar (D-1520). A month deleted whole is still recreated; stated limit."],
+"hunt-store-1":["fixed","Bar door accepts only the bar layout (D-1523)."],
+"hunt-cli-a-1":["fixed","Indexed prefix re-hashed on growth; rewrite refused (D-1560)."],
+"hunt-cli-a-2":["fixed","Same prefix check on detail-sets.bin (D-1560)."],
+"hunt-api-1":["fixed","Pulls run detached from the connection (D-1581)."],
+"hunt-api-2":["partial","Shutdown waits at most 10 s, then names what it abandons (D-1582). The sweep itself has no cancel flag yet."],
+"attacksweep-1":["fixed","Blank leading lines no longer stop the head deadline (D-1580)."],
+"hunt-api-3":["partial","Cross-site failure logging capped at 50 lines a minute (D-1583); same-origin clients still logged in full."],
+"hunt-api-4":["fixed","Recovery filters by plan before checking symbols (D-1584)."],
+"webcontract-1":["fixed","/vocab.json now sends commit_digest (D-1586)."],
+"errpaths-1":["fixed","AWS_PROFILE honoured; half-set env identity refused (D-1534)."],
+"hunt-costs-1":["fixed","Each leg priced at its own date's regime (D-1535)."],
+"hunt-costs-3":["fixed","Cross-process lock; a second sink on one directory is refused (D-1537)."],
+"hunt-ci-1":["partial","CODEOWNERS plus an owner-approval check in auto-merge (D-1604). Fully closing it needs branch protection's code-owner review, a setting only the owner can turn on."],
+"hunt-ci-2":["fixed","Hourly check dispatches CI on main when its head has no run (D-1605)."],
+"testgaps-1":["fixed","Gate 10 checks two-segment and bare names; four rows cite real tests (D-1606)."],
+"testgaps-6":["fixed","Gate 6d builds and runs the web/ Rust tests: 68 pass; 2 need operator data and are named."],
+"gaps-1":["documented","No retirement decision exists, so nothing deleted; modules recorded as unwired (D-1568)."],
+"gaps-3":["documented","Recorded as unwired with a test that pins the record (D-1547)."],
+"gaps-5":["open","Needs an out-of-sample split and correction across 210 instruments: a new feature, not a bug fix."],
+"gaps-7":["open","Needs point-in-time F&O membership data, which the charter does not source."],
+"gaps-8":["open","Needs a charter-sourced equity charge stack."],
+"o1surface2-1":["documented","Reusing the column is unsafe here (identity-bound); per-step bound now in limits (D-1567)."],
+"hunt-conc-1":["partial","sweep-all now files rows in walk order (D-1564); range-all and pool documented."],
+"hunt-cli-a-3":["fixed","Cold open refuses duplicate sealed identities (D-1561)."],
+"hunt-cli-b-1":["fixed","Exhausted rerun publishes nothing (D-1562)."],
+"hunt-pull-3":["fixed","Named once per day (D-1533)."],
+"hunt-indicators-2":["fixed","Equal-body reversal lights neither pattern (D-1543)."],
+"hunt-indicators-3":["fixed","Four patterns take classical shapes (D-1543)."],
+"hunt-runner-2":["fixed","p = 0.05 clears inclusively everywhere (D-1548)."],
+"hunt-runner-5":["documented","No sourced HAC bandwidth; stated (D-1549)."],
+"hunt-costs-2":["fixed","Restart seeds above the last block's run ids (D-1536)."],
+"hunt-costs-4":["fixed","Future time floor named and counted (D-1538)."],
+"hunt-costs-5":["open","UNVERIFIED: the charter needs primary sources for cost rates. Not invented."],
+"attacksweep-2":["fixed","Fragment closed before the next event (D-1539)."],
+"attacksweep-3":["fixed","Repeated form keys refused (D-1587)."],
+"hunt-store-2":["fixed","Torn genesis repaired when nothing is committed (D-1521)."],
+"hunt-store-3":["fixed","Missing store root refused (D-1522)."],
+"hunt-store-4":["fixed","Created directories' parents synced (D-1522)."],
+"hunt-store-5":["fixed","Lake refuses wrong unit or non-UTC timestamps (D-1528)."],
+"hunt-store-7":["fixed","Tests run where permission bits bind (D-1526)."],
+"webcontract-2":["fixed","Vendor text escaped (D-1585)."],
+"webcontract-3":["fixed","Failed reload is said; footer corrected (D-1585)."],
+"errpaths-2":["fixed","symlink_metadata; only NotFound is absent (D-1561)."],
+"errpaths-3":["fixed","Invalid stop ladders refused (D-1545)."],
+"errpaths-4":["partial","Widths::new refuses swapped widths (D-1546); public fields kept for degraded-path tests."],
+"hunt-conc-2":["documented","Ordered phases need transaction re-plumbing; bound stated (D-1564)."],
+"hunt-conc-3":["fixed","Reconcile walks identities in sorted order (D-1565)."],
+"attackdata-2":["fixed","Byte equality; greek domain enforced (D-1524)."],
+"attackdata-3":["fixed","Repeated JSON keys refused (D-1531)."],
+"attackdata-4":["documented","Needs serde_json arbitrary_precision; limit stated."],
+"attackdata-5":["fixed","Negative volume and over-wide buckets refused (D-1532)."],
+"attackdata-7":["fixed","OverlapDisagrees names the conflict (D-1525)."],
+"attackdata-8":["documented","Needs a new on-disk format version (§3 rule 8); limit stated (D-1528)."],
+"o1store2-1":["fixed","Doc bound corrected (D-1527)."],
+"o1surface2-2":["fixed","Tick reads only its own vendor once (D-1588)."],
+"o1surface2-3":["fixed","Landing runs off the HTTP workers (D-1589)."],
+"o1eng2-1":["documented","Θ(window) bound stated in limits; Newey-West effect UNVERIFIED."],
+"hunt-ci-3":["fixed","step-runs refuses swallowed or skipped commands (D-1600)."],
+"hunt-ci-4":["fixed","Gate checks ci-ok's needs, always() and success-only (D-1601)."],
+"hunt-ci-5":["fixed","Gate tools clippy-clean; Gate 6c lints them."],
+"hunt-ci-6":["fixed","Gate 27 reads 1,488 ids, up from 1,309."],
+"hunt-ci-7":["fixed","pipefail and silent-zero refusal (D-1609)."],
+"hunt-ci-8":["fixed","A stop disarms; PR picked by head sha (D-1604)."],
+"rustonly2-1":["fixed","Only members and built tools count as compiled."],
+"rustonly2-2":["fixed","Every inline-interpreter form refused."],
+"rustonly2-3":["fixed","Indirect spawns from build scripts refused."],
+"rustonly2-4":["fixed","Shell or interpreter spawned from crate code refused."],
+"rustonly2-6":["fixed","Fingerprint hashes versions."],
+"rustonly2-7":["fixed","Gate 1g reads more config doors (D-1610)."],
+"testgaps-7":["documented","Each ignored test documented; they need operator data."],
+"testgaps-11":["fixed","Stale limits entries corrected."],
+"gaps-11":["open","Automated handoff from discovery to qualification is a new feature."],
+"gaps-10":["open","A V6 results route and page is a new feature."],
+"hunt-ci-10":["fixed","Check renamed to its real 90% / 89% floors."],
+"hunt-ci-12":["partial","CI declares contents: read; actions not yet pinned to commit SHAs."],
+"rustonly2-10":["documented","macOS-only native dependency; no change needed on Linux."],
+"webcontract-5":["fixed","Content-hashed assets served immutable (D-1591)."],
+"hunt-api-6":["fixed","Browser-launch child reaped (D-1590)."],
+"hunt-cli-a-5":["open","Not addressed in this pass."],
+"hunt-conc-4":["fixed","Doc corrected."],
+"o1eng2-3":["fixed","Doc corrected."],
+"o1store2-2":["fixed","Doc corrected (D-1527)."],
+"hunt-runner-4":["fixed","Doc corrected (D-1547)."],
+"hunt-costs-6":["fixed","Doc and D-number corrected (D-1535)."],
+"hunt-store-6":["fixed","Doc corrected (D-1527)."],
+};
+
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const code=s=>esc(s).replace(/`([^`]+)`/g,"<code>$1</code>");
+const STL={fixed:"Fixed",partial:"Partly fixed",documented:"Documented limit",open:"Still open"};const stN=k=>Object.values(ST).filter(v=>v[0]===k).length;
 const sevN=s=>F.filter(f=>f[2]===s).length;
 document.getElementById("tiles").innerHTML=[
- ["high",sevN("high"),"high (objective risk)"],
- ["med",sevN("medium"),"medium defects"],
- ["",sevN("low"),"low defects"],
- ["",F.filter(f=>f[3]==="probe").length,"proven by a probe that ran"],
- ["ok","6,565","tests passed (4 root-only)"],
+ ["",F.length,"new findings (1 high, "+sevN("medium")+" medium)"],
+ ["ok",stN("fixed"),"fixed (code fixes carry a test)"],
+ ["",stN("partial"),"partly fixed"],
+ ["",stN("documented"),"documented limits"],
+ ["med",stN("open"),"still open (need data, a feature or you)"],
  ["ok",H.length,"attacks that held"],
 ].map(([c,n,l])=>`<div class="tile ${c}"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
 
-const tabs=[["findings","Findings ("+F.length+")"],["o1","O(1) check ("+O.length+")"],["rust","Rust only"],["gates","Build and tests"],["held","Attacks that held ("+H.length+")"]];
+const tabs=[["findings","Findings ("+F.length+")"],["o1","O(1) check ("+O.length+")"],["rust","Rust only"],["gates","Build and tests"],["p99","Tail latency ("+PV.length+")"],["held","Attacks that held ("+H.length+")"]];
 let cur="findings"; try{cur=localStorage.getItem("bx-tab")||cur}catch(e){}
 if(location.hash&&tabs.some(t=>t[0]===location.hash.slice(1)))cur=location.hash.slice(1);
 const tabsEl=document.getElementById("tabs"),panel=document.getElementById("panel");
@@ -275,13 +377,13 @@ tabsEl.addEventListener("click",e=>{const b=e.target.closest("button");if(!b)ret
 const areas=[...new Set(F.map(f=>f[1].split(" / ")[0]))].sort();
 function draw(){
  if(cur==="findings"){
-  panel.innerHTML=`<div class="filters"><select id="fs" aria-label="Severity"><option value="">All severities</option><option>high</option><option>medium</option><option>low</option><option>info</option></select><select id="fa" aria-label="Area"><option value="">All areas</option>${areas.map(a=>`<option>${esc(a)}</option>`).join("")}</select><select id="fp" aria-label="Proof"><option value="">Any proof</option><option value="probe">Probe ran</option><option value="run">Command run</option><option value="code">Code read</option></select><input id="fq" type="search" placeholder="Search findings" aria-label="Search findings"><span class="count" id="fc"></span></div><div class="tbl"><table><thead><tr><th>Severity</th><th>Finding</th><th>Area</th><th>Proof</th><th>Where</th><th>ID</th></tr></thead><tbody id="fb"></tbody></table></div>`;
-  const $=id=>document.getElementById(id),fs=$("fs"),fa=$("fa"),fp=$("fp"),fq=$("fq"),fc=$("fc"),fb=$("fb");
+  panel.innerHTML=`<div class="filters"><select id="fs" aria-label="Severity"><option value="">All severities</option><option>high</option><option>medium</option><option>low</option><option>info</option></select><select id="fa" aria-label="Area"><option value="">All areas</option>${areas.map(a=>`<option>${esc(a)}</option>`).join("")}</select><select id="fst" aria-label="Fix status"><option value="">Any fix status</option><option value="fixed">Fixed</option><option value="partial">Partly fixed</option><option value="documented">Documented limit</option><option value="open">Still open</option></select><select id="fp" aria-label="Proof"><option value="">Any proof</option><option value="probe">Probe ran</option><option value="run">Command run</option><option value="code">Code read</option></select><input id="fq" type="search" placeholder="Search findings" aria-label="Search findings"><span class="count" id="fc"></span></div><div class="tbl"><table><thead><tr><th>Severity</th><th>Finding</th><th>Fix</th><th>Area</th><th>Proof</th><th>Where</th><th>ID</th></tr></thead><tbody id="fb"></tbody></table></div>`;
+  const $=id=>document.getElementById(id),fs=$("fs"),fa=$("fa"),fp=$("fp"),fq=$("fq"),fc=$("fc"),fb=$("fb"),fst=$("fst");
   const rend=()=>{const s=fs.value,a=fa.value,p=fp.value,q=fq.value.toLowerCase();
-   const rows=F.filter(f=>(!s||f[2]===s)&&(!a||f[1].startsWith(a))&&(!p||f[3]===p)&&(!q||f.join(" ").toLowerCase().includes(q)));
+   const t=fst.value;const rows=F.filter(f=>(!t||(ST[f[0]]||["open"])[0]===t)&&(!s||f[2]===s)&&(!a||f[1].startsWith(a))&&(!p||f[3]===p)&&(!q||f.join(" ").toLowerCase().includes(q)));
    fc.textContent=rows.length+" of "+F.length;
-   fb.innerHTML=rows.map(f=>`<tr><td><span class="pill s-${f[2]}">${f[2]}</span></td><td class="what"><b>${code(f[4])}</b><span>${code(f[5])}</span></td><td>${esc(f[1])}</td><td class="proof">${f[3]==="probe"?"Probe ran":f[3]==="run"?"Command run":"Code read"}</td><td class="where">${esc(f[6])}</td><td class="num">${esc(f[0])}</td></tr>`).join("")};
-  ["fs","fa","fp"].forEach(id=>document.getElementById(id).addEventListener("change",rend));fq.addEventListener("input",rend);rend();
+   fb.innerHTML=rows.map(f=>`<tr><td><span class="pill s-${f[2]}">${f[2]}</span></td><td class="what"><b>${code(f[4])}</b><span>${code(f[5])}</span></td><td class="note"><span class="pill st-${(ST[f[0]]||["open"])[0]}">${STL[(ST[f[0]]||["open"])[0]]}</span><br>${esc((ST[f[0]]||["",""])[1])}</td><td>${esc(f[1])}</td><td class="proof">${f[3]==="probe"?"Probe ran":f[3]==="run"?"Command run":"Code read"}</td><td class="where">${esc(f[6])}</td><td class="num">${esc(f[0])}</td></tr>`).join("")};
+  ["fs","fa","fp","fst"].forEach(id=>document.getElementById(id).addEventListener("change",rend));fq.addEventListener("input",rend);rend();
  } else if(cur==="o1"){
   const cls={ok:"v-ok",bounded:"v-bounded",not:"v-not",bad:"v-bad"};
   const lab={ok:"O(1)",bounded:"Bounded / amortised",not:"Not O(1), inherent or documented",bad:"Not O(1), fixable"};
@@ -289,6 +391,11 @@ function draw(){
  } else if(cur==="rust"){
   const c={pass:"v-ok",note:"v-bounded",warn:"v-not"};
   panel.innerHTML=`<div class="tbl"><table><thead><tr><th>Check</th><th>Result</th><th>Verdict</th><th>Evidence</th></tr></thead><tbody>${R.map(r=>`<tr><td class="what"><b>${esc(r[0])}</b></td><td class="num">${esc(r[1])}</td><td><span class="pill ${c[r[2]]}">${r[2]==="pass"?"Rust only":r[2]==="note"?"Allowed":"Guard gap"}</span></td><td>${esc(r[3])}</td></tr>`).join("")}</tbody></table></div>`;
+ } else if(cur==="p99"){
+  const f=ns=>ns>=1e6?(ns/1e6).toFixed(ns>=1e7?0:1)+" ms":ns>=1e3?(ns/1e3).toFixed(ns>=1e4?0:1)+" µs":(ns>=100?ns.toFixed(0):ns.toFixed(1))+" ns";
+  panel.innerHTML=`<p class="sub">Each operation the code calls constant time, timed at a small and a very large input on the 4-core build box (load about 2, so a single max is often a scheduler preemption). At least 10,000 timed calls after warm-up, except Column::support at 1M bars (2,000) and Results::open (200). Flat means p50 and p99 do not grow with the input. Measured 2026-10-03 on integrate @ fad2895; source: scratchpad out/p99.md.</p>
+  <h3>Verdict per operation</h3><div class="tbl"><table><thead><tr><th>Operation</th><th>Small → large</th><th>Measured</th><th>Why</th></tr></thead><tbody>${PV.map(v=>`<tr><td class="what"><b>${code(v[0])}</b></td><td><span class="pill ${v[1]?"v-ok":"v-not"}">${v[1]?"Flat":"Grows"}</span></td><td>${esc(v[2])}</td><td>${code(v[3])}</td></tr>`).join("")}</tbody></table></div>
+  <h3>Every measurement</h3><div class="tbl"><table><thead><tr><th>Operation</th><th>Input size</th><th class="num">Calls</th><th class="num">p50</th><th class="num">p99</th><th class="num">p99.9</th><th class="num">max</th></tr></thead><tbody>${P.map(r=>`<tr><td class="what"><b>${code(r[0])}</b></td><td>${esc(r[1])}</td><td class="num">${esc(r[2])}</td><td class="num">${f(r[3])}</td><td class="num">${f(r[4])}</td><td class="num">${f(r[5])}</td><td class="num">${f(r[6])}</td></tr>`).join("")}</tbody></table></div>`;
  } else if(cur==="gates"){
   const c=v=>v.startsWith("pass")?"v-ok":"v-bounded";
   panel.innerHTML=`<div class="tbl"><table><thead><tr><th>Command</th><th>Result</th><th>Detail</th></tr></thead><tbody>${G.map(g=>`<tr><td class="where" style="max-width:none">${esc(g[0])}</td><td><span class="pill ${c(g[1])}">${esc(g[1])}</span></td><td>${esc(g[2])}</td></tr>`).join("")}</tbody></table></div>`;

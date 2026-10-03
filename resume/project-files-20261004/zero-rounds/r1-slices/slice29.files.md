@@ -1,0 +1,14 @@
+crates/store/src/block.rs
+crates/store/src/catalog.rs
+crates/store/src/checksum_audit.rs
+crates/store/src/crc.rs
+crates/store/src/emits.rs
+crates/store/src/file.rs
+crates/store/src/flock.rs
+crates/store/src/format.rs
+crates/store/src/header.rs
+crates/store/src/layout.rs
+crates/store/src/lib.rs
+crates/store/src/open_flags.rs
+crates/store/src/path.rs
+crates/store/src/repair.rs
