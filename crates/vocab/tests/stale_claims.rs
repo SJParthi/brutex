@@ -375,3 +375,33 @@ fn the_corrected_sentences_do_not_return() {
         "store::file::initialise no longer passes FLAG_CHECKSUMS: S-06 is stale"
     );
 }
+
+/// R9-csr-cx-4: the weekday bits' comments said NSE does not trade on a
+/// weekend, beside a paragraph and a charter (`docs/00-charter.md` §3) that
+/// record six weekend sessions and 1,710 bars. The behaviour (a weekend bar sets
+/// no weekday bit) is right and stays; the sentences that called the exchange
+/// weekday-only are refused here so they cannot return. D-1667.
+#[test]
+fn no_weekday_comment_says_nse_never_trades_on_a_weekend() {
+    for file in ["crates/indicators/src/lib.rs", "crates/vocab/src/table.rs"] {
+        let text = flat(&read(file));
+        for stale in [
+            "NSE trades Monday to Friday",
+            "NSE does not trade them",
+            "NSE DOES NOT TRADE THESE",
+            "an exchange that trades Monday to Friday",
+            "A weekend bar in an equity series is a store defect",
+        ] {
+            assert!(!text.contains(stale), "{file} still says {stale:?}");
+        }
+    }
+    let lib = flat(&read("crates/indicators/src/lib.rs"));
+    assert!(
+        lib.contains("NSE ordinarily trades Monday to Friday"),
+        "the corrected statement is the one weekday_bit carries"
+    );
+    assert!(
+        lib.contains("1,710 real trading bars"),
+        "the charter's count stays"
+    );
+}

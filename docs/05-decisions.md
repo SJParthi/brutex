@@ -53651,3 +53651,24 @@ reference: the naive reference would be a second evaluator, larger than the
 defect. Teaching gate 10 the module segment: `ci.yml` is shared by four
 parallel workers today, and path-qualifying the rows closes these three
 without it; the gate's limit is already named in its own comment.
+
+### D-1667 — Stop the weekday-bit comments saying NSE never trades on a weekend — 2026-10-03
+
+**Finding.** R9-csr-cx-4 (low, stale doc). D-0694 corrected the weekend
+reasoning in `evaluator.rs` and in `weekday_bit`'s own paragraph (six
+charter-recorded weekend sessions, 1,710 bars), but `weekday_bit`'s doc still
+opened "NSE trades Monday to Friday", its match arm said "2 and 3 are Saturday
+and Sunday: NSE does not trade them", its test said "NSE DOES NOT TRADE THESE
+... A weekend bar in an equity series is a store defect", `IST_OFFSET_MICROS`
+said "an exchange that trades Monday to Friday", and `vocab/src/table.rs` said
+"NSE trades Monday to Friday, so five bits and no more". Each contradicts
+`docs/00-charter.md` §3.
+
+**Decision.** Reword every one to "ordinarily trades Monday to Friday" and
+state that a weekend bar sets no weekday bit by design (D-0694). The behaviour
+is unchanged. `vocab/tests/stale_claims.rs` gains
+`no_weekday_comment_says_nse_never_trades_on_a_weekend`, which refuses the five
+stale sentences in both files and requires the corrected one.
+
+**Rejected.** Adding weekend bits: `CLAUDE.md` §3 rule 8 makes appending bits a
+decision of its own, and `weekday_bit`'s doc already records that as open.
