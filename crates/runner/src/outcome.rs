@@ -643,7 +643,13 @@ impl WindowExtremes {
     /// The highest high and lowest low over `bars[lo..=hi]`, or `None` when the
     /// range is empty or reaches past the slice.
     fn over(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
-        if hi < lo || hi >= bars.len() {
+        // ONE BOUNDS CHECK, NOT TWO COMPARISONS (D-1452). `get(lo..=hi)` is
+        // `None` when `hi` reaches past the slice or `lo > hi + 1`, and the one
+        // empty `Some` is `lo == hi + 1`. The former `hi < lo || hi >= len`
+        // carried a `||` -> `&&` mutant no test could observe: every range it
+        // let through still answered `None` further down, so the operator
+        // decided only how much work a refusal cost. O(1) either way.
+        if bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty) {
             return None;
         }
         // BACKWARDS, OR A JUMP PAST EVERYTHING HELD: start again at `lo`. A
@@ -3782,6 +3788,41 @@ mod tests {
             e.t
         );
     }
+    /// A ZERO MEAN IS READ LONG, and the boundary is the strict `< 0.0`.
+    ///
+    /// D-1178 swaps the path lanes only for a combination traded short, which
+    /// is `mean_paisa < 0` -- the rule `cli::side_of_evidence` and
+    /// [`Edge::payoff_bp`] use. A sample whose moves cancel exactly (+100 and
+    /// -100) has a mean of exactly `0.0` and is NOT short, so its up excursion
+    /// is the reward. Fixture: up runs summing to 300, down runs to 100.
+    /// Read long that is 3.00x; read short it would be 100/300 = 0.33x.
+    #[test]
+    fn a_zero_mean_path_ratio_is_read_on_the_long_side() {
+        let flat_mean = Edge {
+            n: 2,
+            mean_paisa: 0.0,
+            wins: 1,
+            win_sum: 100.0,
+            losses: 1,
+            loss_sum: -100.0,
+            favourable_sum: 300.0,
+            adverse_sum: 100.0,
+            ..Edge::default()
+        };
+        assert_eq!(
+            flat_mean.path_ratio_bp(),
+            300,
+            "a zero mean is read long: 300 up over 100 down is 3.00x"
+        );
+
+        // The control just below zero (the smallest normal negative) IS short, so the lanes swap and the
+        // same path reads 100 / 300, truncated to 33 bp.
+        let barely_short = Edge {
+            mean_paisa: -f64::MIN_POSITIVE,
+            ..flat_mean
+        };
+        assert_eq!(barely_short.path_ratio_bp(), 33);
+    }
 }
 
 #[cfg(test)]
@@ -4148,6 +4189,12 @@ mod window_tests {
         assert_eq!(window.over(&bars, 7, 6), None);
         assert_eq!(window.over(&bars, 398, 400), None);
         assert_eq!(WindowExtremes::new().over(&[], 0, 0), None);
+        // Reversed by more than one, and `hi == usize::MAX`, whose `hi + 1`
+        // cannot be formed: both absent, and a valid query after them is still
+        // the scan (D-1452).
+        assert_eq!(window.over(&bars, 9, 3), None);
+        assert_eq!(window.over(&bars, 0, usize::MAX), None);
+        assert_eq!(window.over(&bars, 2, 5), scan(&bars, 2, 5));
     }
 
     /// And through `forward` itself: every measured excursion equals the scan

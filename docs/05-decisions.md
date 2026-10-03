@@ -53403,3 +53403,43 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1452 — Kill four Gate 18 runner survivors: two by boundary tests, two by removing equivalent code — 2026-10-03
+
+**Finding.** Gate 18 (cargo-mutants 26.2.0) on `final/all-fixes` reported
+four surviving mutants in `runner`.
+
+**Two were missing tests.** `bootstrap.rs` `reality_check`'s
+`periods < 2` -> `<= 2`: nothing ran White's test at exactly two periods.
+`two_periods_are_tested_by_the_reality_check_rather_than_refused` feeds
+`[10, 20]`; no resample reaches `sqrt(2) * 15`, so p is exactly `1/1001` at
+1,000 draws, where the mutant returns `1.0`. `outcome.rs`
+`Edge::path_ratio_bp`'s `mean_paisa < 0.0` -> `<= 0.0`: nothing scored a
+mean of exactly zero. `a_zero_mean_path_ratio_is_read_on_the_long_side`
+does, 300 bp read long against the mutant's 33 bp, with a just-negative
+control read short. D-1178's side rule is unchanged.
+
+**Two were equivalent, and no test can kill those (D-0192).** Each was
+applied by hand and the `outcome::`, `grid::` and `excursion::` tests,
+161 of them, all passed.
+
+- `WindowExtremes::over`'s `hi < lo || hi >= bars.len()` -> `&&`. Every
+  range the mutant let through still answered `None` further down. A reversed
+  range resets or pops the deques to empty, and a range past the slice stops
+  at `bars.get(next)?`. The operator decided only how much work a refusal
+  cost. It is now one O(1) check, `bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty)`,
+  which has no operator to mutate. The window test adds a reversed-by-more-
+  than-one range, `hi == usize::MAX`, and a valid query after both.
+- `grid::blocks_without_pricing`'s `map_or(c.cross.refused() > 0, ..)` -> `< 0`.
+  That default is read only when `first_refused()` is `None`, and
+  `first_refused()` is `None` exactly when `refused()` is zero:
+  `excursion::admit_located` is the only production site that counts a
+  refusal, and it records the first offset in the same call. So the
+  comparison only ever saw zero. The call is now
+  `first_refused().is_some_and(|hole| hole <= exit_offset)`, and
+  `docs/04-invariants.md` states the Some-iff-non-zero invariant beside the
+  tests that pin it.
+
+**Rejected.** Excluding the two equivalent mutants in the cargo-mutants
+configuration. An exclusion hides the next real survivor on the same line,
+and D-0192 already chose restructuring over skipping.

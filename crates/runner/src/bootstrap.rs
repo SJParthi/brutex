@@ -2234,6 +2234,24 @@ mod tests {
             "a constant series produced a non-finite statistic"
         );
     }
+
+    /// TWO PERIODS IS COMPUTED, NOT REFUSED, by White's test too.
+    ///
+    /// The `periods < 2` guard is structural: one period cannot be resampled.
+    /// Two can, so the guard must not fire at exactly two. With returns of
+    /// `[10, 20]` the observed statistic is `sqrt(2) * 15`; the largest
+    /// recentred resample is both indices drawing 20, `sqrt(2) * (20 - 15)`,
+    /// which never reaches it. So no draw beats the observation and the
+    /// p-value is exactly the bootstrap floor `1 / (draws + 1)` -- not the
+    /// guard's `1.0`.
+    #[test]
+    fn two_periods_are_tested_by_the_reality_check_rather_than_refused() {
+        let two = vec![vec![10_i64, 20]];
+        let rc = reality_check(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        assert_eq!(rc.periods, 2);
+        same(rc.p_value, 1.0 / 1_001.0, "no draw can beat sqrt(2) * 15");
+        assert!(rc.clears(), "the floor 1/1001 clears 5%");
+    }
 }
 
 #[cfg(test)]
