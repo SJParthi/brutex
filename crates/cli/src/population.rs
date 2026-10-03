@@ -4631,6 +4631,16 @@ fn index_receipts_v4(
     Ok(receipts)
 }
 
+/// A receipt map's entries in identity order, not the per-process random order
+/// of `HashMap` iteration, so the first bad population a reconciliation
+/// refuses is the same one in every process. O(n log n) over an O(n) cold open.
+/// audit-20261003 hunt-conc-3, D-1565.
+fn in_identity_order<V>(map: &HashMap<[u8; 32], V>) -> Vec<(&[u8; 32], &V)> {
+    let mut ordered: Vec<_> = map.iter().collect();
+    ordered.sort_unstable_by_key(|(identity, _)| **identity);
+    ordered
+}
+
 fn reconcile_receipts(
     blocks: &HashMap<[u8; 32], BlockFacts>,
     receipts: &HashMap<[u8; 32], CompletionReceiptV2>,
@@ -4641,7 +4651,7 @@ fn reconcile_receipts(
         receipts.len(),
         "reconciled committed-population index",
     )?;
-    for (identity, receipt) in receipts {
+    for (identity, receipt) in in_identity_order(receipts) {
         let facts = blocks.get(identity);
         validate_receipt_v2_against_facts(receipt, facts)?;
         let block = facts.map_or(PopulationBlock { first: 0, count: 0 }, |held| held.block);
@@ -4667,7 +4677,7 @@ fn reconcile_receipts_v3(
         receipts.len(),
         "reconciled authoritative V3 population index",
     )?;
-    for (identity, receipt) in receipts {
+    for (identity, receipt) in in_identity_order(receipts) {
         let v2 = receipt.v2();
         if let Some(audit) = audit_v2.get(identity)
             && *audit != v2
@@ -4703,7 +4713,7 @@ fn reconcile_receipts_v4(
         receipts.len(),
         "reconciled authoritative V4 population index",
     )?;
-    for (identity, receipt) in receipts {
+    for (identity, receipt) in in_identity_order(receipts) {
         let v3 = receipt.v3();
         let v2 = v3.v2();
         let held_v2 = audit_v2.get(identity).ok_or_else(|| {
@@ -7820,5 +7830,24 @@ mod tests {
         );
         drop(stale_reader);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// audit-20261003 hunt-conc-3: the V2 reconciliation refuses the lowest
+    /// bad identity, not whichever one a freshly seeded `HashMap` yields first.
+    #[test]
+    fn reconcile_refuses_the_lowest_bad_population_whatever_the_map_order() {
+        for _ in 0..32 {
+            let mut receipts = std::collections::HashMap::new();
+            for seed in 1..=16_u8 {
+                let population_id = digest(seed);
+                receipts.insert(
+                    population_id,
+                    receipt(population_id, &two_rows(population_id)),
+                );
+            }
+            let why = super::reconcile_receipts(&std::collections::HashMap::new(), &receipts)
+                .expect_err("every receipt lacks its rows");
+            assert!(why.contains(&super::hex(&digest(1))), "{why}");
+        }
     }
 }
