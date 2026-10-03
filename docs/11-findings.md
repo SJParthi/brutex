@@ -662,3 +662,19 @@ the failure at the fixture root, separate from the deliberately injected
 journal-publication collision. The test-only fixture now uses a checked
 monotonic suffix with its PID/timestamp. Preserve the failed baseline and
 diagnostic replay; they are not counted as caught production mutants.
+
+### audit-20261003 — crates/api and web/ findings fixed on audit-fix/w4 — 2026-10-03
+
+| Finding | Resolution |
+|---|---|
+| audit-20261003 attacksweep-1 — leading `\r\n\r\n` stopped the head deadline | D-1580; blank lines before a request line are skipped and the deadline keeps running |
+| audit-20261003 hunt-api-1 — a closed tab cancelled a hand pull half-way | D-1581; the route runs its pull on a spawned task |
+| audit-20261003 hunt-api-2 — Ctrl-C could not end the process during a sweep | D-1582; bounded shutdown wait that names abandoned engine tasks |
+| audit-20261003 hunt-api-3 — a flood of 4xx rotated the retained log away | D-1583; failed-request lines rationed per window, held-back count logged |
+| audit-20261003 hunt-api-4 — one retired symbol blocked every recovery plan | D-1584; stored attempts filtered by plan scope before being judged |
+| audit-20261003 webcontract-1 — `/vocab.json` lacked the `commit_digest` the page reads | D-1586; the API sends it |
+| audit-20261003 attacksweep-3 / hunt-api-5 — repeated POST body keys read first-match | D-1587; refused 400, list fields excepted |
+| audit-20261003 webcontract-2 / webcontract-3 — unescaped innerHTML, ignored reload outcome, stale footer | D-1585 |
+| audit-20261003 webcontract-5 — no cache header on hashed bundle files | D-1591 |
+| audit-20261003 o1surface2-2 / o1surface2-3 — tick read every manifest twice; landing on a Tokio worker | D-1588, D-1589 |
+| audit-20261003 hunt-api-6 — browser-launch child left a zombie | D-1590 |

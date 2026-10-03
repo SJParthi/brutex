@@ -53403,3 +53403,170 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1580 — Leading blank lines do not complete a request head — 2026-10-03
+
+**What was observed.** audit-20261003 attacksweep-1: `HeadDeadline::observe`
+read the first `\n\n` on a connection as the end of a request head, even
+before any request line. httparse skips leading empty lines (RFC 9112 §2.2
+allows it), so a client sending only `\r\n\r\n` moved its connection to
+`Delivered`, no deadline ran, and it held one of the 256 slots forever; four
+such clients against a cap of four starved a real request.
+
+**The decision.** CR and LF before the first byte of a request line are
+skipped by the scan and do not mark the head partial; the deadline keeps
+running and a connection that sends only blank lines is closed silently at
+the deadline. A head after leading blank lines is still served. Proved by
+`api::server::head_deadline_tests::leading_blank_lines_do_not_stop_the_head_deadline`
+and `..::blank_line_holders_cannot_starve_a_real_request`.
+
+### D-1581 — A hand pull runs on its own task, not on the connection's future — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-1: `POST /pull/spot` and
+`/pull/fno` awaited the whole vendor pull inside the handler. A client
+disconnect drops the handler future, so a pull was cancelled wherever it
+was awaiting: bars already landed stayed, but the audit record, the
+telemetry run-id release and the autopilot's `now = None` never ran.
+
+**The decision.** Both routes hand their whole body (seat, pull, receipt) to
+`detached_pull`, which `tokio::spawn`s it and awaits the handle. Dropping the
+handle does not cancel the task, so the pull and everything after its last
+await always run. A panicking task is a 500 saying bars may have been
+written, never "NOT STARTED". Not done: a drop guard for the run-id and
+"now fetching" on a panic inside `broker_run` itself; the workspace denies
+panics in production code. Rejected: keeping the pull inline and only adding
+drop guards, which would still abandon a pull half-way on every closed tab.
+
+### D-1582 — Shutdown waits a bounded time for engine tasks and names what it abandons — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-2: `#[tokio::main]` drops its
+runtime on exit, and that drop waits forever for `spawn_blocking` tasks. A
+sweep has no cancellation point, so Ctrl-C during a sweep left a process
+with no HTTP surface, a free `serve.lock` and an exit already logged, still
+running for hours.
+
+**The decision.** `api`'s `main` builds and ends the runtime itself through
+`server::end_runtime`, which waits at most `SHUTDOWN_GRACE` (10 s) while
+`sweeprun`'s count of live `TaskFinisher`s is non-zero, then says on stderr
+and in the log (Error) how many engine tasks it abandons, and calls
+`shutdown_timeout`. The abandoned work ends with the process, as a crash
+would end it. Not done: a cancellation flag inside `cli`'s sweep loop — that
+is `cli`'s code and was not changed here; the bound and the loud refusal are
+the fix this crate can make. A process-wide atomic counts the tasks.
+
+### D-1583 — Failed-request log lines are rationed per window — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-3: `logs::note_request`
+wrote every answer ≥ 400 at Warn/Error. A cross-site GET is admitted to
+every non-journaled route by design, so any open page could loop no-cors
+fetches and rotate the whole 64 MiB retained log away (100,000 requests in
+29 s evicted a sentinel).
+
+**The decision.** At most 50 such lines per 60-second window; the rest are
+counted, and the first failed request of a later window writes one Warn line
+with the count. Rejected: not logging cross-site requests at all (a real
+failure from a cross-site read would vanish) and per-origin buckets (the
+origin is the attacker's to vary). Limit stated in `docs/06-limits.md`.
+
+### D-1584 — Recovery filters stored attempts by plan scope before judging them — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-4: `reconcile_pending` ran
+`checked` (the current build's F&O table and window limits) on every
+pending row of the shared, append-only attempt ledger before skipping rows
+outside the plan. One row naming a symbol a later build retired made every
+plan's recovery fail, forever.
+
+**The decision.** `stored_scope_key` reads a row's symbol, rung and month
+from its body without the universe check, and a row whose scope is not in
+the plan is skipped first. A row inside the plan is judged exactly as
+before. Proved by `api::recovery::tests::a_retired_symbol_outside_the_plan_does_not_block_it`.
+
+### D-1585 — `/masters` escapes vendor text and reads the refresh's own answer — 2026-10-03
+
+**What was observed.** audit-20261003 webcontract-2: `web/masters.js` put
+`detail` (up to 500 bytes of a vendor's response body), `refusal`, `error`
+and vendor `symbol`s into `innerHTML` unescaped. webcontract-3: it ignored
+`reloaded:false` and the `universe` reason on a 502, printed "All four are on
+disk." over a refused re-parse, keyed a restart message on a
+`restart_required` the route hard-codes false, and the page footer still
+said a refresh does not reload the universe.
+
+**The decision.** Every interpolated value goes through one `esc`. The
+outcome sentence is built from `reloaded` and `universe`: a refused re-parse
+says the previous parse is still in force, with the reason, and tells the
+operator to fix the cause and refresh or restart (Gate W6's `Restart the
+server` text stays, now true). The footer states that a refresh re-parses.
+Proved by the two new tests in `web/tests/masters-load.test.js` and
+`api::mastersrun::tests::the_page_says_a_restart_is_required_rather_than_pretending_otherwise`.
+
+### D-1586 — `/vocab.json` carries `commit_digest` — 2026-10-03
+
+**What was observed.** audit-20261003 webcontract-1: the backtest page names
+a saved research rule's conditions only when `/vocab.json`'s
+`commit_digest` equals the grids' `commit` (`blake3` of the build's commit
+stamp). The route never sent the field, so every rule rendered as
+"condition N (name not loaded)", even on the build that saved it.
+
+**The decision.** The API side was wrong: the page's check is the correct
+guard against renaming a historical expression with another build's table.
+`vocab_json` now sends `commit_digest` = hex `blake3(cli::commit_stamp())`,
+the digest the grid records, or `null` on an unstamped build. The web tests
+that inject `commitDigest` now inject what the server sends; no `web/src`
+change, so `web/build` is unchanged. The saved-results viewer's
+`api_commit` field is served by no route in this repository and is not
+addressed here.
+
+### D-1587 — A form body that names one field twice is refused — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-5 / attacksweep-3: D-1202
+refused a repeated query key, but POST bodies went through `param`, first
+match wins, so `vendor=dhan&vendor=groww` pulled Dhan and the second value
+was never read.
+
+**The decision.** `one_value_per_form_field`, innermost of the admission
+layers, reads a non-GET body once within `MAX_FORM_BYTES` (413 past it, as
+before), and answers 400 naming the first repeated key. `member` and `leg`
+are list fields and may repeat; JSON bodies pass unchecked.
+
+### D-1588 — An autopilot tick reads only its own vendor's census — 2026-10-03
+
+**What was observed.** audit-20261003 o1surface2-2: `tick` called
+`census::read_all` twice, reading and CRC-checking every vendor's whole
+manifest, where both uses need only the tick's vendor (`ladder_refusal`
+looks up the asked feed's store vendor and no other).
+
+**The decision.** Both reads are `census::read_vendor(root, state.vendor)`.
+The second read stays, because it must see what the pull just wrote.
+
+### D-1589 — A pull's landing does not hold a Tokio worker — 2026-10-03
+
+**What was observed.** audit-20261003 o1surface2-3: `land_spot` ran the
+census observation and each body's landing (census read, fsynced appends,
+possibly a calendar derivation) synchronously inside an async fn on the
+runtime that serves HTTP.
+
+**The decision.** Both run through `off_the_workers`, which uses
+`block_in_place` on the multi-threaded runtime and runs inline on a
+current-thread one (where `block_in_place` is not allowed and there is no
+other worker to starve). Rejected: `spawn_blocking`, which needs `'static`
+copies of a whole fetched window.
+
+### D-1590 — The browser-launch child is reaped — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-6: the `xdg-open`/`open`
+child was spawned and its `Child` dropped without `wait`, a zombie for the
+life of the server.
+
+**The decision.** `reap_detached` waits for it on a named thread of its own.
+
+### D-1591 — Content-hashed bundle files are served cacheable — 2026-10-03
+
+**What was observed.** audit-20261003 webcontract-5: no static answer carried
+`Cache-Control`, `ETag` or `Last-Modified`, so every navigation re-downloaded
+every chunk.
+
+**The decision.** A file under `_app/immutable/` (content hash in its name)
+is served with `Cache-Control: public, max-age=31536000, immutable`. Nothing
+else gains a cache header, so the shell and `version.json` are fetched
+afresh and a rebuild is seen. No `ETag`: it would need a hash or stat per
+request for files that never change under one name.

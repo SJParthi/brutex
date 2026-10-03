@@ -1035,6 +1035,28 @@ pub async fn note_request(
     } else {
         telemetry::Level::Debug
     };
+    // THE FAILED-REQUEST LINES ARE RATIONED. See [`FAILED_LINES_PER_WINDOW`].
+    if level != telemetry::Level::Debug {
+        let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
+        let admit = FAILED_LINES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit(now);
+        if let Some(suppressed) = admit.summary {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Warn,
+                    "api.request",
+                    "failed-request lines suppressed in the previous window",
+                )
+                .with("suppressed", telemetry::Value::Uint(suppressed))
+                .with("window_ms", telemetry::Value::Uint(FAILED_LINE_WINDOW_MS)),
+            );
+        }
+        if !admit.write {
+            return response;
+        }
+    }
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::new(level, "api.request", "served")
             .with("method", telemetry::Value::Str(&method))
@@ -1045,12 +1067,124 @@ pub async fn note_request(
     response
 }
 
+/// How many `api.request` lines at `Warn` or `Error` one window may write.
+///
+/// audit-20261003 hunt-api-3, D-1583. Every answer ≥ 400 was written, and a
+/// cross-site GET with a local `Host` is admitted to every non-journaled route
+/// by design — so any page the operator had open could loop `fetch(…,
+/// {mode:'no-cors'})` and roll the whole 64 MiB window away (100,000 requests
+/// in 29 s evicted a sentinel). The lines are now rationed per window, and what
+/// was held back is COUNTED and said in one line by the first failed request
+/// of a later window, so a flood is still visible as a flood. Honest limit: a
+/// count is said only once another request fails; a flood followed by silence
+/// until shutdown leaves its last window's count unsaid.
+///
+/// Bound: at most this many lines plus one summary per window, ~620 bytes
+/// each — about 1.8 MB an hour at the worst, against a 64 MiB retained log.
+pub const FAILED_LINES_PER_WINDOW: u64 = 50;
+
+/// The length of one rationing window, in milliseconds.
+pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
+
+/// The process's one failed-request ration.
+static FAILED_LINES: std::sync::Mutex<Ration> = std::sync::Mutex::new(Ration::new());
+
+/// A fixed-window count of failed-request lines. O(1) per request.
+#[derive(Debug)]
+pub(crate) struct Ration {
+    /// When the current window opened.
+    opened_ms: u64,
+    /// Lines written in it.
+    written: u64,
+    /// Lines held back in it.
+    suppressed: u64,
+}
+
+/// What one failed request may write.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Admit {
+    /// Whether its own line is written.
+    pub(crate) write: bool,
+    /// How many lines the window that just closed held back, when non-zero.
+    pub(crate) summary: Option<u64>,
+}
+
+impl Ration {
+    pub(crate) const fn new() -> Self {
+        Self {
+            opened_ms: 0,
+            written: 0,
+            suppressed: 0,
+        }
+    }
+
+    /// Accounts one failed request at `now_ms`.
+    pub(crate) fn admit(&mut self, now_ms: u64) -> Admit {
+        let mut summary = None;
+        if now_ms.saturating_sub(self.opened_ms) >= FAILED_LINE_WINDOW_MS || now_ms < self.opened_ms
+        {
+            if self.suppressed > 0 {
+                summary = Some(self.suppressed);
+            }
+            *self = Self {
+                opened_ms: now_ms,
+                written: 0,
+                suppressed: 0,
+            };
+        }
+        let write = self.written < FAILED_LINES_PER_WINDOW;
+        if write {
+            self.written = self.written.saturating_add(1);
+        } else {
+            self.suppressed = self.suppressed.saturating_add(1);
+        }
+        Admit { write, summary }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // The same exceptions every test module in this workspace takes.
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+
+    /// audit-20261003 hunt-api-3, D-1583: A FLOOD OF FAILED REQUESTS CANNOT
+    /// WIPE THE LOG. 100,000 failed requests inside one window write at most
+    /// the ration, and the next window opens with one line counting the rest.
+    #[test]
+    fn a_flood_of_failed_requests_writes_a_bounded_number_of_lines() {
+        let mut ration = Ration::new();
+        let start = 1_000_000_u64;
+        let mut written = 0_u64;
+        for i in 0..100_000_u64 {
+            let admit = ration.admit(start + i / 10);
+            assert_eq!(admit.summary, None);
+            if admit.write {
+                written += 1;
+            }
+        }
+        assert_eq!(written, FAILED_LINES_PER_WINDOW);
+        let next = ration.admit(start + FAILED_LINE_WINDOW_MS);
+        assert!(next.write, "a new window writes again");
+        assert_eq!(
+            next.summary,
+            Some(100_000 - FAILED_LINES_PER_WINDOW),
+            "what was held back is counted, not lost"
+        );
+        // A quiet window that held nothing back says nothing extra.
+        let quiet = ration.admit(start + 3 * FAILED_LINE_WINDOW_MS);
+        assert_eq!(
+            quiet,
+            Admit {
+                write: true,
+                summary: None
+            }
+        );
+        // A clock that stepped backwards opens a window rather than wedging.
+        let back = ration.admit(start);
+        assert!(back.write);
+    }
 
     /// A sink of our own, in a scratch directory — never the process global.
     ///

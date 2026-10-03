@@ -3439,8 +3439,17 @@ async fn tick(
     // A FRESH CENSUS FOR THE GATE. This function already reads one either side
     // of this call; the pull order must see the same store those reads do, and
     // not the one `Site::load` froze at process start.
-    let run =
-        crate::server::broker_run(&asked, site, &crate::census::read_all(&site.store_root)).await;
+    //
+    // ONE VENDOR, NOT EVERY VENDOR (o1surface2-2, D-1588). `broker_run` reads
+    // the census only through `ladder_refusal`, which looks up the asked
+    // feed's own store vendor and no other; `read_all` read and CRC-checked
+    // every vendor's whole manifest to answer that, twice a tick.
+    let run = crate::server::broker_run(
+        &asked,
+        site,
+        &[census::read_vendor(&site.store_root, state.vendor)],
+    )
+    .await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let source = format!("autopilot {} {}", state.feed.display(), unit.month);
 
@@ -3484,7 +3493,8 @@ async fn tick(
     // THE STORE IS THE AUTHORITY ON WHETHER THE MONTH IS DONE, not the
     // counters this run happens to hold. One census read and one probe per
     // series.
-    let censuses = census::read_all(&site.store_root);
+    // THIS FEED'S MANIFEST ONLY, re-read because the pull above wrote it.
+    let censuses = [census::read_vendor(&site.store_root, state.vendor)];
     let manifest = manifest_of(&censuses, state.vendor);
     let complete = yesterday_ist(std::time::SystemTime::now())
         .and_then(|yesterday| {
@@ -3993,6 +4003,30 @@ mod tests {
     use brutex_core::instrument::{Exchange, Segment};
     use brutex_core::symbol::Symbol;
     use std::collections::HashMap;
+
+    /// audit-20261003 o1surface2-2, D-1588: ONE TICK READS ONE VENDOR'S
+    /// MANIFEST, NOT EVERY VENDOR'S TWICE. Source-text, because `tick` drives a
+    /// live pull; what is pinned is that its census reads are `read_vendor` of
+    /// the tick's own vendor and that `read_all` is gone from it.
+    #[test]
+    fn a_tick_reads_only_its_own_vendors_census() {
+        let source = include_str!("autopilot.rs");
+        let tail = source
+            .split_once("\nasync fn tick(")
+            .expect("tick exists")
+            .1;
+        let body = &tail[..tail.find("\n}\n").expect("tick ends")];
+        assert!(
+            !body.contains("read_all("),
+            "tick reads every vendor's manifest"
+        );
+        assert_eq!(
+            body.matches("census::read_vendor(&site.store_root, state.vendor)")
+                .count(),
+            2,
+            "the gate read and the completion read, each of this feed only"
+        );
+    }
 
     /// **THE TICK ASKS FOR EXACTLY WHAT THE COMPLETION PROBE GRADES.**
     ///

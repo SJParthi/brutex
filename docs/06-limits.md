@@ -12397,6 +12397,12 @@ not:
   ahead of it. Measured in the test with a cap of 4, a 400 ms deadline and 16
   partial clients: the real request was answered, after at least two waves.
   The listener is loopback-only, so the client doing this is local.
+  **That bound is for partial heads only.** Clients that send a complete head
+  and then a slow body (the first bullet) are not bounded in time, so 256 of
+  them can hold every slot for as long as they like (audit-20261003
+  attacksweep-1b). Leading blank lines before a request line used to be read
+  as a complete head and held a slot the same way; since D-1580 they are
+  skipped and the deadline keeps running (attacksweep-1).
 - **A pipelined second request can be cut.** The deadline restarts after a
   response is written. If a client pipelined a complete second head in the
   same read as the first, it was already buffered by hyper when the clock
@@ -13911,3 +13917,29 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## crates/api audit fixes — D-1580..D-1591, 3 October 2026
+
+- **Failed-request log lines are rationed, not unbounded (D-1583).** At most
+  `logs::FAILED_LINES_PER_WINDOW` (50) `api.request` lines at `Warn`/`Error`
+  per `FAILED_LINE_WINDOW_MS` (60 s), plus one summary line counting what was
+  held back, said by the first failed request of a later window. A flood that
+  is followed by silence until shutdown leaves its last count unsaid. The
+  ration is one process-wide mutex take per failed request: O(1).
+- **Every non-GET request body is read once before its handler (D-1587)** to
+  refuse a form field named twice: O(body), bounded by `MAX_FORM_BYTES`
+  (8 KiB), the same bound `DefaultBodyLimit` already put on every handler. A
+  JSON body (by `Content-Type` or a leading `{`/`[`) is passed through
+  unchecked. `member` and `leg` are list fields and may repeat.
+- **Shutdown waits at most `server::SHUTDOWN_GRACE` (10 s) for engine tasks
+  (D-1582).** A sweep, descent or command still running then is abandoned
+  with the process — named on stderr and in the log — and its invocation
+  audit stays non-terminal. `cli` has no cancellation point inside a sweep;
+  threading one through it is not done.
+- **A pull's landing uses `block_in_place` (D-1589).** The worker hands its
+  queue to another thread for the length of each landing, so the HTTP surface
+  keeps answering; the landing itself is as costly as before (D-1446).
+- **A hand pull runs on its own task (D-1581).** A client that disconnects no
+  longer cancels it, so the connection that asked cannot be used to stop a
+  pull: the seat stays held until the pull ends. The stop control for a hand
+  pull remains the per-instrument pause of the autopilot epoch, as before.

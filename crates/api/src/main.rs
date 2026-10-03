@@ -28,17 +28,35 @@
 /// so that every arm of [`api::server::run`] is drivable from a test without a
 /// signal and without a hard kill. Ctrl-C is what an operator has; an
 /// already-resolved future is what a test has.
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+///
+/// THE RUNTIME IS BUILT AND ENDED BY HAND, not by `#[tokio::main]`, whose
+/// runtime drop waits forever for a running sweep's blocking thread — Ctrl-C
+/// then left a ghost process with no HTTP surface. `end_runtime` bounds that
+/// wait and names what it abandons (hunt-api-2, D-1582).
+fn main() -> std::process::ExitCode {
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let count = raw.len();
-    let code = match text_args(raw) {
-        Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
-        Err(refusal) => {
-            eprintln!("{refusal}");
-            api::server::MISUSED
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(why) => {
+            eprintln!("FAILED: the async runtime could not start: {why}");
+            note_exit(api::server::FAILED, count);
+            return std::process::ExitCode::from(api::server::FAILED);
         }
     };
+    let code = runtime.block_on(async {
+        match text_args(raw) {
+            Ok(args) => api::server::run(&args, Box::pin(tokio::signal::ctrl_c())).await,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                api::server::MISUSED
+            }
+        }
+    });
+    let _abandoned = api::server::end_runtime(runtime, api::server::SHUTDOWN_GRACE);
     note_exit(code, count);
     std::process::ExitCode::from(code)
 }
