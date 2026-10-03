@@ -86,3 +86,16 @@ Documented-only but worth fixing (user wants nothing left "documented only"):
 - **D-0743 PBO floor** at cli/src/index_stop_qualification_numeric.rs:608 (`pbo_ppm = ….ppm()` into a max-gated field) while the four p-values in the same function round up (:667-670). Same class in `boolean_admission_reader.rs:223-246` and `boolean_admission_v1::apply_statistics` :291-321.
 
 Next: pass 3 (2 agents): workspace-wide sweep for every floor-then-max-gated projection (the class found 5 times), and the cli/api files no pass has covered yet.
+
+### Pass 3 results (2 agents, 18:50–19:05 UTC) — 2 new
+
+p3rest (18 uncovered cli files + 54 api files): clean. p3floor: SAFE table of ~20 gated fields in `numeric/pass3/p3floor.md`.
+
+| id | sev | where | what | probe |
+|---|---|---|---|---|
+| p3floor-1 | low | cli population_base_evidence_v2.rs:610-612, boolean_admission_v1.rs:250-252, index_stop_qualification_metrics.rs:210-213, institutional_evidence.rs:1412 (via runner grid.rs:562 `Cell::avg_loss`) | `average_loss_paisa` floored, gated `> max_average_loss_paisa` (runner admission.rs:1064): 3 trades, 1 win, gross loss −301 → 150 passes a 150 max. Fix `div_ceil`; decision entry. | ran |
+| p3floor-2 | low | runner excursion.rs:1466 `ppm_of` → grid.rs:4399/4454 `worst_mae`; gates cli lib.rs:8911, :13045 | Worst MAE floored then `<= max_mae_ppm`: entry 2,000,001, low 20,001 below → 10000.495 stored 10000, admitted at max 10000. Fix by exact compare (`ppm_of` also drives rung crossing, so not in place). Not run2-1. | ran |
+
+Note: `boolean_admission_v1::base_values` (~:229-243) also calls p2bool-1's `measured_rate`, so the helper fix covers it.
+
+Status at 19:05 UTC: passes 1–3 complete (35 new total). Weekly usage 86%+ → no new agents. Next session: re-check every finding on the fix thread's head, then a pass over any area that changed. Resume notes: fix-queue `resume/numeric-audit/RESUME.md`.
