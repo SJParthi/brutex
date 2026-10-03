@@ -55,12 +55,10 @@ async function settle() {
  */
 /**
  * @param {string} source
- * @param {Record<string, {status: number, body: any}>} [answers] what each URL answers
+ * @param {Record<string, {status: number, body: any}> | ((url: string) => unknown)} [answers]
+ *   what each URL answers, or a function giving the 200 body for any URL
  */
 async function open(source, answers = {}) {
- * @param {(url: string) => unknown} [respond] the JSON body each request reads
- */
-async function open(source, respond = () => ({})) {
   /** @type {string[]} */
   const requests = [];
   /** @type {Map<string, ReturnType<typeof element>>} */
@@ -105,11 +103,13 @@ async function open(source, respond = () => ({})) {
     Date,
     fetch: async (/** @type {unknown} */ url) => {
       requests.push(String(url));
+      if (typeof answers === 'function') {
+        const body = answers(String(url));
+        return { ok: true, status: 200, json: async () => body };
+      }
       const answer = answers[String(url)];
       const status = answer ? answer.status : 200;
       return { ok: status >= 200 && status < 300, status, json: async () => (answer ? answer.body : {}) };
-      const body = respond(String(url));
-      return { ok: true, status: 200, json: async () => body };
     },
     setTimeout: schedule,
     setInterval: schedule,
@@ -252,6 +252,8 @@ test('vendor text reaching the page is escaped, never parsed as markup', async (
   ].join('\n');
   assert.ok(markup.includes('&lt;img src=x onerror=alert(1)&gt;'), markup);
   assert.ok(!markup.includes('<img'), markup);
+});
+
 // MR-23, audit-20261003 testgaps-3 (D-1606). The row said the join "names the
 // symbols it could not resolve" and cited a test that never existed; the two
 // that did only found `id="xverify"` in the HTML. This presses Verify against
