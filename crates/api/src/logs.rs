@@ -1637,6 +1637,7 @@ mod tests {
             last_error: last_error.map(str::to_owned),
             current_bytes: 4_096,
             next_seq: 1_201,
+            clock_held: 0,
         }
     }
 
