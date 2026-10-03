@@ -195,27 +195,23 @@ mod tests {
         fifo: &Path,
         open: impl FnOnce() -> Option<String> + Send + 'static,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        use std::os::unix::fs::OpenOptionsExt as _;
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let _ = tx.send(open());
         });
-        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            Ok(refusal) => {
-                worker.join().map_err(|_| "the opener panicked")?;
-                refusal.ok_or_else(|| format!("{} was admitted", fifo.display()).into())
-            }
-            Err(_) => {
-                use std::os::unix::fs::OpenOptionsExt as _;
-                let peer = std::fs::OpenOptions::new()
-                    .write(true)
-                    .custom_flags(store::open_flags::O_NONBLOCK)
-                    .open(fifo);
-                // Not joined: an old door may block again on a later open, and
-                // the refusal below must not wait for it.
-                drop((peer, worker));
-                Err(format!("opening {} waited for a FIFO peer", fifo.display()).into())
-            }
+        if let Ok(refusal) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            worker.join().map_err(|_| "the opener panicked")?;
+            return refusal.ok_or_else(|| format!("{} was admitted", fifo.display()).into());
         }
+        let peer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(store::open_flags::O_NONBLOCK)
+            .open(fifo);
+        // Not joined: an old door may block again on a later open, and the
+        // refusal below must not wait for it.
+        drop((peer, worker));
+        Err(format!("opening {} waited for a FIFO peer", fifo.display()).into())
     }
 
     /// W2-cli13-4: a FIFO planted at a cli ledger path made every read-only
