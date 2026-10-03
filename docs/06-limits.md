@@ -13998,3 +13998,21 @@ witness as well; §169 states it.
   `derive_population_id_v1` per cell, which hashes the one-minute execution
   series; a `Complete` data source adds `require_population`'s O(E) walk
   (D-1636). O(C·E) per population of C cells.
+
+## Population base evidence and strategy identity costs that are not per-cell constant — D-1639, 3 October 2026
+
+- **Base Evidence V2 append reopens the ledger twice (W2-cli10-0).**
+  `append_and_reopen_base_evidence_v2` opens the ledger for write and then
+  read-only; each open's `scan` reads, seal-checks and ordered-hashes every
+  record. One family append is O(R_total) for every Base record of every
+  universe ever committed, not O(the family's records), and N family appends
+  cost Θ(N·R_total). The module rustdoc says "O(records)"; this states what
+  the records are.
+- **`derive_strategy_digest_v1` is O(G) per call (W2-cli10-2).** It
+  validates the whole evaluated grid before deriving one cell. Production
+  derives per cell through `derive_strategy_digest_from_validated_v1` after
+  one validation, so the O(1)-per-cell statement above holds for that path
+  only.
+- **Max-gated rates are floored (GAP15-17).** Not a cost: an exact rate just
+  above a `max_*_rate_ppm` ceiling floors onto it and is admitted. D-1640
+  records why it is not changed here.

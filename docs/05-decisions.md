@@ -53772,3 +53772,41 @@ refusing on the aggregate would turn replays that publish today into
 refusals. That changes the shipping Global Replay result and needs its own
 decision with the operator's rule for what an exceeded ceiling does
 (refuse the replay, as V1 did, or reject further trades of that stream).
+
+### D-1639 — Population sides grow geometrically; the public strategy-digest entry states its O(G) — 2026-10-03
+
+**What was wrong.** W2-cli10-1: `evaluate_population_side` called
+`evaluated_sides.try_reserve_exact(1)` before every push, which grows the
+vector one slot at a time and can copy every retained side on each push,
+O(n²) over a population, forfeiting the amortised O(1) append §3 rule 4
+names. W2-cli10-2: `pub fn derive_strategy_digest_v1` validates the whole
+evaluated grid per call, O(G), and nothing said so.
+
+**The change.** The reservation is `try_reserve(1)`, still fallible, now
+geometric. `derive_strategy_digest_v1` gains a `# Cost` section: O(G) per
+call, O(G²) over a grid, no production caller; the per-cell production path
+is `derive_strategy_digest_from_validated_v1`. No output changes.
+
+**What it proves.**
+`cli::population_admission_writer::tests::evaluated_sides_grow_geometrically_not_one_slot_per_push`
+requires the production source to hold no exact one-slot reservation and the
+side append to use `try_reserve(1)`, and measures at most 14 reallocations
+over 4,096 pushes.
+
+### D-1640 — Max-gated admission rates are still floored before `value > ceiling`; not changed here — 2026-10-03
+
+**What was found (GAP15-17).** `population_base_evidence_v2::rate_ppm` (and
+the writer's twin) floors `part × 1_000_000 / total`, and
+`runner::admission` refuses a max-gated rate only when `value > ceiling`. An
+exact rate of 1/3 (333,333.33 ppm) against a 333,333 ceiling floors to
+333,333 and is admitted. The audit probe reproduced it.
+
+**Why it is not fixed in this change.** The floored ppm is the stored value
+in every Base Evidence V2 record and is re-derived and compared on reopen.
+Rounding max-gated rates up would change those stored values, refuse every
+existing ledger on reopen, and change which candidates are admitted into
+Selection V6. That is a stored-value and selection-result change across the
+whole population chain, and the instruction for this audit lane is to stop
+and report such a change rather than make it. The fix belongs in a new
+evidence version (or an admission-side exact comparison that carries
+`part` and `total`), decided on its own.
