@@ -14150,24 +14150,34 @@ bounds are all nonzero.
 
 ### a flipping cadence makes `forward`'s window rebuild and leaves Newey-West pairs queued — D-1550
 
-`runner::outcome::WindowExtremes` and `OverlapWindow` were documented as
-amortised O(1) per query because both window ends only advance. Since D-1410
-the exit of bar `i` is `ts(i) + step_at(i)·H`, and `step_at` is a prefix
-running median that can step DOWN. Measured by the audit (o1eng2-1) on twenty
-generated sessions with every third minute dropped: at H=9, 111 of 227 priced
-bars had an exit earlier than the previous priced bar's. Each such query
-clears and rebuilds the deques from its left end, Θ(window) for that query,
-so the per-query bound is Θ(H) in the worst case and the amortised O(1) holds
-only while the cadence is constant. The audit's timing showed no measurable
-cost at that size (279 ns/bar at H=9, 261 ns/bar at H=144), because the
-flips stop once the prefix median settles; that is one fixture, not a bound.
+**Superseded by D-1572; kept for the record.** `runner::outcome::WindowExtremes`
+and `OverlapWindow` were documented as amortised O(1) per query because both
+window ends only advance. Since D-1410 the exit of bar `i` is
+`ts(i) + step_at(i)·H`, and `step_at` is a prefix running median that can step
+DOWN (the audit measured 111 backward exits among 227 priced bars at H=9 on a
+fixture with every third minute dropped). Until D-1572 each such query cleared
+and rebuilt the deques, Θ(window), and the Newey-West drain popped only from
+the front, so a queued hit whose exit preceded the front's was counted as
+overlapping with later hits.
 
-The Newey-West drain in `OverlapWindow::observe` pops only from the front. A
-queued hit whose exit precedes the front's stays queued until the front
-drains, and its pairs with later hits are counted as overlapping although
-the two windows share no bar. Its effect on `edge`'s t-statistic is
-UNVERIFIED: nothing has measured it. A drain independent of exit order needs
-an exit-ordered structure, O(log H) per hit; it is not done here.
+**What holds now (D-1572).**
+
+- `WindowExtremes`: a backward query is answered by `BlockExtremes` in at most
+  two partial 64-bar blocks of reads plus one lookup, O(1). The table is built
+  once per `forward`, on its first backward query: O(n) time, and
+  `(n/64)·log₂(n/64)` pairs of memory, about 4.6 MB at 1,222,791 bars. A
+  `forward` whose exits never step back never builds it. Proven by
+  `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`
+  (18,008,999 bars read for 17,999 queries over 20,000 bars before; held to
+  `3n + 130·queries` now). Not timed: no bench row covers `forward`.
+- `OverlapWindow`: each hit is filed on a timing wheel by its death
+  `min(exit, o + H)` and retired when an entry reaches it, in any exit order.
+  The wheel has `min(H, bars + 1)` slots; its tick only advances, so across one
+  `edge` walk the slots visited are bounded by the bars walked, O(1) amortised
+  per bar. Proven equal to the pair-by-pair definition by
+  `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`.
+- UNVERIFIED: how much the over-counted pairs moved `edge`'s t-statistic on
+  runs made before D-1572. Nothing measured it.
 
 ### SPA and Romano-Wolf studentize by an i.i.d. standard error — D-1549
 

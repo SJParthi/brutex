@@ -56043,3 +56043,31 @@ on records (format.rs: checked at the write boundary).
 month was version 2), `store::file::tests::a_version_two_month_still_reads_and_appends_at_version_two`,
 and the updated constant pins in `store/tests/unit.rs` and `write.rs`.
 Recorded in `docs/02-store-format.md` §2.1. AFF-41, AFF-42.
+
+### D-1572 — `forward`'s window extremes and the Newey-West window are O(1) in any exit order — 2026-10-03
+
+**What was observed.** audit-20261003 o1eng2-1, documented only by D-1550.
+Since D-1410 an exit can move backwards when the prefix median cadence steps
+down. `WindowExtremes::over` then cleared and rebuilt its deques, Θ(window)
+per such query, and `OverlapWindow` drained only from the front, so a hit
+whose window had closed stayed queued behind an older one and its pairs were
+counted as overlapping.
+
+**The decision.** `WindowExtremes` keeps its two deques for queries whose ends
+advance and answers any other query from `BlockExtremes`: per-64-bar-block
+extremes plus a power-of-two table over blocks, built once per `forward` on
+the first such query (O(n)), each query then at most two partial blocks of
+reads and one lookup. `OverlapWindow` files each hit on a timing wheel of
+`min(H, bars + 1)` slots by its death `min(exit, o + H)` and retires exactly the
+hits dead by each new entry; its exact `i128` running sums are unchanged. Both
+are O(1) amortised per bar; the excursion answers equal a full scan and the
+cross-sums equal the pair-by-pair definition. With monotone exits the results
+are the previous ones (the existing full-scan and pairwise tests pass
+unchanged). The effect the old drain had on earlier runs' t-statistics stays
+UNVERIFIED.
+
+**Proof.** `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`
+(previous tree: 18,008,999 bars read for 17,999 queries over 20,000 bars) and
+`runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`
+(previous tree: 4 live hits where 3 windows were open at H=4). AFF-43, AFF-44.
+`docs/06-limits.md` restates the bounds.
