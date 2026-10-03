@@ -53442,3 +53442,55 @@ Tests: `cli::candidate_universe::tests::production_append_scans_the_ledger_once_
 `cli::candidate_universe::tests::reverify_committed_refuses_every_disagreement_with_the_disk`,
 `cli::candidate_universe::tests::reverify_committed_refuses_counts_absences_and_order_it_did_not_write`,
 `cli::ledger_append_lookup_costs::section_150_states_one_open_per_production_append_and_no_data_hash`.
+
+### D-1681 — A Pre-Admission page checks generations by metadata; the hashing lookups keep their hash and the limits price them by file bytes — 2026-10-03
+
+**What was wrong.** One defect class in three ledgers: a page or a cached
+lookup re-hashed a whole file through its generation check while the
+documents said O(P) or average O(1).
+W2-cli13-0: `PreAdmissionDataLedgerV1::page` content-hashed the lock file
+once and the data file twice per page (`require_unchanged`, then
+`require_generation` on a second descriptor), so paging all R rows at 256 per
+page hashed O(R^2 / 256) bytes, while §153 said "A page costs O(P)" and the
+module doc said a page is proportional to the returned records.
+W2-cli11-3: Observation V1 and V2 `reopen_audit` read the whole bounded
+authority file and blake3 it per lookup; §157 and §161 called the lookup
+average O(1).
+W2-cli11-2: Finalization V2 `reopen_structural_receipt` re-hashes the data
+file per lookup; its rustdoc said so and `docs/06-limits.md` said nothing.
+
+**The decision.** (b) for the page, (a) for the lookups.
+The page now compares the cached lock and data generations by metadata only
+(`require_metadata_generation`: length, device/inode, nanosecond
+modification/change times; the path must still name the held inode) and
+re-seals every record it returns, which it already did. It is O(P) plus a
+constant number of `stat` calls. What it does not see is stated in §153 and
+in the new limits chapter: a same-length rewrite of a record outside the page
+that leaves every metadata field equal. A rewrite of a returned record is
+refused by that record's seal. `reopen_audit` on the same ledger keeps its
+content hash, O(file bytes).
+The Observation and Finalization V2 lookups keep their content hash, because
+they are audit-only, seldom-called lookups and the hash is what refuses a
+same-length edit. Their rustdoc and §157, §161 and the new chapter now price
+each lookup at O(file bytes) before an average-O(1) probe.
+
+**An existing assertion changed, and why.**
+`stale_same_length_mutation_and_nonzero_bounds_fail_closed` asserted that a
+page after an external same-length write refuses with `changed`. The page no
+longer hashes, and Linux file timestamps advance in coarse ticks, so a write
+inside one tick of the append can leave the metadata equal; the page then
+refuses through the returned record's seal ("seal does not match"). The
+assertion now accepts either named refusal. It still requires a refusal. The
+new test pins each path deterministically: a pinned modification time for the
+metadata refusal, and a re-measured cached generation for the seal refusal.
+
+**Rejected.** Metadata checks for the Observation and Finalization lookups:
+they are not paged in loops, and giving up their same-length detection buys
+nothing measurable. Keeping the page's hash and only correcting the document:
+it leaves paging quadratic in the ledger.
+
+Tests: `cli::pre_admission_data::tests::pages_hash_no_file_and_reseal_only_the_records_they_return`
+(failed first: 33 whole-file hashes over eleven pages, expected 0),
+`cli::pre_admission_data::tests::replaced_lock_and_data_paths_refuse_cached_audits`,
+`cli::ledger_append_lookup_costs::a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes`,
+`cli::ledger_append_lookup_costs::observation_lookups_still_hash_the_whole_file_and_say_so`.

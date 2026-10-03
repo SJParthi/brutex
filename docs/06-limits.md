@@ -7866,7 +7866,15 @@ are linear in admitted bars and calendar days.
 Opening a file with R physical records validates R seals and semantic pairs and
 hashes the complete file while holding the shared path lock, so it is O(file
 bytes) time with a bounded O(completions) index. A page costs O(P) for P returned
-rows. Hash-map lookup is average O(1), not a worst-case collision guarantee.
+rows: since D-1681 it checks the lock and data generations by metadata only and
+re-seals each returned record, where before it content-hashed the lock file once
+and the data file twice per page, so paging all R rows cost O(R^2 / 256). A
+cached `reopen_audit` lookup still content-hashes both files, O(file bytes),
+before an average-O(1) hash-map probe, not a worst-case collision guarantee.
+The metadata check is length, device/inode and nanosecond modification/change
+times: a same-length rewrite of a record outside the page that left all of
+those equal is not seen by that page, and a rewrite of a returned record is
+refused by its seal.
 Lock acquisition, filesystem cache, `sync_data`, allocation and storage latency
 remain system-dependent.
 
@@ -8041,8 +8049,11 @@ The companion authority contains only fixed-size identities, counts and
 digests. It does not durably retain the O(C·P + C·K) raw evidence. Crash recovery
 therefore requires the upstream exact Candidate replay to derive the same
 observations again before an orphan Data may receive Completion. Opening the
-ledger scans and hashes its bounded bytes; hash-index lookup is average O(1),
-and one fixed-stride record position is worst-case O(1) in record count after
+ledger scans and hashes its bounded bytes. A cached `reopen_audit` lookup
+reads and hashes the whole bounded file again before its hash-index probe, so
+one lookup is O(file bytes); only the probe itself is average O(1) (D-1681
+corrected an older sentence here that called the lookup average O(1)). One
+fixed-stride record position is worst-case O(1) in record count after
 admission. Allocation, hashing, locking, sync and device latency are not
 constant-time.
 
@@ -8159,8 +8170,9 @@ For A admitted Observation authorities and B file bytes, open/fresh reopen scan
 and validate O(B) bytes and retain O(A) identity/data indexes. Append validates
 the embedded Pre-Admission record, hashes fixed records, synchronizes Data then
 Completion, hashes the bounded file and freshly reopens it. One fixed-stride
-record address is worst-case O(1) in record count after admission and one
-identity-map lookup is average O(1); allocation, locking, synchronization,
+record address is worst-case O(1) in record count after admission. One cached
+`reopen_audit` lookup reads and hashes the whole bounded file, O(B), before an
+identity-map probe that is average O(1) (D-1681); allocation, locking, synchronization,
 filesystem traversal, page faults, controller behavior, removable-drive loss
 and latency have no constant bound. The explicit byte/authority ceilings refuse
 excess; they do not truncate history or hide a failure.
@@ -13925,3 +13937,39 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Ledger append, page and lookup costs found by lane 1-b — D-1680 onward
+
+Group E of the lane 1-b redo. Each subsection names its findings and decision.
+Bounds are read from the source and the counting tests named in
+`docs/04-invariants.md`; no wall-clock time is measured here, and none is
+claimed (`CLAUDE.md` §3 rule 6).
+
+### Cached lookups and pages that hash a whole ledger file — D-1681
+
+W2-cli13-0, W2-cli11-2 and W2-cli11-3 found three generation checks that read
+and hash a complete file per page or per lookup while the documents said O(P)
+or average O(1).
+
+- **Pre-Admission Data V1 `page`** (§153) is now O(P) for P returned rows plus
+  a constant number of `stat` calls. It compares the cached lock and data
+  generations by metadata only and re-seals every record it returns. Before
+  D-1681 it content-hashed the lock file once and the data file twice per page,
+  so paging all R rows at 256 per page was O(R^2 / 256) bytes hashed. What a
+  page does not see: a same-length rewrite of a record outside its own range
+  that leaves length, device/inode and nanosecond modification/change times
+  equal. A rewrite of a record it returns is refused by that record's seal.
+- **Pre-Admission Data V1 `reopen_audit`** still content-hashes the lock and
+  data files, O(file bytes) per lookup, then probes its map in average O(1).
+- **Observation V1 and V2 `reopen_audit`** (§157, §161) read the whole bounded
+  authority file into memory and hash it, O(B) time and O(B) transient memory
+  per lookup, before an average-O(1) map probe. Kept deliberately: they are
+  audit-only lookups, and the content hash is what refuses a same-length edit.
+- **Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data
+  file through `require_unchanged`, O(file bytes) per lookup, before an
+  average-O(1) probe; its rustdoc already said so and this section is its
+  first statement here. Its append is dormant outside tests
+  (`expect(dead_code)`) and calls `require_unchanged`, a whole-file hash, at
+  several steps, so one append is a constant multiple of O(file bytes). The
+  finding counted at least eight passes; that count is not re-measured here
+  and is UNVERIFIED.
