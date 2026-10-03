@@ -1,4 +1,40 @@
-# Zero-findings audit loop — resume state, 2026-10-03 ~19:00 UTC
+# Zero-findings audit loop — resume state, 2026-10-03 ~20:20 UTC (FINAL SAVE at 93%)
+
+Saved because weekly usage reached 93% at 20:09 UTC. Work stopped after this save.
+
+## UPDATE 20:20 UTC — read this first
+- Main-thread batch **D-1769** (fixes CE-4, 5, 6, 7, 8, 10, 14, 15, 16, 17, 21, 27,
+  28, 29, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41; P3-01-01, P3-01-05, P3-02-02,
+  P3-02-03, P3-02-04, P3-02-05; p3floor-1, p3floor-2; CE-22 was already fixed by
+  D-1762). Invariants ZR-32..ZR-56. New module `crates/core/src/knob.rs`
+  (shared empty-folder / HOME / boolean-switch refusals).
+  - If the commit hash is in the tsv as `branch <hash>`, it was pushed to
+    `final/all-fixes-zero`. If the tsv still says `fixing`, the batch was NOT
+    committed: it lived only in the cloud container's working tree and is lost;
+    redo from the D-1769 bullets in this file's section below.
+  - Verification state at save: clippy -D warnings clean on the batch before the
+    P3-01-01 edit; first full test run stopped at `core/tests/lint.rs`
+    (knob.rs missing from OTHERS — fixed). A `--no-fail-fast` re-run was in
+    flight; see the commit message for its result.
+- Web tests: `node --test web/tests/*.test.js` shows 20 failures that are
+  ENVIRONMENTAL (`Cannot find package 'svelte'`; no node_modules in the cloud
+  box). Same 20 fail with the batch stashed. Run `npm ci` in web/ to check them.
+- Agents at stop: ledger-tails (branch zero/ledger-tails, D-1900..1919, prefix
+  ZL-) and test-teeth (branch zero/test-teeth, D-1920..1939, prefix ZT-) were
+  told to commit and push what they had. Review each branch, merge into
+  final/all-fixes-zero keeping both sides of docs/04 + docs/05 conflicts, test.
+- Next free numbers for the main thread: D-1770..D-1799, invariant ZR-57.
+- Still open (state `found` in the tsv): CE-9, 12, 13, 18, 19, 20 (CE-20 needs a
+  cli census change surfaced in api + web; CE-12/13 parquet pre-validation is
+  large); P3-01-02 (routes silently ignore known fields), P3-01-03 (disconnect
+  records `cancelled` while admission runs), P3-01-04 (masters refresh inside the
+  request, page aborts at 90 s), P3-02-01, 06, 07; all P1-*; numeric items; slice
+  findings; W3-runner5-0; W1-api5-4. Full evidence for each is in `findings/`.
+- Not yet done on staging: merge origin/final/all-fixes (a21d031f, mastersrun
+  conflict expected); cargo-mutants 26.2.0 on changed lines; non-root tests;
+  message PR 74 CI thread (cse_01TPJRnnkg5yuNeRBHDyzaaP) then merge into #74;
+  tell the 4 helper sessions the new staging head.
+
 
 Saved because weekly usage reached 86% at 18:32 UTC (save at 93%, stop at 98%).
 

@@ -233,3 +233,16 @@ Pass 3 complete: 5 themes, 13 new findings (CE-23..CE-35). Pass 4 is running.
 - **CE-37** an empty `BRUTEX_WEB` serves `./build` of the cwd as the front end: crates/api/src/assets.rs:109-110 (`value.map_or_else(default_web_dir, PathBuf::from)`); otherwise the 503 page names an empty directory. Fix: as CE-36.
 - **CE-38** `HOME` set but empty turns every `$HOME/...` default into a cwd-relative path: masters dir (server.rs:354), BRUTEX_ARCHIVES default (pull/src/folder.rs:199-202), the §8 credential-config path (server.rs:10200-10205), `~/.aws/credentials` (pull/src/ssm.rs:329-337), folder suggestions (render.rs:3135). Each refuses only an unset HOME. Not run. Fix: one `home_dir()` helper that refuses empty or relative HOME by name.
 - **CE-39** `BRUTEX_ARCHIVE_SUGGESTIONS` is off only for a literal `0` (render.rs:3126-3127); `false`/`off`/`no`/` 0` silently leave the `~/Downloads` walk running. Same shape as CE-6. Fix: one shared boolean-knob parser that refuses unknown words by name.
+
+### CE-40: an extra hard link to the store's execution lock refuses every sweep forever, without naming the file
+- Severity: low (one-off `cp -al` snapshot or `ln`)
+- Location: crates/cli/src/execution_lease.rs:73-86 (`verify`, `nlink() != 1`, helper re-read; message has no path), reached from cli `run_durable` (lib.rs:2101), browser launch (api sweeprun.rs:1761), status probe (sweeprun.rs:2235). Same unnamed refusal in selection_v6.rs:243, global_replay_v4_store.rs:192, checksum_receipts.rs:480 (Execution V3/V4, Population V5, Selection V5, checksum_audit do name the path).
+- Fix: name the lock path and the remedy in every such refusal.
+
+### CE-41: one failed log roll disables rotation for the process lifetime, and /logs says the opposite
+- Severity: low
+- Location: crates/telemetry/src/sink.rs:1147-1158 (`rotation_broken`, set once, never cleared; helper confirmed no reset), :1284-1298 (a failed `reopen` after rename leaves events going to `events.1.ndjson` with no `events.ndjson`); banner at crates/api/src/logs.rs:881-887 says the oldest events "may already have been overwritten"
+- Evidence: a transient roll failure (e.g. fd exhaustion) makes the log grow without bound until restart; the banner claims overwrite, which `rotation_broken` guarantees did not happen, and never says a restart re-enables rotation.
+- Fix: retry the roll on a later write (or after a bounded number of events) and make the banner state "rotation stopped after a failed roll; restart to resume".
+
+Pass 4 complete: CE-36..CE-41. The wedge agent also lists concurrency.md wedges (cli2-1/sweep-2 widest: one torn `sweep-evidence/attempts.bin` append refuses every sweep store-wide) so the fixer can treat the class together; see its report section "already filed".
