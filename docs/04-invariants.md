@@ -6306,6 +6306,8 @@ old line regex the same input and watched it pass.
 | ZR-27 | A master row cut short of a right-most vendor-id column is unreadable and names the shortfall, never a routine skip (D-1761, D-1766) | `api::master::tests::a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall` | ✓ |
 | ZR-28 | A caught-up autopilot feed stays on yesterday's month and fetches the next day of it; a stored place past that month is pulled back (D-1767) | `api::autopilot::tests::a_caught_up_feed_stays_on_the_month_still_being_written` | ✓ |
 | ZR-29 | A stop after the autopilot task returned keeps the halt, and a resume stays refused (D-1767) | `api::autopilot::tests::a_stop_after_the_task_returned_keeps_the_halt_and_resume_stays_refused` | ✓ |
+| ZR-30 | `/masters` shows every server string as text; nothing the server sends reaches `innerHTML` (D-1768) | `web/tests/masters-text.test.js` · *a host-quoted refusal is shown as text and never parsed as markup* | ✓ |
+| ZR-31 | A `/masters` refresh the server did not reload is reported with its status and reason, never as success (D-1768) | `web/tests/masters-text.test.js` · *a host-quoted refusal is shown as text and never parsed as markup* · *a refresh that reloaded says so* | ✓ |
 
 ### Documents state what the code writes — zero-findings round (D-1940 onward)
 

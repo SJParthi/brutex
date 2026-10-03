@@ -1,7 +1,27 @@
+// EVERY STRING FROM THE SERVER IS TEXT, NEVER MARKUP.
+//
+// A refusal quotes the first bytes a master host answered, and an attempt's
+// detail and an index map's symbols come from third parties too. They were
+// interpolated into `innerHTML`, so a host answering `x,<img src=x onerror=…>`
+// ran script in the operator's console (CE-25, D-1768). Every cell is now built
+// with `createElement` and `textContent`, the way `typeahead.js` builds its list.
 const say = (t) => { document.getElementById('say').textContent = t; };
 const cell = (file, klass) => document.querySelector(`tr[data-file="${file}"] .${klass}`);
 
 const when = (ms) => ms ? new Date(ms).toLocaleString() : '—';
+
+/** One element with a class and text content; children appended in order. */
+function el(tag, klass, text, ...children) {
+  const node = document.createElement(tag);
+  if (klass) node.className = klass;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  for (const child of children) if (child) node.appendChild(child);
+  return node;
+}
+
+function fill(node, ...children) {
+  node.replaceChildren(...children.filter(Boolean));
+}
 
 async function status() {
   try {
@@ -10,32 +30,37 @@ async function status() {
     for (const m of (d.masters || [])) {
       const c = cell(m.file, 'disk');
       if (!c) continue;
-      if (!m.present) { c.innerHTML = '<span class="bad">absent</span>'; continue; }
-      const stale = m.newer_than_parse
-        ? '<div class="sub bad">newer than this server’s parse — restart required</div>'
-        : '';
-      c.innerHTML = `<span class="ok">present</span><div class="sub">${m.bytes} bytes</div>`
-        + `<div class="sub">${when(m.modified_unix_millis)}</div>${stale}`;
+      if (!m.present) { fill(c, el('span', 'bad', 'absent')); continue; }
+      fill(
+        c,
+        el('span', 'ok', 'present'),
+        el('div', 'sub', `${m.bytes} bytes`),
+        el('div', 'sub', when(m.modified_unix_millis)),
+        m.newer_than_parse
+          ? el('div', 'sub bad', 'newer than this server’s parse — restart required')
+          : null
+      );
     }
   } catch (e) { say('Could not read what is on disk: ' + e); }
 }
 
 function ledger(rows) {
   const box = document.getElementById('ledger');
-  box.innerHTML = '';
+  box.replaceChildren();
   for (const m of rows) {
     if (!m.attempts || !m.attempts.length) continue;
-    const el = document.createElement('div');
-    el.className = 'att';
-    const steps = m.attempts.map(a => {
-      const status = a.status === null ? 'no answer' : a.status;
+    const steps = el('ol');
+    for (const a of m.attempts) {
+      const state = a.status === null ? 'no answer' : a.status;
       const waited = a.waited_ms ? ` after waiting ${a.waited_ms} ms` : '';
       const why = a.detail ? ` — ${a.detail}` : '';
-      return `<li>#${a.number} ${a.got} (${status})${waited}${why}</li>`;
-    }).join('');
-    el.innerHTML = `<h3>${m.file} — ${m.attempts.length} step(s), `
-      + `${m.waited_ms} ms waited</h3><ol>${steps}</ol>`;
-    box.appendChild(el);
+      steps.appendChild(el('li', null, `#${a.number} ${a.got} (${state})${waited}${why}`));
+    }
+    box.appendChild(
+      el('div', 'att', null,
+        el('h3', null, `${m.file} — ${m.attempts.length} step(s), ${m.waited_ms} ms waited`),
+        steps)
+    );
   }
 }
 
@@ -47,27 +72,38 @@ async function refresh() {
   try {
     const r = await fetch('/masters/refresh', { method: 'POST' });
     const d = await r.json();
-    if (d.refusal) { say('Refused before anything was asked: ' + d.refusal); go.disabled = false; return; }
+    if (d.refusal) { say('Refused before anything was asked: ' + d.refusal); return; }
     const rows = d.landed || [];
     for (const m of rows) {
       const c = cell(m.file, 'out');
       if (!c) continue;
       if (m.written) {
-        c.innerHTML = `<span class="ok">${m.changed ? 'updated' : 'unchanged'}</span>`
-          + `<div class="sub">${m.bytes} bytes</div>`;
+        fill(c, el('span', 'ok', m.changed ? 'updated' : 'unchanged'), el('div', 'sub', `${m.bytes} bytes`));
       } else if (m.skipped) {
-        c.innerHTML = `<span class="skip">skipped</span><div class="sub">${m.refusal || ''}</div>`;
+        fill(c, el('span', 'skip', 'skipped'), el('div', 'sub', m.refusal || ''));
       } else {
-        c.innerHTML = `<span class="bad">refused</span><div class="sub">${m.refusal || ''}</div>`;
+        fill(c, el('span', 'bad', 'refused'), el('div', 'sub', m.refusal || ''));
       }
     }
     ledger(rows);
+    // A REFRESH THAT DID NOT RELOAD IS NOT A SUCCESS. The route answers 502
+    // with `reloaded:false` and the reason in `universe` when the new files
+    // were refused on re-parse, and this page used to say "All four are on
+    // disk" over it, reading a `restart_required` this route always sends
+    // false (CE-26, D-1768).
     const missing = d.missing || [];
-    say(missing.length
-      ? `${missing.length} master(s) still missing: ${missing.join(', ')}.`
-      : (d.restart_required
-          ? 'All four are on disk. Restart the server so the new masters are parsed.'
-          : 'All four are on disk.'));
+    if (!r.ok || d.reloaded === false) {
+      say(`The refresh did not finish (HTTP ${r.status}). `
+        + (missing.length ? `${missing.length} master(s) still missing: ${missing.join(', ')}. ` : '')
+        + (d.reloaded === false
+          ? `The server is still answering from its previous masters: ${d.universe || 'no reason given'}. `
+            + 'Restart the server only after the files on disk parse; until then a restart reads the same refusal.'
+          : (d.universe || '')));
+    } else {
+      say(missing.length
+        ? `${missing.length} master(s) still missing: ${missing.join(', ')}.`
+        : `All four are on disk and the server reloaded them. ${d.universe || ''}`);
+    }
     await status();
   } catch (e) {
     say('The refresh call itself failed: ' + e);
@@ -87,40 +123,44 @@ document.getElementById('go').addEventListener('click', refresh);
 // way to see it was to type the URL.
 async function verify() {
   const box = document.getElementById('xverify');
-  box.innerHTML = '<div class="sub">joining…</div>';
+  fill(box, el('div', 'sub', 'joining…'));
   const feeds = ['dhan', 'groww', 'zerodha'];
-  const parts = [];
+  const body = el('tbody');
+  const failed = (feed, why) => {
+    const td = el('td', 'bad', why);
+    td.colSpan = 5;
+    body.appendChild(el('tr', null, null, el('td', null, null, el('b', null, feed)), td));
+  };
   for (const feed of feeds) {
     try {
       const r = await fetch(`/indexmap.json?feed=${feed}`);
       const d = await r.json();
-      if (d.error) {
-        parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${d.error}</td></tr>`);
-        continue;
-      }
+      if (d.error) { failed(feed, d.error); continue; }
       const refused = d.refused || 0;
       const names = (d.rows || [])
         .filter(x => x.nse === null || x.nse === undefined)
         .map(x => x.symbol);
-      parts.push(
-        `<tr><td><b>${feed}</b></td>`
-        + `<td>${d.published}</td><td>${d.listed}</td>`
-        + `<td class="ok">${d.resolved}</td>`
-        + `<td class="${refused ? 'bad' : 'ok'}">${refused}</td>`
-        + `<td class="sub">${names.slice(0, 12).join(', ')}`
-        + `${names.length > 12 ? ` … and ${names.length - 12} more` : ''}</td></tr>`
-      );
+      body.appendChild(el('tr', null, null,
+        el('td', null, null, el('b', null, feed)),
+        el('td', null, d.published),
+        el('td', null, d.listed),
+        el('td', 'ok', d.resolved),
+        el('td', refused ? 'bad' : 'ok', refused),
+        el('td', 'sub', names.slice(0, 12).join(', ')
+          + (names.length > 12 ? ` … and ${names.length - 12} more` : ''))));
     } catch (e) {
-      parts.push(`<tr><td><b>${feed}</b></td><td colspan="5" class="bad">${e}</td></tr>`);
+      failed(feed, String(e));
     }
   }
-  box.innerHTML =
-    '<h3>Cross&#8209;verification — every feed’s index symbols against NSE’s own catalogue</h3>'
-    + '<table class="xv"><thead><tr><th>Feed</th><th>NSE publishes</th><th>Feed lists</th>'
-    + '<th>Resolved</th><th>Unconfirmed</th><th>Which ones</th></tr></thead><tbody>'
-    + parts.join('') + '</tbody></table>'
-    + '<div class="sub">An unconfirmed symbol is one whose bars are filed under a name '
-    + 'no exchange confirms. It is never filtered out.</div>';
+  const head = el('tr');
+  for (const h of ['Feed', 'NSE publishes', 'Feed lists', 'Resolved', 'Unconfirmed', 'Which ones']) {
+    head.appendChild(el('th', null, h));
+  }
+  fill(box,
+    el('h3', null, 'Cross‑verification — every feed’s index symbols against NSE’s own catalogue'),
+    el('table', 'xv', null, el('thead', null, null, head), body),
+    el('div', 'sub', 'An unconfirmed symbol is one whose bars are filed under a name '
+      + 'no exchange confirms. It is never filtered out.'));
 }
 
 document.getElementById('verify').addEventListener('click', verify);

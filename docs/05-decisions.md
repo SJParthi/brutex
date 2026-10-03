@@ -55021,3 +55021,16 @@ tests and header: hit `<= 8` (worst 7), miss `<= 12` (worst 11, 10 on the
 by the asserted bound. Probe counts are a property of the compiled tables, so
 the row says they do not depend on the machine the rest of that table was
 measured on.
+
+### D-1768 — /masters shows server strings as text, and a refresh that did not reload is not a success — 2026-10-03
+
+- `web/masters.js` interpolated a refusal, an attempt's detail, a file name, an
+  index-map error and vendor symbols into `innerHTML`. A refusal quotes the
+  first bytes a master host answered, so a host answering
+  `x,<img src=x onerror=…>` ran script in the operator's console. Every cell is
+  now built with `createElement` and `textContent` (CE-25).
+- A refresh whose new files the server refused to re-parse answers 502 with
+  `reloaded:false` and the reason in `universe`. The page checked neither and
+  said "All four are on disk", reading a `restart_required` the route always
+  sends false. It now reports the status and the reason, and success only when
+  the server reloaded (CE-26).

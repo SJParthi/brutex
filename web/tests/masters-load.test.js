@@ -39,6 +39,7 @@ function element(id) {
       (listeners[type] ||= []).push(fn);
     },
     appendChild() {},
+    replaceChildren() {},
   };
 }
 
