@@ -11688,7 +11688,7 @@ fn screen_cascade<'a>(
     let _ = writeln!(out);
 
     // HOISTED, ONE SCAN PER RUN AND NOT ONE PER TIER. `reference_price` walks
-    // the bars once for a min and a max; the ladder below has up to eight tiers
+    // the bars once for a min and a max; the ladder below has up to 4,800 tiers
     // and the mildest fallback after it, so reading it inside the loop would pay
     // that scan nine times for an answer that cannot change. CLAUDE.md §3 rule 4
     // bounds the PER-OPERATION cost, and a per-run scan is not one of the five
