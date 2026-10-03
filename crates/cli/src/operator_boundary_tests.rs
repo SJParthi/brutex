@@ -527,7 +527,7 @@ fn a_report_that_cannot_be_written_is_said_and_never_panics() {
             earned, code,
             "a reader that stopped reading changes no code"
         );
-        let said = String::from_utf8(err).expect("UTF-8");
+        let said = String::from_utf8_lossy(&err).into_owned();
         assert!(said.contains("stdout is not writable"), "{said}");
         assert!(said.contains("7 bytes"), "{said}");
         assert!(said.contains("closed the pipe"), "{said}");
@@ -543,7 +543,7 @@ fn a_report_that_cannot_be_written_is_said_and_never_panics() {
             &mut err,
         );
         assert_eq!(earned, wanted, "from {code}");
-        let said = String::from_utf8(err).expect("UTF-8");
+        let said = String::from_utf8_lossy(&err).into_owned();
         assert!(said.contains("not a clean exit"), "{said}");
     }
 
