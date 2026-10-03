@@ -7546,7 +7546,9 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      max-parallel: 8
+      # D-1453: 20, from 8. Half-size jobs double the matrix; at 8 at once a
+      # 2,405-case plan would take ten waves.
+      max-parallel: 20
       matrix: ${{ fromJSON(needs.mutant-plan.outputs.matrix) }}
     env:
       CARGO_BUILD_JOBS: 2

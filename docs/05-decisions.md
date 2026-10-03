@@ -53443,3 +53443,31 @@ applied by hand and the `outcome::`, `grid::` and `excursion::` tests,
 **Rejected.** Excluding the two equivalent mutants in the cargo-mutants
 configuration. An exclusion hides the next real survivor on the same line,
 and D-0192 already chose restructuring over skipping.
+
+### D-1453 — Halve Gate 18's mutation jobs and run 20 at once, from PR #74's measured run — 2026-10-03
+
+**What happened.** On PR #74 (run 37092404876, head `1087e544`), Gate 18
+planned 2,405 in-diff cases into 39 jobs of 62 under D-0697's sizing, eight at
+a time. Of the first 12 jobs to stop, 8 finished and every one of them failed on
+surviving mutants (17 in all, killed or removed by D-1452 and the commits
+beside it), and 4 (shards 6, 8, 9 and 10) were cancelled at the 240-minute job
+limit. A cancelled job uploads nothing and GitHub serves no log for it, so
+whatever those four would have found, a survivor or a timeout, went unnamed.
+
+**Measured.** The finished jobs spent 27 to 40 minutes on setup and the clean
+baseline, then about 205 to 290 worker-seconds a case. A case in `cli` costs
+far more than the average (one survivor took 294s to build and 2,185s to test),
+and a mutant that hangs runs to cargo-mutants' own test timeout, set from the
+baseline at 2,475 to 3,648 seconds on this run. 62 cases left no room for
+either.
+
+**The change.** `ESTIMATED_CASE_SECONDS` is 540, twice the worst finished
+cost, so a job holds 31 cases: 2,405 cases plan to 78 jobs, and the matrix
+limit of 256 jobs now covers 7,936 cases. `max-parallel` is 20, from 8, so the
+doubled matrix runs in four waves rather than ten. Nothing else changed: every
+case is still planned, assigned exactly once and reconciled (D-0629), a timeout
+still fails the gate, and a plan over the limit is still refused by name. The
+planner's own tests pin 31, 78 jobs for 2,405 cases and the new ceiling. Both
+figures remain estimates: a job with several slow or hanging cases can still
+reach 240 minutes, and if the account runs fewer than 20 jobs at once the rest
+queue rather than fail.
