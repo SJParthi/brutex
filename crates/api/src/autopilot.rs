@@ -2459,7 +2459,17 @@ where
     F: Fn(&EntryKey) -> Option<i64>,
 {
     let last = yesterday.year_month().unwrap_or(hint);
-    let mut month = hint;
+    // NEVER PAST YESTERDAY'S MONTH, on the way in or on the way out. The place
+    // only moves forward, so a caught-up scan that returned the month AFTER
+    // yesterday's parked the feed beyond the month still being written: every
+    // later day of it sat below the place, was never scanned, and the status
+    // said the store was complete (CE-23, D-1767). A hint already past it — a
+    // place stored before this clamp, or advanced by `settle` — is pulled back.
+    let mut month = if ordinal(hint) > ordinal(last) {
+        last
+    } else {
+        hint
+    };
     while ordinal(month) <= ordinal(last) {
         if let Some(span) = month_span(month, floor, yesterday)
             && let Some(unit) = next_window(&held, series, month, span)
@@ -2471,7 +2481,14 @@ where
         };
         month = next;
     }
-    (month, None)
+    (
+        if ordinal(month) > ordinal(last) {
+            last
+        } else {
+            month
+        },
+        None,
+    )
 }
 
 /// How many months lie between a feed's floor and yesterday, inclusive.
@@ -3985,9 +4002,18 @@ fn answer(action: &str, accepted: bool, why: &str, control: &Control) -> String 
 ///
 /// One function for both routes, so the sentence an operator is shown cannot
 /// depend on which control they pressed.
+///
+/// **A halt is not overwritten.** `fly`'s pre-loop exits publish `Halted` with
+/// no feeds and return, and that phase is the only record that no task is left
+/// to read the flag. Stop rewrote it as `Paused`, so a following Resume was
+/// admitted and answered "running" with nothing behind it (CE-24, D-1767). The
+/// flag is still set, and a halted status keeps its phase and its reason.
 fn stop(control: &Control) {
     control.pause();
     control.publish(|status| {
+        if status.phase == Phase::Halted {
+            return;
+        }
         status.phase = Phase::Paused;
         status.detail = String::from(
             "pause requested. The sweep stops at its next instrument; the partial month \
@@ -4177,6 +4203,51 @@ mod tests {
         assert_eq!(unit.window.to(), day(2020, 3, 31));
         assert_eq!(unit.behind, 2);
         assert_eq!(unit.done, 0);
+    }
+
+    /// A caught-up feed stays on the month still being written, so the next
+    /// day of it is fetched by the same process. The frontier used to return
+    /// the month AFTER yesterday's, the place only moves forward, and every
+    /// later day of the current month was never scanned (CE-23, D-1767).
+    #[test]
+    fn a_caught_up_feed_stays_on_the_month_still_being_written() {
+        let axis = [series("NIFTY")];
+        let held = holdings(&[
+            (axis[0], month(2026, 9), day(2026, 9, 30)),
+            (axis[0], month(2026, 10), day(2026, 10, 2)),
+        ]);
+        let floor = day(2026, 9, 1);
+        let (at, unit) = frontier(
+            |k| held.get(k).copied(),
+            &axis,
+            month(2026, 9),
+            floor,
+            day(2026, 10, 2),
+        );
+        assert_eq!(unit, None, "caught up through yesterday");
+        assert_eq!(
+            at,
+            month(2026, 10),
+            "parked on yesterday's month, not after it"
+        );
+
+        // The next day: the stored place is fed back and 2026-10-05 is owed.
+        let (again, owed) = frontier(|k| held.get(k).copied(), &axis, at, floor, day(2026, 10, 5));
+        assert_eq!(again, month(2026, 10));
+        let owed = owed.expect("the new day of the current month is fetched");
+        assert_eq!(owed.window.to(), day(2026, 10, 5));
+
+        // A place stored past yesterday's month (before this fix, or moved on
+        // by `settle`) is pulled back rather than trusted.
+        let (back, owed) = frontier(
+            |k| held.get(k).copied(),
+            &axis,
+            month(2026, 11),
+            floor,
+            day(2026, 10, 5),
+        );
+        assert_eq!(back, month(2026, 10));
+        assert!(owed.is_some());
     }
 
     /// A complete store owes nothing, contacts nothing, and says which month
@@ -5954,6 +6025,32 @@ mod tests {
     /// null-or-complete, and `failures` present even when empty. Dropping any
     /// one of them from [`Status::json`] fails here rather than at the browser,
     /// which is the whole point of having it.
+    /// Stop on a task that already returned keeps the halt, so a Resume is
+    /// still refused rather than answered "running" with no task behind it
+    /// (CE-24, D-1767).
+    #[test]
+    fn a_stop_after_the_task_returned_keeps_the_halt_and_resume_stays_refused() {
+        let control = Control::new();
+        control.publish(|status| {
+            status.phase = Phase::Halted;
+            status.detail = String::from("the clock is unusable");
+        });
+        assert!(matches!(admit_resume(&control), Admission::Refused { .. }));
+        stop(&control);
+        assert!(control.is_paused(), "the flag is still set");
+        let kept = control.inspect(|status| (status.phase, status.detail.clone()));
+        assert_eq!(
+            kept,
+            Some((Phase::Halted, String::from("the clock is unusable")))
+        );
+        assert!(matches!(admit_resume(&control), Admission::Refused { .. }));
+
+        // An ordinary stop still reads as paused.
+        let live = Control::new();
+        stop(&live);
+        assert_eq!(live.inspect(|status| status.phase), Some(Phase::Paused));
+    }
+
     #[test]
     fn the_payload_satisfies_the_contract_the_page_enforces() {
         // `failures` IS EMITTED EVEN WHEN EMPTY. The page refuses an absent

@@ -6304,3 +6304,5 @@ old line regex the same input and watched it pass.
 | ZR-25 | `/engine/top.json` canonicalises a feed and refuses an unknown one (D-1765) | `api::topjson::tests::top_queries_and_unreadable_files_refuse_without_creating_a_store` | ✓ |
 | ZR-26 | `/backtest/audit.json` refuses an `invocation` or `before` inside the reserved id namespace with 400, not 503 (D-1762, D-1766) | `api::operation_audit::tests::queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages` | ✓ |
 | ZR-27 | A master row cut short of a right-most vendor-id column is unreadable and names the shortfall, never a routine skip (D-1761, D-1766) | `api::master::tests::a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall` | ✓ |
+| ZR-28 | A caught-up autopilot feed stays on yesterday's month and fetches the next day of it; a stored place past that month is pulled back (D-1767) | `api::autopilot::tests::a_caught_up_feed_stays_on_the_month_still_being_written` | ✓ |
+| ZR-29 | A stop after the autopilot task returned keeps the halt, and a resume stays refused (D-1767) | `api::autopilot::tests::a_stop_after_the_task_returned_keeps_the_halt_and_resume_stays_refused` | ✓ |

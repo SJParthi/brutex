@@ -54863,3 +54863,16 @@ older gap in the dev proxy.
   them now name all three, and the test pins that `read_in_time` is reached
   only from `window` (P2-01-04).
 - `docs/02-store-format.md` §11.3 said "both versions" over three.
+
+### D-1767 — The autopilot never parks past the month still being written, and a stop keeps a halt — 2026-10-03
+
+- `autopilot::frontier` returned the month after yesterday's once a feed was
+  caught up. The feed's place only moves forward, so every later day of the
+  current month sat below it, was never scanned, and the status said the store
+  was complete. The scan now starts no later than yesterday's month and never
+  returns a later one, so a place stored past it is pulled back (CE-23).
+- `stop` rewrote a `Halted` status as `Paused`. `fly`'s pre-loop exits halt with
+  no feeds and return, and that phase was the only record that no task was left;
+  a Resume after a Stop was admitted and answered "running" with nothing behind
+  it. A halted status now keeps its phase and reason; the pause flag is still
+  set (CE-24).
