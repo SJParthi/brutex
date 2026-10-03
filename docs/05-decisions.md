@@ -53510,3 +53510,28 @@ panicking; both callers pass constants.
 boundary, and it rounds -0.5 toward zero, so a reduced statistic would not be
 symmetric in sign. Printing three decimals of the stored thousandths. That
 changes the column widths and the money format every other rupee column uses.
+
+### D-1724 — The audit's OVERFITTING block counts folds with the exact placement — 2026-10-03
+
+**Finding.** ET-strategies-trades-ranking-costs-3 (low bug).
+
+**What was wrong.** `overfitting_of` placed each fold with the legacy
+`runner::pbo::place`. That adapter halves `place_v1`'s doubled midrank, which
+rounds an exact half-rank toward the better half. With three candidates and
+the in-sample winner tied for second out of sample, its midrank is 1.5 of a
+last rank of 2, strictly below the median. The adapter read it as rank 1,
+exactly the median, and did not count it. So the "winner below median" count
+was understated.
+
+**The decision.** `overfitting_of` places folds with `place_v1`, uses
+`PlacementV1::unrankable(0)` for an empty fold, and aggregates with
+`anchored_walk_forward_bottom_half_rate_v1`. That classifies each fold on the
+exact doubled ratio. The result is carried in the `Pbo` shape
+`audit::overfitting` already renders. Every field comes from the exact
+aggregate, and the block keeps its "legacy" and "NOT MEASURED as CSCV" labels,
+because the diagnostic is still not CSCV. The cost is the same.
+
+**Rejected.** Changing `runner::pbo::place`. It is the documented
+compatibility adapter, and other callers rely on its frozen integer field.
+Rewriting the renderer to take the exact type. Same answer, a wider diff in a
+second crate.

@@ -374,3 +374,38 @@ fn half_away_from_zero_is_symmetric_and_never_overflows() {
         );
     }
 }
+/// ET-strategies-trades-ranking-costs-3. A winner whose exact out-of-sample
+/// midrank is strictly in the bottom half is counted there. The legacy
+/// adapter halved the doubled rank and rounded 1.5 of 2 down to the median.
+#[test]
+fn an_exact_half_rank_in_the_bottom_half_counts_as_overfit() {
+    let fold = |in_sample: Vec<i64>, out_of_sample: Vec<i64>| runner::validate::FoldResult {
+        in_sample_all: in_sample,
+        out_of_sample_all: out_of_sample,
+        ..runner::validate::FoldResult::default()
+    };
+    // Three candidates; the in-sample winner (index 0) ties one other out of
+    // sample below a third: midrank 1.5 of a last rank of 2, strictly past 1.
+    let validated = runner::validate::Validated {
+        folds: vec![fold(vec![10, 1, 1], vec![5, 9, 5])],
+        refused: None,
+    };
+    let measured = overfitting_of(&validated).expect("a rankable fold");
+    assert_eq!(measured.folds, 1);
+    assert_eq!(
+        measured.overfit_folds, 1,
+        "midrank 1.5 of 2 is below the median"
+    );
+    assert_eq!(measured.median_placement, 750_000);
+    // Four candidates: midrank 1.5 of 3 is exactly the midpoint, not below it.
+    let even = runner::validate::Validated {
+        folds: vec![fold(vec![10, 1, 1, 1], vec![5, 9, 5, 0])],
+        refused: None,
+    };
+    let measured = overfitting_of(&even).expect("a rankable fold");
+    assert_eq!(
+        measured.overfit_folds, 0,
+        "the exact midpoint is not below it"
+    );
+    assert_eq!(measured.median_placement, 500_000);
+}

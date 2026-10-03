@@ -19877,22 +19877,34 @@ fn overfitting_of(folds: &runner::validate::Validated) -> Option<runner::pbo::Pb
         return None;
     }
 
+    // THE EXACT PLACEMENT, NOT THE LEGACY ADAPTER (ET-strategies-trades-
+    // ranking-costs-3, D-1724). This called `runner::pbo::place`, which halves
+    // `place_v1`'s doubled midrank and so rounds an exact half-rank toward the
+    // BETTER half: a winner tied at midrank 1.5 of 2 -- strictly in the bottom
+    // half -- read as rank 1, exactly the median, and was not counted. The
+    // exact placement and its aggregate cost the same and keep that half.
     let mut placements = Vec::with_capacity(folds.folds.len());
     for fold in &folds.folds {
         if fold.in_sample_all.len() != fold.out_of_sample_all.len() {
             return None;
         }
         let placement = if fold.in_sample_all.is_empty() {
-            runner::pbo::Placement {
-                candidates: 0,
-                winner_rank: 0,
-            }
+            runner::pbo::PlacementV1::unrankable(0)?
         } else {
-            runner::pbo::place(&fold.in_sample_all, &fold.out_of_sample_all)?
+            runner::pbo::place_v1(&fold.in_sample_all, &fold.out_of_sample_all)?
         };
         placements.push(placement);
     }
-    Some(runner::pbo::probability_of_overfitting(&placements))
+    let exact = runner::pbo::anchored_walk_forward_bottom_half_rate_v1(&placements);
+    // Carried in the shape `audit::overfitting` renders. Every field is the
+    // exact aggregate's: the count classified on the exact doubled ratio, and
+    // the median of the exact projections.
+    Some(runner::pbo::Pbo {
+        folds: exact.folds,
+        overfit_folds: exact.bottom_half_folds,
+        unrankable: exact.unrankable,
+        median_placement: exact.median_placement_ppm,
+    })
 }
 
 /// [`both_shapes`], or a pair of REFUSED walks when validation is off.
