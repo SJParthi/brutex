@@ -34,8 +34,28 @@
 //! including one exactly one bit above `X`. So a violation, if it exists, is
 //! always visible one level up.
 //!
-//! And that superset is always PRESENT to be seen: if `sup(Y) = sup(X)` and `X`
-//! cleared `min_hits`, then `Y` cleared it too, so the sweep kept `Y`.
+//! # When the superset is not there to be seen, and the answer is not closed
+//!
+//! If `sup(Y) = sup(X)` and `X` cleared `min_hits`, then `Y` cleared it too. That
+//! makes `Y` FREQUENT; it does not make the sweep hold it. This said `Y` "is
+//! always PRESENT", and two cases make that false (c4a-7, AC-whp-cx-2, D-1496):
+//!
+//! * **A halted sweep.** When `Sweep::halted` is `Some`, the deepest level held
+//!   is partial and no level above it was built. A set on that level has no
+//!   successor to be checked against, and a set one level below it is checked
+//!   against a partial successor, so both levels can report a set as closed
+//!   that is not. `validate`'s `FoldResult::halted` measures the effect:
+//!   1,407 kept at extinction against 318,862 when the same search halted.
+//!   [`Closed::closure_complete`] is `false` for such a sweep. The streamed
+//!   rankers already handle it per set: `engine` lends no successor to either
+//!   of those two levels, so their sets are marked `Unknown`, not closed.
+//! * **A superset the engine refused for meaning.** `engine`'s join drops a
+//!   candidate whose one new pair is uninformative under
+//!   `vocab::implication` (for example `above_s2` with `above_s3`, where the
+//!   first implies the second). Such a `Y` has the same support as `X` and is
+//!   never built, so `X` is reported closed. That is the intended answer: `Y`
+//!   only restates `X`. It is closed relative to the informative lattice the
+//!   sweep walks, not relative to every frequent set.
 
 use std::collections::{HashMap, HashSet};
 
@@ -54,6 +74,15 @@ pub struct Closed {
     /// read whether this was worth doing on a given column, and `kept.len()`
     /// alone cannot say.
     pub considered: u64,
+    /// Whether every set in `kept` was checked against a complete successor
+    /// level: `true` when the sweep went extinct, `false` when it halted.
+    ///
+    /// When `false`, the deepest two levels may hold sets reported closed that
+    /// are not, and `kept` over-counts the closed sets (see the module header).
+    /// Carried rather than acted on, so a halted sweep's `kept` is the same
+    /// list it always was and a caller decides what a partial answer is worth
+    /// (c4a-7, W3-runner1-3, D-1496).
+    pub closure_complete: bool,
 }
 
 impl Closed {
@@ -87,6 +116,16 @@ fn frequent_total(sweep: &Sweep) -> usize {
 
 /// Masks in `lower` made redundant by an immediate superset in `upper` with
 /// identical support.
+///
+/// # Cost (c4a-6, D-1496)
+///
+/// Not O(1) per itemset. It builds a `HashMap<ConditionMask, u64>` copy of
+/// the whole lower level, O(|lower|) time and about 56 bytes plus hashing
+/// overhead per entry, held only for this call and outside the engine's
+/// `DEFAULT_CEILING` memory model. Then each upper itemset costs one
+/// expected-O(1) probe per set bit: O(k) per itemset, k at most 384. So one
+/// call is O(|lower| + k·|upper|) and is paid once per retired level.
+/// UNVERIFIED as a measurement: no bench times it. `docs/06-limits.md`.
 ///
 /// Immediate supersets are sufficient by the theorem in this module's header.
 /// Keeping the operation at one adjacent pair is what lets the streamed ranker
@@ -159,7 +198,11 @@ pub fn closed(sweep: &Sweep) -> Closed {
         .filter(|i| !redundant.contains(&i.mask))
         .copied()
         .collect();
-    Closed { kept, considered }
+    Closed {
+        kept,
+        considered,
+        closure_complete: sweep.halted.is_none(),
+    }
 }
 
 #[cfg(test)]
@@ -188,6 +231,45 @@ mod tests {
         Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
             .run(&bars, &mut evaluator())
             .sweep
+    }
+
+    /// **A HALTED SWEEP SAYS ITS CLOSURE IS INCOMPLETE (c4a-7, D-1496).**
+    ///
+    /// The same bars at a ceiling that forces a halt: `closure_complete` is
+    /// `false`, and the extinct sweep's is `true`. The halted `kept` is not
+    /// changed by the flag: it still holds every set the old walk kept.
+    #[test]
+    fn a_halted_sweep_reports_an_incomplete_closure() {
+        let extinct = swept();
+        assert!(extinct.halted.is_none(), "the fixture goes extinct");
+        assert!(closed(&extinct).closure_complete);
+
+        let bars = synthetic::sessions(8);
+        let halted = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(64))
+            .run(&bars, &mut evaluator())
+            .sweep;
+        assert!(
+            halted.halted.is_some(),
+            "a 64-row ceiling halts this column"
+        );
+        let c = closed(&halted);
+        assert!(
+            !c.closure_complete,
+            "a partial top level cannot prove closure"
+        );
+        assert_eq!(
+            c.considered,
+            u64::try_from(halted.all_frequent().count()).expect("fits"),
+            "every frequent set is still considered"
+        );
+        assert!(
+            !c.kept.is_empty(),
+            "and the partial answer is still returned"
+        );
+        assert!(
+            !super::Closed::default().closure_complete,
+            "unknown is not complete"
+        );
     }
 
     #[test]

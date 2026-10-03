@@ -53535,3 +53535,30 @@ holding a digest. The checks run in the same order on the same values.
 **What it changes.** One pass per call instead of two. The digest, the run
 checks, the refusal reported for a faulty input and every output byte are
 unchanged.
+
+### D-1496 — `closed` says when a halted sweep leaves its closure unproved, and its cost and its "always present" claim are corrected — 2026-10-03
+
+**What was observed.** c4a-7 and W3-runner1-3: `runner::closed::closed` zips
+adjacent `sweep.levels` and never reads `sweep.halted`. On a halted sweep the
+top level is partial, so the top level has no successor and the level below
+it has a partial one, and both report sets as closed that are not.
+`validate`'s `FoldResult::halted` doc measured 1,407 kept at extinction
+against 318,862 when halted. The module doc said the equal-support superset
+"is always PRESENT to be seen". AC-whp-cx-2: it is also absent when
+`engine`'s join refuses it as an uninformative pair (its meaning prune),
+and `vocab::implication`'s doc still said `closed` keeps the long
+`{above_s2, above_s3, above_s4, above_s5}`. c4a-6: `redundant_between` is
+O(k) probes per itemset and builds an O(|lower|) map per call, with only an
+UNVERIFIED comment and no limits entry.
+
+**The decision.** `Closed` gains `closure_complete`, `true` only when the
+sweep went extinct. `kept` is NOT changed for a halted sweep: dropping or
+re-marking those sets would change the walk-forward candidate set and every
+selection built on it, which needs a decision that owns those outputs. The
+streamed rankers already mark both levels `Unknown`, because `engine` lends
+no successor to either. The two doc sentences now say when the superset is
+absent and why the meaning prune's answer is the intended one. The cost of
+`redundant_between` is stated in its doc and in `docs/06-limits.md`.
+
+**What it changes.** One new field; no existing output, digest or run
+identity term moves.

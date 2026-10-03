@@ -13934,3 +13934,18 @@ bounds are all nonzero.
   text. Checked over 160,000 texts by
   `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`;
   not proved for every fifteen-digit text.
+- **The closure check is O(k) per itemset and copies a level per call (c4a-6,
+  D-1496).** `runner::closed::redundant_between` builds a
+  `HashMap<ConditionMask, u64>` of the whole lower level, O(|F_k|) time and
+  about 56 bytes plus hashing overhead per survivor, then probes it once per
+  set bit of each upper itemset: O(k) per itemset, k at most 384. It runs once
+  per retired level in `rank` and `run_prepared_population_by_reporting`, and
+  once per level pair in `closed` and `redundant_count`. The transient map is
+  outside the engine's `DEFAULT_CEILING` memory model, so a level near the
+  ceiling briefly needs that much again. Probing the engine's own sorted
+  level instead was not done here. Not timed: no bench row covers it.
+- **A halted sweep's closed set is an over-count (c4a-7, W3-runner1-3,
+  D-1496).** `runner::closed::closed` cannot prove closure for the top two
+  levels of a halted sweep and now says so through `closure_complete`; it
+  still returns those sets in `kept`. `validate` records `halted` beside its
+  candidate count, and the streamed rankers mark the two levels `Unknown`.
