@@ -677,6 +677,7 @@ diagnostic replay; they are not counted as caught production mutants.
 | audit-20261003 o1store2-1, o1store2-2, o1store2-3, hunt-store-6: store docs disagreed with the code | Corrected (D-1527, AFA-08). |
 | audit-20261003 attackdata-8: a cleared checksum flag disables verification | Not fixed: needs a new format version. Stated limit (D-1528). |
 | audit-20261003 hunt-store-5: lake never checked the timestamp's unit or UTC flag | Refused by name (D-1528, AFA-20). |
+| audit-20261003 attackdata-4: JSON rupee price snapped from the f64 re-rendering | Not fixed; stated limit, comment corrected (`docs/06-limits.md`). |
 | audit-20261003 hunt-pull-1: derivatives audit ignored the venue's 15:40 close | Venue-dated classification (D-1529, AFA-09). |
 | audit-20261003 hunt-pull-2: rolling rupee price snapped to zero | Refused (D-1530, AFA-10). |
 | audit-20261003 attackdata-3: repeated JSON key kept the last value silently | Refused by name (D-1531, AFA-11). |

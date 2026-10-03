@@ -1468,8 +1468,12 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
-        // Rupees: the text is the truth, and `core`'s half-up reader owns the
-        // rule. NOT `csv::paisa`, which refuses past two decimals — see the
+        // Rupees: `core`'s half-up reader owns the rule, applied to serde's
+        // re-rendering of the number — NOT the vendor's own text. Past ~17
+        // significant digits the f64 has already rounded and the snap can
+        // land one paisa from the vendor's text (audit-20261003 attackdata-4;
+        // a 2M-case differential found no realistic price affected). Stated
+        // in `docs/06-limits.md`. NOT `csv::paisa`, which refuses past two decimals — see the
         // header on `prices` for why that refusal was wrong and what it cost.
         //
         // STILL NO FLOAT. `serde_json` renders the number back to its shortest

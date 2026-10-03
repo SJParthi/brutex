@@ -13947,6 +13947,13 @@ bounds are all nonzero.
   proves records were committed. A `.bin` deleted whole, sidecar left behind,
   is created again empty, as before: a deletion is an explicit act, and the
   lost records are not named.
+* **A JSON rupee price is snapped from serde's re-rendering, not the vendor's
+  text (audit-20261003 attackdata-4).** `http` reads the number as an f64 and
+  snaps `Number::to_string()` half-up. Past about 17 significant digits the
+  f64 has already rounded, so `100.12499999999999999` snaps to 100.13 where its
+  own text says 100.12. A 2,000,000-case differential found 0 differences for
+  2- and 3-decimal prices. Closing it needs `serde_json`'s
+  `arbitrary_precision`, a dependency feature change not made here.
 * **Run-id resumption reads one block (D-1536).** `reserve_run_id` resumes above
   the largest `run` in the last 64 KiB of the newest non-empty log file. A run id
   carried only by lines further back, and above every later `seq`, is not seen.
