@@ -984,11 +984,7 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
 fn an_unadmitted_commit_waits_for_the_result_set_writer_lock() {
     let id = id();
     let scored = runner::rank::Scored {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the public scored type supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 1,
         edge: runner::outcome::Edge::default(),
     };

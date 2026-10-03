@@ -2557,8 +2557,8 @@ mod tests {
         assert!(
             pass_1
                 .lines()
-                .any(|line| line.starts_with(&format!("  {:<14}{:>9}", "NIFTY", 600))),
-            "pass 1 screened NIFTY's 600 generated five-minute bars:\n{pass_1}"
+                .any(|line| line.starts_with(&format!("  {:<14}{:>9}", "NIFTY", 300))),
+            "pass 1 records the 300 bars it swept of NIFTY's 600 generated five-minute bars, warm-up excluded (D-1661):\n{pass_1}"
         );
         assert!(
             !pass_1.contains("REFUSED") && !pass_1.contains("NOT READ"),

@@ -737,7 +737,9 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             let row = ledger.read(0)?;
             assert_eq!(
                 (row.bars, row.min_hits, row.months_asked, row.months_found),
-                (3_000, 3_000, 1, 1)
+                // `bars` is the column's swept count, warm-up excluded
+                // (AC-whp-law-2, D-1661): 1,500 of the 3,000 loaded bars.
+                (1_500, 3_000, 1, 1)
             );
             assert_eq!(row.halted, 0);
             let attempt =

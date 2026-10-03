@@ -221,7 +221,9 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
 #[test]
 fn the_ledger_v6_route_and_replay_costs_are_stated() {
     let route = function(LEDGER_V6, "fn run_route(");
-    assert!(route.contains("sized.take()"));
+    assert!(route.contains("preloaded_for(underlying, &mut sized)"));
+    let hand_off = function(LEDGER_V6, "fn preloaded_for<");
+    assert!(hand_off.contains("sized.take()"));
     assert!(route.contains("commit_strict_candidate_pre_admission_authority_sized_v1("));
     assert!(
         !route.contains("commit_strict_candidate_pre_admission_authority_v1("),
