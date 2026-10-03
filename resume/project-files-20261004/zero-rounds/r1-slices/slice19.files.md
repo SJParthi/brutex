@@ -1,0 +1,16 @@
+crates/cli/src/global_replay.rs
+crates/cli/src/global_replay_v2.rs
+crates/cli/src/global_replay_v3.rs
+crates/cli/src/global_replay_v4.rs
+crates/cli/src/global_replay_v4_codec.rs
+crates/cli/src/global_replay_v4_lifecycle.rs
+crates/cli/src/global_replay_v4_store.rs
+crates/cli/src/index_consistency.rs
+crates/cli/src/index_consistency_store.rs
+crates/cli/src/index_stop.rs
+crates/cli/src/index_stop_launch.rs
+crates/cli/src/index_stop_qualification.rs
+crates/cli/src/index_stop_qualification_codec.rs
+crates/cli/src/index_stop_qualification_metrics.rs
+crates/cli/src/index_stop_qualification_numeric.rs
+crates/cli/src/index_stop_search.rs

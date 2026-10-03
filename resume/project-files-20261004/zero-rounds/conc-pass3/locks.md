@@ -1,0 +1,117 @@
+# conc-pass3 / locks: every non-blocking lock acquisition in non-test code, at 5140aca3
+
+**Verdict: 3 new findings (0 high, 0 medium, 3 low).** Every other non-blocking site has a defect already named in concurrency.md passes 1-2, or I found none. D-1760 fixes the permanent half of indexstop-2. Its concurrent-publisher clause is PARTIAL.
+
+Method: I grepped `try_lock|try_lock_shared|LOCK_NB|flock(` across `crates/` and dropped `*_tests.rs`, `tests/` and `#[cfg(test)]` modules: telemetry sink.rs:1792, sweeprun.rs:3436, mastersrun.rs:926, server.rs:20989/21110/21134/24988, audit.rs:2371, selection_v4_authority.rs:1641-1646, population.rs:7745-7752 and admission_join.rs:934 are all test code. No production `libc::flock`, `LOCK_NB`, `RwLock::try_read` or `RwLock::try_write` exists. `server.rs:17091 try_write` is a socket write. `store/src/flock.rs:109/121` is the wrapper itself. I read the source only and did not run cargo.
+
+## Site table (one row per production site)
+
+"Prior" is the concurrency.md finding that already names the defect at that site. "—" means none, and no defect beyond the row's note.
+
+| # | Site | Lock / mode | Who else can hold it at the same time | Loser does | Refusal text truthful? | User-visible consequence | Prior |
+|---|---|---|---|---|---|---|---|
+| 1 | store/src/file.rs:1248 `open_or_create` | month `.lock`, EX, try | another writer (in-process ingest; cross-process none, because only api ingests); **any reader's SH** (`open_existing`, audited reads, `/bars/window.json` x240, cli `stored::load`, strict ranges for the whole run) | refuse (`StoreError::Locked`) | **No**: says "another writer holds" when the holder is a reader. Host error is classified separately. | pulled month lost (re-fetched later at quota cost); derived rung never re-derived for a past month | barflow-1; ledgerv6-1 (whole-run hold) |
+| 2 | store/src/file.rs:1403 `open_existing` | month `.lock`, SH, try | the writer's EX | refuse `Locked` | yes (the only conflicting holder is a writer) | read page or sweep refuses during an ingest of that month | replay-5 (late VIX open), store1-1 (absent `.lock` → unlocked) |
+| 3 | store/src/file.rs:1444 `open_existing_audited` | month `.lock`, SH, try, held for the AdmittedMonth's life | writer EX | refuse (`why.to_string()`) | vague: std "operation would block", names no holder | strict sweep refused during a pull; while held, it refuses writers for the whole run | ledgerv6-1, barflow-1 |
+| 4 | store/src/repair.rs:448 `shared_lock` | source/revision `.lock`, SH | writer EX | refuse `Locked` ("another writer holds") | yes | none in production (no caller outside tests) | store2-1 (latent) |
+| 5 | pull/src/ingest.rs:3156 `CensusLock::take` | `<vendor>.man.lock`, EX, try | another same-vendor ingest in-process (seats prevent most of these); no cross-process writer | refuse; **silently proceeds unlocked** on EMFILE/ENOSPC open errors | yes (WouldBlock and host error are split, D-0955) | rows lost on the unlocked arm | pull2-1 |
+| 6 | pull/src/cash_session_cache.rs:390 `lock_day` (callers :270, :314, :491) | per-day cache `.lock`, EX, try, held across a gunzip and parse of up to 32 MiB | another ingest validating or installing the same day; `/gaps.json` and the recovery auditor (same EX); `read_local_lifecycle` SH | refuse ("unavailable") | neutral | equity window refused; combined with equity-1, a permanent hole | pull2-4, equity-2 |
+| 7 | pull/src/cash_session_cache.rs:121 `read_local_lifecycle` | per-day `.lock`, SH, try | row 6's EX holders | refuse "UNVERIFIED … unavailable" | yes | recovery lifecycle read refused | equity-2 |
+| 8 | api/src/server.rs:17800 `take_serve_lock` | `<store>/serve.lock`, EX, try | a second `api serve` process | refuse, exit | **No on a host error**: both arms say "another brutex api is already serving" and quote whatever pid is in the file | **locks-1** | — |
+| 9 | api/src/audit.rs:1190 `Journal::appended` | `audit/pull.journal`, EX, try, across write + fsync | parallel press legs; recovery receipt; autopilot tick; refused-request records (all in-process) | refuse | hedged ("may be appending") | run/receipt record lost from `/audit`; recovery BLOCKED | server1-1, recovery-4, recauto-2 |
+| 10 | api/src/recovery_journal.rs:315 `open_at` | plan/attempts/active/stop `.bin`, EX, try, held for the Journal's life | `snapshot` SH (preflight of a second start/prepare); a running recovery's worker EX | refuse WouldBlock "already exclusively locked; no work was admitted" | slightly off: the holder can be a shared snapshot. In-process only, and STOP/is_stopped serialise on `recovery_active` | a racing double start or prepare is refused | — (checked; no material defect) |
+| 11 | api/src/recovery_journal.rs:639 `snapshot` | same files, SH, try | a live writer EX (running recovery) | refuse "has a writer" | yes | a second start or prepare is refused while one runs (intended) | — |
+| 12-16 | api/src/indexstopvixjson.rs:130, indexstopcandlesjson.rs:159, indexstopqualificationjson.rs:150, indexstopjson.rs:131, indexstoprankingjson.rs:185 | process-wide `Mutex<Option<Cached>>`, `try_lock` | **the same viewer's own abandoned request** (still running in `spawn_blocking`); a second tab | refuse 503 "…busy; nothing/no request queued". Poisoned is mapped to busy too (unreachable in release, panic=abort) | yes ("busy") | **locks-2** | — (pass 2 listed it as the good design) |
+| 17 | cli/src/execution_lease.rs:66 (`acquire` and `probe`) | `execution.lock`, EX, try | a real sweep (cli or browser); **a `/backtest/run.json` probe holding EX** | refuse `Busy` | **No** when the holder is a probe ("another sweep owns…") | FAILED cli sweep / 409 launch with no sweep running | cli1-3, runs-2 |
+| 18 | cli/src/operation_audit.rs:522 `begin` | `invocation index.bin`, EX, try, across write + fsync | every audited HTTP request's begin (in-process api); cli begins; readers' SH (:599) across `sync_all` | refuse BUSY | yes-ish ("another operation holds") | cli FAILED; browser 429 then Run locked | cli1-2, log-1 |
+| 19 | cli/src/operation_audit.rs:599 `read` | index, SH, try, across `sync_all` | `begin` EX | refuse BUSY | yes | `/backtest/audit.json` 429 | log-1 |
+| 20 | cli/src/operation_audit.rs:326 `append` | per-invocation file, EX, try (raw `File::try_lock` + `unlock`) | nobody: readers deliberately take no lock on it, and the State sits behind a Mutex | n/a (the WouldBlock arm is unreachable) | — | none | — (checked) |
+| 21 | cli/src/search_checkpoint.rs:154 `Journal::open` | `owner.lock`, EX, try | a second writer of the same search; **any `Snapshot::open` probe SH** (:108) | refuse "already owned or cannot be locked" | **No** when the holder is a probe | false "already owned" refusal; attempt sealed Refused | expr-1, indexstop-2(b) |
+| 22 | cli/src/search_checkpoint.rs:108 `Snapshot::open_through` probe | `owner.lock`, SH, try, released immediately | the writer's EX → sets `writer_observed` (correct) | proceeds (it is a probe) | n/a | causes row 21 | expr-1 |
+| 23 | cli/src/search_checkpoint.rs:494 `read_saved` | `<seq>/payload`, SH, try | **the publishing writer's EX, still held after the `complete` marker is visible** | refuse "checkpoint payload is busy or cannot be read" | yes ("busy") | **locks-3** | — (3259 named only the 0-byte-marker sub-window) |
+| 24 | cli/src/boolean_candidate_persistence.rs:110 `prepare_in_namespace` | namespace `owner.lock`, EX, try, held through `finish` | a concurrent publisher; **reader leases SH** (rows 25-27, Observation::open) | refuse "already owned or lock refused" | **No** when the holder is a reader | rung or batch refused, campaign checkpoints burned | expr-2, indexstop-2(a) |
+| 25 | cli/src/boolean_candidate_persistence.rs:270 `read_held` | the file being read, SH, try | `write_or_equal` takes no lock, so nobody | refuse "busy" | yes | none found | — |
+| 26 | cli/src/boolean_observation_file.rs:228 `ReadLease::acquire` | `owner.lock`, SH, try (CAS guards one lease per descriptor) | publisher EX | refuse "busy or cannot be locked" | yes | read refused while publishing; it in turn refuses the publisher (row 24) | expr-2, indexstop-2 |
+| 27 | cli/src/boolean_campaign_reader.rs:170 | child `owner.lock`, SH, try | re-preparing child EX | refuse "publication is busy" | yes | `/boolean-campaign.json` error; refuses row 24 | expr-2 |
+| 28 | cli/src/expression_search_reader.rs:253 | signal `.rows`, SH, try | `EvidenceWriter` EX until the end of `finish` | refuse "busy" | yes | unreachable: the reader requires a Completed attempt receipt first, which is written after `finish` | — (checked) |
+| 29 | cli/src/expression.rs:465 `read` | `.rows`, SH, try | the same writer | refuse "busy" | yes | as row 28 | — (checked) |
+| 30 | cli/src/checksum_receipts.rs:314 `publish` | receipt, EX, try (raw) | a concurrent publisher of the same receipt (same month audited by two processes) | refuse with std's bare WouldBlock text | vague, names nothing | audit refused; a retry reuses the receipt | replay-3 (durability of the fast path); pass 2 judged the refusal clean |
+| 31 | cli/src/checksum_receipts.rs:274 `Receipt::open` | receipt, SH, try, held for the authority's life | a publisher's EX between its seal write and its unlock | refuse bare | vague | transient | replay-3 |
+| 32 | cli/src/candidate_trades.rs:852, 1049, 1362 | catalog, trade and detail files, SH, try | the writer's EX in `write_exact` | refuse "candidate detail is busy; retry" | yes | transient 503 | cli2-5 (empty before lock) |
+| 33 | cli/src/candidate_trades.rs:1101 `TradeReader::page` | cached trade file, SH, try (raw) | a writer EX (the file is immutable once published) | refuse busy | yes | none found | apicache-1 (staleness, not the lock) |
+
+## Findings
+
+### locks-1 (low): the serve lock reports every flock refusal as "another brutex api is already serving this store" and quotes a stale pid, even when the host refused the lock itself
+
+- **Where:** crates/api/src/server.rs:17800-17827 (`take_serve_lock`).
+- **Code:**
+  ```rust
+  let file = match store::flock::Flock::try_lock(file, path.clone()) {
+      Ok(held) => held,
+      Err(refusal) => {
+          let held_by = std::fs::read_to_string(&path).unwrap_or_default();
+          let held_by = held_by.lines().next().unwrap_or_default().trim();
+          release_root(&key);
+          return Err(format!(
+              "REFUSED: another brutex api is already serving this store.\n  \
+               store: {}\n  lock:  {} ({refusal})\n  held by: {}\n ...
+               Stop the other instance, or point this one at another BRUTEX_STORE.", ...
+  ```
+- **Why it is wrong:** `refusal` is a `TryLockError`. It is `WouldBlock` only when another description holds the lock. `TryLockError::Error` is the host refusing `flock` (ENOLCK on an NFS or SMB mount without a lock manager, ENOTSUP on a filesystem with no advisory locks). In that case no other instance exists, but the message asserts one does. It then fills "held by:" from line 1 of the file. `serve.lock` is opened without truncation and only re-stamped after a successful lock, so that line is the **last successful holder's** `addr=… pid=…`, which is a dead process. The repo already fixed exactly this conflation for the census lock (`lock_refusal`, ingest.rs:3201-3218, R9-csr-cx-1/D-0955: "Only WouldBlock means another run holds it… Both arms used to say there was one"). It also fixed the stale-pid misattribution twice (D-1446, D-1481), but not on this arm. `execution_lease::lock` and `store::file::lock_fault` split the two arms; this site does not.
+- **Repro:** Run `api serve` once on store S, which stamps `addr=127.0.0.1:8080 pid=4242`, then stop it. Move S to (or mount it from) a filesystem whose `flock` returns ENOLCK or ENOTSUP, for example an NFSv3 export with no lockd, or an SMB share mounted `nobrl`/`nolock`. Run `api serve` again. `try_lock` returns `Err(TryLockError::Error(ENOLCK))`, and the process exits with "REFUSED: another brutex api is already serving this store … held by: addr=127.0.0.1:8080 pid=4242". pid 4242 does not exist, and stopping "the other instance" or changing the port can never help. The refusal itself is correct, since serving without the lock would be unsafe. Only the stated cause is false.
+- **Minimal fix:** Match on the error. `TryLockError::WouldBlock` keeps today's text. `TryLockError::Error(host)` returns "REFUSED: the host refused to lock {path}: {host}. No other instance is implied; put the store on a filesystem that supports advisory locks", and does not read or quote the stamp.
+
+### locks-2 (low): the five index-stop JSON caches refuse a viewer's own next request as "busy" (503), because the request the page just abandoned still holds the process-wide slot
+
+- **Where:** crates/api/src/indexstopvixjson.rs:128-130, indexstopcandlesjson.rs:157-159, indexstopqualificationjson.rs:148-151, indexstopjson.rs:129-132, indexstoprankingjson.rs:183-186. Each handler runs `render` inside `crate::detail::run` (detail.rs:100-107, `spawn_blocking`). Client: web/src/lib/index-stop-vix.js:89-93 and index-stop-source.js:77 (`reads.cancel()` then a new read), and detail-refusal.js:3-15.
+- **Code:**
+  ```rust
+  static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
+  let mut held = CACHE.get_or_init(|| Mutex::new(None)).try_lock()
+      .map_err(|_| "saved-VIX reader busy; nothing queued")?;
+  if !held.as_ref().is_some_and(|cached| cached.root == root && cached.identity == asked.identity && ...) {
+      *held = None;
+      let reader = Reader::open(root, asked.identity, asked.pin, bounds)?;   // cold: verifies the whole saved evidence
+  ```
+  The `Err(why)` arm maps to `refused(StatusCode::SERVICE_UNAVAILABLE, &why)`.
+- **Why it is wrong:** The slot is one per route for the whole process, and it is held for the whole closure, including a cold `Reader::open`, which re-verifies the saved catalog or observation (O(file)). The browser cancels and replaces reads on every selection change ("One read in flight; selection changes revoke stale publication even if abort is ignored", index-stop-vix.js:87). An `AbortController` abort drops the axum future, but `spawn_blocking` cannot be cancelled, so the abandoned closure keeps the guard until it finishes. The replacement request that the same page sends a moment later then gets `try_lock` → `WouldBlock` → 503 "…busy; nothing queued". The page renders it as `phase:'failed'` with no retry: "The saved VIX companion is unavailable… saved-VIX reader busy; nothing queued". The same happens between two tabs on one route. Pass 2 recorded `try_lock` here as the better design, because it does not park a `detail` permit (expr-3, cand-2). That is true, but the cost is that the most ordinary interaction, clicking one trade and then another, refuses the second click. Nobody else is contending: the holder is work whose result nobody will read. No wrong data is served.
+- **Repro:** On the index-stop page, open trade A's VIX companion for catalog K1 (cold `Reader::open`, many MB). While it loads, click trade B of a different setting or catalog K2. The client aborts A's fetch and GETs `/index-stop-vix.json?identity=K2…`. The server thread for A is still inside `Reader::open` holding `CACHE`. B's closure → `try_lock` → `WouldBlock` → 503. The panel shows the busy refusal. A's result is discarded on arrival. The user must click B again after A's closure ends. The same applies to `/index-stop-candles.json` (trade candles) and to paging `/index-stop-ranking.json` twice quickly.
+- **Minimal fix:** Hold the global mutex only to look up, take or install the `Cached` entry. Move the reader out (`Option::take`), run `Reader::open` and the projection outside the lock, and put it back afterwards. Concurrent requests for other identities then simply open their own reader, and the slot is never held across verification. Alternatively, keep `try_lock` but have the client retry a `busy` refusal once or twice after a short delay (as `fetchWithBusyRetry` does for `/backtest.json`), and answer 429 rather than 503 so the busy refusal matches the server's other busy refusals.
+
+### locks-3 (low): a live checkpoint is visible to readers before its writer releases the payload lock, so polling a running search or campaign gets "checkpoint payload is busy" at every publication
+
+- **Where:** writer crates/cli/src/search_checkpoint.rs:263-281 (`publish_inner`); discovery :457-463 (`discover_through`); reader :494-498 (`read_saved`, via `Snapshot::read` :128).
+- **Code:**
+  ```rust
+  // writer, holding Flock::lock(payload) EXCLUSIVE since :236
+  let mut marker = File::create_new(directory.join("complete")).map_err(error)?;   // :263  <- now discoverable
+  marker.write_all(&seal).and_then(|()| marker.sync_all())...;                      // fsync
+  File::open(&directory)...sync_all()...;                                            // dir fsync
+  verify_acknowledged(&mut file, &path, &header, payload, seal)?;                    // :272  re-reads the WHOLE payload
+  if regular_bytes(&directory.join("complete"), 32)? != seal { ... }
+  file.release()...;                                                                 // :281  payload lock released
+  // reader
+  Ok(metadata) if metadata.file_type().is_file() => { ...; latest = Some(...max(sequence)); }   // :458-462
+  let mut file = Flock::try_lock_shared(readonly_file::open(&path)?, path.as_path())
+      .map_err(|why| format!("checkpoint payload is busy or cannot be read: {why}"))?;            // :494-498
+  ```
+- **Why it is wrong:** `discover_through` treats a `complete` marker as an acknowledged checkpoint and makes it `latest`. The writer creates that marker while it still holds the payload's exclusive flock. It keeps holding it through two fsyncs and a full re-read of the payload, and releases it only at :281. Any `Snapshot` reader in that window picks the new sequence, and its shared `try_lock` on the payload fails with `WouldBlock`. Pass 2's xcut H8 note (concurrency.md:3259) named only the sub-window :263-:265, where the marker is still 0 bytes and the reader says "marker width mismatch". This window is the longer one that follows: it lasts until :281 and includes two fsyncs plus an O(payload) re-read. It also survives the GAP11-0 fix proposed there (temp name, then rename to `complete`), because the renamed marker would still appear before :281. The checkpoint is fully durable and verified at :265, so the reader is refused for bytes that are already published.
+- **Who hits it:** every observer of a live search or campaign: the campaign monitor (web/src/lib/campaign-monitor.js polls `/boolean-campaign.json` every 5 s while `running`, through `boolean_campaign_reader.rs:26-33`), unpinned `/index-stop-ranking.json` (`index_stop_search_reader::latest_checkpoint`), `/expression-search.json`, and `boolean_qualified_observer.rs:33/84/176`. All of these are cross-process when the search runs in `cli`, and cross-thread when the browser launched it in `api`.
+- **Repro:** Launch a boolean campaign and open its monitor. When the CLI publishes checkpoint N, thread W is between :263 and :281: marker written, fsyncing or re-reading payload. API thread R runs `Snapshot::open` → `discover_through` → `latest = N` → `read(N)` → `read_saved` → `try_lock_shared(N/payload)` → `WouldBlock` → `Err("checkpoint payload is busy or cannot be read: …")`. `/boolean-campaign.json` returns an error. The monitor shows `why` and increments `failures`. Three such hits in a row stop the watch (campaign-monitor.js:28, `failures<3`). For the ranking page the result is a failed load of the newest batch at the moment it lands.
+- **Minimal fix:** In `publish_inner`, release the payload lock before the marker is created: after the first `verify_acknowledged` (:258) and the directory fsync (:259-262), call `file.release()`. Keep a plain unlocked handle for the second verification, or drop that verification, since the `complete` marker and the reader's own seal check already cover it. Alternatively, have `read_saved` wait on the shared lock (`Flock::lock_shared`), because the writer's hold after the marker is bounded and the writer never re-locks an acknowledged payload.
+
+## Fix verification (lock-family findings that the new commits claim to touch)
+
+`git log 331b05c..HEAD` contains D-1760..D-1765. Only D-1760 touches a lock-family site (`boolean_candidate_persistence::prepare_in_namespace` and `index_stop_vix::publish`). `store/src/file.rs`, `pull/src/cash_session_cache.rs`, `pull/src/ingest.rs`, `cli/src/operation_audit.rs`, `cli/src/execution_lease.rs` and `cli/src/search_checkpoint.rs` are unchanged. The `api/src/audit.rs` diff is doc-only. So barflow-1, pull2-1, pull2-4, equity-2, server1-1, recovery-4, recauto-2, cli1-2, cli1-3, runs-2, log-1, expr-1, expr-2 and replay-5 are unchanged and still present. None of them is claimed fixed.
+
+- **indexstop-2 case (c), the permanent VIX wedge reached by a reader lease: FIXED.** `index_stop_vix::publish` now shortcuts only on `persistence::committed(&directory)` (a 112-byte `complete.bin`), not on the directory existing. After a writer `try_lock` is refused by an `Observation::open` lease, the directory holds only `owner.lock` and `committed` is false. The rerun therefore falls through to `prepare_in_namespace`, whose `directory()` accepts the existing directory. `try_lock` now succeeds, and because the receipt is not whole, it discards any stale `complete.bin`/`body.bin` and writes the body fresh. The permanent half is gone.
+- **indexstop-2 cases (a)/(b) and expr-2 (writer `try_lock` refused by reader leases, worded "already owned"): NOT FIXED** (not claimed). boolean_candidate_persistence.rs:110-114 is unchanged.
+- **D-1760's own clause "when its own attempt fails after a concurrent publisher committed, it answers with that committed companion": PARTIAL.** The loser reaches `Err(_) if persistence::committed(&directory)?` (index_stop_vix.rs ~:411) only if the winner's `complete.bin` is whole. But the winner keeps the exclusive owner lock (`Pending.owner`) until its `with_current` closure returns, which is after `finish`'s directory fsync. If the check lands in that window, `saved()` → `Reader::open` → `Observation::open` → `read_held(owner.lock)` shared `try_lock` → `WouldBlock` → "Boolean evidence is busy or cannot be locked", and the loser is refused although the companion is committed. More commonly, the loser's own `try_lock` refusal happens while the winner is still writing its body, so `committed` is false and the loser is refused outright. Either way the next run succeeds, so this is transient and not counted as a finding.
+
+## Checked and clean (no new defect)
+
+- `Flock` (store/src/flock.rs): every guard path unlocks explicitly. Raw `File::try_lock`/`try_lock_shared` sites (search_checkpoint.rs:108, checksum_receipts.rs:314, operation_audit.rs:326, candidate_trades.rs:1101) each pair success with an explicit `unlock()` on every path that follows.
+- Lock ordering: every acquisition in the family is non-blocking, so no wait cycle is possible.
+- No site in the family silently proceeds unlocked except the already-known ones: pull2-1 (census lock on EMFILE/ENOSPC), store1-1 (absent month `.lock`), and server2-2 (in-process `ServeLock { held: None }`).
+- The `Mutex::try_lock` sites map `Poisoned` to "busy". This is unreachable in the shipped binary (`panic = "abort"`, poison-1).

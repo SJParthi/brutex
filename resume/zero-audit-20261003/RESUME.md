@@ -33,7 +33,9 @@ id, state (found / fixing / branch / merged), commit. All findings evidence is i
 
 ## Fix work queued (briefs in `briefs/`; each agent uses COMMON-BRIEF.md)
 1. pull-autopilot: CE-23 (HIGH), CE-24, CE-28, CE-29, CE-30, CE-14, CE-15+P1-19-02,
-   CE-16, P1-19-01, P1-19-03, CE-5, CE-33.
+   CE-16, P1-19-01, P1-19-03, and one shared empty-path refusal plus one shared
+   boolean-knob parser for CE-5, CE-6, CE-33, CE-36, CE-37, CE-38, CE-39
+   (helper's resume: fix-queue resume/zero-rounds/crash-edge.md).
 2. web-routes: CE-25, CE-26, CE-27, CE-32, P3-01-01..05, P3-02-01..07, P1-06-01..03.
 3. cli-edges: CE-4, CE-6..10, CE-12, CE-13, CE-17, CE-18..22, CE-34, CE-35.
 4. numeric (numeric-complexity.md): floor-vs-max class first (p2bool-1, p2inst-1,

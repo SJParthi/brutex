@@ -1,0 +1,13 @@
+crates/cli/src/index_stop_search_checkpoint.rs
+crates/cli/src/index_stop_search_progress.rs
+crates/cli/src/index_stop_search_reader.rs
+crates/cli/src/index_stop_source_context.rs
+crates/cli/src/index_stop_source_context_codec.rs
+crates/cli/src/index_stop_store.rs
+crates/cli/src/index_stop_vix.rs
+crates/cli/src/index_stop_vix_codec.rs
+crates/cli/src/institutional_evidence.rs
+crates/cli/src/institutional_statistics.rs
+crates/cli/src/knobs.rs
+crates/cli/src/ledger_all.rs
+crates/cli/src/ledger_v6.rs

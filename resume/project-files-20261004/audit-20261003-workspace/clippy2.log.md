@@ -1,0 +1,155 @@
+    Checking core v0.1.0 (/home/claude/brutex-clean/crates/core)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+    Checking vocab v0.1.0 (/home/claude/brutex-clean/crates/vocab)
+   Compiling libc v0.2.189
+    Checking telemetry v0.1.0 (/home/claude/brutex-clean/crates/telemetry)
+   Compiling version_check v0.9.5
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+    Checking bytes v1.12.1
+    Checking once_cell v1.21.4
+    Checking cfg-if v1.0.4
+    Checking store v0.1.0 (/home/claude/brutex-clean/crates/store)
+   Compiling generic-array v0.14.7
+    Checking indicators v0.1.0 (/home/claude/brutex-clean/crates/indicators)
+    Checking stable_deref_trait v1.2.1
+    Checking pin-project-lite v0.2.17
+    Checking costs v0.1.0 (/home/claude/brutex-clean/crates/costs)
+   Compiling getrandom v0.3.4
+   Compiling synstructure v0.13.2
+    Checking itoa v1.0.18
+    Checking futures-core v0.3.33
+   Compiling displaydoc v0.2.7
+    Checking errno v0.3.14
+   Compiling crc32fast v1.5.0
+    Checking signal-hook-registry v1.4.8
+   Compiling tokio-macros v2.7.2
+    Checking socket2 v0.6.5
+    Checking mio v1.2.2
+    Checking smallvec v1.15.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+    Checking tokio v1.53.1
+    Checking zerofrom v0.1.8
+    Checking http v1.5.0
+    Checking yoke v0.8.3
+    Checking zerovec v0.11.6
+    Checking subtle v2.6.1
+    Checking writeable v0.6.3
+    Checking tinystr v0.8.3
+    Checking litemap v0.8.2
+    Checking potential_utf v0.1.5
+    Checking http-body v1.1.0
+    Checking icu_locale_core v2.2.0
+    Checking zerotrie v0.2.4
+    Checking tracing-core v0.1.36
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+    Checking log v0.4.33
+    Checking percent-encoding v2.3.2
+    Checking zeroize v1.9.0
+    Checking utf8_iter v1.0.4
+   Compiling serde_core v1.0.229
+    Checking rustls-pki-types v1.15.1
+    Checking icu_collections v2.2.0
+    Checking tracing v0.1.44
+    Checking icu_provider v2.2.0
+    Checking futures-task v0.3.33
+   Compiling httparse v1.10.1
+    Checking typenum v1.20.1
+    Checking tower-service v0.3.3
+    Checking slab v0.4.12
+    Checking futures-util v0.3.33
+   Compiling rustls v0.23.45
+    Checking untrusted v0.9.0
+    Checking simd-adler32 v0.3.10
+    Checking adler2 v2.0.1
+    Checking memchr v2.8.3
+    Checking try-lock v0.2.5
+    Checking want v0.3.1
+    Checking miniz_oxide v0.8.9
+    Checking rustls-webpki v0.103.15
+    Checking icu_properties v2.2.0
+    Checking icu_normalizer v2.2.0
+    Checking form_urlencoded v1.2.2
+    Checking futures-channel v0.3.33
+    Checking sync_wrapper v1.0.2
+    Checking httpdate v1.0.3
+   Compiling serde v1.0.229
+    Checking atomic-waker v1.1.2
+   Compiling zmij v1.0.23
+    Checking tower-layer v0.3.3
+    Checking hyper v1.11.0
+    Checking idna_adapter v1.2.2
+    Checking flate2 v1.1.9
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking http-body-util v0.1.4
+   Compiling serde_derive v1.0.229
+    Checking base64 v0.22.1
+    Checking compression-core v0.4.32
+    Checking ipnet v2.12.1
+   Compiling serde_json v1.0.151
+    Checking hyper-util v0.1.20
+    Checking compression-codecs v0.4.38
+    Checking digest v0.10.7
+    Checking idna v1.1.0
+    Checking tower v0.5.3
+    Checking greeks v0.1.0 (/home/claude/brutex-clean/crates/greeks)
+    Checking futures-sink v0.3.34
+    Checking ryu v1.0.23
+   Compiling crossbeam-utils v0.8.22
+    Checking tokio-util v0.7.19
+    Checking url v2.5.8
+    Checking serde_urlencoded v0.7.1
+    Checking async-compression v0.4.42
+    Checking tokio-rustls v0.26.4
+    Checking webpki-roots v1.0.9
+    Checking engine v0.1.0 (/home/claude/brutex-clean/crates/engine)
+    Checking bitflags v2.13.1
+    Checking cpufeatures v0.2.17
+   Compiling crossbeam-epoch v0.9.20
+    Checking tower-http v0.6.11
+    Checking hyper-rustls v0.27.9
+    Checking graviola v0.4.1
+   Compiling crossbeam-deque v0.8.7
+    Checking reqwest v0.12.28
+    Checking sha2 v0.10.9
+    Checking sha1 v0.10.7
+    Checking hmac v0.12.1
+   Compiling rayon-core v1.13.0
+    Checking either v1.18.0
+    Checking rayon v1.12.0
+    Checking rustls-graviola v0.4.0
+    Checking pull v0.1.0 (/home/claude/brutex-clean/crates/pull)
+    Checking runner v0.1.0 (/home/claude/brutex-clean/crates/runner)
+   Compiling cli v0.1.0 (/home/claude/brutex-clean/crates/cli)
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.56
+   Compiling zerocopy-derive v0.8.56
+   Compiling ahash v0.8.12
+    Checking num-integer v0.1.46
+    Checking twox-hash v2.1.3
+    Checking iana-time-zone v0.1.65
+    Checking chrono v0.4.45
+    Checking num-bigint v0.5.1
+   Compiling seq-macro v0.3.6
+    Checking hashbrown v0.17.1
+    Checking ruzstd v0.8.2
+    Checking mime v0.3.17
+    Checking parquet-format-safe v0.2.4
+    Checking axum-core v0.5.6
+    Checking half v2.7.1
+    Checking parquet v59.2.0
+    Checking serde_path_to_error v0.1.20
+    Checking matchit v0.8.4
+    Checking axum v0.8.9
+    Checking lake v0.1.0 (/home/claude/brutex-clean/crates/lake)
+    Checking api v0.1.0 (/home/claude/brutex-clean/crates/api)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 2m 03s
+CLIPPY EXIT 0
