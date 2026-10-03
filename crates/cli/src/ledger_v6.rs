@@ -242,7 +242,7 @@ impl RungRoots {
 /// reuses rather than rewrites them.
 pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     let mut out = String::new();
-    out.push_str(crate::STORED_PROVENANCE);
+    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-V6  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points\n\
@@ -645,7 +645,7 @@ pub(crate) fn ledger_v6_replay(
     oos_from: (u16, u8),
     oos_to: (u16, u8),
 ) -> String {
-    let mut out = String::from(crate::STORED_PROVENANCE);
+    let mut out = String::from(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "GLOBAL REPLAY V4 — actual Selection V6 prefixes, OOS {}-{:02} through {}-{:02}",

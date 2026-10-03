@@ -53795,3 +53795,223 @@ a warning to a committed report and is appended to a refusal.
 writes a trades block and a selected direction this path has none of.
 
 Invariants DUR-C-10 and DUR-C-11.
+
+### D-1700 — A range rung reads its own ledger row back by the identity its page names, not by the newest row with its key — 2026-10-03
+
+**Findings.** W2-cli8-9 (medium), W2-cli8-4 (low).
+
+**What was wrong.** `one_rung` discards the long audit page and read its row
+back with `latest_for`, the NEWEST ledger row matching (feed, underlying,
+rung, span, `min_hits`). The key carries no identity. An exact rerun of run A
+takes `Committed::Reused` and appends nothing, so when a different run B with
+the same key had been appended since, `range-all` and `descend` printed B's
+combinations, depth and totals under A's banner. Each call also opened a fresh
+`Results` handle, an O(runs) index build, then scanned backwards, while its
+doc said "`O(1)` in the ordinary case".
+
+**The decision.** `record_run`'s two record blocks open with named constants,
+`RECORDED_HEAD` and `REUSED_HEAD`, and carry their identity on a
+`RECORDED_IDENTITY` line. `recorded_identity` reads the identity from the one
+block the page carries and refuses a page with none, with two, with no
+identity line or with an identity that is not 64 lowercase hex characters.
+`recorded_row` then probes the process's shared, already-indexed ledger handle
+(`results::with_shared_writer`, the handle `ensure_run_record` committed
+through) with `of_identity`, and refuses an absent identity and a row whose
+key is not this rung's. Per rung that is O(rows appended since the handle's
+last use) plus one expected-O(1) probe and one fixed-width read; the handle's
+first open per process and root is still O(runs), and `docs/06-limits.md`
+states it.
+
+**Rejected.** Threading the `RunId` out of `audit_range_kernel` through
+`audit_bars` as a return value: it changes the signature of a kernel four
+other changes are editing at once, for the same identity the page already
+prints. Keeping the key lookup and adding the identity as one more key term:
+it would still open the ledger per rung and scan.
+
+### D-1701 — Durable rows of the parallel stored commands are written in input order — 2026-10-03
+
+**Findings.** GAP13-13 (medium), R9-cli-o1-0 (medium), W2-cli1-5 (low).
+
+**What was wrong.** `sweep-all`, `range-all` and pool pass 1 wrote ledger
+rows, attempt starts and attempt terminals from inside rayon workers, so the
+ledger's row order and the attempt tokens followed thread completion and `cli
+results` listed one store's identical reruns differently; `batch.rs` said "a
+rerun therefore produces the same bytes". Pool pass 1 ran up to the pool's
+width of `one_rung` sweeps at once while nothing raised
+`SWEEPS_SHARING_THIS_MACHINE`, so each took the whole machine's candidate
+ceiling and every core. And two comments in `batch::one` promised its identity
+equals `sweep-stored`'s for the same month ("the same 64 hex characters");
+batch digests with `stored_anchored_digest` under `BATCH_CEILING`, sweep-stored
+with `stored_executed_digest` under the derived ceiling, so the two can never
+be equal.
+
+**The decision.**
+- `sweep-all`: `sweep_chunk` runs each chunk of at most the pool's width in
+  four phases: load and identify in parallel (no writes); one `begin_many` in
+  input order; build and sweep in parallel (each attempt writes only its own
+  depth rows); file each month's ledger row and terminal sequentially in input
+  order. A begin refusal refuses by name exactly the months it left without an
+  attempt.
+- `range-all` (`sweep_rungs`) and pool pass 1 run `one_rung` ONE AT A TIME in
+  input order through `in_input_order`. Their writes happen deep inside the
+  audit kernel and cannot be lifted to an ordered commit without restructuring
+  it. With one sweep in flight the sharing counter's 1 is true, so each rung or
+  instrument gets the whole machine's ceiling and every core for its sweep,
+  whose support lanes and grid pricing remain parallel; `range-all`'s rows now
+  carry the same budget, and so the same identity, as `range-rung` gives one
+  rung alone. A first `range-all` after this change therefore records new
+  identities rather than reusing rows recorded under the divided ceiling.
+- The batch identity comments now say what is true: the batch identity is a
+  different run and does not join with `sweep-stored`'s; feed, instrument,
+  month and mask compare.
+
+`limits_o1cli_3` pinned `sweep_rungs`'s `par_iter`; it now pins
+`in_input_order` and the limit's sentence says "one rung at a time in input
+order". The cost is in `docs/06-limits.md`.
+
+**Rejected.** An ordering turnstile inside the rayon workers: a worker blocked
+on its turn can hold, below it on its own stack, an earlier item that its own
+inner `par_iter` stole, which deadlocks. Making only the readers
+order-independent: the attempt tokens and the ledger's own order would still be
+scheduling-dependent, and `cli results`' newest-first listing is history the
+operator reads. `SharedBy::these` alone for pool pass 1: it bounds memory but
+leaves the order defect.
+
+### D-1702 — Pool pass 2 prices where pass 1 prices: on the one-minute execution series — 2026-10-03
+
+**Findings.** GAP13-15 (medium), W2-cli9-4 (medium), R9-cli-o1-1 (low).
+
+**What was wrong.** `price_all` evaluated the exit grid on the coarse signal
+bars with the horizon counted in signal bars, while pass 1 projects its column
+onto the one-minute execution series and prices there in minutes; at 60min the
+pool printed "no candidate fired" over instruments with 83-94 pass-1 trades.
+The test claiming to pin the preparation searched with unbounded `find`s and
+matched `stored_anchored_column(` inside `audit_bars_work`, another function.
+The cost in `pool.rs` and `docs/06-limits.md` §171 left out the Θ(B) column
+walk every `evaluate_over` pays.
+
+**The decision.** `price_all` resolves the horizon and floors as
+`audit_range_kernel` does, projects with `project_onto_execution` exactly as
+`audit_bars_work` calls it (explicit execution series for a coarse rung, native
+self-alignment for `1min`), and builds the grid as `screen` does from the
+projected bars, with one hoisted `SliceFacts`. A behavioural test holds its
+cells, both sides, coarse and `1min`, to the audit path's own; the old test is
+renamed and bounded to `price_all`'s body. The cost is restated as
+Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)), with U growing with I.
+One stated difference remains: pass 1 withholds an exact-minute-unsourceable
+day and rebuilds its column (writing a preparation attempt); this read-only
+pass refuses such an instrument by name instead.
+
+**Rejected.** Refusing coarse rungs in pass 2: the projection exists and is the
+reference. Keeping the source-order test as the proof: order of text is not
+equality of cells.
+
+### D-1703 — The pool union admits the parent ledger once, not once per instrument — 2026-10-03
+
+**Finding.** W2-cli9-0 (low).
+
+**What was wrong.** `union_of` called `Frontier::of_run` per screened
+instrument, and each call proved its parent through `committed_receipt`, which
+opens and indexes the whole results ledger and receipt sidecar: O(I × (L + R))
+per pool, while the header said nothing scanned the store.
+
+**The decision.** One `CommittedParents::open_read_bounded` snapshot after pass
+1, one expected-O(1) receipt probe per instrument, then
+`Frontier::of_run_against_receipt`, which applies the same commit and count
+checks. A test counts ledger index builds on the calling thread through a
+test-only seam in `Results::open_with`: one for five instruments.
+
+**Rejected.** Caching the receipt inside `Frontier`: it would make a public
+read handle stateful about another file's generation.
+
+### D-1704 — Pool tables: refusals print last, and every pooled column is separated — 2026-10-03
+
+**Findings.** W2-cli9-7 (low), GAP13-16 (low).
+
+**What was wrong.** Pass 1 sorted ascending with refusals keyed `(true, ..)`
+and then reversed, so refusals printed FIRST against the comment and D-0509.
+The pooled row printed `net` and `dd>=` as `{:>12}{:>5}`, so -16462 beside
+123456 read "-16462123456".
+
+**The decision.** Ok rows are sorted descending on the money key (stable, so
+ties keep input order) and refusals are appended after them in input order. The
+pooled table is laid out with `crate::columns`, as pass 1 has been since
+D-1420, keeping every old width as a minimum. D-0990 had deferred GAP13-16 to
+another lane; this is that lane.
+
+**Rejected.** Widening only the two columns: `worst`, `min_win` and `net` touch
+too at `i64::MIN`.
+
+### D-1705 — Pages over many instruments or months open with a banner that promises no single run — 2026-10-03
+
+**Findings.** R9-cli-law-3 (low), GAP15-21 (low).
+
+**What was wrong.** `pool`, `ledger-v6`, `ledger-v6-replay`, `ledger-all` and
+the Boolean research pages opened with `STORED_PROVENANCE`, which promises "the
+run identity beneath names the exact column" and that "a figure here describes
+that instrument and that month", over figures spanning instruments and months
+and, on the pool page, no identity at all.
+
+**The decision.** `STORED_POOLED_PROVENANCE`: REAL MARKET DATA, no single
+instrument, month or identity promised, and the identities named as recorded
+in the store's ledgers and printed beside their rows where a page has rows.
+Those five pages open with it, and the pool's pass-1 table gains an `identity`
+column. `the_generated_and_stored_banners_make_opposite_claims` now holds all
+three banners apart, and the two Boolean heading tests expect the new banner.
+Refusal pages still carry no banner.
+
+**Rejected.** Printing nine-term identities per family and rung on the ledger
+pages: they live in those verbs' own ledgers and the pages are being edited by
+another change; the banner now says where they are.
+
+### D-1706 — Mask literals in `cli` name `vocab::ConditionMask`, and no comment denies the arrow — 2026-10-03
+
+**Finding.** R9-cli-law-1 (low).
+
+**What was wrong.** Fifteen `mask: Default::default()` literals in `cli` kept
+`#[expect(clippy::default_trait_access)]` with reasons saying the named path
+"would add a dependency arrow §5 does not draw", that "`vocab` is not among
+`cli`'s dependencies", or that the type "belongs to runner's private dependency
+graph". `crates/cli/Cargo.toml` declares `vocab` and §5 draws it (D-0683).
+
+**The decision.** Each literal is `vocab::ConditionMask::default()`, the
+suppressions and the false comments are gone, and
+`crates/cli/tests/crate_graph_claims.rs` refuses the false sentences and the
+lint name in any `cli` source.
+
+**Rejected.** Rewording the reasons and keeping the suppressions: a
+suppression with no reason left to hold is noise a later reader must
+re-derive.
+
+### D-1707 — Pool pass 2 withholds an exact-minute-unsourceable day as pass 1 does — 2026-10-03
+
+**Finding.** The difference D-1702 left stated (GAP13-15 follow-up): pass 1
+builds its column through `column_withholding_at_build`, which withholds a day
+whose closing minute the one-minute store cannot source and rebuilds; pool
+pass 2's `price_all` built the column once and refused the whole instrument on
+the same day. An instrument pass 1 screened and recorded therefore priced as a
+refusal in pass 2, and the pool's two passes disagreed on which days exist.
+
+**The decision.** `price_all` calls pass 1's own build, read-only.
+`StoredPreparationBuild::commit` becomes `Option<&str>`: `Some` is the
+existing recorded build (both existing callers pass it unchanged), `None` runs
+the same withholding loop, digest and column and writes no preparation
+attempt, because pass 2 prepares nothing pass 1 did not already prepare and
+record. One withholding rule, one place.
+
+**Proof.** `cli::pool::tests::pass_two_withholds_an_unsourceable_close_day_as_pass_one_does`
+builds a generated store whose one-minute series stops five minutes early on
+2025-05-06 (premises: no interior gap; the whole-span column build refuses on
+that day's closing minute) and holds `price_all`'s cells, both sides, to the
+audit path's cells over the span with that day withheld. Failing first, before
+the change: `pass 2 withholds the day and prices the rest: "the exact stored
+1min ORB/GapFib overlay was refused: MissingClosingMinute { source: 224,
+expected_ts_micros: 1746525540000000 }..."`.
+
+**Cost.** The column build is O(B_sig + B_min) per attempt and runs W + 1
+times for W withheld days (at most 64), as in pass 1. `docs/06-limits.md`
+states it in the pool's cost.
+
+**Rejected.** A second withholding loop in `pool.rs`: two copies of one rule
+drift. Writing a preparation attempt from pass 2: it would record a
+preparation under no run this pass commits.

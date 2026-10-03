@@ -823,7 +823,7 @@ pub(crate) fn gates_refused_event(verb: &str, missing: usize) -> telemetry::Even
 /// rule 4 bounds five per-operation costs and this is none of them.
 pub(crate) fn ledger_all(request: &LedgerAllRequest<'_>) -> String {
     let mut out = String::new();
-    out.push_str(crate::STORED_PROVENANCE);
+    out.push_str(crate::STORED_POOLED_PROVENANCE);
     let _ = writeln!(
         out,
         "\nLEDGER-ALL  {} {:04}-{:02}..{:04}-{:02}  support {} ppm  stop ceiling {} points",

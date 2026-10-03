@@ -8538,11 +8538,28 @@ made exact by exposing each cell's trade sequence from the grid, which is a
 change inside the pricing loop and is not made. Every report labels the
 column as a bound.
 
-Cost: pass 1 is I screens in parallel, each what `range-rung` costs on that
-instrument; pass 2 is I × U grid evaluations, each O(cells × T) for that
-instrument and candidate; the fold is one pass over I × U cells. The union is
-one expected-O(1) `HashSet` insert per frontier row, not worst-case O(1).
-None of this is a rule-4 primitive, and none of it is constant in I or U.
+Cost: pass 1 is I screens, one at a time in surface order (D-1701), each
+what `range-rung` costs on that instrument, with that screen's sweep and
+pricing parallel inside it. The union admits the parent ledger and receipt
+sidecar once, O(L + R) for L ledger rows and R receipts, then reads one
+frontier block per screened instrument, O(its rows), and makes one
+expected-O(1) `HashSet` insert per frontier row, not worst-case O(1)
+(D-1703; it was O(I × (L + R)) until then). Pass 2 prices on the one-minute
+execution series (D-1702): per instrument the loads, column, projection and
+one `SliceFacts`, O(B_sig + B_exec) -- times W + 1 for the column, where W is
+the number of exact-minute-unsourceable days withheld, because pass 1's own
+build reloads both contexts and rebuilds after each one (D-1707, at most 64) --
+and per union candidate one
+`grid::evaluate_over`, which walks every row of the projected column before it
+prices, Θ(B_exec + cells × T). So pass 2 is
+Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)). U is the union of
+every instrument's kept frontier (at most `top` rows a run), so U grows with
+I, up to I × `top`, and pass 2 is up to Θ(I² × top × B_exec) when T is small
+and B_exec large -- the rare-setup case the pool exists for. This said "I × U
+grid evaluations, each O(cells × T)", which left the B_exec walk out
+(R9-cli-o1-1). The fold is one pass over I × U cells. None of this is a rule-4
+primitive, and none of it is constant in I or U. Stated from the code's shape;
+not timed.
 
 Persistence: the I pass-1 runs write their own ledger rows and frontier
 blocks under their own identities. The pooled table is rendered and not
@@ -11333,8 +11350,9 @@ the counts the tests assert: no bench times the fold.
 
 ## Parallel rungs each re-read the same one-minute span (audit o1cli-3)
 
-- **`sweep_rungs` runs every rung through `one_rung` in parallel, and each
-  rung reads the same one-minute span for itself.** For a rung other than
+- **`sweep_rungs` runs every rung through `one_rung`, one rung at a time in
+  input order (in parallel until D-1701), and each rung reads the same
+  one-minute span for itself.** For a rung other than
   `1min` the reads are the execution series `audit_range_kernel` loads, one
   per attempt of every column build (inside `load_exact_minute_context`: the
   kernel's build, and `one_rung`'s own when the support is derived), and one
@@ -14034,3 +14052,37 @@ named refusal rather than an abort. The rows themselves are already held in
 memory by the caller, so this at most doubles that footprint. Not measured.
 The rollback on a failed append is one `seek`, one `set_len` and one
 `fsync`, on the failure path only.
+
+## A range rung's row is read back by identity through the shared ledger handle (D-1700)
+
+- **`one_rung` reads its own ledger row back with one expected-O(1) probe,
+  not O(1) worst case, after an O(delta) refresh.** `recorded_row` lifts the
+  identity from the rung's page and calls `of_identity` on the process's
+  shared ledger handle (`results::with_shared_writer`). The handle's `refresh`
+  absorbs the rows appended since its last use -- O(delta), zero in the common
+  case because the same handle just committed the row -- and the probe is one
+  `HashMap` lookup, expected O(1), then one fixed-width read. The handle's
+  FIRST open in a process (and on a change of store root) is the O(runs) index
+  build `Results::open` states; it is paid once per process and root, not
+  once per rung. Until D-1700 this was a fresh O(runs) open per rung plus a
+  backward scan over every row appended since the rung's row (W2-cli8-4).
+  Stated from the code's shape; not timed.
+
+## Ordered stored commands trade overlap for input order (D-1701)
+
+- **`sweep-all` files in input order behind a barrier per chunk.** Each chunk
+  of at most the rayon pool's width loads and sweeps its months in parallel,
+  then files them one at a time; the next chunk starts only when the chunk's
+  slowest month is filed. Wall-clock is therefore the sum over chunks of each
+  chunk's slowest month plus its sequential filing (one ledger append and one
+  terminal per month), not the parallel makespan of the whole walk. Memory per
+  chunk is what one month per worker holds, as before.
+- **`range-all` and pool pass 1 run `one_rung` one call at a time.** Each
+  sweep's support lanes and each screen's candidate pricing are still
+  parallel, and each call now gets the whole machine's ceiling and cores; what
+  no longer overlaps is each rung's or instrument's span loads, column folds
+  and probe preparation, O(bars) each, summed over the rungs or the surface
+  instead of overlapped. This is the price of writing every durable row in
+  input order without restructuring the audit kernel. Stated from the code's
+  shape; not timed, and the wall-clock change on the operator's stores is
+  UNVERIFIED.

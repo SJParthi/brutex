@@ -15,6 +15,71 @@ pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R
     run(&fixture.root)
 }
 
+/// A warmed store holding every one of `symbols`, each month written exactly
+/// as [`Fixture::warmed_for`] writes it for one symbol. D-1701.
+pub(crate) fn with_warmed_store_of<R>(
+    symbols: &[&'static str],
+    run: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).expect("copy target");
+        for entry in fs::read_dir(from).expect("copy source") {
+            let entry = entry.expect("entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).expect("copy");
+            }
+        }
+    }
+    let Some((&first, rest)) = symbols.split_first() else {
+        return with_warmed_store(run);
+    };
+    let fixture = Fixture::warmed_for(first);
+    for &symbol in rest {
+        let other = Fixture::warmed_for(symbol);
+        copy_tree(&other.root.join("bars"), &fixture.root.join("bars"));
+    }
+    run(&fixture.root)
+}
+
+/// A warmed NIFTY store whose one-minute series stops `cut` minutes early on
+/// 2025-05-06, every other file as [`with_warmed_store`] writes it. The cut is
+/// at the session's end, so no interior minute is missing and
+/// `minute_gaps::days_with_interior_gaps` names no day; the 5min bars still
+/// close on minutes the one-minute series no longer holds, which is the
+/// exact-minute-unsourceable day pass 1 withholds. `run` is given the store and
+/// that day's IST day number. D-1707.
+pub(crate) fn with_unsourceable_close<R>(
+    cut: usize,
+    run: impl FnOnce(&std::path::Path, i64) -> R,
+) -> R {
+    const SHORT_DAY: u8 = 6;
+    let fixture = Fixture::for_symbol("NIFTY");
+    let mut short_day = None;
+    for day in 5..=13 {
+        let rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        let minutes = if day == SHORT_DAY {
+            short_day = rows.first().map(|bar| indicators::ist_day(bar.ts_micros));
+            &rows[..rows.len().saturating_sub(cut)]
+        } else {
+            &rows[..]
+        };
+        fixture.write(5, Timeframe::MINUTE_1, minutes);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    run(&fixture.root, short_day.expect("2025-05-06 is a session"))
+}
+
 struct Fixture {
     root: PathBuf,
     /// The swept instrument every file and request names. NIFTY unless a
@@ -2343,4 +2408,140 @@ fn a_descent_loads_its_stored_inputs_once() {
     assert_eq!(crate::SCREEN_SPAN_LOADS.with(std::cell::Cell::get), 2);
     assert_ne!(one_minute.replace(&cached_root, &fresh_root), expected[0]);
     crate::knobs::clear_all();
+}
+
+/// **A recorded range rung reads back ITS OWN row, by identity.** W2-cli8-9,
+/// D-1700.
+///
+/// Run A, then a different run B with the same feed, instrument, rung, span
+/// and `min_hits` (another commit, so another identity), then A again, which
+/// takes `Committed::Reused` and appends nothing. The key lookup this replaced
+/// returned the NEWEST row with the key -- B's -- under A's page.
+#[test]
+fn a_reused_range_rung_reads_its_own_row_and_not_the_newest_with_its_key() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fixture = Fixture::warmed();
+    let at = |commit: &'static str| {
+        crate::audit_range_kernel(crate::StoredRangeAuditRequest {
+            root: fixture.root.clone(),
+            vendor: Vendor::Zerodha,
+            underlying: fixture.symbol,
+            rung: "5min",
+            from: (2025, 5),
+            to: (2025, 5),
+            min_hits: u64::MAX,
+            attempt: Some(7),
+            commit,
+        })
+        .expect("actual stored range audit")
+    };
+    let first = at("generated-range-readback-a");
+    let other = at("generated-range-readback-b");
+    let retry = at("generated-range-readback-a");
+    assert!(retry.contains(crate::REUSED_HEAD), "{retry}");
+    let a = crate::recorded_identity(&first).expect("A's identity");
+    let b = crate::recorded_identity(&other).expect("B's identity");
+    assert_ne!(a, b, "premise: two runs under one key");
+    assert_eq!(crate::recorded_identity(&retry), Ok(a));
+    let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
+    assert_eq!(ledger.len().expect("rows"), 2);
+    let newest = ledger.read(1).expect("newest");
+    assert_eq!(
+        newest.identity, b,
+        "premise: the newest row with the key is B's"
+    );
+    let key = crate::RungKey {
+        feed: "zerodha",
+        underlying: fixture.symbol,
+        rung: "5min",
+        from: (2025, 5),
+        to: (2025, 5),
+        min_hits: newest.min_hits,
+    };
+    let row = crate::recorded_row(&fixture.root, &retry, key).expect("A's row");
+    assert_eq!(row.identity, a, "the rerun reads its own row");
+    assert_eq!(row, ledger.read(0).expect("A's stored row"));
+    // A key the row does not describe is refused, not printed.
+    let foreign = crate::recorded_row(
+        &fixture.root,
+        &retry,
+        crate::RungKey {
+            min_hits: newest.min_hits.wrapping_add(1),
+            ..key
+        },
+    );
+    assert!(
+        foreign
+            .as_ref()
+            .is_err_and(|why| why.contains("does not describe")),
+        "{foreign:?}"
+    );
+    // An identity the ledger does not hold is refused by name.
+    let absent = format!(
+        "{}\n  row 0 in x\n  {}{}\n",
+        crate::RECORDED_HEAD,
+        crate::RECORDED_IDENTITY,
+        "ab".repeat(32)
+    );
+    let missing = crate::recorded_row(&fixture.root, &absent, key);
+    assert!(
+        missing
+            .as_ref()
+            .is_err_and(|why| why.contains("holds no row")),
+        "{missing:?}"
+    );
+    crate::knobs::clear_all();
+}
+
+/// The identity a page names is read exactly, or the page is refused: no
+/// block, two blocks, no identity line, uppercase or short hex. D-1700.
+#[test]
+fn the_record_block_identity_is_read_exactly_or_refused() {
+    let id = |hex: &str| format!("  {}{hex}\n", crate::RECORDED_IDENTITY);
+    let good = "0123456789abcdef".repeat(4);
+    let one = format!(
+        "banner\n{}\n  row 3 in x\n{}\n",
+        crate::RECORDED_HEAD,
+        id(&good)
+    );
+    let parsed = crate::recorded_identity(&one).expect("one block");
+    assert_eq!(parsed[0], 0x01);
+    assert_eq!(parsed[31], 0xef);
+    let reused = format!("{}\n{}", crate::REUSED_HEAD, id(&good));
+    assert_eq!(crate::recorded_identity(&reused), Ok(parsed));
+    for (page, why) in [
+        ("no block here\n".to_owned(), "no record block"),
+        (format!("{one}{reused}"), "2 record blocks"),
+        (
+            format!("{}\n  row 1\n\n{}", crate::RECORDED_HEAD, id(&good)),
+            "no identity line",
+        ),
+        (
+            format!("{}\n{}", crate::RECORDED_HEAD, id(&good.to_uppercase())),
+            "not 64 lowercase",
+        ),
+        (
+            format!("{}\n{}", crate::RECORDED_HEAD, id(&good[1..])),
+            "not 64 lowercase",
+        ),
+        (
+            format!(
+                "{}\n{}",
+                crate::RECORDED_HEAD,
+                id(&format!("{}g", &good[1..]))
+            ),
+            "not 64 lowercase",
+        ),
+    ] {
+        let verdict = crate::recorded_identity(&page);
+        assert!(
+            verdict.as_ref().is_err_and(|e| e.contains(why)),
+            "{why}: {verdict:?}"
+        );
+    }
+    // A sentence merely CONTAINING the head is not a block.
+    assert!(
+        crate::recorded_identity(&format!("x {}\n{}", crate::RECORDED_HEAD, id(&good))).is_err()
+    );
 }

@@ -525,7 +525,7 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    instrument the store holds on this feed and
                                    rung that is on the engine surface -- the two
                                    indices and the F&O cash equities -- each as
-                                   `range-rung` would, in parallel, one identity
+                                   `range-rung` would, one at a time, one identity
                                    each; then prices the union of their top
                                    combinations on every instrument and POOLS
                                    the trades. Two tables: PER SYMBOL and
@@ -533,13 +533,11 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    in sample, unvalidated. Takes `auto` too.
        cli range-rung   VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    ONE rung, with the WHOLE machine. `range-all`
-                                   divides the candidate ceiling by eight, so a
-                                   rung inside the eight can HALT where the same
-                                   rung alone completes -- and a halted ladder
-                                   records no row at all. Run the eight in
-                                   sequence with this and each gets the full
-                                   ceiling, every support lane, and a row on the
-                                   page the moment it finishes. Takes `auto` too.
+                                   now runs its rungs one at a time, each with
+                                   the full ceiling and every support lane, and
+                                   prints its table when the last finishes; this
+                                   prints one rung's row the moment it finishes.
+                                   Takes `auto` too.
        cli ledger-all   VENDOR FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM MAX_POINTS ROOT
                                    the DURABLE all-rung run. Sweeps the span on
                                    all eight rungs and WRITES the ledgers --
@@ -980,14 +978,21 @@ fn column_withholding_unsourceable_days(
         span,
         bars,
         signal_length,
-        StoredPreparationBuild { rung, commit },
+        StoredPreparationBuild {
+            rung,
+            commit: Some(commit),
+        },
     )
 }
 
 #[derive(Clone, Copy)]
 struct StoredPreparationBuild<'a> {
     rung: &'a str,
-    commit: &'a str,
+    /// The admitted build a preparation attempt is recorded under. `None` is
+    /// a READ-ONLY build: the same withholding loop, the same column, and no
+    /// attempt written -- the `pool`'s pass 2, which prices instruments pass 1
+    /// already prepared and recorded (D-1707).
+    commit: Option<&'a str>,
 }
 
 fn column_withholding_at_build(
@@ -1011,14 +1016,19 @@ fn column_withholding_at_build(
         let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
         let digest = stored_anchored_digest(bars, &exact, &daily)?;
-        let attempt =
-            preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)?;
+        let attempt = commit
+            .map(|commit| {
+                preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)
+            })
+            .transpose()?;
         let folded = stored_anchored_column(bars, &daily, &exact, signal_length, availability);
-        attempt.finish(if folded.is_ok() {
-            sweep_evidence::Completion::Completed
-        } else {
-            sweep_evidence::Completion::Refused
-        })?;
+        if let Some(attempt) = attempt {
+            attempt.finish(if folded.is_ok() {
+                sweep_evidence::Completion::Completed
+            } else {
+                sweep_evidence::Completion::Refused
+            })?;
+        }
         match folded {
             Ok(column) => {
                 if !dropped.is_empty() {
@@ -1081,11 +1091,7 @@ fn preparation_attempt_with_commit(
 ) -> Result<sweep_evidence::Attempt, String> {
     let key = stored::swept_index(underlying)?;
     let id = identity(&Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the public identity API supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         direction: RunDirection::Undirected,
         instrument: &key,
         timeframe: rung,
@@ -1731,7 +1737,8 @@ fn descend_arm(
 ///
 /// # Why this exists, and it is not a convenience
 ///
-/// `range-all` sweeps eight rungs under one `par_iter`, and `sweep_rungs` calls
+/// `range-all` swept eight rungs under one `par_iter` until D-1701 (it now runs
+/// them one at a time, each with the whole machine), and `sweep_rungs` called
 /// `SharedBy::these(8)` before it. That divides the machine's candidate ceiling
 /// by eight — 134,217,720 becomes 16,777,215 — and `support_lanes_for` divides
 /// the core count the same way. The division is CORRECT: eight rungs each
@@ -2775,6 +2782,28 @@ a file some earlier pull wrote, and the run identity beneath names the exact
 column they came from. A figure here describes that instrument and that month.
 ";
 
+/// What a page over REAL bars of MORE THAN ONE instrument or month says about
+/// itself.
+///
+/// [`STORED_PROVENANCE`] promises that "the run identity beneath names the
+/// exact column they came from" and that "a figure here describes that
+/// instrument and that month". Both are true of a one-instrument, one-month
+/// report and false of a page that pools many: `pool`, `ledger-v6`,
+/// `ledger-v6-replay`, `ledger-all` and the Boolean research pages each print
+/// figures spanning instruments and months, and none carried one identity
+/// naming every column (R9-cli-law-3, GAP15-21, D-1705). This banner still says
+/// REAL MARKET DATA -- it is not the generated one -- and promises no single
+/// instrument, month or identity: it says where the identities are.
+pub const STORED_POOLED_PROVENANCE: &str = "\
+=== THESE BARS ARE REAL MARKET DATA, READ FROM THE STORE ===
+Nothing was pulled from a vendor by this process. The bars below were read from
+files some earlier pull wrote. This page spans more than one instrument or month,
+so no single run identity names every column it used, and a figure here describes
+one instrument and one month only where its own line names them. Each run's
+nine-term identity is recorded in the store's ledgers, and is printed beside the
+row it produced wherever this page has one.
+";
+
 /// [`STORED_PROVENANCE`], then what a stock's figures are made of. D-0694.
 ///
 /// Every stored report that ranks or audits ONE instrument opens with this.
@@ -3508,16 +3537,9 @@ fn stored_month_kernel(
     // applied. `Params::of` reads the ladder rather than the argument, so a
     // `min_hits` the ladder raised is recorded as what ran, not as what was asked.
     let id = identity(&Run {
-        // `Default::default()` AND NOT `ConditionMask::default()`, which clippy asks
-        // for and this crate cannot give it. The named path needs `use vocab::…`,
-        // and `vocab` is not among `cli`'s dependencies -- `CLAUDE.md` §5 lists
-        // them, and adding an arrow to satisfy a lint would be the silent scope
-        // change §3 rule 2 forbids. The struct field types this value already.
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the named path would add a dependency arrow §5 does not draw"
-        )]
-        mask: Default::default(),
+        // The named path: `cli` depends on `vocab` directly (CLAUDE.md §5,
+        // D-0683), so no lint suppression is needed to spell it. D-1706.
+        mask: vocab::ConditionMask::default(),
         direction: RunDirection::Undirected,
         instrument: &loaded.key,
         timeframe: loaded.timeframe,
@@ -4075,11 +4097,7 @@ fn auto_search_run<'a>(
     commit: &'a str,
 ) -> Run<'a> {
     Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the public identity API supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
@@ -6135,11 +6153,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
     let id = identity(&Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the named path would add a dependency arrow §5 does not draw"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         // UNDIRECTED, and deliberately so even though this command DOES trade.
         // The identity names the SWEEP that produced the candidates; the
         // direction a trade is taken in is chosen per combination further down,
@@ -6799,7 +6813,10 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
         (from, to),
         &mut span.bars,
         signal_length,
-        StoredPreparationBuild { rung, commit },
+        StoredPreparationBuild {
+            rung,
+            commit: Some(commit),
+        },
     )?;
     // REBUILT FROM THE SURVIVING BARS. The helper above may have withheld days,
     // and both of these are keyed to the bars -- reading them from before it ran
@@ -6845,11 +6862,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     let ladder = ladder_for(min_hits)?;
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     let id = identity(&Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the named path would add a dependency arrow §5 does not draw"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         // Undirected for the reason `audit_stored_inner` states: the identity
         // names the SWEEP, and direction is chosen per combination below.
         direction: RunDirection::Undirected,
@@ -9199,8 +9212,8 @@ impl Rules {
     ///
     /// Measured on the one-minute rung: 618,296 bars across four parallel
     /// vectors is about 30 MB allocated, walked and freed, twice — and
-    /// `range_over` runs eight rungs under `par_iter`, so it is eight extra full
-    /// passes concurrently. Reuse needs `RankedRun` to return the `Forward` it
+    /// `range_over` runs eight rungs, so it is eight extra full passes per
+    /// command (concurrent until D-1701, one at a time since). Reuse needs `RankedRun` to return the `Forward` it
     /// built, which is a signature change on a crate boundary, so it is recorded
     /// here rather than claimed away. §3 rule 6.
     #[must_use]
@@ -13615,9 +13628,9 @@ fn one_rung(
         // "AUDIT / REFUSED. The streamed sweep offered N survivor(s)". Both are
         // uppercase and indented, so neither carried the `refused: ` prefix
         // this tested nor the `NOT_RECORDED` marker below, and both fell
-        // through to `latest_for`.
+        // through to the key lookup that `recorded_row` replaced (D-1700).
         //
-        // That fall-through is the defect. `latest_for` keys on feed,
+        // That fall-through was the defect. The lookup keyed on feed,
         // underlying, rung, span and min_hits -- never the identity -- so a
         // rung that halted on the budget printed an EARLIER run's combination
         // count, depth, trades and totals, under this run's banner, with
@@ -13633,8 +13646,9 @@ fn one_rung(
     } else if let Some(why) = not_recorded_reason(&text) {
         // A ROW THAT DID NOT LAND IS A REFUSAL, NOT A LOOKUP.
         //
-        // `latest_for` reads the newest row matching the KEY -- feed, underlying,
-        // rung, span, min_hits -- and the key does not carry the identity. So
+        // The key lookup `recorded_row` replaced read the newest row matching
+        // the KEY -- feed, underlying, rung, span, min_hits -- and the key does
+        // not carry the identity. So
         // when this run's append failed, the read did not fail with it: it
         // returned an EARLIER run's row, from a different commit and possibly a
         // different ceiling, and the descent printed it under this run's banner
@@ -13642,12 +13656,25 @@ fn one_rung(
         // the string it named it into was thrown away here.
         //
         // Refusing costs the rung its row and says why, which is what §4 asks
-        // for. The alternative -- matching `record.identity` in `latest_for` --
-        // is the stronger fix and needs the `RunId` computed twice or threaded
-        // through; this closes the silent substitution now and does not block it.
+        // for. The stronger fix -- reading the row by `record.identity` -- is
+        // now the arm below as well (D-1700): this arm still refuses first, so a
+        // row that did not land is named as that and never looked up.
         Err(first_line(format!("the result was not recorded: {why}")))
     } else {
-        latest_for(vendor_word, underlying, rung, from, to, min_hits)
+        // BY IDENTITY, NOT BY KEY. W2-cli8-9, D-1700: see `recorded_row`.
+        recorded_row(
+            &root,
+            &text,
+            RungKey {
+                feed: vendor_word,
+                underlying,
+                rung,
+                from,
+                to,
+                min_hits,
+            },
+        )
+        .map_err(first_line)
     };
 
     // A RUNG FINISHING IS AN EVENT, AND IT WAS NOT ONE.
@@ -14924,8 +14951,8 @@ pub fn descend(
 
     // SEQUENTIAL, and deliberately so.
     //
-    // `range_all` runs its nine rungs in parallel because they are independent.
-    // These are not independent in the way that matters: each step is roughly an
+    // `range_all` ran its nine rungs in parallel until D-1701 because they are
+    // independent. These are not independent in the way that matters: each step is roughly an
     // order of magnitude more expensive than the last, so running them at once
     // would hold the cheap answers hostage to the expensive one -- which is the
     // exact failure this command exists to avoid. One at a time, printed as it
@@ -15134,13 +15161,29 @@ pub fn range_over_for_attempt(
     )
 }
 
-/// Sweeps independent rungs in parallel while preserving their input order.
+/// Sweeps the rungs ONE AT A TIME, in input order.
 ///
-/// [`SharedBy`] divides the machine candidate ceiling among exactly the rungs
-/// in flight. The guard spans the indexed parallel map, so panic unwinding
-/// cannot leave the divisor raised. Rayon preserves the order of this indexed
-/// input in the collected rows, keeping reruns byte-identical regardless of
-/// completion order.
+/// # Why not in parallel any more (GAP13-13, R9-cli-o1-0, D-1701)
+///
+/// This was `rungs.par_iter().map(one_rung)` under `SharedBy::these(rungs.len())`.
+/// Each `one_rung` writes durable rows deep inside the audit kernel --
+/// preparation and probe attempts, the frontier, trade and receipt blocks, the
+/// ledger row, the attempt terminals -- so under `par_iter` the ledger's row
+/// order and every attempt token followed thread completion, and `cli results`
+/// listed one store's identical reruns differently. Those writes cannot be
+/// lifted out to an ordered commit without restructuring the kernel, and an
+/// ordering gate inside rayon workers can deadlock: a worker blocked on its
+/// turn may hold, below it on its own stack, an earlier item its inner
+/// `par_iter` stole. One at a time makes every write input-ordered by
+/// construction.
+///
+/// It costs less than it looks. Each rung's sweep and its grid pricing are
+/// themselves parallel (support lanes over every core, `par_iter` over
+/// candidates), and with one sweep in flight [`SWEEPS_SHARING_THIS_MACHINE`]
+/// is truthfully one, so each rung gets the whole machine's ceiling and cores
+/// -- the same budget, and so the same identity, `range-rung` gives that rung
+/// alone. What is serialised is each rung's loads and column folds;
+/// `docs/06-limits.md` states it.
 fn sweep_rungs(
     vendor_word: &str,
     underlying: &str,
@@ -15150,21 +15193,25 @@ fn sweep_rungs(
     attempt: Option<u64>,
 ) -> Vec<RungRow> {
     let (from, to) = span;
-    let _sharing = SharedBy::these(rungs.len());
-    rungs
-        .par_iter()
-        .map(|&rung| {
-            one_rung(
-                vendor_word,
-                underlying,
-                rung,
-                from,
-                to,
-                support_ppm,
-                attempt,
-            )
-        })
-        .collect()
+    in_input_order(rungs, |&rung| {
+        one_rung(
+            vendor_word,
+            underlying,
+            rung,
+            from,
+            to,
+            support_ppm,
+            attempt,
+        )
+    })
+}
+
+/// `each` over `items`, one call at a time, in input order, collected in that
+/// order. The outer loop of every caller of [`one_rung`] (`range-all` and pool
+/// pass 1), named so the property is one function both use and a test drives.
+/// D-1701.
+pub(crate) fn in_input_order<T, R>(items: &[T], each: impl FnMut(&T) -> R) -> Vec<R> {
+    items.iter().map(each).collect()
 }
 
 /// The comparable-run provenance and support explanation above a range table.
@@ -15507,50 +15554,142 @@ const IN_SAMPLE_WARNING: &str = "\n  \
     and discards the report that carries them. Treat these totals as an upper\n  \
     bound on what the setup did, not as an estimate of what it will do.\n";
 
-/// The record just written for this exact run, read back from the store.
+/// The exact run a recorded rung's page names, read back from the store BY
+/// IDENTITY.
 ///
-/// Reads BACKWARDS from the newest row and stops at the first match, because the
-/// row this command just appended is the last one. That is `O(1)` in the ordinary
-/// case and `O(rows)` only if the run was somehow not recorded — which is
-/// reported as the refusal it is rather than absorbed.
+/// # Why the key is not enough, and why it used to be used
 ///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
-fn latest_for(
-    vendor_word: &str,
-    underlying: &str,
-    rung: &str,
+/// This read the newest row matching (feed, underlying, rung, span,
+/// `min_hits`). The key does not carry the identity, so whenever the row this
+/// run committed was not the newest with that key -- an exact rerun that took
+/// `Committed::Reused` while a different run with the same key (another
+/// commit, another ceiling, another store digest) had been appended since --
+/// the rung printed THAT run's combinations, depth and totals under this run's
+/// banner (W2-cli8-9). It also opened a fresh `Results` handle per rung, an
+/// O(runs) index build, and then scanned backwards O(rows since the row)
+/// (W2-cli8-4). D-1700.
+///
+/// # What it does now
+///
+/// [`recorded_identity`] lifts the identity out of the one record block the
+/// page carries, and the row is found by one probe of the process's shared,
+/// already-indexed ledger handle ([`results::with_shared_writer`]), the same
+/// handle `ensure_run_record` committed through. Its `refresh` absorbs only
+/// the rows appended since it was last used, so the cost per rung is
+/// O(rows appended since the handle's last use) plus one O(1)-expected hash
+/// probe and one fixed-width read. The handle's first open in a process is
+/// still the O(runs) index build `Results::open` states; that is paid once per
+/// process and root, not once per rung. `docs/06-limits.md` states it.
+///
+/// The key is still checked against the row found, as a guard: an identity
+/// whose row names another feed, instrument, rung, span or `min_hits` is a
+/// damaged or foreign ledger and is refused by name rather than printed.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the shape of the
+/// code and no bench in this workspace times it. `CLAUDE.md` §3 rule 6.
+fn recorded_row(
+    root: &std::path::Path,
+    page: &str,
+    key: RungKey<'_>,
+) -> Result<crate::results::Record, String> {
+    let rung = key.rung;
+    let identity = recorded_identity(page)
+        .map_err(|why| format!("the {rung} run's page names no single recorded row: {why}"))?;
+    let found = results::with_shared_writer(root, |store| store.of_identity(&identity))?;
+    let Some(record) = found else {
+        return Err(format!(
+            "the {rung} run reported identity {} recorded, but the results store holds no row with it",
+            hex_of(&identity)
+        ));
+    };
+    let matches = record.feed == results::field(key.feed)
+        && record.underlying == results::field(key.underlying)
+        && record.timeframe == results::field(rung)
+        && (record.from_year, record.from_month) == key.from
+        && (record.to_year, record.to_month) == key.to
+        && record.min_hits == key.min_hits;
+    if !matches {
+        return Err(format!(
+            "the row recorded under identity {} does not describe this {rung} run's feed, \
+             instrument, rung, span and min_hits; it was not printed as this run's",
+            hex_of(&identity)
+        ));
+    }
+    Ok(record)
+}
+
+/// What a `range-all` / descend rung was asked, for [`recorded_row`]'s guard.
+#[derive(Clone, Copy)]
+struct RungKey<'a> {
+    feed: &'a str,
+    underlying: &'a str,
+    rung: &'a str,
     from: (u16, u8),
     to: (u16, u8),
     min_hits: u64,
-) -> Result<crate::results::Record, String> {
-    let root = store_root()?;
-    let mut store = crate::results::Results::open(&root)?;
-    let count = store.len()?;
-    let (feed, name, tf) = (
-        crate::results::field(vendor_word),
-        crate::results::field(underlying),
-        crate::results::field(rung),
-    );
-    for back in 1..=count {
-        let record = store.read(count.saturating_sub(back))?;
-        if record.feed == feed
-            && record.underlying == name
-            && record.timeframe == tf
-            && record.from_year == from.0
-            && record.from_month == from.1
-            && record.to_year == to.0
-            && record.to_month == to.1
-            && record.min_hits == min_hits
-        {
-            return Ok(record);
-        }
+}
+
+/// Lowercase hex of a 32-byte identity, for a refusal that names one.
+fn hex_of(identity: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for byte in identity {
+        let _ = write!(s, "{byte:02x}");
     }
-    Err(format!(
-        "the {rung} run completed but no row for it is in the results store"
-    ))
+    s
+}
+
+/// The identity of the one ledger row a recorded page reports.
+///
+/// Exactly one record block -- [`RECORDED_HEAD`] or [`REUSED_HEAD`] at the
+/// start of a line -- must be present; none, or more than one, is a refusal
+/// naming the count, because a page whose row cannot be told apart is the case
+/// the key lookup this replaced got wrong. The identity line is the block's
+/// [`RECORDED_IDENTITY`] line, and its value must be exactly 64 lowercase hex
+/// characters.
+///
+/// # Errors
+///
+/// A block count other than one, a block without its identity line, or an
+/// identity that is not 64 lowercase hex characters.
+fn recorded_identity(page: &str) -> Result<[u8; 32], String> {
+    let mut heads = page
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| *line == RECORDED_HEAD || *line == REUSED_HEAD);
+    let Some((at, _)) = heads.next() else {
+        return Err("it carries no record block".to_owned());
+    };
+    let extra = heads.count();
+    if extra != 0 {
+        return Err(format!(
+            "it carries {} record blocks, and only one can be this run's",
+            extra.saturating_add(1)
+        ));
+    }
+    let Some(hex) = page
+        .lines()
+        .skip(at.saturating_add(1))
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| line.trim_start().strip_prefix(RECORDED_IDENTITY))
+    else {
+        return Err("its record block has no identity line".to_owned());
+    };
+    let bytes = hex.as_bytes();
+    let well_formed = bytes.len() == 64
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b));
+    if !well_formed {
+        return Err(format!(
+            "its identity line reads {hex:?}, not 64 lowercase hex characters"
+        ));
+    }
+    let mut identity = [0_u8; 32];
+    for (slot, pair) in identity.iter_mut().zip(bytes.chunks_exact(2)) {
+        let text = std::str::from_utf8(pair).map_err(|why| why.to_string())?;
+        *slot = u8::from_str_radix(text, 16).map_err(|why| why.to_string())?;
+    }
+    Ok(identity)
 }
 
 /// `screen`: sweep a span and report only the combinations that satisfy the
@@ -15948,11 +16087,7 @@ fn screen_range_kernel_cached(
     let rungs = grid_rungs(&span.bars);
     let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     let id = identity(&Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the named path would add a dependency arrow §5 does not draw"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
@@ -16407,7 +16542,8 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// therefore a budget for the machine, not for a caller.
 ///
 /// [`range_over`] hands that whole-machine budget to **every rung at once**.
-/// Its `rungs.par_iter()` runs eight independent sweeps concurrently and
+/// Its `rungs.par_iter()` ran eight independent sweeps concurrently (until
+/// D-1701, which runs them one at a time) and
 /// nothing divided the ceiling between them, so eight sweeps each believed they
 /// could claim 19.6 GB: **157 GB of a 48 GB machine**. The guard that exists to
 /// stop the machine swapping was itself oversubscribing it eightfold.
@@ -17416,16 +17552,16 @@ fn record_run(
     let committed = ensure_run_record(into.root, &record)?;
     let report = match committed {
         Committed::Written(index) => format!(
-            "RESULT RECORDED\n  \
+            "{RECORDED_HEAD}\n  \
              row                                            {index:>10}  in {}\n  \
-             identity                                       {}\n\n",
+             {RECORDED_IDENTITY}{}\n\n",
             results::Results::path(into.root).display(),
             record.identity_hex(),
         ),
         Committed::Reused(index) => format!(
-            "RESULT ALREADY RECORDED AND VERIFIED\n  \
+            "{REUSED_HEAD}\n  \
              row                                            {index:>10}  in {}\n  \
-             identity                                       {}\n  \
+             {RECORDED_IDENTITY}{}\n  \
              the prepared detail blocks and every deterministic ledger field match; the existing completion timestamp was kept\n\n",
             results::Results::path(into.root).display(),
             record.identity_hex(),
@@ -17458,6 +17594,22 @@ fn record_run(
 /// a version it does not write, while `read_at` reads older rows and widens
 /// them, so the two halves disagreed by design.
 pub(crate) const NOT_RECORDED: &str = "RESULT NOT RECORDED";
+
+/// The sentence [`record_run`] opens with when this invocation appended the row.
+///
+/// Written by `record_run` and read by [`recorded_identity`], which is why it is
+/// a constant: `one_rung` discards the long report and recovers the identity of
+/// the row it must read back from this block, so a reword moves both sides or
+/// neither. D-1700.
+pub(crate) const RECORDED_HEAD: &str = "RESULT RECORDED";
+
+/// The sentence [`record_run`] opens with when an exact rerun found its row.
+pub(crate) const REUSED_HEAD: &str = "RESULT ALREADY RECORDED AND VERIFIED";
+
+/// The label of the identity line inside either record block, padded to the
+/// block's value column. [`recorded_identity`] reads the 64 hex characters
+/// that follow it.
+pub(crate) const RECORDED_IDENTITY: &str = "identity                                       ";
 
 /// The reason a report gives for a row that did not reach the ledger, if any.
 ///
@@ -20354,12 +20506,13 @@ mod tests {
     }
 
     use super::{
-        COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_PROVENANCE, UNVALIDATED,
-        USAGE, Vendor, audit_run, audit_run_within, audit_stored, auto, auto_with, calendar_terms,
-        direction_of, evaluator_from, existing_store_root, grid_rungs, knobs_checked, log_dir_from,
-        month_banner, nothing_to_trade, overfitting_of, parse_min_hits, parse_sessions,
-        parse_vendor, policy_of, root_from, run, sample_warning, side_of_evidence, streaming_note,
-        support_from_knob, sweep, sweep_stored, sweep_with, validates,
+        COMMANDS, MIN_AUDIT_SESSIONS, MISUSED, OK, PROVENANCE, STORED_POOLED_PROVENANCE,
+        STORED_PROVENANCE, UNVALIDATED, USAGE, Vendor, audit_run, audit_run_within, audit_stored,
+        auto, auto_with, calendar_terms, direction_of, evaluator_from, existing_store_root,
+        grid_rungs, knobs_checked, log_dir_from, month_banner, nothing_to_trade, overfitting_of,
+        parse_min_hits, parse_sessions, parse_vendor, policy_of, root_from, run, sample_warning,
+        side_of_evidence, streaming_note, support_from_knob, sweep, sweep_stored, sweep_with,
+        validates,
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
@@ -21623,14 +21776,7 @@ mod tests {
         use runner::rank::Scored;
 
         let scored = |mean: f64| Scored {
-            // `Default::default()` and not the named path, for the reason every
-            // other mask literal in this crate gives: spelling `ConditionMask`
-            // needs a `vocab` arrow §5 does not draw for `cli`.
-            #[expect(
-                clippy::default_trait_access,
-                reason = "the named path would add a dependency arrow §5 does not draw"
-            )]
-            mask: Default::default(),
+            mask: vocab::ConditionMask::default(),
             hits: 100,
             edge: Edge {
                 n: 100,
@@ -21679,11 +21825,7 @@ mod tests {
         use runner::rank::Scored;
 
         let scored = |mean: f64| Scored {
-            #[expect(
-                clippy::default_trait_access,
-                reason = "the named mask type belongs to runner's private dependency graph"
-            )]
-            mask: Default::default(),
+            mask: vocab::ConditionMask::default(),
             hits: 100,
             edge: Edge {
                 n: 100,
@@ -22272,6 +22414,25 @@ mod tests {
             !STORED_PROVENANCE.contains("not a backtest"),
             "the real banner must not carry the generated one's disclaimer"
         );
+        // THE POOLED BANNER IS A THIRD CLAIM, AND EQUALS NEITHER. It is real
+        // data, so it carries neither the generated claim nor its disclaimer,
+        // and it covers many instruments and months, so it makes none of the
+        // single-run promises. R9-cli-law-3, GAP15-21, D-1705.
+        assert!(STORED_POOLED_PROVENANCE.contains("REAL MARKET DATA"));
+        assert_ne!(STORED_POOLED_PROVENANCE, STORED_PROVENANCE);
+        assert_ne!(STORED_POOLED_PROVENANCE, PROVENANCE);
+        assert!(!STORED_POOLED_PROVENANCE.contains("GENERATED"));
+        assert!(!STORED_POOLED_PROVENANCE.contains("not a backtest"));
+        for single in [
+            "describes that instrument and that month",
+            "the run identity beneath names the exact",
+        ] {
+            assert!(STORED_PROVENANCE.contains(single), "premise: {single}");
+            assert!(
+                !STORED_POOLED_PROVENANCE.contains(single),
+                "the pooled banner must not promise {single:?}"
+            );
+        }
     }
 
     /// THE STORED AUDIT SAYS WHICH RUNG ITS TRADES FILLED ON.
@@ -23176,11 +23337,7 @@ mod tests {
         use runner::rank::Scored;
 
         let scored = Scored {
-            #[expect(
-                clippy::default_trait_access,
-                reason = "the named mask type belongs to runner's private dependency graph"
-            )]
-            mask: Default::default(),
+            mask: vocab::ConditionMask::default(),
             hits: 300,
             edge: runner::outcome::Edge::default(),
         };
@@ -24028,7 +24185,7 @@ mod tests {
     }
 
     /// A record with the money fields filled and the mask left to the caller.
-    fn record_for_naming() -> crate::results::Record {
+    pub(crate) fn record_for_naming() -> crate::results::Record {
         crate::results::Record {
             identity: [7; 32],
             finished_micros: 1_785_727_500_000_000,
@@ -24059,7 +24216,7 @@ mod tests {
         }
     }
 
-    fn result_commit_root(tag: &str) -> std::path::PathBuf {
+    pub(crate) fn result_commit_root(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "brutex-result-commit-{tag}-{}-{:?}",
             std::process::id(),
@@ -24067,7 +24224,7 @@ mod tests {
         ))
     }
 
-    fn result_commit_frontier(identity: [u8; 32], hits: u64) -> crate::frontier::Row {
+    pub(crate) fn result_commit_frontier(identity: [u8; 32], hits: u64) -> crate::frontier::Row {
         crate::frontier::Row {
             direction: costs::fill::Direction::Long,
             rules: crate::Rules {
@@ -24106,7 +24263,7 @@ mod tests {
         }
     }
 
-    fn result_commit_trade(identity: [u8; 32]) -> crate::trades::Row {
+    pub(crate) fn result_commit_trade(identity: [u8; 32]) -> crate::trades::Row {
         crate::trades::Row {
             identity,
             seq: 0,
@@ -27016,7 +27173,8 @@ mod tests {
     /// `one_rung` discards the long report and reads the row back out of the
     /// ledger by KEY -- feed, underlying, rung, span, `min_hits` -- and the key
     /// carries no identity. So an append that failed did not make the read fail
-    /// with it: `latest_for` returned the newest row matching that key, which is
+    /// with it: the key lookup (since D-1700 an identity probe, `recorded_row`)
+    /// returned the newest row matching that key, which is
     /// an EARLIER run at a different commit. Nine plausible rows, each possibly
     /// from a different binary.
     ///
