@@ -53557,3 +53557,27 @@ flush that fails after every byte was taken is a failure; a closed stderr as
 well is still not a panic. `tests/binary.rs::a_closed_stdout_is_said_on_stderr_and_never_panics`
 runs the binary with a pipe whose read end was closed before it started and
 asserts exit 0, no panic, and the stderr sentence. C-V53-02.
+
+### D-1485 — The store library's two catalog permission tests run where the mode bits bind — 2026-10-03
+
+**What was observed (audit-root, PARTIAL).** D-0995 moved every
+permission-refusal test it found onto `where_permission_binds`, which re-runs
+the test alone as uid 65534 when the suite runs as root. Two unit tests in
+`crates/store/src/catalog_tests.rs` were not among them, and
+`cargo test -p store --lib` as root failed both on their own premise:
+`a_locked_directory_is_one_unreadable_entry` ("a process that ignores
+permissions cannot run this test") and
+`only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused`
+(a mode-000 root is still searchable by root, so the `os error 13` arm never
+ran).
+
+**The decision.** Test-only, D-0995's shape exactly: each is now a thin
+`#[test]` calling `where_permission_binds` with its full harness name, and its
+body moved unchanged into `<name>_body`. The helper is the file the store's
+integration tests already use, `crates/store/tests/support/mod.rs`, mounted
+into the library under `#[cfg(all(test, unix))]` as `pull` mounts its own.
+Nothing is skipped and nothing returns early: the same refusal runs under the
+same assertions as root and as anyone else.
+
+**Proof.** `cargo test -p store --lib` as root: 100 passed, 0 failed (it
+failed 2 before). No new invariant: the two tests' own rows are unchanged.
