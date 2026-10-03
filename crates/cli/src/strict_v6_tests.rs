@@ -371,6 +371,206 @@ mod strict_v6_fixture_tests {
     }
 
     #[test]
+    fn strict_v6_the_nifty_commit_consumes_the_sizing_load_once() -> Result<(), String> {
+        // W2-cli7-3 / D-1683: sizing loaded NIFTY's span and dropped it, then
+        // the NIFTY family commit loaded the same span again.
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let ledger_request = crate::ledger_all::LedgerAllRequest {
+            vendor: "zerodha",
+            from: FIXTURE_FROM,
+            to: FIXTURE_TO,
+            support_ppm: 1_000_000,
+            max_points: 1,
+            root: &fixture.base,
+        };
+        strict::STRICT_LOADS.with(|count| count.set(0));
+        let (sweeper, sizing_inputs, sized) = strict::size_sweeper(
+            &fixture.source,
+            Vendor::Zerodha,
+            &ledger_request,
+            "1min",
+            fixture_bounds()?,
+            &config,
+        )?;
+        assert_eq!(strict::STRICT_LOADS.with(std::cell::Cell::get), 1);
+        let nifty = commit_family_from_v6(
+            fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            Some(sized),
+        )?;
+        nifty.require_current()?;
+        assert_eq!(
+            strict::STRICT_LOADS.with(std::cell::Cell::get),
+            1,
+            "the NIFTY commit consumed the sizing context and loaded nothing"
+        );
+        let banknifty = commit_family_from_v6(
+            fixture_request(&fixture.source, "BANKNIFTY", &sweeper, &long, &short)?,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            None,
+        )?;
+        banknifty.require_current()?;
+        assert_eq!(
+            strict::STRICT_LOADS.with(std::cell::Cell::get),
+            2,
+            "one load per family per rung"
+        );
+        sizing_inputs.require_current()?;
+        Ok(())
+    }
+
+    #[test]
+    fn strict_v6_a_sized_context_refuses_every_other_request()
+    -> Result<(), String> {
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let ledger_request = crate::ledger_all::LedgerAllRequest {
+            vendor: "zerodha",
+            from: FIXTURE_FROM,
+            to: FIXTURE_TO,
+            support_ppm: 1_000_000,
+            max_points: 1,
+            root: &fixture.base,
+        };
+        // Every term the sized context was loaded under must match.
+        let (sweeper, _, sized) = strict::size_sweeper(
+            &fixture.source,
+            Vendor::Zerodha,
+            &ledger_request,
+            "1min",
+            fixture_bounds()?,
+            &config,
+        )?;
+        let exact = fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?;
+        let source = AdmittedRootV1::admit(&fixture.source)?;
+        assert_eq!(sized.differing_term(&exact, source.path(), Some(&config)), None);
+        assert_eq!(
+            sized.differing_term(&exact, &fixture.base, Some(&config)),
+            Some("root")
+        );
+        let mut other = exact;
+        other.vendor = Vendor::Dhan;
+        assert_eq!(
+            sized.differing_term(&other, source.path(), Some(&config)),
+            Some("vendor")
+        );
+        let banknifty_request =
+            fixture_request(&fixture.source, "BANKNIFTY", &sweeper, &long, &short)?;
+        assert_eq!(
+            sized.differing_term(&banknifty_request, source.path(), Some(&config)),
+            Some("family")
+        );
+        let mut other = exact;
+        other.rung_name = "5min";
+        assert_eq!(
+            sized.differing_term(&other, source.path(), Some(&config)),
+            Some("rung")
+        );
+        let mut other = exact;
+        other.to = (2025, 10);
+        assert_eq!(
+            sized.differing_term(&other, source.path(), Some(&config)),
+            Some("span")
+        );
+        let mut other = exact;
+        other.bounds.daily_records = StoredSpanLoadBoundV1::new(127)?;
+        assert_eq!(
+            sized.differing_term(&other, source.path(), Some(&config)),
+            Some("load bounds")
+        );
+        let changed = crate::audited_range_command::StrictConfig::from_values(
+            Some(config.receipt_root().as_os_str().to_owned()),
+            Some((config.max_bytes() + 1).to_string().into()),
+            Some(config.max_records().to_string().into()),
+        )
+        .map_err(|why| why.to_string())?;
+        assert_eq!(
+            sized.differing_term(&exact, source.path(), Some(&changed)),
+            Some("strict configuration")
+        );
+        assert_eq!(
+            sized.differing_term(&exact, source.path(), None),
+            Some("strict configuration")
+        );
+        let refused = commit_family_from_v6(
+            banknifty_request,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+            Some(sized),
+        );
+        assert!(
+            matches!(&refused, Err(why) if why.contains("cannot serve a request with another family")),
+            "{refused:?}",
+            refused = refused.as_ref().err()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn strict_v6_a_sized_context_whose_source_changed_refuses() -> Result<(), String> {
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let ledger_request = crate::ledger_all::LedgerAllRequest {
+            vendor: "zerodha",
+            from: FIXTURE_FROM,
+            to: FIXTURE_TO,
+            support_ppm: 1_000_000,
+            max_points: 1,
+            root: &fixture.base,
+        };
+        // A source that changes between sizing and the commit refuses.
+        let (sweeper, _, sized) = strict::size_sweeper(
+            &fixture.source,
+            Vendor::Zerodha,
+            &ledger_request,
+            "1min",
+            fixture_bounds()?,
+            &config,
+        )?;
+        let key = crate::stored::swept_index("NIFTY")?;
+        let path = StorePath::for_key(
+            Vendor::Zerodha,
+            &key,
+            Timeframe::DAY_1,
+            YearMonth::new(2025, 8).map_err(|why| why.to_string())?,
+            FileKind::Bars,
+        )
+        .map_err(|why| why.to_string())?
+        .to_path_buf(&fixture.source);
+        corrupt_strict_fixture_byte(&path, 700)?;
+        let exact = fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?;
+        assert!(
+            commit_family_from_v6(
+                exact,
+                VerifiedBuildCommitV1(FIXTURE_COMMIT),
+                &|_, _, _| {},
+                Some(&config),
+                true,
+                Some(sized),
+            )
+            .is_err(),
+            "a sized context whose source changed cannot be consumed"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn strict_v6_independent_role_caps_refuse_before_candidate_computation() -> Result<(), String> {
         let fixture = StoredSuccessFixture::new()?;
         let config = strict_fixture_config(&fixture)?;

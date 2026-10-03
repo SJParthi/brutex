@@ -13991,3 +13991,26 @@ or average O(1).
   several steps, so one append is a constant multiple of O(file bytes). The
   finding counted at least eight passes; that count is not re-measured here
   and is UNVERIFIED.
+
+### Ledger V6 route: one load per family per rung, and replay recomputes the route — D-1683
+
+W2-cli7-3: `strict_v6_inputs::size_sweeper` ran a complete checksum-audited
+strict load of NIFTY's span for every rung only to count its signal bars, and
+dropped it; the NIFTY family commit of the same rung then loaded the same span
+again. Since D-1683 the sizing load is handed to that commit as a
+`SizedNifty`, which it consumes only when root, vendor, family, rung, span,
+load bounds and strict configuration all match and the sources are still
+current. One `run_route` now makes 16 strict loads (8 rungs x 2 families),
+each O(M + B + source bytes) for M months and B bars, where before it made 24.
+Holding the context until the NIFTY commit does not raise the peak: the old
+route held one context at a time and so does this one.
+
+W2-cli7-2: `ledger-v6-replay` (and every `ledger-v6` rerun) runs the complete
+route before anything decides reuse. Reuse is keyed by data digest, the data
+digest needs the strict load, and the load is the dominant term, so a rerun
+over fully committed authorities still costs the full Step-4 route: 16 strict
+loads, eight Search V4 sweeps per family and every commit's reopen. That is
+not O(1) and not proportional to new work. Making it so would need a durable
+request-keyed index of committed routes that a replay could consult before
+loading, which is a new authority and a new format; D-1683 does not add one and
+states the cost here instead.

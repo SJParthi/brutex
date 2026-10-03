@@ -12,6 +12,8 @@
 //! * W2-cli12-0, W2-cli12-1 and W2-cli12-2 (D-1682): Statistics V2 filtered
 //!   whole vectors per candidate, reserved its audit ceiling on every open, and
 //!   its two-open append was stated nowhere.
+//! * W2-cli7-2 and W2-cli7-3 (D-1683): the Ledger V6 route loaded NIFTY twice
+//!   per rung, and its replay's full-route cost was stated nowhere.
 //!
 //! Every file a constant below names is read at compile time, so a rename
 //! fails the build rather than skipping the check. A separate test crate, as
@@ -31,6 +33,8 @@ const CANDIDATE: &str = include_str!("../src/candidate_universe.rs");
 const PRE_ADMISSION: &str = include_str!("../src/pre_admission_data.rs");
 const OBSERVATIONS: &str = include_str!("../src/population_observations_v1.rs");
 const STATISTICS: &str = include_str!("../src/population_statistics_v2.rs");
+const LEDGER_V6: &str = include_str!("../src/ledger_v6.rs");
+const STRICT_INPUTS: &str = include_str!("../src/strict_v6_inputs.rs");
 
 /// The body of one `### §N —` section, up to the next `### ` heading.
 fn section(number: u32) -> &'static str {
@@ -208,5 +212,41 @@ fn section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append() 
         "A appends to one root cost O(A²) block validations in total",
     ] {
         assert!(text.contains(needed), "§154 no longer says `{needed}`");
+    }
+}
+
+#[test]
+fn the_ledger_v6_route_and_replay_costs_are_stated() {
+    let route = function(LEDGER_V6, "fn run_route(");
+    assert!(route.contains("sized.take()"));
+    assert!(route.contains("commit_strict_candidate_pre_admission_authority_sized_v1("));
+    assert!(
+        !route.contains("commit_strict_candidate_pre_admission_authority_v1("),
+        "the route calls the door that always reloads NIFTY"
+    );
+    let sizing = function(STRICT_INPUTS, "pub(crate) fn size_sweeper(");
+    assert_eq!(sizing.matches("load(").count(), 1);
+    assert!(sizing.contains("Ok((sweeper, inputs, sized))"));
+    let replay = function(LEDGER_V6, "fn replay_route(");
+    assert!(replay.contains("run_route(request, out)?"));
+    let start = LEDGER_V6.find("fn replay_route(").expect("replay_route");
+    let doc = flat(
+        LEDGER_V6
+            .get(..start)
+            .and_then(|before| before.rfind("\n\n").and_then(|gap| before.get(gap..)))
+            .expect("the rustdoc"),
+    );
+    assert!(doc.contains("O(full Step-4 route) per call"));
+
+    let chapter = chapter(CHAPTER);
+    for needed in [
+        "One `run_route` now makes 16 strict loads (8 rungs x 2 families)",
+        "where before it made 24",
+        "a rerun over fully committed authorities still costs the full Step-4 route",
+    ] {
+        assert!(
+            chapter.contains(needed),
+            "the chapter no longer says `{needed}`"
+        );
     }
 }

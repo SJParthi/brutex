@@ -53541,3 +53541,37 @@ population-statistics index: memory allocation failed because the computed
 capacity exceeded the collection's maximum"),
 `cli::population_statistics_v2::tests::one_append_runs_two_full_scans_as_section_154_states`,
 `cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-1683 — The rung's sizing load of NIFTY is the NIFTY commit's load; replay's full-route cost is stated — 2026-10-03
+
+**What was wrong.** W2-cli7-3: `strict_v6_inputs::size_sweeper` ran a full
+checksum-audited strict load of NIFTY's span for each of the eight rungs only
+to count its signal bars, dropped it, and the NIFTY family commit of the same
+rung loaded the same span again: 24 strict loads per `run_route` where 16 do
+the work. W2-cli7-2: `ledger-v6-replay` runs the whole route (all eight rungs,
+both families, Search V4 and every commit) before anything can decide that the
+authorities are already committed; `docs/06-limits.md` did not say so.
+
+**The decision.** `size_sweeper` returns the loaded context as a
+`SizedNifty`, and `commit_strict_candidate_pre_admission_authority_sized_v1`
+(which replaces the unsized `..._v1` door, its only caller being `run_route`)
+consumes it for the NIFTY family. It is consumed only when root, vendor,
+family, rung, span, the three load bounds and the strict configuration all
+equal what it was loaded under, and after `require_current` and the root's
+`require_same`; anything else refuses by naming the differing term. Nothing a
+digest or identity reads changes: the commit receives the same context bytes
+it would have loaded. The replay cost is stated in `replay_route`'s rustdoc
+and the limits chapter: reuse is keyed by data digest, the digest needs the
+load, so a rerun over committed authorities is the full route.
+
+**Rejected.** A request-keyed index of committed routes so a replay can skip
+loading: it is a new durable authority and format, out of scope for a cost
+correction. Sizing from a header count instead of a load: the support
+threshold must count the bars the sweep will see after admission, and only the
+strict load admits them.
+
+Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_load_once`
+(failed first: 2 strict loads after the NIFTY commit, expected 1),
+`cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_sized_context_refuses_every_other_request`,
+`cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_sized_context_whose_source_changed_refuses`,
+`cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated`.
