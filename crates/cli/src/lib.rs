@@ -9680,6 +9680,11 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
     let per_point = points_to_ppm_at(1, reference).max(1);
     // ONE BAR, as above: a points-facing display ladder with no hold in scope.
     let step = grid_step_ppm(bars, 1);
+    // READ ONCE, NOT ONCE PER RUNG (W2-cli8-1, D-1726). This sat inside the
+    // `filter` below, and `max_stop_points` collects every bar's range into a
+    // `Vec` of length N and selects a percentile from it: O(N) per rung for an
+    // answer no rung changes.
+    let ceiling = max_stop_points(bars);
     (1..=grid_rungs(bars))
         .filter_map(|i| i64::try_from(i).ok())
         .map(|i| {
@@ -9687,7 +9692,7 @@ fn stop_rungs_in_points(bars: &[indicators::Candle]) -> Vec<i64> {
             // Ceiling division into whole points.
             ppm.saturating_add(per_point - 1) / per_point
         })
-        .filter(|&pt| pt > 0 && pt <= max_stop_points(bars))
+        .filter(|&pt| pt > 0 && pt <= ceiling)
         .collect()
 }
 
@@ -9788,10 +9793,23 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
     // thousand-trade combination is finer than one judging fifty.
     let rates = win_rate_rungs(trades);
     let ratios = grid_ratios();
+    // ONE TRADE FLOOR PER WIN RATE, NOT PER TIER (W2-cli8-1, D-1726). The floor
+    // below depends on the rate alone, and `trades_needed_for` is a search of up
+    // to `TRADES_SEARCH_CEILING` Wilson bounds. Inside the loop it ran once per
+    // (stop, ratio, rate): up to 64 x 28 x 396 times for 396 distinct answers.
+    let floors: Vec<(i64, u64)> = rates
+        .iter()
+        .map(|&rate| {
+            (
+                rate,
+                runner::grid::trades_needed_for(10_000, rate, TRADES_SEARCH_CEILING),
+            )
+        })
+        .collect();
     let mut out: Vec<Tier> = Vec::with_capacity(stops.len() * ratios.len() * rates.len());
     for &max_points in &stops {
         for &min_rr_bp in &ratios {
-            for &min_win_rate_bp in &rates {
+            for &(min_win_rate_bp, min_trades) in &floors {
                 out.push(Tier {
                     // NAMED BY RANK, ASSIGNED BELOW. A name cannot be computed
                     // from the thresholds without inventing a scale; it is the
@@ -9826,11 +9844,8 @@ fn tiers(bars: &[indicators::Candle], trades: u64) -> Vec<Tier> {
                     // that with a bound in place "the honest `min_trades` is
                     // small or zero, because the bound already refuses what a
                     // floor was standing in for". The floor stops standing in.
-                    min_trades: runner::grid::trades_needed_for(
-                        10_000,
-                        min_win_rate_bp,
-                        TRADES_SEARCH_CEILING,
-                    ),
+                    // Computed once per rate above, before the loop.
+                    min_trades,
                 });
             }
         }

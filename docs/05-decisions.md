@@ -53557,3 +53557,29 @@ reader, so it was deleted. Its comment references, and its row in
 
 **Rejected.** Keeping the constant in sync with the function. The function is
 derived from the span, so no constant can match it.
+
+### D-1726 — The tier ladder reads its stop ceiling once and its trade floor once per rate — 2026-10-03
+
+**Finding.** W2-cli8-1 (low cost).
+
+**What was wrong.** `stop_rungs_in_points` called `max_stop_points(bars)`
+inside its per-rung `filter`. Each call collects every bar's range into a
+`Vec` of length N and selects a percentile, so it was O(N) per rung for an
+answer no rung changes. `tiers` called `runner::grid::trades_needed_for`
+inside the stop × ratio × rate loop. That is a search of up to
+`TRADES_SEARCH_CEILING` (5,000) Wilson bounds, and its answer depends on the
+rate alone. So it ran up to 64 × 28 × 396 times for at most 396 distinct
+answers. Neither cost was in `docs/06-limits.md`, and Gate 11's reason for
+this file's sorts called the ladder "a compile-time list of eight".
+
+**The decision.** Hoist the ceiling out of the filter. Compute the floor once
+per rate, as `(rate, floor)` pairs, before the loop. The tiers are
+field-for-field what they were: a test checks every tier's `min_trades`
+against the per-tier call. `docs/06-limits.md` states what remains: a fixed
+number of O(N) scans (`reference_price`, `grid_step_ppm`, `grid_rungs`,
+`max_stop_points`) per ladder, at most 396 floor searches, and the
+`O(T log T)` sort over `T <= 64 × 28 × 396` generated tiers. It also corrects
+the Gate 11 sentence.
+
+**Rejected.** A `HashMap` memo keyed by rate. The rates are already a `Vec`
+walked in order, so a parallel vector is the memo, with no hashing.

@@ -437,3 +437,38 @@ fn the_sample_line_states_the_folds_the_walk_forward_ran() {
         "and divide by them: {text}"
     );
 }
+
+/// W2-cli8-1. The stop ceiling is read once per ladder, not once per rung, and
+/// the trade floor once per win rate, not once per tier.
+#[test]
+fn the_tier_ladder_hoists_its_per_rung_and_per_rate_work() {
+    let rungs = code_of("\nfn stop_rungs_in_points(");
+    assert_eq!(rungs.matches("max_stop_points(bars)").count(), 1, "{rungs}");
+    assert!(
+        rungs
+            .lines()
+            .all(|line| !(line.contains(".filter(") && line.contains("max_stop_points"))),
+        "the ceiling is not recomputed inside the per-rung filter: {rungs}"
+    );
+    let ladder = code_of("\nfn tiers(");
+    let (before, inside) = ladder
+        .split_once("for &max_points")
+        .expect("the tier loop is still there");
+    assert!(
+        before.contains("trades_needed_for("),
+        "memoised per rate: {ladder}"
+    );
+    assert!(
+        !inside.contains("trades_needed_for("),
+        "not per tier: {ladder}"
+    );
+
+    // And the answer is the one the per-tier call gave.
+    let bars = runner::synthetic::sessions(8);
+    for tier in tiers(&bars, 400) {
+        assert_eq!(
+            tier.min_trades,
+            runner::grid::trades_needed_for(10_000, tier.min_win_rate_bp, TRADES_SEARCH_CEILING)
+        );
+    }
+}

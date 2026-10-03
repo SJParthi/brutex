@@ -13224,6 +13224,11 @@ FIXED RATHER THAN LISTED -- which is what the rule is for.
   cli/lib.rs 5 -- the support ladder's rungs and the report's rows.
     The ladder is a compile-time list of eight; the rows are what is
     printed, which is capped before it is ordered.
+    CORRECTED by D-1726 and D-1728: the tier ladder is GENERATED, up to
+    64 x 28 x 396 tiers sorted once, not a list of eight (its cost is
+    under "`cli` screening, tier-ladder and report costs"); and the
+    frontier commit ordered every retained row before `take(top)` until
+    D-1728 made it select first.
   pull/nseindex.rs 1 -- the REFUSED entries of one exchange page,
     ordered so the refusal list is byte-identical between runs.
   runner/grid.rs 2 -- the exit grid's distinct values, bounded by the
@@ -13929,3 +13934,11 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   `ladder.len() + 1`. An O(1) tier would need one grid holding every tier's
   forced stop. That is a different grid and a different identity, and it was
   rejected.
+
+- **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
+  number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
+  `grid_rungs`, `max_stop_points`, each once), one
+  `runner::grid::trades_needed_for` per win-rate rung (at most 396, each at
+  most `TRADES_SEARCH_CEILING` Wilson bounds), and one `O(T log T)` sort over
+  `T <= 64 × 28 × 396` generated tiers. Before D-1726 the ceiling scan ran
+  once per rung and the floor search once per tier.
