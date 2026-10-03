@@ -13911,3 +13911,15 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Walk-forward fold rung counts are derived per training window — D-1660, 3 October 2026
+
+`cli::fold_rungs` hands each walk-forward fold `grid_rungs` over its own
+training signal slice (GAP4-46). That is one `reference_price`, one
+`grid_step_ppm` and one `max_stop_points` pass per fold, so **O(training
+bars) per fold and O(folds x span) per walk-forward shape**, beside the
+per-fold column build that already costs O(training bars). It runs on the
+outer thread once per fold, never per bar or per candidate, so none of the
+five operations `CLAUDE.md` §3 rule 4 bounds is touched. **UNVERIFIED as a
+measured bound**: read off the source, no bench times it. With
+`BRUTEX_GRID_RUNGS` set the count is fixed and no per-fold pass runs.

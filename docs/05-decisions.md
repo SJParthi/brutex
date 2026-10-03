@@ -53403,3 +53403,41 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1660 — Size each walk-forward fold's exit ladder from its own training window, and name that policy as an appended identity term — 2026-10-03
+
+**Finding.** GAP4-46 (medium, law). `knobs_checked` resolved `grid_rungs(bars)`
+over the whole span and `both_shapes` handed that one count to every fold of
+both walk-forward shapes. `grid_rungs` reads the span's reference price, grid
+step and ninetieth-percentile bar range, test windows included, so a bar in
+fold N's test window could change the exit ladder fold N was trained with.
+That is a later bar deciding an earlier answer, which `CLAUDE.md` §3 rule 7
+bans.
+
+**Decision.** `runner::validate::FoldRungs::{Fixed(usize),
+PerTraining(&dyn Fn(&[Candle]) -> usize + Sync)}` replaces the `usize` on
+`walk_forward_core` and on the two projected doors `cli` calls. `PerTraining`
+is resolved inside the fold loop on that fold's training signal slice alone,
+before the sweep, and a resolver answering zero refuses the walk by name
+rather than borrowing a default. `Fixed(0)` keeps the legacy `DEFAULT_RUNGS`
+fallback the `usize` doors always had; the one-series doors and the sealed
+Admission V2/V3 doors pass `Fixed` unchanged, because their identities
+already bind the resolved count. Every fold now records its count on the new
+`FoldResult::resolved_rungs` (`None` for Anchored Search V4, which seals its
+own per-fold exact grid). `cli::fold_rungs` passes `Fixed(n)` when
+`BRUTEX_GRID_RUNGS` is set, since an operator's count is decided by no bar,
+and `PerTraining(&grid_rungs)` otherwise. The screen keeps the whole-span
+count; it is in-sample by construction.
+
+**Identity.** Positional and append-only, so no term is reinterpreted.
+`policy_of` keeps term seventeen's value (the resolved whole-span count) and
+gains a twenty-first term, 1 for a fixed fold count and 2 for per-training;
+zero is never written. Runs at the new commit re-key in any case because the
+commit is a term.
+
+**Rejected.** Reinterpreting term seventeen as "per-fold": a positional
+identity whose meaning moves under the same bytes is the defect §3 rule 8
+forbids. Deriving the count from the execution prefix: the screen derives it
+from signal bars, and the fold must ask the same question of the same series.
+Dropping the override's fixed path: an explicit operator count is not
+look-ahead and changing it would silently change a knob's meaning.
