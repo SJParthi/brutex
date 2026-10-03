@@ -53483,3 +53483,24 @@ probe count times the measured per-probe cost, labelled an extrapolation.
 the three stale phrases in `file.rs`, `docs/06-limits.md` and
 `docs/02-store-format.md`, and fails if the bench stops defining or running
 either cold row, so the test's premise cannot go stale silently.
+
+### D-1504 — Gate 14 layer 3 pins are exact counts, and store and engine are re-pinned at 11 and 13 — 2026-10-03
+
+**What was observed.** D-1117 set every layer-3 pin to "that count at this
+commit". The audit (v2-2) ran Gate 14's own counter (`source_scan code` plus
+its awk) on every bench: store held 11 measurement points against a pin of 9,
+engine 13 against 12 (C-E-12 landed after the pin), every other bench equal.
+Re-run for this change: the same 11 and 13. The check was `npt >= pts`, so
+two store points and one engine point could be deleted with the gate green,
+and the pins had drifted because nothing made raising them necessary.
+
+**The decision.** Store is pinned at 11 and engine at 13, and the check is
+equality: a bench that gains a measurement fails layer 3 until its pin is
+raised in the same change, so a pin cannot fall behind its bench again. The
+message names both numbers (`N-measurement-points-but-pinned-at-M`).
+
+**Evidence.** Gate 14 on the changed workflow: every bench `= pin`, OK, rc 0.
+A scratch copy with engine's pin left at 12 refuses engine's row.
+
+**Rejected.** A warning when count > pin: a warning is the decorative check
+this gate's history keeps replacing.
