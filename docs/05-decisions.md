@@ -53596,3 +53596,60 @@ sha dispatched once, one run dispatched nothing.
 passes, so a run started on CI's completion races the merge and may check
 the pre-merge `main`. A daily full schedule: it re-runs an unchanged `main`
 and still leaves a day of unverified merges.
+
+### D-1609 — Gate W4 fails on a failed build and refuses a silent zero — 2026-10-03
+
+**What was observed (hunt-ci-7).** W4 piped `npm --prefix web run build` into
+`tee` with no `pipefail`, so a failed build passed it, and a log in which the
+build said nothing counted zero unused selectors and passed. Gates 26, 27 and
+W3 already refuse that shape.
+
+**The decision.** W4 runs under `set -euo pipefail`, writes the build log
+directly, and refuses a log without vite's `built in <n>` line. Proven with a
+stub `npm`: silent output and a failing build passed the old step and fail
+the new one; a clean build passes; one unused selector fails.
+
+### D-1610 — Coverage check named for what it enforces; stale toolchain comment; least-privilege CI token; Gate 5 counts every unsafe exception form — 2026-10-03
+
+**What was observed.** hunt-ci-10: the check shown on every PR was named
+`Coverage 100%` while it enforces `--fail-under-lines 90
+--fail-under-regions 89` (D-0677) and no branch coverage, and
+`docs/06-limits.md` still called region coverage "the number that is actually
+100%". hunt-ci-11: a Gate 3 comment said `rust-toolchain.toml` pins 1.85.0; it
+pins 1.97.1. hunt-ci-12: `ci.yml` had no `permissions:`, so its jobs got the
+repository-default token scope. hunt-ci-13: Gate 5 counted only the literal
+`allow(unsafe_code)`, not `allow(unsafe_code, reason = …)` or
+`expect(unsafe_code)`.
+
+**The decision.** The job's display name is `Coverage — 90% lines, 89% regions
+(D-0677)`; its id `coverage`, which `ci-ok`'s `needs` names, is unchanged, and
+branch protection requires only `ci-ok`, so nothing matches on the old name.
+The two `docs/06-limits.md` sentences now state the real floors. The comment
+says what was pinned then and what is pinned now. `ci.yml` declares
+`permissions: contents: read` at the top: no step uses `GITHUB_TOKEN` for a
+write (artifacts and caches use the runner's own token). `auto-merge.yml`
+keeps exactly `contents: write, pull-requests: write, checks: read`, which
+`gh pr merge --auto`/`--disable-auto`, the reviews and file listings and the
+check-run read need. Gate 5 counts `(allow|expect)(unsafe_code` followed by
+`,` or `)`; the tree still holds one exception
+(`crates/pull/tests/allocation.rs`). Proven on a scratch repository with four
+`allow(unsafe_code, reason = "x")` files: the old step counted 0 and passed,
+the new one counts 4 and fails. Third-party actions are still referenced by
+mutable tag (`dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`);
+pinning them to a commit needs the commit ids from GitHub, which this change
+did not fetch, so that hardening is left open rather than guessed.
+
+### D-1612 — Gate 1g refuses a linker in RUSTFLAGS, a CARGO_HOME, and a nextest config file by another name — 2026-10-03
+
+**What was observed (rustonly2-7).** Gate 1g's workflow regex missed
+`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` with `-C linker=` (the door
+`target.<t>.linker` opens), `CARGO_HOME=<tracked dir>` (whose `config.toml`
+is any allowed `.toml`), and `cargo nextest run --config-file <file>`.
+
+**The decision.** A second pattern, read with file names and skipping comment
+lines, refuses `CARGO_HOME` set to anything, a `RUSTFLAGS`-family value naming
+`linker`, `link-arg` or `fuse-ld`, and nextest's `--config-file` and
+`--tool-config-file`. The workflow-wide `RUSTFLAGS: -D warnings` still
+passes. Proven on a scratch workflow carrying all three forms plus a comment
+naming them: the old step printed OK, the new one names the three lines and
+not the comment.

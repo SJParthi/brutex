@@ -17,6 +17,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# D-1610 (hunt-ci-12): no job here writes through GITHUB_TOKEN; checkout reads.
+permissions:
+  contents: read
+
 jobs:
   language-purity:
     name: Gate 1+2 — one language
@@ -471,6 +475,13 @@ jobs:
           wf=$(git ls-files '.github/workflows/*.yml')
           # shellcheck disable=SC2086
           envs=$(grep -nE '(^|[^A-Za-z0-9_])(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|RUSTC|RUSTDOC|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]|cargo[^#|;]*[[:space:]]--config[[:space:]=]' $wf || true)
+          # D-1612 (rustonly2-7): the same doors by other names -- a linker in
+          # RUSTFLAGS, a CARGO_HOME whose config.toml is any tracked file, and
+          # a nextest configuration under another name. Comment lines skipped.
+          # shellcheck disable=SC2086
+          envs2=$( { grep -nHE '(^|[^A-Za-z0-9_])CARGO_HOME[[:space:]]*[:=]|RUSTFLAGS[^#]*(linker|link-arg|fuse-ld)|nextest[^#|;]*--(tool-)?config-file' $wf || true; } \
+                   | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)
+          envs="${envs}${envs2:+${envs:+$'\n'}$envs2}"
           if [ -n "$envs" ]; then
             printf 'REFUSED  a workflow sets a compiler wrapper, runner or linker:\n%s\n' "$envs"
             bad=1
@@ -7160,12 +7171,15 @@ jobs:
           # given a single file, so `awk -F:` read field 2 of a bare number
           # and counted zero — an exception in the only .rs file would have
           # been invisible. Counting occurrences directly fixes both.
-          n=$( { git ls-files '*.rs' | xargs -r grep -oh 'allow(unsafe_code)' || true; } \
+          # D-1610 (hunt-ci-13): `allow(unsafe_code, reason = ..)` and
+          # `expect(unsafe_code)` are exceptions too, not only the bare form.
+          pat='(allow|expect)\(unsafe_code[,)]'
+          n=$( { git ls-files '*.rs' | xargs -r grep -ohE "$pat" || true; } \
                | wc -l | tr -d ' ')
           echo "documented unsafe exceptions: $n"
           if [ "$n" -gt 3 ]; then
             echo "More than 3 unsafe exceptions. Each needs a decision entry."
-            git ls-files '*.rs' | xargs -r grep -n 'allow(unsafe_code)'
+            git ls-files '*.rs' | xargs -r grep -nE "$pat"
             exit 1
           fi
 
@@ -7183,9 +7197,10 @@ jobs:
           # This is a CI tool version, not a workspace dependency: it adds
           # nothing to the dependency graph and needs no ledger entry. The
           # constraint stays bounded rather than floating, so a future breaking
-          # 0.18.9 needs rustc 1.88 and rust-toolchain.toml pins 1.85.0, so the
-          # version is pinned EXACTLY at 0.18.3 -- the newest release cargo
-          # itself reports as supporting 1.85.0. A caret range would silently
+          # 0.18.9 needs rustc 1.88 and rust-toolchain.toml then pinned 1.85.0
+          # (it pins 1.97.1 now; D-1610), so the version was pinned EXACTLY at
+          # 0.18.3 -- the newest release cargo itself reported as supporting
+          # 1.85.0. A caret range would silently
           # re-break the moment a newer cargo-deny raises its MSRV again.
           #
           # THE VERSION IS PINNED, AND UNTIL D-0034 IT WAS NOT. The paragraph
@@ -7210,7 +7225,7 @@ jobs:
           cargo build -p web --target wasm32-unknown-unknown --locked
 
   coverage:
-    name: Coverage 100%
+    name: Coverage — 90% lines, 89% regions (D-0677)
     runs-on: ubuntu-24.04
     needs: build
     steps:
@@ -7896,9 +7911,18 @@ jobs:
           echo "     nothing on load; only the socket-free status() runs."
       - name: Gate W4 — unused CSS does not grow
         run: |
+          set -euo pipefail
           CEILING=0
-          npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
-          FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
+          # D-1609 (hunt-ci-7): the build's own status fails the step (it was
+          # piped into tee with no pipefail), and a log without vite's
+          # "built in" line is refused rather than read as zero warnings.
+          npm --prefix web run build > /tmp/build.log 2>&1
+          if ! grep -qE 'built in [0-9]' /tmp/build.log; then
+            echo "GATE W4 READ NO BUILD OUTPUT. A silent zero is not a pass."
+            tail -20 /tmp/build.log
+            exit 1
+          fi
+          FOUND=$( { grep -F 'Unused CSS selector' /tmp/build.log || true; } \
                   | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')
           echo "distinct unused CSS selectors: $FOUND (ceiling $CEILING)"
           if [ "$FOUND" -gt "$CEILING" ]; then

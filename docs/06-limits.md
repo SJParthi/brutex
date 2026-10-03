@@ -216,7 +216,7 @@ exactly the mistake the read-only-mapping decision was made to avoid.
 |---|---|
 | Extension allowlist | the design is good — only that it is one language |
 | 100% coverage | the tests assert anything useful; that is what mutation testing is for |
-| 100% coverage | **branches** were covered. `cargo llvm-cov` reports `Branches 0 0 -` for every file: zero branches are instrumented, and the coverage job gates on `--fail-under-lines` and `--fail-under-regions` only. `--branch` needs `-Z coverage-options=branch`, which is nightly, and `rust-toolchain.toml` pins stable 1.97.1 — so `cargo llvm-cov --branch` fails with `error: 1 nightly option were parsed`. Branch coverage is **unmeasured and currently unmeasurable here**. `docs/04-invariants.md` X-06 claimed it for a long time with a ✓ beside it; D-0030 narrowed the row to what is enforced. Region coverage is the closest stable substitute and is the number that is actually 100%. |
+| 100% coverage | **branches** were covered. `cargo llvm-cov` reports `Branches 0 0 -` for every file: zero branches are instrumented, and the coverage job gates on `--fail-under-lines` and `--fail-under-regions` only. `--branch` needs `-Z coverage-options=branch`, which is nightly, and `rust-toolchain.toml` pins stable 1.97.1 — so `cargo llvm-cov --branch` fails with `error: 1 nightly option were parsed`. Branch coverage is **unmeasured and currently unmeasurable here**. `docs/04-invariants.md` X-06 claimed it for a long time with a ✓ beside it; D-0030 narrowed the row to what is enforced. Region coverage is the closest stable substitute. It is not 100% either: the coverage job gates 90% lines and 89% regions (D-0677), and since D-1610 the check is named for those numbers rather than `Coverage 100%`. |
 | Gate 10 | the invariants file is complete. It walks **rows → tests** and never tests → rows, so a module can ship with genuine invariants, real tests and no rows at all, and the build stays green. `crates/core/src/universe.rs` did exactly that; D-0029 and rows `U-01`…`U-05` are the correction, and the gap in the gate remains. |
 | Gate 8 ratios | absolute speed is acceptable — only that it did not degrade with input size |
 | `cargo deny` | a dependency is trustworthy — only that it is licensed and un-advised |
@@ -3654,9 +3654,11 @@ measurement are separate evidence, and neither may be inferred from the other.
 
 ## 54. Why `crates/telemetry` is 99.24% and not 100%, line by line
 
-`CLAUDE.md` §9 asks for 100% line and branch coverage, and CI's `Coverage 100%`
-job enforces it with `--fail-under-lines 100 --fail-under-regions 100` and **no
-exclusion mechanism at all** — no ignore-regex, no `continue-on-error`. That job
+`CLAUDE.md` §9 asks for 100% line and branch coverage, and when this section was
+written CI's coverage job (then named `Coverage 100%`) enforced it with
+`--fail-under-lines 100 --fail-under-regions 100` and **no
+exclusion mechanism at all**. It now gates 90% lines and 89% regions (D-0677)
+and is named for those numbers (D-1610). It has no ignore-regex and no `continue-on-error`. That job
 is in `ci-ok`'s `needs`, so it is not advisory.
 
 The logging crate does not meet it. Measured 2026-08-11, `cargo llvm-cov -p
