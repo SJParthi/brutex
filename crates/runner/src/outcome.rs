@@ -3782,6 +3782,41 @@ mod tests {
             e.t
         );
     }
+    /// A ZERO MEAN IS READ LONG, and the boundary is the strict `< 0.0`.
+    ///
+    /// D-1178 swaps the path lanes only for a combination traded short, which
+    /// is `mean_paisa < 0` -- the rule `cli::side_of_evidence` and
+    /// [`Edge::payoff_bp`] use. A sample whose moves cancel exactly (+100 and
+    /// -100) has a mean of exactly `0.0` and is NOT short, so its up excursion
+    /// is the reward. Fixture: up runs summing to 300, down runs to 100.
+    /// Read long that is 3.00x; read short it would be 100/300 = 0.33x.
+    #[test]
+    fn a_zero_mean_path_ratio_is_read_on_the_long_side() {
+        let flat_mean = Edge {
+            n: 2,
+            mean_paisa: 0.0,
+            wins: 1,
+            win_sum: 100.0,
+            losses: 1,
+            loss_sum: -100.0,
+            favourable_sum: 300.0,
+            adverse_sum: 100.0,
+            ..Edge::default()
+        };
+        assert_eq!(
+            flat_mean.path_ratio_bp(),
+            300,
+            "a zero mean is read long: 300 up over 100 down is 3.00x"
+        );
+
+        // The control just below zero (the smallest normal negative) IS short, so the lanes swap and the
+        // same path reads 100 / 300, truncated to 33 bp.
+        let barely_short = Edge {
+            mean_paisa: -f64::MIN_POSITIVE,
+            ..flat_mean
+        };
+        assert_eq!(barely_short.path_ratio_bp(), 33);
+    }
 }
 
 #[cfg(test)]
