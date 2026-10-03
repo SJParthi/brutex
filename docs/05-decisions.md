@@ -53481,7 +53481,9 @@ two doors share one validator and cannot drift apart. The `one_rung` comment
 names the shared validator. `audited_stored_tests.rs`'s public-command flow
 typed `1000000` to get a cheap screen that finds nothing. It now types
 `999999`, which still prunes every condition the synthetic month does not hold
-on 2,999 of 3,000 bars. The test still asserts a recorded result.
+on 2,999 of 3,000 bars. The test still asserts a recorded result, and its
+pinned `min_hits` moves from 3,000 to 2,999, the hit count the new support
+gives. That is the only expectation that changed.
 
 **Rejected.** Widening the knob to accept 1,000,000. That accepts a value the
 search can never answer, which is the hour-long empty report the argv

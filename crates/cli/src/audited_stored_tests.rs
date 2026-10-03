@@ -664,9 +664,11 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             let mut ledger = crate::results::Results::open_read(root)?;
             assert_eq!(ledger.len()?, 1);
             let row = ledger.read(0)?;
+            // 999,999 ppm of 3,000 bars is 2,999 hits: a million is refused
+            // at both support doors since D-1722.
             assert_eq!(
                 (row.bars, row.min_hits, row.months_asked, row.months_found),
-                (3_000, 3_000, 1, 1)
+                (3_000, 2_999, 1, 1)
             );
             assert_eq!(row.halted, 0);
             let attempt =
