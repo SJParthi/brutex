@@ -17003,8 +17003,15 @@ impl tokio::io::AsyncWrite for HeadDeadline {
         written
     }
 
+    /// `true`, because `poll_write_vectored` above forwards to a tokio
+    /// `TcpStream`, whose own `is_write_vectored` is the constant `true`.
+    /// Written as the constant rather than forwarded: forwarding left a
+    /// `-> true` mutant no test could tell apart (D-0192). The socket and the
+    /// wrapper are held equal by
+    /// `the_head_deadline_reports_its_sockets_vectored_writes`, so a tokio that
+    /// stopped writing vectored fails that test instead of drifting.
     fn is_write_vectored(&self) -> bool {
-        self.io.is_write_vectored()
+        true
     }
 
     fn poll_flush(
@@ -17192,6 +17199,7 @@ mod head_deadline_tests {
             freed: tokio::sync::Notify::new(),
         });
         let wrapped = HeadDeadline::new(io, Slot(std::sync::Arc::clone(&slots)), T);
+        assert_eq!(wrapped.is_write_vectored(), wrapped.io.is_write_vectored());
         assert_eq!(wrapped.is_write_vectored(), socket);
         drop(wrapped);
         assert_eq!(
