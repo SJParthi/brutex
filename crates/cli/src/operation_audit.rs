@@ -578,7 +578,7 @@ pub fn begin(root: &Path, origin: Origin, label: &str) -> Result<Attempt, String
 }
 
 /// Look up exactly one invocation across process restarts, with bounded reads.
-/// Missing per-invocation creation returns its unconfirmed indexed start.
+/// Missing or empty per-invocation creation returns its unconfirmed indexed start.
 /// # Errors
 /// Refuses busy writers, torn/corrupt records, wrong ancestry and invalid IDs.
 pub fn read(root: &Path, id: u64) -> Result<Option<Record>, String> {
@@ -615,7 +615,14 @@ pub fn read(root: &Path, id: u64) -> Result<Option<Record>, String> {
     // A writer only appends. Taking its lock to poll progress could fail the
     // computation. Verify this bounded snapshot again after the sync instead.
     let bytes = length(&file)?;
-    if bytes == 0 || at(&mut file, 0)? != started {
+    // A crash between `create_new` and the first synced record leaves an empty
+    // journal. It confirms nothing, exactly like a missing one, so it reads as
+    // the same unconfirmed indexed start; a partial record was refused by
+    // `length` above (D-1742).
+    if bytes == 0 {
+        return Ok(Some(started));
+    }
+    if at(&mut file, 0)? != started {
         return Err(error("invocation journal lost its indexed start"));
     }
     let last = at(&mut file, bytes / STRIDE - 1)?;

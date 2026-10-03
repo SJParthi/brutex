@@ -53608,3 +53608,189 @@ Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_o
 (failed first with each fold mint delegated back to the cohort's own
 per-witness mint: 4 source builds, the fold's and one per witness, expected 1),
 `cli::ledger_append_lookup_costs::section_169_prices_the_oos_fold_once_per_cohort`.
+### D-1740 — A search checkpoint's completion marker is published by rename, and a publication refuses before it would pass discovery's directory limit — 2026-10-03
+
+**Findings.** GAP11-0 and W2-cli13-5, both in
+`crates/cli/src/search_checkpoint.rs` `Journal::publish_inner`.
+
+**What was wrong.** GAP11-0: the `complete` marker was made with
+`File::create_new` and only then written and synced. A kill (or ENOSPC)
+between the two left a 0-byte `complete`. `discover_through` counted any
+regular `complete` as acknowledged, so the torn reservation became `latest`,
+and `read_saved` refused it with "checkpoint marker width mismatch" on every
+reopen: the search could never resume. W2-cli13-5: `publish_inner` never
+compared the namespace's entry count with `DIRECTORY_LIMIT`, while
+`discover_through` refuses at `index == DIRECTORY_LIMIT`. A publication could
+return Ok for checkpoint 1,000,000 and leave a namespace no later
+`Journal::open` or `Snapshot::open` would admit.
+
+**The decision.** `publish_marker` writes the seal to `complete.tmp`
+(`create_new`), syncs it, renames it to `complete`, then syncs the
+reservation directory. A kill before the rename leaves only `complete.tmp`,
+which discovery never reads, so the reservation counts as interrupted and the
+previous checkpoint stays the resume point. A failure the writer sees removes
+the temporary file and refuses, naming whether the removal held. Discovery
+now also reads a 0-byte `complete` as interrupted: that is exactly what the
+old protocol left on a kill, and stores written before this change hold such
+markers. Any other width is still refused when read. `Journal` keeps the
+entry count discovery measured and refuses a reservation that would exceed
+the limit, before `create_dir`, with "checkpoint namespace reached its
+directory admission limit". The check is one comparison per publication. The
+limit is read through `directory_limit()`, which a test may lower on its own
+thread so the boundary is exercised with real directories; production reads
+`DIRECTORY_LIMIT`. The api source pin in `indexstoprankingjson.rs` follows
+that rename of the comparison.
+
+**Rejected.** Treating every short marker (1 to 31 bytes) as interrupted: a
+32-byte write to an empty file is not torn by a kill in practice, so a short
+non-empty marker is foreign or damaged and must refuse, not be skipped.
+Comparing `next` with the limit: holes and external deletion make the
+sequence an upper bound, not the entry count discovery measures. Creating a
+million directories in a test: the thread-local lowered limit reaches the
+same boundary with real files in milliseconds.
+
+Invariants DUR-C-01 to DUR-C-04.
+
+### D-1741 — A failed sweep-evidence append rolls back to the length measured under its lock, and a ranking is written in one write — 2026-10-03
+
+**Finding.** GAP11-1, `crates/cli/src/sweep_evidence.rs`.
+
+**What was wrong.** `append_events`, `append_row`, `shape`'s fresh header
+and `Attempt::ranked` each wrote with `write_all` and never truncated a
+partial write. A full filesystem extends a file and then errors, so one
+short write left a tail that is not a whole row. `shape` then refused the
+file as "torn or short" on every later open. In `attempts.bin` or an
+identity's `starts.bin` that blocked every later attempt in the store, of
+any identity, until someone repaired the tail by hand. `ranked` wrote its
+rows one `write_all` at a time, so a failure could also leave a prefix of a
+ranking.
+
+**The decision.** One helper, `append_rolled_back`, does every one of those
+appends: it measures `end` with `seek(End)` under the caller's held lock,
+writes, issues the barrier, and on a write or barrier failure truncates to
+`end` and syncs. The refusal says whether the rollback held, in the D-0426
+wording `frontier.rs` already uses. A barrier failure rolls back too: a row
+whose barrier failed was never acknowledged, and leaving it would let a
+later row depend on it. `ranked` encodes the whole block into one buffer
+reserved with `try_reserve_exact` and writes it once, so a failure leaves
+only the header. Every write goes through `write_rows`, a seam a test arms on
+its own thread to write a prefix and then fail with `StorageFull`.
+
+**Rejected.** Repairing a torn tail on the next open: that would truncate
+bytes another writer might still own, and only the writer that measured
+`end` under the lock knows which bytes are its own. Keeping `ranked`'s
+streaming writes with a rollback around the loop: it would work, but one
+write is simpler and the memory it costs is stated in `docs/06-limits.md`.
+`reserve_start` is unchanged: its file is private to one token, a torn one
+is refused by every reader, and the next `begin` takes a new token.
+
+**An empty file now reads as no rows.** A rolled-back first write leaves an
+empty file, the same state `open_append` leaves before its first write.
+`shape` used to refuse an empty file on every read path as "torn or short",
+which turned one refused start into a refusal of every later read of that
+identity (`index_stop::tests::refused_later_starts_and_finishes_leave_no_completion`
+caught it). A reader now counts an empty file as zero rows, exactly like an
+absent one; a writer still gives it a fresh header. A detail file a terminal
+says holds rows is still refused when it is empty, by the count comparison.
+
+Invariants DUR-C-05 and DUR-C-12.
+
+### D-1742 — An empty per-invocation journal reads as its unconfirmed indexed start — 2026-10-03
+
+**Finding.** W2-cli9-5, `crates/cli/src/operation_audit.rs` `read`.
+
+**What was wrong.** `begin` creates the per-invocation journal with
+`create_new` and writes its start record next. A crash between them leaves a
+0-byte journal. `read` returned the unconfirmed start for a missing journal
+but refused an empty one ("invocation journal lost its indexed start"), so
+every `page` that covered that ID refused for good.
+
+**The decision.** An empty journal is the same fact as a missing one: an
+indexed start nobody confirmed. `read` returns `Ok(Some(started))` for it.
+A journal holding a partial record is still refused by `length`, and one
+whose first record differs from the index is still refused. Nothing on disk
+is repaired.
+
+**Rejected.** Creating the journal by temp-and-rename: it removes the empty
+state for new journals but not for those already on disk, and the read rule
+is needed either way.
+
+Invariant DUR-C-06.
+
+### D-1743 — Every cli ledger open sets `O_NONBLOCK` and admits only a regular file — 2026-10-03
+
+**Finding.** W2-cli13-4: `results.rs` `open_result_file`,
+`result_set.rs` `Receipts::open_read` / `open_read_bounded` / `open`, and
+`pre_admission_data.rs` `open_file` and both `file_generation` reopens.
+
+**What was wrong.** None of these opens set `O_NONBLOCK`, and the type of
+the opened file was asked only after `open(2)` returned. A FIFO planted at
+`results/runs.bin`, `results/detail-sets.bin` or a pre-admission lock or
+data path made every read-only open block forever, including the HTTP
+detail path through `CommittedParents::open_read_bounded`.
+
+**The decision.** One door, `readonly_file::regular`, takes the caller's
+`OpenOptions`, adds `store::open_flags::O_NONBLOCK`, and refuses a handle
+whose `fstat` is not a regular file, naming the path. It follows final
+symlinks, as `store::file::open_read` does (AC-whp-cx-0), so a symlink to a
+regular ledger stays readable. `NotFound` keeps its kind, so the callers
+that report an absent ledger as "no run recorded" are unchanged. Every
+read-only open above uses it, and so do the pre-admission writable opens and
+`Receipts::open`. The results ledger's write door adds `O_NONBLOCK` but does
+not refuse a non-regular file: it opens read-write, which never waits on a
+FIFO, and it must keep reaching `write_fresh_header`'s specific refusal for
+a path that does not keep what it is given (a link to /dev/null), which
+`a_ledger_that_does_not_keep_what_it_is_given_is_refused` pins.
+
+**Rejected.** A `symlink_metadata` check before the open: the name can be
+swapped between the check and the open, while the handle cannot. Adding
+`O_NOFOLLOW` here: the store's read door deliberately follows a final
+symlink, and the ledgers had no rule against one.
+
+Invariants DUR-C-07 and DUR-C-08.
+
+### D-1744 — A receipt-less population-statistics orphan retry checks the byte ceiling before writing — 2026-10-03
+
+**Finding.** W2-cli12-5, `crates/cli/src/population_statistics_v2.rs`
+`resume_orphan`.
+
+**What was wrong.** The new-write path refuses before writing when the file
+would pass `bounds.file_bytes`. `resume_orphan` appended the rest of the
+planned block and its Completion and synced both with no byte check; only
+the `file_generation` measurement afterwards refused. A refused retry had
+already grown the file past the operator's explicit maximum.
+
+**The decision.** Before the first byte, `resume_orphan` computes the
+current length plus the remaining planned Data records plus the Completion,
+with checked arithmetic, and refuses when that exceeds `bounds.file_bytes`,
+leaving the file untouched. Exactly the ceiling is admitted. The cost is one
+`fstat`.
+
+**Rejected.** Truncating the orphan suffix after an over-ceiling write: it
+writes bytes the operator's bound forbade and then has to undo them.
+
+Invariant DUR-C-09.
+
+### D-1745 — `record_unadmitted` commits under both result-set locks and the directory barrier — 2026-10-03
+
+**Finding.** GAP11-3, `crates/cli/src/lib.rs` `record_unadmitted`.
+
+**What was wrong.** Every other result-set commit
+(`record_all_attempt`) holds the process-wide `LEDGER` mutex and the
+cross-process `ResultSetLock` from its first child to its ledger row, and
+calls `confirm_result_directory` before the row. `record_unadmitted`
+called `record_frontier`, `ensure_detail_receipt` and `record_swept_run`
+with none of the three, so a concurrent writer could interleave its own
+children and row with these, and a power loss could keep the ledger row
+while losing a child's directory entry.
+
+**The decision.** `record_unadmitted` takes `LEDGER.lock()` (a poisoned
+mutex is a named refusal), then `ResultSetLock::acquire`, then prepares the
+frontier and the receipt, calls `confirm_result_directory`, and only then
+appends the ledger row. The lock is released by name; a failed release adds
+a warning to a committed report and is appended to a refusal.
+
+**Rejected.** Calling `record_all_attempt` with an empty trade set: it
+writes a trades block and a selected direction this path has none of.
+
+Invariants DUR-C-10 and DUR-C-11.

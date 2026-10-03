@@ -414,3 +414,56 @@ fn durable_id_boundaries_are_exact_before_and_after_index_creation() {
     maximum.id = u64::MAX;
     assert_eq!(Record::decode(&maximum.encode().unwrap()).unwrap(), maximum);
 }
+
+/// W2-cli9-5: a crash after `create_new` of the per-invocation journal and
+/// before its first synced record leaves a 0-byte journal. That is the same
+/// fact as a missing journal -- an indexed start nobody confirmed -- and must
+/// read as one, not refuse every page that covers the ID forever. A journal
+/// holding any partial record still refuses. D-1742.
+#[test]
+fn an_empty_journal_left_by_a_crash_reads_as_its_unconfirmed_start() {
+    let root = Scratch::new();
+    let mut first = begin(&root.0, Origin::Cli, "range-all").unwrap();
+    first.armed = false;
+    let mut second = begin(&root.0, Origin::Browser, "sweep").unwrap();
+    second.finish(Phase::Completed, 0).unwrap();
+    drop(second);
+    let path = own(&base(&root.0), ID_BASE + 1);
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    let started = read(&root.0, ID_BASE + 1).unwrap().unwrap();
+    assert_eq!(
+        (started.id, started.phase, started.label.as_str()),
+        (ID_BASE + 1, Phase::Started, "range-all")
+    );
+    let listed = page(&root.0, None, 10).unwrap();
+    assert_eq!(
+        listed.iter().map(|r| (r.id, r.phase)).collect::<Vec<_>>(),
+        vec![
+            (ID_BASE + 2, Phase::Completed),
+            (ID_BASE + 1, Phase::Started)
+        ]
+    );
+    assert_eq!(
+        fs::metadata(&path).unwrap().len(),
+        0,
+        "nothing was repaired"
+    );
+    for torn in [1, STRIDE - 1, STRIDE + 1] {
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(torn)
+            .unwrap();
+        assert!(read(&root.0, ID_BASE + 1).is_err(), "{torn} bytes refuse");
+        assert!(
+            page(&root.0, None, 10).is_err(),
+            "{torn} bytes refuse a page"
+        );
+    }
+}

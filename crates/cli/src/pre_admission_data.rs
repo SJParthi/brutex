@@ -3605,21 +3605,25 @@ fn append_record(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PreAdm
         .map_err(|why| format!("cannot append pre-admission record: {why}"))
 }
 
+/// Every pre-admission lock and data open: never waits on a FIFO and admits
+/// only a regular file (D-1743).
 fn open_file(path: &Path, writable: bool, create: bool) -> Result<File, PreAdmissionDataRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(writable)
-        .create(create)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("cannot open {}: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .create(create)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("cannot open {}: {why}", path.display()))
 }
 
 fn file_generation(file: &File, path: &Path) -> Result<FileGenerationV1, PreAdmissionDataRefusal> {
     let held_before = file
         .metadata()
         .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
-    let mut named = File::open(path).map_err(|why| {
+    let mut named = open_file(path, false, false).map_err(|why| {
         format!(
             "cannot reopen named {} for generation: {why}",
             path.display()
@@ -3883,7 +3887,7 @@ fn file_generation_v2(
     let held_before = file
         .metadata()
         .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
-    let mut named = File::open(path).map_err(|why| {
+    let mut named = open_file(path, false, false).map_err(|why| {
         format!(
             "cannot reopen named {} for V2 generation: {why}",
             path.display()

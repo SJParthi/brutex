@@ -705,23 +705,36 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
 /// guard's explicit unlock, never by closing a descriptor: a duplicate left in
 /// a child another thread spawned would otherwise keep it (D-0693).
 fn open_result_file(path: &Path, writable: bool) -> Result<(File, Option<Flock<File>>), Refusal> {
-    let file = OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .read(true)
         .write(writable)
         .create(writable)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| {
-            if why.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "{} does not exist yet. No run has been recorded — this \
+        .truncate(false);
+    // THE READ DOOR NEVER WAITS AND READS ONLY A REGULAR FILE (D-1743). A FIFO
+    // here blocked every read-only open, the HTTP detail path included. The
+    // write door opens read-write, which never waits on a FIFO, and it keeps
+    // reaching `write_fresh_header`'s specific refusal for a path that does
+    // not keep what it is given, such as a link to /dev/null.
+    let opened = if writable {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .custom_flags(store::open_flags::O_NONBLOCK)
+            .open(path)
+    } else {
+        crate::readonly_file::regular(&mut options, path)
+    };
+    let file = opened.map_err(|why| {
+        if why.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{} does not exist yet. No run has been recorded — this \
                      is not an error, and nothing was created.",
-                    path.display()
-                )
-            } else {
-                format!("{} could not be opened: {why}", path.display())
-            }
-        })?;
+                path.display()
+            )
+        } else {
+            format!("{} could not be opened: {why}", path.display())
+        }
+    })?;
     // Initial header validation, indexing and its generation snapshot are one
     // read transaction. Cooperative appenders must not change the length in
     // between those steps; a writer also owns fresh-header creation exclusively.

@@ -50,6 +50,44 @@ fn barrier(
     file.sync_all()
 }
 
+/// Every evidence row write in this module passes here, so a test can make it
+/// write a prefix and then fail exactly as a full filesystem does.
+fn write_rows(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(result) = tests::write_rows(file, bytes) {
+        return result;
+    }
+    file.write_all(bytes)
+}
+
+/// Append `bytes` at the end of `file`, measured under the caller's held
+/// lock, and make them durable; return the offset they start at.
+///
+/// A write that fails part-way (a full filesystem extends the file and then
+/// errors) or a barrier that fails leaves bytes that are not a whole row. Left
+/// behind they make `shape` refuse the file -- for the shared journal and
+/// start index, every later attempt in the store. They are truncated back to
+/// that measured end, which removes only this call's bytes, and the refusal
+/// says whether the rollback held (the D-0426 wording, D-1741).
+fn append_rolled_back(file: &mut File, path: &Path, bytes: &[u8]) -> Result<u64, String> {
+    let end = file.seek(SeekFrom::End(0)).map_err(io_error)?;
+    write_rows(file, bytes)
+        .and_then(|()| barrier(file, path))
+        .map_err(|why| {
+            io_error(match file.set_len(end).and_then(|()| file.sync_all()) {
+                Ok(()) => format!(
+                    "{} could not be appended: {why}. The partial write was rolled back to byte {end}, so every older whole row remains readable",
+                    path.display()
+                ),
+                Err(and) => format!(
+                    "{} could not be appended: {why}. Rolling the partial write back to byte {end} ALSO failed: {and}. The file may now end mid-row and is refused until its tail is repaired",
+                    path.display()
+                ),
+            })
+        })?;
+    Ok(end)
+}
+
 /// The computation this attempt actually performs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -623,13 +661,18 @@ impl Attempt {
                             .to_owned(),
                     );
                 }
-                file.seek(SeekFrom::End(0)).map_err(io_error)?;
+                // ONE WRITE FOR THE WHOLE BLOCK, so a failure rolls back to the
+                // header and no prefix of the ranking can survive it.
+                let mut block = Vec::new();
+                block
+                    .try_reserve_exact(rows.len().saturating_mul(RANK_BYTES))
+                    .map_err(io_error)?;
                 for row in rows {
                     let raw = encode_words::<19, RANK_BYTES>(self.evidence, row.words())?;
-                    file.write_all(&raw).map_err(io_error)?;
+                    block.extend_from_slice(&raw);
                     digest.update(&raw);
                 }
-                barrier(&file, &path).map_err(io_error)
+                append_rolled_back(&mut file, &path, &block).map(|_| ())
             })();
             let released = file.unlock().map_err(io_error);
             result.and(released)
@@ -1176,6 +1219,13 @@ fn shape<const N: usize>(
     create: bool,
 ) -> Result<u64, String> {
     let mut len = file.metadata().map_err(io_error)?.len();
+    // AN EMPTY FILE HOLDS NO ROWS, exactly like an absent one (D-1741). It is
+    // what `open_append` leaves before its first write and what a rolled-back
+    // first write leaves; reading it as torn would turn one refused append
+    // into a refusal of every later read of that identity.
+    if len == 0 && !create {
+        return Ok(0);
+    }
     if len == 0 && create {
         let mut header = [0_u8; 16];
         header[..8].copy_from_slice(&magic);
@@ -1185,9 +1235,7 @@ fn shape<const N: usize>(
                 .map_err(|why| why.to_string())?
                 .to_le_bytes(),
         );
-        file.write_all(&header)
-            .and_then(|()| barrier(file, path))
-            .map_err(io_error)?;
+        append_rolled_back(file, path, &header)?;
         if let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }
@@ -1284,10 +1332,7 @@ fn append_row<const N: usize>(path: &Path, magic: [u8; 8], raw: &[u8; N]) -> Res
     file.lock().map_err(io_error)?;
     let result = (|| {
         let at = shape::<N>(&mut file, path, magic, true)?;
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(raw))
-            .and_then(|()| barrier(&file, path))
-            .map_err(io_error)?;
+        append_rolled_back(&mut file, path, raw)?;
         Ok(at)
     })();
     let released = file.unlock().map_err(io_error);
@@ -1380,10 +1425,7 @@ fn append_events(
         } else {
             rows
         };
-        file.seek(SeekFrom::End(0))
-            .and_then(|_| file.write_all(&bytes))
-            .and_then(|()| barrier(&file, path))
-            .map_err(io_error)?;
+        append_rolled_back(&mut file, path, &bytes)?;
         if started && let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }
