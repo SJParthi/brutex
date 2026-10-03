@@ -53582,3 +53582,34 @@ refuses a membership scan, and the probe is expected O(1).
 
 **What it changes.** `Best` has no production caller (D-0762), so no run,
 report or identity moves. Its memory is now `cap` itemsets plus `cap` masks.
+
+### D-1498 — Correct runner's false manifest comments and column-digest doc, print the bootstrap sample count, and compare every ranking lens incrementally — 2026-10-03
+
+**What was observed.** c4a-8 and ET-strategies-trades-ranking-costs-7:
+`crates/runner/Cargo.toml` said the crate had only ever been driven with
+generated bars (`cli sweep-stored` drives it with real stored bars), that
+`CLAUDE.md` §5 lists neither `costs` nor `runner` (it draws both), that
+`trade` prices through `costs::fill::worst_case_fills` (it calls `fills_at`
+and `costs::trip::price`), and that `rank::walk` calls `outcome::edge` (no
+`rank::walk` exists); `validate` cited the same `rank::walk`.
+ET-strategies-trades-ranking-costs-6: the bootstrap render printed only
+`Verdict::calibration`'s band label, so 57 periods printed "30 periods: ..."
+and `periods` was never shown. W3-runner2-8: `column_digest_v1`'s doc said it
+hashes "every durable field" and it does not hash `Column::known()`.
+AC-whp-tb-2: the incremental-versus-retained ranker test compared only
+`Detectability` and `Payoff`.
+
+**The decision.** The comments say what the code does. The render prints
+`sample: N period(s); nearest measured row at or below it -- <band>`. The
+digest doc names the omission; the digest itself is NOT changed, because
+adding `known()` changes every recorded V1 column digest and the cell and
+selection digests over it, which needs a V2 codec and its own decision. The
+ranker test covers all four lenses.
+
+**Not done here.** `cli` still has no production path that builds
+`Lens::Asymmetry`, `cli`'s identity test still compares only two lenses, and
+`cli::lib` still cites `WALK_FORWARD_SPLITS` in cost prose: `crates/cli` is
+owned by another change.
+
+**What it changes.** One audit render line gains the period count. No digest,
+selection or run identity moves.

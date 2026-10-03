@@ -3963,7 +3963,16 @@ fn digest_global_replay_witness(
     h.finalize()
 }
 
-/// Stable V1 digest of every durable field in one indicator/execution column.
+/// Stable V1 digest of one indicator/execution column's durable fields, all but
+/// one.
+///
+/// **`Column::known()` is not hashed** (W3-runner2-8, D-1498). This said
+/// "every durable field", and the per-bar availability masks are not among
+/// the bytes below, so two columns that differ only in which conditions have a
+/// certified answer share a V1 digest. Adding them would change every V1
+/// column digest already recorded, and the cell and selection digests built
+/// on it, so it needs a V2 codec under its own decision rather than an edit
+/// here.
 ///
 /// This is the sole codec used by grid evaluation and pre-admission durable
 /// adapters. It is O(column length), so callers compute it once at a structural
