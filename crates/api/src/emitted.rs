@@ -220,7 +220,9 @@ struct Case {
 /// brackets.
 /// 30 -> 31 at D-1443: `api.calendar withheld`, a calendar month inside the
 /// span whose daily rung was not read, driven over two daily bars on disk.
-const ROWS: usize = 31;
+/// 31 -> 33 at D-1765: `api.backtest limit ignored`, an unparseable `limit`,
+/// and `api.logs filter ignored`, a `level` or `run` that could not be read.
+const ROWS: usize = 33;
 
 /// How many distinct production emit sites those rows cover.
 ///
@@ -1114,6 +1116,46 @@ fn cases() -> Vec<Case> {
         });
     }
 
+    // crates/api/src/backtest.rs — an unparseable `limit` answered the default
+    // page and said nothing (P1-01-03, D-1765).
+    cases.push(Case {
+        site: "backtest.rs api.backtest limit ignored",
+        target: "api.backtest",
+        message: "limit ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            assert_eq!(
+                crate::backtest::limit_asked("limit=emit-site-probe"),
+                crate::backtest::DEFAULT_LIMIT
+            );
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "limit")
+        }),
+    });
+
+    // crates/api/src/logs.rs — a `level` or `run` filter that could not be read
+    // answered the unfiltered tail as if it were the filtered one (P1-01-02,
+    // D-1765).
+    cases.push(Case {
+        site: "logs.rs api.logs filter ignored",
+        target: "api.logs",
+        message: "filter ignored",
+        level: telemetry::Level::Warn,
+        drive: Box::new(|| {
+            let (status, _headers, body) = block_on(crate::logs::logs_json(
+                "/logs.json?level=emit-site-probe&limit=1"
+                    .parse()
+                    .expect("a real uri"),
+            ));
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert!(body.contains("emit-site-probe"), "{body}");
+        }),
+        mine: Box::new(|record| {
+            says(record, "asked", "emit-site-probe") && says(record, "param", "level")
+        }),
+    });
+
     cases
 }
 
@@ -1694,9 +1736,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     //
     // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
     // unreachable list above.
+    //
+    // 61 -> 63 at D-1765: `api.backtest limit ignored` and `api.logs filter
+    // ignored`, both driven in the table above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 61,
+        lib_sites, 63,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

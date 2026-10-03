@@ -300,6 +300,25 @@ impl Selector {
         root: Result<std::path::PathBuf, String>,
         query: &str,
     ) -> Result<Self, String> {
+        // THE SAME EXACTNESS EVERY SIBLING DETAIL ROUTE HOLDS. This read only
+        // its three keys through `param`, so `offset=256` (the boolean routes'
+        // spelling) or a typo like `pgae=3` was answered page 0 under 200,
+        // again and again. Unknown, repeated and empty keys now refuse
+        // (P1-01-04, D-1765).
+        query_is_bounded(query)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            if value.is_empty()
+                || !matches!(key, "identity" | "page" | "limit")
+                || !seen.insert(key)
+            {
+                return Err(format!(
+                    "unknown, repeated or empty detail query field {key:?}; this \
+                     route reads identity, page and limit"
+                ));
+            }
+        }
         let page = Page::parse(query)?;
         let root = root?;
         let identity = crate::trades::from_hex_public(&crate::server::param(query, "identity"))
@@ -312,6 +331,8 @@ impl Selector {
     }
 }
 
+/// A canonical unsigned decimal: `+3` and `003` are refused, as
+/// `candidatejson::integer` refuses them, rather than read as 3 (D-1765).
 fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     let value = crate::server::param(query, name);
     if value.is_empty() {
@@ -319,8 +340,10 @@ fn integer_param(query: &str, name: &str) -> Result<Option<u64>, String> {
     }
     value
         .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
         .map(Some)
-        .map_err(|_| format!("`{name}` must be an unsigned decimal integer"))
+        .ok_or_else(|| format!("`{name}` must be a canonical unsigned decimal integer"))
 }
 
 /// Bounds every file a fresh detail request will index before it opens one.
@@ -890,7 +913,7 @@ mod tests {
         let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
         assert_eq!(
             Selector::parse(unset(), "identity=x&page=banana").err(),
-            Some("`page` must be an unsigned decimal integer".to_owned())
+            Some("`page` must be a canonical unsigned decimal integer".to_owned())
         );
         assert_eq!(
             Selector::parse(unset(), "identity=x").err(),
@@ -914,6 +937,39 @@ mod tests {
                 limit: 3
             }
         );
+    }
+
+    /// The selector is exact the way every sibling detail route is: an
+    /// unknown key (the boolean routes' `offset`, a typo), a repeated key, an
+    /// empty value and a non-canonical integer all refuse instead of answering
+    /// page 0 (P1-01-04, D-1765).
+    #[test]
+    fn a_detail_selector_refuses_unknown_keys_and_non_canonical_integers() {
+        let set = || Ok(std::path::PathBuf::from("/selector-fixture"));
+        let id = "ab".repeat(32);
+        for query in [
+            format!("identity={id}&offset=256"),
+            format!("identity={id}&pgae=3"),
+            format!("identity={id}&page=1&page=2"),
+            format!("identity={id}&page="),
+            format!("identity={id}&limit"),
+        ] {
+            let why = Selector::parse(set(), &query).err().unwrap_or_default();
+            assert!(why.contains("detail query field"), "{query}: {why}");
+        }
+        for (query, field) in [
+            (format!("identity={id}&page=+1"), "`page`"),
+            (format!("identity={id}&page=003"), "`page`"),
+            (format!("identity={id}&limit=016"), "`limit`"),
+        ] {
+            let why = Selector::parse(set(), &query).err().unwrap_or_default();
+            assert!(
+                why.contains(field) && why.contains("canonical"),
+                "{query}: {why}"
+            );
+        }
+        assert!(Selector::parse(set(), &format!("identity={id}&page=0&limit=16")).is_ok());
+        assert!(Page::parse("page=+1").is_err());
     }
 
     #[test]

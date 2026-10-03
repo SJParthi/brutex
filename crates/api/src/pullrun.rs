@@ -363,6 +363,16 @@ pub enum Refusal {
     /// A run is already in flight. Named rather than queued: two runs over one
     /// store would interleave two vendors' writes into one month file.
     AlreadyRunning,
+    /// A leg's envelope names a vendor or rung its own payload does not ask
+    /// for. The chain, the ladder and the failure gating all read the
+    /// envelope while the route runs the payload, so the two must be one
+    /// request (P1-02-01, D-1765).
+    Disagrees {
+        /// The leg, decoded once, as it arrived.
+        leg: String,
+        /// Which half disagreed, and with what.
+        why: String,
+    },
 }
 
 impl Refusal {
@@ -383,6 +393,12 @@ impl Refusal {
                  interleave two vendors' writes into a single month file. Watch \
                  /pull/run.json, or stop it first."
                 .to_owned(),
+            Self::Disagrees { leg, why } => format!(
+                "A leg's envelope disagrees with its own payload and NOTHING was \
+                 started -- the run would be filed, ordered and gated under the \
+                 envelope while the payload decides what is fetched. {why}. The \
+                 leg was: {leg}"
+            ),
         }
     }
 }
@@ -445,18 +461,59 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         {
             return Err(Refusal::Malformed(decoded));
         }
+        let body = percent_decode(payload);
+        if let Some(why) = envelope_disagreement(route, vendor, dir, &body) {
+            return Err(Refusal::Disagrees { leg: decoded, why });
+        }
         legs.push(Leg {
             route,
             vendor: vendor.to_owned(),
             dir: dir.to_owned(),
             label: label.to_owned(),
-            body: percent_decode(payload),
+            body,
         });
     }
     if legs.is_empty() {
         return Err(Refusal::NothingAsked);
     }
     Ok(legs)
+}
+
+/// Where a leg's envelope and its payload name different requests, or `None`
+/// when they are one.
+///
+/// The payload is read the way the route that runs it reads it: `vendor` through
+/// [`crate::ingest::parse_feed`] (absent means Dhan), and for spot
+/// `granularity` through [`crate::ingest::parse_granularity`] (absent means one
+/// minute), for derivatives `series` through [`crate::ingest::Series`]. That is
+/// the check `recovery::plan` already made on its own legs; `/pull/run`
+/// trusted the label (P1-02-01, D-1765).
+fn envelope_disagreement(route: Route, vendor: &str, dir: &str, body: &str) -> Option<String> {
+    let asked = crate::server::param(body, "vendor");
+    let feed = crate::ingest::parse_feed(&asked).map(pull::vendor::Feed::wire);
+    if feed != Some(vendor) {
+        return Some(format!(
+            "the envelope names vendor {vendor:?} and the payload asks for {asked:?}"
+        ));
+    }
+    let (field, payload_dir) = match route {
+        Route::Spot => {
+            let raw = crate::server::param(body, "granularity");
+            let rung = crate::ingest::parse_granularity(&raw).map(pull::vendor::Granularity::dir);
+            ("granularity", (raw, rung))
+        }
+        Route::Fno => {
+            let raw = crate::server::param(body, "series");
+            let series = crate::ingest::Series::from_slug(&raw).map(|series| match series {
+                crate::ingest::Series::Futures => "futures",
+                crate::ingest::Series::Options => "options",
+            });
+            ("series", (raw, series))
+        }
+    };
+    let (raw, rung) = payload_dir;
+    (rung != Some(dir))
+        .then(|| format!("the envelope names rung {dir:?} and the payload's {field} is {raw:?}"))
 }
 
 /// Groups legs by vendor, keeping the order the feeds were ticked, and sorts
@@ -1153,10 +1210,133 @@ mod tests {
         out
     }
 
-    /// One `leg` field, encoded exactly as the page encodes it.
+    /// One `leg` field, encoded exactly as the page encodes it, whose payload
+    /// declares the vendor and rung its envelope names -- as the page's does.
     fn field(route: &str, vendor: &str, dir: &str, label: &str, body: &str) -> String {
+        raw_field(
+            route,
+            vendor,
+            dir,
+            label,
+            &format!("{}&{body}", declared(route, vendor, dir)),
+        )
+    }
+
+    /// The payload fields that agree with an envelope, the way the page writes
+    /// them.
+    fn declared(route: &str, vendor: &str, dir: &str) -> String {
+        if route == "/pull/fno" {
+            let series = if dir == "futures" { "fut" } else { "opt" };
+            format!("vendor={vendor}&series={series}")
+        } else {
+            format!("vendor={vendor}&granularity={dir}")
+        }
+    }
+
+    /// One `leg` field whose payload is exactly `body`, agreeing or not.
+    fn raw_field(route: &str, vendor: &str, dir: &str, label: &str, body: &str) -> String {
         let joined = format!("{route}|{vendor}|{dir}|{label}|{}", enc(body));
         format!("leg={}", enc(&joined))
+    }
+
+    /// An envelope that names one request while its payload asks for another
+    /// refuses the whole run, on either half and on either route.
+    ///
+    /// The chain, the ladder order and the failed-daily gate all read the
+    /// envelope; `pull_spot` and `pull_fno` run the payload. A `groww|1day`
+    /// leg carrying `granularity=1min` and no `vendor` would have run a Dhan
+    /// minute pull filed as a Groww day pass (P1-02-01, D-1765).
+    #[test]
+    fn a_leg_whose_payload_disagrees_with_its_envelope_refuses_the_run() {
+        let refused = |leg: String, needle: &str| match legs_from(&leg) {
+            Err(Refusal::Disagrees { leg, why }) => {
+                assert!(why.contains(needle), "{why}");
+                assert!(Refusal::Disagrees { leg, why }.why().contains(needle));
+            }
+            other => panic!("a disagreeing leg must be refused, got {other:?}"),
+        };
+        // The finding's own repro: no vendor means Dhan, 1min is not 1day.
+        refused(
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "member=NIFTY&granularity=1min",
+            ),
+            "\"groww\"",
+        );
+        refused(
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "vendor=groww&granularity=1min",
+            ),
+            "\"1min\"",
+        );
+        // An absent granularity means one minute, not the envelope's day.
+        refused(
+            raw_field("/pull/spot", "dhan", "1day", "x", "vendor=dhan"),
+            "granularity",
+        );
+        refused(
+            raw_field(
+                "/pull/fno",
+                "dhan",
+                "options",
+                "x",
+                "vendor=dhan&series=fut",
+            ),
+            "\"fut\"",
+        );
+        refused(
+            raw_field("/pull/fno", "dhan", "futures", "x", "vendor=dhan"),
+            "series",
+        );
+        refused(
+            raw_field(
+                "/pull/fno",
+                "groww",
+                "options",
+                "x",
+                "vendor=zerodha&series=opt",
+            ),
+            "\"zerodha\"",
+        );
+        // The same leg, agreeing, is read; the vendor matches case-blind the
+        // way the route that runs it reads it.
+        for agreeing in [
+            raw_field(
+                "/pull/spot",
+                "groww",
+                "1day",
+                "x",
+                "vendor=Groww&granularity=1DAY",
+            ),
+            raw_field("/pull/spot", "dhan", "1min", "x", "member=NIFTY"),
+            raw_field(
+                "/pull/fno",
+                "dhan",
+                "futures",
+                "x",
+                "vendor=dhan&series=fut",
+            ),
+            raw_field(
+                "/pull/fno",
+                "groww",
+                "options",
+                "x",
+                "vendor=groww&series=opt",
+            ),
+        ] {
+            assert_eq!(
+                legs_from(&agreeing).map(|legs| legs.len()),
+                Ok(1),
+                "{agreeing}"
+            );
+        }
     }
 
     /// A form body survives the two encodings intact, INCLUDING the characters
@@ -1170,8 +1350,15 @@ mod tests {
     #[test]
     fn a_body_carrying_every_separator_survives_both_encodings() {
         let body = "member=BANKNIFTY&seg=futures%2Coptions&note=a|b+c&pct=100%";
-        let legs = legs_from(&field("/pull/spot", "dhan", "1day", "Spot · 1 day", body))
-            .expect("one well-formed leg");
+        let body = format!("vendor=dhan&granularity=1day&{body}");
+        let legs = legs_from(&raw_field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "Spot · 1 day",
+            &body,
+        ))
+        .expect("one well-formed leg");
         assert_eq!(legs.len(), 1);
         assert_eq!(legs[0].body, body, "the body reaches the route unchanged");
         assert_eq!(legs[0].route, Route::Spot);

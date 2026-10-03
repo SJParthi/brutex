@@ -3368,7 +3368,19 @@ impl WindowAsk {
             sort,
             desc,
             offset: number("offset", 0)?,
-            limit: number("limit", bars::PAGE_BARS)?,
+            // A LIMIT OUTSIDE 1..=MAX IS REFUSED, NOT CLAMPED. `limit=5000`
+            // answered 1,000 rows under a 200 and a pager stepping by what it
+            // asked skipped 4,000 of them; `limit=0` answered an empty page
+            // beside a non-zero total (P1-01-01, P1-02-02, D-1765).
+            limit: match number("limit", bars::PAGE_BARS)? {
+                limit @ 1..=bars::MAX_WINDOW_LIMIT => limit,
+                other => {
+                    return Err(format!(
+                        "{other} is not a page size this grid serves. Accepted: 1 to {}.",
+                        bars::MAX_WINDOW_LIMIT
+                    ));
+                }
+            },
             want_extremes,
         })
     }
@@ -15365,10 +15377,20 @@ fn store_filter(query: &str) -> census::StoreFilter {
         // and upper-cases at construction, so the comparison is now allocation
         // free on both sides.
         symbol: (!symbol.is_empty()).then(|| symbol.to_uppercase()),
-        // Not offered in the bar yet: the store holds one timeframe today, and
-        // a control with one option is a control that lies about having a
-        // choice. The field is parsed so a URL can still carry it.
-        timeframe: None,
+        // PARSED, AND SHOWN. This read `None` under a comment saying the field
+        // was parsed, while the store held two rungs — so `?timeframe=1day`
+        // silently listed both (P1-02-05, D-1765). It is read through the
+        // store's own `Timeframe::KNOWN` the way `timeframe_param` reads it,
+        // and the filter bar renders it, so what the bar shows is what was
+        // applied. An unknown value is `None`, shown as "All", like every
+        // other malformed narrowing here.
+        timeframe: {
+            let raw = param(query, "timeframe");
+            store::path::Timeframe::KNOWN
+                .iter()
+                .copied()
+                .find(|rung| rung.as_str() == raw)
+        },
         from: month(&param(query, "from")),
         to: month(&param(query, "to")),
     }
@@ -15489,6 +15511,49 @@ fn bars_refusal(
 /// Only that census can say where that feed filed the name, so when it cannot
 /// be read and the caller did not give the pair, the route refuses and names
 /// it, as `/calendar.json` does.
+/// The feed a `/bars` request names, under either spelling.
+///
+/// `feed=` is how every sibling read route spells it (`/bars.json`,
+/// `/bars/window.json`, `/store`); this page read only `vendor=`, so
+/// `/bars?feed=groww` was answered with Dhan's month under 200 (P1-02-03,
+/// D-1765). Both are read now. `vendor=` stays because the links this server
+/// renders carry it. A request carrying both with different values is
+/// refused: neither can be chosen without guessing.
+///
+/// # Errors
+///
+/// `Err(())` when `feed` and `vendor` are both present and differ, compared
+/// case-blind as [`ingest::parse_vendor`] compares.
+fn bars_feed_word(query: &str) -> Result<String, ()> {
+    let feed = param(query, "feed");
+    let vendor = param(query, "vendor");
+    match (feed.is_empty(), vendor.is_empty()) {
+        (false, false) if !feed.eq_ignore_ascii_case(&vendor) => Err(()),
+        (false, _) => Ok(feed),
+        _ => Ok(vendor),
+    }
+}
+
+/// The vendor a `/bars` request names, or the sentence its refusal carries.
+///
+/// ONE PARSER, shared with the pull form. This route had its own copy that
+/// compared with `==` while `ingest::parse_vendor` used `eq_ignore_ascii_case`,
+/// so `?vendor=Groww` meant a different vendor here than there — one question,
+/// two answers, and BOTH silently fell back to Dhan. Being served Dhan's copy
+/// of a month after asking for Groww's, under HTTP 200, is the worst class of
+/// defect in this repository: a wrong answer wearing the shape of a right one.
+fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
+    let word = bars_feed_word(query).map_err(|()| {
+        "`feed` and `vendor` name different feeds. Refused rather than \
+         answered from either: the page cannot know which one was meant."
+    })?;
+    ingest::parse_vendor(&word).ok_or(
+        "that is not a vendor this build has a feed for. Refused rather \
+         than answered from another vendor's prefix — a month served from \
+         the wrong feed looks exactly like the right one.",
+    )
+}
+
 fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
     let asked_exchange = param(query, "exchange");
     let asked_segment = param(query, "segment");
@@ -15502,7 +15567,9 @@ fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, Stri
     // hand-typed `/bars` URL. D-0686. At most `Vendor::ALL` censuses, each
     // walked once through `held_entries`, as before.
     let (censuses, _) = census_now(site);
-    let asked_vendor = ingest::parse_vendor(&param(query, "vendor"));
+    let asked_vendor = bars_feed_word(query)
+        .ok()
+        .and_then(|word| ingest::parse_vendor(&word));
     let asked_first = censuses
         .iter()
         .filter(|census| Some(census.vendor) == asked_vendor);
@@ -15710,25 +15777,19 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
         Ok(pair) => pair,
         Err(why) => return unlocatable(site, &symbol, &why),
     };
-    // ONE PARSER, shared with the pull form. This route had its own copy that
-    // compared with `==` while `ingest::parse_vendor` used
-    // `eq_ignore_ascii_case`, so `?vendor=Groww` meant a different vendor here
-    // than there — one question, two answers, and BOTH silently fell back to
-    // Dhan. Being served Dhan's copy of a month after asking for Groww's, under
-    // HTTP 200, is the worst class of defect in this repository: a wrong answer
-    // wearing the shape of a right one.
-    let asked_vendor = param(query, "vendor");
-    let Some(vendor) = ingest::parse_vendor(&asked_vendor) else {
-        return bars_refusal(
-            site,
-            axum::http::StatusCode::BAD_REQUEST,
-            &symbol,
-            &segment,
-            "—",
-            "that is not a vendor this build has a feed for. Refused rather \
-             than answered from another vendor's prefix — a month served from \
-             the wrong feed looks exactly like the right one.",
-        );
+    // See `bars_vendor` for why this is one parser and refuses by name.
+    let vendor = match bars_vendor(query) {
+        Ok(vendor) => vendor,
+        Err(why) => {
+            return bars_refusal(
+                site,
+                axum::http::StatusCode::BAD_REQUEST,
+                &symbol,
+                &segment,
+                "—",
+                why,
+            );
+        }
     };
     let page = page_number(query);
 
@@ -32295,28 +32356,41 @@ fn resolved_master_rows(merged: &merge::Merged, vendor: Vendor) -> Vec<(String, 
 /// evaluated and its verdict is reported, so an operator can see whether this
 /// pass WOULD be publishable — but the append-only write is a separate act and
 /// is not taken here.
+///
+/// # The feed is named, never defaulted
+///
+/// An absent `feed` used to mean Groww here while it means Dhan on every other
+/// route, and a crawl of ~150 requests started against a feed nobody named. It
+/// is now required, read case-blind as [`ingest::parse_vendor`] reads it, and
+/// every refusal of the REQUEST answers 400 rather than a 200 a monitor reads
+/// as success (P1-02-04, D-1765). A refusal the server cannot help — no HTTP
+/// client, no clock — answers 503.
 pub async fn universe_resolve(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
-) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
     let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
 
     let feed = param(&body, "feed");
-    let feed = if feed.is_empty() {
-        brutex_core::vendor::Vendor::Groww.as_str().to_owned()
+    let named = if feed.is_empty() {
+        None
     } else {
-        feed
+        ingest::parse_vendor(&feed)
     };
-    let Some(vendor) = brutex_core::vendor::Vendor::ALL
-        .into_iter()
-        .find(|v| v.as_str() == feed)
-    else {
+    let Some(vendor) = named else {
         return (
+            axum::http::StatusCode::BAD_REQUEST,
             json,
             format!(
                 r#"{{"ok":false,"why":{}}}"#,
                 render::json_string(&format!(
-                    "{feed:?} is not a vendor this build names. It is one of: {}",
+                    "{feed:?} is not a vendor this build names, and a crawl is \
+                     never started against a feed the request did not name. \
+                     Send feed= one of: {}",
                     brutex_core::vendor::Vendor::ALL
                         .map(brutex_core::vendor::Vendor::as_str)
                         .join(", ")
@@ -32324,6 +32398,7 @@ pub async fn universe_resolve(
             ),
         );
     };
+    let feed = vendor.as_str().to_owned();
 
     // THE MASTER IS THE ONE ALREADY READ, not one fetched here. See this
     // function's own documentation on why a broker request is a separate act.
@@ -32356,6 +32431,7 @@ pub async fn universe_resolve(
         Ok(client) => client,
         Err(why) => {
             return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 json,
                 format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
             );
@@ -32368,6 +32444,7 @@ pub async fn universe_resolve(
         Ok(day) => day,
         Err(why) => {
             return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 json,
                 format!(
                     r#"{{"ok":false,"why":{}}}"#,
@@ -32403,7 +32480,11 @@ pub async fn universe_resolve(
     .await;
 
     let verdict = snap.admits_publication(None);
-    (json, universe_snapshot_json(&snap, &verdict))
+    (
+        axum::http::StatusCode::OK,
+        json,
+        universe_snapshot_json(&snap, &verdict),
+    )
 }
 
 /// One snapshot as JSON, with the publication verdict beside it.
@@ -32509,6 +32590,84 @@ mod universe_route_tests {
             !me.contains(&verb("get")),
             "a GET on this route would let a link preview crawl an exchange"
         );
+    }
+
+    /// `/store`'s bar length is read from the query, not dropped: the store
+    /// holds more than one rung, and `?timeframe=1day` used to list them all
+    /// (P1-02-05, D-1765). An unknown rung is no narrowing, shown as "All".
+    #[test]
+    fn the_store_filter_reads_the_bar_length_it_is_given() {
+        assert_eq!(
+            store_filter("timeframe=1day").timeframe,
+            Some(store::path::Timeframe::DAY_1)
+        );
+        assert_eq!(
+            store_filter("timeframe=1min&symbol=nifty").timeframe,
+            Some(store::path::Timeframe::MINUTE_1)
+        );
+        assert_eq!(store_filter("timeframe=5parsecs").timeframe, None);
+        assert_eq!(store_filter("").timeframe, None);
+    }
+
+    /// `/bars` reads the feed under the spelling every sibling route uses,
+    /// keeps the `vendor=` its own links carry, and refuses a request whose
+    /// two spellings disagree (P1-02-03, D-1765).
+    #[test]
+    fn the_bars_page_reads_feed_as_well_as_vendor_and_refuses_a_disagreement() {
+        use super::tests::{agreeing, site};
+        assert_eq!(
+            bars_feed_word("feed=groww&symbol=NIFTY"),
+            Ok("groww".to_owned())
+        );
+        assert_eq!(bars_feed_word("vendor=zerodha"), Ok("zerodha".to_owned()));
+        assert_eq!(
+            bars_feed_word("feed=Groww&vendor=groww"),
+            Ok("Groww".to_owned())
+        );
+        assert_eq!(bars_feed_word(""), Ok(String::new()));
+        assert_eq!(bars_feed_word("feed=groww&vendor=dhan"), Err(()));
+        let dir = agreeing("bars-feed-disagrees");
+        let built = site("bars-feed-disagrees", &dir);
+        let (status, body) = bars_html(
+            &built,
+            "symbol=NIFTY&exchange=NSE&segment=INDEX&feed=groww&vendor=dhan&month=2025-07",
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("name different feeds"), "{body}");
+        let (status, body) = bars_html(
+            &built,
+            "symbol=NIFTY&exchange=NSE&segment=INDEX&feed=nofeed&month=2025-07",
+        );
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("not a vendor this build has a feed for"),
+            "{body}"
+        );
+    }
+
+    /// A crawl is never started against a feed the request did not name, and
+    /// the refusal is a 400 a monitor can see rather than a 200 carrying
+    /// `ok:false` (P1-02-04, D-1765). Both refusals return before the HTTP
+    /// client is built, so this test opens no socket.
+    #[tokio::test]
+    async fn a_crawl_with_no_feed_or_an_unknown_one_is_refused_with_400() {
+        use super::tests::{agreeing, site};
+        let dir = agreeing("resolve-feed-refused");
+        let built: Loaded = std::sync::Arc::new(site("resolve-feed-refused", &dir));
+        for body in ["", "feed=", "feed=nofeed", "member=NIFTY"] {
+            let (status, _, answer) = universe_resolve(
+                axum::extract::State(std::sync::Arc::clone(&built)),
+                body.to_owned(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{body}: {answer}"
+            );
+            assert!(answer.contains(r#""ok":false"#), "{answer}");
+            assert!(answer.contains("did not name"), "{answer}");
+        }
     }
 
     /// **The boot-snapshot class, refused by name.**

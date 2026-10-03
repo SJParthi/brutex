@@ -113,14 +113,26 @@ struct Asked {
     target: String,
     /// The run the reader narrowed to, or zero for every run.
     run: u64,
+    /// Each filter the request carried that could not be read, by name, with
+    /// what it said. Such a filter is no narrowing, and the answer says so in
+    /// its JSON and with one Warn, rather than passing the unfiltered tail off
+    /// as the filtered one (P1-01-02, D-1765).
+    ignored: Vec<(&'static str, String)>,
 }
 
 /// Reads the query string into a bounded [`telemetry::Query`].
 ///
 /// Every parameter is **clamped rather than refused**. A log viewer that
 /// answers a mangled bookmark with a 400 is a log viewer an operator stops
-/// reaching for, and unlike a pull request nothing here can be made wrong by a
-/// bad number — the worst a bad `limit` can do is show a different count.
+/// reaching for, and the worst a bad `limit` can do is show a different count.
+///
+/// **A bad `level` or `run` is not a count.** It drops a narrowing, so the
+/// unfiltered tail would arrive looking like the filtered one. Each is still
+/// answered rather than refused, but it is NAMED: listed under `ignored` in the
+/// JSON, beside the filters that were applied, and reported by one
+/// `api.logs filter ignored` Warn — the bargain `audit_json`'s `page ignored`
+/// strikes (P1-01-02, D-1765). `run` must be a canonical unsigned integer;
+/// `+3`, `03` and `3.0` are not quietly read as some run.
 fn asked(raw: &str) -> Asked {
     // NOT THROUGH `render::query_value`. That is a percent-ENCODER, and
     // `param` has already decoded; encoding a decoded value and then parsing it
@@ -138,7 +150,30 @@ fn asked(raw: &str) -> Asked {
     // ZERO IS "EVERY RUN", not run zero. An event outside a backfill omits the
     // key entirely, so there is no run zero to ask for and the value is free to
     // mean the absence of a filter.
-    let run = crate::server::param(raw, "run").parse::<u64>().unwrap_or(0);
+    let run_word = crate::server::param(raw, "run");
+    let run = run_word
+        .parse::<u64>()
+        .ok()
+        .filter(|run| run.to_string() == run_word)
+        .unwrap_or(0);
+    let mut ignored = Vec::new();
+    if level.is_none() && !level_word.is_empty() {
+        ignored.push(("level", level_word));
+    }
+    if run == 0 && !run_word.is_empty() && run_word != "0" {
+        ignored.push(("run", run_word));
+    }
+    for (param, word) in &ignored {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.logs", "filter ignored")
+                .with("param", telemetry::Value::Str(param))
+                .with("asked", telemetry::Value::Str(word))
+                .with(
+                    "why",
+                    telemetry::Value::Str("not a value this filter reads; answered without it"),
+                ),
+        );
+    }
 
     let mut query = telemetry::Query::last(limit);
     query.max_scan_bytes = SCAN_BYTES;
@@ -157,6 +192,7 @@ fn asked(raw: &str) -> Asked {
         level,
         target,
         run,
+        ignored,
     }
 }
 
@@ -461,6 +497,39 @@ fn json_of(
             out.push(',');
         }
         out.push_str(&render::json_string(why));
+    }
+    // THE FILTERS THIS ANSWER APPLIED, AND THE ONES IT COULD NOT. Without them
+    // `?level=eror` and no level at all answered byte-identically (D-1765).
+    // The run twice, as each record carries it: a number, and the exact
+    // decimal a JavaScript reader cannot round.
+    let (run, run_key) = if asked.run == 0 {
+        ("null".to_owned(), "null".to_owned())
+    } else {
+        (asked.run.to_string(), format!("\"{}\"", asked.run))
+    };
+    let _ = write!(
+        out,
+        r#"],"level":{},"target":{},"run":{run},"run_key":{run_key},"ignored":["#,
+        asked.level.map_or_else(
+            || "null".to_owned(),
+            |level| render::json_string(level.label())
+        ),
+        if asked.target.is_empty() {
+            "null".to_owned()
+        } else {
+            render::json_string(&asked.target)
+        },
+    );
+    for (n, (param, word)) in asked.ignored.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"param":{},"asked":{}}}"#,
+            render::json_string(param),
+            render::json_string(word)
+        );
     }
     out.push_str("],\"sink\":");
     out.push_str(&sink_json(health));
@@ -1879,6 +1948,54 @@ mod tests {
             .contains(r#""errors":[]"#),
             "and no stray comma when there are none"
         );
+    }
+
+    /// A filter that could not be read is named in the answer, and the filters
+    /// that were applied are echoed, so `?level=eror&run=12x` no longer answers
+    /// byte-identically to no filter at all (P1-01-02, D-1765).
+    #[test]
+    fn an_unreadable_filter_is_named_and_the_applied_ones_are_echoed() {
+        let bad = asked("level=eror&run=12x");
+        assert_eq!(bad.level, None);
+        assert_eq!(bad.run, 0);
+        assert_eq!(
+            bad.ignored,
+            vec![("level", "eror".to_owned()), ("run", "12x".to_owned())]
+        );
+        for word in ["+3", "03", "3.0", "-3"] {
+            let one = asked(&format!("run={word}"));
+            assert_eq!(one.run, 0, "{word}");
+            assert_eq!(one.ignored, vec![("run", word.to_owned())], "{word}");
+        }
+        let json = json_of(
+            &walk(Vec::new()),
+            &bad,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":null,"target":null,"run":null,"run_key":null,"ignored":[{"param":"level","asked":"eror"},{"param":"run","asked":"12x"}],"sink":"#
+            ),
+            "{json}"
+        );
+
+        let good = asked("level=WARN&target=api.backtest&run=18446744073709551615");
+        assert!(good.ignored.is_empty());
+        let json = json_of(
+            &walk(Vec::new()),
+            &good,
+            None,
+            (std::path::Path::new("/served"), None),
+        );
+        assert!(
+            json.contains(
+                r#""level":"warn","target":"api.backtest","run":18446744073709551615,"run_key":"18446744073709551615","ignored":[],"sink":"#
+            ),
+            "{json}"
+        );
+        // Zero is "every run" and is not a mistake.
+        assert!(asked("run=0").ignored.is_empty());
     }
 
     /// **EVERY WALK FLAG REACHES THE PAGE, AND EACH ONE ALONE.**

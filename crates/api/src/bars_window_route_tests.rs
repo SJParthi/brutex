@@ -430,11 +430,19 @@ fn an_unknown_direction_or_extremes_flag_is_refused_not_defaulted() {
         let ask = WindowAsk::parse(&format!("{base}{extra}")).expect(extra);
         assert_eq!((ask.desc, ask.want_extremes), (desc, extremes), "{extra}");
     }
+    // The page size is served as asked at both ends of its range (P1-01-01).
+    for (extra, limit) in [("", 200), ("&limit=1", 1), ("&limit=1000", 1_000)] {
+        let ask = WindowAsk::parse(&format!("{base}{extra}")).expect(extra);
+        assert_eq!(ask.limit, limit, "{extra}");
+    }
     for (extra, named) in [
         ("&dir=ASC", "\"ASC\" is not a direction"),
         ("&dir=ascending", "\"ascending\" is not a direction"),
         ("&extremes=yes", "\"yes\" is not an extremes flag"),
         ("&extremes=2", "\"2\" is not an extremes flag"),
+        ("&limit=0", "0 is not a page size"),
+        ("&limit=1001", "1001 is not a page size"),
+        ("&limit=5000", "Accepted: 1 to 1000"),
     ] {
         let why = WindowAsk::parse(&format!("{base}{extra}"))
             .err()

@@ -54798,3 +54798,41 @@ code no longer has.
 - The two root handovers are marked resolved and done, with the current
   pointers: every bar read verifies its block (P1-15-07), and the backtest
   route exists over a 261-byte version-3 ledger (P1-15-08).
+
+### D-1765 — A request the server cannot read as asked is refused or named, never answered as something else — 2026-10-03
+
+Round 1's request-validation pass found nine routes that read a malformed or
+misdirected parameter as a different request and answered it under 200.
+
+- `/bars/window.json` took a `limit` outside 1 to 1000 and served some other
+  page size. It is refused by name (P1-01-01).
+- `/backtest.json` answered an unparseable `limit` with the default page and
+  said nothing. It still answers, and emits one `api.backtest limit ignored`
+  Warn naming what was asked (P1-01-03).
+- `/logs` and `/logs.json` read an unknown `level` or a non-canonical `run` as
+  no filter. The JSON now echoes the `level`, `target` and `run` it applied and
+  lists every filter it could not read under `ignored`, and one
+  `api.logs filter ignored` Warn is emitted. Clamping stays the policy for a
+  log viewer, but a dropped narrowing is named (P1-01-02).
+- `/frontier.json` and `/trades.json` accepted unknown keys and `+3` or `003`.
+  The selector now holds the same exactness as every sibling detail route:
+  unknown, repeated or empty keys refuse, and integers must be canonical
+  (P1-01-04).
+- `POST /pull/run` trusted each leg's envelope. A leg is refused unless its
+  payload's `vendor`, and its `granularity` (spot) or `series` (derivatives),
+  read the way the route that runs it reads them, equal the envelope. This is
+  the check `/recovery` already made (P1-02-01).
+- `/bars` read only `vendor=`. It now also reads `feed=`, the sibling routes'
+  spelling, and refuses a request whose two spellings disagree (P1-02-03).
+- `POST /universe/resolve` defaulted an absent feed to Groww, matched case
+  sensitively, and refused under 200. The feed is required, read through
+  `ingest::parse_vendor`, and a refused request answers 400 (P1-02-04).
+- `/store` ignored `timeframe=` under a comment saying it was parsed, while the
+  store held two rungs. It is parsed from `Timeframe::KNOWN` and the filter bar
+  renders it, so what the bar shows is what was applied (P1-02-05).
+- `/engine/top.json` looked up any `feed` verbatim and answered a typo with a
+  sentence about runs that halted. The feed is parsed, canonicalised to its
+  wire name, and refused when unknown (P1-02-06).
+
+The emitted-events accounting in `api::emitted` moves 61 to 63 sites and 31 to
+33 rows; both new Warns are driven and read back off the installed sink.

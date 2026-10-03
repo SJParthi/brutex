@@ -1285,12 +1285,32 @@ fn respond(
 /// Clamped rather than refused: a bookmarked `?limit=99999` is not an error, it
 /// is an operator who wants everything, and the honest answer is everything up
 /// to the ceiling plus the flag that says the ceiling was reached. An
-/// unparseable value takes [`DEFAULT_LIMIT`] for the same reason.
-fn limit_asked(raw: &str) -> usize {
+/// unparseable value takes [`DEFAULT_LIMIT`] for the same reason, AND SAYS SO:
+/// one `api.backtest` Warn naming what was asked, the same bargain
+/// `audit_json`'s `page ignored` strikes. It answered byte-identically to an
+/// intentional default with nothing emitted (P1-01-03, D-1765).
+pub(crate) fn limit_asked(raw: &str) -> usize {
+    if let Some(asked) = unparseable_limit(raw) {
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.backtest", "limit ignored")
+                .with("param", telemetry::Value::Str("limit"))
+                .with("asked", telemetry::Value::Str(&asked))
+                .with(
+                    "why",
+                    telemetry::Value::Str("not a whole number; answered the default page"),
+                ),
+        );
+    }
     crate::server::param(raw, "limit")
         .parse::<usize>()
         .unwrap_or(DEFAULT_LIMIT)
         .clamp(1, MAX_RUNS)
+}
+
+/// The `limit` text when it is present and is not a whole number.
+fn unparseable_limit(raw: &str) -> Option<String> {
+    let asked = crate::server::param(raw, "limit");
+    (!asked.is_empty() && asked.parse::<usize>().is_err()).then_some(asked)
 }
 
 #[cfg(test)]
@@ -1845,6 +1865,21 @@ mod tests {
             "the refusal must say WHY guessing is worse: {why}"
         );
         assert!(ledger.runs.is_empty(), "nothing is parsed from it");
+    }
+
+    /// An unparseable `limit` is named for the Warn, a whole one is not, and
+    /// both still answer a bounded page (P1-01-03, D-1765).
+    #[test]
+    fn an_unparseable_limit_is_named_and_a_whole_one_is_not() {
+        for raw in ["limit=all", "limit=-1", "limit=1e3"] {
+            let asked = raw.split_once('=').map(|(_, v)| v.to_owned());
+            assert_eq!(super::unparseable_limit(raw), asked, "{raw}");
+            assert_eq!(super::limit_asked(raw), super::DEFAULT_LIMIT, "{raw}");
+        }
+        for raw in ["", "limit=7", "other=x"] {
+            assert_eq!(super::unparseable_limit(raw), None, "{raw}");
+        }
+        assert_eq!(super::limit_asked("limit=7"), 7);
     }
 
     #[test]

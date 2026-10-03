@@ -6293,3 +6293,12 @@ old line regex the same input and watched it pass.
 | ZR-14 | `docs/02-store-format.md` §13 states the frontier version, stride, seal and rule offsets this build writes (D-1763) | `cli::frontier::tests::the_store_format_doc_states_the_frontier_this_build_writes` | ✓ |
 | ZR-15 | A 640-byte execution-parameter file, written before the fingerprint widened, is refused by name and left as it was (D-1763) | `cli::execution_capability::tests::a_retired_640_byte_parameter_file_is_refused_by_name_and_kept` | ✓ |
 | ZR-16 | Every level of the ladder appends its survivors through `engine::primitives::append`; no shipping line pushes an `Itemset` directly (D-1764) | `engine::tests::every_level_appends_its_survivors_through_the_one_primitive` | ✓ |
+| ZR-17 | `/bars/window.json` refuses a `limit` outside 1 to 1000 by name (D-1765) | `api::server::bars_window_route_tests::an_unknown_direction_or_extremes_flag_is_refused_not_defaulted` | ✓ |
+| ZR-18 | An unparseable `/backtest.json` `limit` is named; a whole one is not (D-1765) | `api::backtest::tests::an_unparseable_limit_is_named_and_a_whole_one_is_not` | ✓ |
+| ZR-19 | `/logs.json` echoes the filters it applied and names each it could not read (D-1765) | `api::logs::tests::an_unreadable_filter_is_named_and_the_applied_ones_are_echoed` | ✓ |
+| ZR-20 | The `/frontier.json` and `/trades.json` selector refuses unknown, repeated and empty keys and non-canonical integers (D-1765) | `api::detail::tests::a_detail_selector_refuses_unknown_keys_and_non_canonical_integers` | ✓ |
+| ZR-21 | A `/pull/run` leg whose payload disagrees with its envelope refuses the run (D-1765) | `api::pullrun::tests::a_leg_whose_payload_disagrees_with_its_envelope_refuses_the_run` | ✓ |
+| ZR-22 | `/bars` reads `feed=` as well as `vendor=` and refuses a disagreement (D-1765) | `api::server::universe_route_tests::the_bars_page_reads_feed_as_well_as_vendor_and_refuses_a_disagreement` | ✓ |
+| ZR-23 | `POST /universe/resolve` refuses an absent or unknown feed with 400 (D-1765) | `api::server::universe_route_tests::a_crawl_with_no_feed_or_an_unknown_one_is_refused_with_400` | ✓ |
+| ZR-24 | `/store` applies and shows the bar length it is given (D-1765) | `api::server::universe_route_tests::the_store_filter_reads_the_bar_length_it_is_given` | ✓ |
+| ZR-25 | `/engine/top.json` canonicalises a feed and refuses an unknown one (D-1765) | `api::topjson::tests::top_queries_and_unreadable_files_refuse_without_creating_a_store` | ✓ |

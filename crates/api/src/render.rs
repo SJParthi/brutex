@@ -2275,6 +2275,39 @@ fn store_filter_bar(filter: &crate::census::StoreFilter, held_only: bool) -> Str
         escape(symbol)
     );
 
+    // ---- BAR LENGTH -----------------------------------------------------
+    // From the store's own rung list, so a rung added there is offered here.
+    // Rendered from the parsed filter like every other control: the store
+    // holds more than one rung, and a narrowing the URL applied but the bar did
+    // not show was the silent filter this bar exists to refuse (D-1765).
+    out.push_str(
+        "<div class=\"fgroup\"><span class=\"flabel\">Bar length</span><div class=\"pills\">",
+    );
+    let all = if filter.timeframe.is_none() {
+        " checked"
+    } else {
+        ""
+    };
+    let _ = write!(
+        out,
+        "<input type=\"radio\" name=\"timeframe\" id=\"t-all\" value=\"\"{all}>\
+         <label for=\"t-all\">All</label>"
+    );
+    for rung in store::path::Timeframe::KNOWN {
+        let value = rung.as_str();
+        let checked = if filter.timeframe == Some(*rung) {
+            " checked"
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            "<input type=\"radio\" name=\"timeframe\" id=\"t-{value}\" value=\"{value}\"{checked}>\
+             <label for=\"t-{value}\">{value}</label>"
+        );
+    }
+    out.push_str("</div></div>");
+
     // ---- MONTHS ---------------------------------------------------------
     // Typed as YYYY-MM. A month is not a date and the calendar picker would be
     // the wrong control: it offers 31 days the store has no opinion about.
@@ -3190,6 +3223,33 @@ mod tests {
     // holds `Drops`, which is the same four counts as a value, because a
     // record read back off disk cannot rebuild a counter without counting.
     use pull::session::{DropCensus, DropReason};
+
+    /// The store filter bar shows the bar length it was given, one pill per
+    /// rung the store knows, and "All" only when no rung narrows the view
+    /// (P1-02-05, D-1765).
+    #[test]
+    fn the_store_filter_bar_shows_the_bar_length_that_was_applied() {
+        let filter = |timeframe| crate::census::StoreFilter {
+            segment: None,
+            symbol: None,
+            timeframe,
+            from: None,
+            to: None,
+        };
+        let day = store_filter_bar(&filter(Some(store::path::Timeframe::DAY_1)), true);
+        assert!(
+            day.contains(r#"id="t-1day" value="1day" checked>"#),
+            "{day}"
+        );
+        assert!(day.contains(r#"id="t-all" value="">"#), "{day}");
+        for rung in store::path::Timeframe::KNOWN {
+            let pill = format!(r#"name="timeframe" id="t-{0}" value="{0}""#, rung.as_str());
+            assert!(day.contains(&pill), "{pill}");
+        }
+        let all = store_filter_bar(&filter(None), true);
+        assert!(all.contains(r#"id="t-all" value="" checked>"#), "{all}");
+        assert!(!all.contains(r#"value="1day" checked"#), "{all}");
+    }
 
     fn nifty() -> InstrumentKey {
         InstrumentKey::index(Exchange::Nse, "NIFTY").expect("valid")
