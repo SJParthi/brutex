@@ -256,10 +256,11 @@ pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
 ///
 /// # Cost
 ///
-/// O(signal + minutes + d log d) for d flagged days: one interior pass, one
-/// cursor walk that only moves forward because the demanded minute is
-/// non-decreasing in signal order, one `kind_of` lookup per signal bar (bounded
-/// by `pull::calendar::MAX_WINDOWS`), and a sort of the flagged days.
+/// O(signal + minutes) for d flagged days: one interior pass, one cursor walk
+/// that only moves forward because the demanded minute is non-decreasing in
+/// signal order, one `kind_of` lookup per signal bar (bounded by
+/// `pull::calendar::MAX_WINDOWS`), and one O(d) merge of the two ascending
+/// flagged-day lists (no sort).
 /// **UNVERIFIED as a measured bound**; read off the source per `CLAUDE.md` §3
 /// rule 6.
 #[must_use]
@@ -268,7 +269,8 @@ pub fn days_with_minute_holes(
     minutes: &[Candle],
     signal_length_micros: i64,
 ) -> Vec<i64> {
-    let mut days = days_with_interior_gaps(minutes);
+    let interior = days_with_interior_gaps(minutes);
+    let mut edges: Vec<i64> = Vec::new();
     let mut cursor = 0_usize;
     for bar in signal {
         let day = indicators::ist_day(bar.ts_micros);
@@ -286,13 +288,36 @@ pub fn days_with_minute_holes(
         if minutes
             .get(cursor)
             .is_none_or(|minute| minute.ts_micros != expected)
+            && edges.last() != Some(&day)
         {
-            days.push(day);
+            edges.push(day);
         }
     }
-    days.sort_unstable();
-    days.dedup();
-    days
+    merge_ascending(&interior, &edges)
+}
+
+/// The ascending union of two ascending day lists, each day once.
+///
+/// Both inputs are built by a forward walk over time-ordered bars, so each is
+/// already ascending; a two-cursor merge keeps that order in O(a + b) without
+/// the sort gate 11 rule 4 refuses on this path.
+fn merge_ascending(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let (mut l, mut r) = (left.iter().peekable(), right.iter().peekable());
+    loop {
+        let next = match (l.peek(), r.peek()) {
+            (Some(&&a), Some(&&b)) if a <= b => l.next().copied(),
+            (Some(_), Some(_)) | (None, Some(_)) => r.next().copied(),
+            (Some(_), None) => l.next().copied(),
+            (None, None) => break,
+        };
+        if let Some(day) = next
+            && out.last() != Some(&day)
+        {
+            out.push(day);
+        }
+    }
+    out
 }
 
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
@@ -369,6 +394,34 @@ pub fn withhold_holed_days(
 
 #[cfg(test)]
 mod tests {
+
+    /// `days_with_minute_holes` unions its two ascending lists by a merge, not
+    /// a sort (gate 11 rule 4, D-1662): ascending, each day once, nothing
+    /// dropped, on every interleaving including empty sides and full overlap.
+    #[test]
+    fn the_flagged_day_union_is_ascending_and_each_day_once() {
+        let merge = super::merge_ascending;
+        assert_eq!(merge(&[], &[]), Vec::<i64>::new());
+        assert_eq!(merge(&[3], &[]), vec![3]);
+        assert_eq!(merge(&[], &[3]), vec![3]);
+        assert_eq!(merge(&[1, 4, 9], &[2, 4, 10]), vec![1, 2, 4, 9, 10]);
+        assert_eq!(merge(&[5, 6], &[1, 2]), vec![1, 2, 5, 6]);
+        assert_eq!(merge(&[1, 2], &[5, 6]), vec![1, 2, 5, 6]);
+        assert_eq!(merge(&[7, 7], &[7]), vec![7]);
+        assert_eq!(
+            merge(&[i64::MIN, 0], &[0, i64::MAX]),
+            vec![i64::MIN, 0, i64::MAX]
+        );
+        // Against a sort-and-dedup reference over a deterministic sweep.
+        for seed in 0_i64..64 {
+            let left: Vec<i64> = (0..seed % 7).map(|k| k * 3 + seed % 2).collect();
+            let right: Vec<i64> = (0..seed % 5).map(|k| k * 2 + seed % 3).collect();
+            let mut expected = [left.clone(), right.clone()].concat();
+            expected.sort_unstable();
+            expected.dedup();
+            assert_eq!(merge(&left, &right), expected, "seed {seed}");
+        }
+    }
     use super::*;
 
     /// A one-minute bar `minute` minutes past 09:15 IST on `day`.
