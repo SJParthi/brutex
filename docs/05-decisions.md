@@ -53423,3 +53423,38 @@ distinctness check cannot pass vacuously on a fixture that keeps one.
 **Rejected.** Making `joined_frontier` count duplicates: the prefix join is
 injective, so a counter would be a second literal zero with extra work, and
 CLAUDE.md §3 rule 4 already says there is no dedup operation on that path.
+
+### D-1503 — Gate 14 layer 5 reads gate 8 through `source_scan step-runs`, as D-1102 said it already did — 2026-10-03
+
+**What was observed.** D-1102 recorded that both copies of the
+`runs_unconditionally` awk, gate 13's and gate 14's, were replaced by
+`source_scan step-runs`, and that the false comment "gate 8 carries
+`if: always()`" was corrected. Only gate 13's copy was. Gate 14 layer 5 still
+ran the denylist awk, which refuses an `if:` only when it collapses to
+`false`, `0`, `failure()` or `cancelled()`. The audit (v2-1, with
+AC-gates-o1-3 and AC-gates-cx-2 PARTIAL) inserted `if: false && true` under
+gate 8's bench step in a copy of the workflow and layer 5 printed "present".
+Re-run for this change against the pre-fix file: "present" twice, `bad=0`.
+Gate 8's step carries no `if:` at all, so the comment was false too.
+
+**The decision.** Layer 5's two checks call `"$scan" step-runs "$wf"` with
+the needles `cargo bench --workspace --locked` and
+`echo "GATE 8 MEASURED NOTHING`, the allowlist gate 13 uses: a step whose
+script has a line beginning with the needle must set no `continue-on-error`
+other than `false`, carry no step or job `if:` other than `always()`,
+`success()`, `!cancelled()` or the build job's crate probe, and sit in a job
+`ci-ok` needs. The awk and its false sentence are deleted.
+
+Because `step-runs` matches a line PREFIX, the bench check also requires a
+whole line `cargo bench --workspace --locked` in the workflow; every line with
+that prefix is in a step `step-runs` accepted, so the whole line is too. Without
+it `cargo bench --workspace --locked || true` passed.
+
+**Evidence.** Probes on scratch copies, layer 5 run under `set -euo pipefail`
+as CI runs it: `if: false && true`, `if: github.run_attempt == 0` and
+`continue-on-error: true` under the bench step each refuse both checks
+(`bad=1`); `|| true` on the bench line refuses the bench check; `if: always()`
+passes. Gate 14 on the real workflow: OK, rc 0.
+
+**Not changed.** A shell-level bypass inside the script (`if false; then`)
+is out of scope, as it is for gate 13.
