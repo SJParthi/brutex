@@ -20762,6 +20762,42 @@ mod tests {
         assert_eq!(empty.runs, absent.runs);
     }
 
+    /// **ONLY AN NSE DERIVATIVES SERIES IS AUDITED AGAINST THE DERIVATIVES
+    /// VENUE'S HOURS.** From 2026-08-03 that venue trades to 15:40, a 385-minute
+    /// day where the exchange session is 375. An NSE futures series, by
+    /// segment or by contract, owes the ten extra minutes; the same series
+    /// named on another exchange, and an NSE series that is neither, owe the
+    /// exchange session alone. Each address below is absent from the store, so
+    /// the whole obligation is the classifier's and nothing else is measured.
+    #[test]
+    fn only_an_nse_derivatives_series_owes_the_derivatives_venue_hours() {
+        let root = store_root("gap-derivative-door");
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gap-derivative-door", None, None),
+            &root,
+        ));
+        let date = i64::from(day(2026, 8, 3).days_from_epoch());
+        let calendar =
+            pull::calendar::Calendar::from_observed(&[pull::calendar::Observed::from_runs(
+                date,
+                &[(555, 929)],
+            )]);
+        for (query, owed) in [
+            ("exchange=NSE&segment=FNO&symbol=NIFTY", 385),
+            ("exchange=BSE&segment=FNO&symbol=SENSEX", 375),
+            ("exchange=NSE&segment=SPOT&symbol=NIFTY", 375),
+        ] {
+            let asked = Addressed::parse(&format!(
+                "feed=zerodha&{query}&timeframe=1min&month=2026-08"
+            ))
+            .unwrap();
+            let audit = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+            assert!(audit.absent_file.is_some(), "{query}");
+            assert_eq!(audit.expected, owed, "{query}");
+            assert_eq!(audit.lost, owed, "{query}");
+        }
+    }
+
     #[test]
     fn committed_off_grid_minutes_do_not_certify_the_gap_page() {
         for (tag, extra) in [("gap-shifted", false), ("gap-extra-stamp", true)] {

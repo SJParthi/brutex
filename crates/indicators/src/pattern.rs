@@ -2901,6 +2901,170 @@ mod exemplars {
         }
     }
 
+    /// A pattern, its classical shape, and that shape with one clause failed.
+    type NearMisses = (u32, &'static [Ohlc], &'static [&'static [Ohlc]]);
+
+    /// The near misses `every_clause_of_the_reshaped_patterns_is_required_on_its_own`
+    /// walks: every one is the classical shape with exactly ONE clause failed.
+    const RESHAPED: [NearMisses; 4] = [
+        (
+            228,
+            &[(1100, 1110, 990, 1000), (1080, 1085, 1010, 1020)],
+            &[
+                // the second bar is white
+                &[(1100, 1110, 990, 1000), (1020, 1085, 1010, 1080)],
+                // its top clears the first open
+                &[(1100, 1110, 990, 1000), (1110, 1115, 1050, 1060)],
+                // its bottom falls under the first close
+                &[(1100, 1110, 990, 1000), (1080, 1085, 980, 990)],
+                // an equal body is not strictly inside
+                &[(1100, 1110, 990, 1000), (1100, 1105, 995, 1000)],
+            ],
+        ),
+        (
+            213,
+            &[
+                (1000, 1060, 990, 1050),
+                (1100, 1160, 1090, 1150),
+                (1120, 1125, 1070, 1075),
+            ],
+            &[
+                // opens AT the second open, not above it
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1100, 1105, 1070, 1075),
+                ],
+                // opens AT the second close, not below it
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1150, 1155, 1070, 1075),
+                ],
+                // closes AT the second low: the gap is not entered
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1120, 1125, 1085, 1090),
+                ],
+                // closes AT the first high: the gap is filled
+                &[
+                    (1000, 1060, 990, 1050),
+                    (1100, 1160, 1090, 1150),
+                    (1120, 1125, 1055, 1060),
+                ],
+            ],
+        ),
+        (
+            214,
+            &[
+                (1050, 1060, 990, 1000),
+                (960, 970, 900, 910),
+                (930, 985, 925, 980),
+            ],
+            &[
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (960, 985, 925, 980),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (910, 985, 905, 980),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (930, 975, 925, 970),
+                ],
+                &[
+                    (1050, 1060, 990, 1000),
+                    (960, 970, 900, 910),
+                    (930, 995, 925, 990),
+                ],
+            ],
+        ),
+        (
+            221,
+            &[
+                (1100, 1100, 1000, 1000),
+                (1060, 1065, 950, 1020),
+                (970, 1000, 960, 980),
+            ],
+            &[
+                // the second close equals the first close
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1000),
+                    (970, 1000, 960, 980),
+                ],
+                // the second low equals the first low
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 1000, 1020),
+                    (1005, 1020, 1002, 1008),
+                ],
+                // the third bar is black
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (980, 1000, 960, 970),
+                ],
+                // the third body is 20 of a 30 range: not small
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (960, 985, 955, 980),
+                ],
+                // the third bar opens AT the second low
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (950, 1000, 945, 960),
+                ],
+                // the third bar closes AT the second close
+                &[
+                    (1100, 1100, 1000, 1000),
+                    (1060, 1065, 950, 1020),
+                    (1010, 1040, 1000, 1020),
+                ],
+            ],
+        ),
+    ];
+
+    /// EVERY CLAUSE OF THE FOUR RE-SHAPED PATTERNS IS REQUIRED ON ITS OWN, AND
+    /// EVERY STRICT BOUND IS STRICT.
+    ///
+    /// `four_patterns_take_their_classical_shapes` proves each classical shape
+    /// fires and the old shape does not; it does not prove each clause carries
+    /// weight. Every near miss below is the classical shape with exactly ONE
+    /// clause failed -- and where that clause is a strict comparison, failed by
+    /// equality -- so a joining `&&` read as `||`, or a `<` read as `<=`,
+    /// lights the bit on a shape the predicate refuses.
+    #[test]
+    fn every_clause_of_the_reshaped_patterns_is_required_on_its_own() {
+        let groups = RESHAPED;
+        for (position, classical, misses) in groups {
+            assert!(fold(classical).get(position), "{position}: classical shape");
+            for (index, miss) in misses.iter().enumerate() {
+                assert!(
+                    !fold(miss).get(position),
+                    "{position}: near miss {index} must stay dark"
+                );
+            }
+        }
+        // Identical three crows needs BOTH opens at the prior close: the third
+        // crow opening at 995 instead of 1000 is three black crows and no more.
+        let one_open_off = fold(&[
+            (1100, 1110, 1040, 1050),
+            (1050, 1055, 990, 1000),
+            (995, 1002, 940, 950),
+        ]);
+        assert!(one_open_off.get(166), "still three black crows");
+        assert!(!one_open_off.get(230), "one open off the prior close");
+    }
+
     #[test]
     fn every_named_exemplar_survives_price_translation_and_session_reset() {
         let mut checked = 0;
