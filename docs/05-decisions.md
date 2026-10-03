@@ -56383,3 +56383,22 @@ requires `2 × i64::MAX + 1` and `3 × i64::MIN`, and requires a bucket that sum
 `cli::tests::rupees_render_zero_unsigned_and_every_i128_exactly` pins zero
 unsigned and the exact Indian-grouped rendering of `i64::MIN`,
 `3 × i64::MIN`, `i128::MIN` and `i128::MAX`.
+
+### D-1853 — AF-16 and the D-0694 limits text follow D-1851 — 2026-10-03
+
+**What was wrong.** D-1851 gave the explicit stored-expression report the
+stock statements, but AF-16 still named that report as the one that opens with
+the bare `STORED_PROVENANCE`, `docs/06-limits.md` still listed Expression V1 as
+unchanged, and the guard test
+`af_16_names_the_explicit_expression_report_as_one_that_opens_with_the_bare_banner`
+failed on the merged head exactly as it was written to: it pins AF-16's
+exception to the source.
+
+**The change.** AF-16's sentence now says the report opens with
+`stored_provenance_of` since D-1851. The limits sentence says the same. The
+guard is renamed
+`af_16_names_the_explicit_expression_report_as_carrying_the_stock_note_since_d_1851`
+and now requires the row's new sentence, refuses its old one, requires
+`crate::stored_provenance_of(self.key)` in `crates/cli/src/expression.rs` and
+refuses `String::from(crate::STORED_PROVENANCE)` there. No output changes
+beyond D-1851's.

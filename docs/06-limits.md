@@ -9335,7 +9335,8 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   a stock's among them, with their worst and best figures and no statement: it
   is a listing of the ledger rather than a ranking or an audit, and it was
   left as it was. Expression V1, which evaluates one named expression and
-  ranks nothing, is unchanged, and so are `fold-audit`, `checksum-audit-stored`
+  ranks nothing, opens with `stored_provenance_of` since D-1851, so a stock's
+  report carries both statements; unchanged are `fold-audit`, `checksum-audit-stored`
   and `verify`, which check stored bytes rather than rank anything. The
   browser's command results and `/engine/top.json` carry the report text, so
   the sentence reaches them through that text.
