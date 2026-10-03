@@ -53876,3 +53876,18 @@ reads rebuild `Prepared::from_execution` twice around an O(H) scan, and a
 Selection V6 commit scans the history twice. These are stated in
 `docs/06-limits.md`; they are the modules' re-authentication of their
 upstream sources, and reducing them is a change to what a read proves.
+
+### D-1633 — A single-stop search's per-launch history replay is stated, not cached — 2026-10-03
+
+**What was found (W2-cli6-0).** `index_stop_search_checkpoint::recover`
+re-verifies every completed historical frame's every selected rung through
+`qualification::verify_search_slot_bounded` on each launch and resume, a full
+child replay per link. `docs/06-limits.md` said only that cold readers
+authenticate full admitted ancestors, which does not state the B × R
+multiplier per launch.
+
+**The decision.** `docs/06-limits.md` states the per-launch cost and why it
+stays: the replay is how a resume proves an acknowledged child still says
+what its pin says, and a cache of verified frames would be a new durable
+authority with its own invalidation rule. That is a design change, not an
+audit fix.

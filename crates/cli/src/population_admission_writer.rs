@@ -343,6 +343,10 @@ pub fn derive_population_id_v1(
 /// `derive_strategy_digest_from_validated_v1`, which is O(1) per cell; this
 /// entry has no production caller (W2-cli10-2, D-1639).
 ///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured; `docs/06-limits.md` records it. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// Refuses an absent identity, a torn/foreign evaluation, a side mismatch, an
