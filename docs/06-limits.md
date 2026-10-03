@@ -7119,9 +7119,11 @@ data and admission verdicts it was actually given.
 ### §128 — the fixed portfolio arbiter is bounded per minute, not a completed portfolio simulation
 
 `GlobalSinglePositionV1` stores one optional occupancy timestamp, one previous
-minute and fixed counters. A minute owns at most 25 intents and a fixed 25-slot
-result. Atomic validation and canonical fixed-array insertion can each compare
-up to the square of that compiled ceiling, so their work and auxiliary state
+minute and fixed counters. A minute owns at most 200 intents and a fixed
+200-slot result: `MAX_INTENTS_PER_MINUTE` is the eight supported rungs times
+25 priorities each (`runner::portfolio`, corrected by o1eng2-3). Atomic
+validation and canonical fixed-array insertion can each compare up to the
+square of that compiled ceiling, 40,000 comparisons, so their work and auxiliary state
 are O(1) with respect to run length. That statement does not make a historical
 portfolio run O(1): the caller still has to generate, execute, order, offer,
 persist and display every relevant minute and intent, so total work grows with
@@ -13911,3 +13913,52 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Audit 2026-10-03 worker 2 — non-monotone exits, SPA's i.i.d. scale and corporate actions, D-1540 to D-1550
+
+### a flipping cadence makes `forward`'s window rebuild and leaves Newey-West pairs queued — D-1550
+
+`runner::outcome::WindowExtremes` and `OverlapWindow` were documented as
+amortised O(1) per query because both window ends only advance. Since D-1410
+the exit of bar `i` is `ts(i) + step_at(i)·H`, and `step_at` is a prefix
+running median that can step DOWN. Measured by the audit (o1eng2-1) on twenty
+generated sessions with every third minute dropped: at H=9, 111 of 227 priced
+bars had an exit earlier than the previous priced bar's. Each such query
+clears and rebuilds the deques from its left end, Θ(window) for that query,
+so the per-query bound is Θ(H) in the worst case and the amortised O(1) holds
+only while the cadence is constant. The audit's timing showed no measurable
+cost at that size (279 ns/bar at H=9, 261 ns/bar at H=144), because the
+flips stop once the prefix median settles; that is one fixture, not a bound.
+
+The Newey-West drain in `OverlapWindow::observe` pops only from the front. A
+queued hit whose exit precedes the front's stays queued until the front
+drains, and its pairs with later hits are counted as overlapping although
+the two windows share no bar. Its effect on `edge`'s t-statistic is
+UNVERIFIED: nothing has measured it. A drain independent of exit order needs
+an exit-ordered structure, O(log H) per hit; it is not done here.
+
+### SPA and Romano-Wolf studentize by an i.i.d. standard error — D-1549
+
+Hansen (2005) divides each strategy's mean by a consistent estimate of its
+long-run (HAC or bootstrap) standard deviation. `runner::bootstrap::summarise`
+uses `sqrt(sample variance / n)`, the i.i.d. one, for SPA and Romano-Wolf
+(hunt-runner-5). The observed and resampled statistics share that scale, so
+both remain valid max-type tests; what changes under serially correlated
+returns is the size of SPA's `-sqrt(2 ln ln n)` recentring gate, that is,
+which strategies are dropped from the null. The workspace's only
+Newey-West code is `OverlapWindow`, which is specific to overlapping
+H-bar forward windows and has no bandwidth rule a daily return series could
+reuse. Choosing a bandwidth would be a number with no source in
+`docs/00-charter.md`, so the deviation is stated rather than changed.
+
+### a stock's corporate actions are measured, not detected — D-1540
+
+D-1540 puts the largest overnight move of a stock's bars, by session and size,
+on the stored single-instrument doors (`sweep-stored`, `sweep-audited-stored`,
+`audit-stored`, `audit-range`, `screen`, the strict audited range and
+`auto-stored`). No threshold is applied, because D-0018 names none, and no
+window is refused. Every other stock surface (the pool, `range-all`,
+`range-rung`, `descend`, the elite descent, `top`, the expression search and
+the Boolean research commands) still carries only D-0694's sentence, because
+their banners are written before or without the bars. The measurement is one
+pass over the bars at a once-per-report boundary, O(bars).
