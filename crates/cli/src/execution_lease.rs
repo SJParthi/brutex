@@ -55,7 +55,7 @@ fn options() -> OpenOptions {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = OpenOptions::new();
     // Same no-follow/nonblocking flags as operation_audit's native file door.
-    options.custom_flags(store::open_flags::O_NOFOLLOW | store::open_flags::O_NONBLOCK);
+    options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     options
 }
 
