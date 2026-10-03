@@ -16,3 +16,14 @@ Scope: verify all 547 earlier findings (250 batch-2 in fix-queue/lane{1,2,3}{,-b
 3. Finish the non-root full test run and read the cli failure above.
 4. Route the 55 NOT-FIXED lane1-b items and v2-1 to a fix lane (PR #74 will merge without them).
 5. Publish the comparison Artifact from out/*.md. Worker rules: RULES.md (paths need adjusting).
+
+## Resumed 2026-10-03 04:10 UTC (new account, audit thread)
+- Workers running against final/all-fixes 1087e544: v3a (lane3.md 16 + lane3-b first 36), v3b (lane3-b last 37), v53 (audit-53), v4 (batch-1 64 groups), fold (fold-regression hunt). Reports will land in resume/audit-20261003/out/{v3a,v3b,v53,v4,fold}.md.
+- The CLI test failure and #74 CI belong to the PR-#74 thread; the 55 lane1-b NOT-FIXED items belong to the lane-1 redo thread. This thread does not duplicate them.
+- If stopped again: rerun only the workers whose out/*.md file is missing, using RULES.md.
+
+## State 2026-10-03 ~05:45 UTC (audit thread)
+- All verification done; reports in out/: v1 v2 (earlier), v3a v3b (lane 3, 89), v53 (audit-53), v4 (batch-1 64 groups), fold, c4a/c4a-verdicts/c4b (16 lost batch-1 groups, original text in resume/lanes/c4-missing-findings.md: 60 findings, 44 NOT-FIXED, 8 PARTIAL).
+- Three local fixers running on branches audit-fixes (new findings v3b-1/-2, v3a-1, v53-1/-2, audit-root, docs, v4-1..3; D-1480..1489), audit-fixes-2 (c4 non-cli + c4a-N + v4-4; D-1490..1519), audit-fixes-3 (c4 cli + c4b-N; D-1620..1659, moved off the sweep thread's D-1520..1619). These are local; if lost, redo from the out/*.md reports with those decision ranges.
+- When they finish: merge each into final/all-fixes (fetch + merge first, never force), validate, push onto PR #74, then publish the comparison Artifact.
+- Local fix branches are mirrored as wip/audit-fixes, wip/audit-fixes-2, wip/audit-fixes-3 (pushed at each checkpoint; resume from them).
