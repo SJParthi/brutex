@@ -83,7 +83,11 @@ use indicators::Candle;
 /// close?"* from the bytes actually on disk. A build could change either without
 /// the other, and under one version number a later change to this would be
 /// indistinguishable from a change to that.
-pub const MINUTE_GAP_POLICY: u32 = 1;
+///
+/// TWO since D-1662: the census also withholds a day whose demanded closing
+/// minute is absent ([`days_with_minute_holes`]), so a holed span withholds
+/// more days than version 1 did and must not share its identity.
+pub const MINUTE_GAP_POLICY: u32 = 2;
 
 /// One minute, in microseconds.
 const MINUTE_MICROS: i64 = 60_000_000;
@@ -220,6 +224,74 @@ pub fn days_with_interior_gaps(minutes: &[Candle]) -> Vec<i64> {
     // The scan visits bars in time order, so `days` is already ascending and
     // `last() != day` suppressed the repeats. Sorting would be a second claim
     // about an order the input already guarantees.
+    days
+}
+
+/// Days a stored span must withhold before its column is built: every day
+/// [`days_with_interior_gaps`] finds, and every day holding a signal bar whose
+/// closing minute the exact-minute overlay will demand and the minute stream
+/// does not hold. W2-cli9-3, D-1662.
+///
+/// # The holes the interior walk could not see
+///
+/// The interior walk compares adjacent minutes on the SAME day, so a session
+/// that stops early (15:25 to 15:29 missing) steps from its last minute to the
+/// next morning's 09:15, fails the same-day test, and is never flagged. A day
+/// holding signal bars and no minutes at all is invisible to it for the same
+/// reason. The overlay then refused `MissingClosingMinute` for that day's last
+/// bucket, `pool` and `screen` refused the whole span, and `audit-range` found
+/// the days one refusal at a time, reloading both contexts and rebuilding the
+/// column per day (W2-cli8-6).
+///
+/// # Asking the overlay's own question
+///
+/// For each signal bar this computes the minute
+/// [`indicators::anchored::exact_closing_minute`] says the overlay will demand,
+/// with [`crate::stored::nse_session_close_minute`], the session close the
+/// stored column passes it, and checks that exact stamp is held. So the census
+/// and the join cannot disagree about which day is unsourceable, the retry
+/// loops behind it become a defence, and a day the overlay would not refuse is
+/// not withheld: a `1min` rung whose session ends early has no signal bar
+/// demanding the missing minutes, and nothing here invents one.
+///
+/// # Cost
+///
+/// O(signal + minutes + d log d) for d flagged days: one interior pass, one
+/// cursor walk that only moves forward because the demanded minute is
+/// non-decreasing in signal order, one `kind_of` lookup per signal bar (bounded
+/// by `pull::calendar::MAX_WINDOWS`), and a sort of the flagged days.
+/// **UNVERIFIED as a measured bound**; read off the source per `CLAUDE.md` §3
+/// rule 6.
+#[must_use]
+pub fn days_with_minute_holes(
+    signal: &[Candle],
+    minutes: &[Candle],
+    signal_length_micros: i64,
+) -> Vec<i64> {
+    let mut days = days_with_interior_gaps(minutes);
+    let mut cursor = 0_usize;
+    for bar in signal {
+        let day = indicators::ist_day(bar.ts_micros);
+        let expected = indicators::anchored::exact_closing_minute(
+            bar.ts_micros,
+            signal_length_micros,
+            crate::stored::nse_session_close_minute(day),
+        );
+        while minutes
+            .get(cursor)
+            .is_some_and(|minute| minute.ts_micros < expected)
+        {
+            cursor = cursor.saturating_add(1);
+        }
+        if minutes
+            .get(cursor)
+            .is_none_or(|minute| minute.ts_micros != expected)
+        {
+            days.push(day);
+        }
+    }
+    days.sort_unstable();
+    days.dedup();
     days
 }
 

@@ -54015,3 +54015,272 @@ states it in the pool's cost.
 **Rejected.** A second withholding loop in `pool.rs`: two copies of one rule
 drift. Writing a preparation attempt from pass 2: it would record a
 preparation under no run this pass commits.
+
+### D-1660 — Size each walk-forward fold's exit ladder from its own training window, and name that policy as an appended identity term — 2026-10-03
+
+**Finding.** GAP4-46 (medium, law). `knobs_checked` resolved `grid_rungs(bars)`
+over the whole span and `both_shapes` handed that one count to every fold of
+both walk-forward shapes. `grid_rungs` reads the span's reference price, grid
+step and ninetieth-percentile bar range, test windows included, so a bar in
+fold N's test window could change the exit ladder fold N was trained with.
+That is a later bar deciding an earlier answer, which `CLAUDE.md` §3 rule 7
+bans.
+
+**Decision.** `runner::validate::FoldRungs::{Fixed(usize),
+PerTraining(&dyn Fn(&[Candle]) -> usize + Sync)}` replaces the `usize` on
+`walk_forward_core` and on the two projected doors `cli` calls. `PerTraining`
+is resolved inside the fold loop on that fold's training signal slice alone,
+before the sweep, and a resolver answering zero refuses the walk by name
+rather than borrowing a default. `Fixed(0)` keeps the legacy `DEFAULT_RUNGS`
+fallback the `usize` doors always had; the one-series doors and the sealed
+Admission V2/V3 doors pass `Fixed` unchanged, because their identities
+already bind the resolved count. Every fold now records its count on the new
+`FoldResult::resolved_rungs` (`None` for Anchored Search V4, which seals its
+own per-fold exact grid). `cli::fold_rungs` passes `Fixed(n)` when
+`BRUTEX_GRID_RUNGS` is set, since an operator's count is decided by no bar,
+and `PerTraining(&grid_rungs)` otherwise. The screen keeps the whole-span
+count; it is in-sample by construction.
+
+**Identity.** Positional and append-only, so no term is reinterpreted.
+`policy_of` keeps term seventeen's value (the resolved whole-span count) and
+gains a twenty-first term, 1 for a fixed fold count and 2 for per-training;
+zero is never written. Runs at the new commit re-key in any case because the
+commit is a term.
+
+**Rejected.** Reinterpreting term seventeen as "per-fold": a positional
+identity whose meaning moves under the same bytes is the defect §3 rule 8
+forbids. Deriving the count from the execution prefix: the screen derives it
+from signal bars, and the fold must ask the same question of the same series.
+Dropping the override's fixed path: an explicit operator count is not
+look-ahead and changing it would silently change a knob's meaning.
+
+### D-1661 — Every stored door records the canonical instrument and the swept bar count — 2026-10-03
+
+**Findings.** AC-whp-law-0 (medium, bug) and AC-whp-law-2 (low, bug), both
+wrong ledger fields written at the same `Recording` / `record_swept_run` call
+sites.
+
+- AC-whp-law-0. The stored doors build the run identity from the canonical
+  key (`Symbol::new` upper-cases), but `sweep-stored`, `audit-stored`,
+  `audit-range` (both its command door and its kernel) and `screen` recorded
+  the word the operator typed. `sweep-stored zerodha nifty …` then `NIFTY …`
+  computed one identity over the same bars and the second run was refused as
+  "deterministic fields differ" — a safe rerun reported as a collision
+  (`CLAUDE.md` §3 rule 5).
+- AC-whp-law-2. `results::Record::bars` is documented "Signal bars swept".
+  `sweep-all` recorded `census.swept`; `sweep-stored` and the audit door
+  recorded the length of the bar slice, which includes the warm-up bars the
+  column folded and did not sweep. One instrument-month gave two `bars` under
+  one field name.
+
+**Decision.** Every stored door records `key.underlying` (the canonical word
+the identity uses) and `outcome.census.swept` (the column's swept rows).
+`sweep-all` now also reads the canonical word off its loaded key rather than
+the directory name. The field docs stay "Signal bars swept", now true of every
+door. Four tests pinned the old `bars` (the retained slice length) and now
+pin the swept count, because the old value was the defect:
+`a_damaged_newest_header_slot_screens_as_the_previous_commit` (600 and 525
+become 300 and 225),
+`the_ordinary_stored_sweep_withholds_and_names_a_holed_session`,
+`stored_screens_scale_support_to_retained_bars_and_disclose_holed_sessions` and
+`stored_screen_support_and_exact_retries_bind_the_actual_sample`. The screens'
+`min_hits` is still scaled to the retained bars, warm-up included; that is
+unchanged here and is noted as open rather than silently altered.
+
+**Legacy rows.** `same_run_answer` is unchanged and still refuses any
+deterministic-field difference loudly. A row written before this change
+cannot meet a rerun from this build under one identity, because the build's
+commit is an identity term and this change is a new commit; a binary at the
+old commit keeps writing its own old values consistently. Nothing is silently
+accepted.
+
+**Rejected.** Renaming the doc to "signal bars offered" and making `sweep-all`
+match: the support fraction readers compute is hits over swept bars, and
+offered bars include rows that could never hit. Upper-casing inside `record_run`:
+the key is the authority and is already in hand at every door.
+
+### D-1662 — Withhold every day whose demanded closing minute is absent before the column is built — 2026-10-03
+
+**Findings.** W2-cli9-3 (medium, bug) and W2-cli8-6 (low, cost), one root
+cause. `minute_gaps::days_with_interior_gaps` flagged a day only for a step
+wider than a minute between two minutes of the SAME day. A session that stops
+early (15:25 to 15:29 missing while other days hold them) steps from its last
+minute to the next morning's 09:15 and fails the same-day test, and a day with
+signal bars and no minutes has no step at all. Neither was withheld. The
+exact-minute overlay then refused `MissingClosingMinute` for that day's last
+bucket: `pool` and `screen`, which have no retry, refused the whole span, and
+`audit-range` discovered the days one refusal at a time inside
+`column_withholding_at_build`, each pass reloading both contexts, re-digesting,
+writing a durable preparation attempt and rebuilding the whole column (up to
+64 passes).
+
+**Decision.** `minute_gaps::days_with_minute_holes(signal, minutes,
+signal_length)` is the census every stored door now calls (sweep-stored,
+auto-stored, audit-range, screen, pool): the interior-gap days, plus every day
+holding a signal bar whose demanded closing minute is not stored. The demanded
+minute comes from the overlay's own rule, now public as
+`indicators::anchored::exact_closing_minute` and called by the overlay itself,
+with the same `stored::nse_session_close_minute` the stored column passes it,
+so census and join cannot disagree. One pass, O(signal + minutes + d log d).
+The retry loops stay, bounded and loud, as a defence that a correct census
+makes run once; a test counts `column_withholding_at_build`'s passes on a span
+with three edge-holed days and requires one. `MINUTE_GAP_POLICY` becomes 2,
+because the rule withholds more days than version 1 and the identity binds it;
+1 keeps naming the interior-gap rule (`CLAUDE.md` §3 rule 8).
+`the_minute_gap_rule_is_bound_by_value_and_the_audited_door_records_the_ladder_alone`
+pinned the literal 1 and now pins the literal 2, and also refuses a row
+recorded under rule 1's word; AF-19's row says so.
+
+**Not withheld, by design.** A day whose missing minutes no signal bar
+demands — a `1min` rung that stops at 15:24, or a missing 09:15 — is not
+withheld: the overlay never refuses it, and the census asks only the
+overlay's question. That is stated in `docs/06-limits.md`.
+
+**Rejected.** Comparing each day's first and last stored minute against
+`pull::calendar::kind_of`'s window: the calendar is venue-blind, so every
+NSE cash equity day after 2026-08-03 (continuous trading ends 15:14 for a
+CAS-eligible share) would have been withheld on its correct close.
+
+### D-1663 — Refuse a CAS-eligible cash prior session by name instead of calling it truncated — 2026-10-03
+
+**Finding.** GAP12-6 (low, bug). `exact_minute_context_from_span` judges the
+prior session that seeds `GapFib` against `prior_accepted_session`, which reads
+the venue-blind `pull::calendar::kind_of`. From 2026-08-03 an NSE cash share's
+continuous session ends at 15:15 when the share is eligible for the closing
+auction (every F&O share is, per NSE/CMTR/74466 §A) and at 15:30 when it is not
+(`pull::vendor::NSE_CASH_SESSIONS`, `cash_auction_eligibility_required`). A
+correct 15:14 close on an equity was refused as "Early or truncated bars
+cannot seed GapFib".
+
+**Decision.** For an equity key whose prior session day requires dated CAS
+eligibility, the stored read refuses before the geometry check with "cash
+session close UNVERIFIED: dated CAS eligibility required", naming the day, and
+never says truncated. The dated per-share schedule the fold uses
+(`pull::fold::minute_session` with a `cash_auction::Schedule`) is crate-private
+to `pull` and is not held on this read path, so no close is derived; inventing
+one from today's F&O list would be the undated eligibility `CLAUDE.md` §3
+rule 1 forbids. A 15:29 close on such a day is refused the same way, because
+it too cannot be confirmed without the schedule. Index keys and cash days
+before 2026-08-03 are unchanged. Test:
+`a_cas_equity_prior_session_ending_1514_seeds_gapfib` takes the plan's
+"with no schedule, an Err naming CAS" branch; its name is the plan's, and on
+an equity it asserts the refusal, not a seed. No failing-first run of this
+test against the old code was taken.
+
+**Not closed here.** The same venue-blindness reaches the exact-minute
+overlay's session close (`stored::nse_session_close_minute`), so a coarse
+equity rung's last bucket on a CAS day demands 15:29 and is withheld as a
+minute gap by D-1662's census rather than priced. Passing a dated schedule
+into the cli's stored path is the fix for both, and is left open.
+
+**Rejected.** Treating every swept equity as CAS-eligible: membership is
+dated and the list in hand is not.
+
+### D-1664 — Say what the daily-reference filter does: bound the offered set, not enforce causality — 2026-10-03
+
+**Finding.** GAP4-48 (low, doc-false). The comment over `if day >=
+last_signal_day` in `daily_context_from_span` said same-day and future daily
+records "are omitted from the offered reference stream rather than relying on
+the evaluator". The filter drops only days at or after the LAST signal day; an
+earlier signal day's same-day record is offered, and
+`AnchoredEvaluator::advance_before` is what keeps a signal bar from reading it.
+
+**Decision.** The comment now says the filter bounds the offered set to records
+some signal day can consume, so the census's `remaining()` is zero after a full
+build, and that per-row causality is the evaluator's. No behaviour changes.
+`the_offered_daily_stream_is_consumed_whole_and_a_prefix_build_agrees` pins
+both halves: a same-day record is offered and fully consumed, and the first
+day's rows equal a build over that day alone.
+
+**Rejected.** Dropping every same-day record per signal day: the offered
+stream is one slice for the whole span, and the evaluator already enforces the
+per-row rule.
+
+### D-1665 — Seed `isqrt_i128` at or above the root and stop on the first non-decreasing Newton step — 2026-10-03
+
+**Findings.** W3-indicators2-1 (low, bug) and W3-indicators2-0 (low, cost).
+`isqrt_i128_counted` started Newton at `guess = v` and stopped on
+`guess == previous`. At every `v = k^2 - 1` the integer iteration oscillates
+between `k - 1` and `k`, so the loop never met its exit and ran the whole
+128-step cap before a bounded step-down repaired the root: 128 or 129
+iterations at 3, 143, 975² − 1, (10¹⁵)² − 1 and isqrt(i128::MAX)² − 1, and 999
+of the inputs in `1..=10^6` hit the cap (measured on the old code with a
+verbatim copy in a scratch program). `docs/06-limits.md` §51, the module
+header and the function doc all said 1 to 69. The root was always exact; the
+cost and the documentation were not. It runs on the VWAP sigma path, twice per
+bar on an equity column build.
+
+**Decision.** Seed with `1 << ceil(bits(v) / 2)`, which is at least the root
+and at most twice it, and iterate `next = (g + v / g) / 2` while it strictly
+decreases; the first step that does not decrease is the exit and lands exactly
+on `floor(sqrt(v))`, so the step-down is deleted. `NEWTON_STEPS` = 16 and
+`ITERATION_CEILING` = `NEWTON_STEPS`; `STEP_DOWN_STEPS` is removed. Measured:
+at most 5 iterations over `1..=10^6`, 2/5/5/6 at 1, `i64::MAX`, `10^30`,
+`i128::MAX`, 7 at isqrt(i128::MAX)² − 1, worst 8 over five million
+pseudo-random inputs. Tests pin the exactness over `1..=10^6`, the `k² − 1`
+counts, perfect squares and the four documented counts; §51, the module
+header, the function doc, the bench doc and C-I-03 state the new figures and
+say the new loop's timings are not re-measured.
+
+**Changed tests.** `the_documented_iteration_counts_are_the_measured_ones`
+pinned 1/37/55/69 and now pins 2/5/5/6; `the_iteration_ceiling_is_the_sum_of_
+the_two_loops` pinned 128 + 2 and is replaced by
+`the_iteration_ceiling_is_the_newton_budget`, because there is one loop.
+
+**Rejected.** Keeping `guess = v` and adding a cycle check: it fixes the
+oscillation but keeps 64 halvings for wide inputs. Using `i128::isqrt`: it is
+not `const` and its iteration bound is not ours to state. Removing the cap: the
+proof is a sketch and a hard ceiling is what C-I-03 asserts against.
+
+### D-1666 — Make the V-03, V-04 and V-05 invariant rows say what their tests prove, and make V-03's test do what its doc promised — 2026-10-03
+
+**Finding.** AC-whp-tb-9 (low, bug). Three rows of `docs/04-invariants.md`
+misstated their proofs. V-03's test doc promised `i64::MAX` / `i64::MIN`
+prices and a far-future timestamp, while the loop wrote `±i64::MAX / 4`,
+open 0 and volume `i64::MAX` and never touched `ts_micros`. V-04 claimed
+"time-of-day and VWAP bits are cleared on a daily timeframe"; the test checks
+only the twenty VWAP positions under `Availability::Absent` on a one-minute
+session, nothing clears time-of-day bits, the `Evaluator` has no timeframe
+input, and `1day` is not a swept rung. V-05 claimed "the fast evaluator agrees
+with a naive reference on random input"; the test held five hand-picked
+`DailyLevels` triples and no `Evaluator`. All three named modules that do not
+exist (`indicators::proptest::`, `indicators::unit::`), which gate 10 cannot
+see because it ignores the module segment.
+
+**Decision.** Strengthen, then restate. V-03's suffix now cycles through four
+pathological shapes, including `i64::MAX`/`i64::MIN` prices with a far-future
+timestamp, a timestamp running backwards to `i64::MIN`, and `i64::MAX`
+everywhere, over every cut 1..`len − 1`; its row keeps its wording because the
+test now proves it. V-04's test is renamed
+`vwap_positions_stay_clear_without_volume` and its row states the VWAP-only
+claim. V-05's test gains 4,096 seeded pseudo-random sessions and its row names
+`DailyLevels`, not the `Evaluator`. All three rows are path-qualified to
+`crates/indicators/tests/invariants.rs`, which `.github/invariant_paths.rs`
+binds to the exact file, and their status glyph is ✓.
+
+**Rejected.** A seeded differential of the whole `Evaluator` against a naive
+reference: the naive reference would be a second evaluator, larger than the
+defect. Teaching gate 10 the module segment: `ci.yml` is shared by four
+parallel workers today, and path-qualifying the rows closes these three
+without it; the gate's limit is already named in its own comment.
+
+### D-1667 — Stop the weekday-bit comments saying NSE never trades on a weekend — 2026-10-03
+
+**Finding.** R9-csr-cx-4 (low, stale doc). D-0694 corrected the weekend
+reasoning in `evaluator.rs` and in `weekday_bit`'s own paragraph (six
+charter-recorded weekend sessions, 1,710 bars), but `weekday_bit`'s doc still
+opened "NSE trades Monday to Friday", its match arm said "2 and 3 are Saturday
+and Sunday: NSE does not trade them", its test said "NSE DOES NOT TRADE THESE
+... A weekend bar in an equity series is a store defect", `IST_OFFSET_MICROS`
+said "an exchange that trades Monday to Friday", and `vocab/src/table.rs` said
+"NSE trades Monday to Friday, so five bits and no more". Each contradicts
+`docs/00-charter.md` §3.
+
+**Decision.** Reword every one to "ordinarily trades Monday to Friday" and
+state that a weekend bar sets no weekday bit by design (D-0694). The behaviour
+is unchanged. `vocab/tests/stale_claims.rs` gains
+`no_weekday_comment_says_nse_never_trades_on_a_weekend`, which refuses the five
+stale sentences in both files and requires the corrected one.
+
+**Rejected.** Adding weekend bits: `CLAUDE.md` §3 rule 8 makes appending bits a
+decision of its own, and `weekday_bit`'s doc already records that as open.

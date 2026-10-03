@@ -3527,33 +3527,37 @@ slowdown is measurable, which is what C-T-02 requires.
 
 ---
 
-## 51. `isqrt_i128` is BOUNDED, not flat: a 217× cost spread inside a constant step bound
+## 51. `isqrt_i128` is BOUNDED, not flat: an operand-dependent cost inside a constant step bound
 
-Measured 2026-08-11, `cargo bench -p indicators`, on the operator's machine.
+**Rewritten by D-1665 (W3-indicators2-0, W3-indicators2-1).** The loop is now a
+decreasing Newton iteration from the seed `1 << ceil(bits(v) / 2)`, which is at
+or above the root, with the textbook exit `next >= guess`. Its step count is
+bounded by `ITERATION_CEILING` = `NEWTON_STEPS` = 16, a compile-time constant.
 
-| `v` | Iterations | Total | Per iteration |
-|---|---|---|---|
-| 1 | 1 | 4.0 ns | 4.0 ns |
-| `i64::MAX` | 37 | 293 ns | 7.9 ns |
-| `10^30` | 55 | 712 ns | 13.0 ns |
-| `i128::MAX` | 69 | 916 ns | 13.3 ns |
+**Iteration counts, measured by `cargo test -p indicators` (exact, not timed):**
+2 at `v = 1`, 5 at `i64::MAX`, 5 at `10^30`, 6 at `i128::MAX`, at most 5 over
+every `v` in `1..=10^6`, 7 at `isqrt(i128::MAX)^2 - 1`, and 8 as the worst of
+five million pseudo-random inputs across every bit length (a scratch program,
+not a committed test). **Proved, as a sketch:** the seed's relative error is at
+most 1 and each step leaves at most the square of it over two, so six steps
+reach an error under one unit for any root an `i128` has and one or two more
+reach the exit. 16 is twice the measured worst.
 
-The iteration count is bounded by `ITERATION_CEILING` = `NEWTON_STEPS` +
-`STEP_DOWN_STEPS` = 130, a compile-time constant, and `C-I-03` asserts the real
-count against it at all four probes. **That bound is real and it is the thing
-worth having** — it is what prevents the regression this function already had,
-where an unbounded step-down needed 1,638,791,155,897,336,446 decrements at
-`i128::MAX` under a doc comment calling itself constant-cost.
+**The figures this replaced were wrong.** The previous loop started at
+`guess = v` and stopped on `guess == previous`. This section said "a small
+input finishes in one iteration and a 127-bit one needs sixty-nine", and that
+was true only of inputs that converge: at every `v = k^2 - 1` Newton
+oscillates between `k - 1` and `k`, so the loop ran its whole 128-step cap and
+a bounded step-down repaired the root — 128 or 129 iterations at 3, 8, 143,
+975² − 1, (10¹⁵)² − 1 and isqrt(i128::MAX)² − 1, and 999 inputs in `1..=10^6`
+hit the cap. The root was always exact.
 
-**What is not true is that the cost is flat.** Two effects compound:
-
-1. The Newton loop exits on convergence (`guess != previous`), so a small input
-   finishes in one iteration and a 127-bit one needs sixty-nine. **69×.**
-2. Each iteration performs a 128-bit division, which on this architecture is a
-   library call whose own cost rises with the magnitude of its operands. **3.3×
-   per iteration.**
-
-Together, **217×** end to end.
+**What is not true is that the cost is flat.** The count still depends on the
+operand (2 to 8), and each iteration is a 128-bit division whose own cost
+rises with its operands. Historical timings on the old loop, 2026-08-11 on the
+operator's machine: 4.0 ns at `v = 1` against 916 ns at `i128::MAX`, 217× end
+to end. **The new loop has not been re-timed**: no figure is claimed for it
+here, and `C-I-03` prints its cost as context, not as a ceiling.
 
 ### Why the bench reports this as context and not as a ratio
 
@@ -3570,7 +3574,7 @@ passes. So the row asserts the bound and the root, and prints the cost with
 
 ### Why it is not made genuinely flat
 
-Dropping the convergence exit would run all 130 iterations every call, paying the
+Dropping the convergence exit would run all 16 iterations every call, paying the
 worst case always to buy a uniformity no caller needs. **VWAP abstains on spot
 indices**, which the stored paths sweep with `Availability::Absent`, so on an
 index `isqrt_i128` does not execute.
@@ -3579,8 +3583,8 @@ index `isqrt_i128` does not execute.
 swept data at all.** Since D-0507, `cli::stored::vwap_availability` answers
 `Availability::Present` for every cash-equity key, so an equity sweep reaches
 `isqrt_i128` through the VWAP sigma bands (`vwap.rs`, the variance's square
-root) on every bar where enough volume has contributed for a sigma. The 217×
-spread is therefore a real per-call spread on equity runs. It stays bounded by
+root) on every bar where enough volume has contributed for a sigma. The
+operand-dependent spread is therefore a real per-call spread on equity runs. It stays bounded by
 `ITERATION_CEILING`, and its share of a whole bar is inside what gate 8 measures:
 `C-R-05` builds the column with `Availability::Present` on bars that carry volume,
 and D-0690 recorded the VWAP family adding about 42% to 44% per bar on that
@@ -14086,3 +14090,38 @@ The rollback on a failed append is one `seek`, one `set_len` and one
   input order without restructuring the audit kernel. Stated from the code's
   shape; not timed, and the wall-clock change on the operator's stores is
   UNVERIFIED.
+
+## Walk-forward fold rung counts are derived per training window — D-1660, 3 October 2026
+
+`cli::fold_rungs` hands each walk-forward fold `grid_rungs` over its own
+training signal slice (GAP4-46). That is one `reference_price`, one
+`grid_step_ppm` and one `max_stop_points` pass per fold, so **O(training
+bars) per fold and O(folds x span) per walk-forward shape**, beside the
+per-fold column build that already costs O(training bars). It runs on the
+outer thread once per fold, never per bar or per candidate, so none of the
+five operations `CLAUDE.md` §3 rule 4 bounds is touched. **UNVERIFIED as a
+measured bound**: read off the source, no bench times it. With
+`BRUTEX_GRID_RUNGS` set the count is fixed and no per-fold pass runs.
+
+## The minute-gap census asks the overlay's question once; the retry loop is a defence — D-1662, 3 October 2026
+
+`minute_gaps::days_with_minute_holes` (W2-cli9-3) withholds, before any column
+is built, every day with an interior minute gap and every day holding a
+signal bar whose demanded closing minute is absent. **O(signal + minutes +
+d log d)** for d flagged days, one `kind_of` lookup per signal bar, off every
+per-bar sweep path. **UNVERIFIED as a measured bound**: read off the source.
+
+`column_withholding_at_build` and `exact_minute_withholding_unsourceable_days`
+keep their 64-pass loops (W2-cli8-6). Each pass still reloads the daily and
+exact-minute contexts, re-digests, writes a durable preparation attempt and
+rebuilds the column, so the worst case remains O(64 x (bars x vocabulary +
+minutes)) per rung. With the census asking the overlay's own question the
+loop runs once on every span the census can see;
+`sessions_missing_their_closing_minutes_are_withheld_up_front` counts one pass
+on a span with three edge-holed days. A second pass now means the census and
+the overlay disagree, which is a defect, and it is still refused loudly at
+the bound rather than ground through.
+
+What the census does not withhold: a session-edge hole no signal bar's close
+demands (a `1min` rung that stops at 15:24, a missing 09:15). Such a day is
+swept with the bars it has, as before.

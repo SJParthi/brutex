@@ -262,3 +262,51 @@ fn a_chunk_of_unidentified_months_begins_no_attempt() {
         );
     });
 }
+
+/// AC-whp-law-0 and AC-whp-law-2, D-1661: one stored month swept through
+/// `sweep-all`'s `one` and through `sweep-stored` — typed in lower case —
+/// files two ledger rows that agree on the two fields readers compare across
+/// doors. `bars` is the column's swept count, warm-up excluded, on both: it was
+/// `loaded.bars.len()` on `sweep-stored`, which counts warming bars the sweep
+/// never folded. `underlying` is the canonical key on both: it was the typed
+/// word on `sweep-stored`, while the run identity already used the key.
+#[test]
+fn sweep_all_and_sweep_stored_record_the_same_swept_bars_and_canonical_name() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::audited_stored::with_warmed_store(|root| {
+        let row = one(root, &held(root, "5min"), u64::MAX, COMMIT);
+        require_completed(&row);
+        let report = crate::sweep_stored_kernel(crate::StoredSweepRequest {
+            root: root.to_path_buf(),
+            vendor: brutex_core::vendor::Vendor::Zerodha,
+            underlying: "nifty",
+            rung: "5min",
+            year: 2025,
+            month: 5,
+            min_hits: u64::MAX,
+            commit: COMMIT,
+        })
+        .expect("the lower-case word names the same stored month");
+        assert!(report.contains("RESULT RECORDED"), "{report}");
+        let mut ledger = Results::open_read(root).expect("two parents");
+        assert_eq!(ledger.len().expect("parent count"), 2);
+        let all = ledger.read(0).expect("sweep-all parent");
+        let stored = ledger.read(1).expect("sweep-stored parent");
+        assert_eq!(stored.bars, all.bars, "one month, one swept count");
+        assert_eq!(all.bars, row.bars);
+        assert_eq!(crate::results::read_field(&stored.underlying), "NIFTY");
+        assert_eq!(crate::results::read_field(&all.underlying), "NIFTY");
+        // Strictly fewer than the month's bars: warm-up is not swept.
+        let loaded = crate::stored::load(
+            root,
+            brutex_core::vendor::Vendor::Zerodha,
+            "NIFTY",
+            "5min",
+            2025,
+            5,
+        )
+        .expect("the month");
+        assert!(stored.bars < u64::try_from(loaded.bars.len()).expect("fits"));
+    });
+}

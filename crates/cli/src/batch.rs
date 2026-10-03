@@ -454,6 +454,12 @@ struct Prepared<'h> {
 /// One instrument-month swept under its begun attempt, not yet filed.
 struct Swept<'h> {
     held: &'h Held,
+    /// The feed and the CANONICAL instrument the identity was built from
+    /// (`loaded.vendor`, `loaded.key.underlying`), so the ledger row names what
+    /// the identity names and not the word the catalogue listed (AC-whp-law-0,
+    /// D-1661).
+    feed: String,
+    underlying: String,
     label: String,
     id: runner::identity::RunId,
     attempt: crate::sweep_evidence::Attempt,
@@ -811,6 +817,8 @@ fn sweep_prepared(
     );
     Ok(Swept {
         held,
+        feed: loaded.vendor.as_str().to_owned(),
+        underlying: loaded.key.underlying.as_str().to_owned(),
         label,
         id,
         attempt,
@@ -826,6 +834,8 @@ fn sweep_prepared(
 fn file_swept(root: &std::path::Path, swept: Swept<'_>, min_hits: u64) -> Row {
     let Swept {
         held,
+        feed,
+        underlying,
         label,
         id,
         attempt,
@@ -855,8 +865,8 @@ fn file_swept(root: &std::path::Path, swept: Swept<'_>, min_hits: u64) -> Row {
         crate::record_swept_run(
             crate::Recording {
                 root,
-                feed: held.vendor.as_str(),
-                underlying: held.symbol.as_str(),
+                feed: feed.as_str(),
+                underlying: underlying.as_str(),
                 timeframe: held.timeframe.as_str(),
                 from: (held.month.year(), held.month.month()),
                 to: (held.month.year(), held.month.month()),

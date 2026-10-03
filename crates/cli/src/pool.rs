@@ -939,7 +939,8 @@ fn price_all(
             crate::EXECUTION_RUNG
         )
     })?;
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days =
+        crate::minute_gaps::days_with_minute_holes(&span.bars, execution_slice, signal_length);
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
@@ -2719,7 +2720,7 @@ mod tests {
             "stored::load_span(",
             "stored::rung_length_micros(",
             "validate_one_minute_execution(",
-            "minute_gaps::days_with_interior_gaps(",
+            "minute_gaps::days_with_minute_holes(",
             "minute_gaps::withhold(",
             "crate::column_withholding_at_build(",
             "crate::StoredPreparationBuild { rung, commit: None }",

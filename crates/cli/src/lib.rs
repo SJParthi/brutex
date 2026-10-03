@@ -841,7 +841,8 @@ fn verify_arm(out: &mut String, feed: &str, underlying: &str) -> u8 {
 /// close on that minute.
 ///
 /// [`crate::minute_gaps::days_with_interior_gaps`] was written for this and
-/// GUESSES: it walks the minute series looking for a step wider than a minute.
+/// GUESSED (its successor, `days_with_minute_holes`, now asks the overlay's
+/// own question up front, D-1662, so this loop is a defence): it walks the minute series looking for a step wider than a minute.
 /// The overlay does not need "a day with a gap somewhere" — it needs, for each
 /// signal bar, the exact minute its close lands on. Those are different
 /// questions, and the gap walk answered the wrong one: the day survived its
@@ -1013,6 +1014,8 @@ fn column_withholding_at_build(
     // does not change when a day is withheld.
     let availability = stored::vwap_availability(&stored::swept_index(underlying)?);
     for _ in 0..ATTEMPTS {
+        #[cfg(test)]
+        COLUMN_BUILD_ATTEMPTS.with(|count| count.set(count.get().saturating_add(1)));
         let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
         let digest = stored_anchored_digest(bars, &exact, &daily)?;
@@ -1078,6 +1081,15 @@ fn column_withholding_at_build(
          {ATTEMPTS} day(s): {dropped:?}. A span needing more than that is not a \
          span with holes. Nothing was swept."
     ))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: passes of [`column_withholding_at_build`]'s loop on this
+    /// thread, so a test can prove the census withheld every day up front and
+    /// the loop ran once (W2-cli8-6, D-1662).
+    pub(crate) static COLUMN_BUILD_ATTEMPTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Records preparation under the same admitted build identity as its caller.
@@ -3365,7 +3377,7 @@ fn sweep_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
 /// # Exactly as the other four doors do it
 ///
 /// The day list is MEASURED from the execution series with
-/// [`crate::minute_gaps::days_with_interior_gaps`] and never written down;
+/// [`crate::minute_gaps::days_with_minute_holes`] and never written down;
 /// [`crate::minute_gaps::withhold`] removes those days from the signal bars;
 /// and the daily and exact-minute contexts are derived afterwards, from the
 /// bars that remain, so all three agree. On a coarse rung the separately
@@ -3422,7 +3434,11 @@ fn stored_sweep_inputs(request: &StoredSweepRequest<'_>) -> Result<StoredMonthIn
             "the {EXECUTION_RUNG} execution series for {year}-{month:02} is malformed: {why}. Nothing was swept; repair or repull that exact feed/instrument/month"
         )
     })?;
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &loaded.bars,
+        execution_slice,
+        stored::rung_length_micros(rung)?,
+    );
     let withheld = if holed_days.is_empty() {
         0
     } else {
@@ -3689,7 +3705,7 @@ fn stored_month_kernel(
                 Recording {
                     root: &root,
                     feed: vendor.as_str(),
-                    underlying,
+                    underlying: loaded.key.underlying.as_str(),
                     timeframe: rung,
                     from: (year, month),
                     to: (year, month),
@@ -3699,7 +3715,7 @@ fn stored_month_kernel(
                 },
                 &id,
                 &outcome.sweep,
-                u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX),
+                outcome.census.swept,
                 min_hits,
             )
             .map(|(report, _committed)| report)
@@ -3968,7 +3984,8 @@ fn auto_stored_kernel(
     // against a refusal that stops the run dead. See `crate::minute_gaps` for
     // what is withheld and why it is measured rather than listed.
     let minutes = stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to)?.bars;
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(&minutes);
+    let holed_days =
+        crate::minute_gaps::days_with_minute_holes(&span.bars, &minutes, signal_length);
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
@@ -5320,8 +5337,8 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // anywhere -- and this knob is settable over HTTP from a free-text box, so
     // a typo silently bought a different grid. `CLAUDE.md` §4: degrade loudly
     // and name the reason, or refuse. `audit_bars` prints what was refused.
-    if let Some(n) = crate::knobs::count_usize("BRUTEX_GRID_RUNGS") {
-        return n.min(rungs_within_cell_budget()).max(2);
+    if let Some(n) = grid_rungs_override() {
+        return n;
     }
     let reference = reference_price(bars);
     // ONE BAR: this sizes a DISPLAY rung count, not a priced ladder, and it has
@@ -5337,6 +5354,62 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // ladder -- left this division with no upper bound at all.
     from_the_data.min(rungs_within_cell_budget())
 }
+
+/// The operator's explicit `BRUTEX_GRID_RUNGS`, clamped to the cell budget and
+/// floored at two, or `None` when it is unset or unusable (the refusal is
+/// recorded by `knobs::count_usize`). The one read [`grid_rungs`] and
+/// [`walk_forward_rungs`] share, so the screen and the walk-forward cannot disagree
+/// about whether an override is in force.
+fn grid_rungs_override() -> Option<usize> {
+    crate::knobs::count_usize("BRUTEX_GRID_RUNGS").map(|n| n.min(rungs_within_cell_budget()).max(2))
+}
+
+/// How each walk-forward fold sizes its exit ladder. GAP4-46, D-1660.
+///
+/// # The look-ahead this closes
+///
+/// [`knobs_checked`] resolves [`grid_rungs`] over the WHOLE span, and that
+/// count used to reach every fold. Its derivation reads the span's reference
+/// price, its grid step and its ninetieth-percentile bar range -- test windows
+/// included -- so a bar inside fold N's test window could move the ladder fold
+/// N was TRAINED with. `CLAUDE.md` §3 rule 7 bans exactly that.
+///
+/// Now each fold derives the count from its own training signal slice through
+/// the same [`grid_rungs`], so nothing after a fold's training window reaches
+/// its ladder. An operator's explicit `BRUTEX_GRID_RUNGS` is a count no bar
+/// decides and stays [`runner::validate::FoldRungs::Fixed`]: the same value in
+/// every fold, exactly what it was. The screen's whole-span count is unchanged:
+/// it is in-sample by construction and labelled so.
+///
+/// # Cost
+///
+/// One [`grid_rungs`] per fold -- O(training bars) through `reference_price`,
+/// `grid_step_ppm` and `max_stop_points` -- off every per-bar and
+/// per-candidate path, beside the per-fold column build that is already
+/// O(training bars). Named in `docs/06-limits.md`.
+fn walk_forward_rungs() -> runner::validate::FoldRungs<'static> {
+    grid_rungs_override().map_or(
+        runner::validate::FoldRungs::PerTraining(&grid_rungs),
+        runner::validate::FoldRungs::Fixed,
+    )
+}
+
+/// The identity word for [`walk_forward_rungs`]' policy, appended to [`policy_of`] as
+/// its twenty-first term. Zero is never written: an identity minted before the
+/// term existed has twenty terms, and `with_policy` folds the length first.
+const fn fold_rungs_policy_word(rungs: runner::validate::FoldRungs<'_>) -> u64 {
+    match rungs {
+        runner::validate::FoldRungs::Fixed(_) => FOLD_RUNGS_FIXED,
+        runner::validate::FoldRungs::PerTraining(_) => FOLD_RUNGS_PER_TRAINING,
+    }
+}
+
+/// [`fold_rungs_policy_word`] for a fold count the caller fixed.
+const FOLD_RUNGS_FIXED: u64 = 1;
+
+/// [`fold_rungs_policy_word`] for a count each fold derives from its own
+/// training window.
+const FOLD_RUNGS_PER_TRAINING: u64 = 2;
 
 /// The most rungs whose grid still fits the memory this machine can spare.
 ///
@@ -6250,7 +6323,7 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
             recording: Some(Recording {
                 root: &root,
                 feed: vendor.as_str(),
-                underlying,
+                underlying: loaded.key.underlying.as_str(),
                 timeframe: rung,
                 from: (year, month),
                 to: (year, month),
@@ -6794,7 +6867,11 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     // siblings -- all still hold: a hole still refuses when its day IS swept.
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &span.bars,
+        execution_slice,
+        stored::rung_length_micros(rung)?,
+    );
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
@@ -6957,7 +7034,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
             recording: Some(Recording {
                 root: &root,
                 feed: vendor.as_str(),
-                underlying,
+                underlying: span.key.underlying.as_str(),
                 timeframe: span.timeframe,
                 from,
                 to,
@@ -10364,7 +10441,7 @@ fn policy_of(
     validate: bool,
     horizon: Horizon,
     fold_rungs: usize,
-) -> [u64; 20] {
+) -> [u64; 21] {
     [
         // Negative is not expected and is not silently folded to zero: the cast
         // is saturating so a negative rule still differs from an absent one.
@@ -10511,13 +10588,15 @@ fn policy_of(
         // is always `0`. It stays, at this position, because positional
         // identity is append-only.
         screen_budget_ms().unwrap_or(0),
-        // THE SEVENTEENTH: THE RUNG COUNT THE WALK-FORWARD ACTUALLY PRICED.
+        // THE SEVENTEENTH: THE RESOLVED WHOLE-SPAN RUNG COUNT.
         //
         // The third term remains the SCREEN's historical count and cannot move:
-        // positional identity is append-only. This last term records the value
-        // the caller also hands to `walk_forward_shaped_with_rungs`, so the
-        // identity and the validation computation cannot disagree merely
-        // because runner cannot see the CLI's request-local knob store.
+        // positional identity is append-only. This term was appended as "the
+        // value the walk-forward priced", and it still is when
+        // `BRUTEX_GRID_RUNGS` fixes the count. Without the override each fold
+        // now derives its own count from its training window (GAP4-46); the
+        // twenty-first term names which policy ran, and this one keeps its
+        // value and its position.
         u64::try_from(fold_rungs).unwrap_or(u64::MAX),
         // THE EIGHTEENTH: the protective-exit rule.
         //
@@ -10566,6 +10645,15 @@ fn policy_of(
         // term added in the middle silently renumbers every one after it.
         u64::from_ne_bytes(rules.min_fill_headroom_bp.to_ne_bytes()),
         u64::from_ne_bytes(rules.min_avg_rr_bp.to_ne_bytes()),
+        // THE TWENTY-FIRST: HOW EACH FOLD SIZED ITS LADDER (GAP4-46, D-1660).
+        //
+        // The seventeenth term above still holds the whole-span count, computed
+        // exactly as it always was: positional identity is append-only and a
+        // term is never reinterpreted. What changed is that a fold no longer
+        // receives that count unless `BRUTEX_GRID_RUNGS` fixed it -- each fold
+        // derives its own from its training window. That is a different
+        // computation over the same bars, so it is named here, appended.
+        fold_rungs_policy_word(walk_forward_rungs()),
     ]
 }
 
@@ -15982,7 +16070,11 @@ fn load_screen_inputs(
     // siblings -- all still hold: a hole still refuses when its day IS swept.
     // What changed is that the day is not swept. Substituting would answer a
     // question with the wrong bar; withholding declines to answer it, out loud.
-    let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    let holed_days = crate::minute_gaps::days_with_minute_holes(
+        &span.bars,
+        execution_slice,
+        stored::rung_length_micros(rung)?,
+    );
     let withheld = if holed_days.is_empty() {
         0
     } else {
@@ -16136,7 +16228,7 @@ fn screen_range_kernel_cached(
             recording: Some(Recording {
                 root: &root,
                 feed: vendor.as_str(),
-                underlying,
+                underlying: span.key.underlying.as_str(),
                 timeframe: span.timeframe,
                 from,
                 to,
@@ -18758,8 +18850,10 @@ fn knobs_checked(
 ) -> (Horizon, usize, Option<String>) {
     let _screen_cap = screen_cap();
     let _budget = screen_budget_ms();
-    // Retained, not merely checked: this exact resolved value reaches both
-    // walk-forward shapes instead of runner re-reading a different knob door.
+    // Retained, not merely checked: this is the SCREEN's whole-span count. It
+    // reaches a walk-forward fold only when `BRUTEX_GRID_RUNGS` fixes it;
+    // otherwise each fold derives its own from its training window
+    // (`walk_forward_rungs`, GAP4-46), so no test-window bar can size a fold's ladder.
     let rungs = grid_rungs(bars);
     let _sizing_rate = sizing_rate_bp();
     let horizon = horizon_for(bars, on_execution_series);
@@ -18919,7 +19013,6 @@ fn ranked_opening(
 /// Every fallible input needed before an audit can rank one candidate.
 struct PreparedAudit {
     horizon: Horizon,
-    rungs: usize,
     refused_knobs: Option<String>,
     ladder: engine::Ladder,
     column: indicators::column::Column,
@@ -18937,7 +19030,10 @@ fn prepare_audit(
     ceiling: Option<usize>,
     on_execution_series: bool,
 ) -> Result<PreparedAudit, String> {
-    let (horizon, rungs, refused_knobs) = knobs_checked(bars, on_execution_series);
+    // The whole-span rung count is read for its refusal only: a walk-forward
+    // fold resolves its own (`walk_forward_rungs`, GAP4-46) and the screen
+    // derives its grid where it prices.
+    let (horizon, _whole_span_rungs, refused_knobs) = knobs_checked(bars, on_execution_series);
     let ladder = ladder_within(min_hits, ceiling).map_err(|why| format!("refused: {why}\n"))?;
     let column = if let Some(column) = prepared_column {
         column
@@ -18947,7 +19043,6 @@ fn prepare_audit(
     };
     Ok(PreparedAudit {
         horizon,
-        rungs,
         refused_knobs,
         ladder,
         column,
@@ -19312,7 +19407,6 @@ fn audit_bars_work(
         .map_or(Availability::Absent, Evaluator::availability);
     let PreparedAudit {
         horizon,
-        rungs,
         refused_knobs,
         ladder,
         column,
@@ -19462,7 +19556,7 @@ fn audit_bars_work(
                 recording,
                 id,
                 &outcome.sweep,
-                u64::try_from(bars.len()).unwrap_or(u64::MAX),
+                outcome.census.swept,
                 min_hits,
                 if outcome.sweep.halted.is_some() {
                     "the streamed ladder halted on a budget before it could certify closure"
@@ -19515,7 +19609,7 @@ fn audit_bars_work(
             recording,
             id,
             &outcome.sweep,
-            u64::try_from(bars.len()).unwrap_or(u64::MAX),
+            outcome.census.swept,
             min_hits,
             "no closed combination survived edge ranking, so no TRADE was selected",
         );
@@ -19658,7 +19752,7 @@ fn audit_bars_work(
             }
             let unadmitted = Unadmitted {
                 sweep: &outcome.sweep,
-                bars: u64::try_from(bars.len()).unwrap_or(u64::MAX),
+                bars: outcome.census.swept,
                 min_hits,
                 by_evidence: &by_evidence,
                 rules,
@@ -19801,7 +19895,7 @@ fn audit_bars_work(
                 ladder,
                 &fresh,
                 replay,
-                rungs,
+                walk_forward_rungs(),
                 &|progress| note_validation_fold(recording, progress),
             )
         })
@@ -19860,7 +19954,7 @@ fn audit_bars_work(
         outcome: &outcome,
         selected: chosen.cell,
         direction: chosen.direction,
-        bars: u64::try_from(bars.len()).unwrap_or(u64::MAX),
+        bars: outcome.census.swept,
         min_hits,
         mask_words: chosen.scored.mask.words(),
         by_evidence: &by_evidence,
@@ -20012,7 +20106,8 @@ fn both_shapes(
     // one from the borrow.
     fresh: &Evaluator,
     replay: Option<StoredReplay<'_>>,
-    rungs: usize,
+    // A POLICY, NOT A COUNT (GAP4-46). The whole-span count read test windows.
+    rungs: runner::validate::FoldRungs<'_>,
     on_fold: &(dyn Fn(runner::validate::FoldProgress) + Sync),
 ) -> (runner::validate::Validated, runner::validate::Validated) {
     let splits = walk_forward_splits(bars.len());
@@ -23036,13 +23131,14 @@ mod tests {
         // length first precisely so adding one re-keys.
         assert_eq!(
             start.len(),
-            20,
-            "twenty choices are folded in. The eighteenth is \
+            21,
+            "twenty-one choices are folded in. The eighteenth is \
              `require_protective_exits`; the nineteenth and twentieth are \
              `min_fill_headroom_bp` and `min_avg_rr_bp`, both APPENDED after it \
              rather than placed beside the other rule terms, because positional \
              identity is append-only and inserting one there renumbers every \
-             term after it. \
+             term after it. The twenty-first is the walk-forward fold-rung \
+             policy (GAP4-46, D-1660), appended for the same reason. \
              If this moved, `policy_of`'s doc \
              table and the append-never-insert rule both need reading before the \
              number is changed"
@@ -23163,6 +23259,62 @@ mod tests {
         assert_eq!(
             policy[16], 2,
             "the same value validation receives stays appended as term seventeen"
+        );
+    }
+
+    /// GAP4-46: without an override each walk-forward fold sizes its ladder
+    /// from its own training slice through `grid_rungs`, a bar after that
+    /// slice cannot move it, and the identity names the policy as an APPENDED
+    /// twenty-first term while the seventeenth keeps the whole-span count.
+    #[test]
+    fn walk_forward_folds_size_their_ladder_from_training_alone_and_the_identity_says_so() {
+        let _guard = crate::knobs::serially();
+        crate::knobs::clear_all();
+        let bars = runner::synthetic::sessions(4);
+        let cut = bars.len() / 2;
+        let training = bars.get(..cut).expect("half the span");
+        let mut later = bars.clone();
+        for bar in later.get_mut(cut..).expect("the second half") {
+            bar.high = bar.high.saturating_add(bar.high / 50);
+        }
+        assert_ne!(
+            grid_rungs(&later),
+            grid_rungs(&bars),
+            "the fixture's later bars must move the whole-span count, or this proves nothing"
+        );
+        let runner::validate::FoldRungs::PerTraining(resolve) = crate::walk_forward_rungs() else {
+            panic!("with no override a fold must derive its own count");
+        };
+        let early = later.get(..cut).expect("half the span");
+        assert_eq!(
+            resolve(early),
+            grid_rungs(training),
+            "only the training slice is read"
+        );
+        assert_eq!(resolve(early), resolve(training));
+
+        let h = Horizon::DEFAULT;
+        let rungs = grid_rungs(&bars);
+        let lens = runner::rank::Lens::Detectability;
+        let rules = crate::Rules::elite(400, 25);
+        let derived = policy_of(&bars, rules, lens, true, h, rungs);
+        assert_eq!(
+            Some(derived[16]),
+            u64::try_from(rungs).ok(),
+            "term seventeen keeps its value"
+        );
+        assert_eq!(derived[20], crate::FOLD_RUNGS_PER_TRAINING);
+
+        crate::knobs::set("BRUTEX_GRID_RUNGS", "3");
+        let fixed = crate::walk_forward_rungs();
+        let pinned = policy_of(&bars, rules, lens, true, h, grid_rungs(&bars));
+        crate::knobs::clear_all();
+        assert!(matches!(fixed, runner::validate::FoldRungs::Fixed(3)));
+        assert_eq!(pinned[16], 3);
+        assert_eq!(pinned[20], crate::FOLD_RUNGS_FIXED);
+        assert_ne!(
+            derived[20], pinned[20],
+            "the two policies are different computations and must key apart"
         );
     }
 
