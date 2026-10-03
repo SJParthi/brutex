@@ -724,6 +724,37 @@ fn index_stop_vix_full_capture_budget_refuses_before_any_companion_publication()
 }
 
 #[test]
+fn index_stop_vix_publication_cut_short_before_its_receipt_resumes() -> Result<(), String> {
+    let (fixture, _, saved) = saved(None)?;
+    let directory = directory(&fixture, &saved);
+    let whole = fs::read(directory.join("body.bin")).map_err(display)?;
+    let receipt = fs::read(directory.join("complete.bin")).map_err(display)?;
+    let catalog = Catalog::open(
+        &fixture.output,
+        saved.identity(),
+        bounds().bytes,
+        bounds().records,
+    )?;
+    // A kill after `prepare_in_namespace` created the directory, part-way
+    // through the body, and before `finish` wrote the receipt (D-1760).
+    for kept in [0, whole.len() / 2] {
+        fs::remove_file(directory.join("complete.bin")).map_err(display)?;
+        fs::write(directory.join("body.bin"), &whole[..kept]).map_err(display)?;
+        let reader = publish(
+            &fixture.output,
+            &fixture.root,
+            Vendor::Zerodha,
+            &catalog,
+            bounds(),
+        )?;
+        assert_eq!(reader.image.meta.feed, "zerodha");
+        assert_eq!(fs::read(directory.join("body.bin")).map_err(display)?, whole);
+        assert_eq!(fs::read(directory.join("complete.bin")).map_err(display)?, receipt);
+    }
+    Ok(())
+}
+
+#[test]
 fn index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error()
 -> Result<(), String> {
     let (fixture, _, saved) = saved(None)?;

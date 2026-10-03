@@ -186,29 +186,53 @@ fn directory(parent: &Path, path: &Path) -> Result<(), String> {
         .map_err(display)
 }
 
+/// Writes `body` once, accepts an identical existing file, and finishes a
+/// torn one.
+///
+/// Every caller holds the namespace's exclusive owner lock and writes the
+/// receipt last, so an existing file that is a strict prefix of `body` is a
+/// write that was cut short (a kill, ENOSPC or EIO between `create_new` and
+/// `sync_all`), never committed history: nothing reads a body before its
+/// receipt exists, and a receipt is only read whole. Refusing it would wedge
+/// that identity for good, because every rerun derives the same path
+/// (D-1760). Anything that is NOT a prefix of the intended bytes, or is longer
+/// than them, is a different publication and is still refused.
 fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
-    match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(mut file) => {
-            file.write_all(body).map_err(display)?;
-            file.sync_all().map_err(display)?;
-            let before = crate::result_set::file_generation(&file, path)?;
-            if file.metadata().map_err(display)?.len() != body.len() as u64 {
-                return Err("Boolean evidence write was not retained".to_owned());
-            }
-            crate::result_set::require_generation_unchanged(
-                before,
-                crate::result_set::file_generation(&file, path)?,
-                path,
-            )
-        }
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
-            if read_exact(path, body.len() as u64)? != body {
-                return Err("Boolean evidence already exists with different or incomplete bytes; history preserved".to_owned());
+            let limit = (body.len() as u64).saturating_add(1);
+            let existing = read_exact(path, limit)?;
+            if existing == body {
+                return Ok(());
             }
-            Ok(())
+            if existing.len() >= body.len() || !body.starts_with(&existing) {
+                return Err("Boolean evidence already exists with different bytes; history preserved".to_owned());
+            }
+            let mut file = OpenOptions::new().append(true).open(path).map_err(display)?;
+            if file.metadata().map_err(display)?.len() != existing.len() as u64 {
+                return Err("Boolean evidence changed while its torn write was resumed".to_owned());
+            }
+            file.write_all(&body[existing.len()..]).map_err(display)?;
+            return retained(&file, path, body.len());
         }
-        Err(why) => Err(display(why)),
+        Err(why) => return Err(display(why)),
+    };
+    file.write_all(body).map_err(display)?;
+    retained(&file, path, body.len())
+}
+
+fn retained(file: &File, path: &Path, bytes: usize) -> Result<(), String> {
+    file.sync_all().map_err(display)?;
+    let before = crate::result_set::file_generation(file, path)?;
+    if file.metadata().map_err(display)?.len() != bytes as u64 {
+        return Err("Boolean evidence write was not retained".to_owned());
     }
+    crate::result_set::require_generation_unchanged(
+        before,
+        crate::result_set::file_generation(file, path)?,
+        path,
+    )
 }
 
 pub(super) fn read_exact(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -414,3 +438,7 @@ fn cell(out: &mut Vec<u8>, value: &runner::grid::Cell) {
     signed(out, value.worst_trade);
     signed(out, value.max_drawdown);
 }
+
+#[cfg(test)]
+#[path = "boolean_candidate_persistence_tests.rs"]
+mod persistence_tests;

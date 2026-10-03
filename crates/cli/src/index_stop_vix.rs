@@ -383,7 +383,11 @@ pub(crate) fn publish(
     let pin = catalog.completion_digest();
     let lookup = lookup_identity(identity, pin);
     let directory = root.join(NAMESPACE).join(crate::identity_hex(&lookup));
-    match std::fs::symlink_metadata(&directory) {
+    // The receipt, not the directory, marks a publication finished: the
+    // directory exists from the first step of `prepare_in_namespace`, so a run
+    // cut short before `finish` must fall through and resume rather than be
+    // read as published and refused on every rerun (D-1760).
+    match std::fs::symlink_metadata(directory.join("complete.bin")) {
         Ok(_) => {
             let saved = Reader::open(root, identity, pin, bounds)?;
             if saved.image.meta.feed != feed.as_str() {
