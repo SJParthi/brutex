@@ -53481,3 +53481,25 @@ write is simpler and the memory it costs is stated in `docs/06-limits.md`.
 is refused by every reader, and the next `begin` takes a new token.
 
 Invariant DUR-C-05.
+
+### D-1742 — An empty per-invocation journal reads as its unconfirmed indexed start — 2026-10-03
+
+**Finding.** W2-cli9-5, `crates/cli/src/operation_audit.rs` `read`.
+
+**What was wrong.** `begin` creates the per-invocation journal with
+`create_new` and writes its start record next. A crash between them leaves a
+0-byte journal. `read` returned the unconfirmed start for a missing journal
+but refused an empty one ("invocation journal lost its indexed start"), so
+every `page` that covered that ID refused for good.
+
+**The decision.** An empty journal is the same fact as a missing one: an
+indexed start nobody confirmed. `read` returns `Ok(Some(started))` for it.
+A journal holding a partial record is still refused by `length`, and one
+whose first record differs from the index is still refused. Nothing on disk
+is repaired.
+
+**Rejected.** Creating the journal by temp-and-rename: it removes the empty
+state for new journals but not for those already on disk, and the read rule
+is needed either way.
+
+Invariant DUR-C-06.
