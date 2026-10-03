@@ -100,6 +100,10 @@ pub enum FolderError {
     /// `CLAUDE.md` §4 bans, so this arm refuses instead, and the deviation
     /// from the two siblings is named here rather than left to be discovered.
     NoHome,
+    /// [`ROOT_ENV`] or `HOME` is set but empty, or `HOME` is relative: either
+    /// would resolve against the working directory (CE-33, CE-38, D-1769). The
+    /// sentence is `brutex_core::knob`'s, naming the variable.
+    Unusable(String),
     /// The feed is REST. It has no folder at all.
     ///
     /// Refused rather than answered with a path, because a path invented for a
@@ -141,6 +145,7 @@ impl core::fmt::Display for FolderError {
                  is its folder, so a guess here would report a precise and \
                  wrong answer"
             ),
+            Self::Unusable(ref why) => f.write_str(why),
             Self::NotAFolderFeed { feed } => write!(
                 f,
                 "{feed} is a {}, so it has no folder — its bars are {} over the \
@@ -193,13 +198,16 @@ const HOME_ENV: &str = "HOME";
 ///
 /// [`FolderError::NoHome`] when both are absent.
 fn root_from(value: Option<OsString>, home: Option<OsString>) -> Result<PathBuf, FolderError> {
-    if let Some(named) = value {
-        return Ok(PathBuf::from(named));
+    if let Some(named) =
+        brutex_core::knob::folder(ROOT_ENV, value).map_err(FolderError::Unusable)?
+    {
+        return Ok(named);
     }
     let Some(home) = home else {
         return Err(FolderError::NoHome);
     };
-    Ok(PathBuf::from(home)
+    Ok(brutex_core::knob::home(Some(home))
+        .map_err(FolderError::Unusable)?
         .join(crate::config::CONFIG_DIR)
         .join(ROOT_DIR))
 }
@@ -618,6 +626,25 @@ mod tests {
             !derived.starts_with("/Users") && !derived.starts_with("/home/y"),
             "the home half must come from the caller"
         );
+    }
+
+    /// CE-33 and CE-38, D-1769: an empty archive root and an empty or relative
+    /// HOME refuse by name instead of naming the working directory.
+    #[test]
+    fn an_empty_root_or_an_unusable_home_refuses_by_name() {
+        let why = root_from(Some("".into()), Some("/home/x".into())).expect_err("empty root");
+        assert!(
+            why.to_string()
+                .starts_with(&format!("{ROOT_ENV} is set but empty")),
+            "{why}"
+        );
+        let why = root_from(None, Some(" ".into())).expect_err("empty HOME");
+        assert!(
+            why.to_string().starts_with("HOME is set but empty"),
+            "{why}"
+        );
+        let why = root_from(None, Some("rel".into())).expect_err("relative HOME");
+        assert!(why.to_string().contains("relative"), "{why}");
     }
 
     /// With neither set there is NO default folder, and the halt says so.

@@ -173,6 +173,25 @@ pub fn expiry_of(
     let settled = found.ok_or(RollingError::NoExpiry {
         why: "no expiry was reached",
     })?;
+    // A CLOSED DAY IS NOT AN EXPIRY. `costs::expiry` returns the plain
+    // calendar weekday and leaves holidays to its caller, and this caller never
+    // asked, so a holiday week's contract got a closed day as its expiry, was
+    // filed under that key, and priced at a tenor ~4.8x too long (CE-14,
+    // D-1769). The exchange's holiday-shift rule is not recorded in
+    // `docs/00-charter.md`, so the closed day is REFUSED rather than stepped
+    // back (`CLAUDE.md` §3 rule 1). A day past the calendar's last measured
+    // day cannot be checked and is passed through; `docs/06-limits.md` names
+    // that limit.
+    if matches!(
+        crate::calendar::kind_of(i64::from(settled.ordinal())),
+        crate::calendar::DayKind::Closed
+    ) {
+        return Err(RollingError::NoExpiry {
+            why: "the computed expiry falls on a day the exchange calendar marks closed, and the \
+                  rule that moves an expiry off a holiday is not charter-sourced, so no date is \
+                  guessed",
+        });
+    }
     brutex_core::instrument::Expiry::new(settled.year(), settled.month(), settled.day()).map_err(
         |_| RollingError::NoExpiry {
             why: "the calendar produced a date this store cannot name",
@@ -272,6 +291,17 @@ pub enum RollingError {
         /// The cell exactly as the vendor wrote it.
         text: String,
     },
+    /// A decimal cell that is present and cannot be read exactly — not text
+    /// or a number, or a form the six-place shift does not read (an exponent,
+    /// an overflow, junk). It was stored as the null sentinel, which is the
+    /// record that the vendor SENT NONE, and pricing then solved its own value
+    /// and labelled it so (CE-16, D-1769).
+    Undecimal {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
     /// A price cell that is negative, or is not zero and snaps to zero.
     /// GAP16-23, D-1492.
     NotAPrice {
@@ -332,6 +362,12 @@ impl core::fmt::Display for RollingError {
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
             }
+            Self::Undecimal { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, which is not a decimal this build \
+                 reads exactly. Refused rather than stored as the absence the \
+                 vendor did not state"
+            ),
             Self::Uncountable { field, text } => write!(
                 f,
                 "a `{field}` cell holds {text}, which is not a non-negative whole \
@@ -630,7 +666,10 @@ pub fn read(
             // IV IN MILLIONTHS, and the multiply happens on the way in so the
             // store never holds a float. See `Overlay`'s header for why a
             // volatility is stored as an integer despite being a statistic.
-            iv_micros: iv.map_or(OI_NULL, |a| a.get(at).map_or(OI_NULL, micros_of)),
+            iv_micros: match iv.and_then(|a| a.get(at)) {
+                None | Some(serde_json::Value::Null) => OI_NULL,
+                Some(cell) => micros_of(cell, f.implied_volatility)?,
+            },
         };
         // THE STRIKE FOR THIS STAMP. A rolling series is ATM-relative, so the
         // resolved strike genuinely can differ between two bars of one answer
@@ -838,13 +877,23 @@ fn paisa(
 /// # Cost
 ///
 /// One pass over at most a few dozen characters. No allocation.
-fn micros_of(cell: &serde_json::Value) -> i64 {
+///
+/// # Errors
+///
+/// [`RollingError::Undecimal`] for a present cell that is not text or a
+/// number, or that `shift_six` cannot read. A JSON `null` never reaches here:
+/// the caller files it as absent, which is what the vendor said.
+fn micros_of(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingError> {
+    let refuse = || RollingError::Undecimal {
+        field,
+        text: cell.to_string(),
+    };
     let text = match cell {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Number(n) => n.to_string(),
-        _ => return OI_NULL,
+        _ => return Err(refuse()),
     };
-    shift_six(text.trim()).unwrap_or(OI_NULL)
+    shift_six(text.trim()).ok_or_else(refuse)
 }
 
 /// A decimal string as millionths, half-up, or `None` when it will not read.
@@ -1078,6 +1127,39 @@ mod tests {
         );
     }
 
+    /// CE-16, D-1769: an implied-volatility cell that is present and cannot
+    /// be read refuses the answer by name; only a `null` or a missing cell is
+    /// filed as "the vendor sent none".
+    #[test]
+    fn an_unreadable_volatility_cell_is_refused_not_filed_as_absent() {
+        let with = |iv: &str| {
+            format!(
+                r#"{{"data":{{"ce":{{
+                "timestamp":[1700000000],
+                "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+                "volume":[1],"iv":[{iv}]
+            }}}}}}"#
+            )
+        };
+        for bad in [
+            r#""junk""#,
+            "1e-7",
+            "true",
+            r#"{"v":1}"#,
+            "99999999999999999999",
+        ] {
+            let got = read(&with(bad), &spec(), "CALL", PriceScale::Rupees);
+            assert!(
+                matches!(got, Err(RollingError::Undecimal { field: "iv", .. })),
+                "{bad}: {got:?}"
+            );
+        }
+        let rows = read(&with("null"), &spec(), "CALL", PriceScale::Rupees).expect("null reads");
+        assert_eq!(rows[0].overlay.iv_micros, OI_NULL);
+        let rows = read(&with("0.125"), &spec(), "CALL", PriceScale::Rupees).expect("reads");
+        assert_eq!(rows[0].overlay.iv_micros, 125_000);
+    }
+
     /// **IV AND SPOT LAND IN THE OVERLAY, KEYED BY THE BAR'S OWN STAMP.**
     ///
     /// The stamp is the join. Position would be faster and wrong the first time
@@ -1238,6 +1320,39 @@ mod tests {
         assert_ne!(
             monthly, near,
             "the monthly and the near weekly are not the same contract"
+        );
+    }
+
+    /// CE-14, D-1769: a computed expiry the exchange calendar marks CLOSED is
+    /// refused, not filed. NIFTY's weekly from 2024-08-14 lands on 2024-08-15
+    /// (Independence Day) and its monthly from 2023-03-29 on 2023-03-30 (Ram
+    /// Navami); both are `Closed` in `pull::calendar`.
+    #[test]
+    fn a_computed_expiry_on_a_closed_day_is_refused() {
+        use crate::session::Day;
+        for (on, flag) in [
+            (Day::new(2024, 8, 14).expect("a real day"), "WEEK"),
+            (Day::new(2023, 3, 29).expect("a real day"), "MONTH"),
+        ] {
+            let got = expiry_of("NIFTY", &spec(), flag, "1", on);
+            assert!(
+                matches!(
+                    got,
+                    Err(RollingError::NoExpiry { why }) if why.contains("marks closed")
+                ),
+                "{on:?} {flag}: {got:?}"
+            );
+        }
+        // An ordinary week still resolves.
+        assert!(
+            expiry_of(
+                "NIFTY",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2024, 8, 21).expect("a day")
+            )
+            .is_ok()
         );
     }
 

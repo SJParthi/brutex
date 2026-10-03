@@ -331,12 +331,12 @@ impl AwsIdentity {
                 "HOME is unset, so ~/.aws/credentials cannot be located".to_owned(),
             ));
         };
-        Self::from_credentials_file(
-            &std::path::PathBuf::from(home)
-                .join(".aws")
-                .join("credentials"),
-            profile,
-        )
+        // AN EMPTY OR RELATIVE HOME IS REFUSED, not read as the working
+        // directory's `.aws/credentials` (CE-38, D-1769).
+        let home = brutex_core::knob::home(Some(home)).map_err(|why| {
+            SsmError::unreachable(format!("{why}, so ~/.aws/credentials cannot be located"))
+        })?;
+        Self::from_credentials_file(&home.join(".aws").join("credentials"), profile)
     }
 
     /// One profile out of a credentials file **the caller names**.

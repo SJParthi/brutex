@@ -3079,9 +3079,23 @@ fn folder_input(suggestions: &[String]) -> String {
         let _ = write!(out, "<option value=\"{}\">", escape(f));
     }
     out.push_str("</datalist>");
-    if !archive_suggestions_enabled() {
-        out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS=0). No discovery scan was performed; explicit folder imports remain available.</p>");
-        return out;
+    match archive_suggestions() {
+        Ok(true) => {}
+        Ok(false) => {
+            out.push_str("<p class=\"fine\">Automatic CSV-folder suggestions are disabled for this process (BRUTEX_ARCHIVE_SUGGESTIONS is off). No discovery scan was performed; explicit folder imports remain available.</p>");
+            return out;
+        }
+        // A WORD THE SWITCH DOES NOT TAKE TURNS THE WALK OFF AND SAYS SO. It
+        // used to leave the walk running for anything but a literal `0`, so
+        // `false`, `off` and `no` silently did nothing (CE-39, D-1769).
+        Err(why) => {
+            let _ = write!(
+                out,
+                "<p class=\"fine\">Automatic CSV-folder suggestions are off: {}. No discovery scan was performed; explicit folder imports remain available.</p>",
+                escape(&why)
+            );
+            return out;
+        }
     }
     let _ = write!(
         out,
@@ -3119,11 +3133,19 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 /// `docs/06-limits.md` §34 records the cost and what is not bounded about it.
 #[must_use]
 pub fn folder_suggestions() -> Vec<String> {
-    folders_when(archive_suggestions_enabled(), discover_folders)
+    folders_when(archive_suggestions() == Ok(true), discover_folders)
 }
 
-fn archive_suggestions_enabled() -> bool {
-    std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS").as_deref() != Some(std::ffi::OsStr::new("0"))
+/// `BRUTEX_ARCHIVE_SUGGESTIONS`, read by the shared switch: on unless turned
+/// off, and a word it does not take refused by name (CE-39, D-1769).
+fn archive_suggestions() -> Result<bool, String> {
+    let raw = std::env::var_os("BRUTEX_ARCHIVE_SUGGESTIONS");
+    brutex_core::knob::switch(
+        "BRUTEX_ARCHIVE_SUGGESTIONS",
+        raw.as_deref()
+            .map(|value| value.to_str().unwrap_or("\u{fffd}")),
+        true,
+    )
 }
 
 fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<String> {
@@ -3132,8 +3154,10 @@ fn folders_when(enabled: bool, discover: impl FnOnce() -> Vec<String>) -> Vec<St
 
 fn discover_folders() -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::PathBuf::from(home);
+    // AN EMPTY OR RELATIVE HOME WALKS NOTHING. It used to walk the working
+    // directory's `Downloads` (CE-38, D-1769); a convenience list has no
+    // refusal to give, so it is simply empty.
+    if let Ok(home) = brutex_core::knob::home(std::env::var_os("HOME")) {
         for root in [
             home.join("Downloads"),
             home.join(".brutex").join("vendor-data"),
@@ -3170,10 +3194,23 @@ mod archive_suggestion_tests {
 /// Directories at or under `dir` that directly contain a `.csv`.
 ///
 /// Depth-limited and allocation-bounded. `depth` counts down, so the recursion
-/// cannot outlive the number it was given — there is no cycle check because
-/// there is no cycle a bounded depth can complete.
+/// cannot outlive the number it was given. A linked directory below the root
+/// is not followed, so a link back to an ancestor cannot multiply the walk
+/// (CE-35, D-1769); the depth bound remains the backstop.
 fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
-    if depth == 0 || out.len() >= MAX_FOLDER_SUGGESTIONS || !dir.is_dir() {
+    // ONE PAST THE CAP, SO THE PAGE CAN TELL A FULL LIST FROM A CAPPED ONE.
+    // The walk stopped at exactly `MAX_FOLDER_SUGGESTIONS`, and `folder_input`
+    // states the cap only when it holds MORE than that — so the notice could
+    // never print and a capped list read as complete (CE-32, D-1769). The one
+    // extra folder is collected and never offered.
+    //
+    // AND A LINK IS NOT A FOLDER TO WALK. `is_dir` followed symlinks, so
+    // `~/Downloads/loop -> ~/Downloads` re-walked the whole tree at every level
+    // to depth six before the server started (CE-35, D-1769). A linked child
+    // directory is now skipped, as `assets` and `store::catalog` already do.
+    // The ROOT may still be a link — `~/Downloads` on an external drive is an
+    // ordinary setup — because a root is followed once, not at every level.
+    if depth == 0 || out.len() > MAX_FOLDER_SUGGESTIONS || !dir.is_dir() {
         return;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -3193,9 +3230,12 @@ fn collect_csv_dirs(dir: &std::path::Path, depth: usize, out: &mut Vec<String>) 
         {
             continue;
         }
-        if p.is_dir() {
+        let Ok(kind) = e.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
             children.push(p);
-        } else if p.extension().is_some_and(|x| x == "csv") {
+        } else if !kind.is_symlink() && p.extension().is_some_and(|x| x == "csv") {
             has_csv = true;
         }
     }
@@ -3223,6 +3263,64 @@ mod tests {
     // holds `Drops`, which is the same four counts as a value, because a
     // record read back off disk cannot rebuild a counter without counting.
     use pull::session::{DropCensus, DropReason};
+
+    /// A directory link is not walked, so a link back to an ancestor cannot
+    /// multiply the startup walk (CE-35, D-1769).
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_directory_is_not_walked() {
+        let root = std::env::temp_dir().join(format!("brutex-ce35-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("x.csv"), "a\n").unwrap();
+        std::os::unix::fs::symlink(&root, data.join("loop")).unwrap();
+        let mut found = Vec::new();
+        collect_csv_dirs(&root, 6, &mut found);
+        // A root that is itself a link is followed once, and the link inside
+        // it is still not walked.
+        let mut through_link = Vec::new();
+        collect_csv_dirs(&data.join("loop"), 6, &mut through_link);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, vec![data.to_string_lossy().into_owned()]);
+        assert_eq!(through_link.len(), 1, "{through_link:?}");
+    }
+
+    /// A tree holding more CSV folders than the cap is walked one past it, so
+    /// the picker offers sixty and SAYS it was capped; a tree holding exactly
+    /// sixty is offered whole with no notice (CE-32, D-1769).
+    #[test]
+    fn a_capped_folder_walk_is_stated_and_an_exact_one_is_not() {
+        for (made, capped) in [
+            (MAX_FOLDER_SUGGESTIONS + 5, true),
+            (MAX_FOLDER_SUGGESTIONS, false),
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("brutex-ce32-{}-{made}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            for i in 0..made {
+                let d = root.join(format!("f{i:03}"));
+                std::fs::create_dir_all(&d).unwrap();
+                std::fs::write(d.join("x.csv"), "a\n").unwrap();
+            }
+            let mut found = Vec::new();
+            collect_csv_dirs(&root, 6, &mut found);
+            let html = folder_input(&found);
+            std::fs::remove_dir_all(&root).unwrap();
+            assert_eq!(found.len(), made.min(MAX_FOLDER_SUGGESTIONS + 1));
+            assert_eq!(
+                html.matches("<option value=").count(),
+                made.min(MAX_FOLDER_SUGGESTIONS)
+            );
+            if archive_suggestions() == Ok(true) {
+                assert_eq!(
+                    html.contains(&format!("capped at {MAX_FOLDER_SUGGESTIONS}")),
+                    capped,
+                    "{html}"
+                );
+            }
+        }
+    }
 
     /// The store filter bar shows the bar length it was given, one pill per
     /// rung the store knows, and "All" only when no rung narrows the view

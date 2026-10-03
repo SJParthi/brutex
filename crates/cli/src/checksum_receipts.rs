@@ -478,7 +478,12 @@ fn regular_generation(
     let held = file.metadata().map_err(error)?;
     let named = fs::symlink_metadata(path).map_err(error)?;
     if !held.is_file() || !named.is_file() || held.nlink() != 1 {
-        return Err("checksum receipt refuses a non-regular file or alias".to_owned());
+        return Err(format!(
+            "checksum receipt refuses {}: it is not a regular file with one link \
+             ({} links); remove any other hard link to it (CE-40, D-1769)",
+            path.display(),
+            held.nlink()
+        ));
     }
     crate::result_set::file_generation(file, path)
 }

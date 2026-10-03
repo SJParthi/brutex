@@ -815,7 +815,11 @@ fn only_this_file_names_d_0692_and_only_greeks_also_cites_limits_29() {
         "greeks/src/solver.rs",
         "greeks/tests/vendor_anchor.rs",
     ];
-    let mut expected = greeks.to_vec();
+    // `cli/src/live.rs` cites `docs/02-store-format.md` §29, the live-file
+    // layout D-1940 documented, not the libm register; read and listed
+    // (D-1769).
+    let mut expected = vec!["cli/src/live.rs"];
+    expected.extend(greeks);
     expected.push("store/tests/libm_key.rs");
     assert_eq!(
         sources_that(|text| mentions_section(text, "29")),

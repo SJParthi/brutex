@@ -53,6 +53,34 @@
 use crate::census;
 use crate::server::{Loaded, Site, percent_decode};
 
+/// How many legs one press may carry: one per feed, per rung the ingest page
+/// offers (`1s`, `1min`, `1day`), per route (`/pull/spot`, `/pull/fno`).
+///
+/// A form with more is refused by name ([`Refusal::TooManyLegs`]) rather than
+/// read, so [`MAX_RUN_FORM_BYTES`] has a count to be sized from (P3-01-01,
+/// D-1769).
+pub const MAX_RUN_LEGS: usize = pull::vendor::FEED_COUNT * 3 * 2;
+
+/// The worst size of one `leg=` field: a member form the inner route admits
+/// ([`crate::ingest::MAX_MEMBER_FORM_BYTES`]) plus an ordinary form's worth of
+/// envelope, percent-encoded twice more by the page. Encoding an
+/// already-encoded byte turns `%` into `%25`, so each pass costs at most a
+/// further two bytes per original escape: five bytes per form byte in all.
+pub const MAX_LEG_FIELD_BYTES: usize =
+    "leg=".len() + 5 * (crate::ingest::MAX_MEMBER_FORM_BYTES + crate::server::MAX_FORM_BYTES);
+
+/// The body `/pull/run` and `/pull/recovery` read.
+///
+/// Both carry legs, and each leg repeats its member list twice-encoded, so the
+/// shared 8 KiB bound answered a framework 413 in plain text at about 340
+/// ticked members on one leg and about 55 across six; the page then reported
+/// a `SyntaxError` instead of a reason (P3-01-01, D-1769). Sized so every run
+/// [`legs_from`] would accept is read, and one leg too many reaches
+/// [`Refusal::TooManyLegs`]. About 26.5 MB at most, held in memory once; see
+/// `docs/06-limits.md`.
+pub const MAX_RUN_FORM_BYTES: usize =
+    crate::server::MAX_FORM_BYTES + (MAX_RUN_LEGS + 1) * MAX_LEG_FIELD_BYTES;
+
 /// How many passes one press may make.
 ///
 /// A window can be larger than one sitting at a legal rate, so the run keeps
@@ -373,6 +401,8 @@ pub enum Refusal {
         /// Which half disagreed, and with what.
         why: String,
     },
+    /// The form carried more legs than one press may ([`MAX_RUN_LEGS`]).
+    TooManyLegs(usize),
 }
 
 impl Refusal {
@@ -398,6 +428,11 @@ impl Refusal {
                  started -- the run would be filed, ordered and gated under the \
                  envelope while the payload decides what is fetched. {why}. The \
                  leg was: {leg}"
+            ),
+            Self::TooManyLegs(count) => format!(
+                "The run carried {count} legs and NOTHING was started. One press \
+                 carries at most {MAX_RUN_LEGS}: one per feed, per rung, per \
+                 route. Split the selection into two presses."
             ),
         }
     }
@@ -437,6 +472,13 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         let Some(("leg", raw)) = field.split_once('=') else {
             continue;
         };
+        if legs.len() == MAX_RUN_LEGS {
+            let count = body
+                .split('&')
+                .filter(|field| field.starts_with("leg="))
+                .count();
+            return Err(Refusal::TooManyLegs(count));
+        }
         let decoded = percent_decode(raw);
         let mut parts = decoded.splitn(5, '|');
         let (Some(route), Some(vendor), Some(dir), Some(label), Some(payload)) = (
@@ -1441,6 +1483,60 @@ mod tests {
     /// every leg names a real feed. Before D-0906 `legs_from` copied the vendor
     /// unchecked, so a form of invented vendor names grew one group and one
     /// chain per distinct name. W1-api3-3.
+    /// P3-01-01, D-1769: one leg past the bound is refused by name, and the
+    /// widest leg the page can write fits the field bound.
+    #[test]
+    fn a_run_past_the_leg_bound_is_refused_by_name_and_the_widest_leg_fits() {
+        let one = field("/pull/spot", "dhan", "1day", "d", "a=1");
+        let full = vec![one.clone(); MAX_RUN_LEGS].join("&");
+        assert_eq!(
+            legs_from(&full).map(|legs| legs.len()).ok(),
+            Some(MAX_RUN_LEGS)
+        );
+        let over = vec![one; MAX_RUN_LEGS + 1].join("&");
+        match legs_from(&over) {
+            Err(Refusal::TooManyLegs(count)) => {
+                assert_eq!(count, MAX_RUN_LEGS + 1);
+                let why = Refusal::TooManyLegs(count).why();
+                assert!(why.contains(&MAX_RUN_LEGS.to_string()), "{why}");
+            }
+            other => panic!("one leg past the bound must be named, got {other:?}"),
+        }
+        // The page's own shape: a member form of `MAX_MEMBERS` symbols that
+        // each need escaping, encoded once more for the payload and once
+        // more for the field.
+        let encode = |text: &str| -> String {
+            text.bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                        char::from(b).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        };
+        let symbol = "&".repeat(brutex_core::symbol::SYMBOL_CAPACITY);
+        let members =
+            vec![format!("member={}", encode(&symbol)); crate::ingest::MAX_MEMBERS].join("&");
+        let form = format!("target=nifty50&vendor=dhan&{members}");
+        assert!(
+            form.len() <= crate::ingest::MAX_MEMBER_FORM_BYTES,
+            "{}",
+            form.len()
+        );
+        let leg = format!(
+            "leg={}",
+            encode(&["/pull/spot", "dhan", "1day", "label", &encode(&form)].join("|"))
+        );
+        assert!(
+            leg.len() <= MAX_LEG_FIELD_BYTES,
+            "{} > {MAX_LEG_FIELD_BYTES}",
+            leg.len()
+        );
+        const { assert!(MAX_RUN_FORM_BYTES > MAX_RUN_LEGS * MAX_LEG_FIELD_BYTES) };
+    }
+
     #[test]
     fn a_leg_naming_no_feed_refuses_the_run_so_groups_never_outnumber_feeds() {
         let invented: Vec<String> = (0..=pull::vendor::FEED_COUNT)

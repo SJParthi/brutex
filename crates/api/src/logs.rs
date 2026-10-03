@@ -881,8 +881,16 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
     if h.rotation_failures > 0 {
         let _ = write!(
             out,
-            "{} roll(s) failed, so the current file is past its bound and the \
-             oldest events may already have been overwritten. ",
+            // WHAT THE SINK ACTUALLY DOES AFTER A FAILED ROLL. It stops
+            // rotating for the life of the process (`Sink::rotation_broken`),
+            // so nothing is overwritten after the failure: the file GROWS. The
+            // banner said the opposite and never said a restart resumes
+            // rotation (CE-41, D-1769).
+            "{} roll(s) failed, so rotation has stopped for the life of this \
+             process: the current file is growing past its bound and no later \
+             event overwrites an older one. The failed roll itself may have \
+             removed the oldest retained file. Fix the cause named below and \
+             restart the server to resume rotation. ",
             h.rotation_failures,
         );
     }
@@ -1694,6 +1702,27 @@ mod tests {
             walk_notes(&walk(Vec::new()), Some(&health(9, 9, None))).is_empty(),
             "a loud banner does not invent a MISSING note"
         );
+    }
+
+    /// CE-41, D-1769: after a failed roll the banner says rotation STOPPED
+    /// and the file is growing, never that events were overwritten, and that a
+    /// restart resumes it.
+    #[test]
+    fn a_failed_roll_is_described_as_stopped_rotation_not_overwrite() {
+        let page = health_banner(Some(&health(0, 1, Some("rename refused"))));
+        assert!(
+            page.contains("rotation has stopped for the life of this process"),
+            "{page}"
+        );
+        assert!(
+            page.contains("restart the server to resume rotation"),
+            "{page}"
+        );
+        assert!(
+            !page.contains("may already have been overwritten"),
+            "{page}"
+        );
+        assert!(page.contains("rename refused"), "{page}");
     }
 
     fn health(dropped: u64, rotation_failures: u64, last_error: Option<&str>) -> telemetry::Health {

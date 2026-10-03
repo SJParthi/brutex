@@ -2591,10 +2591,7 @@ impl HttpSource {
             //
             // CARRIED AS A NUMBER BESIDE THE SENTENCE, which is what makes the
             // rolling path's retry decidable at all.
-            return Err(Refusal::answered(
-                status.as_u16(),
-                format!("the vendor answered {status}"),
-            ));
+            return Err(self.refused_status(&mut answer).await);
         }
         // A FAILED BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status
         // was already a success; what failed is the socket delivering the rest.
@@ -2618,6 +2615,46 @@ impl HttpSource {
         // A REFUSAL UNDER A 200 IS A REFUSAL (W1-pull2-11, D-0950).
         self.weigh_refused_body(&body, status.as_u16())?;
         Ok(body)
+    }
+
+    /// A non-2xx answer on the rolling POST or the discovery GET, as a
+    /// [`crate::chain::Refusal`] that carries what the BODY said.
+    ///
+    /// Both paths returned the status alone and never read the body (CE-29,
+    /// D-1769). Dhan answers a dead token with HTTP 400 and `DH-906` "Invalid
+    /// Token" in the body (D-0325), so without it the token was sent on to
+    /// every remaining cell instead of halting the feed, and a 403 "not
+    /// entitled" was read as a dead token. This reads the body under the same
+    /// bound and through the same classifier as `window_async`
+    /// ([`refusal_words`]), marks a named dead session as one, and records a
+    /// throttle the vendor named under a status other than 429 — the one the
+    /// status test above cannot see, so the shared governor learns it exactly
+    /// once.
+    async fn refused_status(&self, answer: &mut reqwest::Response) -> crate::chain::Refusal {
+        use crate::chain::Refusal;
+        use crate::refusal::Disposition;
+        let status = answer.status();
+        let (detail, named) = refusal_words(answer, self.spec.error_names).await;
+        if named == Some(Disposition::Throttled)
+            && status.as_u16() != 429
+            && let Some(lock) = self.governor.as_ref()
+        {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            g.record_throttled();
+        }
+        let said = if detail.is_empty() {
+            format!("the vendor answered {status}")
+        } else {
+            format!("the vendor answered {status}: {detail}")
+        };
+        let refusal = if named == Some(Disposition::SessionDead) {
+            Refusal::credential(Some(status.as_u16()), said)
+        } else {
+            Refusal::answered(status.as_u16(), said)
+        };
+        refusal.named_by_vendor(named)
     }
 
     /// The throttle half of the governor feedback, the only half that can be
@@ -2760,10 +2797,7 @@ impl crate::chain::Discovery for HttpSource {
             // this was retryable had to search prose for `429` — which is the
             // coupling `api::server::with_retry` refuses by name on the bars
             // path, and the reason discovery had no retry ladder at all.
-            return Err(Refusal::answered(
-                status.as_u16(),
-                format!("the vendor answered {status}"),
-            ));
+            return Err(self.refused_status(&mut answer).await);
         }
         // THE BODY READ IS A TRANSPORT FAILURE, NOT A REFUSAL. The status was
         // already a success; what failed is the socket delivering the rest of
@@ -5206,6 +5240,116 @@ mod tests {
                     moves,
                     "{path}: {body} moved the allowance {before} -> {after}"
                 );
+            }
+        }
+    }
+
+    /// **A REFUSING STATUS ON THE ROLLING POST AND ON A DISCOVERY GET IS READ
+    /// FOR ITS BODY.** CE-29, D-1769.
+    ///
+    /// Both paths returned a non-2xx refusal as its status alone, so Dhan's
+    /// dead-token answer — HTTP 400 carrying `DH-906` "Invalid Token" (D-0325)
+    /// — was an ordinary answered refusal and the token went on to every
+    /// remaining cell. Each row is driven over a real loopback socket: the
+    /// body's words reach the detail, the vendor's named disposition travels
+    /// with the refusal, a named dead session is marked as one, and a throttle
+    /// named under a 400 narrows the allowance by exactly one step.
+    #[test]
+    fn a_refusing_status_on_the_post_and_discovery_paths_is_read_for_its_body() {
+        use crate::refusal::Disposition;
+        let shipped = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is HTTP"),
+        };
+        let allowance = |source: &HttpSource| -> Option<u32> {
+            source.governor.as_ref().and_then(|lock| {
+                lock.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .permitted(crate::rate::WindowSpan::Second)
+            })
+        };
+        let once = {
+            let mut g = crate::rate::Governor::new(
+                shipped.budget.per_second,
+                shipped.budget.per_minute,
+                shipped.budget.per_day,
+            )
+            .expect("the shipped budget");
+            g.record_throttled();
+            g.permitted(crate::rate::WindowSpan::Second)
+        };
+        let full = shipped.budget.per_second;
+        let dead =
+            r#"{"errorType":"Order_Error","errorCode":"DH-906","errorMessage":"Invalid Token"}"#;
+        let throttled = r#"{"errorCode":"DH-904","errorMessage":"Too many requests"}"#;
+        let wrong = r#"{"errorCode":"DH-905","errorMessage":"Missing required fields"}"#;
+        // (status line, body, credential dead?, named, allowance after, a word the detail carries)
+        let rows = [
+            (
+                "400 Bad Request",
+                dead,
+                true,
+                Some(Disposition::SessionDead),
+                full,
+                "Invalid Token",
+            ),
+            (
+                "400 Bad Request",
+                throttled,
+                false,
+                Some(Disposition::Throttled),
+                once,
+                "DH-904",
+            ),
+            (
+                "400 Bad Request",
+                wrong,
+                false,
+                Some(Disposition::RequestWrong),
+                full,
+                "Missing required",
+            ),
+            (
+                "502 Bad Gateway",
+                "upstream down",
+                false,
+                None,
+                full,
+                "upstream down",
+            ),
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        for post in [true, false] {
+            for (line, body, credential_dead, named, after, word) in rows {
+                let source = HttpSource::new(shipped, Credential::token("shhh".to_owned()))
+                    .expect("a client for the shipped Dhan row");
+                let (url, _seen, _) = listener(Some(format!(
+                    "HTTP/1.1 {line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )));
+                let got = runtime.block_on(async {
+                    if post {
+                        source.post_json(&url, "{}".to_owned()).await
+                    } else {
+                        crate::chain::Discovery::get(&source, &url).await
+                    }
+                });
+                let path = if post { "post_json" } else { "Discovery::get" };
+                let refusal = got.expect_err(&format!("{path}: {line} is a refusal"));
+                assert_eq!(refusal.credential_dead, credential_dead, "{path}: {body}");
+                assert_eq!(refusal.named, named, "{path}: {body}");
+                assert!(refusal.detail.contains(word), "{path}: {}", refusal.detail);
+                assert!(
+                    refusal
+                        .detail
+                        .contains(line.split(' ').next().unwrap_or_default()),
+                    "{path}: the status is still named: {}",
+                    refusal.detail
+                );
+                assert_eq!(allowance(&source), after, "{path}: {body}");
             }
         }
     }

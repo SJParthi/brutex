@@ -562,6 +562,21 @@ impl Cell {
         self.gross_loss.saturating_div(losers.cast_signed())
     }
 
+    /// The MAGNITUDE of the mean loss, rounded UP, for a field a maximum gates.
+    ///
+    /// [`Self::avg_loss`] truncates toward zero, so `-301` over two losers is
+    /// `-150` and a `150` cap admitted a true mean of `150.5`. Admission
+    /// evidence reads this one instead (p3floor-1, D-1769); the display keeps
+    /// the truncated figure.
+    #[must_use]
+    pub const fn avg_loss_magnitude_ceil(&self) -> u64 {
+        let losers = self.trades.saturating_sub(self.wins);
+        if losers == 0 {
+            return 0;
+        }
+        self.gross_loss.unsigned_abs().div_ceil(losers)
+    }
+
     /// Mean holding time, in execution bars — minutes under the 1-minute layer.
     #[must_use]
     pub const fn avg_bars_held(&self) -> u64 {
@@ -4450,8 +4465,12 @@ fn one_variant(
         if let Some(rows) = trades.as_deref_mut() {
             rows.push(row_of(bars, c, exit, pess, opt, went_against, went_for));
         }
-        if went_against > cell.worst_mae {
-            cell.worst_mae = went_against;
+        // `worst_mae` is gated by a maximum, so it takes the reading rounded UP
+        // (p3floor-2, D-1769); `went_against` stays the floored figure the
+        // trade rows and the all-trades sum have always carried.
+        let worst_of_this = c.cross.adverse_ppm_ceil_at(pess_off, c.entry_pess, side);
+        if worst_of_this > cell.worst_mae {
+            cell.worst_mae = worst_of_this;
         }
 
         if pess > 0 {
@@ -6150,6 +6169,33 @@ mod exit_family_tests {
 mod tests {
     use super::{Cell, Grid, Levels, Streaks, evaluate, evaluate_over, tally_trade};
 
+    /// p3floor-1, D-1769: the gated mean-loss magnitude rounds UP.
+    #[test]
+    fn the_gated_mean_loss_magnitude_rounds_up() {
+        let cell = Cell {
+            trades: 2,
+            wins: 0,
+            gross_loss: -301,
+            ..Cell::default()
+        };
+        assert_eq!(cell.avg_loss(), -150, "the display figure still truncates");
+        assert_eq!(cell.avg_loss_magnitude_ceil(), 151);
+        let even = Cell {
+            trades: 3,
+            wins: 1,
+            gross_loss: -300,
+            ..Cell::default()
+        };
+        assert_eq!(even.avg_loss_magnitude_ceil(), 150);
+        let none = Cell {
+            trades: 2,
+            wins: 2,
+            gross_loss: 0,
+            ..Cell::default()
+        };
+        assert_eq!(none.avg_loss_magnitude_ceil(), 0);
+    }
+
     /// BOTH RUNS ARE MEASURED, AND EACH ONE ENDS THE OTHER.
     ///
     /// `max_losing_streak` shipped alone. A reader shown only the bad run learns
@@ -7469,8 +7515,10 @@ mod tests {
         assert_eq!(
             fingerprint(&rendered),
             // RE-TAKEN alongside the cell counts above, for the reason given
-            // there. Was 4_541_430_464_614_536_018 over the three-target grid.
-            11_636_914_018_498_032_287,
+            // there. Was 4_541_430_464_614_536_018 over the three-target grid,
+            // then 11_636_914_018_498_032_287 until `worst_mae` took the
+            // reading rounded up (p3floor-2, D-1769); counts are unchanged.
+            5_087_617_185_273_455_494,
             "every cell of both grids, byte for byte"
         );
     }

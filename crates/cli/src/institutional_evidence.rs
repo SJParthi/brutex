@@ -318,7 +318,7 @@ pub const ADMISSION_EVIDENCE_SOURCE_MATRIX_V1: [EvidenceSourceMapRowV1; 44] = [
     EvidenceSourceMapRowV1 {
         field: "average_loss_paisa",
         availability: EvidenceAvailabilityV1::MeasuredDirect,
-        source: "|Cell.avg_loss()| with explicit no-loser Unmeasured state",
+        source: "Cell.avg_loss_magnitude_ceil() (rounded up) with explicit no-loser Unmeasured state",
     },
     EvidenceSourceMapRowV1 {
         field: "profit_factor_ppm",
@@ -1409,7 +1409,7 @@ fn direct_cell_values(cell: &Cell) -> Result<DirectCellEvidenceV1, String> {
     let average_loss = if losing == 0 {
         ObservedU64V1::Unmeasured
     } else {
-        ObservedU64V1::Measured(cell.avg_loss().unsigned_abs())
+        ObservedU64V1::Measured(cell.avg_loss_magnitude_ceil())
     };
     let worst_loss = negative_magnitude(cell.worst_trade);
     let min_win = nonnegative_u64("minimum win", cell.min_win)?;

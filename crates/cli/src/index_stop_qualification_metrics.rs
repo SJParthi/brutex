@@ -207,9 +207,9 @@ pub(super) fn base<S: Snapshot>(row: &S) -> Result<AdmissionEvidenceValuesV1, St
             .gross_win
             .checked_div(m.wins)
             .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
-        average_loss_paisa: t
-            .gross_loss
-            .checked_div(losses)
+        // Rounded UP: gated by a maximum (p3floor-1, D-1769).
+        average_loss_paisa: (losses != 0)
+            .then(|| t.gross_loss.div_ceil(losses))
             .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
         profit_factor_ppm: ratio(t.gross_win, t.gross_loss, "native profit factor")?,
         consecutive_losing_streak: measured(t.losing_streak),

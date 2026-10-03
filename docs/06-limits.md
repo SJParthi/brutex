@@ -1432,10 +1432,19 @@ end date would be as much a fabrication as inventing a rate.
 An expiry returned by `expiry::next_weekly_expiry` or
 `expiry::next_monthly_expiry` is the **calendar** expiry. When an expiry day
 falls on an NSE trading holiday the contract settles on the previous trading
-day, and neither this crate nor the source knows which days those are. There is
-no holiday calendar in this repository. **Every expiry this crate returns can be
-one or more days late on a holiday week**, and a caller that needs the settled
-date must apply a holiday calendar it obtains elsewhere.
+day, and this crate does not know which days those are. **Every expiry this
+crate returns can be one or more days late on a holiday week**, and a caller
+that needs the settled date must apply a holiday calendar.
+
+**This said there is no holiday calendar in this repository, and there is one:**
+`pull::calendar::kind_of` marks every day from 2019-12-02 to 2026-09-04 open or
+closed, measured from stored daily bars (D-1769, CE-14). `costs` cannot use it
+(`pull` depends on `costs`, not the reverse), so the one caller that turns these
+into contract keys, `pull::rolling::expiry_of`, now REFUSES a computed expiry
+the calendar marks closed. It does not step back to the previous trading day,
+because that rule is not recorded in `docs/00-charter.md`. An expiry after
+2026-09-04 is outside the calendar's measured range and cannot be checked; it
+is passed through unchanged until the calendar is extended.
 
 **How often that bites is UNVERIFIED and is not estimated here.** It depends on
 the NSE holiday calendar, which this repository does not hold and which
@@ -14171,3 +14180,25 @@ and H the committed blocks in `global-selection-v6.bin` (at most
 
 None of these is O(1), and none grows with the request alone. They are not
 reduced here (D-1642).
+
+## A rate span published slower than one permit a second keeps the old floor — D-1769, 3 October 2026
+
+`pull::rate::Window::floor_of` floors every span at one permit a second in its
+own length, so no refusal can make a live feed's permit wait longer than a
+second (CE-28). A span whose PUBLISHED ceiling is already slower than one a
+second cannot take that floor, since it would sit above its own ceiling and a
+refusal would narrow nothing. That span floors at one step,
+`ceiling / BACKOFF_STEPS` and at least one, and a long such span (a day quota
+below 86,400) can still be stepped to a wait of hours. No live feed publishes
+one: `every_live_rate_span_floors_at_one_permit_per_second` pins every shipped
+descriptor. A feed added with one inherits this limit until a bound on the wait
+itself exists.
+
+## `/pull/run` and `/pull/recovery` read up to about 26.5 MB of form — D-1769, 3 October 2026
+
+`MAX_RUN_FORM_BYTES` is sized so every run `pullrun::legs_from` accepts is read:
+`MAX_RUN_LEGS` (feeds × 3 rungs × 2 routes = 30) legs, each a member form the
+inner route admits, percent-encoded twice more. That is the worst case, held in
+memory once per request; a real press is a few kilobytes per leg. One leg past
+the bound is refused by name (`Refusal::TooManyLegs`) rather than read further.
+The figure is arithmetic from the constants, not a measurement.

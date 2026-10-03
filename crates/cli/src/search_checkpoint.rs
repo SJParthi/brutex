@@ -415,6 +415,12 @@ fn error(why: impl std::fmt::Display) -> String {
 #[path = "search_checkpoint_tests.rs"]
 pub(crate) mod tests;
 
+/// Finder's `.DS_Store` and the `._<name>` `AppleDouble` files a copy to a
+/// non-HFS volume writes: operating-system litter, never a reservation.
+fn is_os_litter(name: &str) -> bool {
+    name == ".DS_Store" || name.starts_with("._")
+}
+
 fn discover(directory: &Path) -> Result<(u64, Option<u64>, u64, u64), String> {
     discover_through(directory, None)
 }
@@ -438,13 +444,29 @@ fn discover_through(
         if name == "owner.lock" {
             continue;
         }
-        let sequence = u64::from_str_radix(&name, 16)
-            .map_err(|_| "invalid checkpoint reservation name".to_owned())?;
+        // MACOS LITTER IS NOT A RESERVATION, AND A STRANGER IS NAMED. Finder
+        // writes `.DS_Store` into a folder it opens, and a copy to a non-HFS
+        // volume writes `._<name>` beside each file; either one refused every
+        // start, resume and dashboard read of this search with a sentence that
+        // named no file (CE-34, D-1769). Those two, as plain files, are passed
+        // over; anything else still refuses, now by its name.
+        if is_os_litter(&name) && entry.file_type().map_err(error)?.is_file() {
+            continue;
+        }
+        let sequence = u64::from_str_radix(&name, 16).map_err(|_| {
+            format!(
+                "invalid checkpoint reservation name {name:?} in {}",
+                directory.display()
+            )
+        })?;
         if sequence == 0
             || name != format!("{sequence:016x}")
             || !entry.file_type().map_err(error)?.is_dir()
         {
-            return Err("invalid checkpoint reservation type or sequence".to_owned());
+            return Err(format!(
+                "invalid checkpoint reservation type or sequence {name:?} in {}",
+                directory.display()
+            ));
         }
         next = next.max(
             sequence

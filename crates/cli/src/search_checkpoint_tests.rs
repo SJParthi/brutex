@@ -235,3 +235,27 @@ fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Res
     drop(child);
     Ok(())
 }
+
+/// CE-34, D-1769: Finder's `.DS_Store` and an `AppleDouble` `._` file are
+/// passed over, and any other stray entry refuses BY NAME.
+#[test]
+fn os_litter_is_passed_over_and_a_stranger_is_named() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let dir = scratch.0.join("litter");
+    fs::create_dir_all(dir.join(format!("{:016x}", 1))).map_err(error)?;
+    fs::write(dir.join(".DS_Store"), b"finder").map_err(error)?;
+    fs::write(dir.join("._0000000000000001"), b"appledouble").map_err(error)?;
+    let (next, ..) = discover(&dir)?;
+    assert_eq!(next, 2, "litter does not block the search");
+    // Litter by name but a DIRECTORY is not litter.
+    fs::create_dir(dir.join("._odd")).map_err(error)?;
+    let why = discover(&dir)
+        .err()
+        .ok_or("a directory is not passed over")?;
+    assert!(why.contains("\"._odd\""), "{why}");
+    fs::remove_dir(dir.join("._odd")).map_err(error)?;
+    fs::write(dir.join("notes.txt"), b"x").map_err(error)?;
+    let why = discover(&dir).err().ok_or("a stranger refuses")?;
+    assert!(why.contains("\"notes.txt\""), "{why}");
+    Ok(())
+}

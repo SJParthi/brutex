@@ -55034,3 +55034,140 @@ measured on.
   said "All four are on disk", reading a `restart_required` the route always
   sends false. It now reports the status and the reason, and success only when
   the server reloaded (CE-26).
+
+### D-1769 — /db explains every withheld-change code, and a capped folder list says so — 2026-10-03
+
+- `crates/api/src/bars.rs` withholds a bar's change with `previous_unreadable`
+  (the bar before failed its checksum) or `overflow` (the change does not fit
+  the server's integer range). `/db`'s `BAR_WHY` table had no sentence for
+  either, so a real, explained withholding was shown as "unknown … a defect
+  here". Both now have one, and `web/tests/bar-why.test.js` reads every code
+  `bars.rs` can send and fails when the page cannot explain one (CE-27).
+- `collect_csv_dirs` stopped at exactly `MAX_FOLDER_SUGGESTIONS` and
+  `folder_input` states the cap only when it holds more than that, so the
+  "capped at 60" notice could never print and a capped list read as complete.
+  The walk now collects one past the cap, which is never offered; it only lets
+  the page tell a full list from a capped one (CE-32).
+- Rate floor (CE-28). Every refusal stepped every span down by
+  `ceiling / BACKOFF_STEPS` to a floor of ONE, so 32 refusals left Dhan's
+  100,000/day window at one permit and the next request slept 86,390 s behind
+  no bound. Each span now floors at one permit a second in its own length (1,
+  60, 86,400), the rate the second span already floored at. A span published
+  slower than one a second floors at one step instead; no live feed has one,
+  and `docs/06-limits.md` names that branch.
+- Dead token on the rolling and discovery paths (CE-29). `post_json` and
+  `Discovery::get` returned a non-2xx refusal as its status alone. They now read
+  the body under the bars path's bound and classifier (`refusal_words`), mark a
+  named dead session as one, carry the vendor's disposition on
+  `chain::Refusal::named`, and `laddered` hands it to `step`. A 400 `DH-906`
+  "Invalid Token" now halts the feed, and a named not-entitled 403 is no longer
+  read as a dead token.
+- Double throttle (CE-30). `with_retry` recorded a throttle named in a 2xx body
+  that `weigh_body_parsed` had already recorded. It now records only a named
+  throttle under a non-2xx, non-429 status, the one set the transport cannot
+  see (`transport_missed_throttle`). The rolling and discovery transport now
+  records that set itself, so `laddered`'s "the transport already took the
+  decrease" is true there too.
+- Pool pass 1 order (CE-4). `render_per_symbol` sorted ascending and reversed
+  the whole list, which put every refusal on top against its own comment and
+  listed ties in reverse input order. One ascending sort with each direction in
+  the key now puts the smallest drawdown first, ties in screened order and
+  refusals last.
+- Live Bonferroni bar (CE-7). `bar_milli` truncated the bar and the page
+  compared a ROUNDED `t_milli` with `>=`, so a |t| up to 1.5 milli below the
+  bar was shown as clearing it. The bar is now the ceiling (a non-finite bar is
+  one no row clears) and `/live.json` compares strictly above it, which cannot
+  call a |t| below the bar a clearance.
+- First signal day's daily anchor (CE-10). `daily_context_from_span` asked only
+  for ANY eligible daily record before the first signal day, and its per-day
+  walk covers a day only once a previous signal day exists, so a previous-month
+  file that ended early anchored the first day's pivots, previous-day and gap
+  bits to an older session while GapFib anchored to the right one. The newest
+  eligible record before the first signal day must now be
+  `prior_accepted_session(first_signal_day)`, or the run refuses by name.
+- Global Replay V4 VIX months (CE-8). `VixCatalog` kept every opened VIX month,
+  about 2.86 MB each, for the whole replay with no bound. It now holds at most
+  `VIX_MONTHS_HELD` (4) and drops the earliest held month before opening a new
+  one; a month asked for again is re-read from the same file, so every stamp is
+  unchanged.
+- Return over drawdown below a hundredth (CE-17). The range-all table printed
+  `-` ("no profit") whenever the integer ratio was 0, which is also what a
+  profitable variant whose return is under 0.01x its drawdown truncates to. The
+  dash is now decided from `pessimistic <= 0`, and a truncated profit prints
+  `<0.01`.
+- Startup folder walk follows links (CE-35). `collect_csv_dirs` used `is_dir`,
+  which follows symlinks, so `~/Downloads/loop -> ~/Downloads` re-walked the
+  tree at every level to depth six. A linked directory below the root is now
+  skipped via `DirEntry::file_type`; the root itself may still be a link.
+- Search checkpoint litter (CE-34). One `.DS_Store` in a search checkpoint
+  folder refused every start, resume and dashboard read with a sentence that
+  named no file. Finder's `.DS_Store` and AppleDouble `._` files are passed
+  over when they are plain files, and any other stray entry refuses with its
+  name and folder.
+- Empty or loosely-read configuration values (CE-5, CE-6, CE-33, CE-36, CE-37,
+  CE-38, CE-39). Every folder variable was read as `PathBuf::from(value)` and
+  only an UNSET one was refused, so a variable set but EMPTY resolved against
+  the working directory: `BRUTEX_LOG_DIR`, `BRUTEX_LOGS`, `BRUTEX_STORE`,
+  `BRUTEX_MASTERS`, `BRUTEX_ARCHIVES` and `BRUTEX_WEB`, and an empty `HOME`
+  under every `$HOME/...` default including the §8 credential configuration and
+  `~/.aws/credentials`. Two switches turned off only for a literal `0`. One
+  reader now lives in `brutex_core::knob` (`core` depends on nothing, so every
+  crate can share it): `folder` refuses an empty or blank value by the
+  variable's name, `home` also refuses a relative `HOME`, and `switch` takes
+  `0/false/off/no` and `1/true/on/yes` and refuses any other word. An unusable
+  `BRUTEX_VALIDATE` keeps validation ON and is named in the KNOB REFUSED block;
+  an unusable `BRUTEX_ARCHIVE_SUGGESTIONS` turns the walk off and the page says
+  why; the api refuses to serve on an empty `BRUTEX_LOGS` or `BRUTEX_WEB`.
+- Unnamed hard-link refusals (CE-40). An extra hard link to the store's
+  execution lock (a `cp -al` snapshot, an `ln`) refused every sweep for good
+  with a sentence naming no file. That refusal and the same one in Selection
+  V6, Global Replay V4 and the checksum receipt now name the path, the link
+  count and what to remove.
+- The `/logs` banner after a failed roll (CE-41). The sink deliberately stops
+  rotating for the life of the process after a failed roll, because a
+  re-attempted roll empties the retained history one file per event
+  (`Sink::rotation_broken`). The banner said the oldest events "may already
+  have been overwritten", which that design guarantees did not happen after the
+  failure, and never said a restart resumes rotation. It now says rotation has
+  stopped, the file is growing, the failed roll may have removed the oldest
+  file, and a restart after fixing the named cause resumes rotation. Retrying
+  in-process is not added: a retry that fails half-way is the
+  history-emptying defect D-1324 removed.
+- Archive walk depth (CE-21). `archive::MAX_DEPTH` was 4 under a doc promising
+  one level of headroom, but the check `depth >= MAX_DEPTH` put the deepest
+  real GDFL folder (`-I`, at depth 3) at the limit as soon as one wrapper
+  folder was added, so every Futures contract was skipped with only a count.
+  The bound is 5, the doc states the depth of each level, and a test walks a
+  member exactly one level inside it.
+- CE-22 needed no change here: `limit=0` on `/operation-audit.json` was already
+  refused with 400 by D-1762's canonical-integer parser, and
+  `queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages` pins it.
+- Discovery URL values (CE-15). The vendor's own expiry string went into the
+  next contracts URL unescaped and was decoded only after that request was
+  sent, while the refusal for an undecodable one said "its contracts were not
+  asked for". The expiry is now decoded before the request, and every resolved
+  path and query value is percent-encoded outside RFC 3986's unreserved set, so
+  an underlying such as `M&M` is one component too.
+- Rolling-option expiry on a closed day (CE-14). `pull::rolling::expiry_of`
+  took `costs::expiry`'s calendar weekday and never asked `pull::calendar`, so
+  a holiday week's contract (NIFTY weekly from 2024-08-14 landed on the
+  2024-08-15 holiday) was filed under a closed day and priced at a tenor about
+  4.8 times too long. A computed expiry the calendar marks `Closed` is now
+  refused by name. It is not stepped back to the previous trading day, because
+  that rule is not in `docs/00-charter.md`. Expiries after the calendar's last
+  measured day (2026-09-04) pass through unchecked, named in
+  `docs/06-limits.md`, whose sentence "there is no holiday calendar in this
+  repository" was stale and is corrected along with `costs::expiry`'s.
+- Unreadable vendor IV (CE-16). `rolling::micros_of` turned any present cell it
+  could not read (an exponent form, an overflow, junk, a non-number) into the
+  null sentinel, which the append-only overlay records as "the vendor sent no
+  IV", and pricing then solved its own. A present unreadable cell now refuses
+  the answer with `RollingError::Undecimal` naming the field and the cell; only
+  `null` or a missing cell is filed as absent.
+- P3-02-03/04/05: `USAGE` names the optional `[TIMEFRAMES]` argument of `boolean-qualified-search-stored`, prints `80%` rather than the printf escape `80%%` a Rust string never needed, and the `UNDERLYING` line names the F&O cash equities CLAUDE.md §1 admits. Pinned by `the_usage_text_states_what_the_commands_actually_take`.
+- p3floor-1: `average_loss_paisa` is gated by `<= max_average_loss_paisa` and was a floored mean, so a true 150.5 passed a 150 cap. The four evidence builders now round it UP (`div_ceil`, and `runner::grid::Cell::avg_loss_magnitude_ceil` for the two that read a cell). The display `avg_loss` still truncates; `average_win`, gated by a minimum, keeps its floor, which is already the safe direction.
+- p3floor-2: `worst_mae` is gated by `<= max_mae_ppm` and was the floored ppm, so 10,000.495 ppm passed a 10,000 cap. It now takes `Crossings::adverse_ppm_ceil_at`, a second reading rounded up; `ppm_of` is unchanged because rung crossing, the trade rows and the all-trades sum still read the floored figure.
+- P3-01-05: docs/04 row MR-20 said the masters had "no reload path" and cited a test renamed by D-1762. It now states the in-place reparse and cites `the_page_says_a_refresh_reloads_and_names_when_a_restart_is_required`.
+- P3-02-02: the backtest page named a stored instrument by its last `-` segment, so the sweepable shares `BAJAJ-AUTO` and `NAM-INDIA` were offered, run and printed in the `cli range-all` hint as `AUTO` and `INDIA`, which the engine refuses. Both joins now read `instrument.js`'s `sweptSymbolOf`, which takes everything after the exchange and segment through `parseKey` and answers `null` for a contract row so a future never lends its months to the spot series.
+- P3-01-01: `/pull/run` and `/pull/recovery` read legs that repeat their member list twice-encoded, under the shared 8 KiB bound, so a modest press answered a framework 413 in plain text and the page showed a `SyntaxError`. Both routes now read `pullrun::MAX_RUN_FORM_BYTES`, sized from `MAX_RUN_LEGS` and the member form the inner route admits, and a press past `MAX_RUN_LEGS` is refused by name. The worst-case size is named in docs/06-limits.md.
+- The wide-bar grid fingerprint in `runner::grid::tests::the_grid_over_the_wide_bar_fixture_is_byte_stable` was re-taken for p3floor-2 (cell counts unchanged; only `worst_mae` values moved up). `store/tests/libm_key.rs` now lists `cli/src/live.rs`, which cites docs/02-store-format.md §29 (added by D-1940), not the libm register.

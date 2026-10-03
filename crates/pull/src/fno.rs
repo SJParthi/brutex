@@ -214,9 +214,10 @@ fn join(base: &str, path: &[PathSegment], params: &[Param], ask: &Ask) -> String
             // A value segment resolves through the same table the query does,
             // so a feed that puts its underlying in the path is one row rather
             // than a second builder.
-            PathSegment::Value { placeholder, value } => {
-                out.push_str(&resolve(value, ask).unwrap_or_else(|| placeholder.to_owned()));
-            }
+            PathSegment::Value { placeholder, value } => match resolve(value, ask) {
+                Some(value) => push_encoded(&mut out, &value),
+                None => out.push_str(placeholder),
+            },
         }
     }
     let mut first = true;
@@ -228,9 +229,35 @@ fn join(base: &str, path: &[PathSegment], params: &[Param], ask: &Ask) -> String
         first = false;
         out.push_str(p.name);
         out.push('=');
-        out.push_str(&value);
+        push_encoded(&mut out, &value);
     }
     out
+}
+
+/// `value`, percent-encoded so it is one query or path component whatever it
+/// holds.
+///
+/// The expiry in a contracts URL is the vendor's OWN string from its expiries
+/// answer, and it was appended raw, so a value carrying `&`, `=`, `#` or a
+/// space became a different request (CE-15, D-1769). Every byte outside RFC
+/// 3986's unreserved set is escaped; a value made only of those passes
+/// through unchanged, which is every value a live feed sends today.
+fn push_encoded(out: &mut String, value: &str) {
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            // A nibble is below sixteen, so `from_digit` always answers.
+            for nibble in [byte >> 4, byte & 0x0f] {
+                out.push(
+                    char::from_digit(u32::from(nibble), 16)
+                        .unwrap_or('0')
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
 }
 
 /// What one parameter is worth for this ask, or [`None`] where this ask does
@@ -308,6 +335,24 @@ mod tests {
             contracts_url(&spec, &with_expiry).expect("it builds"),
             "https://api.groww.in/v1/historical/contracts\
              ?exchange=NSE&underlying_symbol=NIFTY&expiry_date=2025-01-25"
+        );
+    }
+
+    /// CE-15, D-1769: a value carrying URL syntax stays ONE component. The
+    /// vendor's own expiry string and an underlying such as `M&M` were
+    /// appended raw, so `&`, `=`, `#` and spaces became a different request.
+    #[test]
+    fn a_value_with_url_syntax_is_percent_encoded_into_one_component() {
+        let hostile = Ask {
+            underlying: "M&M".to_owned(),
+            expiry: "2025-01-25&x=1#f g".to_owned(),
+            year: 2025,
+            ..ask()
+        };
+        assert_eq!(
+            contracts_url(&groww(), &hostile).expect("it builds"),
+            "https://api.groww.in/v1/historical/contracts\
+             ?exchange=NSE&underlying_symbol=M%26M&expiry_date=2025-01-25%26x%3D1%23f%20g"
         );
     }
 

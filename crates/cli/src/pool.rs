@@ -678,17 +678,22 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
     // worst trade closest to zero, then the net. Refusals sort last and are
     // named, never dropped.
+    //
+    // ONE ASCENDING SORT, NO REVERSE. This sorted `(refused, -dd, worst, net)`
+    // ascending and then reversed the whole list, which got the money order
+    // right and put every refusal on TOP, against the sentence above, and
+    // listed tied rows in reverse input order (CE-4, D-1769). The key now
+    // states each direction itself and the sort is stable.
     let mut rows: Vec<&Screened> = screened.iter().collect();
     rows.sort_by_key(|s| match &s.outcome {
         Ok(r) => (
             false,
-            r.max_drawdown.saturating_neg(),
-            r.worst_trade,
-            r.pessimistic,
+            r.max_drawdown,
+            core::cmp::Reverse(r.worst_trade),
+            core::cmp::Reverse(r.pessimistic),
         ),
-        Err(_) => (true, i64::MIN, i64::MIN, i64::MIN),
+        Err(_) => (true, 0, core::cmp::Reverse(0), core::cmp::Reverse(0)),
     });
-    rows.reverse();
     // LAID OUT TOGETHER (D-1420). Raw paisa at `i64::MIN` is 20 characters
     // in a 12-character column, and a 14-character symbol filled its column,
     // so `worst`, `net` and `max_dd` could read as one number.
@@ -2102,6 +2107,51 @@ mod tests {
             returns += usize::from(returned);
         }
         (writes, renders, returns)
+    }
+
+    /// Pass 1 lists priced rows by the money, smallest drawdown first, ties in
+    /// the order they were screened, and every refusal LAST (CE-4, D-1769).
+    #[test]
+    fn pass_one_puts_refusals_last_and_keeps_ties_in_screened_order() {
+        let record = |dd: i64, worst: i64, net: i64| crate::results::Record {
+            max_drawdown: dd,
+            worst_trade: worst,
+            pessimistic: net,
+            ..crate::results::Record::from_bytes(&[0; crate::results::STRIDE_BYTES])
+        };
+        let row = |symbol: &str, outcome| super::Screened {
+            symbol: symbol.to_owned(),
+            outcome,
+        };
+        let screened = [
+            row("REFUSED_A", Err("a".to_owned())),
+            row("DEEP", Ok(record(900, -50, 10))),
+            row("TIE_FIRST", Ok(record(100, -20, 5))),
+            row("TIE_SECOND", Ok(record(100, -20, 5))),
+            row("SHALLOW_WORSE", Ok(record(100, -80, 5))),
+            row("REFUSED_B", Err("b".to_owned())),
+            row("SHALLOWEST", Ok(record(10, -90, 1))),
+        ];
+        let mut out = String::new();
+        super::render_per_symbol(&mut out, &screened);
+        let order: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|word| screened.iter().any(|s| s.symbol == *word))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "SHALLOWEST",
+                "TIE_FIRST",
+                "TIE_SECOND",
+                "SHALLOW_WORSE",
+                "DEEP",
+                "REFUSED_A",
+                "REFUSED_B"
+            ],
+            "{out}"
+        );
     }
 
     /// **Each renderer `run_under` hands the page to only appends to it.**

@@ -467,6 +467,24 @@ fn push(
 trait VixLookup {
     fn stamp(&mut self, feed: Vendor, ts: i64) -> Result<VixStamp, String>;
 }
+/// The most VIX months a Global Replay V4 run holds at once (CE-8, D-1769).
+const VIX_MONTHS_HELD: usize = 4;
+
+/// Drops the held month with the earliest `(month, feed)` while `held` is at
+/// `cap`, so one insert after it never takes the map past `cap`.
+fn make_room<V>(held: &mut HashMap<(Vendor, store::path::YearMonth), V>, cap: usize) {
+    while held.len() >= cap.max(1) {
+        let Some(oldest) = held
+            .keys()
+            .copied()
+            .min_by_key(|(feed, month)| (*month, *feed))
+        else {
+            return;
+        };
+        held.remove(&oldest);
+    }
+}
+
 struct VixCatalog<'a> {
     root: &'a Path,
     months: HashMap<(Vendor, store::path::YearMonth), VixReferenceMonth>,
@@ -477,6 +495,16 @@ impl VixLookup for VixCatalog<'_> {
             .map_err(|why| why.to_string())?;
         let month = moment.day().year_month().map_err(|why| why.to_string())?;
         if !self.months.contains_key(&(feed, month)) {
+            // BOUNDED, OLDEST OUT. Every opened month was kept for the whole
+            // replay, about 2.86 MB each, so a ten-year span held hundreds of
+            // MB that no record bound counted (CE-8, D-1769). Trades are
+            // stamped in entry order, entry then exit, so only the month being
+            // walked and the one after it are live; the oldest held month is
+            // dropped before a new one opens. A month asked for again is
+            // re-opened from the same file, so the stamp is unchanged and only
+            // the read repeats. The scan is over at most `VIX_MONTHS_HELD`
+            // keys, a constant.
+            make_room(&mut self.months, VIX_MONTHS_HELD);
             self.months.try_reserve(1).map_err(|why| why.to_string())?;
             self.months.insert(
                 (feed, month),

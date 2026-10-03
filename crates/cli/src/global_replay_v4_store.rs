@@ -190,7 +190,12 @@ fn open(path: &Path, writable: bool) -> Result<File, String> {
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.nlink() != 1 {
-            return Err("Global Replay V4 refuses hard-link aliases".to_owned());
+            return Err(format!(
+                "Global Replay V4 refuses hard-linked file {} ({} links); remove the \
+                 other hard link to it (CE-40, D-1769)",
+                path.display(),
+                metadata.nlink()
+            ));
         }
     }
     crate::result_set::file_generation(&file, path)?;

@@ -82,6 +82,7 @@
   import { page as routePage } from '$app/state';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
+  import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
      is a different thing entirely. One name for one value. */
@@ -3329,10 +3330,11 @@
       for (const row of rows ?? []) {
         const full = String(row.instrument ?? '');
         // The census names an instrument `NSE-INDEX-NIFTY`; the ledger and
-        // the run route both name it `NIFTY`. Matching on the LAST segment
-        // is what joins them without this page holding an exchange or a
-        // segment literal — the same join `loadRungs` already makes.
-        const leaf = full.split('-').pop() ?? '';
+        // the run route both name it `NIFTY`. The symbol is everything after
+        // the exchange and segment, NOT the last `-` segment: `BAJAJ-AUTO`
+        // and `NAM-INDIA` are sweepable shares and were offered as `AUTO`
+        // and `INDIA`, a name the engine refuses (P3-02-02, D-1769).
+        const leaf = sweptSymbolOf(full) ?? '';
         const month = String(row.month ?? '');
         const rung = String(row.timeframe ?? '');
         if (!leaf || !month || !rung) continue;
@@ -4777,9 +4779,8 @@
       const months = new Map();
       for (const row of rows ?? []) {
         // The census names an instrument `NSE-INDEX-NIFTY`; the ledger names
-        // it `NIFTY`. Matching on the LAST segment is what joins them without
-        // this page holding an exchange or a segment literal.
-        const leaf = String(row.instrument ?? '').split('-').pop();
+        // it `NIFTY`. The symbol may itself hold a `-` (P3-02-02, D-1769).
+        const leaf = sweptSymbolOf(String(row.instrument ?? ''));
         if (leaf !== run.underlying) continue;
         months.set(row.timeframe, (months.get(row.timeframe) ?? 0) + 1);
       }

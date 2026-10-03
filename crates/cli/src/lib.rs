@@ -376,11 +376,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    qualify a predeclared finite catalog on later
                                    real OHLCV across all eight intraday timeframes;
                                    retain every failed check and fixed-training fold.
-       cli boolean-qualified-search-stored VENDOR SYMBOLS FROM_Y FROM_M TO_Y TO_M BITS HORIZON MAX_POINTS BATCH_PROGRAMS NODE_ALLOWANCE BATCH_ALLOWANCE OUTPUT_ROOT LATER_FROM_Y LATER_FROM_M LATER_TO_Y LATER_TO_M
+       cli boolean-qualified-search-stored VENDOR SYMBOLS FROM_Y FROM_M TO_Y TO_M BITS HORIZON MAX_POINTS BATCH_PROGRAMS NODE_ALLOWANCE BATCH_ALLOWANCE OUTPUT_ROOT LATER_FROM_Y LATER_FROM_M LATER_TO_Y LATER_TO_M [TIMEFRAMES]
                                    continue the complete fixed AND/OR/NOT grammar
                                    with one immutable search-wide testing allowance;
-                                   automatically process bounded batches across all
-                                   eight intraday rungs and retain later qualification.
+                                   automatically process bounded batches across the
+                                   comma-separated TIMEFRAMES, or all eight intraday
+                                   rungs when it is omitted, and retain later
+                                   qualification.
                                    Work limits pause; they never claim exhaustion.
        cli auto-stored VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                                    the same search, over REAL stored bars. There
@@ -472,8 +474,8 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    cheap ceiling toward the floor one trade a week
                                    implies, stopping at the first support that
                                    admits a row. Cheap answers arrive first.
-                                   Every rule is on: 80%% of trades won AND 80%% on
-                                   the 95%% lower bound, the smallest win at least
+                                   Every rule is on: 80% of trades won AND 80% on
+                                   the 95% lower bound, the smallest win at least
                                    3x the largest loss, total profit at least 5x
                                    the worst peak-to-trough fall, and the weakest
                                    calendar grain still half positive. There is NO
@@ -585,7 +587,8 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
 SESSIONS  how many generated trading days to sweep, 1..=3650
 MIN_HITS  bars a combination must fire on to be kept, 1 or more
 VENDOR    the feed that wrote them -- groww, dhan, truedata, gdfl, zerodha
-UNDERLYING  the index, e.g. NIFTY or BANKNIFTY
+UNDERLYING  the index, e.g. NIFTY or BANKNIFTY, or one of the F&O
+            underlyings that is a share, e.g. RELIANCE (its cash equity)
 RUNG      the bar length as its directory word -- 1min, 1day
 
 The stored commands read a run identity off the build. They refuse unless the
@@ -2943,12 +2946,20 @@ fn root_from(
     explicit: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Result<std::path::PathBuf, stored::Refusal> {
-    if let Some(explicit) = explicit {
-        return Ok(std::path::PathBuf::from(explicit));
+    // ONE READER WITH THE API'S. An empty BRUTEX_STORE or an empty or relative
+    // HOME is refused by name rather than resolved against the working
+    // directory, where `.brutex/store` could exist and canonicalize (CE-38,
+    // D-1769).
+    if let Some(explicit) = brutex_core::knob::folder("BRUTEX_STORE", explicit)? {
+        return Ok(explicit);
     }
     home.map_or_else(
         || Err("neither BRUTEX_STORE nor HOME is set, so the store cannot be found".to_owned()),
-        |home| Ok(std::path::PathBuf::from(home).join(".brutex").join("store")),
+        |home| {
+            Ok(brutex_core::knob::home(Some(home))?
+                .join(".brutex")
+                .join("store"))
+        },
     )
 }
 
@@ -2990,10 +3001,12 @@ fn root_from(
 fn log_dir_from(
     explicit: Option<std::ffi::OsString>,
     store: Option<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-    explicit
-        .map(std::path::PathBuf::from)
-        .or_else(|| store.map(|s| s.join("logs").join("cli")))
+) -> Result<Option<std::path::PathBuf>, String> {
+    // SET BUT EMPTY IS REFUSED, NOT RESOLVED. `PathBuf::from("")` opened
+    // `events.ndjson` in the working directory, the banner printed
+    // `events -> ` and `/logs` never read it (CE-5, D-1769).
+    Ok(brutex_core::knob::folder("BRUTEX_LOG_DIR", explicit)?
+        .or_else(|| store.map(|s| s.join("logs").join("cli"))))
 }
 
 /// Installs the process-wide event sink, or says why it could not.
@@ -3058,7 +3071,11 @@ fn log_dir_from(
 /// unwritable one by changing permissions.
 #[must_use]
 pub fn install_log() -> String {
-    let Some(dir) = log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) else {
+    let dir = match log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) {
+        Ok(dir) => dir,
+        Err(why) => return format!("events are NOT being recorded: {why}"),
+    };
+    let Some(dir) = dir else {
         return "events are NOT being recorded: neither BRUTEX_LOG_DIR nor a store root \
                 is set, so there is nowhere to write them. Set BRUTEX_LOG_DIR, or set \
                 BRUTEX_STORE or HOME so the log can sit beside the store."
@@ -10341,7 +10358,14 @@ fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offere
 /// `validate: false` and only the rung that lands is re-run with the stack. This
 /// gives the same choice to the command an operator reaches for first.
 fn validate_from_env() -> bool {
-    validates(crate::knobs::var("BRUTEX_VALIDATE").as_deref())
+    let raw = crate::knobs::var("BRUTEX_VALIDATE");
+    validates(raw.as_deref()).unwrap_or_else(|| {
+        // A WORD THE SWITCH DOES NOT TAKE IS NAMED, AND THE STACK STAYS ON.
+        // The banner's KNOB REFUSED block says which value was not used
+        // (CE-6, D-1769).
+        crate::knobs::refuse_value("BRUTEX_VALIDATE", raw.as_deref().unwrap_or_default());
+        true
+    })
 }
 
 /// The rule itself, over the raw value, so it can be tested without touching the
@@ -10352,14 +10376,17 @@ fn validate_from_env() -> bool {
 /// from the LOOKUP is what makes the rule provable at all — and the reader above
 /// is then one line with nothing left to get wrong.
 ///
-/// Only a literal `0` turns validation off. A malformed or unexpected value
-/// leaves it ON: a typo must never silently buy a weaker answer, which is the
-/// same argument §4 makes against a fallback that hides a failure.
-fn validates(raw: Option<&str>) -> bool {
-    // NOT a `const fn`: matching a `&str` in one needs `PartialEq` as a const
-    // trait, which is not stable. `trim` is the honest rule anyway -- an
-    // operator who exports the variable with a trailing space meant `0`.
-    raw.is_none_or(|value| value.trim() != "0")
+/// The words are `brutex_core::knob::switch`'s — `0`, `false`, `off`, `no`
+/// turn validation off, `1`, `true`, `on`, `yes` leave it on, in any case and
+/// with surrounding space ignored — the same eight the request path already
+/// took. Only a literal `0` used to turn it off here, so `false`, `off` and
+/// `no` silently left it ON against the operator's stated choice (CE-6,
+/// D-1769). Any other word is `None`: [`validate_from_env`] keeps the stack on
+/// and names the refused value, because a typo must never silently buy a
+/// weaker answer, which is the same argument §4 makes against a fallback that
+/// hides a failure.
+fn validates(raw: Option<&str>) -> Option<bool> {
+    brutex_core::knob::switch("BRUTEX_VALIDATE", raw, true).ok()
 }
 
 /// What a report says when the validation stack did not run.
@@ -15085,8 +15112,13 @@ fn return_over_drawdown_cell(pessimistic: i64, max_drawdown: i64) -> String {
         // A variant that never gave anything back. Unbounded, so it is named
         // rather than printed as a number no divisor produced.
         i64::MAX => "inf".to_owned(),
-        // No profit to divide. `-` is the honest answer, not a zero.
-        0 => "-".to_owned(),
+        // No profit to divide. `-` is the honest answer, not a zero — and it
+        // is decided from the MONEY, not from the ratio. The ratio is also 0
+        // for a profitable variant whose return is under a hundredth of its
+        // drawdown (1,000 paisa against 200,000), and printing `-` there told
+        // the reader it made nothing (CE-17, D-1769).
+        0 if pessimistic <= 0 => "-".to_owned(),
+        0 => "<0.01".to_owned(),
         // HUNDREDTHS, RENDERED AS A DECIMAL, and the raw integer was a second
         // way to misread this column. `return_over_drawdown` is `x100` by the
         // same convention `win_rate_bp` and `profit_factor_bp` use, so a run
@@ -17889,9 +17921,21 @@ fn publish_ranked(
                   threshold does not move a verdict that is 3.42 against 6.19. The
                   multiply is the only arithmetic and it touches no price: gate
                   11 counts the float TYPE NAME and this line writes
-                  none."
+                  none. ROUNDED AGAINST THE FINDING, though: truncating put
+                  the bar up to a milli BELOW itself, and `t_milli` is rounded,
+                  so a |t| 1.5 milli short of the bar read as clearing it
+                  (CE-7, D-1769). The bar is now the ceiling, the page compares
+                  strictly above it, and a bar that is not finite is one no row
+                  clears."
     )]
-    let bar_milli = (bar * 1_000.0) as i64;
+    let bar_milli = {
+        let scaled = bar * 1_000.0;
+        if scaled.is_finite() {
+            scaled.ceil() as i64
+        } else {
+            i64::MAX
+        }
+    };
     let summary = crate::live::Summary {
         trials,
         bar_milli,
@@ -21549,6 +21593,16 @@ mod tests {
             "the refusal names both: {why}"
         );
         assert!(why.contains("HOME"), "the refusal names both: {why}");
+        // CE-38, D-1769: empty or relative values are refused by name.
+        assert!(
+            root_from(Some("".into()), Some("/Users/x".into()))
+                .is_err_and(|why| why.starts_with("BRUTEX_STORE is set but empty"))
+        );
+        assert!(
+            root_from(None, Some("".into()))
+                .is_err_and(|why| why.starts_with("HOME is set but empty"))
+        );
+        assert!(root_from(None, Some("rel".into())).is_err_and(|why| why.contains("relative")));
     }
 
     /// A MISSING STORE ROOT IS A REFUSAL, NEVER AN IMPLICIT DIRECTORY CREATE.
@@ -21926,7 +21980,7 @@ mod tests {
                 Some(OsString::from("/tmp/brutex-events")),
                 Some(PathBuf::from("/srv/store")),
             ),
-            Some(PathBuf::from("/tmp/brutex-events")),
+            Ok(Some(PathBuf::from("/tmp/brutex-events"))),
         );
 
         // WITH NO VARIABLE, THE LOG SITS UNDER THE STORE, IN ITS OWN
@@ -21944,7 +21998,7 @@ mod tests {
         // which is the only shape that stays O(1) per event with two writers.
         assert_eq!(
             log_dir_from(None, Some(PathBuf::from("/srv/store"))),
-            Some(PathBuf::from("/srv/store/logs/cli")),
+            Ok(Some(PathBuf::from("/srv/store/logs/cli"))),
             "the CLI owns a child directory so it cannot interleave with the \
              server's file"
         );
@@ -21953,13 +22007,44 @@ mod tests {
         // guess at the working directory. `install_log` turns this into the
         // printed "events are NOT being recorded" line rather than a silent
         // absence — degrade loudly, per §4.
-        assert_eq!(log_dir_from(None, None), None);
+        assert_eq!(log_dir_from(None, None), Ok(None));
+        // CE-5, D-1769: set but EMPTY is refused by name, never the cwd, and
+        // never quietly replaced by the store's directory either.
+        for blank in ["", " "] {
+            assert!(
+                log_dir_from(
+                    Some(OsString::from(blank)),
+                    Some(PathBuf::from("/srv/store"))
+                )
+                .is_err_and(|why| why.starts_with("BRUTEX_LOG_DIR is set but empty"))
+            );
+        }
 
         // AND AN EXPLICIT DIRECTORY STILL WINS WITH NO STORE AT ALL, which is
         // the case for an operator who has moved the store away entirely.
         assert_eq!(
             log_dir_from(Some(OsString::from("/var/log/brutex")), None),
-            Some(PathBuf::from("/var/log/brutex")),
+            Ok(Some(PathBuf::from("/var/log/brutex"))),
+        );
+    }
+
+    /// P3-02-03..05, D-1769: the help text names the optional TIMEFRAMES
+    /// argument, prints no printf escape, and names the cash equities on the
+    /// UNDERLYING line (CLAUDE.md §1).
+    #[test]
+    fn the_usage_text_states_what_the_commands_actually_take() {
+        assert!(!USAGE.contains("%%"), "a Rust &str has no printf escapes");
+        assert!(USAGE.contains("80% of trades won"));
+        assert!(USAGE.contains("LATER_TO_M [TIMEFRAMES]"));
+        let underlying = USAGE
+            .lines()
+            .skip_while(|line| !line.starts_with("UNDERLYING"))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            underlying.contains("NIFTY") && underlying.contains("cash equity"),
+            "{underlying}"
         );
     }
 
@@ -23303,9 +23388,9 @@ mod tests {
     /// in shape to one that ran all three, so the banner is the only thing
     /// separating a CANDIDATE from a FINDING.
     ///
-    /// The switch defaults ON and only a literal `0` turns it off: a typo must
+    /// The switch defaults ON and only an off word turns it off: a typo must
     /// not silently buy a weaker answer, which is why a malformed value is not
-    /// read as off.
+    /// read as off, and is named (CE-6, D-1769).
     #[test]
     fn an_unvalidated_screen_cannot_be_mistaken_for_a_validated_one() {
         assert!(
@@ -23328,26 +23413,35 @@ mod tests {
             );
         }
 
-        // THE DEFAULT IS ON, AND ONLY `0` TURNS IT OFF.
+        // THE DEFAULT IS ON, AND THE EIGHT SWITCH WORDS DECIDE IT.
         //
         // Asserted on `validates`, the same decision `validate_from_env` calls,
         // rather than by re-deriving the rule here — so a change to one is a
         // change to both. The lookup is not tested because it cannot be: this
         // crate is `#![forbid(unsafe_code)]` and `std::env::set_var` is unsafe.
         // Splitting the decision out is what made the rule provable at all.
+        // CE-6, D-1769: the eight switch words, and anything else is refused
+        // (`None`), which `validate_from_env` turns into ON plus a named
+        // KNOB REFUSED line.
         for (raw, want, why) in [
-            (None, true, "absent means the full stack runs"),
-            (Some("0"), false, "a literal zero is the only way off"),
-            (Some(" 0 "), false, "and whitespace around it still counts"),
-            (Some("1"), true, "any other value leaves it on"),
+            (None, Some(true), "absent means the full stack runs"),
+            (Some("0"), Some(false), "zero turns it off"),
+            (
+                Some(" 0 "),
+                Some(false),
+                "and whitespace around it still counts",
+            ),
+            (Some("1"), Some(true), "one leaves it on"),
             (
                 Some("no"),
-                true,
-                "including one that LOOKS like an off switch",
+                Some(false),
+                "an off word is honoured, not reversed",
             ),
-            (Some("false"), true, "and one that reads like one"),
-            (Some(""), true, "and empty is not off"),
-            (Some("00"), true, "and a near-miss is not off either"),
+            (Some("FALSE"), Some(false), "in any case"),
+            (Some("off"), Some(false), "all four of them"),
+            (Some("yes"), Some(true), "and an on word is on"),
+            (Some(""), None, "empty is refused, not read as either"),
+            (Some("00"), None, "and a near-miss is refused by name"),
         ] {
             assert_eq!(validates(raw), want, "{why}");
         }
@@ -25954,6 +26048,9 @@ mod tests {
         // No profit to divide.
         assert_eq!(return_over_drawdown_cell(0, 29_163), "-");
         assert_eq!(return_over_drawdown_cell(-5_000, 29_163), "-");
+        // CE-17, D-1769: a PROFIT under a hundredth of its drawdown is not
+        // "no profit". The ratio truncates to 0; the money decides the dash.
+        assert_eq!(return_over_drawdown_cell(1_000, 200_000), "<0.01");
 
         // THE REGRESSION ITSELF. A negative drawdown is not a value the engine
         // can produce; if one ever reaches here the answer must not be a
@@ -25976,7 +26073,8 @@ mod tests {
                 };
                 let want = match cell.return_over_drawdown() {
                     i64::MAX => "inf".to_owned(),
-                    0 => "-".to_owned(),
+                    0 if pess <= 0 => "-".to_owned(),
+                    0 => "<0.01".to_owned(),
                     r => hundredths_of(r),
                 };
                 assert_eq!(

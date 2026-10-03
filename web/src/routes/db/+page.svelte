@@ -4882,7 +4882,11 @@
       'open interest on this bar is the store’s null sentinel, i64::MIN - this feed stamps none for this segment. It is NOT zero; a zero here would be a real zero.',
     oi_null_before:
       'the previous bar carries no open interest, so there is nothing to measure this one against.',
-    previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.'
+    previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.',
+    previous_unreadable:
+      'the bar before this one failed its checksum and was not read, so there is no trusted value to measure this one against. Its own value is shown; only the change is withheld.',
+    overflow:
+      'the change does not fit the integer range the server measures in, so it is withheld rather than shown wrapped. Both values are real.'
   };
   /** @param {string | null} code */
   const barWhyText = (code) =>

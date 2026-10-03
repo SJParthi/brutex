@@ -239,7 +239,9 @@ pub fn masters_dir() -> Result<PathBuf, String> {
 ///
 /// No value and no `HOME`. See [`default_masters_dir_from`].
 fn masters_dir_from(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
-    value.map_or_else(default_masters_dir, |v| Ok(PathBuf::from(v)))
+    // SET BUT EMPTY IS REFUSED, NOT RESOLVED. `PathBuf::from("")` is the
+    // working directory (CE-33, D-1769).
+    brutex_core::knob::folder("BRUTEX_MASTERS", value)?.map_or_else(default_masters_dir, Ok)
 }
 
 /// The directory the bar store and its manifests are read from.
@@ -290,8 +292,12 @@ fn store_dir_from(
     value: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Result<PathBuf, String> {
-    if let Some(value) = value {
-        return Ok(PathBuf::from(value));
+    // SET BUT EMPTY IS REFUSED, NOT RESOLVED: `PathBuf::from("")` is the
+    // working directory, the `.` fallback this function's doc says was removed,
+    // reached by another road (CE-33, D-1769). An empty or relative HOME is
+    // refused the same way (CE-38).
+    if let Some(value) = brutex_core::knob::folder("BRUTEX_STORE", value)? {
+        return Ok(value);
     }
     let Some(home) = home else {
         return Err(format!(
@@ -304,7 +310,9 @@ fn store_dir_from(
                 .map_or_else(|e| format!("unreadable ({e})"), |p| p.display().to_string())
         ));
     };
-    Ok(PathBuf::from(home).join(".brutex").join("store"))
+    Ok(brutex_core::knob::home(Some(home))?
+        .join(".brutex")
+        .join("store"))
 }
 
 /// Where the masters live when `BRUTEX_MASTERS` says nothing.
@@ -351,7 +359,11 @@ fn default_masters_dir_from(home: Option<std::ffi::OsString>) -> Result<PathBuf,
                  under an environment that has HOME.",
             ))
         },
-        |home| Ok(PathBuf::from(home).join(".brutex").join("masters")),
+        |home| {
+            Ok(brutex_core::knob::home(Some(home))?
+                .join(".brutex")
+                .join("masters"))
+        },
     )
 }
 
@@ -8517,13 +8529,17 @@ where
         // and so must this one, or the two paths disagree about one credential.
         let invalid_auth = why.detail.contains("Invalid_Authentication");
 
-        match step(why.status, invalid_auth, None, attempt, server_errors) {
+        // THE VENDOR'S OWN NAME FOR IT, read from the body by the transport
+        // (CE-29, D-1769). `None` here sent a 403 "not entitled" down the dead
+        // token arm and a 400 `DH-906` down the answered one.
+        match step(why.status, invalid_auth, why.named, attempt, server_errors) {
             Step::NotEntitled => {
                 return Err(pull::chain::Refusal {
                     // ALIVE, AND NOT ENTITLED. Two different facts, and
                     // conflating them halts a feed over a subscription gap.
                     credential_dead: false,
                     status: why.status,
+                    named: why.named,
                     detail: format!(
                         "{why} — the credential is ALIVE and this API key is not \
                          entitled to this call. Re-running later cannot fix it; \
@@ -8539,6 +8555,7 @@ where
                     // re-derived downstream by grepping a rendered page.
                     credential_dead: true,
                     status: why.status,
+                    named: why.named,
                     detail: format!(
                         "{why} — the access token is no longer valid mid-walk. \
                          This repository never mints one (§8): the refreshed \
@@ -8555,6 +8572,7 @@ where
                     // THE VENDOR'S SIDE FAILED; the credential was fine.
                     credential_dead: false,
                     status: why.status,
+                    named: why.named,
                     // MARKED, SO THE RUN LOOP DOES NOT HAVE TO READ THIS
                     // SENTENCE TO KNOW WHAT IT SAYS. The marker is stripped in
                     // `broker_run` before the reason reaches an operator or the
@@ -8582,6 +8600,7 @@ where
         // EXHAUSTED IS ABOUT THE TRANSPORT, NOT THE TOKEN.
         credential_dead: false,
         status: last.status,
+        named: last.named,
         detail: format!(
             "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport \
              is not blipping, it is down"
@@ -9815,8 +9834,14 @@ async fn with_retry(
                         // vendor had just refused. So the decrease is taken here
                         // for the named case only, which is precisely the set
                         // the transport misses. D-0322.
+                        //
+                        // AND THE TRANSPORT DOES NOT MISS A 2xx. A throttle
+                        // named in a 2xx body is recorded by
+                        // `weigh_body_parsed` (D-0950), so taking it here too
+                        // counted it twice and halved the refusals needed to
+                        // floor the allowance (CE-30, D-1769).
                         if throttled
-                            && status != Some(429)
+                            && transport_missed_throttle(status)
                             && let Ok(budgets) = site.budgets.lock()
                             && let Some(Some(shared)) = budgets.get(feed as usize)
                         {
@@ -9838,6 +9863,36 @@ async fn with_retry(
         "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport is not \
          blipping, it is down"
     ))
+}
+
+/// Whether a throttle `step` named under `status` is one the transport did not
+/// already record against the shared governor.
+///
+/// `window_async` records a 429 on its status, and a throttle named in a 2xx
+/// body in `weigh_body_parsed`. What it cannot see is a named throttle under
+/// any other answered status, and that is the only set `with_retry` may record
+/// (D-0322, CE-30, D-1769).
+fn transport_missed_throttle(status: Option<u16>) -> bool {
+    status.is_some_and(|code| code != 429 && !(200..=299).contains(&code))
+}
+
+#[cfg(test)]
+mod throttle_record_tests {
+    use super::transport_missed_throttle;
+
+    /// One named throttle is one decrement: a 429 and a 2xx body are the
+    /// transport's to record, a named throttle under any other status is
+    /// `with_retry`'s, and no status means nothing was answered (CE-30, D-1769).
+    #[test]
+    fn a_throttle_the_transport_recorded_is_not_recorded_again() {
+        for code in [200, 201, 204, 299, 429] {
+            assert!(!transport_missed_throttle(Some(code)), "{code}");
+        }
+        for code in [199, 300, 400, 403, 428, 430, 500, 503] {
+            assert!(transport_missed_throttle(Some(code)), "{code}");
+        }
+        assert!(!transport_missed_throttle(None));
+    }
 }
 
 /// Every secret this feed's [`pull::vendor::AuthScheme`] names, read from
@@ -10202,7 +10257,14 @@ pub(crate) async fn credentialed_source(
             "HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned(),
         ));
     };
-    let config_path = pull::config::default_config_path(std::path::Path::new(&home));
+    // AN EMPTY OR RELATIVE HOME IS REFUSED, not read as the working
+    // directory's `.brutex/credentials.toml` (CE-38, D-1769).
+    let home = brutex_core::knob::home(Some(home)).map_err(|why| {
+        Unreadable::configuration(format!(
+            "{why}, so ~/.brutex/credentials.toml cannot be located"
+        ))
+    })?;
+    let config_path = pull::config::default_config_path(&home);
     let config = pull::config::CredentialConfig::load(&config_path).map_err(|why| {
         Unreadable::configuration(format!(
             "the credential configuration at {} is not usable: {why}",
@@ -15935,12 +15997,16 @@ pub enum Broker {
 /// `web/src/routes/+layout.svelte` have both said `/` is since they were
 /// written. The server-rendered dashboard it displaced answers at
 /// `/dashboard`, unchanged and still linked from the nav; D-0064.
-pub fn router(site: Loaded) -> axum::Router {
-    router_serving(
+///
+/// # Errors
+///
+/// `BRUTEX_WEB` is set but empty; see [`assets::web_dir`].
+pub fn router(site: Loaded) -> Result<axum::Router, String> {
+    Ok(router_serving(
         site,
-        std::sync::Arc::new(assets::Assets::new(&assets::web_dir())),
+        std::sync::Arc::new(assets::Assets::new(&assets::web_dir()?)),
         DEFAULT_ADDR,
-    )
+    ))
 }
 
 /// Production HTTP surface with durable sweep-control and result-read auditing.
@@ -16292,10 +16358,21 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // still serve one leg each; this starts a run that drives them itself,
         // so the operator's retry loop is no longer inside a browser tab. See
         // `crate::pullrun`.
-        .route("/pull/run", axum::routing::post(pull_run))
+        // Both read legs, each repeating its member list twice-encoded, so
+        // both read the run bound, not 8 KiB (P3-01-01, D-1769).
+        .route(
+            "/pull/run",
+            axum::routing::post(pull_run).layer(axum::extract::DefaultBodyLimit::max(
+                crate::pullrun::MAX_RUN_FORM_BYTES,
+            )),
+        )
         .route(
             "/pull/recovery",
-            axum::routing::post(crate::recovery::start).get(crate::recovery::page),
+            axum::routing::post(crate::recovery::start)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::pullrun::MAX_RUN_FORM_BYTES,
+                ))
+                .get(crate::recovery::page),
         )
         .route(
             "/pull/recovery.json",
@@ -18333,7 +18410,7 @@ fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Re
 /// because a server started from `/` or from a read-only directory must still
 /// log somewhere it can write, and the store root is already required to be
 /// writable for the process to do anything at all.
-fn served_log_dir(store_root: &Path) -> PathBuf {
+fn served_log_dir(store_root: &Path) -> Result<PathBuf, String> {
     log_dir_from(
         std::env::var_os(LOG_DIR_ENV),
         std::env::current_dir().ok().as_deref(),
@@ -18376,14 +18453,17 @@ fn log_dir_from(
     named: Option<std::ffi::OsString>,
     cwd: Option<&Path>,
     store_root: &Path,
-) -> PathBuf {
-    if let Some(named) = named {
-        return PathBuf::from(named);
+) -> Result<PathBuf, String> {
+    // SET BUT EMPTY IS REFUSED: `PathBuf::from("")` opened `events.ndjson`
+    // in the working directory, an untracked file in the checkout that gate 1
+    // forbids (CE-36, D-1769).
+    if let Some(named) = brutex_core::knob::folder(LOG_DIR_ENV, named)? {
+        return Ok(named);
     }
-    match cwd {
+    Ok(match cwd {
         Some(cwd) if is_workspace_root(cwd) => cwd.join("logs"),
         _ => telemetry::dir_beneath_store(store_root),
-    }
+    })
 }
 
 /// Read here rather than threaded through [`run_in`] for the same reason
@@ -18510,7 +18590,13 @@ async fn run_in_over(
                 // let a retarget after admission send later writers elsewhere
                 // while this process still held the old store's lock.
                 let store_root = one_server.root.clone();
-                let log_dir = served_log_dir(&store_root);
+                let log_dir = match served_log_dir(&store_root) {
+                    Ok(dir) => dir,
+                    Err(why) => {
+                        warn_line!("REFUSED — {why}. No request was served.");
+                        return FAILED;
+                    }
+                };
                 // The ENV DECIDES THE LEVELS AND THE CALLER DECIDES THE
                 // DIRECTORY. `served_log_level` builds a template it cannot
                 // know the path for, so the directory is set here, where it is
@@ -18528,7 +18614,14 @@ async fn run_in_over(
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart
                 // from the browser. `CLAUDE.md` §4.
-                let front = std::sync::Arc::new(assets::Assets::new(&assets::web_dir()));
+                let web = match assets::web_dir() {
+                    Ok(web) => web,
+                    Err(why) => {
+                        warn_line!("REFUSED — {why}. No request was served.");
+                        return FAILED;
+                    }
+                };
+                let front = std::sync::Arc::new(assets::Assets::new(&web));
                 announce_front_end(&front);
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
@@ -23658,7 +23751,7 @@ mod tests {
             "a crate is not the workspace root"
         );
         assert_eq!(
-            log_dir_from(None, Some(repo), store),
+            log_dir_from(None, Some(repo), store).expect("no variable"),
             telemetry::dir_beneath_store(store),
             "a crate directory falls back to the store, never to ./logs"
         );
@@ -23670,7 +23763,7 @@ mod tests {
             .expect("crates/api has two parents");
         assert!(is_workspace_root(root), "the workspace root is recognised");
         assert_eq!(
-            log_dir_from(None, Some(root), store),
+            log_dir_from(None, Some(root), store).expect("no variable"),
             root.join("logs"),
             "the workspace root takes ./logs, which is what pressing Run does"
         );
@@ -23894,7 +23987,8 @@ mod tests {
                 Some(std::ffi::OsString::from("/named/elsewhere")),
                 None,
                 store
-            ),
+            )
+            .expect("a named folder"),
             std::path::Path::new("/named/elsewhere"),
             "an explicit BRUTEX_LOGS wins over every probe"
         );
@@ -23906,14 +24000,22 @@ mod tests {
             .and_then(std::path::Path::parent)
             .expect("crates/api has two parents");
         assert_eq!(
-            log_dir_from(Some(std::ffi::OsString::from("/named")), Some(root), store),
+            log_dir_from(Some(std::ffi::OsString::from("/named")), Some(root), store)
+                .expect("a named folder"),
             std::path::Path::new("/named"),
         );
         assert_eq!(
-            log_dir_from(None, None, store),
+            log_dir_from(None, None, store).expect("no variable"),
             telemetry::dir_beneath_store(store),
             "no variable and no working directory falls back to the store"
         );
+        // CE-36, D-1769: set but empty is refused by name, never the cwd.
+        for blank in ["", "  "] {
+            assert!(
+                log_dir_from(Some(std::ffi::OsString::from(blank)), Some(root), store)
+                    .is_err_and(|why| why.starts_with("BRUTEX_LOGS is set but empty"))
+            );
+        }
     }
 
     /// A directory with no manifest at all is not a workspace root, and the
@@ -23929,7 +24031,8 @@ mod tests {
                 None,
                 Some(std::path::Path::new("/nonexistent-uCe1r")),
                 store
-            ),
+            )
+            .expect("no variable"),
             telemetry::dir_beneath_store(store),
         );
     }
@@ -23970,6 +24073,33 @@ mod tests {
             ("explorer.exe", &[][..])
         );
         assert_eq!(browser_handler(BrowserHost::Other), ("xdg-open", &[][..]));
+    }
+
+    /// CE-33 and CE-38, D-1769: a store or masters folder set but EMPTY, and
+    /// a HOME that is empty or relative, are refused by name, never resolved
+    /// against the working directory.
+    #[test]
+    fn an_empty_folder_or_a_relative_home_is_refused_not_resolved() {
+        for blank in ["", " "] {
+            let why = store_dir_from(Some(blank.into()), Some("/home/who".into()))
+                .expect_err("an empty store refuses");
+            assert!(why.starts_with("BRUTEX_STORE is set but empty"), "{why}");
+            let why = masters_dir_from(Some(blank.into())).expect_err("an empty masters refuses");
+            assert!(why.starts_with("BRUTEX_MASTERS is set but empty"), "{why}");
+            let why = store_dir_from(None, Some(blank.into())).expect_err("an empty HOME refuses");
+            assert!(why.starts_with("HOME is set but empty"), "{why}");
+            let why =
+                default_masters_dir_from(Some(blank.into())).expect_err("an empty HOME refuses");
+            assert!(why.starts_with("HOME is set but empty"), "{why}");
+        }
+        assert!(
+            store_dir_from(None, Some("relative/home".into()))
+                .is_err_and(|why| why.contains("relative"))
+        );
+        assert!(
+            default_masters_dir_from(Some("relative/home".into()))
+                .is_err_and(|why| why.contains("relative"))
+        );
     }
 
     #[test]
@@ -25134,7 +25264,8 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router(Loaded::new(Site::load(&dir, &store_root("health503")))),
+            router(Loaded::new(Site::load(&dir, &store_root("health503"))))
+                .expect("BRUTEX_WEB is not set empty in a test"),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 

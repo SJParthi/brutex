@@ -247,8 +247,10 @@ pub(super) fn base_values(row: &BooleanCoordinateV1) -> Result<AdmissionEvidence
         average_win_paisa: gross_win
             .checked_div(cell.wins)
             .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
-        average_loss_paisa: gross_loss
-            .checked_div(losses)
+        average_loss_paisa: (losses != 0)
+            // Rounded UP: this field is gated by a maximum, and a floored mean
+            // passed a 150 cap at a true 150.5 (p3floor-1, D-1769).
+            .then(|| gross_loss.div_ceil(losses))
             .map_or(ObservedU64V1::Unmeasured, ObservedU64V1::Measured),
         profit_factor_ppm: ratio(gross_win, gross_loss, "profit factor")?,
         consecutive_losing_streak: measured(u64::from(cell.max_losing_streak)),

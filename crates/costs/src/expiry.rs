@@ -41,8 +41,10 @@
 //! contract settles on the previous trading day, and this module does not
 //! account for that — exactly as the source does not. It is stated here rather
 //! than left to be discovered: an expiry returned by this module is the
-//! *calendar* expiry, and a holiday calendar is a separate, unbuilt thing.
-//! `docs/06-limits.md` carries it.
+//! *calendar* expiry. The holiday calendar is `pull::calendar`, which this
+//! crate cannot name (`pull` depends on `costs`), so the caller that files
+//! contracts, `pull::rolling::expiry_of`, refuses an expiry it marks closed
+//! (CE-14, D-1769). `docs/06-limits.md` carries it.
 //!
 //! # Why the weekday regime is dated, and where it refuses
 //!

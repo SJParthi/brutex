@@ -902,6 +902,33 @@ fn the_walk_descends_into_group_folders_rather_than_skipping_them() {
     assert_eq!(earliest, day(2022, 9, 30));
 }
 
+/// CE-21, D-1769: a member whose folder is exactly one level inside the bound
+/// is walked — the GDFL shape `GFDLNFO_.../Futures/-I/` inside one wrapper
+/// folder, which the old bound of four skipped.
+#[test]
+fn a_gdfl_tree_inside_one_wrapper_folder_is_still_walked() {
+    let scratch = Scratch::new();
+    let root = scratch.dir("one-wrapper");
+    let mut at = root.clone();
+    for level in 1..archive::MAX_DEPTH {
+        at = at.join(format!("l{level}"));
+    }
+    assert_eq!(
+        archive::MAX_DEPTH - 1,
+        4,
+        "wrapper / GFDLNFO_... / Futures / -I is four folders below the root"
+    );
+    fs::create_dir_all(&at).expect("a wrapped tree");
+    fs::write(at.join("AT_LIMIT.csv"), TWO_DAYS).expect("a member at the limit");
+
+    let census = folder::read_census(&root, Feed::TrueData, Columns::TrueDataIndex)
+        .expect("the walk reads it");
+    assert!(
+        !census.instruments.is_empty(),
+        "a member one level inside the bound is walked"
+    );
+}
+
 /// THE DESCENT IS BOUNDED, and a member past the bound is COUNTED not dropped.
 ///
 /// Both feed folders on the operator's machine are SYMLINKS, so an unbounded

@@ -228,7 +228,14 @@ fn write_row(out: &mut String, row: &cli::frontier::Row, bar_milli: i64) {
             // removes the chance of two integers on different scales being
             // eyeballed against each other. `t_milli` can be negative for a
             // short's evidence; the bar is on |t|.
-            row.t_milli.saturating_abs() >= bar_milli,
+            //
+            // STRICTLY ABOVE. `t_milli` is rounded and `bar_milli` is the
+            // ceiling of the bar, so `t_milli > bar_milli` is the comparison
+            // that cannot call a |t| below the bar a clearance: |t| is at least
+            // `t_milli - 0.5` thousandths, which is at least `bar_milli + 0.5`
+            // and above the bar. `>=` read a |t| up to 1.5 milli short as
+            // clearing it (CE-7, D-1769).
+            row.t_milli.saturating_abs() > bar_milli,
         ),
     );
 }
@@ -294,6 +301,48 @@ mod tests {
             !body.contains(r#""stale""#) && !body.contains(r#""strays""#),
             "and no count is served for a directory that was never opened: {body}"
         );
+    }
+
+    /// A |t| whose rounded thousandths EQUAL the ceilinged bar is not called a
+    /// clearance, and one a milli above it is; the sign of `t` does not matter
+    /// (CE-7, D-1769).
+    #[test]
+    fn a_t_at_the_rounded_bar_does_not_clear_it_and_one_above_does() {
+        let row = |t_milli: i64| cli::frontier::Row {
+            identity: [0; 32],
+            rank: 1,
+            mask_words: [1, 0, 0, 0, 0, 0],
+            hits: 1,
+            n: 1,
+            mean_milli_paisa: 0,
+            t_milli,
+            payoff_bp: 0,
+            wins: 0,
+            trades: 0,
+            cell_wins: 0,
+            pessimistic: 0,
+            worst_trade: 0,
+            max_drawdown: 0,
+            min_win: 0,
+            gross_win: 0,
+            gross_loss: 0,
+            direction: cli::frontier::Direction::Long,
+            rules: cli::Rules::elite(400, 25),
+        };
+        // bar 5.6739 is carried as 5674; t 5.6735 rounds to 5674 and is below it.
+        for (t_milli, clears) in [
+            (5_674, false),
+            (-5_674, false),
+            (5_675, true),
+            (-5_675, true),
+        ] {
+            let mut out = String::new();
+            super::write_row(&mut out, &row(t_milli), 5_674);
+            assert!(
+                out.contains(&format!(r#""clears_bar":{clears}"#)),
+                "{t_milli}: {out}"
+            );
+        }
     }
 
     /// A published run is served with its bar, and the rows are NOT judged.

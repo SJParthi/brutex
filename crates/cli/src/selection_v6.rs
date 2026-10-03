@@ -241,7 +241,12 @@ fn open(root: &Path, writable: bool) -> Result<(File, PathBuf), String> {
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.nlink() != 1 {
-            return Err("Selection V6 refuses aliased hard-linked files".to_owned());
+            return Err(format!(
+                "Selection V6 refuses aliased hard-linked file {} ({} links); remove \
+                 the other hard link to it (CE-40, D-1769)",
+                path.display(),
+                metadata.nlink()
+            ));
         }
     }
     crate::result_set::file_generation(&file, &path)?;

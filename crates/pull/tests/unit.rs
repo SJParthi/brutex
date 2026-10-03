@@ -2819,6 +2819,100 @@ fn a_refusal_steps_down_every_allowance_and_drains_every_bucket() {
     );
 }
 
+/// CE-28 — refusals floor every span at one permit a second, never at one per
+/// span.
+///
+/// Each refusal steps every span down by `ceiling / BACKOFF_STEPS`, and the
+/// floor was one for all of them, so Dhan's 100,000/day window reached ONE
+/// after exactly 32 refusals and the next permit was a day away: measured at
+/// 86,390 s, and 172,790 s for the next one queued. A day of sleep behind no
+/// bound and no refusal. The floor is now the rate the second span already
+/// floors at, in each span's own length (D-1769).
+#[test]
+fn ce28_a_day_span_never_floors_below_one_permit_a_second() {
+    let mut governor =
+        Governor::new(Some(DHAN_PER_SECOND), None, Some(DHAN_PER_DAY)).expect("within bounds");
+    for _ in 0..1_000 {
+        governor.record_throttled();
+    }
+    assert_eq!(governor.permitted(WindowSpan::Second), Some(1));
+    assert_eq!(governor.permitted(WindowSpan::Day), Some(86_400));
+    // The drained buckets clear in one second, not one day.
+    match governor.admit(0) {
+        Verdict::Deny { wait_micros, .. } => assert!(
+            wait_micros <= MICROS_PER_SECOND,
+            "a floored governor waits at most a second, waited {wait_micros} µs"
+        ),
+        Verdict::Admit => panic!("a drained bucket admits nothing at once"),
+    }
+    // A minute span floors at sixty, the same rate.
+    let mut minute = only(WindowSpan::Minute, 500);
+    for _ in 0..1_000 {
+        minute.record_throttled();
+    }
+    assert_eq!(minute.permitted(WindowSpan::Minute), Some(60));
+}
+
+/// Every span every live feed publishes is faster than a permit a second, so
+/// every one floors at exactly that rate and no refusal can make a permit wait
+/// longer than a second on any span (CE-28, D-1769).
+#[test]
+fn every_live_rate_span_floors_at_one_permit_per_second() {
+    let mut seen = 0;
+    for feed in pull::vendor::Feed::ALL {
+        let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+            continue;
+        };
+        let mut governor = Governor::new(
+            spec.budget.per_second,
+            spec.budget.per_minute,
+            spec.budget.per_day,
+        )
+        .expect("a live budget is within bounds");
+        for _ in 0..10_000 {
+            governor.record_throttled();
+        }
+        for span in WindowSpan::ALL {
+            let Some(left) = governor.permitted(span) else {
+                continue;
+            };
+            seen += 1;
+            assert_eq!(
+                u64::from(left),
+                span.len_micros() / MICROS_PER_SECOND,
+                "{feed:?} {span} floored at {left}"
+            );
+        }
+    }
+    assert!(seen >= 4, "only {seen} live spans were checked");
+}
+
+/// A span published SLOWER than a permit a second keeps a floor of one step,
+/// because one a second would sit above its own ceiling and a refusal would
+/// narrow nothing (D-1769).
+#[test]
+fn a_span_published_slower_than_one_a_second_floors_at_one_step() {
+    for (span, ceiling, floor) in [
+        (WindowSpan::Minute, 30, 1),
+        (WindowSpan::Minute, 60, 1),
+        (WindowSpan::Minute, 61, 60),
+        (WindowSpan::Day, 3_200, 100),
+        (WindowSpan::Day, 86_400, 2_700),
+        (WindowSpan::Day, 86_401, 86_400),
+    ] {
+        let mut governor = only(span, ceiling);
+        governor.record_throttled();
+        assert!(
+            governor.permitted(span) < Some(ceiling),
+            "{span} {ceiling} must narrow"
+        );
+        for _ in 0..10_000 {
+            governor.record_throttled();
+        }
+        assert_eq!(governor.permitted(span), Some(floor), "{span} {ceiling}");
+    }
+}
+
 /// **A REFUSED DAY SPAN COSTS LITTLE AND RECOVERS IN A BOUNDED NUMBER OF
 /// REQUESTS**, and under halve-down / `+1`-up it did neither.
 ///
