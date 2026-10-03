@@ -53613,3 +53613,71 @@ owned by another change.
 
 **What it changes.** One audit render line gains the period count. No digest,
 selection or run identity moves.
+
+### D-1499 — The two member forms read a body large enough for every member they allow — 2026-10-03
+
+**What was observed (W1-api3-6).** Every form route shared `MAX_FORM_BYTES`,
+8 KiB. `/pull/spot` and `/ingest/queue` take repeated `member` fields, and
+`ingest::MAX_MEMBERS` (2,000) says a caller "may legitimately tick all" 750 of
+the widest set. 750 member fields exceed 8 KiB, so ticking them answered the
+framework's 413, and `Refusal::TooManyMembers` could not be reached over HTTP.
+
+**The decision.** Those two routes carry a route-level `DefaultBodyLimit` of
+`ingest::MAX_MEMBER_FORM_BYTES` = `MAX_FORM_BYTES` + `MAX_MEMBERS` x
+(`member=` + 3 x `SYMBOL_CAPACITY` + 1) = 168,192 bytes, derived from the two
+bounds so it cannot drift from them. Every other form keeps 8 KiB. The body
+limit test for 8 KiB now posts to `/pull/fno`.
+
+**What it costs.** `param` scans the body once per field, so on those two
+routes each scan is bounded by 168,192 bytes instead of 8,192 (stated in
+`docs/06-limits.md`). No run identity term moves.
+
+### D-1500 — A recovery rerun over an unchanged store records nothing for an Unverified attempt — 2026-10-03
+
+**What was observed (W1-api4-6).** `recovery::reconcile_pending` keeps
+`Unverified` attempts pending, and each pass that reassessed one with no day
+to retry added its evidence count and one more to `diagnostics`, set it
+`Unverified` again, and appended it to both journals. A rerun over an
+unchanged store therefore grew both journals and the diagnostic count every
+time, against `CLAUDE.md` §3 rule 5.
+
+**The decision.** The reassessment moves into `reassessed`, which returns
+`None`, and nothing is appended, when an `Unverified` attempt finds the same
+missing and unverified quantities and no day to retry. A changed quantity, a
+day to retry, or a first verdict from `Queued` or `InFlight` still records
+exactly as before. `Unverified` stays pending so a later change is seen.
+
+**What it changes.** Idle reruns append nothing. No coverage verdict changes.
+
+### D-1501 — A scrub names a month a writer holds as busy, and `verify`'s cost and order docs are corrected — 2026-10-03
+
+**What was observed.** W1-api6-7: `pull::scrub::one` mapped every open
+failure except `Missing` to `Unreadable`, `Locked` included, so a month a pull
+was appending to was reported by `api::verify` as one that "reads as held
+while the disk says otherwise". W1-api6-0: `verify`'s module and function docs
+said "O(1) per entry ... nothing is read whole"; `Manifest::newest` walks the
+whole append log and the scrub runs on the request's task. c4a-9:
+`Report::named` said its order is "the order the census holds them";
+`Manifest::newest` walks the log backward, so it is newest write first.
+
+**The decision.** `Finding::Busy` and `Tally::busy`. A busy month is neither
+agreement nor disagreement; `Tally::disagreed` excludes it; `clean()` is false
+while one is busy, because it was not checked. `Report::say` says "none
+disagrees" when only busy months stand in the way, and names the busy count
+either way. The docs now state the log walk, the per-entry opens, the
+blocking task and the order.
+
+**What it changes.** `/verify.json`'s sentence for a busy month. A store with
+no busy month reads exactly as before.
+
+### D-1502 — Bound the NSE catalogue read, and state the qualification page's fold walk — 2026-10-03
+
+**What was observed.** UC-19: `indexmap::Published::read` read the catalogue
+whole with no size bound, on every `/indexmap.json` request. W1-api2-8:
+`booleanqualification_projection::row_detail` maps every fold of a row into
+the page, and no limits entry stated it. W1-api3-1's limits entry did not say
+that the conductor's ticker runs `census_now` on a runtime task.
+
+**The decision.** `MAX_CATALOGUE_BYTES` (1 MiB); the read is capped one byte
+past it and a larger file is refused naming the bound. The two costs are
+stated in `docs/06-limits.md`.

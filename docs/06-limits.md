@@ -13954,3 +13954,26 @@ bounds are all nonzero.
   hashing six words, not a worst-case bound. An admission adds one insert and,
   when full, one removal, inside the reservation. The O(log cap) sift stated
   above is unchanged. Memory is `cap` itemsets plus `cap` masks. Not timed.
+- **The two member forms read up to 168,192 bytes (W1-api3-6, D-1499).**
+  `/pull/spot` and `/ingest/queue` carry `ingest::MAX_MEMBER_FORM_BYTES`, so
+  D-1202's "`param` scans a form body of at most 8,192 bytes" is 168,192 bytes
+  on those two routes: k fields cost k scans of at most that. Still constant
+  per request, because the length is capped. Not timed.
+- **`/verify.json` walks the census log and opens every held month, on the
+  request's task (W1-api6-0, D-1501).** O(log length) for
+  `Manifest::newest`, then one open, one header read and two record reads per
+  held entry, inline in `async fn verify_json`, so the runtime worker serving
+  it is blocked for the whole scrub. Moving it to a blocking pool was not done
+  here. Not timed.
+- **The conductor's row count runs on a runtime task (W1-api3-1, D-1502).**
+  The D-1382 entry above states the cost of `pullrun::rows_now`; its ticker
+  calls it inside `tokio::spawn`, so a miss (a whole-manifest read and sort)
+  blocks that runtime worker while it runs. Not timed.
+- **A Boolean qualification row renders every one of its folds (W1-api2-8,
+  D-1502).** `booleanqualification_projection::row_detail` maps all of a
+  row's folds into the page: O(F) per row and O(page x F) per page, F bounded
+  by the saved run's `max_folds`, which `cli`'s Boolean OOS validation
+  enforces. The api crate states no bound of its own. Not timed.
+- **The NSE catalogue is read whole per request, at most 1 MiB (UC-19,
+  D-1502).** W1-api5-9's O(file bytes + U) now has a byte bound,
+  `indexmap::MAX_CATALOGUE_BYTES`.
