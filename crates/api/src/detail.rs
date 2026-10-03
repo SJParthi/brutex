@@ -776,6 +776,61 @@ pub(crate) fn must_admit(held: bool, pinned: bool, current: impl FnOnce() -> boo
     !held || (!pinned && !current())
 }
 
+/// ONE RETAINED READER, TAKEN OUT BY A REQUEST AND PUT BACK WHEN IT ENDS
+/// (locks-2, D-1912).
+///
+/// The five index-stop JSON caches held a process-wide `try_lock` guard across
+/// the whole render, a cold `Reader::open` included. `spawn_blocking` cannot be
+/// cancelled, so a request the page had just abandoned kept the slot until its
+/// verification finished, and the same viewer's next click was refused 503
+/// "busy". The mutex is now held only to take the entry out and to put it back:
+/// a request that finds the slot empty opens its own reader, and the last one
+/// to finish is the one retained. Concurrency stays bounded by `run`'s
+/// admission, not by this slot.
+pub(crate) struct Checkout<'slot, T> {
+    slot: &'slot std::sync::Mutex<Option<T>>,
+    value: Option<T>,
+}
+
+impl<'slot, T> Checkout<'slot, T> {
+    /// Empties `slot` into this request. The lock is released on return.
+    pub(crate) fn take(slot: &'slot std::sync::Mutex<Option<T>>) -> Self {
+        // A poisoned slot holds a plain `Option`; no invariant spans the
+        // panic, and the shipped binary aborts on panic regardless.
+        let value = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Self { slot, value }
+    }
+}
+
+impl<T> std::ops::Deref for Checkout<'_, T> {
+    type Target = Option<T>;
+    fn deref(&self) -> &Option<T> {
+        &self.value
+    }
+}
+
+impl<T> std::ops::DerefMut for Checkout<'_, T> {
+    fn deref_mut(&mut self) -> &mut Option<T> {
+        &mut self.value
+    }
+}
+
+impl<T> Drop for Checkout<'_, T> {
+    /// Puts a still-admitted entry back. An entry this request evicted stays
+    /// out.
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            *self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -790,6 +845,40 @@ mod tests {
         STORE_READ_ACTIVE, Selector, admission_refused, must_admit, preflight, run, run_calendar,
         run_store_read, seek_window, window,
     };
+
+    /// locks-2, D-1912: a request that finds the retained reader taken out is
+    /// not refused; it starts empty, and the entry is back once the first
+    /// request ends. An evicted entry is not put back.
+    #[test]
+    fn a_checked_out_reader_never_refuses_the_next_request() {
+        let slot = std::sync::Mutex::new(Some(7_u8));
+        let first = super::Checkout::take(&slot);
+        assert_eq!(*first, Some(7));
+        let second = super::Checkout::take(&slot);
+        assert_eq!(*second, None);
+        drop(second);
+        drop(first);
+        let mut third = super::Checkout::take(&slot);
+        assert_eq!(*third, Some(7));
+        *third = None;
+        drop(third);
+        assert_eq!(*slot.lock().unwrap(), None);
+    }
+
+    /// locks-2, D-1912: no index-stop cache holds its slot across the render.
+    #[test]
+    fn no_index_stop_cache_holds_its_slot_across_the_render() {
+        for source in [
+            include_str!("indexstopvixjson.rs"),
+            include_str!("indexstopcandlesjson.rs"),
+            include_str!("indexstopqualificationjson.rs"),
+            include_str!("indexstopjson.rs"),
+            include_str!("indexstoprankingjson.rs"),
+        ] {
+            assert!(!source.contains(".try_lock()"));
+            assert!(source.contains("crate::detail::Checkout::take(CACHE.get_or_init("));
+        }
+    }
 
     /// THE ADMISSION DECISION, EVERY INPUT. W1-api1-5, D-1444.
     ///

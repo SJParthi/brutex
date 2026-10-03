@@ -55029,3 +55029,18 @@ pid. The new `serve_lock_refusal` keeps the text and the holder stamp for
 `WouldBlock` only. `Error(host)` names the host refusal, says no other instance
 is implied, and asks for a filesystem with advisory locks. The serve is still
 refused in both cases. This is the D-0955 split, applied to this site.
+
+### D-1912 — Index-stop JSON caches hold their slot only to take and return the reader — 2026-10-03
+
+locks-2: the five index-stop JSON caches (`indexstopvixjson`,
+`indexstopcandlesjson`, `indexstopqualificationjson`, `indexstopjson`,
+`indexstoprankingjson`) held a process-wide `Mutex::try_lock` guard across the
+whole render, a cold `Reader::open` included. `spawn_blocking` cannot be
+cancelled, so a request the page had just abandoned kept the slot, and the same
+viewer's next selection was refused 503 "busy". The new
+`detail::Checkout` empties the slot into the request under a lock held only for
+that move, derefs to the `Option` the render code already used, and puts a
+still-admitted entry back on drop. A request that finds the slot empty opens
+its own reader, and the last to finish is the one retained. Concurrency stays
+bounded by `detail::run`'s admission. Two concurrent cold requests for one
+identity now both open a reader rather than one being refused.
