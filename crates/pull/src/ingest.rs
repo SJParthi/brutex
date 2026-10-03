@@ -3697,9 +3697,14 @@ mod tests {
     /// v3b-1, D-1480. Opening a UNIX socket fails with ENXIO, a kind that is
     /// neither `PermissionDenied` nor `IsADirectory`, so it fell into the
     /// path-failure arm and the ingest ran unserialised in silence. A dangling
-    /// symlink whose target directory is missing fails the open with NotFound,
-    /// the path-failure kind itself, and is the same misfiled name.
+    /// symlink whose target directory is missing fails the open with
+    /// `NotFound`, the path-failure kind itself, and is the same misfiled name.
     #[test]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "whether the guard holds a lock is the fact under test, and the \
+                  field is underscored because production never reads it"
+    )]
     fn a_socket_at_the_lock_path_is_refused_rather_than_run_unlocked() {
         let root = scratch("LOCK-SOCKET");
         let census = root.join("manifest").join("dhan.man");
