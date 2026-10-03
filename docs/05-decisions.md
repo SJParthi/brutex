@@ -53403,3 +53403,23 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1505 — The runner's join test checks distinct k-sets, not the literal zero the engine writes — 2026-10-03
+
+**What was observed.** D-1440 removed every `duplicates == 0` assertion at
+k>=2 from `engine`, because `joined_frontier` writes `duplicates: 0` as a
+literal and counts nothing, so the assertion could never fail (CLAUDE.md §4,
+"a test that asserts nothing"). One copy survived outside the crate:
+`crates/runner/tests/join_answer_is_unchanged.rs`,
+`the_join_no_longer_walks_a_pair_it_will_discard`, asserted it over every
+level from k=2 up (audit v2-3, AC-whp-tb-5 PARTIAL).
+
+**The decision.** The assertion is replaced by the property its message
+named, checked on the answer: every mask a level keeps has exactly `k` bits,
+and no mask is kept twice (one `HashSet::insert` per kept set). A last
+assertion requires some k>=2 level to keep at least two sets, so the
+distinctness check cannot pass vacuously on a fixture that keeps one.
+
+**Rejected.** Making `joined_frontier` count duplicates: the prefix join is
+injective, so a counter would be a second literal zero with extra work, and
+CLAUDE.md §3 rule 4 already says there is no dedup operation on that path.

@@ -6216,3 +6216,9 @@ old line regex the same input and watched it pass.
 | CUH-06 | One candidate-trade `Summary` hashes its catalog once across thirty page-level reads, a `read` summary adds none, and a replaced or removed catalog is still refused on every page surface (D-0991) | `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change` | ✓ |
 | CUH-07 | An empty candidate-trade catalog is verified once and its absent tier is refused (D-0991) | `cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses` | ✓ |
 | CUH-08 | A capture derives slice facts once for all of its candidate sides, records a side with no trading cell with no rows, and issues exactly four `fsync`s per candidate side (D-0991) | `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side` | ✓ |
+
+### Audit fixer 4 follow-ups (D-1503 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AU4-01 | On the runner's synthetic eight-session sweep every level from k=2 up keeps only masks of exactly `k` bits, no mask twice, and at least one such level keeps two or more, so distinctness is tested rather than read from the literal `duplicates: 0` the join writes (D-1505) | `runner::join_answer_is_unchanged::the_join_no_longer_walks_a_pair_it_will_discard` | ✓ |
