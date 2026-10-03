@@ -53575,3 +53575,36 @@ Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_n
 `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_sized_context_refuses_every_other_request`,
 `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_sized_context_whose_source_changed_refuses`,
 `cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated`.
+
+### D-1684 — One stored OOS fold per family cohort serves every witness — 2026-10-03
+
+**What was wrong.** W2-cli3-3: Population V6 caches one
+`StoredPostTrainingOosCohortV1` per family, but `mint_witness_inner` built a
+new `CandidateGlobalReplayOosSourceV1` for every witness: the anchored signal
+column, its exact-minute overlay, the checked execution column, alignment,
+calendars and stream digests, Θ(S + Q + D + E), up to 25 times per rung, from
+inputs that are all cohort fields. §169 said minting is proportional to the
+replay.
+
+**The decision.** `StoredPostTrainingOosCohortV1::fold_recorded` builds the
+source once as a `StoredOosFoldV1` that borrows the cohort, and
+`StoredOosFoldV1::mint_witness_recorded` mints each witness over it.
+`selected_stored_oos_witnesses` first resolves and validates every requested
+strategy (building cohorts as before), then mints in the same order, building
+each family's fold at its first witness. Witness bytes are unchanged (the test
+compares them with the cohort's own one-off mint). Each witness still re-proves
+the cohort current, twice, and that re-derives the cohort identity over every
+stream, so a witness remains Θ(S + Q + D + E) in hashing; §169 says so. The
+lifecycle observer now sees one fold stage per family instead of one per
+witness, so a Global Replay V4 run records fewer `Preparation` attempts in
+sweep evidence; no identity or format byte changes.
+
+**Rejected.** Caching the source inside the cohort: it borrows the cohort's
+own bytes, which a field cannot hold without a self-referential type. Caching
+a sealed integrity verdict to drop the per-witness re-hash: the per-witness
+check is what refuses a source that changed after the fold.
+
+Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`
+(failed first with each fold mint delegated back to the cohort's own
+per-witness mint: 4 source builds, the fold's and one per witness, expected 1),
+`cli::ledger_append_lookup_costs::section_169_prices_the_oos_fold_once_per_cohort`.

@@ -1219,6 +1219,8 @@ impl<'a> CandidateGlobalReplayOosSourceV1<'a> {
         minute_load_bound: StoredSpanLoadBoundV1,
         daily_load_bound: StoredSpanLoadBoundV1,
     ) -> Result<Self, CandidateUniverseRefusal> {
+        #[cfg(test)]
+        OOS_SOURCE_BUILDS.with(|count| count.set(count.get().saturating_add(1)));
         require_rung(rung_seconds)?;
         require_series_family(family, execution_series)?;
         if execution_series.calendar_digest() != crate::stored::calendar_policy_digest_v2() {
@@ -4859,6 +4861,13 @@ struct HoistedExecutionV1<'s> {
     run_source: ExecutionDigestsV1,
     long: AttestedTrainingV1<'s>,
     short: AttestedTrainingV1<'s>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of [`CandidateGlobalReplayOosSourceV1::new`] calls on
+    /// this thread.
+    pub(crate) static OOS_SOURCE_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

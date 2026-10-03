@@ -8440,9 +8440,17 @@ those witnesses. Header admission is O(1) per stored month, but constructing
 one `StoredPostTrainingOosCohortV1` is O(M + S + D + Q): it loads complete
 bounded streams, validates calendar continuity, derives previous-day and
 exact-minute causal columns and hashes the retained snapshot. Space is
-O(S + D + Q) for the owned snapshot and derived column. Minting every witness
-is proportional to the authenticated Runner replay over its OOS bars and exit
-paths, and full future V4 preflight/scheduling is at least O(P + C) before
+O(S + D + Q) for the owned snapshot and derived column. The OOS replay
+source a witness replays over (the anchored signal column, its exact-minute
+overlay, the checked execution column, alignment, calendars and stream
+digests) costs Θ(S + Q + D + E) to build. Since D-1684 Population V6 builds it
+once per family cohort and every witness of that cohort replays over it;
+before D-1684 it was rebuilt for every witness. Each witness still pays two
+cohort integrity checks, and each re-derives the cohort identity by hashing
+the signal, minute-context, daily and execution streams and re-checks the
+strict source guards, so a witness remains Θ(S + Q + D + E) in hashing; what
+D-1684 removes per witness is the column evaluation and alignment, not that
+term. Then the authenticated Runner replay over its OOS bars and exit paths. Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 
