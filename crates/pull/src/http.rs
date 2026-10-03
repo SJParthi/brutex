@@ -4276,6 +4276,44 @@ mod tests {
         }
     }
 
+    /// **A JSON PRICE IS SNAPPED FROM THE VENDOR'S OWN TEXT, NOT FROM AN f64
+    /// (audit-20261003 attackdata-4, D-1570).**
+    ///
+    /// Each text below is one an `f64` rounds before the snap sees it, so the
+    /// old re-rendering landed one paisa from the vendor's own digits (the
+    /// right-hand comment is what the f64 path gave). An exponent form is read
+    /// exactly as well, and a count in exponent form is still a whole count.
+    #[test]
+    fn a_json_price_is_snapped_from_the_vendors_own_text() {
+        for (sent, want) in [
+            ("100.12499999999999999", 10_012_i64), // f64: 100.125 -> 10013
+            ("100.0049999999999999999", 10_000),   // f64: 100.005 -> 10001
+            ("0.0149999999999999999", 1),          // f64: 0.015 -> 2
+            ("92233720368547758.07", i64::MAX),    // f64: refused out of range
+            ("1.0012499999999999999e2", 10_012),   // f64: 100.125 -> 10013
+            ("24500.75", 2_450_075),
+            ("2.450075E4", 2_450_075),
+        ] {
+            let body = format!(
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[2.5e2],\"timestamp\":[1751337900]}}"
+            );
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .unwrap_or_else(|why| panic!("{sent}: {why:?}"));
+            let row = &window.rows[0];
+            assert_eq!(
+                (row.open, row.high, row.low, row.close),
+                (want, want, want, want),
+                "{sent} rupees is {want} paisa by its own text"
+            );
+            assert_eq!(row.volume, 250, "2.5e2 is the whole count 250");
+        }
+    }
+
     /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
     /// exchange's own price.
     ///
