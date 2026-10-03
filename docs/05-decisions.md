@@ -53535,3 +53535,25 @@ swapped between the check and the open, while the handle cannot. Adding
 symlink, and the ledgers had no rule against one.
 
 Invariants DUR-C-07 and DUR-C-08.
+
+### D-1744 — A receipt-less population-statistics orphan retry checks the byte ceiling before writing — 2026-10-03
+
+**Finding.** W2-cli12-5, `crates/cli/src/population_statistics_v2.rs`
+`resume_orphan`.
+
+**What was wrong.** The new-write path refuses before writing when the file
+would pass `bounds.file_bytes`. `resume_orphan` appended the rest of the
+planned block and its Completion and synced both with no byte check; only
+the `file_generation` measurement afterwards refused. A refused retry had
+already grown the file past the operator's explicit maximum.
+
+**The decision.** Before the first byte, `resume_orphan` computes the
+current length plus the remaining planned Data records plus the Completion,
+with checked arithmetic, and refuses when that exceeds `bounds.file_bytes`,
+leaving the file untouched. Exactly the ceiling is admitted. The cost is one
+`fstat`.
+
+**Rejected.** Truncating the orphan suffix after an over-ceiling write: it
+writes bytes the operator's bound forbade and then has to undo them.
+
+Invariant DUR-C-09.

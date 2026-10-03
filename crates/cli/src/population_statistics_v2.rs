@@ -4626,10 +4626,31 @@ impl PopulationStatisticsV2Ledger {
             .checked_sub(1)
             .ok_or_else(|| "orphan retry plan lacks Completion".to_owned())?;
         let present = usize_of(orphan.present_records, "orphan present records")?;
-        for raw in planned
+        let suffix = planned
             .get(present..completion)
-            .ok_or_else(|| "orphan retry Data suffix is outside plan".to_owned())?
-        {
+            .ok_or_else(|| "orphan retry Data suffix is outside plan".to_owned())?;
+        // THE CEILING BEFORE THE FIRST BYTE, as the new-write path checks it:
+        // the rest of the planned Data plus its Completion. Measured after the
+        // writes, a refusal came only once the file had already grown past
+        // the operator's explicit maximum (D-1744).
+        let added_bytes = u64_of(suffix.len(), "orphan retry records")?
+            .checked_add(1)
+            .and_then(|records| records.checked_mul(POPULATION_STATISTICS_V2_RECORD_STRIDE))
+            .ok_or_else(|| "orphan retry byte count overflowed".to_owned())?;
+        let desired = self
+            .data_file
+            .metadata()
+            .map_err(|why| format!("cannot stat orphan append file: {why}"))?
+            .len()
+            .checked_add(added_bytes)
+            .ok_or_else(|| "orphan retry file size overflowed".to_owned())?;
+        if desired > self.bounds.file_bytes {
+            return Err(format!(
+                "population-statistics orphan retry would produce {desired} bytes above explicit maximum {}",
+                self.bounds.file_bytes
+            ));
+        }
+        for raw in suffix {
             append_raw_record(&mut self.data_file, raw)?;
         }
         self.data_file
@@ -6759,6 +6780,72 @@ mod tests {
         drop(orphaned);
         PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
             .expect("completed orphan reopens");
+    }
+
+    /// W2-cli12-5: retrying a receipt-less orphan wrote and synced the rest of
+    /// its planned block and only then measured the byte ceiling, so a refused
+    /// retry had already grown the file past the operator's explicit maximum.
+    /// The ceiling is now checked before the first byte: one byte short of the
+    /// completed block refuses with the file untouched, and exactly the
+    /// completed block's size is admitted. D-1744.
+    #[test]
+    fn an_orphan_retry_above_the_byte_ceiling_refuses_before_writing() {
+        let root = TempRoot::new("orphan-ceiling");
+        let prepared = fixture(2);
+        let ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+            .expect("empty fixture ledger opens");
+        let planned = prepared.records(0, 0).expect("planned bytes build");
+        drop(ledger);
+        let data_path = root.path().join(DATA_FILE);
+        let prefix_len = planned.len() / 2;
+        for raw in planned
+            .get(..prefix_len)
+            .expect("fixture prefix is inside plan")
+        {
+            write_bytes(&data_path, raw);
+        }
+        let orphan_len = std::fs::metadata(&data_path)
+            .expect("orphan measures")
+            .len();
+        let missing = u64::try_from(planned.len() - prefix_len).expect("fits u64");
+        let full = orphan_len + missing * POPULATION_STATISTICS_V2_RECORD_STRIDE;
+        let short = PopulationStatisticsV2Bounds::new(8, 64, 64, 64, full - 1)
+            .expect("explicit short ceiling");
+        let mut orphaned = PopulationStatisticsV2Ledger::open_writer(root.path(), short)
+            .expect("the orphan itself fits the short ceiling");
+        let why = orphaned
+            .append(&prepared)
+            .expect_err("a retry that would exceed the ceiling refuses");
+        assert!(
+            why.contains(&format!(
+                "would produce {full} bytes above explicit maximum {}",
+                full - 1
+            )),
+            "{why}"
+        );
+        assert_eq!(
+            std::fs::metadata(&data_path)
+                .expect("orphan measures")
+                .len(),
+            orphan_len,
+            "the refused retry wrote nothing"
+        );
+        assert_eq!(orphaned.completed_audits(), 0);
+        drop(orphaned);
+        let exact =
+            PopulationStatisticsV2Bounds::new(8, 64, 64, 64, full).expect("explicit exact ceiling");
+        let mut orphaned = PopulationStatisticsV2Ledger::open_writer(root.path(), exact)
+            .expect("the untouched orphan reopens");
+        assert!(matches!(
+            orphaned
+                .append(&prepared)
+                .expect("exactly the ceiling completes"),
+            PopulationStatisticsV2Append::Written(_)
+        ));
+        assert_eq!(
+            std::fs::metadata(&data_path).expect("block measures").len(),
+            full
+        );
     }
 
     #[test]
