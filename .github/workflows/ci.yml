@@ -7219,6 +7219,42 @@ jobs:
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo test --workspace --locked
 
+      - name: Gate 6d — the native Rust tests under web/ run
+        if: steps.probe.outputs.has_crates == 'true'
+        run: |
+          set -euo pipefail
+          # D-1607 (testgaps-6). Eleven invariant rows are proven by native
+          # tests in web/*.rs, which belong to no crate, so cargo never ran
+          # them. They are built here by rustc against the libraries the
+          # Tests step already compiled, as their READMEs describe. Two viewer
+          # tests need an operator-captured store and vocabulary and are
+          # skipped BY NAME; docs/06-limits.md says so.
+          t="${RUNNER_TEMP:-/tmp}/web-native"; mkdir -p "$t"
+          cargo build -p api -p cli --lib --tests --locked --message-format=json > "$t/art.json"
+          ext=""
+          for n in serde serde_json axum tower tokio api cli brutex_core vocab; do
+            p=$( { grep '"reason":"compiler-artifact"' "$t/art.json" \
+                   | grep -o "\"crate_types\":\[\"lib\"\],\"name\":\"$n\".*" \
+                   | grep -o '"filenames":\["[^"]*\.rlib"' || true; } | sed 's/.*\["//; s/"$//' | sort -u)
+            [ "$(grep -c . <<< "$p")" -eq 1 ] || { echo "GATE 6d: no single rlib for $n: $p"; exit 1; }
+            ext="$ext --extern $n=$p"
+          done
+          api=$(sed -E 's/.* --extern api=([^ ]+).*/\1/' <<< "$ext")
+          sha() { sha256sum "$1" | cut -c1-64; }
+          export BRUTEX_INSPECTOR_API_SHA256="$(sha "$api")" BRUTEX_VIEWER_API_SHA256="$(sha "$api")"
+          export BRUTEX_INSPECTOR_SOURCE_SHA256="$(sha web/sweep-readiness/main-inspector.rs)"
+          export BRUTEX_VIEWER_SOURCE_SHA256="$(sha web/saved-backtest/viewer.rs)"
+          rustc --edition=2024 -D warnings web/sweep-readiness/verify.rs -o "$t/verify"
+          for f in web/sweep-readiness/frontend-publish.rs web/sweep-readiness/main-inspector.rs \
+                   web/sweep-readiness/deployment-preflight.rs web/saved-backtest/viewer.rs; do
+            b=$(basename "$f" .rs)
+            # shellcheck disable=SC2086
+            rustc --edition=2024 --test -D warnings "$f" -o "$t/$b" -L dependency=target/debug/deps $ext
+            ( cd "$t" && "./$b" --skip vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses \
+                                --skip exact_saved_search_rejects_foreign_pin_through_existing_handler )
+          done
+          echo "OK — every native test under web/ but the two named above ran."
+
       - name: The browser crate actually builds for the browser
         run: |
           [ -d crates/web ] || { echo "skip"; exit 0; }

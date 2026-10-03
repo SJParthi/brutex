@@ -13965,3 +13965,13 @@ bounds are all nonzero.
   `#[cfg(target_os = "macos")]` and every CI job runs on `ubuntu-24.04`, so it
   is compiled out of every CI run; so is the aarch64 Linux row. Row
   S-NOFOLLOW-01 already says CI runs only the x86_64 row.
+- **Gate 6d runs the native tests under `web/` except two (D-1607).**
+  `web/saved-backtest/viewer.rs`'s
+  `vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses` and
+  `exact_saved_search_rejects_foreign_pin_through_existing_handler` need an
+  operator-captured vocabulary file and a completed search in a real store;
+  they are skipped by name and run only by hand. `web/sweep-readiness/verify.rs`
+  is a runner, not a test file: CI compiles it and does not run it, because it
+  executes the whole workspace suite and the browser toolchain. Gate 10 does
+  not read `web/` paths, so the eleven rows that cite these files are still
+  checked by name by nothing; Gate 6d is what makes their tests run.

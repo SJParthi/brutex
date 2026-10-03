@@ -4901,7 +4901,7 @@ certification. The inspector does not relax the existing release gates.
 | Visible setting joins are limited to 32 rows, split gaps, read sequentially and preserve the exact original/later ancestry | `web/tests/saved-backtest-setting-pages.test.js` |
 | Duplicate coordinates, missing numeric facts, changed pins, caller edits during reads and later-page failure cannot become a partial successful comparison | `web/tests/saved-backtest-setting-pages.test.js` |
 | Integer money, ppm distances, policy ratios, missing values and measured zero retain distinct exact meanings | `web/tests/saved-backtest-explanations.test.js` |
-| Rule descriptions consume the supplied Rust vocabulary; NOT never turns unknown VWAP into a known entry | `web/tests/saved-backtest-explanations.test.js`; native vocabulary test in `web/saved-backtest/viewer.rs` |
+| Rule descriptions consume the supplied Rust vocabulary; NOT never turns unknown VWAP into a known entry | `web/tests/saved-backtest-explanations.test.js`; native vocabulary test in `web/saved-backtest/viewer.rs` (it needs an operator-captured vocabulary file and pin, so Gate 6d skips it by name and no CI run executes it; D-1607) |
 | Frontend publication preserves every old immutable chunk and verifies its sealed source, destination and rollback bytes | native `staging_apply_retry_and_rollback_preserve_both_chunk_generations` in `web/sweep-readiness/frontend-publish.rs` |
 | Changed files, duplicate manifests, symlinks, lock contention and an interrupted apply remain explicit refusal or resumable states | remaining native tests in `web/sweep-readiness/frontend-publish.rs` |
 

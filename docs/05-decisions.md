@@ -53709,3 +53709,29 @@ edited to the current tree, naming what replaced the removed item; the rustdoc
 links point at `ceiling_from_env` and `whole_machine_ceiling`. `07-plan.md`
 §11 is a dated measurement, so it gains a dated status note instead of having
 its rows rewritten.
+
+### D-1607 — CI builds and runs the native Rust tests under `web/` (Gate 6d) — 2026-10-03
+
+**What was observed (testgaps-6).** Eleven invariant rows are proven only by
+native Rust tests in `web/saved-backtest/viewer.rs` and
+`web/sweep-readiness/{frontend-publish,main-inspector(-tests),deployment-preflight(-tests),verify}.rs`.
+They belong to no crate, `cargo test` never sees them, and no CI step named
+them, so no run executed what those rows rely on.
+
+**The decision.** A build-job step, Gate 6d, runs after `Tests`. It asks
+cargo (`cargo build -p api -p cli --lib --tests --locked
+--message-format=json`, which the `Tests` step has already compiled) for the
+exact rlib of `serde`, `serde_json`, `axum`, `tower`, `tokio`, `api`, `cli`,
+`brutex_core` and `vocab`, refusing when any name resolves to zero or two
+files; sets the four `*_SHA256` build stamps the two servers embed from those
+files; compiles `verify.rs` and builds each of the four test roots with
+`rustc --edition=2024 --test -D warnings`; and runs them. Two viewer tests
+need an operator-captured vocabulary and store and are skipped by name; the
+row that cites one now says so, and `docs/06-limits.md` lists both. Measured
+locally: 7 + 13 + 35 + 13 tests passed (2 filtered); a constructed failing
+assertion in `frontend-publish.rs` made its test binary exit 101, which fails
+the step under `set -e`. This uses only `rustc` and cargo's own output; no
+interpreter or `web/` toolchain is involved, so §2's engine boundary holds.
+Moving the files into a crate was rejected: they would become members, add
+arrows to the measured graph, and stop being the standalone tools their
+READMEs describe.
