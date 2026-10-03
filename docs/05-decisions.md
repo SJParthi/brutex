@@ -54884,7 +54884,7 @@ printed. §1 records two measured limits: `npm --prefix web run build` exits
 127 (`vite: not found`) without an install, which this session could not do,
 and the `find -newer` check is meaningless in a fresh checkout because
 checkout sets modification times. Every command on the page was run for this
-entry; outputs not run are not stated.
+entry except `cargo test --workspace --locked`, which was still running when this was committed; `cargo build --workspace`, `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` exited 0.
 
 ### D-1942 — `docs/10-shared-core.md` §3 says twelve sources and 328 positions, and a test reads it — 2026-10-03
 

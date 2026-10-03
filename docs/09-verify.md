@@ -13,7 +13,10 @@ checks the printed count is the check, not the exit status.
 This page was re-run on 3 October 2026 on the tree that carries D-1941
 (P1-18-01).
 Every command below was run there, and every expected output stated here is
-what it printed, except where a section says otherwise.
+what it printed, except where a section says otherwise. Of §1's gates,
+`cargo build --workspace`, `cargo fmt --all --check` and `cargo clippy` exited
+0 on that re-run; `cargo test --workspace --locked` had not finished when this
+page was committed, so no result is stated for it.
 
 ---
 
