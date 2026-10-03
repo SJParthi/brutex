@@ -307,7 +307,7 @@ fn merge_ascending(left: &[i64], right: &[i64]) -> Vec<i64> {
     loop {
         let next = match (l.peek(), r.peek()) {
             (Some(&&a), Some(&&b)) if a <= b => l.next().copied(),
-            (Some(_), Some(_)) | (None, Some(_)) => r.next().copied(),
+            (Some(_) | None, Some(_)) => r.next().copied(),
             (Some(_), None) => l.next().copied(),
             (None, None) => break,
         };
