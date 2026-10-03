@@ -26,7 +26,7 @@ jobs:
     name: Gate 1+2 — one language
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
 
       - name: Gate 0 — the source scanner proves itself, then reads this workflow
@@ -6945,13 +6945,13 @@ jobs:
     runs-on: ubuntu-24.04
     needs: language-purity
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Is there a crate to build yet?
         id: probe
@@ -7251,7 +7251,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
       - name: Use a fresh coverage target for this run and attempt
         run: |
@@ -7260,7 +7260,7 @@ jobs:
           test ! -e "$coverage_target"
           mkdir -p "$coverage_target"
           printf 'CARGO_TARGET_DIR=%s\n' "$coverage_target" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
         with: { components: llvm-tools-preview }
       - name: Measure
         run: |
@@ -7475,7 +7475,7 @@ jobs:
 
       - name: Retain the measured line report for diagnosis
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-lines
           path: /tmp/cov.txt
@@ -7490,10 +7490,10 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/bin/cargo-mutants
@@ -7598,7 +7598,7 @@ jobs:
           matrix=$(/tmp/mutation-gate plan /tmp/mutation-plan/all.txt)
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > /tmp/mutation-plan/commit.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-plan
           path: /tmp/mutation-plan/
@@ -7624,19 +7624,19 @@ jobs:
       RUST_TEST_THREADS: 2
       RAYON_NUM_THREADS: 2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: mutation-shards
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/bin/cargo-mutants
             ~/.cargo/bin/cargo-nextest
           key: mutation-tools-${{ runner.os }}-26.2.0-nextest-0.9.145-v1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: mutation-plan
           path: /tmp/mutation-plan
@@ -7695,7 +7695,7 @@ jobs:
           /tmp/mutation-gate verify /tmp/mutation-plan/assigned.txt mutants.out "$status"
       - name: Retain exact assignments and terminal outcomes
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-shard-${{ matrix.index }}
           path: |
@@ -7714,9 +7714,9 @@ jobs:
     needs: build
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Per-operation cost at 1x / 10x / 100x
         run: |
           set -euo pipefail
@@ -7749,9 +7749,9 @@ jobs:
     name: Gate W — the browser tree
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm

@@ -56051,3 +56051,23 @@ planner's own tests pin 31, 78 jobs for 2,405 cases and the new ceiling. Both
 figures remain estimates: a job with several slow or hanging cases can still
 reach 240 minutes, and if the account runs fewer than 20 jobs at once the rest
 queue rather than fail.
+
+### D-1457 — Pin every workflow action to a commit, the tag kept as a comment — 2026-10-03
+
+**What was observed (hunt-ci-12).** The workflows declare `contents: read`,
+yet every `uses:` named a mutable reference: `actions/checkout@v4`,
+`actions/cache@v4`, `actions/upload-artifact@v4`,
+`actions/download-artifact@v4`, `actions/setup-node@v4`,
+`Swatinem/rust-cache@v2` and `dtolnay/rust-toolchain@stable`. Whoever can move
+one of those tags or that branch changes what runs in this repository's CI with
+no commit here. D-1611 left this open because it had not fetched the commit ids.
+
+**The decision.** Each `uses:` names the full 40-character commit and keeps the
+tag or branch it was resolved from as a trailing comment. The ids were read on
+2026-10-03 with `git ls-remote` against each action's repository (an annotated
+tag read through its `^{}` peel). `dtolnay/rust-toolchain`'s `stable` is a
+branch whose `action.yml` defaults its `toolchain` input to `stable`, read at the
+pinned commit, so the pinned action still installs the current stable toolchain:
+the action's code is frozen, the toolchain it installs is not, and gate 6b's
+exposure to a new stable lint is unchanged. Bumping an action is now a commit
+that names the new id.
