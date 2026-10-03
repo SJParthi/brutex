@@ -56267,3 +56267,24 @@ contract (`4.5 * len + 8` slots cleared), but observing it would need a
 test-only side channel in the evaluation path; removing the wildcard removes
 the mutant without one. Excluding the mutants in configuration was rejected
 for D-1452's reason.
+
+### D-1461 — Two CI failures on PR #74's 0cab319: the store bench makes its own root, and the route-label test stops comparing two literals' addresses — 2026-10-03
+
+**What was observed (run 1261).** Gate 8 stopped in `crates/store/benches/ratio.rs`
+setup: "the bench file would not open: /tmp/brutex-bench-read-small-… does not
+exist". D-1522 made `BarFile::open_or_create` refuse a missing store root
+rather than create it, and the bench removed its root and relied on the old
+creation. Coverage's Measure step failed one api test,
+`operation_audit::tests::every_registered_route_is_audited_or_exempt_by_name`,
+at `assert!(std::ptr::eq(found, route))`. Both sides were the same string
+literal reached through two uses of the `const` array `AUDITED`, and whether
+the compiler merges identical literals is unspecified: the ordinary build did,
+the coverage build did not.
+
+**The decision.** The bench creates its root with `create_dir_all` before the
+open, and refuses loudly if it cannot. D-1522's refusal is untouched. The test now looks
+up a fresh heap copy of each route and asserts that the label returned is not
+that copy's bytes. That is the property its comment states ("the list's own
+static, never the request's bytes"), and it no longer depends on literal
+merging. Checked locally: `cargo bench -p store --bench ratio` prints "all
+ratios within the ceiling", and the operation_audit tests pass, 15 of 15.

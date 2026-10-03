@@ -137,6 +137,11 @@ fn refuse(why: &str) -> ! {
 fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!("brutex-bench-{name}-{}", std::process::id()));
     let _ignored = std::fs::remove_dir_all(&root);
+    // `open_or_create` never creates the store root (D-1522: a missing root
+    // on an unmounted volume must refuse), so the bench makes its own first.
+    if let Err(e) = std::fs::create_dir_all(&root) {
+        refuse(&format!("the bench root would not create: {e}"));
+    }
     let mut file = match BarFile::open_or_create(&root, bench_path(), 7) {
         Ok(f) => f,
         Err(e) => refuse(&format!("the bench file would not open: {e}")),
