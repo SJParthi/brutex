@@ -17683,38 +17683,47 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // was taken left the PREVIOUS holder's line in the file, and a refused
     // second instance quoted that dead pid as the one holding the store -- the
     // misattribution R9-api-cx-2 fixed, back through the error path.
-    let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let stamped = stamp_outcome(
-        || {
-            std::io::Write::write_all(&mut &*file, stamp.as_bytes())
-                .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)))
-        },
-        || file.set_len(0),
-        &path,
-    );
-    match stamped {
-        Ok(None) => {}
-        Ok(Some(warning)) => {
-            let _noted = telemetry::emit(
-                &telemetry::Event::new(
-                    telemetry::Level::Warn,
-                    "api.serve",
-                    "the serve lock is held but could not be stamped",
-                )
-                .with("why", telemetry::Value::Str(&warning)),
-            );
-            warn_line!("{warning}");
-        }
-        Err(refusal) => {
-            drop(file);
-            release_root(&key);
-            return Err(refusal);
-        }
+    if let Err(refusal) = stamp_serve_lock(&file, addr, &path) {
+        drop(file);
+        release_root(&key);
+        return Err(refusal);
     }
     Ok(ServeLock {
         held: Some(file),
         root: key,
     })
+}
+
+/// Writes this instance's `addr=… pid=…` line into the held serve lock, cut to
+/// its own length, and decides what a failure leaves (v3b-2, D-1481): a
+/// cleared file is served with one WARN event and a stderr line, an uncleared
+/// one is the refusal returned.
+fn stamp_serve_lock(
+    file: &store::flock::Flock<std::fs::File>,
+    addr: std::net::SocketAddr,
+    path: &Path,
+) -> Result<(), String> {
+    let stamp = format!("addr={addr} pid={}\n", std::process::id());
+    let stamped = stamp_outcome(
+        || {
+            std::io::Write::write_all(&mut &**file, stamp.as_bytes())
+                .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)))
+        },
+        || file.set_len(0),
+        path,
+    )?;
+    if let Some(warning) = stamped {
+        let _noted = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "api.serve",
+                "the serve lock is held but could not be stamped",
+            )
+            .with("why", telemetry::Value::Str(&warning)),
+        );
+        warn_line!("{warning}");
+    }
+    Ok(())
 }
 
 /// What a failed serve-lock stamp leaves, decided over two operations a test
