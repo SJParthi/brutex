@@ -18261,6 +18261,15 @@ fn bootstrap_family(
     //
     // `by_evidence` is the same list the traded combination is drawn from, so
     // the head of the family and the strategy under test are now one thing.
+    //
+    // THE SLICE FACTS ONCE FOR THE FAMILY, NOT ONCE PER CANDIDATE (AC-whp-o1-2,
+    // D-1730). `trade::walk` builds `SliceFacts::of(bars, column)` on every
+    // call -- a B-sized hash map, two B+1 prefix arrays and a B-entry forced-
+    // exit table, none of which depends on the candidate -- and this ran it up
+    // to `BOOTSTRAP_CANDIDATES` times. `trade.rs` states the rule: a loop over
+    // candidates hoists the facts and calls `walk_over`. This is the FIFTH site
+    // of that defect (`screen`, `cap_for_budget`, `validate.rs`, `measure_top`).
+    let facts = runner::trade::SliceFacts::of(bars, column);
     let family: Vec<Vec<i64>> = by_evidence
         .iter()
         .take(BOOTSTRAP_CANDIDATES)
@@ -18271,12 +18280,13 @@ fn bootstrap_family(
             // have earned, so the bootstrap's null would be built from returns
             // no strategy in the family would ever have taken — and the p-value
             // beside it would describe that fiction rather than the family.
-            let walked = trade::walk(
+            let walked = trade::walk_over(
                 bars,
                 column,
                 &scored.mask,
                 horizon,
                 direction_of(side_of_evidence(scored)),
+                &facts,
             );
             session_returns(&index, days.len(), bars, &walked)
         })

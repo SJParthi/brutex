@@ -840,3 +840,19 @@ fn the_listing_window_equals_full_retention_and_keeps_at_most_forty() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&lone);
 }
+/// AC-whp-o1-2. The bootstrap family builds its slice facts once, not once
+/// per candidate: the fifth site of the defect `trade.rs` names.
+#[test]
+fn the_bootstrap_family_builds_its_slice_facts_once() {
+    let family = code_of("\nfn bootstrap_family(");
+    assert!(!family.contains(concat!("trade::walk", "(")), "{family}");
+    assert_eq!(
+        family.matches(concat!("SliceFacts", "::of(")).count(),
+        1,
+        "{family}"
+    );
+    assert!(
+        family.contains(concat!("trade::walk_over", "(")),
+        "{family}"
+    );
+}

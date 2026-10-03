@@ -53674,3 +53674,23 @@ newest, so stopping early would change which run `cli top` reports. It is left
 as one O(1)-memory pass, and the limit says so. A secondary index, for per-request
 O(1). The ledger is one append-only array whose path is its index, and an
 index file is a second store to keep in step.
+
+### D-1730 — The bootstrap family builds its slice facts once — 2026-10-03
+
+**Finding.** AC-whp-o1-2 (low cost).
+
+**What was wrong.** `bootstrap_family` called `trade::walk` for each of up to
+`BOOTSTRAP_CANDIDATES` (16) candidates. `walk` builds `SliceFacts::of(bars,
+column)` on every call: a B-sized hash map, two B+1 prefix arrays and a
+B-entry forced-exit table over the whole execution slice, about 618k one-minute
+bars on the audit path. None of it depends on the candidate. `trade.rs` states
+the rule ("a loop over candidates must hoist the facts and use `walk_over`"),
+and this file had already fixed the same defect at four other sites.
+
+**The decision.** Build the facts once before the family map and call
+`trade::walk_over(.., &facts)`. `walk` is `walk_over` over freshly built facts,
+so every series is unchanged. A source-shape test pins one construction and no
+`trade::walk(` in the function, in the style of the existing D-1190 guard.
+
+**Rejected.** Nothing. This is the existing hoist pattern applied at a fifth
+site.
