@@ -19,7 +19,7 @@
 
 #![expect(
     dead_code,
-    reason = "Population V6 source retention and fixed receipt-last codec await their all-rung production caller"
+    reason = "the all-rung production caller exists (`ledger_v6::commit_stored_population_v6_route`); some source-retention and codec items are still reached only from tests"
 )]
 
 use std::collections::{HashMap, HashSet};

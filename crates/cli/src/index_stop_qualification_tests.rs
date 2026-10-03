@@ -160,8 +160,8 @@ impl Fixture {
         let later = evaluate(days, suffix, &program);
         let old = [31; 32];
         let new = [32; 32];
-        let training_body = candidates::encode(old, &training, BYTES).unwrap();
-        let later_body = candidates::encode(new, &later, BYTES).unwrap();
+        let training_body = candidates::encode(old, &training, BYTES, 100_000).unwrap();
+        let later_body = candidates::encode(new, &later, BYTES, 100_000).unwrap();
         let old_pin = save(&root.0, candidates::NAMESPACE, old, &training_body);
         let new_pin = save(&root.0, candidates::NAMESPACE, new, &later_body);
         let facts = Facts {

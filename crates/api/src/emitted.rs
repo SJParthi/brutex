@@ -1662,10 +1662,19 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// own tests cover the landing and the transport pairing against a
     /// recording transport, which is the half that has no network in it.
     ///
+    /// AND ONE MORE, added with D-1481 (v3b-2): `api.serve the serve lock is
+    /// held but could not be stamped`. It fires only when writing the stamp
+    /// into a lock file this process holds fails while emptying that same file
+    /// succeeds — a disk that fills between two calls on one descriptor. No
+    /// fixture produces that split: `/dev/full` fails both, which is the
+    /// refusal arm `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+    /// drives end to end, and the decision between the two arms is driven
+    /// directly through `stamp_outcome` with the host's own errors.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the seven
+    /// `pull.fno discovery refused`, the three named before it and the eight
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 8;
+    const UNREACHABLE: usize = 9;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
@@ -1682,9 +1691,12 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 58 -> 59 at D-0948: the credential re-read in `credential_law::note`.
     //
     // 59 -> 60 at D-1443: `api.calendar withheld`, driven in the table above.
+    //
+    // 60 -> 61 at D-1481: the unstamped serve lock's WARN, named in the
+    // unreachable list above.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 60,
+        lib_sites, 61,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

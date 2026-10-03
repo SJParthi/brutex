@@ -2216,17 +2216,21 @@ impl HeaderRead {
 ///
 /// # Two paths, two different bounds, said separately
 ///
-/// **Lookup — O(1) worst case.** [`Manifest::entry`] is one probe into a table
-/// that the load walk built once and never grew, whatever the census holds.
+/// **Lookup — expected O(1).** [`Manifest::entry`] is one hash probe into a
+/// table that the load walk built once and never grew, whatever the census
+/// holds. A `HashMap` probe is expected O(1), not an adversarial worst-case
+/// guarantee (`CLAUDE.md` §3 rule 4); this called it a worst-case bound until
+/// D-1488 (v4-1).
 /// `docs/07-o1-architecture.md` layer 3. C-12 in `crates/pull/benches/ratio.rs`
 /// measures it at 1×, 10× and 100× the census.
 ///
-/// **Append — O(1) worst case for the first `n_valid` new keys, amortised O(1)
-/// after that.** The reservation carries [`APPEND_HEADROOM_FACTOR`]× the
-/// census, so [`Manifest::record`] has at least `n_valid` free slots waiting
-/// and cannot rehash until they are gone; past them one append in a doubling
-/// rebuilds the table at `O(n_keys)`. Until D-0040 this sentence read "it never
-/// rehashes … O(1) worst case", the reservation was exactly `n_valid`, and a
+/// **Append — no rehash for the first `n_valid` new keys (each one expected-O(1)
+/// hash insert), amortised O(1) after that.** The reservation carries
+/// [`APPEND_HEADROOM_FACTOR`]× the census, so [`Manifest::record`] has at least
+/// `n_valid` free slots waiting and cannot rehash until they are gone; past
+/// them one append in a doubling rebuilds the table at `O(n_keys)`. Until
+/// D-0040 this sentence said it never rehashed and called the append a
+/// worst-case constant, the reservation was exactly `n_valid`, and a
 /// census sitting on a `7·2^k` boundary rehashed on the **first** append —
 /// measured at 22× the cost between a 1,792-entry census and a 57,344-entry
 /// one. `docs/06-limits.md` §23 states what is still not unconditional and what
@@ -2764,8 +2768,8 @@ impl Manifest {
     ///
     /// # Cost, and what crossing a month costs
     ///
-    /// **O(1) worst case**, the same bound [`Manifest::entry`] carries: one
-    /// probe into a table the load walk built once and never grew. A caller
+    /// **Expected O(1)**, the same bound [`Manifest::entry`] carries: one
+    /// hash probe into a table the load walk built once and never grew. A caller
     /// computing a month-over-month change probes twice — this month and
     /// `YearMonth::previous` — which crosses a manifest **entry**, not a file:
     /// no `open`, no `stat`, no `pread`, because the whole census is already
@@ -2851,7 +2855,8 @@ impl Manifest {
     /// `index.insert` that keeps the census current, and that one has a
     /// condition on it:
     ///
-    /// * **O(1) worst case for the first `n_valid` calls after a load.**
+    /// * **No rehash, so one expected-O(1) insert, for the first `n_valid`
+    ///   calls after a load.**
     ///   `Manifest::walk` reserved [`APPEND_HEADROOM_FACTOR`]× the census and
     ///   the walk can leave at most `n_valid` elements in it, so at least
     ///   `n_valid` slots are free and no call in that run can rebuild the

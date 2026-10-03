@@ -1867,8 +1867,9 @@ fn stored_month_arm(
 /// # Why it takes no UNDERLYING
 ///
 /// Every other stored command takes one, because it sweeps one instrument. This
-/// chain does not: `CLAUDE.md` §1 names two instruments as the engine surface
-/// and the Population V5 pipeline commits BOTH per rung, pairing them as one
+/// chain does not: it is built for the two spot indices of `CLAUDE.md` §1
+/// (whose surface also holds the F&O cash equities, which this chain does not
+/// sweep) and the Population V5 pipeline commits BOTH per rung, pairing them as one
 /// cross-sectional statistic. The pair is structural all the way down --
 /// `CandidateFamilyPairV1 { nifty, banknifty }` -- so there is no argument an
 /// operator could pass to ask for one of them, and offering one would be a
@@ -3115,6 +3116,60 @@ pub(crate) fn note(event: &telemetry::Event<'_>) {
     // sink — and `install_log` above is the one place that reports the absence,
     // so reporting it again per event would be noise on every line.
     let _ = telemetry::emit(event);
+}
+
+/// Writes the binary's whole output to `out`, and returns the exit code the
+/// run earns once that write is known (v53-2, D-1484).
+///
+/// `main` printed with `println!` and `print!`, which PANIC on a closed
+/// stdout: `cli sweep 6 100 | true` exited 101 with a backtrace after the
+/// work was done, and a `> report.txt` on a full disk did the same. The shape
+/// is `api`'s `say_line` (probeapi-7, D-1202): written with `write_all`, never
+/// a panic, and a failure SAID on `fallback` with one `cli.output` event.
+///
+/// The code depends on why. A closed pipe (`BrokenPipe`) is a reader that
+/// stopped reading -- `| head` is the ordinary case -- so the computed code
+/// stands, as it does for any Unix filter. Any other error means the report
+/// was meant to land and did not, so a run that would have exited [`OK`]
+/// exits [`FAILED`]: zero would say "everything went as asked" over a report
+/// nobody has. A run that already earned a non-zero code keeps it. If
+/// `fallback` is gone too there is nobody left to tell; the event remains.
+pub fn deliver(
+    code: u8,
+    text: &str,
+    out: &mut impl std::io::Write,
+    fallback: &mut impl std::io::Write,
+) -> u8 {
+    let Err(why) = out.write_all(text.as_bytes()).and_then(|()| out.flush()) else {
+        return code;
+    };
+    let closed = why.kind() == std::io::ErrorKind::BrokenPipe;
+    let earned = if closed || code != OK { code } else { FAILED };
+    let said = why.to_string();
+    note(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "cli.output",
+            "stdout is not writable; the report was not shown whole",
+        )
+        .with("why", telemetry::Value::Str(&said))
+        .with(
+            "bytes",
+            telemetry::Value::Uint(u64::try_from(text.len()).unwrap_or(u64::MAX)),
+        )
+        .with("exit", telemetry::Value::Uint(u64::from(earned))),
+    );
+    let _told = writeln!(
+        fallback,
+        "stdout is not writable ({why}); the report ({} bytes) was not shown whole. {}",
+        text.len(),
+        if closed {
+            "The reader closed the pipe, so the run's own exit code stands."
+        } else {
+            "The report was meant to land and did not, so this is not a clean exit."
+        }
+    );
+    earned
 }
 
 /// Emits one structural event under an exact browser-attempt key when one was
@@ -14764,16 +14819,26 @@ fn descent_table(out: &mut String, steps: Vec<(u64, Result<crate::results::Recor
     }
 }
 
-/// One completed or refused support step in the legacy descent table.
+/// One completed or refused support step, as the `descend` progress line on
+/// stderr announces it the moment it lands.
+///
+/// ONE LITERAL SPACE BETWEEN EVERY FIELD (v4-3, D-1487). The fields were
+/// adjacent width specifiers, the shape D-1420 removed from the stdout tables:
+/// `min_hits` at `u64::MAX` (20 digits) in a 10-wide field, or `pessimistic`
+/// at `i64::MIN` (20 characters), ran into the field beside it and read as
+/// one number. The progress line is printed row by row as each step finishes,
+/// so no later row's width is known and [`crate::columns`] cannot lay it out
+/// jointly; a literal separator keeps any two figures apart whatever their
+/// width. The stdout report is [`descent_table`], laid out with `columns`.
 fn descent_line(support: u64, row: Result<crate::results::Record, String>) -> String {
     match row {
         Err(why) => format!(
-            "  {:<10}REFUSED: {}",
+            "  {:<10} REFUSED: {}",
             format!("{support}ppm"),
             why.lines().next().unwrap_or(&why)
         ),
         Ok(record) => format!(
-            "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
+            "  {:<10} {:>10} {:>14} {:>7} {:>10} {:>9} {:>12} {:>12} {:>14}",
             format!("{support}ppm"),
             record.min_hits,
             record.combinations,
@@ -18219,8 +18284,17 @@ fn signal_spacing_minutes(bars: &[indicators::Candle]) -> u32 {
 ///
 /// The gate silences `vocab engine indicators runner` because those hold the
 /// innermost loops, and its own remedy prescribes the shape: *"plain integer
-/// counters … emitted ONCE at a structural boundary"*. This is `cli`, called
-/// once per rung, holding no loop over bars and none over candidates.
+/// counters … emitted ONCE at a structural boundary"*. This event is that
+/// boundary: it is built once per rung, before the grid starts. The path it
+/// marks is NOT loop-free, and this sentence said it was until D-1486
+/// (AC-gates-o1-4): right after it, `SliceFacts::of` walks every bar of the
+/// slice, and `screen_cascade` walks every candidate (`screen`'s
+/// `by_evidence.par_iter()`), pricing each one with `grid::evaluate_over`
+/// over the bars. Those loops emit nothing per iteration; their only event is
+/// [`note_grid_progress`], one in every `stride` candidates. `cli` is not on
+/// gate 17's silenced list, so the gate does not refuse them; it is the
+/// boundary discipline, not an absence of loops, that keeps this crate's
+/// events affordable.
 fn grid_entered_event(
     recording: Option<Recording<'_>>,
     bars: usize,
@@ -18331,11 +18405,11 @@ impl<'a> GridProgress<'a> {
 ///
 /// # Gate 17, and a correction to what the sibling doc claims
 ///
-/// [`grid_entered_event`] says this path is *"`cli`, called once per rung,
-/// holding no loop over bars and none over candidates."* The first half is
-/// true and the second is not: `screen` runs `by_evidence.par_iter()` over
-/// every candidate and calls `grid::evaluate_over` inside it. That loop is the
-/// phase being timed here.
+/// [`grid_entered_event`]'s doc said this path was called once per rung and
+/// looped over neither bars nor candidates. The first half is true and the
+/// second was not: `screen` runs `by_evidence.par_iter()` over every candidate
+/// and calls `grid::evaluate_over` inside it. That loop is the phase being
+/// timed here. D-1486 corrected the sibling doc.
 ///
 /// It is still `cli`, which is not on gate 17's silenced list, and the cost is
 /// one relaxed `fetch_add` per candidate — the counter is O(1) and the emit

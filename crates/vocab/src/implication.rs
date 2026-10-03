@@ -29,9 +29,12 @@
 //! this is a statement about meaning.
 //!
 //! [`crate`]'s sibling `runner::closed` removes a set only when a superset ONE
-//! BIT LARGER has IDENTICAL support. It therefore deletes `{above_s2}` and
-//! KEEPS `{above_s2, above_s3, above_s4, above_s5}` — the maximal form, which is
-//! lossless and is exactly why the reported row reads long.
+//! BIT LARGER has IDENTICAL support. Without the join screen below, it would
+//! delete `{above_s2}` and KEEP `{above_s2, above_s3, above_s4, above_s5}` —
+//! the maximal form, which is lossless and is exactly why the reported row read
+//! long. With the screen, `engine` never builds that superset, so `closed`
+//! keeps `{above_s2}` instead: the informative form. This said `closed` keeps
+//! the long form until D-1496 (AC-whp-cx-2).
 //!
 //! # The chain, and it is exact rather than approximate
 //!

@@ -40,7 +40,7 @@
 
 #![expect(
     dead_code,
-    reason = "Execution V4 remains crate-private until Selection V6 consumes its source-retaining production capability"
+    reason = "Selection V6 consumes Execution V4 on the production path; some source-retaining items are still reached only from tests"
 )]
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};

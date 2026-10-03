@@ -821,6 +821,51 @@ fn expression_capture_replays_or_not_without_relabelling_the_same_referenced_and
         );
     }
 }
+/// W2-cli5-2, D-1641: a caller-held digest of the same bars writes the same
+/// start record as hashing them per capture, so hoisting the hash out of the
+/// per-candidate path changes no byte; a wrong digest conflicts with it.
+#[test]
+fn a_held_execution_digest_writes_the_same_start_as_hashing_per_capture() {
+    let (bars, column) = fixture();
+    let expression = Expression::parse("0 | !0").expect("predicate");
+    let digest = runner::identity::data_digest(bars);
+    let hashed_root = root();
+    let hashed_attempt = attempt(&hashed_root);
+    let hashed =
+        Capture::begin_expression(&hashed_root, &hashed_attempt, bars, column, &expression)
+            .expect("hashing capture");
+    let held_root = root();
+    let held_attempt = attempt(&held_root);
+    let held = Capture::begin_expression_with_digest(
+        &held_root,
+        &held_attempt,
+        bars,
+        column,
+        &expression,
+        digest,
+    )
+    .expect("held-digest capture");
+    assert_eq!(held.execution_digest, hashed.execution_digest);
+    assert_eq!(
+        std::fs::read(held.directory.join("start.bin")).expect("held start"),
+        std::fs::read(hashed.directory.join("start.bin")).expect("hashed start")
+    );
+    let mut wrong = digest;
+    wrong[0] ^= 1;
+    assert!(
+        Capture::begin_expression_with_digest(
+            &held_root,
+            &held_attempt,
+            bars,
+            column,
+            &expression,
+            wrong,
+        )
+        .is_err(),
+        "a different digest conflicts with the reserved start"
+    );
+}
+
 fn root_for_limit() -> PathBuf {
     root()
 }

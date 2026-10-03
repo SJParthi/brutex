@@ -219,7 +219,12 @@ async fn every_answer_forbids_framing_and_sniffing() {
 
             // THE BODY LIMIT, on an otherwise admitted write.
             let origin = format!("Origin: http://{local}\r\n{same}");
-            let huge = format!("pad={}", "x".repeat(MAX_FORM_BYTES + 1));
+            // `/ingest/queue` reads the member-form bound, not `MAX_FORM_BYTES`
+            // (D-1499).
+            let huge = format!(
+                "pad={}",
+                "x".repeat(crate::ingest::MAX_MEMBER_FORM_BYTES + 1)
+            );
             let request = format!(
                 "POST /ingest/queue HTTP/1.1\r\nHost: {local}\r\n{origin}\
                  Content-Type: application/x-www-form-urlencoded\r\n\

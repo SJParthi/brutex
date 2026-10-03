@@ -498,6 +498,43 @@ async fn a_rotation_mid_rolling_walk_sends_the_remaining_cells_with_the_new_toke
     assert!(facts.is_empty(), "no stop, no stop facts: {facts:?}");
 }
 
+/// **A rotation that is undone mid-walk is caught before the socket.** v3a-1,
+/// D-1482.
+///
+/// The walk sends `stale`, which is rejected; the re-read returns `fresh`,
+/// which is rejected too; the next re-read hands `stale` back. The watch held
+/// only the LAST dead value and only the spot loop's `admit` read it, so the
+/// walk took `stale` for a rotation and sent it to the remaining cells. Now the
+/// re-read itself refuses any value this run already saw rejected: two
+/// requests on the wire, two re-reads, and the stop names the reason.
+#[tokio::test]
+async fn an_undone_rotation_mid_rolling_walk_never_resends_a_rejected_token() {
+    let vendor = FakeVendor::rejecting_all_but(None).await;
+    let script = scripted(&vendor, vec![token("fresh"), token("stale")]);
+    let fixture = Rolling::new("flapped", &vendor, &script);
+
+    let walk = fixture.walk().await;
+
+    assert!(
+        walk.planned > 2,
+        "the premise: cells remain after two: {walk:?}"
+    );
+    let seen = vendor.seen();
+    assert_eq!(
+        seen.len(),
+        2,
+        "stale once, fresh once, never stale again: {seen:?}"
+    );
+    assert!(
+        seen[0].contains("stale") && seen[1].contains("fresh"),
+        "{seen:?}"
+    );
+    assert_eq!(script.reads(), 2, "one re-read per rejection");
+    assert_eq!(walk.credential_stop, Some(CredentialStop::SameValue));
+    let said = walk.done.why.join(" | ");
+    assert!(said.contains("already rejected in this run"), "{said}");
+}
+
 /// **A failed re-read mid-walk ends the walk too, and says so without
 /// claiming a comparison.**
 #[tokio::test]
@@ -610,4 +647,33 @@ async fn a_rotation_mid_contract_walk_sends_the_rest_with_the_new_token() {
     );
     assert_eq!(landed.credential_stop, None);
     assert_eq!(script.reads(), 1);
+}
+
+/// **An undone rotation mid-contract-walk is caught before the socket.**
+/// v3a-1, D-1482. `stale` rejected, `fresh` read and rejected, `stale` read
+/// again: the third contract is never asked.
+#[tokio::test]
+async fn an_undone_rotation_mid_contract_walk_never_resends_a_rejected_token() {
+    let vendor = FakeVendor::rejecting_all_but(None).await;
+    let script = scripted(&vendor, vec![token("fresh"), token("stale")]);
+
+    let landed = named_walk("flapped", &vendor, &script).await;
+
+    let seen = vendor.seen();
+    assert_eq!(seen.len(), 2, "stale once, fresh once: {seen:?}");
+    assert!(
+        seen[0].contains("stale") && seen[1].contains("fresh"),
+        "{seen:?}"
+    );
+    assert_eq!(script.reads(), 2);
+    assert_eq!(landed.credential_stop, Some(CredentialStop::SameValue));
+    assert_eq!(landed.failed, 3, "two rejected and one not asked");
+    assert!(
+        landed
+            .why
+            .iter()
+            .any(|why| why.contains("already rejected in this run")),
+        "{:?}",
+        landed.why
+    );
 }

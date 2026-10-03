@@ -2215,7 +2215,10 @@ impl BarFile {
     /// here said no bench timed a syscall until D-1434 corrected it). What
     /// they time is a WARM read — one fixed index, so its checksum block is
     /// cached and its page resident after the first call. The cold block
-    /// verify a random index pays, and a cold device, are UNVERIFIED. D-0790.
+    /// verify a random index pays is timed by C-BC-01 (flat in the file) and
+    /// C-BC-02 (its own 10,000-floor budget), D-0914; this sentence called it
+    /// UNVERIFIED until D-1506. A cold DEVICE, the page cache dropped, is
+    /// UNVERIFIED. D-0790.
     ///
     /// # Errors
     ///

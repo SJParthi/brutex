@@ -7,8 +7,10 @@
 //! 3. the resolved rungs are replayed unchanged on later bars.
 //!
 //! No equity, future, option, reference index, BSE index, or unknown index can
-//! reach resolution. Those instruments may be stored, but `AGENTS.md` section
-//! 1 permits the sweep only for `NSE-NIFTY` and `NSE-BANKNIFTY`.
+//! reach resolution: this V1 policy resolves only `NSE-NIFTY` and
+//! `NSE-BANKNIFTY`. That is narrower than the sweep surface, which
+//! `CLAUDE.md` §1 widened to the F&O cash equities (D-0506); an equity is not
+//! resolved here.
 //!
 //! The resolver creates no tick and no execution price. Long stops sample
 //! `open - low` while long targets sample `high - open`; short swaps those two
@@ -453,6 +455,9 @@ impl ExecutionRunV1 {
         self.mask
     }
 
+    /// Test-only since D-1495: the one production caller now digests once and
+    /// calls [`Self::require_matches_terms`] itself.
+    #[cfg(test)]
     fn require_matches(
         self,
         series: ExecutionSeriesV1<'_>,
@@ -467,14 +472,38 @@ impl ExecutionRunV1 {
         )
     }
 
+    /// The run-identity checks against `series`, returning the bar digest
+    /// they computed so the caller does not hash the same bars again.
+    ///
+    /// `replay_selected_universe_with` called the digesting check and then
+    /// digested the same OOS bars for its own `oos_data_digest`: two BLAKE3
+    /// passes where one gives both answers (c4a-5, D-1495). The digest and the
+    /// order of checks are unchanged, so the refusal for a faulty input is too.
+    fn require_matches_digested(
+        self,
+        series: ExecutionSeriesV1<'_>,
+        side: crate::excursion::Side,
+    ) -> Result<[u8; 32], ExitGridErrorV1> {
+        let digest = crate::identity::data_digest(series.bars());
+        self.require_matches_terms(
+            series.instrument(),
+            hash(series.feed().as_bytes()),
+            hash(series.commit().as_bytes()),
+            digest,
+            side,
+        )?;
+        Ok(digest)
+    }
+
     /// The five run-identity checks, in their fixed order, against series
     /// terms the caller has already digested.
     ///
-    /// [`Self::require_matches`] digests the series here and now, which is one
-    /// BLAKE3 pass over every execution bar. An attested door has already
-    /// proved those digests equal to its resolution's own, so it passes the
-    /// resolution's copies instead and pays no pass. Both callers reach one
-    /// list of checks; there is no second copy to drift.
+    /// The replay door digests the series once and passes that digest here,
+    /// reusing it for its own `oos_data_digest` (D-1495). An attested door has
+    /// already proved those digests equal to its resolution's own, so it
+    /// passes the resolution's copies instead and pays no pass. Every caller
+    /// reaches one list of checks; there is no second copy to drift. The
+    /// test-only `require_matches` digests and calls this.
     fn require_matches_terms(
         self,
         instrument: &InstrumentKey,
@@ -2773,11 +2802,12 @@ impl ResolvedExitGridV1 {
         }
         let series = oos.series();
         self.require_matching_series(series)?;
-        oos_run.require_matches(series, selected.side)?;
+        // ONE BLAKE3 PASS OVER THE OOS BARS, NOT TWO (c4a-5, D-1495).
+        let oos_data_digest = oos_run.require_matches_digested(series, selected.side)?;
+        let bars = series.bars();
         if oos_run.mask != selected.mask {
             return Err(ExitGridErrorV1::RunIdentityMismatch("mask"));
         }
-        let bars = series.bars();
         validate_execution_bars(bars)?;
         let first_oos = oos.first_oos();
         let first_test_stamp = bars.get(first_oos).map(|bar| bar.ts_micros).ok_or(
@@ -2835,7 +2865,6 @@ impl ResolvedExitGridV1 {
             facts,
         )?;
         let cell = replay.cell;
-        let oos_data_digest = crate::identity::data_digest(bars);
         let column_digest = digest_column(column);
         let digest = digest_replay_universe(
             oos_run.run_id,
@@ -3952,7 +3981,16 @@ fn digest_global_replay_witness(
     h.finalize()
 }
 
-/// Stable V1 digest of every durable field in one indicator/execution column.
+/// Stable V1 digest of one indicator/execution column's durable fields, all but
+/// one.
+///
+/// **`Column::known()` is not hashed** (W3-runner2-8, D-1498). This said
+/// "every durable field", and the per-bar availability masks are not among
+/// the bytes below, so two columns that differ only in which conditions have a
+/// certified answer share a V1 digest. Adding them would change every V1
+/// column digest already recorded, and the cell and selection digests built
+/// on it, so it needs a V2 codec under its own decision rather than an edit
+/// here.
 ///
 /// This is the sole codec used by grid evaluation and pre-admission durable
 /// adapters. It is O(column length), so callers compute it once at a structural
@@ -7115,9 +7153,17 @@ mod tests {
             &execution,
         )
         .expect("the canonical OOS run");
+        crate::identity::DATA_DIGESTS.with(|count| count.set(0));
         let universe = resolved
             .replay_selected_universe(oos, &execution_column, &selected, run)
             .expect("pricing refusals remain conservative occupancy evidence");
+        let passes = crate::identity::DATA_DIGESTS.with(std::cell::Cell::get);
+        assert_eq!(passes, 1, "one replay hashes its OOS bars once (c4a-5)");
+        let held = crate::identity::data_digest(&execution);
+        assert_eq!(
+            universe.oos_data_digest, held,
+            "and still carries their digest"
+        );
 
         assert!(universe.digest_is_valid());
         assert_eq!(universe.require_integrity(), Ok(()));
