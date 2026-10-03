@@ -279,6 +279,19 @@ pub(crate) fn ledger_v6(request: &LedgerAllRequest<'_>) -> String {
     out
 }
 
+/// Hands the sizing load to the one family that may consume it.
+///
+/// Only [`SIZING_UNDERLYING`](crate::step3_orchestrator::strict::SIZING_UNDERLYING)
+/// receives it, and only once: every other family, and a second request for
+/// the sizing family, gets `None` and loads its own span (D-1683).
+fn preloaded_for<T>(underlying: &str, sized: &mut Option<T>) -> Option<T> {
+    if underlying == crate::step3_orchestrator::strict::SIZING_UNDERLYING {
+        sized.take()
+    } else {
+        None
+    }
+}
+
 /// The route itself, lifted out so [`ledger_v6`] owns only the report.
 ///
 /// Per rung: one strict NIFTY load sizes the support threshold and is handed
@@ -333,11 +346,7 @@ fn run_route(
         let mut families = Vec::with_capacity(ROUTE_FAMILIES.len());
         for underlying in ROUTE_FAMILIES {
             sizing_inputs.require_current()?;
-            let preloaded = if underlying == crate::step3_orchestrator::strict::SIZING_UNDERLYING {
-                sized.take()
-            } else {
-                None
-            };
+            let preloaded = preloaded_for(underlying, &mut sized);
             let committed_family = commit_strict_candidate_pre_admission_authority_sized_v1(
                 StoredCandidatePreAdmissionRequestV1 {
                     root: source_root.as_path(),
@@ -1064,6 +1073,27 @@ mod tests {
     #[test]
     fn missing_policy_refuses_before_ledger_v6_replay_market_sizing() {
         assert_missing_policy_precedes_market_sizing(true);
+    }
+
+    /// The sizing load reaches NIFTY once and no other family at all.
+    #[test]
+    fn the_sizing_load_is_handed_to_nifty_once_and_to_no_other_family() {
+        let mut sized = Some(7_u8);
+        assert_eq!(super::preloaded_for("BANKNIFTY", &mut sized), None);
+        assert_eq!(
+            sized,
+            Some(7),
+            "a refused hand-off must not consume the load"
+        );
+        assert_eq!(super::preloaded_for("NIFTY", &mut sized), Some(7));
+        assert_eq!(sized, None);
+        assert_eq!(super::preloaded_for("NIFTY", &mut sized), None);
+        let mut route = Some(9_u8);
+        let handed: Vec<_> = ROUTE_FAMILIES
+            .iter()
+            .map(|family| super::preloaded_for(family, &mut route))
+            .collect();
+        assert_eq!(handed, [Some(9), None]);
     }
 
     /// The family order is the one every V6 successor demands.
