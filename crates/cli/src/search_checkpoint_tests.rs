@@ -8,9 +8,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 type PayloadHook = Box<dyn FnOnce(&File)>;
 
 thread_local! {
+    /// A lowered `DIRECTORY_LIMIT` for this test thread only.
+    pub(super) static LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     /// Armed by a test on its own thread, taken by the next publication on
     /// that thread and by nothing else.
     static PAYLOAD_LOCKED: RefCell<Option<PayloadHook>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// Armed by a test: the next staged marker on this thread fails here, after
+    /// its seal is synced under `complete.tmp` and before the rename.
+    static MARKER_FAULT: std::cell::Cell<Option<std::io::ErrorKind>> = const { std::cell::Cell::new(None) };
+}
+
+/// Called by `publish_marker` between the synced temporary marker and its
+/// rename; fails once when a test armed it.
+pub(super) fn marker_staged(_temporary: &Path) -> std::io::Result<()> {
+    MARKER_FAULT
+        .with(std::cell::Cell::take)
+        .map_or(Ok(()), |kind| {
+            Err(std::io::Error::new(kind, "injected rename failure"))
+        })
 }
 
 /// Called by `publish_inner` right after it takes the payload lock: runs the
@@ -234,4 +252,168 @@ fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Res
     );
     drop(child);
     Ok(())
+}
+
+/// GAP11-0: a kill between creating the completion marker and writing its
+/// seal left a 0-byte `complete` that discovery counted as acknowledged and
+/// `read` refused forever ("checkpoint marker width mismatch"), so no rerun of
+/// that search could ever resume. The state is built with real files: a fully
+/// synced payload for reservation 2 plus the empty marker the old protocol
+/// left. D-1640.
+#[test]
+fn an_empty_marker_left_by_a_kill_is_an_interrupted_reservation() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [11; 32])?;
+    let (first, seal) = journal.publish(b"first", 1024)?;
+    journal.publish(b"second", 1024)?;
+    let second = journal.directory.join("0000000000000002");
+    drop(journal);
+    fs::remove_file(second.join("complete")).map_err(error)?;
+    File::create_new(second.join("complete")).map_err(error)?;
+
+    let snapshot =
+        Snapshot::open(&scratch.0, "and-checkpoint-v1", [11; 32])?.ok_or("the namespace exists")?;
+    assert_eq!(
+        (snapshot.latest, snapshot.interrupted, snapshot.acknowledged),
+        (Some(1), 1, 1)
+    );
+    let mut reopened = Journal::open(&scratch.0, "and-checkpoint-v1", [11; 32])?;
+    assert_eq!((reopened.interrupted(), reopened.acknowledged()), (1, 1));
+    let latest = reopened
+        .latest(1024)?
+        .ok_or("checkpoint 1 is the resume point")?;
+    assert_eq!((latest.sequence, latest.seal), (first, seal));
+    assert_eq!(latest.payload, b"first");
+    assert!(
+        reopened.read(2, 1024).is_err(),
+        "the torn one is never read"
+    );
+    assert_eq!(reopened.publish(b"third", 1024)?.0, 3);
+    assert_eq!(reopened.latest(1024)?.ok_or("latest")?.payload, b"third");
+    Ok(())
+}
+
+/// W2-cli13-5: `publish` acknowledged a reservation that took the namespace
+/// past the entry ceiling discovery admits, so every later `Journal::open` and
+/// `Snapshot::open` refused the search for good. The ceiling is lowered on this
+/// thread so it is reached with real directories: owner.lock plus three
+/// reservations is exactly the limit of four. D-1640.
+#[test]
+fn publishing_never_acknowledges_a_checkpoint_discovery_cannot_reopen() -> Result<(), String> {
+    LIMIT.with(|limit| limit.set(Some(4)));
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [12; 32])?;
+    journal.publish(b"one", 1024)?;
+    drop(journal);
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [12; 32])?;
+    journal.publish(b"two", 1024)?;
+    let (third, _) = journal.publish(b"three", 1024)?;
+    assert_eq!(
+        third, 3,
+        "limit - 1 reservations plus the owner is the limit"
+    );
+    let refused = journal.publish(b"four", 1024);
+    assert_eq!(
+        refused,
+        Err("checkpoint namespace reached its directory admission limit".to_owned())
+    );
+    assert!(
+        !journal.directory.join("0000000000000004").exists(),
+        "the refusal comes before the reservation is created"
+    );
+    drop(journal);
+    let reopened = Journal::open(&scratch.0, "and-checkpoint-v1", [12; 32])?;
+    assert_eq!(reopened.latest(1024)?.ok_or("latest")?.payload, b"three");
+    let mut reopened = reopened;
+    assert!(
+        reopened.publish(b"four", 1024).is_err(),
+        "a reopen counts the same entries"
+    );
+    drop(reopened);
+    fs::create_dir(
+        scratch
+            .0
+            .join("and-checkpoint-v1")
+            .join(hex(&[12; 32]))
+            .join("0000000000000009"),
+    )
+    .map_err(error)?;
+    assert_eq!(
+        Journal::open(&scratch.0, "and-checkpoint-v1", [12; 32]).err(),
+        Some("checkpoint directory admission limit exceeded".to_owned()),
+        "one entry past the limit is what discovery refuses"
+    );
+    LIMIT.with(|limit| limit.set(None));
+    Ok(())
+}
+
+/// The new protocol's own crash window: a kill after the seal is synced under
+/// `complete.tmp` and before the rename leaves that file, which discovery
+/// never reads, so the reservation is interrupted and the previous checkpoint
+/// stays the resume point. A failure the writer sees there (ENOSPC at the
+/// rename) removes the temporary file, refuses, and acknowledges nothing.
+#[test]
+fn a_staged_marker_is_never_an_acknowledgment() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [13; 32])?;
+    journal.publish(b"first", 1024)?;
+    MARKER_FAULT.with(|fault| fault.set(Some(std::io::ErrorKind::StorageFull)));
+    let why = journal
+        .publish(b"second", 1024)
+        .err()
+        .ok_or("the rename refuses")?;
+    assert!(
+        why.starts_with("checkpoint marker was not published: injected rename failure"),
+        "{why}"
+    );
+    let second = journal.directory.join("0000000000000002");
+    assert!(
+        !second.join("complete.tmp").exists(),
+        "the temporary marker was removed"
+    );
+    assert!(!second.join("complete").exists());
+    assert!(
+        journal.publish(b"third", 1024).is_err(),
+        "the writer is poisoned"
+    );
+    drop(journal);
+
+    // A kill at the same point: a whole, synced seal under the temporary name.
+    let seal = fs::read(journal_dir(&scratch.0, [13; 32]).join("0000000000000001/complete"))
+        .map_err(error)?;
+    fs::write(second.join("complete.tmp"), &seal).map_err(error)?;
+    let mut reopened = Journal::open(&scratch.0, "and-checkpoint-v1", [13; 32])?;
+    assert_eq!((reopened.interrupted(), reopened.acknowledged()), (1, 1));
+    assert_eq!(reopened.latest(1024)?.ok_or("latest")?.payload, b"first");
+    assert_eq!(reopened.publish(b"third", 1024)?.0, 3);
+    let marker = reopened.directory.join("0000000000000003");
+    assert!(
+        !marker.join("complete.tmp").exists(),
+        "a published marker leaves no temporary"
+    );
+    assert_eq!(fs::read(marker.join("complete")).map_err(error)?.len(), 32);
+    Ok(())
+}
+
+/// A marker of any other short width is not the empty one a kill left and
+/// still refuses loudly when read.
+#[test]
+fn a_short_nonempty_marker_still_refuses() -> Result<(), String> {
+    let scratch = Scratch::new().map_err(error)?;
+    let mut journal = Journal::open(&scratch.0, "and-checkpoint-v1", [14; 32])?;
+    journal.publish(b"only", 1024)?;
+    let marker = journal.directory.join("0000000000000001/complete");
+    fs::write(&marker, [7_u8; 31]).map_err(error)?;
+    drop(journal);
+    let reopened = Journal::open(&scratch.0, "and-checkpoint-v1", [14; 32])?;
+    assert_eq!((reopened.interrupted(), reopened.acknowledged()), (0, 1));
+    assert_eq!(
+        reopened.latest(1024).err(),
+        Some("checkpoint marker width mismatch".to_owned())
+    );
+    Ok(())
+}
+
+fn journal_dir(root: &Path, identity: [u8; 32]) -> PathBuf {
+    root.join("and-checkpoint-v1").join(hex(&identity))
 }
