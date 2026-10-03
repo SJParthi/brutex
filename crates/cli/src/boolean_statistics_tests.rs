@@ -367,6 +367,73 @@ fn actual_source_odd_calendar_and_foreign_catalog_refuse_without_statistics_comp
     Ok(())
 }
 
+/// GAP14-59, D-1641: `produce` itself refuses through `admit` before any
+/// attempt or numeric work, for each physical bound, over real committed
+/// sources that the unrestricted bounds accept.
+#[test]
+fn produce_refuses_through_admit_before_any_attempt_or_statistics() -> Result<(), String> {
+    let fixture = super::super::tests::Fixture::new()?;
+    let programs = super::super::tests::programs()?;
+    let procedure = PopulationStatisticsProcedureV2::new(7, 49, 2)?;
+    let candidates = fixture.produce_span("NIFTY", &programs, 7, 8)?.rows().len() as u64;
+    assert!(candidates > 1);
+    let tight = [
+        Bounds {
+            candidates: candidates - 1,
+            ..stored_limits()
+        },
+        Bounds {
+            observations: 1,
+            ..stored_limits()
+        },
+        Bounds {
+            bootstrap_work: 1,
+            ..stored_limits()
+        },
+        Bounds {
+            split_work: 1,
+            ..stored_limits()
+        },
+        Bounds {
+            memory_bytes: 1,
+            ..stored_limits()
+        },
+        Bounds {
+            bytes: 1,
+            ..stored_limits()
+        },
+    ];
+    let mut sources = Vec::new();
+    for _ in &tight {
+        sources.push(fixture.produce_span("NIFTY", &programs, 7, 8)?);
+    }
+    let evidence = fixture.output.join("results").join("sweep-evidence-v1");
+    let before = std::fs::read_dir(&evidence).map_or(0, Iterator::count);
+    for (bounds, source) in tight.into_iter().zip(sources) {
+        let refusal = produce(&fixture.output, vec![source], procedure, bounds)
+            .err()
+            .ok_or("a bound below the work must refuse")?;
+        assert_eq!(
+            refusal,
+            "Boolean statistics complete-family work/memory admission refused"
+        );
+        assert!(!fixture.output.join("boolean-statistics-v1").exists());
+    }
+    assert_eq!(
+        std::fs::read_dir(&evidence).map_or(0, Iterator::count),
+        before,
+        "admission refuses before any sweep-evidence attempt is begun"
+    );
+    let committed = produce(
+        &fixture.output,
+        vec![fixture.produce_span("NIFTY", &programs, 7, 8)?],
+        procedure,
+        stored_limits(),
+    )?;
+    committed.require_current()?;
+    Ok(())
+}
+
 /// The body of the first `require_current` method that follows `after` in
 /// `source`, up to its closing brace at method indentation.
 fn require_current_body<'a>(source: &'a str, after: &str) -> Result<&'a str, String> {

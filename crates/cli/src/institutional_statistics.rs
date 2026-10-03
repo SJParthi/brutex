@@ -870,10 +870,45 @@ struct StatisticsFilesV1 {
     completions: File,
 }
 
+/// One held file's content and, on Unix, which file it is. Content alone let a
+/// byte-identical replacement renamed over the path pass the staleness check,
+/// so an append landed in the unlinked inode the handle still held (D-1621).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FileSnapshotV1 {
+    identity: FileIdentityV1,
     length: u64,
     digest: [u8; 32],
+}
+
+/// `(device, inode)` on Unix. Other targets have no portable stable file
+/// identity in `std`, and there the check is content-only, as before D-1621.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentityV1 {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl FileIdentityV1 {
+    fn of(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentityV1;
+
+#[cfg(not(unix))]
+impl FileIdentityV1 {
+    const fn of(_: &fs::Metadata) -> Self {
+        Self
+    }
 }
 
 /// Bounded append-only receipt-last ledger for exact institutional statistics.
@@ -1367,10 +1402,37 @@ fn open_read(path: &Path) -> Result<File, String> {
 }
 
 fn append_sync(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(bytes))
-        .and_then(|()| file.sync_all())
-        .map_err(|why| format!("{} append/sync failed: {why}", path.display()))
+    append_sync_with(file, path, bytes, std::io::Write::write_all)
+}
+
+/// Appends and syncs `bytes`; a write error (ENOSPC, EIO, a short write)
+/// truncates the file back to its length before the append, so a failed write
+/// leaves no torn tail for every later open to refuse (D-1622). A failed sync
+/// after a whole write leaves the whole record, which the next open treats as
+/// the orphan an exact retry continues.
+fn append_sync_with(
+    file: &mut File,
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let end = file
+        .seek(SeekFrom::End(0))
+        .map_err(|why| format!("{} append seek failed: {why}", path.display()))?;
+    if let Err(why) = write(file, bytes) {
+        return Err(match file.set_len(end) {
+            Ok(()) => format!(
+                "{} append failed: {why}; truncated back to {end} bytes",
+                path.display()
+            ),
+            Err(rollback) => format!(
+                "{} append failed: {why}; truncation back to {end} bytes also failed: {rollback}",
+                path.display()
+            ),
+        });
+    }
+    file.sync_all()
+        .map_err(|why| format!("{} append sync failed: {why}", path.display()))
 }
 
 fn measured_len(file: &File, path: &Path) -> Result<u64, String> {
@@ -1390,7 +1452,11 @@ fn snapshots(
 }
 
 fn snapshot_file(file: &mut File, path: &Path) -> Result<FileSnapshotV1, String> {
-    let length = measured_len(file, path)?;
+    let metadata = file
+        .metadata()
+        .map_err(|why| format!("{} metadata could not be read: {why}", path.display()))?;
+    let identity = FileIdentityV1::of(&metadata);
+    let length = metadata.len();
     file.seek(SeekFrom::Start(0))
         .map_err(|why| format!("{} could not be seeked for hashing: {why}", path.display()))?;
     let mut hasher = Hasher::new();
@@ -1413,6 +1479,7 @@ fn snapshot_file(file: &mut File, path: &Path) -> Result<FileSnapshotV1, String>
             .map_err(|_| "institutional statistics hash window does not fit u64".to_owned())?;
     }
     Ok(FileSnapshotV1 {
+        identity,
         length,
         digest: hasher.finalize(),
     })
@@ -2089,6 +2156,87 @@ mod tests {
                 .contains("changed behind")
         );
         cleanup(&content_root);
+    }
+
+    /// W2-cli7-5, D-1621: a byte-identical file renamed over the path is a
+    /// different file, and an append must not land in the unlinked one.
+    #[cfg(unix)]
+    #[test]
+    fn a_byte_identical_replacement_renamed_over_the_path_refuses() {
+        let root = root("identical-rename");
+        cleanup(&root);
+        let mut ledger =
+            InstitutionalStatisticsLedgerV1::open(&root, 4).expect("open rename handle");
+        ledger
+            .append_complete(&prepared(21))
+            .expect("append before replacement");
+        for path in [
+            InstitutionalStatisticsLedgerV1::statistics_path(&root),
+            InstitutionalStatisticsLedgerV1::completion_path(&root),
+        ] {
+            let mut ledger =
+                InstitutionalStatisticsLedgerV1::open(&root, 4).expect("open handle to replace");
+            let bytes = fs::read(&path).expect("read held bytes");
+            let staged = path.with_extension("staged");
+            fs::write(&staged, &bytes).expect("write identical copy");
+            fs::rename(&staged, &path).expect("rename identical copy over the path");
+            let refusal = ledger
+                .append_complete(&prepared(22))
+                .expect_err("an identical replacement must refuse");
+            assert!(
+                refusal.contains("no longer names the file held"),
+                "unexpected refusal {refusal}"
+            );
+            assert_eq!(fs::read(&path).expect("reread replacement"), bytes);
+        }
+        drop(ledger);
+        let mut fresh = InstitutionalStatisticsLedgerV1::open(&root, 4)
+            .expect("a fresh open over the replacement succeeds");
+        assert!(matches!(
+            fresh.append_complete(&prepared(22)),
+            Ok(InstitutionalStatisticsCommitV1::Appended(_))
+        ));
+        cleanup(&root);
+    }
+
+    /// c4b-5, D-1622: a short write truncates back, so the ledger stays open.
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = root("append-rollback");
+        cleanup(&root);
+        let mut ledger = InstitutionalStatisticsLedgerV1::open(&root, 4).expect("open");
+        ledger.append_complete(&prepared(31)).expect("commit one");
+        drop(ledger);
+        for path in [
+            InstitutionalStatisticsLedgerV1::statistics_path(&root),
+            InstitutionalStatisticsLedgerV1::completion_path(&root),
+        ] {
+            let before = fs::read(&path).expect("committed bytes");
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open committed file");
+            let refusal = append_sync_with(&mut file, &path, &[0x5a; 900], |file, bytes| {
+                file.write_all(bytes.get(..451).expect("half"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed write must refuse");
+            assert!(
+                refusal.contains("injected short write") && refusal.contains("truncated back"),
+                "refusal `{refusal}` must name the write error and the rollback"
+            );
+            drop(file);
+            assert_eq!(fs::read(&path).expect("reread"), before);
+            InstitutionalStatisticsLedgerV1::open_read(&root, 4)
+                .expect("committed authority stays readable");
+        }
+        let mut ledger = InstitutionalStatisticsLedgerV1::open(&root, 4).expect("reopen");
+        assert!(matches!(
+            ledger.append_complete(&prepared(31)),
+            Ok(InstitutionalStatisticsCommitV1::Reused(_))
+        ));
+        cleanup(&root);
     }
 
     fn flip_byte(path: &Path, offset: u64) {

@@ -8398,9 +8398,15 @@ those witnesses. Header admission is O(1) per stored month, but constructing
 one `StoredPostTrainingOosCohortV1` is O(M + S + D + Q): it loads complete
 bounded streams, validates calendar continuity, derives previous-day and
 exact-minute causal columns and hashes the retained snapshot. Space is
-O(S + D + Q) for the owned snapshot and derived column. Minting every witness
-is proportional to the authenticated Runner replay over its OOS bars and exit
-paths, and full future V4 preflight/scheduling is at least O(P + C) before
+O(S + D + Q) for the owned snapshot and derived column. Minting a witness is
+the authenticated Runner replay over its OOS bars and exit paths PLUS
+Θ(S + Q + D + E) of cohort-invariant work that is recomputed for every
+witness: `require_integrity` runs twice (each re-derives the cohort identity
+by hashing S, D and Q again), an execution calendar receipt is rebuilt, and
+`CandidateGlobalReplayOosSourceV1::new` refolds the candidate columns and
+digests them again. Over P witnesses that is P × Θ(S + Q + D + E), up to 25
+times per rung, not "proportional to the replay" as this said until D-1636
+(W2-cli16-1). Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 
@@ -14004,3 +14010,143 @@ bounds are all nonzero.
 - **The NSE catalogue is read whole per request, at most 1 MiB (UC-19,
   D-1502).** W1-api5-9's O(file bytes + U) now has a byte bound,
   `indexmap::MAX_CATALOGUE_BYTES`.
+## Search Lineage V2 and V3 rescan on every append, and are dead — D-1631, 3 October 2026
+
+`anchored_search_lineage_v2` and `anchored_search_lineage_v3` are compiled
+outside tests only under `allow(dead_code)` / `expect(dead_code)`; nothing in
+a production path calls them. Stated so the cost is not recorded only in
+their module docs:
+
+- **Append is O(file bytes + pairs).** `append_completion` rehashes the
+  Completion file and ends in `self.scan()`, which rebuilds the receipt index
+  from every pair. Cumulative cost over N appends is Θ(N²).
+- **Lookup is O(file bytes).** V2's `structural_receipt` hashes all three
+  files through `require_unchanged`; V3's lookup calls it twice.
+- **A failed write is not rolled back.** `append_raw` is `seek(End) +
+  write_all`. A short write leaves a ragged tail every later open refuses.
+  The live V4 ledger rolls back and recovers a lone NIFTY member (D-1620);
+  V2 and V3 do not.
+
+These are not fixed because no run reaches them. A change that gives either
+module a caller must port D-1620 and restate this section.
+
+## A single-stop search re-verifies its whole acknowledged history on every launch — D-1633, 3 October 2026
+
+`index_stop_search_checkpoint::recover`, called by `open_checkpoint` on every
+launch and resume of a single-stop search, walks the whole acknowledged
+checkpoint chain and, for every completed historical frame and every selected
+rung (at most eight), calls `qualification::verify_search_slot_bounded`. That
+reopens the child's bounded reader (both candidate catalogs and the daily
+reader) and replays it. Per launch the cost is
+O(B × R × (C·P·D + C·S + C·days)): B completed batches, R selected rungs, C
+candidates, P later periods, D bootstrap draws (three procedures), S CSCV
+splits. It grows linearly with search history and is paid again on each
+resume. The general sentence about cold readers above does not state this
+per-launch multiplier, so it is stated here (W2-cli6-0).
+
+It is not removed: the replay is how a resume proves an acknowledged child
+still says what its pin says. A trusted cache of verified frames would be a
+new durable authority, and none exists.
+
+## Recording a run reopens the chosen-trades file; ledger-v6 sizing reloads the NIFTY span per rung — D-1634, 3 October 2026
+
+- **`Trades::open` per recorded run (W2-cli16-2).** `ensure_trade_rows`
+  opens the writer for each run it records and reopens it to verify. Each
+  open reads every row in `chosen-trades.bin` to rebuild the identity index:
+  O(H + T) per recorded run for H rows already stored and T of this run,
+  Θ(N·H) over N runs. The writer open has no byte ceiling. The module
+  rustdoc said "once per process" until D-1634.
+- **`strict::size_sweeper` per rung (W2-cli16-3).** `ledger_v6` calls it once
+  for each of the eight rungs. Each call loads the whole NIFTY signal, daily
+  and exact-minute span (with prior context) under the strict checksum
+  receipts, to learn one integer, the signal bar count, from which
+  `min_hits_for` sizes the ladder. The NIFTY family commit then loads the same
+  span again. Cost per rung is O(span bytes + months × fsyncs), twice. Not
+  removed: carrying the loaded context from sizing into the family commit
+  changes the guard lifetime of the strict inputs, which this change does not
+  take on.
+
+## Stored completeness re-walks execution bars per cell — D-1636, 3 October 2026
+
+`StoredDataCompletenessAuthorityV1::require_population` ends with
+`StreamFactsV1::of("population execution", population.execution_series.bars())`
+and compares it to the receipt. That is a pairwise walk over every execution
+bar plus a full `data_digest`, O(E). It runs once per institutional-evidence
+binding, which is once per strategy cell, so a population of C cells pays
+O(C·E). The existing preparation statement covers the one-time preparation
+only (W2-cli15-2). Stored post-training OOS repeats cohort-invariant work per
+witness as well; §169 states it.
+
+## Global Replay V3/V4 exit quality is checked per row only; evidence cells re-derive the population — D-1638, 3 October 2026
+
+- **No aggregate quality ceiling (GAP15-19).** Global Replay V1 refused when
+  a stream's admitted ambiguous bars or gap fills, summed, passed its frozen
+  exit policy's `max_ambiguous_bars` / `max_gap_fills`. V3 and V4 refuse a
+  single row with more than one of either and keep no sum, so a stream can
+  admit many one-ambiguity trades past its policy's total. This is a missing
+  rule, not a cost; D-1638 says why it is not restored here.
+- **Evidence cell projection is O(E) (W2-cli7-0).** With a `Measured`
+  population authority, `complete_population_values` calls
+  `derive_population_id_v1` per cell, which hashes the one-minute execution
+  series; a `Complete` data source adds `require_population`'s O(E) walk
+  (D-1636). O(C·E) per population of C cells.
+
+## Population base evidence and strategy identity costs that are not per-cell constant — D-1639, 3 October 2026
+
+- **Base Evidence V2 append reopens the ledger twice (W2-cli10-0).**
+  `append_and_reopen_base_evidence_v2` opens the ledger for write and then
+  read-only; each open's `scan` reads, seal-checks and ordered-hashes every
+  record. One family append is O(R_total) for every Base record of every
+  universe ever committed, not O(the family's records), and N family appends
+  cost Θ(N·R_total). The module rustdoc says "O(records)"; this states what
+  the records are.
+- **`derive_strategy_digest_v1` is O(G) per call (W2-cli10-2).** It
+  validates the whole evaluated grid before deriving one cell. Production
+  derives per cell through `derive_strategy_digest_from_validated_v1` after
+  one validation, so the O(1)-per-cell statement above holds for that path
+  only.
+- **Max-gated rates are floored (GAP15-17).** Not a cost: an exact rate just
+  above a `max_*_rate_ppm` ceiling floors onto it and is admitted. D-1640
+  records why it is not changed here.
+
+## A Boolean search detail page rechecks every retained journal record twice — D-1641, 3 October 2026
+
+`boolean_search_projection::RungReader::rows` calls `require_current()`
+before and after reading one page of at most 256 rows. That fans out to the
+parent search reader, the qualified-campaign reader and the source; the first
+two loop `for old in &self.history` and re-read and seal-check every retained
+journal record (`boolean_search_reader.rs`, `boolean_qualified_observer.rs`).
+One page therefore costs O(H + H') record reads with hashing, twice, for H
+search journal records and H' qualified-campaign records, both growing with
+batches and retries. The reader doc says only "recheck every retained journal
+record" (W2-cli2-5). Not reduced here: the recheck is what lets a page refuse
+a journal that changed under it, and a cheaper generation check would be a
+change to that reader's authority.
+
+## Selection V5 and V6 reads and commits replay their sources — D-1642, 3 October 2026
+
+Let C be the rung's candidates (Population rows / Execution dispositions)
+and H the committed blocks in `global-selection-v6.bin` (at most
+`CEILING_BYTES / 16 KiB` = 4,194,304).
+
+- **Selection V5 `top_twenty_five` / `top_ten` (W2-cli14-1).** Each read
+  calls `PreparedSelectionV5::from_committed_execution` before and after the
+  read, and each of those re-opens the Population execution source twice and
+  every authenticated disposition once: two full two-family Candidate
+  Execution V3 grid replays per call, O(C × replay) per read of at most 25
+  rows. `successor_winners` does more. §163 says Top-10 is a prefix only
+  after the authoritative Top-25 has been reproduced; this is that
+  reproduction's price, per read.
+- **Selection V6 reads (W2-cli14-2).** `top_twenty_five` and `top_ten` call
+  `Prepared::from_execution` twice (each two Population V6 replays) with
+  `require_committed`, an O(H) scan hashing every 16 KiB block twice, in
+  between. `snapshot` is three `from_execution` and two scans;
+  `stored_oos_witnesses` takes two snapshots.
+- **Selection V6 commit (W2-cli14-3).** `persist` scans the whole file before
+  appending one block, and `commit_stored_selection_v6` scans it again in
+  `require_committed` and runs a second `from_execution`: two O(H) scans per
+  commit, once per rung per `ledger-v6` run. An identical rerun appends
+  nothing but pays the same scans.
+
+None of these is O(1), and none grows with the request alone. They are not
+reduced here (D-1642).

@@ -196,6 +196,7 @@ pub(crate) fn encode(
     identity: [u8; 32],
     evaluations: &[Evaluation],
     max_bytes: u64,
+    max_records: u64,
 ) -> Result<Vec<u8>, String> {
     if identity == [0; 32] || evaluations.is_empty() || !evaluations.len().is_multiple_of(2) {
         return Err(
@@ -212,7 +213,7 @@ pub(crate) fn encode(
             .ok_or("single-stop byte admission excludes receipt")?,
     )
     .map_err(display)?;
-    encode_admitted(identity, evaluations, length, max_bytes)
+    encode_admitted(identity, evaluations, length, max_records)
 }
 
 pub(crate) fn encoded_bytes(evaluations: &[Evaluation]) -> Result<u64, String> {
@@ -253,7 +254,7 @@ fn encode_admitted(
     identity: [u8; 32],
     evaluations: &[Evaluation],
     length: usize,
-    max_bytes: u64,
+    max_records: u64,
 ) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(length).map_err(display)?;
@@ -306,8 +307,11 @@ fn encode_admitted(
     if bytes.len() != length {
         return Err("single-stop encoder length differs".into());
     }
-    // Decode the exact bytes before publication, using the same cold-read gates.
-    decode(&bytes, identity, max_bytes)?;
+    // Decode the exact bytes before publication, using the same cold-read gates
+    // `Reader::open` applies: its RECORD limit. This passed the byte limit,
+    // so the record gate was checked against a number of bytes and a catalog
+    // the cold reader refuses could be published first (W2-cli6-3, D-1628).
+    decode(&bytes, identity, max_records)?;
     Ok(bytes)
 }
 

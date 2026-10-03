@@ -37,8 +37,15 @@
 //!
 //! # Cost
 //!
-//! One complete exit grid is validated once in O(G), then each cell projection
-//! and ordinal check is O(1) through the retained opaque capability. Trade
+//! One complete exit grid is validated once in O(G), then each cell's ordinal
+//! check is O(1) through the retained opaque capability. **The cell projection
+//! is not O(1) when the population authority is `Measured`:**
+//! `complete_population_values` re-derives the population identity per call
+//! (`derive_population_id_v1`, which hashes the whole one-minute execution
+//! series, O(E)), and a `Complete` data source adds
+//! `StoredDataCompletenessAuthorityV1::require_population`, another O(E).
+//! Over a population of C cells that is O(C·E). This said "each cell projection
+//! is O(1)" until D-1638; `docs/06-limits.md` states it. Trade
 //! reconciliation, session concentration and stability are O(trades);
 //! support-session measurement is O(signal bars), and validation reconciliation
 //! is O(all fold candidate rows + F log F) for F folds. This is a once-per-result

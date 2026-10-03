@@ -334,6 +334,19 @@ pub fn derive_population_id_v1(
 /// resolution and coordinate.  Metrics and admission verdicts are results, not
 /// strategy semantics, so neither enters the digest.
 ///
+/// # Cost
+///
+/// **O(G) per call, for G cells in the evaluated grid**, because it validates
+/// the whole evaluation (`validate_evaluation`) before deriving one cell's
+/// digest. Deriving every cell of a grid through this entry is O(G²). The
+/// production per-cell path validates once and calls
+/// `derive_strategy_digest_from_validated_v1`, which is O(1) per cell; this
+/// entry has no production caller (W2-cli10-2, D-1639).
+///
+/// **UNVERIFIED as a measured bound.** No bench in this workspace
+/// times this, so the shape above is read from the source rather
+/// than measured; `docs/06-limits.md` records it. `CLAUDE.md` §3 rule 6.
+///
 /// # Errors
 ///
 /// Refuses an absent identity, a torn/foreign evaluation, a side mismatch, an
@@ -847,8 +860,13 @@ where
             resolved.cell_count()
         ));
     }
+    // `try_reserve`, not an exact reservation of one slot: that
+    // grows the vector by one slot per push, forfeiting `Vec`'s geometric
+    // growth, so each push could reallocate and copy every retained side
+    // (O(n²) over a population). This keeps the fallible reservation and the
+    // amortised O(1) append §3 rule 4 names (W2-cli10-1, D-1639).
     evaluated_sides
-        .try_reserve_exact(1)
+        .try_reserve(1)
         .map_err(|why| format!("could not reserve one evaluated population side: {why}"))?;
     evaluated_sides.push(EvaluatedPopulationSideV1 {
         mask_words,
@@ -1675,6 +1693,35 @@ fn require_consistent_i64(
     reason = "focused writer fixtures fail loudly when their own canonical setup is invalid"
 )]
 mod tests {
+
+    /// W2-cli10-1, D-1639: the evaluated-side append keeps `Vec`'s geometric
+    /// growth: no exact one-slot reservation anywhere in production source.
+    #[test]
+    fn evaluated_sides_grow_geometrically_not_one_slot_per_push() {
+        let source = include_str!("population_admission_writer.rs");
+        let production = source
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("production source");
+        assert!(!production.contains("try_reserve_exact(1)"));
+        assert_eq!(
+            production
+                .matches("evaluated_sides\n        .try_reserve(1)")
+                .count(),
+            1
+        );
+        let mut sides: Vec<u64> = Vec::new();
+        let mut reallocations = 0_u32;
+        for value in 0..4_096_u64 {
+            let before = sides.capacity();
+            sides.try_reserve(1).expect("reserve");
+            if sides.capacity() != before {
+                reallocations += 1;
+            }
+            sides.push(value);
+        }
+        assert!(reallocations <= 14, "{reallocations} reallocations");
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;

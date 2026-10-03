@@ -53956,3 +53956,491 @@ that the conductor's ticker runs `census_now` on a runtime task.
 **The decision.** `MAX_CATALOGUE_BYTES` (1 MiB); the read is capped one byte
 past it and a larger file is refused naming the bound. The two costs are
 stated in `docs/06-limits.md`.
+### D-1620 — Search Lineage V4 writes a pair's members in one write, rolls a failed write back, and lets the exact retry finish a lone NIFTY member — 2026-10-03
+
+**What was wrong (c4b-1).** `AnchoredSearchLineageV4Ledger::append_locked`
+wrote the pair's two member records as two `write_all` calls, and
+`append_raw` was `seek(End) + write_all` with no rollback. Two shapes left a
+tail no retry could repair: a crash between the two writes (one whole member
+past the last Completion, which `scan` refused as "partial trailing pair;
+history is not rewritten"), and a write error partway through a record
+(ENOSPC, EIO), which left a ragged file every later open, read-only included,
+refused for good. Admission V3/V4 had the same class and were fixed by D-0916;
+`frontier.rs` already truncates back with `set_len`.
+
+**The change.**
+
+- Both members are encoded into one buffer and written in one call.
+- `append_raw` goes through `append_with_rollback`, which records the end
+  offset and, on a write error, truncates back to it and names both errors when
+  the truncation fails too. It covers the member and the Completion append.
+- `scan` accepts exactly one whole trailing member when it is the NIFTY member
+  of the next sequence. It is retained with its sequence zeroed, never
+  rewritten. A writer completes it only for the exact retry whose NIFTY member
+  equals it, by appending the BANKNIFTY member alone and then the Completion.
+  A foreign retry is refused and the bytes are left as they are. A lone
+  BANKNIFTY member, or a NIFTY member at the wrong sequence, still refuses.
+- `require_append_capacity` counts members from the Completions
+  (`2 × next pairs`), so a retained orphan is not charged twice.
+
+**What is not covered.** A crash in the middle of one `write_all` can still
+leave a partial record. That is a torn write, not a record prefix, and it is
+still refused rather than guessed at. Stored bytes for a clean append are
+unchanged: the same two records in the same order. No identity, digest or
+format changed.
+
+**What it proves.**
+`cli::anchored_search_lineage_v4::tests::full_synced_tail_is_retryable_but_partial_or_foreign_tail_refuses`
+now requires the lone NIFTY member to be readable, a foreign retry to refuse
+without touching it, the exact retry to finish it to exactly two members and
+one Completion, a rerun to reuse, and a lone BANKNIFTY or late member to
+refuse.
+`cli::anchored_search_lineage_v4::tests::a_failed_member_or_completion_write_truncates_back_and_stays_readable`
+injects a short write into each file and requires the file byte-identical
+afterwards and the committed pair still readable.
+
+The dead V2 and V3 lineage modules keep the old `append_raw`; see D-1631.
+
+### D-1629 — Shrink the admission block index to the populations it holds after the open scan — 2026-10-03
+
+**What was wrong (W2-cli1-6).** `scan_decisions` reserved the block map, the
+order vector and the seen set at the DECISION count, because the population
+count is unknown until the scan ends. `blocks` and `order` were moved into the
+ledger with that capacity, and a `HashMap` never shrinks, so retained index
+space was O(decisions), not O(populations).
+
+**The change.** `blocks.shrink_to_fit()` and `order.shrink_to_fit()` before
+the scan returns. One rehash per open, O(populations). Nothing stored changes.
+
+**What it proves.**
+`cli::admission_store::tests::the_retained_block_index_is_sized_by_populations_not_decisions`
+commits 100 decisions of one population and requires the reopened index to
+hold fewer than 16 slots.
+
+### D-1630 — The admission ledger finishes a crash prefix of a decision block for its exact retry — 2026-10-03
+
+**What was wrong (W2-cli1-4).** `append_decisions` wrote one 544-byte record
+per `write_all` and rolled back only on an in-process I/O error. A process
+killed after k of n records left a whole-record prefix. `check_header`
+accepted the length, `scan_decisions` made it the trailing orphan with
+`count = k`, `verify_supplied_decisions` refused the exact retry on
+`block.count != supplied_count`, and every other population was refused
+"must be recovered before". The ledger was wedged for good.
+
+**The change.** The block is written as one buffer. On a retry of the
+trailing orphan population, `complete_orphan_decisions` reads every stored
+record and requires it to equal the supplied record at the same index, and
+requires the block to end exactly at the end of the decision file; it then
+appends the missing suffix (one write, rolled back on error) and the
+Completion. A stored block longer than the retry, a differing record, an
+empty retry, or a block that does not end the file still refuses. The
+finished file is byte-identical to a clean commit's.
+
+**What it proves.**
+`cli::admission_store::tests::a_crash_prefix_of_a_decision_block_is_completed_by_the_exact_retry`
+writes every prefix length 1..3 of a four-decision block, requires a changed
+and a shorter retry to refuse with the file untouched, the exact retry to
+append, both files to equal a clean commit's bytes, a fresh page to read all
+four, and a rerun to reuse.
+
+### D-1631 — Search Lineage V2 and V3 are dead outside tests; their costs and append are stated, not fixed — 2026-10-03
+
+**What was found (W2-cli1-3, W2-cli1-2; and the V2/V3 half of c4b-1).**
+`anchored_search_lineage_v2` and `_v3` rescan their whole files on every
+append (`append_completion` ends in `self.scan()`), each lookup rehashes
+every file, and `append_raw` has no rollback. Both modules are compiled into
+non-test builds only under `allow(dead_code)` / `expect(dead_code)` in
+`crates/cli/src/lib.rs`; no production caller exists. V4 is the live ledger
+(`step3_orchestrator.rs` imports it) and carries the fixes in D-1620.
+
+**The decision.** Not changed. A fix to code nothing runs adds mutation and
+coverage surface for no operator effect. `docs/06-limits.md` now states the
+cost and the dead status, so the module docs are not the only record. If
+either module gains a caller, D-1620's rollback and orphan rule must be
+ported in the same change.
+
+### D-1621 — The institutional statistics staleness check names the file, not only its bytes — 2026-10-03
+
+**What was wrong (W2-cli7-5).** `FileSnapshotV1` was `{ length, digest }` of
+content. `require_files_unchanged` compared the held handles' snapshots and
+then reopened each path and compared again. A byte-identical copy renamed over
+the path passed both, and `append_sync` wrote and fsynced the held, now
+unlinked, inode and returned `Appended`: the commit was reported and was not
+in the file any reader opens.
+
+**The change.** `FileSnapshotV1` gains `identity`, which on Unix is
+`(device, inode)` from the handle's metadata. The reopen comparison now
+refuses a different file with the same bytes ("no longer names the file
+held"). On a non-Unix target `std` has no stable file identity, and the check
+stays content-only there, as it was. The snapshot is in memory only; nothing
+stored changes.
+
+**What it proves.**
+`cli::institutional_statistics::tests::a_byte_identical_replacement_renamed_over_the_path_refuses`
+renames an identical copy over each file under a held handle and requires the
+append to refuse with the replacement untouched, and a fresh open to append.
+
+### D-1622 — Selection V5 and institutional statistics roll a failed append back — 2026-10-03
+
+**What was wrong (c4b-5).** `selection_v5::append_raw` and
+`institutional_statistics::append_sync` were `seek(End) + write_all` with no
+rollback. A short write (ENOSPC, EIO) left a ragged or torn tail that every
+later open refused ("file is ragged", "torn ... body"), so the ledger was
+wedged for good. Whole-record orphan prefixes were already recovered; partial
+records were not. Same class as D-0916 and D-1620.
+
+**The change.** Both go through an append-with-rollback that records the end
+offset and truncates back to it on a write error, naming both errors if the
+truncation fails. In institutional statistics a failed `sync_all` after a
+whole write is not truncated: the whole record stays and the next open treats
+it as the orphan an exact retry continues, which is the existing rule. Stored
+bytes of a successful append are unchanged.
+
+**What it proves.**
+`cli::selection_v5::tests::a_failed_append_truncates_back_and_the_ledger_stays_open`
+and
+`cli::institutional_statistics::tests::a_failed_append_truncates_back_and_the_ledger_stays_open`
+inject a short write into each file and require the directory byte-identical,
+the ledger readable, and the exact rerun to reuse.
+
+### D-1623 — The frontier refuses a fill-headroom rule its four-byte field cannot store — 2026-10-03
+
+**What was wrong (c4b-2).** `Rules::min_fill_headroom_bp` is an `i64` and
+`BRUTEX_MIN_FILL_HEADROOM_BP` accepts any non-negative value. The frontier row
+stores it in bytes 196..200 as `i32::try_from(..).unwrap_or(i32::MAX)`. A run
+judged at 3,000,000,000 bp recorded 2,147,483,647, so the row named a rule
+that did not judge it, and a re-judge from the stored rule could flip a
+verdict. A stored rule that differs from the applied one is a silent fallback
+(§4).
+
+**The change.** `Frontier::append_locked_with` refuses, before any byte is written,
+a row whose `min_fill_headroom_bp` is outside `0..=i32::MAX`, naming the run
+and the value. The format is unchanged (still version 6, still an `i32`).
+Every value that was stored exactly before is stored exactly now; only values
+that used to be clamped are refused. The `to_bytes` saturation stays so the
+encoder is total, and its comment now says it is unreachable on a written row.
+
+**What it proves.**
+`cli::frontier::tests::an_unstorable_fill_headroom_is_refused_not_clamped`
+refuses `i32::MAX + 1`, 3,000,000,000, `i64::MAX`, −1 and `i64::MIN` with the
+file unchanged, and stores and reads back `i32::MAX` exactly.
+
+### D-1632 — `/frontier.json`'s verdict still omits the average-payoff and fill-headroom rules; not fixed here — 2026-10-03
+
+**What was found (W2-cli5-4).** `Row::verdict` sets `admitted` from five rules.
+`Rules::admits` also requires `fills_hold(min_fill_headroom_bp)` and
+`avg_payoff_holds(min_avg_rr_bp)`. Average payoff is computable from the row
+(`cell_wins`, `trades`, `gross_win`, `gross_loss`); fill headroom is not, since
+`Row` carries no optimistic total. Neither is flagged unchecked, so the page
+can show PASS for a row `Rules::admits` refuses.
+
+**Why it is not fixed in this change.** The fix crosses three layers at once:
+`cli::frontier::Verdict` gains fields, `api`'s `/frontier.json` must emit them
+and echo `min_avg_rr_bp`, and `web/src/lib/frontier-analytics.js` recomputes
+`meets.all` from exactly five rules and refuses any row whose `all` differs.
+Changing `admitted` in `cli` alone would make the page refuse valid
+responses. It needs one change across `cli`, `api` and `web`, with the web
+verifier's tests, and is left open as stated here. Until then a PASS on
+`/frontier.json` means "the five named rules hold", as `Verdict::admitted`'s
+rustdoc already says, and does not cover average payoff or fill headroom.
+
+### D-1624 — The trade calendar's Hour key is documented as the IST clock hour — 2026-10-03
+
+**What was wrong (c4b-3).** `trades::Period::Hour`'s rustdoc said "Minutes
+from midnight IST, rounded down to the clock hour". The key is
+`ist_micros.rem_euclid(DAY) / HOUR`, the hour `0..=23`, and the web reader
+(`trade-analytics.js`) expects `0..=23`. The code was right and the doc was
+false.
+
+**The change.** The doc now says "the IST clock hour the trade entered in,
+`0..=23`". No output changes.
+
+**What it proves.** `cli::trades::period_tests::the_hour_key_is_the_ist_clock_hour`
+requires 09:20 IST to key 9, 09:59:59.999999 to key 9 and 10:00 to key 10.
+
+### D-1625 — Trade-calendar money totals are `i128`, exact, not clamped — 2026-10-03
+
+**What was wrong (c4b-6).** `trades::Bucket::take` summed `best_paisa` and
+`worst_paisa` in `i64` with `saturating_add`. A sum past `i64::MAX` or
+`i64::MIN` was served by `/trades.json` as if it were the real total, the
+hidden fallback §4 bans. Global Replay V4 already sums the same money in
+`i128`.
+
+**The change.** `Bucket::best_paisa` and `worst_paisa` are `i128`. Each
+addend is an `i64`, and at most `usize::MAX` of them cannot reach `i128::MAX`
+in magnitude, so the total is exact for any slice; the remaining
+`saturating_add` is unreachable and is commented as such. `api`'s
+`/trades.json` writes the same decimal digits for every total that fit `i64`;
+a total that used to be clamped is now written exactly. No stored bytes
+change; the buckets are computed per request. Prices themselves stay `i64`
+paisa (§7); only these sums widened.
+
+**What it proves.** `cli::trades::period_tests::bucket_totals_past_i64_are_exact_not_clamped`
+sums three `i64::MAX` best fills and three `i64::MIN` worst fills and
+requires `3 × i64::MAX` and `3 × i64::MIN` exactly.
+
+### D-1634 — The chosen-trades writer is opened per recorded run; its rustdoc said once per process — 2026-10-03
+
+**What was wrong (W2-cli16-2).** `trades.rs`'s cost table said the open pass
+runs "once per process". `ensure_trade_rows` opens `Trades` for every
+recorded run and reopens it to verify, and each open reads every row ever
+written to rebuild the index. `docs/06-limits.md` already stated
+"O(all chosen rows)" per open; the source doc contradicted it.
+
+**The change.** The rustdoc says "on every open" and states the per-run
+O(H + T) and cumulative Θ(N·H) cost and that the writer open has no byte
+ceiling. A persistent index or a held writer would be a new on-disk format or
+a process-lifetime cache, neither of which this change adds.
+`docs/06-limits.md` gains the sizing reload (W2-cli16-3) beside it.
+
+### D-1626 — The exact-minute execution range checks IST-day order to the last bar — 2026-10-03
+
+**What was wrong (c4b-4).** `step3_orchestrator::requested_execution_range`
+said its single pass "makes a future ordering regression loud", but it
+`break`s at the first bar past `last_day`, so order after that bar was never
+checked. `[100, 103, 101]` over `100..=102` returned day 100 alone and the
+range silently stopped short. The later calendar receipt catches a missing
+day, so harm was limited; the claim was still false and untested.
+
+**The change.** The loop `continue`s past the span instead of breaking, so
+every bar's IST day is checked against its predecessor. Still one pass,
+O(bars). For ordered input the returned range is unchanged; only disordered
+input, which was mis-sliced before, now refuses.
+
+**What it proves.**
+`cli::step3_orchestrator::tests::requested_execution_is_the_exact_day_bounded_subspan`
+adds `[100, 103, 101]` and `[100, 105, 104]` over `100..=102`, both refused
+as not monotonic, and an ordered tail past the span still excluded.
+
+### D-1627 — The Observation-to-Statistics seam test asserts its privacy — 2026-10-03
+
+**What was wrong (GAP14-66).**
+`paired_observation_statistics_seam_is_crate_private_and_source_retaining`,
+cited by OS-01, ended in `std::hint::black_box(..)` and asserted nothing. A
+function-pointer coercion proves a signature, not a visibility.
+
+**The change.** The test now reads the module's own non-test source and
+requires each of the nine declarations (the struct, the commit function and
+seven accessors) to appear exactly once as `pub(crate)` and never as `pub`,
+and requires the coerced pointers to be distinct where they must be.
+
+### D-1635 — A stored-data completeness receipt accepts the strict route's checksum-receipt integrity byte — 2026-10-03
+
+**What was wrong (W2-cli15-4).** `StoredDataCompletenessReceiptV1::validate`
+refused any `daily_integrity` or `minute_integrity` above 0 as "unknown".
+`runner::identity::ReferenceIntegrity` is an append-only byte vocabulary in
+which 1 is `ChecksumReceiptV1`, and the strict Step-3 route binds exactly that
+(`strict_v6_inputs.rs`). So a strict population could never seal a
+completeness receipt here.
+
+**The change.** `validate` refuses only a byte above `MAX_INTEGRITY_BYTE`
+(1). The receipt layout, version and stride are unchanged; byte 1 was always
+encodable and is now admitted on write and on decode. No receipt that was
+written before changes. No production path calls
+`prepare_stored_data_completeness_v1` today, so no shipping output changes;
+the strict route can now use it.
+
+**What it proves.**
+`cli::stored_data_completeness::tests::a_checksum_receipt_integrity_byte_seals_and_an_unknown_byte_refuses`
+pins `MAX_INTEGRITY_BYTE` to `ChecksumReceiptV1.byte()`, round-trips every
+combination of 0 and 1, and refuses 2 and 255.
+
+### D-1636 — Stored completeness and stored OOS costs that repeat per cell or per witness are stated — 2026-10-03
+
+**What was found.** W2-cli15-2: `StoredDataCompletenessAuthorityV1::require_population`
+recomputes `StreamFactsV1::of` over every execution bar (a pairwise walk plus
+`data_digest`) for every institutional-evidence binding, so O(E) per strategy
+cell and O(C·E) per population. W2-cli16-1: `mint_witness_inner` re-derives
+the cohort identity, rebuilds an execution calendar receipt and refolds the
+candidate columns per witness, and `docs/06-limits.md` §169 said minting was
+proportional to the replay.
+
+**The decision.** Both are stated in `docs/06-limits.md`; §169 is corrected
+in place. Neither is removed in this change: each recomputation is the
+module's re-authentication of bytes it was handed, and caching it is a
+trust-boundary change that needs its own design, not an audit patch.
+
+### D-1628 — The single-stop publisher's pre-publication decode applies the record limit, not the byte limit — 2026-10-03
+
+**What was wrong (W2-cli6-3).** `index_stop_store::encode_admitted` decoded
+its own bytes "using the same cold-read gates" before publication, but called
+`decode(&bytes, identity, max_bytes)` where `decode`'s third parameter is
+`max_records`. The record gates (`count > max_records`,
+`charged > max_records`) were checked against a byte count, so a catalog the
+cold reader (`Reader::open(.., max_bytes, max_records)`) refuses could be
+published first and only refused when read back.
+
+**The change.** `encode` takes `max_records` and passes it through;
+`index_stop::commit` passes `limits.records`, the value it already hands
+`Reader::open`. Bytes of an admitted catalog are unchanged; a catalog over the
+record limit is refused before publication instead of after.
+
+**What it proves.**
+`cli::index_stop_store::tests::the_publisher_applies_the_cold_readers_record_limit`
+finds the least record limit the cold decoder accepts, requires the publisher
+to accept exactly that limit with identical bytes and refuse every lower one,
+and refuses a body over its record limit even under a `u64::MAX` byte budget.
+
+### D-1637 — The Global Replay V4 candidate budget reserves the VIX row — 2026-10-03
+
+**What was wrong (GAP15-18).** `commit_recorded` budgeted candidates as
+`(records − 10 − selected) / 2`: a candidate row and a decision row. Every
+admitted priceable decision also pushes a VIX row (`account_decision`), so a
+replay admitted under the budget could still reach the ceiling in `push`
+after all the OOS work, refusing late instead of up front.
+
+**The change.** `candidate_budget` divides by `RECORDS_PER_CANDIDATE = 3`,
+so `10 + selected + 3 × budget <= records` and the pre-replay check is
+sufficient. This is a behaviour change at the margin: a replay whose
+candidates fit two records each but not three is now refused before replay,
+where before it either succeeded (few admitted) or refused after replay. The
+production ceiling is `CEILING_BYTES / GLOBAL_REPLAY_V4_RECORD_BYTES`
+records, far above any measured candidate count, so no published replay is
+expected to change; that is a statement from the bound, not a measurement.
+No stored format, digest or identity changes.
+
+**What it proves.**
+`cli::global_replay_v4::tests::the_candidate_budget_reserves_three_records_per_candidate`
+checks, from 10 records to `u64::MAX`, that three records per budgeted
+candidate plus the fixed rows fit and one more candidate would not, and that
+an impossible roster refuses.
+
+### D-1638 — Global Replay V3/V4 have no aggregate exit-quality ceiling, and an evidence cell projection is O(E) — stated, not changed — 2026-10-03
+
+**What was found.**
+
+- **GAP15-19.** Global Replay V1 summed admitted ambiguous bars and gap fills
+  per stream and refused when either passed the frozen exit policy's
+  `max_ambiguous_bars` / `max_gap_fills`. V3 and V4 check only each row
+  (`ambiguous_bars() > 1 || gap_fills() > 1`) and keep no aggregate. The V4
+  attempt carries no per-stream policy ceilings to compare against.
+- **W2-cli7-0.** `institutional_evidence::complete_population_values`
+  re-derives the population identity per cell, O(E), and its module doc said
+  each cell projection was O(1).
+
+**The decision.** The module doc is corrected and both are stated in
+`docs/06-limits.md`. The quality ceiling is not ported here: carrying each
+selected strategy's frozen ceilings into the V4 witness projection and
+refusing on the aggregate would turn replays that publish today into
+refusals. That changes the shipping Global Replay result and needs its own
+decision with the operator's rule for what an exceeded ceiling does
+(refuse the replay, as V1 did, or reject further trades of that stream).
+
+### D-1639 — Population sides grow geometrically; the public strategy-digest entry states its O(G) — 2026-10-03
+
+**What was wrong.** W2-cli10-1: `evaluate_population_side` called
+`evaluated_sides.try_reserve_exact(1)` before every push, which grows the
+vector one slot at a time and can copy every retained side on each push,
+O(n²) over a population, forfeiting the amortised O(1) append §3 rule 4
+names. W2-cli10-2: `pub fn derive_strategy_digest_v1` validates the whole
+evaluated grid per call, O(G), and nothing said so.
+
+**The change.** The reservation is `try_reserve(1)`, still fallible, now
+geometric. `derive_strategy_digest_v1` gains a `# Cost` section: O(G) per
+call, O(G²) over a grid, no production caller; the per-cell production path
+is `derive_strategy_digest_from_validated_v1`. No output changes.
+
+**What it proves.**
+`cli::population_admission_writer::tests::evaluated_sides_grow_geometrically_not_one_slot_per_push`
+requires the production source to hold no exact one-slot reservation and the
+side append to use `try_reserve(1)`, and measures at most 14 reallocations
+over 4,096 pushes.
+
+### D-1640 — Max-gated admission rates are still floored before `value > ceiling`; not changed here — 2026-10-03
+
+**What was found (GAP15-17).** `population_base_evidence_v2::rate_ppm` (and
+the writer's twin) floors `part × 1_000_000 / total`, and
+`runner::admission` refuses a max-gated rate only when `value > ceiling`. An
+exact rate of 1/3 (333,333.33 ppm) against a 333,333 ceiling floors to
+333,333 and is admitted. The audit probe reproduced it.
+
+**Why it is not fixed in this change.** The floored ppm is the stored value
+in every Base Evidence V2 record and is re-derived and compared on reopen.
+Rounding max-gated rates up would change those stored values, refuse every
+existing ledger on reopen, and change which candidates are admitted into
+Selection V6. That is a stored-value and selection-result change across the
+whole population chain, and the instruction for this audit lane is to stop
+and report such a change rather than make it. The fix belongs in a new
+evidence version (or an admission-side exact comparison that carries
+`part` and `total`), decided on its own.
+
+### D-1641 — Hoist two per-candidate and per-row recomputations, and test `produce`'s admission refusal — 2026-10-03
+
+**What was wrong.**
+
+- **W2-cli5-2.** `expression_pricing::Prepared::capture` called
+  `Capture::begin_expression` for every priced candidate, and `begin_with`
+  hashed the whole execution month (`runner::identity::data_digest`) each
+  time: O(bars) of identical work per candidate.
+- **W2-cli3-5.** `validate_population_capabilities` called
+  `require_binding` per population row, and that began with
+  `parameters.validate()`, which rehashes the side policy's percentile atoms
+  (O(A)). Preparation was O(R·A); `docs/06-limits.md` §139 says O(R + A).
+- **GAP14-59.** No test drove `boolean_statistics_v1::produce` into
+  `admit`'s refusal; the bound tests called `admit_shape` directly, so the
+  mutant `admit -> Ok(())` survived.
+
+**The change.** `Prepared::new` computes the execution digest once from the
+bars it owns (it is lent only immutably to the search), and `capture` passes
+it to the new `Capture::begin_expression_with_digest`; `start.bin` bytes are
+identical. `validate_population_capabilities` calls the new
+`require_binding_of_validated`, because `from_population_v4` validates both
+side parameters once before the row loop; the public `require_binding` still
+validates. A new test drives `produce` over real committed sources with each
+physical bound set below the work.
+
+**What it proves.**
+`cli::candidate_trades::tests::a_held_execution_digest_writes_the_same_start_as_hashing_per_capture`
+requires the held-digest start record to be byte-identical to the hashing one
+and a wrong digest to conflict.
+`cli::execution_capability::tests::population_rows_bind_without_revalidating_parameters_per_row`
+requires the row loop to call no `validate` and no re-validating binding, and
+the parameter pair to be validated before it.
+`cli::candidate_universe::boolean_candidate_v1::statistics::tests::produce_refuses_through_admit_before_any_attempt_or_statistics`
+requires each of six tight bounds to refuse with `admit`'s exact message, no
+statistics directory and no new sweep-evidence attempt, and the unrestricted
+bounds to commit.
+
+`W2-cli2-5` (Boolean search detail pages recheck every retained journal
+record twice per page) is stated in `docs/06-limits.md` under this number.
+
+### D-1642 — Correct stale scope and caller claims in the V6 chain, and state Selection V5/V6 read and commit costs — 2026-10-03
+
+**What was wrong (GAP15-20).** Five source comments described a world that
+no longer exists: `step3_orchestrator`'s request doc validated `underlying`
+"against the two-instrument sweep surface"; `cli::ledger_all_arm`'s doc said
+"`CLAUDE.md` §1 names two instruments"; `population_v6`, `execution_v4` and
+`stored_post_training_oos` justified `dead_code` by a production caller
+"pending" or "awaited", though `ledger_v6` now calls all three; and
+`runner::exit_grid_policy` cited `AGENTS.md` §1 as permitting only the two
+indices. `CLAUDE.md` §1 sweeps the two indices and the F&O cash equities
+(D-0506, D-0682).
+
+**The change.** Each comment now says what is true: the stored loader
+validates against §1's NSE surface; the ledger chain is built for the two
+indices and does not sweep equities; the V6-chain modules have their
+production caller and keep a lint allowance only for items still reached
+from tests; the exit-grid V1 policy resolves only the two indices, which is
+narrower than the sweep surface. No code changed.
+
+**Costs stated (W2-cli14-1, W2-cli14-2, W2-cli14-3).** Reading a committed
+Selection V5 Top-25/Top-10 rebuilds the prepared selection twice, Selection V6
+reads rebuild `Prepared::from_execution` twice around an O(H) scan, and a
+Selection V6 commit scans the history twice. These are stated in
+`docs/06-limits.md`; they are the modules' re-authentication of their
+upstream sources, and reducing them is a change to what a read proves.
+
+### D-1633 — A single-stop search's per-launch history replay is stated, not cached — 2026-10-03
+
+**What was found (W2-cli6-0).** `index_stop_search_checkpoint::recover`
+re-verifies every completed historical frame's every selected rung through
+`qualification::verify_search_slot_bounded` on each launch and resume, a full
+child replay per link. `docs/06-limits.md` said only that cold readers
+authenticate full admitted ancestors, which does not state the B × R
+multiplier per launch.
+
+**The decision.** `docs/06-limits.md` states the per-launch cost and why it
+stays: the replay is how a resume proves an acknowledged child still says
+what its pin says, and a cache of verified frames would be a new durable
+authority with its own invalidation rule. That is a design change, not an
+audit fix.

@@ -1867,8 +1867,9 @@ fn stored_month_arm(
 /// # Why it takes no UNDERLYING
 ///
 /// Every other stored command takes one, because it sweeps one instrument. This
-/// chain does not: `CLAUDE.md` §1 names two instruments as the engine surface
-/// and the Population V5 pipeline commits BOTH per rung, pairing them as one
+/// chain does not: it is built for the two spot indices of `CLAUDE.md` §1
+/// (whose surface also holds the F&O cash equities, which this chain does not
+/// sweep) and the Population V5 pipeline commits BOTH per rung, pairing them as one
 /// cross-sectional statistic. The pair is structural all the way down --
 /// `CandidateFamilyPairV1 { nifty, banknifty }` -- so there is no argument an
 /// operator could pass to ask for one of them, and offering one would be a
