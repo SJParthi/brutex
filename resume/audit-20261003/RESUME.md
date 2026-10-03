@@ -59,3 +59,5 @@ Scope: verify all 547 earlier findings (250 batch-2 in fix-queue/lane{1,2,3}{,-b
 - Not started: F5 rest, F6 (user approved), F8, F10, pull/store/lake hunter. Briefs in prompts/agent-briefs.md (24 now, incl. F7 restart).
 
 - 20:40 UTC: full workspace test on b23976fc: 6,726 passed, 0 failed. PUSHED to final/all-fixes (fast-forward 8a59ff4e -> b23976fc). F9 items now pushed; wip/audit-combined-f9 is merged, ignore it.
+
+- 21:15 UTC: CI on b23976fc red in Gate 1+2 (run 37151036264): telemetry sink::tests::a_file_that_ends_mid_line_is_terminated_at_open_and_not_appended_onto, reopen refused by the directory lock. b23976fc does not touch crates/telemetry (F9 diff is cli + docs + runner test); passed locally in the 6,726-test run, so likely a lock-release race from the telemetry lock change already on 8a59ff4e. CI thread is told. NEXT: reproduce with repeated runs, fix the lock release in the test or sink.
