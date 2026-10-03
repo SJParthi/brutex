@@ -32,7 +32,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -3146,10 +3146,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Population V5 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationV5Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Population V5 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root_directory(
@@ -3592,6 +3593,7 @@ mod tests {
         PopulationV5AdmissionFixtureRequest, population_v5_test_admission_fixture_for,
         verify_population_v5_canonical_record as verify_admission_fixture,
     };
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -4721,6 +4723,45 @@ mod tests {
                 completed_receipt
             );
         }
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestRoot::new("append-rollback");
+        let prepared = prepared(1, 1);
+        create_empty_files(root.path());
+        let row_path = root.path().join(ROW_FILE);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&row_path)
+            .expect("open orphan row file");
+        append_raw(
+            &mut file,
+            &prepared.rows[0].encode().expect("encode orphan row"),
+        )
+        .expect("append orphan row");
+        drop(file);
+        for (name, width) in [
+            (ROW_FILE, POPULATION_V5_ROW_BYTES),
+            (COMPLETION_FILE, POPULATION_V5_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let commit = PopulationV5Ledger::open_write(root.path(), bounds())
+            .expect("the rolled-back prefix is still recoverable")
+            .append(&prepared)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(commit.was_written());
+        let mut expected_rows = Vec::new();
+        for row in &prepared.rows {
+            expected_rows.extend_from_slice(&row.encode().expect("encode expected row"));
+        }
+        assert_eq!(std::fs::read(&row_path).expect("read rows"), expected_rows);
     }
 
     #[test]

@@ -56288,3 +56288,98 @@ that copy's bytes. That is the property its comment states ("the list's own
 static, never the request's bytes"), and it no longer depends on literal
 merging. Checked locally: `cargo bench -p store --bench ratio` prints "all
 ratios within the ceiling", and the operation_audit tests pass, 15 of 15.
+### D-1850 — Sixteen more fixed-stride ledgers roll a failed append back, through one shared helper — 2026-10-03
+
+**What was wrong (h-cli-1).** D-1622 fixed the wedge in Selection V5 and
+institutional statistics only. Sixteen other append-only `cli` ledgers still
+appended with `seek(End) + write_all` and no rollback: Execution V3 and V4,
+Population Admission V2, Finalization V2, V3 and V4, Statistics V2 and V3,
+Population V5 and V6, Pre-admission data V1 and V2, and Selection V1, V2, V3
+and V4. Each refuses a ragged or torn file when it opens, so one short write
+(ENOSPC, EIO) left a partial record that blocked the ledger for good. The four
+Selection writers also kept their handle after the failure, so the next append
+in the same process landed after the torn bytes.
+
+**The change.** A new module, `cli::append_rollback`, holds the D-1622 shape
+once: record the end offset, write, and on a write error `set_len` back to the
+offset, naming the ledger, the write error and the rollback; when the
+truncation also fails, both errors are named. All sixteen appends go through
+it, with their old labels. The four Selection ledgers split `append` into
+`append_with(receipt, write)`, so a test can inject the write. After a
+successful rollback they keep the file generation of the restored length, as a
+successful append keeps its own, so the same handle can append again. After a
+failed rollback the generation is left stale, and the next append refuses.
+Stored bytes of a successful append are unchanged. No format, digest or
+evidence version changes. The cost is one seek, one write and, only on
+failure, one `set_len`.
+
+The five earlier copies (Selection V5, institutional statistics, Admission V3
+and V4, and Search Lineage V4) are left as they are. They are tested
+equivalents of this helper, and folding them in would change files outside
+this finding.
+
+**What it proves.** `cli::append_rollback::tests` covers the helper: a short
+write, a write that wrote nothing, a failed truncation on a read-only handle,
+and an append whose cursor was elsewhere. Each of the sixteen ledgers has its
+own test (AHA-02). The test injects a half-record write into every file the
+ledger appends to, requires the file to be byte-identical afterwards, and then
+requires the next append, an exact-prefix retry or a same-handle append, to
+succeed.
+
+### D-1851 — The explicit stored-expression report states a stock's corporate actions are unchecked — 2026-10-03
+
+**What was wrong (h-cli-2).** `expression.rs` opened its report with the bare
+`STORED_PROVENANCE`. For a swept cash equity it therefore left out the D-0694
+statements: gross of every charge, and corporate actions unchecked. Its
+sibling `expression-search-stored` printed both for the same instrument. The
+true, false and unknown counts on a stock come from split-unadjusted bars, and
+the report did not say so.
+
+**The change.** The report is now rendered by `expression::Report::render`,
+which starts with `crate::stored_provenance_of(&loaded.key)`. For an index the
+output is byte-identical to before. For a stock the two statements now follow
+the banner. Only the printed text changes. The identity and the evidence files
+do not.
+
+**What it proves.**
+`cli::expression::tests::a_stock_report_states_corporate_actions_unchecked_and_an_index_report_does_not`
+renders RELIANCE, TCS, NIFTY and BANKNIFTY. It requires the head to equal
+`stored_provenance(symbol)`, the corporate-actions statement exactly once for
+a stock and never for an index, and the counts body to be byte-exact.
+
+### D-1852 — Pooled and per-period money totals are `i128`, exact, not clamped — 2026-10-03
+
+**What was wrong (h-cli-3).** `pool::fold` summed each instrument's
+`pessimistic`, `gross_win` and `gross_loss` paisa into `i64` with
+`saturating_add`, and `stability::at` did the same for each period's `net`. A
+sum past either end was printed and ranked as `i64::MAX` or `i64::MIN`, as if
+it were the real total. That is the silent clamp §4 bans, the same class as
+D-1625. Both ratios clamped too. `tail_bp` multiplied an `i64` `min_win` by
+100 with `saturating_mul`, so any win above `i64::MAX / 100` produced
+`i64::MAX`, which is the never-lost sentinel. A measured tail therefore
+rendered as "never lost" and was demoted in the ranking.
+
+**The change.** `Pooled::net`, `gross_win` and `gross_loss`,
+`stability::Bucket::net`, `Stability::worst_period`, and `Consistency::worst_day`
+are now `i128`. At most `usize::MAX` `i64` addends cannot leave `i128`'s range,
+so the remaining `saturating_add`s are unreachable, and the code says so where
+they stand. Both pooled ratios are computed in `i128`. The tail is exact for
+every `i64`. The profit factor's `saturating_mul` is unreachable short of
+pooling about 1.8 × 10^17 instruments. The never-lost sentinel is now
+`i128::MAX`, behind a pool-local `ranked`, and no finite ratio reaches it.
+`rupees` takes any integer up to `i128`. Every figure that fit in `i64` prints
+the same digits as before. Only a figure that used to be clamped changes, and
+it is now exact. The ranking of rows whose totals fit in `i64` is unchanged.
+Nothing stored changes. Pool and stability figures are computed per run and
+rendered, never persisted.
+
+**What it proves.** `cli::pool::tests::pooled_money_totals_past_i64_are_exact_not_clamped`
+pools three `i64::MAX` and three `i64::MIN` cells. It requires the exact
+`3 × i64::MAX` and `3 × i64::MIN` totals, both printed, a profit factor of 99,
+an exact tail of `i64::MAX × 100` that is not the sentinel, and the ranking to
+follow the exact values. `cli::stability::tests::a_period_net_past_i64_is_exact_not_clamped`
+requires `2 × i64::MAX + 1` and `3 × i64::MIN`, and requires a bucket that sums
+`i64::MIN + i64::MAX` to read exactly −1.
+`cli::tests::rupees_render_zero_unsigned_and_every_i128_exactly` pins zero
+unsigned and the exact Indian-grouped rendering of `i64::MIN`,
+`3 × i64::MIN`, `i128::MIN` and `i128::MAX`.

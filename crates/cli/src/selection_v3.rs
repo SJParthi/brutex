@@ -1253,6 +1253,17 @@ impl SelectionLedgerV3 {
     /// Refuses read-only use, invalid or duplicate bytes, stale/replaced file
     /// generation, a caller bound, arithmetic failure, or any I/O/lock error.
     pub fn append(&mut self, receipt: &SelectionReceiptV3) -> Result<(), SelectionV3Refusal> {
+        self.append_with(receipt, std::io::Write::write_all)
+    }
+
+    /// [`Self::append`] with the receipt write supplied, so a test can inject a
+    /// short write. A failed write is truncated back to the scanned end, so the
+    /// file stays whole and the next append lands on a record boundary (D-1850).
+    fn append_with(
+        &mut self,
+        receipt: &SelectionReceiptV3,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    ) -> Result<(), SelectionV3Refusal> {
         if !self.writable {
             return Err("a read-only selection V3 ledger cannot append".to_owned());
         }
@@ -1293,12 +1304,22 @@ impl SelectionLedgerV3 {
                 format!("selection V3 latest index could not reserve one slot: {why}")
             })?;
             let raw = receipt.to_bytes()?;
-            self.file
-                .seek(SeekFrom::End(0))
-                .map_err(|why| format!("selection V3 ledger could not seek to append: {why}"))?;
-            self.file
-                .write_all(&raw)
-                .map_err(|why| format!("selection V3 receipt could not be appended: {why}"))?;
+            if let Err(why) = crate::append_rollback::append_with(
+                &mut self.file,
+                &raw,
+                "selection V3 receipt",
+                write,
+            ) {
+                // The rollback restored exactly the scanned bytes under this
+                // handle's lock; retain that generation as a successful append
+                // retains its own, so this handle stays usable (D-1850). A failed
+                // rollback leaves the length wrong, the generation stale, and the
+                // next append refuses.
+                if let Ok(generation) = validated_generation(&self.file, &self.path, self.scanned) {
+                    self.generation = generation;
+                }
+                return Err(why);
+            }
             self.file
                 .sync_all()
                 .map_err(|why| format!("selection V3 receipt could not be synced: {why}"))?;
@@ -2391,6 +2412,39 @@ mod tests {
                 .unwrap_err()
                 .contains("magic is unknown")
         );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_same_handle_appends_next() {
+        let root = root("append-rollback");
+        let first = receipt(12, 60, 2);
+        let second = receipt(13, 60, 2);
+        let mut ledger = SelectionLedgerV3::open(&root, 4).expect("create rollback fixture");
+        ledger.append(&first).expect("append first");
+        let path = SelectionLedgerV3::path(&root);
+        let before = std::fs::read(&path).expect("V3 bytes");
+        let why = ledger
+            .append_with(&second, |file, raw| {
+                file.write_all(&raw[..raw.len() / 2])?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed V3 write refuses");
+        assert!(
+            why.contains("selection V3 receipt: injected short write; truncated back"),
+            "{why}"
+        );
+        assert_eq!(std::fs::read(&path).expect("V3 bytes"), before);
+        ledger
+            .append(&second)
+            .expect("the same handle appends next");
+        drop(ledger);
+        let reopened = SelectionLedgerV3::open_read(&root, 4).expect("V3 reopen");
+        assert_eq!(
+            reopened.selection_ids(),
+            &[first.selection_id(), second.selection_id()]
+        );
+        drop(reopened);
         cleanup(&root);
     }
 

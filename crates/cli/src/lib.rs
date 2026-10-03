@@ -52,6 +52,8 @@ compile_error!(
     "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
 );
 
+/// The one append-with-rollback every fixed-stride ledger appends through (D-1850).
+mod append_rollback;
 #[cfg(test)]
 mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
@@ -7369,9 +7371,13 @@ fn grouped(n: u64) -> String {
 /// The conversion happens HERE, at the render boundary, and nowhere else — the
 /// same rule the tick grid follows. Integer arithmetic throughout: the rupees
 /// and the paise are separated by division and remainder, never by a float.
-fn rupees(paisa: i64) -> String {
+///
+/// Takes any integer up to `i128`, because a pooled or per-period money total is
+/// summed exactly in `i128` rather than clamped in `i64` (D-1852).
+fn rupees(paisa: impl Into<i128>) -> String {
+    let paisa: i128 = paisa.into();
     let negative = paisa < 0;
-    // `unsigned_abs` and not `abs`: `i64::MIN` has no positive counterpart, and
+    // `unsigned_abs` and not `abs`: `i128::MIN` has no positive counterpart, and
     // it is exactly the value `saturating_add` produces for a variant that lost
     // without bound. A sort that panicked on the worst possible result would be
     // the report killing the process over the answer.
@@ -11832,7 +11838,9 @@ struct Consistency {
     /// every year can still have a day that took a quarter of the account, and
     /// the yearly view cannot show it. A day is the smallest unit an intraday
     /// operator carries risk across.
-    worst_day: i64,
+    ///
+    /// `i128`: a period's net is summed exactly, never clamped (D-1852).
+    worst_day: i128,
     /// Periods counted at the coarsest grain, so a share can be read against a
     /// denominator. `10_000` of one year is not the same evidence as `10_000` of
     /// seven, and a share alone cannot tell them apart.
@@ -11905,7 +11913,7 @@ fn consistency_of(
     }
     // Sized from the ladder, so a new grain cannot be silently discarded.
     let mut shares_bp = [0_i64; crate::stability::GRAINS.len()];
-    let mut worst_day = 0_i64;
+    let mut worst_day = 0_i128;
     let mut years = 0_usize;
     for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
         let measured = crate::stability::at(&rows, *grain);
@@ -12377,7 +12385,7 @@ fn screen<'a>(
         let (weakest, worst_period) = r.consistency.as_ref().map_or(
             // The unmeasured floor: worse than any real grain share and any
             // real period, so measured rows always sort ahead.
-            (i64::MIN, i64::MIN),
+            (i64::MIN, i128::MIN),
             calendar_terms,
         );
         core::cmp::Reverse((
@@ -12585,7 +12593,7 @@ const fn money_key(cell: &grid::Cell) -> core::cmp::Reverse<(i64, i64, i64)> {
 /// Both terms are carried RAW because the caller wraps the key in `Reverse`:
 /// the tuple sorts descending, so a larger term ranks higher, and for both a
 /// grain share and a period's net "larger" already means "better".
-fn calendar_terms(c: &Consistency) -> (i64, i64) {
+fn calendar_terms(c: &Consistency) -> (i64, i128) {
     (c.weakest_bp(), c.worst_day)
 }
 
@@ -23191,6 +23199,33 @@ mod tests {
         );
     }
 
+    /// h-cli-3, D-1852: `rupees` renders every integer up to `i128` exactly,
+    /// zero without a sign, and the `i128` totals a pooled or per-period sum
+    /// can now reach, including `i128::MIN`, without a panic or a clamp.
+    #[test]
+    fn rupees_render_zero_unsigned_and_every_i128_exactly() {
+        assert_eq!(super::rupees(0_i64), "\u{20b9}0.00");
+        assert_eq!(super::rupees(-1_i64), "-\u{20b9}0.01");
+        assert_eq!(super::rupees(1_i64), "\u{20b9}0.01");
+        assert_eq!(super::rupees(12_345_678_i64), "\u{20b9}1,23,456.78");
+        assert_eq!(
+            super::rupees(i64::MIN),
+            "-\u{20b9}92,23,37,20,36,85,47,758.08"
+        );
+        assert_eq!(
+            super::rupees(3 * i128::from(i64::MIN)),
+            "-\u{20b9}2,76,70,11,61,10,56,43,274.24"
+        );
+        assert_eq!(
+            super::rupees(i128::MIN),
+            "-\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.28"
+        );
+        assert_eq!(
+            super::rupees(i128::MAX),
+            "\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.27"
+        );
+    }
+
     /// THE WORST DAY RANKS A SMALLER LOSS HIGHER, WHICH IS WHAT THE RULE SAYS.
     ///
     /// `calendar_terms` feeds a key the caller wraps in `Reverse`, so the tuple
@@ -23211,7 +23246,7 @@ mod tests {
     /// catch it.
     #[test]
     fn a_row_that_never_lost_a_day_outranks_one_that_lost_heavily() {
-        let row = |worst_day: i64| Consistency {
+        let row = |worst_day: i128| Consistency {
             shares_bp: [5_000; crate::stability::GRAINS.len()],
             worst_day,
             years: 6,

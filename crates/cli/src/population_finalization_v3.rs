@@ -38,7 +38,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -2854,10 +2854,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Finalization V3 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationFinalizationV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Finalization V3 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root_directory(
@@ -3162,6 +3163,7 @@ fn hash_exact_prefix(
 )]
 mod tests {
     use super::*;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -3981,6 +3983,37 @@ mod tests {
                     * POPULATION_FINALIZATION_V3_ROW_BYTES as u64,
             )
             .expect("truncate to whole-row prefix");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let limits = bounds();
+        let value = prepared();
+        let full = TestRoot::new("rollback-reference");
+        write_block(full.path(), &value, true);
+        let root = TestRoot::new("append-rollback");
+        write_block(root.path(), &value, false);
+        truncate_rows(root.path(), 1);
+        for (name, width) in [
+            (ROW_FILE, POPULATION_FINALIZATION_V3_ROW_BYTES),
+            (COMPLETION_FILE, POPULATION_FINALIZATION_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let commit = persist_population_finalization_v3(root.path(), limits, &value)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(commit, PopulationFinalizationV3Commit::Written(_)));
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            assert_eq!(
+                std::fs::read(root.path().join(name)).expect("read recovered file"),
+                std::fs::read(full.path().join(name)).expect("read reference file"),
+                "{name} must equal the uncrashed bytes"
+            );
+        }
     }
 
     #[test]
