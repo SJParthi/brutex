@@ -53503,3 +53503,35 @@ state for new journals but not for those already on disk, and the read rule
 is needed either way.
 
 Invariant DUR-C-06.
+
+### D-1743 — Every cli ledger open sets `O_NONBLOCK` and admits only a regular file — 2026-10-03
+
+**Finding.** W2-cli13-4: `results.rs` `open_result_file`,
+`result_set.rs` `Receipts::open_read` / `open_read_bounded` / `open`, and
+`pre_admission_data.rs` `open_file` and both `file_generation` reopens.
+
+**What was wrong.** None of these opens set `O_NONBLOCK`, and the type of
+the opened file was asked only after `open(2)` returned. A FIFO planted at
+`results/runs.bin`, `results/detail-sets.bin` or a pre-admission lock or
+data path made every read-only open block forever, including the HTTP
+detail path through `CommittedParents::open_read_bounded`.
+
+**The decision.** One door, `readonly_file::regular`, takes the caller's
+`OpenOptions`, adds `store::open_flags::O_NONBLOCK`, and refuses a handle
+whose `fstat` is not a regular file, naming the path. It follows final
+symlinks, as `store::file::open_read` does (AC-whp-cx-0), so a symlink to a
+regular ledger stays readable. `NotFound` keeps its kind, so the callers
+that report an absent ledger as "no run recorded" are unchanged. Every
+read-only open above uses it, and so do the pre-admission writable opens and
+`Receipts::open`. The results ledger's write door adds `O_NONBLOCK` but does
+not refuse a non-regular file: it opens read-write, which never waits on a
+FIFO, and it must keep reaching `write_fresh_header`'s specific refusal for
+a path that does not keep what it is given (a link to /dev/null), which
+`a_ledger_that_does_not_keep_what_it_is_given_is_refused` pins.
+
+**Rejected.** A `symlink_metadata` check before the open: the name can be
+swapped between the check and the open, while the handle cannot. Adding
+`O_NOFOLLOW` here: the store's read door deliberately follows a final
+symlink, and the ledgers had no rule against one.
+
+Invariants DUR-C-07 and DUR-C-08.
