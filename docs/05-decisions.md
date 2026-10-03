@@ -53619,3 +53619,35 @@ the_two_loops` pinned 128 + 2 and is replaced by
 oscillation but keeps 64 halvings for wide inputs. Using `i128::isqrt`: it is
 not `const` and its iteration bound is not ours to state. Removing the cap: the
 proof is a sketch and a hard ceiling is what C-I-03 asserts against.
+
+### D-1666 — Make the V-03, V-04 and V-05 invariant rows say what their tests prove, and make V-03's test do what its doc promised — 2026-10-03
+
+**Finding.** AC-whp-tb-9 (low, bug). Three rows of `docs/04-invariants.md`
+misstated their proofs. V-03's test doc promised `i64::MAX` / `i64::MIN`
+prices and a far-future timestamp, while the loop wrote `±i64::MAX / 4`,
+open 0 and volume `i64::MAX` and never touched `ts_micros`. V-04 claimed
+"time-of-day and VWAP bits are cleared on a daily timeframe"; the test checks
+only the twenty VWAP positions under `Availability::Absent` on a one-minute
+session, nothing clears time-of-day bits, the `Evaluator` has no timeframe
+input, and `1day` is not a swept rung. V-05 claimed "the fast evaluator agrees
+with a naive reference on random input"; the test held five hand-picked
+`DailyLevels` triples and no `Evaluator`. All three named modules that do not
+exist (`indicators::proptest::`, `indicators::unit::`), which gate 10 cannot
+see because it ignores the module segment.
+
+**Decision.** Strengthen, then restate. V-03's suffix now cycles through four
+pathological shapes, including `i64::MAX`/`i64::MIN` prices with a far-future
+timestamp, a timestamp running backwards to `i64::MIN`, and `i64::MAX`
+everywhere, over every cut 1..`len − 1`; its row keeps its wording because the
+test now proves it. V-04's test is renamed
+`vwap_positions_stay_clear_without_volume` and its row states the VWAP-only
+claim. V-05's test gains 4,096 seeded pseudo-random sessions and its row names
+`DailyLevels`, not the `Evaluator`. All three rows are path-qualified to
+`crates/indicators/tests/invariants.rs`, which `.github/invariant_paths.rs`
+binds to the exact file, and their status glyph is ✓.
+
+**Rejected.** A seeded differential of the whole `Evaluator` against a naive
+reference: the naive reference would be a second evaluator, larger than the
+defect. Teaching gate 10 the module segment: `ci.yml` is shared by four
+parallel workers today, and path-qualifying the rows closes these three
+without it; the gate's limit is already named in its own comment.
