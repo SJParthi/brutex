@@ -13920,12 +13920,15 @@ bounds are all nonzero.
 
 ## crates/api audit fixes — D-1580..D-1591, 3 October 2026
 
-- **Failed-request log lines are rationed, not unbounded (D-1583).** At most
+- **Cross-site failed-request log lines are rationed (D-1583).** For requests
+  whose `Sec-Fetch-Site` names another site, at most
   `logs::FAILED_LINES_PER_WINDOW` (50) `api.request` lines at `Warn`/`Error`
   per `FAILED_LINE_WINDOW_MS` (60 s), plus one summary line counting what was
   held back, said by the first failed request of a later window. A flood that
-  is followed by silence until shutdown leaves its last count unsaid. The
-  ration is one process-wide mutex take per failed request: O(1).
+  is followed by silence until shutdown leaves its last count unsaid.
+  Same-origin and header-less clients are not rationed, so a local tool can
+  still fill the log. The ration is one process-wide mutex take per
+  cross-site failed request: O(1).
 - **Every non-GET request body is read once before its handler (D-1587)** to
   refuse a form field named twice: O(body), bounded by `MAX_FORM_BYTES`
   (8 KiB), the same bound `DefaultBodyLimit` already put on every handler. A

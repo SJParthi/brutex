@@ -53462,9 +53462,13 @@ every non-journaled route by design, so any open page could loop no-cors
 fetches and rotate the whole 64 MiB retained log away (100,000 requests in
 29 s evicted a sentinel).
 
-**The decision.** At most 50 such lines per 60-second window; the rest are
-counted, and the first failed request of a later window writes one Warn line
-with the count. Rejected: not logging cross-site requests at all (a real
+**The decision.** For requests a browser marks as coming from another site
+(`Sec-Fetch-Site` present and neither `same-origin` nor `none`), at most 50
+such lines per 60-second window; the rest are counted, and the first such
+failed request of a later window writes one Warn line with the count. The
+operator's own pages and local tools are still logged in full: a local
+process that floods is outside this threat, since it can write the log
+directory directly. Rejected: not logging cross-site requests at all (a real
 failure from a cross-site read would vanish) and per-origin buckets (the
 origin is the attacker's to vary). Limit stated in `docs/06-limits.md`.
 

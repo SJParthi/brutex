@@ -1021,6 +1021,7 @@ pub async fn note_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    let rationed = cross_site(request.headers());
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     let started = std::time::Instant::now();
@@ -1036,7 +1037,7 @@ pub async fn note_request(
         telemetry::Level::Debug
     };
     // THE FAILED-REQUEST LINES ARE RATIONED. See [`FAILED_LINES_PER_WINDOW`].
-    if level != telemetry::Level::Debug {
+    if rationed && level != telemetry::Level::Debug {
         let now = u64::try_from(telemetry::now_millis()).unwrap_or(0);
         let admit = FAILED_LINES
             .lock()
@@ -1073,15 +1074,28 @@ pub async fn note_request(
 /// cross-site GET with a local `Host` is admitted to every non-journaled route
 /// by design — so any page the operator had open could loop `fetch(…,
 /// {mode:'no-cors'})` and roll the whole 64 MiB window away (100,000 requests
-/// in 29 s evicted a sentinel). The lines are now rationed per window, and what
+/// in 29 s evicted a sentinel). Cross-site failures ([`cross_site`]) are now
+/// rationed per window, and what
 /// was held back is COUNTED and said in one line by the first failed request
 /// of a later window, so a flood is still visible as a flood. Honest limit: a
-/// count is said only once another request fails; a flood followed by silence
+/// count is said only once another cross-site request fails; a flood followed by silence
 /// until shutdown leaves its last window's count unsaid.
 ///
 /// Bound: at most this many lines plus one summary per window, ~620 bytes
 /// each — about 1.8 MB an hour at the worst, against a 64 MiB retained log.
 pub const FAILED_LINES_PER_WINDOW: u64 = 50;
+
+/// Whether a request came from another site, by the browser's own
+/// `Sec-Fetch-Site`: anything but absent, `same-origin` or `none` (typed or
+/// bookmarked). Only these failed requests are rationed. The operator's own
+/// pages and local tools are logged in full; the flood the ration exists for
+/// comes from a page on another site, and every browser that sends a
+/// `no-cors` fetch sends this header with it.
+pub(crate) fn cross_site(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| !matches!(value.as_bytes(), b"same-origin" | b"none"))
+}
 
 /// The length of one rationing window, in milliseconds.
 pub const FAILED_LINE_WINDOW_MS: u64 = 60_000;
@@ -1184,6 +1198,18 @@ mod tests {
         // A clock that stepped backwards opens a window rather than wedging.
         let back = ration.admit(start);
         assert!(back.write);
+        // Only another site's requests are rationed.
+        let with = |value: &'static str| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                "sec-fetch-site",
+                axum::http::HeaderValue::from_static(value),
+            );
+            cross_site(&headers)
+        };
+        assert!(with("cross-site") && with("same-site"));
+        assert!(!with("same-origin") && !with("none"));
+        assert!(!cross_site(&axum::http::HeaderMap::new()));
     }
 
     /// A sink of our own, in a scratch directory — never the process global.
