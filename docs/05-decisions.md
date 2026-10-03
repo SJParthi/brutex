@@ -53653,3 +53653,59 @@ lines, refuses `CARGO_HOME` set to anything, a `RUSTFLAGS`-family value naming
 passes. Proven on a scratch workflow carrying all three forms plus a comment
 naming them: the old step printed OK, the new one names the three lines and
 not the comment.
+
+### D-1611 — The dependency fingerprint hashes each package's version — 2026-10-03
+
+**What was observed (rustonly2-6).** `crates/vocab/tests/workspace_is_rust.rs`
+hashed each package's name and dependency list and used the version only to
+sort, so a version-only change (ring 0.17.14 → 0.17.99) left the pinned
+fingerprint equal. A new release of a crate that starts vendoring C under the
+same name was invisible to the pin.
+
+**The decision.** The fingerprint eats the version between the name and the
+dependency list. The pin is re-computed over the unchanged `Cargo.lock`; the
+package count (192) is unchanged and no package was added, so there is no new
+set to scan. From now on any version bump moves the fingerprint and requires
+the same scan-then-re-pin the count already requires. Invariant AFE-10.
+
+### D-1613 — The twelve `#[ignore]`d tests are documented, not run — 2026-10-03
+
+**What was observed (testgaps-7).** Twelve `#[ignore]`d tests never run in
+CI, and one `✓` row cited one of them beside a running test without saying so.
+
+**The decision.** No CI job runs `--ignored`: every one of the twelve needs an
+input that cannot be tracked (the `~/.brutex/lake` parquet lake gate 1
+forbids, NSE's dated masters, the operator's store, frozen receipts) or a
+release-build timing run, and each refuses loudly when started without it, so
+a CI job would be red by construction. Each is listed with its reason in
+`docs/06-limits.md`, and the row citing
+`actual_receipted_lifecycle_snapshot_never_claims_complete_history` now says
+it is ignored. The macOS-only `store::open_flags::macos_values_are_the_sdk_ones`
+(testgaps-8) is listed there too; row S-NOFOLLOW-01 already said so.
+
+### D-1614 — Stale limits and plan rows corrected; two compile-time-only tests gain runtime assertions — 2026-10-03
+
+**What was observed.** testgaps-10: two tests in `cli::step3_orchestrator`
+bound functions to fn-pointer types and `black_box`ed them, so they asserted
+nothing at run time, and "crate-private" in one's name was unproven (a `pub
+fn` of the same signature binds identically). testgaps-11: `docs/06-limits.md`
+§93/§94 and five rustdoc links in `crates/cli/src/lib.rs` named
+`cli::derived_ceiling`, which no longer exists. testgaps-12: §82 named
+`.github/workflows/web.yml`, which never existed. testgaps-13: the futures
+paragraph named predecessor-repository paths without saying so. rustonly2-9:
+§96 still said gate 2 greps build scripts for two strings. gaps-13:
+`docs/07-plan.md` R-4 said F&O pull was not yet open (`/pull/fno` is routed),
+§9.3 said there is no trading calendar (`pull::calendar::kind_of` exists), §10
+#11 said a mid-run token expiry has no re-read (`Watch::reread` runs on the
+production path, D-0948), and §11's "no CLI caller" rows predate `ledger-v6`
+and `ledger-v6-replay`.
+
+**The decision.** The two tests now assert, at run time, that the public
+projection and the private authority are two functions
+(`std::ptr::fn_addr_eq`) and that the NIFTY and BANKNIFTY accessors are two,
+and read their own source to assert the authority entry, the statistics seam
+and its six accessors are declared `pub(crate)`. Each stale sentence is
+edited to the current tree, naming what replaced the removed item; the rustdoc
+links point at `ceiling_from_env` and `whole_machine_ceiling`. `07-plan.md`
+§11 is a dated measurement, so it gains a dated status note instead of having
+its rows rewritten.

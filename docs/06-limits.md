@@ -1623,8 +1623,9 @@ use `RoundTrip::new`, which takes units.
 
 ### The futures charge stack is NOT ported
 
-`brutex/costs/futures_costs.py` (48 KB) and `rust/fno-math/src/exec/costs_futures.rs`
-were read and are not ported. Two reasons, in order:
+In the predecessor repository, `brutex/costs/futures_costs.py` (48 KB) and
+`rust/fno-math/src/exec/costs_futures.rs` were read and are not ported; neither
+path exists in this tree. Two reasons, in order:
 
 1. **The rates do not exist here.** A futures stack needs a futures transaction
    tax, a futures exchange transaction charge, and the Groww
@@ -5037,7 +5038,7 @@ comment and names no row is invisible to it. **OPEN.**
 
 ## 82. The browser tree is gated at last, and two of its three gates are ratchets rather than floors
 
-`.github/workflows/web.yml`, `web/svelte.config.js`.
+the `web` job of `.github/workflows/ci.yml` (gates W1-W6; no `web.yml` exists), `web/svelte.config.js`.
 
 Gate W1, W2 and W3 close three findings — the committed bundle was tied to
 nothing, the tracked tests never ran, and `svelte-check` was a script nobody
@@ -5978,8 +5979,10 @@ deciding how far the ladder may walk before it halts and reports
 `complete = NO` — and a combination past the halt is not ranked badly, it is
 never built.
 
-`cli::derived_ceiling` now scales it by
-`std::thread::available_parallelism()`, so the bound moves with the machine
+`cli::whole_machine_ceiling` now scales it by
+`std::thread::available_parallelism()` (and `cli::ceiling_from_env` divides
+that among the sweeps sharing the machine; `derived_ceiling`, which this
+sentence named, was removed), so the bound moves with the machine
 instead of with an assumption. **The quantity that belongs there is usable RAM,
 and it is not what is read.**
 
@@ -6021,7 +6024,8 @@ number it stands in for.
 
 ## 94. `REFERENCE_CORES` is a measured property of one machine and no test can check it — D-0307
 
-`cli::derived_ceiling` scales `engine::DEFAULT_CEILING` by
+`cli::whole_machine_ceiling` (formerly reached through the removed
+`derived_ceiling`) scales `engine::DEFAULT_CEILING` by
 `std::thread::available_parallelism()` against a reference. **The reference must
 be in the unit the measurement answers in, and it was not.**
 
@@ -6105,7 +6109,10 @@ See D-0310 and D-0311.
 
 `CLAUDE.md` §2 forbids *"any `build.rs` that invokes an external process"* and
 lists it under **"forbidden without exception"**. Two gates enforce it — gate 2
-greps every tracked `build.rs` for `Command::new` and `std::process`, and gate 13
+(since D-1100/D-1101) reads every file compiled into a tracked build script as
+TOKENS -- `source_scan closure` then `source_scan build`, refusing `Command`,
+`std::process` beyond the members that start nothing, `unsafe`, `extern`, macros
+and (D-1603) cargo-configuration paths, link arguments and spawning crates -- and gate 13
 layer 3 refuses every tracked build script its allowlist does not name. **Both read
 `git ls-files`.** Neither has ever looked at a dependency.
 
@@ -13930,3 +13937,31 @@ bounds are all nonzero.
   on gate 1e's PATH because the `git` the tests spawn may start a shell.
 - **The `.github/*.rs` gate tools (D-1600).** Gate 6c holds them to rustfmt
   and clippy `-D warnings`; no coverage or mutation measure applies to them.
+- **Twelve `#[ignore]`d tests never run in CI, by design (D-1613,
+  audit-20261003 testgaps-7).** No workflow passes `--ignored`, and none can:
+  each needs an input that cannot be tracked or a machine CI is not, and each
+  refuses loudly ("MISSING FIXTURE") rather than passing when started without
+  it. They prove nothing on CI and every row citing one says so.
+  - `~/.brutex/lake` (a `.parquet` lake gate 1 forbids tracking):
+    `lake::real_lake` `the_real_fno_sample_decodes_to_the_values_it_holds`,
+    `the_real_cash_sample_has_the_seven_column_layout`,
+    `a_real_contract_directory_name_parses_and_round_trips`,
+    `a_spread_of_real_files_decodes_with_no_failures`;
+    `lake::real_lake_regression`
+    `a_wide_sample_of_the_real_lake_decodes_with_no_refusal_and_a_stable_digest`;
+    `lake::refusals` `no_real_lake_file_triggers_either_defect`.
+  - `BRUTEX_NSE_CASH_SAMPLE_DIR` (NSE's dated masters, not redistributable
+    here): `pull::cash_auction` `actual_dated_masters_match_every_current_fno_cash_identity`;
+    `pull::cash_session_cache` `actual_receipted_lifecycle_snapshot_never_claims_complete_history`
+    (cited beside a test that does run, row labelled) and
+    `official_25_dated_masters_install_and_validate_without_network`.
+  - The operator's real store: `api::calendar_of` `it_reproduces_the_operators_store`.
+  - Explicit frozen request and receipt paths: `api::recovery`
+    `authentic_saved_request_reproduces_its_accepted_scope_identity_without_rebuilding_history`.
+  - A timing measurement for a release build: `cli::index_stop_tests`
+    `catalog_attempt_throughput_measurement`.
+- **One store test runs only on macOS (audit-20261003 testgaps-8).**
+  `store::open_flags::macos_values_are_the_sdk_ones` is
+  `#[cfg(target_os = "macos")]` and every CI job runs on `ubuntu-24.04`, so it
+  is compiled out of every CI run; so is the aarch64 Linux row. Row
+  S-NOFOLLOW-01 already says CI runs only the x86_64 row.
