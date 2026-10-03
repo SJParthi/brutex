@@ -91,9 +91,9 @@ pub fn trials(sweep: &Sweep) -> u64 {
 /// It is **not** the whole search for anything chosen through
 /// [`crate::grid`]. There, each surviving combination is evaluated at up to
 /// [`crate::grid::variants`] stop/target/trail/arm settings and the best of them
-/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 325
-/// cells at the shipped four rungs. Selecting a maximum over 325 variants is 325
-/// more chances to look good by luck, per combination, and none of it entered
+/// is kept — `Grid::sharpest` and `Grid::best` are argmaxes over as many as 625
+/// cells at the shipped four rungs (`grid::variants(4, 4, 4)`, pinned below).
+/// Selecting a maximum over 625 variants is 625 more chances to look good by luck, per combination, and none of it entered
 /// the bar. An audit
 /// measured the omission and named the consequence exactly: the reported
 /// Bonferroni and Bailey figures understate the true search size by roughly the
@@ -356,6 +356,10 @@ pub fn p_value(t: f64) -> f64 {
 /// rejected none; and `-1` cleared every threshold, so `[-1, 0.9]` reported
 /// one finding. A p-value outside `[0, 1]` is a defect upstream, and a count
 /// that included it would be a fallback hiding that failure.
+///
+/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it,
+/// and [`p_value`]'s tail is too coarse to feed it at a search's scale
+/// (hunt-runner-3), so FDR control is not available to any report today.
 #[must_use]
 pub fn benjamini_hochberg(p_values: &mut [f64]) -> Option<usize> {
     if p_values.iter().any(|p| !(0.0..=1.0).contains(p)) {
@@ -517,7 +521,7 @@ fn tail_rational(tail: f64) -> f64 {
 /// # Not reachable at shipped defaults, and that is not the reason to fix it
 ///
 /// `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, so `trials` is bounded near
-/// `1.72e10`; times the 325-cell grid that is `5.58e12`, about **80x below the
+/// `1.72e10`; times the 625-cell grid that is `1.07e13`, about **40x below the
 /// cliff**. But `Ladder::with_pair_budget` is `pub` and takes any `u64`, and
 /// [`trials_with_grid`] is `pub` and takes a caller-supplied `u64`. Both return
 /// a wrong answer in the dangerous direction for inputs inside their declared
@@ -599,7 +603,7 @@ mod tests {
     /// # Why each assertion is here
     ///
     /// The first pins the MULTIPLICATION, which is the whole point: a report
-    /// that ran a 325-way grid over every surviving combination searched 325
+    /// that ran a 625-way grid over every surviving combination searched 625
     /// times as much as `trials` alone reports, and a bar computed from the
     /// smaller number admits noise while looking like a family-wise correction.
     ///
@@ -1087,12 +1091,12 @@ mod tail_tests {
         }
 
         // THE SHIPPED CEILING, WHICH IS WHERE THIS ACTUALLY RUNS.
-        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 325
+        // `engine::DEFAULT_PAIR_BUDGET` is `1 << 34`, and the exit grid is 625
         // cells, so the largest family a default run can present is about
-        // 5.6e12 -- roughly 80x below where the old cliff sat. The fix is not
+        // 1.1e13 -- roughly 40x below where the old cliff sat. The fix is not
         // needed for the default path and is needed because both entry points
         // are `pub` and take any `u64`.
-        let shipped = (1_u64 << 34).saturating_mul(325);
+        let shipped = (1_u64 << 34).saturating_mul(625);
         let bar = bonferroni_t(shipped);
         assert!(
             bar > 7.0 && bar < 9.0,
