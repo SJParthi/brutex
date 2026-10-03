@@ -38,3 +38,10 @@ Scope: verify all 547 earlier findings (250 batch-2 in fix-queue/lane{1,2,3}{,-b
 - PUSHED: all audit fixes (batches A-D) on final/all-fixes 331b05c6 (fast-forward from 1087e544). Artifact v2 updated.
 - Still running locally: full workspace test of 331b05c6, cargo-mutants --iterate on 268 changed-line mutants (49 earlier: all caught/unviable). Any survivor/failure -> fix as a normal commit on final/all-fixes (fetch+merge first).
 - Waiting on user decision card: GAP15-19, GAP15-17, W2-cli5-4, W3-runner2-8 (recommended: leave documented).
+
+## State 2026-10-03 13:20 UTC (user: fix everything fully; throttle to 3 agents for usage)
+- Full workspace test on 331b05c6: 6,612 passed, 0 failed.
+- Running (cap 3): F5 (GAP15-19, GAP15-17, cli halves AC-whp-tb-2/ET-7; D-1643..1649, D-1800..1809, AGA-), F7 (gate8 self-test, excursion look-ahead, docs-web-01, probeapi-1 body, GAP17-33, h-api-1..3; D-1509..1519, D-1820..1829, AGC-), F9 (h-cli-1..3; D-1850..1859, AHA-). Branches wip/audit-fixes-5/7/9.
+- QUEUED: F8 (remove documented costs where O(1) possible; triage out/f8-triage.md; branch wip/audit-fixes-8 has 1 commit + 1 WIP commit; D-1830..1849, AGD-), F10 (h-eng-1, h-eng-2 Fib rung co-firing vs implication screen; D-1860..1869, AHB-), hunter pull/store/lake (stopped before reporting).
+- BLOCKED by safety check, needs the user's explicit words: W2-cli5-4 (frontier rule single authority across cli/api/web), W3-runner2-8 (column digest v2), plus W3-runner2-7, W3-runner5-0 that were in the same request.
+- Fixer rules: out/FIXRULES.md. Gate extractor: awk step `run: |` block by line (see FIXRULES).
