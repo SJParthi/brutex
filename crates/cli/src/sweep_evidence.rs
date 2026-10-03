@@ -1219,6 +1219,13 @@ fn shape<const N: usize>(
     create: bool,
 ) -> Result<u64, String> {
     let mut len = file.metadata().map_err(io_error)?.len();
+    // AN EMPTY FILE HOLDS NO ROWS, exactly like an absent one (D-1741). It is
+    // what `open_append` leaves before its first write and what a rolled-back
+    // first write leaves; reading it as torn would turn one refused append
+    // into a refusal of every later read of that identity.
+    if len == 0 && !create {
+        return Ok(0);
+    }
     if len == 0 && create {
         let mut header = [0_u8; 16];
         header[..8].copy_from_slice(&magic);

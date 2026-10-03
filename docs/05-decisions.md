@@ -53480,7 +53480,16 @@ write is simpler and the memory it costs is stated in `docs/06-limits.md`.
 `reserve_start` is unchanged: its file is private to one token, a torn one
 is refused by every reader, and the next `begin` takes a new token.
 
-Invariant DUR-C-05.
+**An empty file now reads as no rows.** A rolled-back first write leaves an
+empty file, the same state `open_append` leaves before its first write.
+`shape` used to refuse an empty file on every read path as "torn or short",
+which turned one refused start into a refusal of every later read of that
+identity (`index_stop::tests::refused_later_starts_and_finishes_leave_no_completion`
+caught it). A reader now counts an empty file as zero rows, exactly like an
+absent one; a writer still gives it a fresh header. A detail file a terminal
+says holds rows is still refused when it is empty, by the count comparison.
+
+Invariants DUR-C-05 and DUR-C-12.
 
 ### D-1742 — An empty per-invocation journal reads as its unconfirmed indexed start — 2026-10-03
 

@@ -962,3 +962,32 @@ fn a_partial_evidence_write_rolls_back_and_never_blocks_the_next_attempt() -> Re
     );
     Ok(())
 }
+
+/// A store's very first journal write tears and is rolled back to an empty
+/// file. An empty evidence file holds no rows, exactly like an absent one, so
+/// readers report nothing rather than "torn or short", and the next attempt
+/// starts the file afresh. D-1741.
+#[test]
+fn a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    let fault = fail_write(1, 40);
+    let why = begin(&fixture.0, [91; 32], Operation::Sweep)
+        .err()
+        .ok_or("the injected first journal write refuses")?;
+    drop(fault);
+    assert!(why.contains("rolled back to byte 0"), "{why}");
+    let journal = base(&fixture.0).join("attempts.bin");
+    assert_eq!(fs::metadata(&journal).map_err(text)?.len(), 0);
+    assert_eq!(latest(&fixture.0, LIMIT)?, None);
+    assert_eq!(read(&fixture.0, [91; 32], LIMIT)?, None);
+    let attempt = begin(&fixture.0, [91; 32], Operation::Sweep)?;
+    assert_eq!(attempt.token(), 1, "the empty journal allocated nothing");
+    attempt.level(depth(1))?;
+    attempt.finish(Completion::Completed)?;
+    assert_eq!(
+        read(&fixture.0, [91; 32], LIMIT)?.map(|e| e.completion),
+        Some(Completion::Completed)
+    );
+    Ok(())
+}
