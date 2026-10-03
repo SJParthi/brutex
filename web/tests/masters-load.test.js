@@ -20,7 +20,12 @@ import vm from 'node:vm';
 const SOURCE = readFileSync(new URL('../masters.js', import.meta.url), 'utf8');
 const LOAD_EVENTS = ['readystatechange', 'DOMContentLoaded', 'load', 'pageshow'];
 
+/** @typedef {(event: any) => any} Listener */
+/** @typedef {Record<string, Listener[]>} Listeners */
+
+/** @param {string} id */
 function element(id) {
+  /** @type {Listeners} */
   const listeners = {};
   return {
     id,
@@ -29,6 +34,7 @@ function element(id) {
     innerHTML: '',
     className: '',
     disabled: false,
+    /** @param {string} type @param {Listener} fn */
     addEventListener(type, fn) {
       (listeners[type] ||= []).push(fn);
     },
@@ -47,16 +53,24 @@ async function settle() {
  * Run `source` as the page would, then play its load. Returns every request
  * the page made and the elements it bound, so a test can press them.
  */
+/** @param {string} source */
 async function open(source) {
+  /** @type {string[]} */
   const requests = [];
+  /** @type {Map<string, ReturnType<typeof element>>} */
   const elements = new Map();
+  /** @param {string} id */
   const byId = (id) => {
     if (!elements.has(id)) elements.set(id, element(id));
     return elements.get(id);
   };
+  /** @type {Listeners} */
   const documentListeners = {};
+  /** @type {Listeners} */
   const windowListeners = {};
+  /** @type {Function[]} */
   const timers = [];
+  /** @param {unknown} fn */
   const schedule = (fn) => {
     if (typeof fn === 'function') timers.push(fn);
     return timers.length;
@@ -67,6 +81,7 @@ async function open(source) {
     querySelector: () => null,
     querySelectorAll: () => [],
     createElement: () => element(''),
+    /** @param {string} type @param {Listener} fn */
     addEventListener(type, fn) {
       (documentListeners[type] ||= []).push(fn);
     },
@@ -76,14 +91,15 @@ async function open(source) {
     console,
     URL,
     Date,
-    fetch: async (url) => {
+    fetch: async (/** @type {unknown} */ url) => {
       requests.push(String(url));
       return { ok: true, status: 200, json: async () => ({}) };
     },
     setTimeout: schedule,
     setInterval: schedule,
     requestAnimationFrame: schedule,
-    queueMicrotask: (fn) => schedule(fn),
+    queueMicrotask: (/** @type {unknown} */ fn) => schedule(fn),
+    /** @param {string} type @param {Listener} fn */
     addEventListener(type, fn) {
       (windowListeners[type] ||= []).push(fn);
     },
@@ -101,7 +117,7 @@ async function open(source) {
     for (const fn of [...(documentListeners[type] || []), ...(windowListeners[type] || [])]) {
       await fn(event);
     }
-    for (const holder of [document, context]) {
+    for (const holder of /** @type {Record<string, unknown>[]} */ ([document, context])) {
       const handler = holder[`on${type.toLowerCase()}`];
       if (typeof handler === 'function') await handler(event);
     }
@@ -116,6 +132,7 @@ async function open(source) {
   return { requests, elements };
 }
 
+/** @param {Map<string, ReturnType<typeof element>>} elements @param {string} id */
 async function press(elements, id) {
   const target = elements.get(id);
   assert.ok(target, `#${id} was looked up by the script`);
