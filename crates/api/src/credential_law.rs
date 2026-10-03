@@ -320,7 +320,7 @@ impl Watch {
     /// Whether the vendor already rejected `print` in this run. O(d), see the
     /// type's docs.
     fn is_dead(&self, print: CredentialPrint) -> bool {
-        self.dead.iter().any(|dead| *dead == print)
+        self.dead.contains(&print)
     }
 
     /// Notes a credential read that produced nothing.
