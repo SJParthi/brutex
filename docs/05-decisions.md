@@ -53403,3 +53403,39 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1720 — The tier cascade reports a tier MET only when a row PASSED it, and states what each tier costs — 2026-10-03
+
+**Findings.** W2-cli8-8 (medium bug) and W2-cli8-0 (medium cost), both in
+`screen_cascade`.
+
+**What was wrong.** `final_selection` falls back to the best-ranked row that
+traded, so a screen's `selected` is `Some` for any traded row, admitted or
+not. The cascade still read `selected` as admission: the mildest-tier probe
+asked `widest.selected.is_none()` and the tier loop asked
+`body.selected.is_none()`. On any span where something traded and nothing
+passed, the probe failed to settle the walk and the loop printed the
+STRICTEST tier, `S++++++`, as `MET` above a table in which nothing had passed.
+Reproduced on `runner::synthetic::sessions(8)` before the fix:
+`a_cascade_that_admits_nothing_prints_no_tier_as_met` failed on its `MET`
+assertion with the fixture's precondition (mildest tier admits nothing, a row
+traded) measured true. Separately, the function's doc said the tiers "cost
+eight passes over cells already computed rather than eight sweeps". Each tier
+calls `screen`, and `screen` passes the tier's `max_mae_ppm` to
+`grid::Levels::forced`, which `runner::grid` merges into the stop ladder, so
+each tier prices a different grid.
+
+**The decision.** The walk moved into `walk_ladder`, which decides on
+`admitted_any` alone: the mildest tier is screened first, a tier is MET only
+when its screen admitted a row, and every stricter tier walked before it is
+reported UNMET. When nothing admits, the cascade still returns the mildest
+tier's best traded row as the run's subject, with `admitted_any: false` and
+the priced map of that same screen. That keeps the ranking a page can open, as
+the search-step branch already did. The false doc now states the bound,
+`O(T × (M + C × 2 × G))` per cascade, and `docs/06-limits.md` records it.
+
+**Rejected.** Returning `selected: None` when no tier admits. That brings back
+the empty page `final_selection`'s fallback was added to remove. Building one
+grid that holds every tier's forced stop, so a tier only re-filters. That is a
+different grid and a different run identity, and it would change every
+recorded answer to save time on spans that have one.

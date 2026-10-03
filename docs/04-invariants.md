@@ -6216,3 +6216,9 @@ old line regex the same input and watched it pass.
 | CUH-06 | One candidate-trade `Summary` hashes its catalog once across thirty page-level reads, a `read` summary adds none, and a replaced or removed catalog is still refused on every page surface (D-0991) | `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change` | ✓ |
 | CUH-07 | An empty candidate-trade catalog is verified once and its absent tier is refused (D-0991) | `cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses` | ✓ |
 | CUH-08 | A capture derives slice facts once for all of its candidate sides, records a side with no trading cell with no rows, and issues exactly four `fsync`s per candidate side (D-0991) | `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side` | ✓ |
+
+### `cli` screening, tier ladder and report policy — lane 1-b group B (D-1720 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| SCB-01 | A generated tier is reported MET only when its screen ADMITTED a row, never because a row traded under it. The mildest tier is screened first, and when it admits nothing the cascade prints `every tier UNMET`, walks no other tier, and returns that tier's best traded row as the subject with `admitted_any: false`. The walk stops at the strictest tier that admits, and every stricter tier walked before it is reported UNMET in rank order (D-1720) | `cli::screen_policy_tests::a_cascade_that_admits_nothing_prints_no_tier_as_met`, `cli::screen_policy_tests::the_tier_walk_stops_on_admission_and_probes_the_mildest_first`, `cli::screen_policy_tests::the_tier_walk_reports_an_inconsistent_ladder_and_propagates_refusals` | ✓ |

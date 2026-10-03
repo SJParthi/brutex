@@ -13911,3 +13911,21 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## `cli` screening, tier-ladder and report costs (lane 1-b group B, D-1720 onward)
+
+Each entry names a cost that is not O(1), says what it grows with, and points
+at the decision that measured or bounded it. None is a per-bar or
+per-candidate primitive from `CLAUDE.md` §3 rule 4.
+
+- **`screen_cascade`, per cascade: `O(T × (M + C × 2 × G))`** (W2-cli8-0,
+  D-1720). `T` is the tiers screened, `M` is one screen's setup over the
+  execution bars, `C` is the priced candidates (at most `screen_cap()`), and
+  `G` is one exit grid's evaluation, done for both sides. Every tier walked is
+  a full re-screen, because a tier's `max_mae_ppm` is merged into the stop
+  ladder as `grid::Levels::forced`, so each tier prices a different grid.
+  `walk_ladder` probes the mildest tier first, so a cascade where nothing
+  admits costs ONE screen, and one where something admits costs at most
+  `ladder.len() + 1`. An O(1) tier would need one grid holding every tier's
+  forced stop. That is a different grid and a different identity, and it was
+  rejected.
