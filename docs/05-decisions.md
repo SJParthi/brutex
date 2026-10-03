@@ -55983,3 +55983,31 @@ extractor still enforces the shared bound. O(1) per request for the choice.
 
 **Proof.** `server::tests::every_ticked_member_fits_and_one_too_many_is_named_not_a_413`
 and `server::tests::form_read_bound_is_wide_only_on_the_member_routes`.
+
+### D-1570 — A JSON price is snapped from the vendor's own digits: `serde_json` gains `arbitrary_precision` — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-4. `http::one_price` (and
+`rolling`'s `paisa`) snapped `Number::to_string()`, which without
+`arbitrary_precision` is the shortest rendering of an `f64`. Past about
+seventeen significant digits the float had already rounded, so
+`100.12499999999999999` stored 10013 paisa where its own text says 10012, and
+`92233720368547758.07` was refused although it fits. D-1494 and D-1528's
+neighbour entry recorded this as a limit only.
+
+**The decision.** The workspace builds `serde_json` with
+`arbitrary_precision` (one feature, no new crate; `cargo deny` is unaffected
+because licences, advisories and bans are per crate, not per feature). A
+number keeps the digits the body carried. `http::number_text` returns them,
+shifting an exponent form (`2.450075E4`) into a plain decimal exactly, and
+every reader that used the f64 text — `one_price`, `one_number`, and
+`rolling`'s `stamp`, `count` and `paisa` — now reads it. A text whose exponent
+puts the point more than `MAX_PRICE_TEXT` places away is refused by name, as
+is a price text over 64 bytes; the f64 path had rounded those silently.
+
+**Cost.** Each number node owns its digits on the heap, so the decode tree's
+argued peak is about twice D-1203's ~16x; stated on `decode_body` and in
+`docs/06-limits.md`, still unmeasured. `Value` stays 32 bytes.
+
+**Proof.** `pull::http::tests::a_json_price_is_snapped_from_the_vendors_own_text`
+and `pull::rolling::tests::a_rolling_price_is_snapped_from_the_vendors_own_text`
+(on the previous tree: 10013 for 10012, and 35413 for 35412). AFF-40.

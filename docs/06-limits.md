@@ -14042,13 +14042,15 @@ bounds are all nonzero.
   proves records were committed. A `.bin` deleted whole, sidecar left behind,
   is created again empty, as before: a deletion is an explicit act, and the
   lost records are not named.
-* **A JSON rupee price is snapped from serde's re-rendering, not the vendor's
-  text (audit-20261003 attackdata-4).** `http` reads the number as an f64 and
-  snaps `Number::to_string()` half-up. Past about 17 significant digits the
-  f64 has already rounded, so `100.12499999999999999` snaps to 100.13 where its
-  own text says 100.12. A 2,000,000-case differential found 0 differences for
-  2- and 3-decimal prices. Closing it needs `serde_json`'s
-  `arbitrary_precision`, a dependency feature change not made here.
+* **A JSON rupee price is snapped from the vendor's own text (audit-20261003
+  attackdata-4, closed by D-1570).** `serde_json` is built with
+  `arbitrary_precision`, so a number keeps its digits and `http::number_text`
+  hands them to the half-up reader unchanged (an exponent is shifted exactly).
+  What remains bounded: a price text longer than
+  `brutex_core::price::MAX_PRICE_TEXT` (64 bytes) is refused by name, where the
+  f64 path had rounded it silently; and each number node now owns its digits on
+  the heap, so the decode tree's argued peak is about twice the earlier ~16x
+  (UNMEASURED).
 * **Run-id resumption reads one block (D-1536).** `reserve_run_id` resumes above
   the largest `run` in the last 64 KiB of the newest non-empty log file. A run id
   carried only by lines further back, and above every later `seq`, is not seen.
@@ -14200,18 +14202,13 @@ pass over the bars at a once-per-report boundary, O(bars).
   minutes (188 for a 375-minute session), and a window of D sessions at most
   about 188·D. A cap was rejected because it would hide which minutes are
   missing. Not timed: no bench covers it.
-- **A JSON rupee price is parsed through an `f64` before its half-up snap
-  (GAP16-24, D-1494).** `serde_json` is built without `arbitrary_precision`,
-  so `http::one_price` and `rolling`'s `paisa` read the shortest
-  round-tripping text of an `f64`, not the vendor's bytes. That is exact,
-  one rounding in all, for a text of at most fifteen significant digits,
-  which covers every NSE price and every measured Dhan float. Past fifteen
-  digits the parse is a second rounding: a value within one `f64` step of a
-  half-paisa boundary can snap the other way, and the widest `i64` paisa
-  price, `92233720368547758.07`, is refused through JSON though it reads as
-  text. Checked over 160,000 texts by
-  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`;
-  not proved for every fifteen-digit text.
+- **A JSON rupee price was parsed through an `f64` before its half-up snap
+  (GAP16-24, D-1494). Closed by D-1570:** `serde_json` is now built with
+  `arbitrary_precision`, so `http::one_price` and `rolling`'s `paisa` read the
+  vendor's own digits and the widest `i64` paisa price,
+  `92233720368547758.07`, reads through JSON exactly as it reads as text.
+  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`
+  now asserts that equality.
 - **The closure check is O(k) per itemset and copies a level per call (c4a-6,
   D-1496).** `runner::closed::redundant_between` builds a
   `HashMap<ConditionMask, u64>` of the whole lower level, O(|F_k|) time and

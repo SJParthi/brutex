@@ -941,7 +941,10 @@ fn note_answer(
 /// `Value` is 32 bytes on this build (pinned by
 /// `the_json_tree_is_thirty_two_bytes_a_node`) against as few as two bytes of
 /// text for one array element (`0,`), so the tree alone can reach ~16× the
-/// body, and more while an array's backing vector doubles. A body is capped at
+/// body, and more while an array's backing vector doubles. Since D-1570
+/// (`arbitrary_precision`) a number node also owns its digits in one heap
+/// allocation, so a body of one-digit numbers can reach about twice that
+/// (~32×, allocator overhead included, also UNMEASURED). A body is capped at
 /// [`MAX_RESPONSE_BYTES`]. That is an ARGUED bound: no peak has been measured,
 /// and the typed or streaming decode that would remove the tree is not built.
 /// o1api-33, D-1203; `docs/06-limits.md` states it.
@@ -2237,7 +2240,8 @@ fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
         detail: format!("{name:?} holds {v}, which is not a whole number"),
     };
     let number = v.as_number().ok_or_else(refuse)?;
-    let hundredths = crate::csv::paisa(&number_text(number).ok_or_else(refuse)?).ok_or_else(refuse)?;
+    let hundredths =
+        crate::csv::paisa(&number_text(number).ok_or_else(refuse)?).ok_or_else(refuse)?;
     if hundredths % 100 == 0 {
         Ok(hundredths / 100)
     } else {
