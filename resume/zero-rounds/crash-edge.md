@@ -5,8 +5,8 @@ Audited heads: final/all-fixes 331b05c (passes 1-2), final/all-fixes-zero 5140ac
 
 State:
 - Pass 1 (20 agents, file slices): CE-1. Pass 2 (21 agents, themes): CE-2..CE-22. Pass 3 (5 themes): CE-23..CE-35. Pass 4: HTML sinks 0 new, durable appends 0 new, empty config CE-36..CE-39; wedge states CE-40..CE-41.
-- CE-1..CE-35 handed to the zero-findings session (session_019avWwsbRWYrj7eHCev5fVr), which assigned fixers; CE-36..CE-39 not yet sent.
-- Next on resume (2 agents max): send CE-36..39 (+ wedge results); pass 5 theme "same rule implemented twice that drifted" (api vs cli vs web parsers; was stopped at launch); then re-audit every CE fix when the zero-findings session reports the new final/all-fixes-zero head. Stop when a pass finds nothing new.
+- CE-1..CE-41 handed to the zero-findings session (session_019avWwsbRWYrj7eHCev5fVr), which assigned fixers.
+- Next on resume (2 agents max): pass 5 theme "same rule implemented twice that drifted" (api vs cli vs web parsers; was stopped at launch); then re-audit every CE fix when the zero-findings session reports the new final/all-fixes-zero head. Stop when a pass finds nothing new.
 
 ---
 
