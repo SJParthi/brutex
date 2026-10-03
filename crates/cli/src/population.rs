@@ -5458,6 +5458,43 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::{Seek as _, SeekFrom, Write as _};
 
+    /// `docs/02-store-format.md` §28 states the population row this build
+    /// writes: its magic, version, stride, payload width and seal row.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_population_row_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 28. Population rows")
+            .expect("the population-row section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(
+            " — `results/population-v1.bin`, version {}\n",
+            super::ROW_VERSION
+        )));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = core::str::from_utf8(&super::ROW_MAGIC).expect("the magic is ASCII");
+        assert!(section.contains(&format!(
+            "The {}-byte header is `{magic}` at `0..8`, version `{}` at `8..12`",
+            super::HEADER,
+            super::ROW_VERSION
+        )));
+        assert!(section.contains(&format!(
+            "Each row is {} bytes: a {}-byte payload and an {}-byte seal.",
+            super::ROW_STRIDE,
+            super::ROW_PAYLOAD_BYTES,
+            super::SEAL_BYTES
+        )));
+        assert!(section.contains(&format!("`16 + n*{}`", super::ROW_STRIDE)));
+        assert!(section.contains(&format!(
+            "| {} | {} | first eight BLAKE3 bytes over `0..{}` |",
+            super::ROW_PAYLOAD_BYTES,
+            super::SEAL_BYTES,
+            super::ROW_PAYLOAD_BYTES
+        )));
+    }
+
     fn root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "brutex-population-{name}-{}-{:?}",

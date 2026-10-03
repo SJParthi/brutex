@@ -1109,6 +1109,33 @@ mod tests {
     use crate::frontier::Row;
     use crate::frontier::STRIDE_BYTES;
 
+    /// `docs/02-store-format.md` §29 states the live file this build writes:
+    /// its magic, version, count slot, summary width and row stride.
+    /// P1-16-04, D-1940.
+    #[test]
+    fn the_store_format_doc_states_the_live_file_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 29. Live top-N")
+            .expect("the live-file section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(
+            " — `results/live/<identity>.bin`, version {VERSION}\n"
+        )));
+        let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+        let magic = core::str::from_utf8(&MAGIC).expect("the magic is ASCII");
+        assert!(section.contains(&format!("| 0 | 8 | `{magic}` |")));
+        assert!(section.contains(&format!("| 8 | 4 | version `{VERSION}`, `u32` |")));
+        assert!(section.contains(&format!("| {} | 4 | row count, `u32` |", super::COUNT_AT)));
+        assert!(section.contains(&format!(
+            "| {ROWS_AT} | `count * {STRIDE_BYTES}` | rows, each a §13 frontier row of the same \
+             {STRIDE_BYTES} bytes |"
+        )));
+        assert!(section.contains(&format!("`{ROWS_AT} + count*{STRIDE_BYTES}`")));
+        assert_eq!(super::HEADER_BYTES + super::SUMMARY_BYTES, ROWS_AT);
+    }
+
     /// An upper-case hex name is not an identity, because `Live::path` writes
     /// `{byte:02x}` and nothing else writes this directory.
     ///

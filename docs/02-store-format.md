@@ -1543,6 +1543,526 @@ dependent. D-0476, CO-01..CO-03 and limits §157 define the semantic and honest
 complexity boundary; D-0473/limits §155 still govern physical-volume identity
 and hot unplug.
 
+## 27. Run ledger — `results/runs.bin`, versions 2 and 3
+
+`runs.bin` is the ledger §12.3 calls the public commit marker: one fixed-stride
+record per finished run. This section was absent until P1-16-04 (D-1940); the
+offsets below are counted from `cli::results::Record::to_bytes`, not from its
+comments. All integers are little-endian.
+
+The 16-byte header is `BRUTEXRS` at `0..8`, the version as a `u32` at `8..12`,
+and four bytes at `12..16` that the writer leaves zero. The reader checks the
+magic and the version only; it does not check those four bytes. A fresh ledger
+is written at version `3`. Version `2` is READ and never appended to, and every
+other version is refused. A length that is not `16 + n*stride` is refused.
+
+Each version-3 record is 261 bytes. Version 2 is the same record without the
+mask: 213 bytes, a 205-byte payload and the seal at `205..213`. Every version-2
+offset below `205` is the version-3 offset; a version-2 record is checked
+against its own seal and then read with six zero mask words.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | nine-term run identity |
+| 32 | 8 | finish time, UTC microseconds, `i64` |
+| 40 | 16 | feed word, zero-padded |
+| 56 | 16 | instrument, zero-padded |
+| 72 | 16 | signal rung, zero-padded |
+| 88 | 2 | first year, `u16` |
+| 90 | 1 | first month |
+| 91 | 2 | last year, `u16` |
+| 93 | 1 | last month |
+| 94 | 4 | months asked, `u32` |
+| 98 | 4 | months found, `u32` |
+| 102 | 8 | signal bars swept, `u64` |
+| 110 | 8 | support threshold, `u64` |
+| 118 | 8 | combinations produced, `u64` |
+| 126 | 4 | deepest level, `u32` |
+| 130 | 1 | halted: `1` when a budget stopped the walk |
+| 131 | 8 | trades of the chosen combination, `u64` |
+| 139 | 8 | pessimistic total paisa, `i64` |
+| 147 | 8 | optimistic total paisa, `i64` |
+| 155 | 8 | worst trade paisa, `i64` |
+| 163 | 8 | maximum drawdown paisa, `i64` |
+| 171 | 8 | winners' adverse excursion ppm, `i64` |
+| 179 | 8 | winners' favourable excursion ppm, `i64` |
+| 187 | 8 | every trade's adverse excursion ppm, `i64` |
+| 195 | 10 | five exit rungs, `i16` each, `-1` for none: stop, target, TSL, TTP arm, TTP trail |
+| 205 | 48 | six condition-mask `u64` words (version 3 only) |
+| 253 | 8 | first eight BLAKE3 bytes over `0..253` |
+
+The seal is an accident detector, not a security claim. The test
+`cli::results::tests::the_store_format_doc_states_the_ledger_this_build_writes`
+binds this section's magic, versions, strides and seal row to the constants.
+
+## 28. Population rows — `results/population-v1.bin`, version 1
+
+The population row file holds one fixed-stride row per expanded strategy. Its
+receipt files (`population-completions-v2.bin` to `-v4.bin`) are separate; §14
+describes the version-4 receipt. Offsets are counted from
+`cli::population::PopulationRowV1::payload_bytes` (D-1940). All integers are
+little-endian.
+
+The 16-byte header is `BRUTEXPP` at `0..8`, version `1` at `8..12`, and four
+reserved bytes at `12..16` that must be zero. A wrong magic, another version,
+a non-zero reserved byte or a length that is not `16 + n*312` is refused.
+
+Each row is 312 bytes: a 304-byte payload and an 8-byte seal.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 32 | population identity |
+| 32 | 8 | row sequence, `u64` |
+| 40 | 32 | strategy digest |
+| 72 | 48 | six condition-mask `u64` words; all zero is refused |
+| 120 | 1 | direction: `1=long`, `2=short` |
+| 121 | 1 | instrument family: `1=NIFTY`, `2=BANKNIFTY` |
+| 122 | 1 | closure: `1=closed`, `2=redundant`, `3=unknown` |
+| 123 | 1 | admission status: `0=admitted`, `1=rejected`, `2=unmeasured`, `3=refused` |
+| 124 | 4 | signal rung seconds, `u32` |
+| 128 | 8 | support hits, `u64` |
+| 136 | 20 | stop, target, TSL, TTP-arm, TTP-trail indices, `u32` each; absent is `u32::MAX`, and TTP is wholly present or wholly absent |
+| 156 | 4 | reserved, zero |
+| 160 | 8 | drawdown, `u64` |
+| 168 | 8 | worst loss, `u64` |
+| 176 | 8 | losing rate ppm, `u64` |
+| 184 | 8 | losing trades, `u64` |
+| 192 | 16 | loss ratio ppm: tag byte (`0` absent, `1` present), seven zero bytes, `u64` value (zero when absent) |
+| 208 | 8 | pessimistic profit, `i64` |
+| 216 | 8 | winning trades, `u64` |
+| 224 | 8 | win rate ppm, `u64` |
+| 232 | 16 | reward-to-risk ppm, the same tagged shape as the loss ratio |
+| 248 | 8 | average win, `u64` |
+| 256 | 8 | average loss, `u64` |
+| 264 | 8 | assurance ppm, `u64` |
+| 272 | 32 | admission reasons, failed, unmeasured and refused bit sets, `u64` each |
+| 304 | 8 | first eight BLAKE3 bytes over `0..304` |
+
+A row whose seal, tag, rate or mask fails its check is refused, not skipped.
+`cli::population::tests::the_store_format_doc_states_the_population_row_this_build_writes`
+binds this section to the constants.
+
+## 29. Live top-N — `results/live/<identity>.bin`, version 2
+
+A live file is not history. It is the in-flight top-N of one run, named by the
+64 lowercase hex characters of its run identity, replaced whole by write, sync
+and rename, and removed when the run finishes. A killed run leaves its file
+behind; `cli::live` says why that cannot be fixed from the reader. Offsets are
+from `cli::live::Live::publish` (D-1940). All integers are little-endian.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 8 | `BRUTEXLV` |
+| 8 | 4 | version `2`, `u32` |
+| 12 | 4 | row count, `u32` |
+| 16 | 8 | trials weighed so far, `u64` |
+| 24 | 8 | the `\|t\|` bar in thousandths, `i64` |
+| 32 | 8 | candidates priced, `u64` |
+| 40 | `count * 280` | rows, each a §13 frontier row of the same 280 bytes |
+
+The reader skips, rather than refuses, a file with the wrong magic, another
+version, a short header or a length that is not `40 + count*280`: a half-written
+file is an ordinary state here. There is no older version to read, because a
+live file from an older build belongs to a process that has stopped.
+`cli::live::tests::the_store_format_doc_states_the_live_file_this_build_writes`
+binds this section to the constants.
+
+## 30. Pre-Admission Data audit ledger — version 2
+
+`pre-admission-data-v2.bin` and `pre-admission-data-v2.lock` are the successor
+of §24. Version 1 bytes are not reinterpreted. Version 2 repeats every version-1
+source field and adds the Candidate Universe reconciliation, and it may carry
+zero Candidate rows only when the Candidate commit proves natural extinction.
+Offsets are from `encode_v2_core`, `encode_v2_reconciliation` and `header_v2` in
+`cli::pre_admission_data` (D-1940). All integers are little-endian.
+
+The 64-byte header is `BTX-PREADMIT-V2\0` at `0..16`, version `2` at `16..20`,
+kind `2` at `20..24`, stride `812` as a `u64` at `24..32`, and a 32-byte BLAKE3
+seal over `0..32` under the domain `brutex-pre-admission-header-v2\0` at
+`32..64`.
+
+Each 812-byte record is a 780-byte payload and a 32-byte domain-separated
+BLAKE3 seal. As in §24, each logical entry is a Data record (kind `1`) synced
+first and a Completion record (kind `2`) synced last; only the kind differs.
+
+| Payload offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | record version `2`, `u32` |
+| 4 | 4 | kind: `1=Data`, `2=Completion`, `u32` |
+| 8 | 8 | canonical sequence, `u64` |
+| 16 | 96 | Pre-Admission identity, Candidate Universe identity, Candidate completion digest |
+| 112 | 8 | Candidate row count, `u64` |
+| 120 | 1 | instrument family: `1=NIFTY`, `2=BANKNIFTY` |
+| 121 | 3 | reserved, zero |
+| 124 | 4 | signal rung seconds, `u32` |
+| 128 | 4 | one-minute horizon bars, `u32` |
+| 132 | 4 | reserved, zero |
+| 136 | 20 | canonical requested month span |
+| 156 | 128 | feed, source commit, calendar policy and daily-reference policy digests |
+| 284 | 40 | exact signal stream: count `u64`, digest |
+| 324 | 56 | complete one-minute context: count, first and last timestamp `i64`, digest |
+| 380 | 40 | exact execution subslice: count `u64`, digest |
+| 420 | 56 | prior-day daily stream: count, first and last timestamp `i64`, digest |
+| 476 | 88 | eligibility: count, eligible count, excluded-day count, eligibility digest, excluded-days digest |
+| 564 | 56 | signal calendar: rung `u32`, four zero bytes, first and last day `i64`, digest |
+| 620 | 56 | one-minute calendar, the same shape |
+| 676 | 24 | signal, minute-context and daily stored-load ceilings, `u64` each |
+| 700 | 8 | execution start index inside the minute context, `u64` |
+| 708 | 64 | reconciliation: sweep trials, frequent, infrequent, closed, redundant and unknown-closure itemsets, long and short exit cells per mask, `u64` each |
+| 772 | 4 | extinction depth, `u32` |
+| 776 | 1 | extinction complete, `0` or `1` |
+| 777 | 1 | closure complete, `0` or `1` |
+| 778 | 2 | reserved, zero |
+| 780 | 32 | seal over payload `0..780`, domain `brutex-pre-admission-record-v2\0` |
+
+`0..708` is the §24 payload with the version field reading `2`; a `const`
+assertion in the module holds the two widths equal.
+`cli::pre_admission_data::tests::the_store_format_doc_states_the_pre_admission_v2_this_build_writes`
+binds this section to the constants.
+
+## 31. Execution V3 authority — record layout 5
+
+Execution V3 is four append-only fixed-record files and one lock, beside each
+other in the root the ledger is opened on:
+
+| File | Magic (16 bytes) | Domain | Stride |
+|---|---|---:|---:|
+| `execution-parameters-v3.bin` | `BTX-EXV3-PARAM\0\0` | 1 | 1,024 |
+| `execution-percentiles-v3.bin` | `BTX-EXV3-PCTL\0\0\0` | 2 | 128 |
+| `execution-dispositions-v3.bin` | `BTX-EXV3-DISP\0\0\0` | 3 | 1,024 |
+| `execution-completions-v3.bin` | `BTX-EXV3-CMPL\0\0\0` | 4 | 1,024 |
+| `execution-v3.lock` | none; must be empty | — | — |
+
+The files have no file header. A length that is not a whole number of strides
+is refused. The semantic seam is V3; the record layout written in every record
+is `5`, and layout-4 bytes are refused rather than reinterpreted. Parameters,
+percentile atoms and dispositions are synced in that order, then one
+Completion is appended and synced last. Offsets are counted from the four
+`encode` functions in `cli::execution_v3` (D-1940). All integers are
+little-endian. Every record starts with the same 24 bytes and ends with a full
+32-byte BLAKE3 seal over its payload, under a per-kind domain
+`brutex-execution-v3-layout-5-<kind>-seal\0`:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 16 | magic |
+| 16 | 4 | layout `5`, `u32` |
+| 20 | 4 | domain, `u32` |
+| stride − 32 | 32 | seal |
+
+Every byte between the last field below and the seal is zero, and is checked.
+
+**Parameter, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 512 | sixteen digests: parameter core ID, parameter ID, population ID, population ordered digest, source finalization ID and completion ID, policy, resolution, training, instrument, feed, commit, calendar, percentile digests, cost-model ID, execution-law digest |
+| 536 | 163 | evaluation fingerprint |
+| 699 | 5 | family (`1=NIFTY`, `2=BANKNIFTY`), direction (`1=long`, `2=short`), range-policy, selector-policy and forced-stop-policy tags |
+| 704 | 3 | reserved, zero |
+| 707 | 24 | rung, horizon bars, execution resolution seconds, entry delay minutes, forced-exit IST minute, forced-stop index (`u32::MAX` for none), `u32` each |
+| 731 | 32 | four run parameters, `u64` each |
+| 763 | 16 | ratio minimum and maximum, hundredths, `i64` each |
+| 779 | 88 | maximum levels, maximum ratio pairs, policy maximum cells, resolved stop, target, trail, ratio-pair and cell counts, maximum ambiguity bars, maximum gap bars, training bars, `u64` each |
+| 867 | 24 | forced-stop ppm, training first and last timestamp, `i64` each |
+| 891 | 16 | percentile offset and count, `u64` each |
+| 907 | 85 | reserved, zero |
+
+**Percentile atom, 128 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 32 | parameter core ID |
+| 56 | 1 | axis: `1=stop`, `2=target`, `3=trail` |
+| 57 | 3 | reserved, zero |
+| 60 | 12 | ordinal, numerator, denominator, `u32` each |
+| 72 | 24 | reserved, zero |
+
+**Disposition, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 512 | sixteen digests: disposition ID, population ID, population row ID, candidate semantic ID, candidate base-row ID, admission decision ID, finalization row ID and completion ID, parameter ID, execution-run ID, evaluated-grid, resolution, column, context, runner-disposition and selected-exit digests |
+| 536 | 40 | global sequence, family sequence, cell ordinal, support hits, refusal bits, `u64` each |
+| 576 | 4 | family, direction, admission status (`1=admitted` … `4=refused`), terminal (`1=authorized`, `2=policy refused`) |
+| 580 | 4 | reserved, zero |
+| 584 | 28 | rung, horizon bars, stop, target, TSL, TTP-arm and TTP-trail indices, `u32` each; absent index is `u32::MAX` |
+| 612 | 380 | reserved, zero |
+
+**Completion, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 56 | block sequence, first parameter record, parameter count, first percentile record, percentile count, first disposition record, disposition count, `u64` each |
+| 80 | 480 | fifteen digests: completion ID, population ID, population ordered digest, source finalization ID and completion ID, source admission block ID and completion ID, execution-law digest, ordered parameter, percentile and disposition digests, NIFTY and BANKNIFTY disposition digests, NIFTY and BANKNIFTY authority IDs |
+| 560 | 128 | four parameter-ID slots |
+| 688 | 40 | row, NIFTY, BANKNIFTY, authorized and policy-refused counts, `u64` each |
+| 728 | 4 | rung, `u32` |
+| 732 | 4 | reserved, zero |
+| 736 | 32 | four admission-status counts, `u64` each |
+| 768 | 128 | sixteen terminal-matrix cells, `u64` each |
+| 896 | 96 | reserved, zero |
+
+A decoded record is re-encoded and compared byte for byte; a record that
+decodes but is not canonical is refused.
+`cli::execution_v3::tests::the_store_format_doc_states_the_execution_v3_layout_this_build_writes`
+binds the magics, layout, domains and strides of this section to the
+constants.
+
+## 32. Execution V4 authority — version 4
+
+Execution V4 is an independent successor of §31 after Population V6. No V3 byte
+is accepted. It has the same four-files-and-a-lock shape, the same 24-byte
+record prefix (magic, version `4`, domain) and the same trailing 32-byte seal,
+under the domains `brutex-execution-v4-<kind>-seal\0`. Offsets are from the four
+`encode` functions in `cli::execution_v4` (D-1940).
+
+| File | Magic (16 bytes) | Domain | Stride |
+|---|---|---:|---:|
+| `execution-parameters-v4.bin` | `BTX-EXV4-PARAM\0\0` | 1 | 1,280 |
+| `execution-percentiles-v4.bin` | `BTX-EXV4-PCTL\0\0\0` | 2 | 128 |
+| `execution-dispositions-v4.bin` | `BTX-EXV4-DISP\0\0\0` | 3 | 1,024 |
+| `execution-completions-v4.bin` | `BTX-EXV4-CMPL\0\0\0` | 4 | 1,280 |
+| `execution-v4.lock` | none; must be empty | — | — |
+
+A naturally extinct family writes no parameter and no disposition; its
+terminal is kept in the Completion.
+
+**Parameter, 1,280 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 608 | nineteen digests: the sixteen of §31 with population completion ID after population ID, and source admission block ID and completion ID after the source finalization pair |
+| 632 | 163 | evaluation fingerprint |
+| 795 | 5 | family, direction, range-policy, selector-policy and forced-stop-policy tags |
+| 800 | 3 | reserved, zero |
+| 803 | 24 | the six `u32` of §31 |
+| 827 | 32 | four run parameters, `u64` each |
+| 859 | 16 | ratio minimum and maximum, `i64` each |
+| 875 | 88 | the eleven `u64` of §31 |
+| 963 | 24 | forced-stop ppm, training first and last timestamp, `i64` each |
+| 987 | 16 | percentile offset and count, `u64` each |
+| 1003 | 245 | reserved, zero |
+| 1248 | 32 | seal |
+
+**Percentile atom, 128 bytes.** The §31 layout, with version `4`.
+
+**Disposition, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 640 | twenty digests: disposition ID, population ID, population completion ID, population family-row ID, population row ID, candidate semantic ID, candidate base-row ID, base-evidence ID, admission decision ID, finalization family-row ID, finalization row ID, finalization completion ID, parameter ID, execution-run ID, evaluated-grid, resolution, column, context, runner-disposition and selected-exit digests |
+| 664 | 40 | global sequence, family sequence, cell ordinal, support hits, refusal bits, `u64` each |
+| 704 | 4 | family, direction, admission status, terminal |
+| 708 | 4 | reserved, zero |
+| 712 | 28 | rung, horizon bars and five exit indices, `u32` each |
+| 740 | 252 | reserved, zero |
+| 992 | 32 | seal |
+
+**Completion, 1,280 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 24 | 56 | block sequence and the first/count pairs for parameters, percentiles and dispositions, `u64` each |
+| 80 | 640 | twenty digests: completion ID, population ID, population completion ID, population ordered digest, NIFTY and BANKNIFTY population family-row IDs, NIFTY and BANKNIFTY finalization family-row IDs, source finalization ID and completion ID, source admission block ID and completion ID, execution-law digest, ordered parameter, percentile and disposition digests, NIFTY and BANKNIFTY disposition digests, NIFTY and BANKNIFTY authority IDs |
+| 720 | 128 | four parameter-ID slots |
+| 848 | 88 | row, evaluated and decision counts; the same three for NIFTY and for BANKNIFTY; authorized and policy-refused counts; `u64` each |
+| 936 | 8 | rung and horizon bars, `u32` each |
+| 944 | 2 | NIFTY and BANKNIFTY family terminal: `1=evaluated`, `2=naturally extinct` |
+| 946 | 2 | reserved, zero |
+| 948 | 32 | four admission-status counts, `u64` each |
+| 980 | 128 | sixteen terminal-matrix cells, `u64` each |
+| 1108 | 140 | reserved, zero |
+| 1248 | 32 | seal |
+
+`cli::execution_v4::tests::the_store_format_doc_states_the_execution_v4_records_this_build_writes`
+binds this section to the constants.
+
+## 33. Global Replay V3 — version 3
+
+Global Replay V3 is five append-only fixed-record files and one lock. It never
+opens V1 or V2 replay records. One commit appends witnesses, candidates,
+decisions and money rows, each file synced, and then one Completion last.
+Offsets are from the five `encode` functions in `cli::global_replay_v3`
+(D-1940). All integers are little-endian.
+
+| File | Magic (16 bytes) | Stride |
+|---|---|---:|
+| `global-replay-witnesses-v3.bin` | `BTX-GRV3-WIT\0\0\0\0` | 512 |
+| `global-replay-candidates-v3.bin` | `BTX-GRV3-CAN\0\0\0\0` | 512 |
+| `global-replay-decisions-v3.bin` | `BTX-GRV3-DEC\0\0\0\0` | 384 |
+| `global-replay-money-v3.bin` | `BTX-GRV3-MNY\0\0\0\0` | 512 |
+| `global-replay-completions-v3.bin` | `BTX-GRV3-CMP\0\0\0\0` | 1,024 |
+| `global-replay-v3.lock` | none | — |
+
+There is no file header and no domain field. Every record starts with the
+16-byte magic and version `3` as a `u32` at `16..20`, and ends with a 32-byte
+BLAKE3 seal over the payload under `brutex-global-replay-v3-<kind>-seal\0`. The
+bytes between the last field and the seal are zero and checked. Family is
+`1=NIFTY`, `2=BANKNIFTY`; direction `1=long`, `2=short`; feed `1=groww`,
+`2=dhan`, `3=truedata`, `4=gdfl`, `5=zerodha`; path `1=priceable`,
+`2=block-only`, `3=crossing refused`, `4=both`.
+
+A **trade row** is 88 bytes: signal, entry and exit bar as `u64`, then best,
+worst, entry and exit time, adverse, adverse paisa, favourable and favourable
+paisa as `i64`. A **VIX stamp** is 64 bytes: tag `0` and 63 zero bytes when
+absent, or tag `1`, seven zero bytes and the seven `i64` of the India VIX
+candle (time, open, high, low, close, volume, open interest).
+
+**Witness, 512 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 288 | nine digests: witness, selection, row, selected exit, universe, run, feed, strategy, ordered candidates |
+| 308 | 48 | six condition-mask `u64` words |
+| 356 | 24 | first candidate, candidate count, pricing-refused count, `u64` each |
+| 380 | 4 | rung seconds, `u32` |
+| 384 | 2 | rank, `u16` |
+| 386 | 3 | family, direction, feed |
+| 389 | 91 | reserved, zero |
+| 480 | 32 | seal |
+
+**Candidate, 512 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 160 | five digests: candidate, witness, selection, row, strategy |
+| 180 | 2 | stream ordinal, `u16` |
+| 182 | 32 | candidate ordinal, signal bar, entry bar, occupied-through bar, `u64` each |
+| 214 | 24 | signal, entry and occupied-through time, `i64` each |
+| 238 | 1 | path |
+| 239 | 89 | price: tag `0` and 88 zero bytes, or tag `1` and a trade row |
+| 328 | 16 | ambiguous bars, gap fills, `u64` each |
+| 344 | 4 | rung seconds, `u32` |
+| 348 | 2 | rank, `u16` |
+| 350 | 3 | family, direction, feed |
+| 353 | 127 | reserved, zero |
+| 480 | 32 | seal |
+
+**Decision, 384 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 128 | four digests: decision, candidate, witness, strategy |
+| 148 | 8 | sequence, `u64` |
+| 156 | 2 | stream ordinal, `u16` |
+| 158 | 8 | candidate ordinal, `u64` |
+| 166 | 16 | entry and occupied-through time, `i64` each |
+| 182 | 4 | rung seconds, `u32` |
+| 186 | 2 | rank, `u16` |
+| 188 | 3 | family, direction, path |
+| 191 | 1 | disposition: `1=admitted`, `2=blocked occupied`, `3=blocked simultaneous`, `4=unreachable`, `5=refused` |
+| 192 | 8 | occupied-through time, `i64`; zero for tags 3 to 5 |
+| 200 | 32 | the admitted decision for tag 3; zero otherwise |
+| 232 | 120 | reserved, zero |
+| 352 | 32 | seal |
+
+**Money, 512 bytes.** Written only for a globally admitted, priceable decision.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 160 | five digests: money, decision, candidate, witness, strategy |
+| 180 | 8 | decision sequence, `u64` |
+| 188 | 2 | stream ordinal, `u16` |
+| 190 | 4 | rung seconds, `u32` |
+| 194 | 2 | rank, `u16` |
+| 196 | 3 | family, direction, feed |
+| 199 | 88 | trade row |
+| 287 | 64 | India VIX stamp at entry |
+| 351 | 64 | India VIX stamp at exit |
+| 415 | 65 | reserved, zero |
+| 480 | 32 | seal |
+
+**Completion, 1,024 bytes.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 20 | 96 | completion, replay and publication IDs |
+| 116 | 256 | eight selection IDs, one per rung |
+| 372 | 128 | ordered witness, candidate, decision and money digests |
+| 500 | 64 | first and count for witnesses, candidates, decisions and money, `u64` each |
+| 564 | 48 | offered, admitted, blocked-occupied, blocked-simultaneous, unreachable and refused counts, `u64` each |
+| 612 | 24 | pricing-refused candidates, admitted pricing-refused, block sequence, `u64` each |
+| 636 | 356 | reserved, zero |
+| 992 | 32 | seal |
+
+India VIX is stamped after admission and never changes selection, execution,
+money or replay identity (`CLAUDE.md` §1).
+`cli::global_replay_v3::tests::the_store_format_doc_states_the_global_replay_v3_this_build_writes`
+binds this section to the constants.
+
+## 34. Population Statistics audit ledger — version 3
+
+`population-statistics-v3-audit.bin` and its lock are the mixed-family
+successor of §25. Version 2 bytes are unchanged and are not read here. One
+block is Data, `Family(NIFTY)`, `Family(BANKNIFTY)`, every candidate statistic
+in family order, then Completion last; everything before Completion is synced
+first. Offsets are from `encode_manifest`, `encode_family`, `encode_candidate`
+and `header` in `cli::population_statistics_v3` (D-1940). All integers are
+little-endian.
+
+The 64-byte header is `BTX-POPSTATS-V3\0` at `0..16`, version `3` at `16..20`,
+kind `1` at `20..24`, stride `1,024` as a `u64` at `24..32`, and a 32-byte
+BLAKE3 seal over `0..32` under `brutex-population-statistics-v3-header\0`.
+
+Every record is a 992-byte payload and a 32-byte seal over it under
+`brutex-population-statistics-v3-record\0`. Every payload starts with:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 4 | record version `3`, `u32` |
+| 4 | 4 | kind: `1=Data`, `2=Family`, `3=Candidate`, `4=Completion`, `u32` |
+| 8 | 8 | physical record sequence, `u64` |
+| 16 | 32 | authority identity |
+
+**Data and Completion** carry the same manifest; only the kind differs.
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 48 | 32 | logical sequence, bootstrap draws, seed, block length, `u64` each |
+| 80 | 8 | rung seconds and horizon bars, `u32` each |
+| 88 | 16 | requested span: from year, from month, to year, to month, `u32` each |
+| 104 | 160 | feed, source commit, calendar policy, daily-reference policy and statistics policy digests |
+| 264 | 64 | NIFTY and BANKNIFTY family identities |
+| 328 | 32 | ordered candidate digest |
+| 360 | 8 | candidate count, `u64` |
+| 368 | 624 | reserved, zero |
+
+**Family.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 48 | 4 | family: `1=NIFTY`, `2=BANKNIFTY`, `u32` |
+| 52 | 4 | terminal: `1=evaluated`, `2=insufficient for CSCV`, `3=naturally extinct`, `u32` |
+| 56 | 16 | Pre-Admission sequence and record index, `u64` each |
+| 72 | 320 | ten digests: Pre-Admission authority, Candidate universe, Candidate completion, observation authority, observation identity, observation policy, observation data, observation completion, accepted sessions, CSCV layout |
+| 392 | 24 | candidate, period and split counts, `u64` each |
+| 416 | 4 | segment count, `u32` |
+| 420 | 4 | presence flags: bit 0 White, bit 1 SPA, bit 2 Romano–Wolf, bit 3 PBO; other bits refused |
+| 424 | 64 | White: statistic bits, probability bits, exact probability numerator and denominator, `u64` each, family digest; zero when absent |
+| 488 | 64 | SPA, the same shape |
+| 552 | 32 | Romano–Wolf family digest; zero when absent |
+| 584 | 48 | PBO: contributing, bottom-half and unrankable splits, probability bits, numerator, denominator, `u64` each; zero when absent |
+| 632 | 128 | ordered candidate, period and split digests, family identity |
+| 760 | 232 | reserved, zero |
+
+**Candidate.**
+
+| Offset | Size | Field |
+|---:|---:|---|
+| 48 | 8 | global sequence, `u64` |
+| 56 | 4 | family, `u32` |
+| 60 | 4 | reserved, zero |
+| 64 | 8 | family sequence, `u64` |
+| 72 | 64 | candidate semantic digest, Pre-Admission authority |
+| 136 | 80 | trades, wins, Wilson lower bits, Romano–Wolf statistic bits, rank, strict exceedances, initial numerator and denominator, adjusted numerator and denominator, `u64` each |
+| 216 | 64 | ordered period and split digests |
+| 280 | 712 | reserved, zero |
+
+A naturally extinct family has no candidate rows and no numeric statistic.
+`cli::population_statistics_v3::tests::the_store_format_doc_states_the_statistics_v3_this_build_writes`
+binds this section to the constants.
+
 ## Dated NSE cash-session cache (D-0519)
 
 Runtime `session-masters/NSE_CM_security_ddmmyyyy.csv.gz` retains the exact
