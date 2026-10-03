@@ -1,7 +1,7 @@
 #![cfg(test)]
 //! Receipt-last publication: scratch from a cut-short attempt is rewritten,
 //! committed history is compared and kept (D-1760).
-use super::{committed, prepare_in_namespace, read_exact, write_or_equal};
+use super::{committed, lost_owner_race, prepare_in_namespace, read_exact, write_or_equal};
 use std::fs;
 use std::path::PathBuf;
 
@@ -141,5 +141,28 @@ fn an_unreceipted_body_link_is_unlinked_never_followed() -> Result<(), String> {
         b"must survive"
     );
     assert_eq!(read_exact(&directory.join("body.bin"), 64)?, b"real body");
+    Ok(())
+}
+
+/// ledgers-1, D-1908: only the owner-lock refusal, which wrote nothing, is
+/// the race a committed receipt may answer. A refusal of anything this call
+/// did itself is never mistaken for it.
+#[test]
+fn only_the_owner_lock_refusal_is_a_lost_race() -> Result<(), String> {
+    let root = scratch("lost-race");
+    let identity = [11_u8; 32];
+    let held = prepare_in_namespace(&root, "index-stop-vix-reference-v1", identity, b"winner")?;
+    let refusal = prepare_in_namespace(&root, "index-stop-vix-reference-v1", identity, b"loser")
+        .err()
+        .unwrap_or_default();
+    drop(held);
+    assert!(lost_owner_race(&refusal), "{refusal}");
+    for own in [
+        "Input/output error (os error 5)",
+        "Boolean evidence already exists with different bytes; history preserved",
+        "",
+    ] {
+        assert!(!lost_owner_race(own), "{own}");
+    }
     Ok(())
 }

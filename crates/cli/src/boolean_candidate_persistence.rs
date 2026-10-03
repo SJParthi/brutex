@@ -111,7 +111,7 @@ pub(crate) fn prepare_in_namespace(
         crate::readonly_file::open(&owner_path).map_err(display)?,
         owner_path.clone(),
     )
-    .map_err(|why| format!("Boolean candidate namespace already owned or lock refused: {why}"))?;
+    .map_err(|why| format!("{OWNER_REFUSED}: {why}"))?;
     let generation = crate::result_set::file_generation(&owner, &owner_path)?;
     if owner.metadata().map_err(display)?.len() != 0 {
         return Err("Boolean candidate owner contains unexpected bytes".to_owned());
@@ -149,6 +149,16 @@ pub(crate) fn prepare_in_namespace(
 /// The length of a whole completion receipt.
 const RECEIPT_BYTES: usize = 112;
 const RECEIPT_LEN: u64 = RECEIPT_BYTES as u64;
+
+/// The prefix of the refusal `prepare_in_namespace` returns when another
+/// holder has the owner lock, before this call wrote any byte.
+const OWNER_REFUSED: &str = "Boolean candidate namespace already owned or lock refused";
+
+/// Whether `why` is `prepare_in_namespace`'s owner-lock refusal, the only
+/// failure that leaves this call's own bytes unwritten (D-1908).
+pub(crate) fn lost_owner_race(why: &str) -> bool {
+    why.starts_with(OWNER_REFUSED)
+}
 
 /// Whether `directory` holds a whole completion receipt, so its body is
 /// published history. A missing or shorter receipt is an attempt that was

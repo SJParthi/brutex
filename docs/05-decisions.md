@@ -54974,3 +54974,15 @@ process-wide set when it fails. `append` refuses such a path with the new
 `StoreError::BarrierFailed` before any other check, including the duplicate
 check. `store` cannot depend on `cli`, so this is its own small copy of the
 D-1900 rule.
+
+### D-1908 — Only the owner-lock race is answered by a committed VIX receipt — 2026-10-03
+
+ledgers-1: `index_stop_vix::publish` answered EVERY failure of its own attempt
+with the committed receipt when one existed (`Err(_) if
+persistence::committed`). A failed receipt or directory barrier after this
+call's own 112 bytes were visible therefore returned the saved companion as a
+publication, although nothing had made it durable. The closure now returns
+`Ok(Some(why))` only for `prepare_in_namespace`'s owner-lock refusal, which
+wrote nothing (`boolean_candidate_persistence::lost_owner_race`, matched on the
+new `OWNER_REFUSED` prefix). Every other failure of this call propagates. The
+race answer itself is unchanged.
