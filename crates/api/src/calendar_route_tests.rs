@@ -324,7 +324,15 @@ fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
         rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
     };
 
-    let gaps = body_of(server, "async fn gaps_json(");
+    let handler = body_of(server, "async fn gaps_json(");
+    assert!(
+        handler.contains("audit_span(&site, asked, span.clone(), peers).await"),
+        "/gaps.json audits its span through the admitted helper:\n{handler}"
+    );
+    for call in ["audit_one(", "audit_cash_schedule("] {
+        assert!(!handler.contains(call), "and calls no {call} inline");
+    }
+    let gaps = body_of(server, "async fn audit_span(");
     let pool = gaps
         .rfind("crate::detail::run_calendar(move ||")
         .expect("the audits are admitted to the calendar pool");

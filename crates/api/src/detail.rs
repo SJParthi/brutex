@@ -1204,7 +1204,11 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.contains("gone"), "{body}");
         let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-        assert!(parsed["error"].is_string());
+        assert!(
+            parsed
+                .get("error")
+                .is_some_and(serde_json::Value::is_string)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

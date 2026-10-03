@@ -2626,19 +2626,43 @@ async fn gaps_json(
             Err(why) => return calendar_admission_refused(&why),
         }
     };
-    // OFF THE ASYNC WORKERS, AND ADMITTED: every month's bar file and its
-    // dated cash-session evidence are read in the calendar pool the peer vote
-    // already used, in one admission for the whole span. The evidence reader
-    // is an `async fn` whose local variant never awaits a fetch, but it reads
-    // and locks files inline, so it is driven to completion on the blocking
-    // thread by the runtime's handle rather than on a worker. W1-api2-11,
-    // D-1508.
+    let (months, peers) = match audit_span(&site, asked, span.clone(), peers).await {
+        Ok(done) => done,
+        Err(why) => return calendar_admission_refused(&why),
+    };
+
+    (
+        axum::http::StatusCode::OK,
+        json(),
+        gaps_body(&months, &span, &peers, truncated_range),
+    )
+}
+
+/// Every month of a `/gaps.json` span, audited OFF THE ASYNC WORKERS.
+///
+/// Each month's bar file and its dated cash-session evidence are read in the
+/// calendar pool the peer vote already used, in one admission for the whole
+/// span. The evidence reader is an `async fn` whose local variant never awaits
+/// a fetch, but it reads and locks files inline, so it is driven to completion
+/// on the blocking thread by the runtime's handle rather than on a worker.
+/// `peers` goes in and comes back, because the answer renders from it.
+/// Split from `gaps_json` for the workspace's 100-line ceiling. W1-api2-11,
+/// D-1508.
+///
+/// # Errors
+///
+/// [`crate::detail::RunError`] when the calendar pool refuses or cannot join.
+async fn audit_span(
+    site: &Loaded,
+    asked: Addressed,
+    span: Vec<store::path::YearMonth>,
+    peers: PeerCalendar,
+) -> Result<(Vec<AuditedMonth>, PeerCalendar), crate::detail::RunError> {
     let runtime = tokio::runtime::Handle::current();
-    let audit_site = std::sync::Arc::clone(&site);
-    let audit_span = span.clone();
-    let audited = crate::detail::run_calendar(move || {
-        let mut months = Vec::with_capacity(audit_span.len());
-        for month in &audit_span {
+    let audit_site = std::sync::Arc::clone(site);
+    crate::detail::run_calendar(move || {
+        let mut months = Vec::with_capacity(span.len());
+        for month in &span {
             let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, *month));
             let mut audited = audit_one(
                 &audit_site,
@@ -2652,17 +2676,7 @@ async fn gaps_json(
         }
         (months, peers)
     })
-    .await;
-    let (months, peers) = match audited {
-        Ok(done) => done,
-        Err(why) => return calendar_admission_refused(&why),
-    };
-
-    (
-        axum::http::StatusCode::OK,
-        json(),
-        gaps_body(&months, &span, &peers, truncated_range),
-    )
+    .await
 }
 
 /// The audit's whole answer, from the months it walked.
