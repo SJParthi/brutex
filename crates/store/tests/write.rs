@@ -1563,6 +1563,22 @@ fn a_truncated_month_whose_sidecar_proves_records_is_refused_not_reinitialised()
     }
 }
 
+/// D-1520's boundary. A month file DELETED whole, its sidecar left behind, is
+/// created again as before: only a file that existed can have been truncated or
+/// zeroed, and a deletion is an explicit act the refusal does not second-guess.
+/// Stated in `docs/06-limits.md`.
+#[test]
+fn a_deleted_month_file_is_created_again_despite_its_sidecar() {
+    let scratch = Scratch::new("deleted-month");
+    let mut file = open(scratch.root()).expect("create");
+    file.append(&batch(0, 3)).expect("three bars commit");
+    drop(file);
+    let on_disk = bars_path().to_path_buf(scratch.root());
+    fs::remove_file(&on_disk).expect("the deletion");
+    let reopened = open(scratch.root()).expect("a deleted month is created again");
+    assert_eq!(reopened.header().n_valid, 0, "and it starts empty");
+}
+
 /// hunt-store-2 (D-1521). A genesis slot write that tore — the zero fill
 /// landed and only part of the 64-byte slot did — leaves a file that cannot
 /// hold a record and has no committed header. With no sidecar entry beside it

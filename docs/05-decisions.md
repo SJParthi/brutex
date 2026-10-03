@@ -53422,6 +53422,13 @@ is refused as the new `StoreError::CommittedRecordsLost`, naming the bar file,
 the sidecar and its length, and both files are left as found. An absent or
 empty sidecar still permits the repair.
 
+**Bounded to a file that existed.** A month `.bin` deleted whole, with its
+sidecar left behind, is created again as before: the refusal guards against a
+file truncated or zeroed in place, and does not second-guess an explicit
+deletion — which several test fixtures use to replace a month. That a deletion
+still loses the month's records silently is stated in `docs/06-limits.md`.
+Proven by `store::write::a_deleted_month_file_is_created_again_despite_its_sidecar`.
+
 **Rejected.** A Warn line and repair anyway: the month would still reopen empty
 and accept a new index 0. Deleting the stale sidecar: §3 rule 8.
 

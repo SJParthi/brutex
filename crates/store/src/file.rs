@@ -1408,6 +1408,10 @@ impl BarFile {
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
 
+        // Whether the month file was THERE before this open. Only a file that
+        // existed can have been truncated or zeroed; one this open creates was
+        // deleted whole, an explicit act D-1520 does not second-guess.
+        let existed = matches!(fs::symlink_metadata(&bars_path), Ok(meta) if meta.is_file());
         let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
 
@@ -1461,7 +1465,9 @@ impl BarFile {
             let mut head = vec![0u8; usize::try_from(len).unwrap_or(REGION_LEN)];
             read_fully(&bars, &bars_path, 0, &mut head)?;
             if is_interrupted_genesis(&head) {
-                refuse_if_sealed(&bars_path, &path.with_file(checksum_kind).to_path_buf(root))?;
+                if existed {
+                    refuse_if_sealed(&bars_path, &path.with_file(checksum_kind).to_path_buf(root))?;
+                }
                 initialise(&bars, &bars_path, symbol_id, timeframe_secs, born)?;
                 fsync_dir(&dir)?;
                 len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();

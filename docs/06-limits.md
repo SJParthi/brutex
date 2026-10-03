@@ -13942,6 +13942,11 @@ bounds are all nonzero.
   this, because the slot CRC covers the flag. The CRC is integrity, not
   authentication. Closing it would need "sealed" recorded outside the header,
   which is a new store format version, not an in-place change.
+* **A deleted month file is not detected (D-1520).** The writer refuses to
+  re-initialise a month file truncated or zeroed in place when its `.crc`
+  proves records were committed. A `.bin` deleted whole, sidecar left behind,
+  is created again empty, as before: a deletion is an explicit act, and the
+  lost records are not named.
 * **Run-id resumption reads one block (D-1536).** `reserve_run_id` resumes above
   the largest `run` in the last 64 KiB of the newest non-empty log file. A run id
   carried only by lines further back, and above every later `seq`, is not seen.
