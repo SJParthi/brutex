@@ -53403,3 +53403,105 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+### D-1620 — Search Lineage V4 writes a pair's members in one write, rolls a failed write back, and lets the exact retry finish a lone NIFTY member — 2026-10-03
+
+**What was wrong (c4b-1).** `AnchoredSearchLineageV4Ledger::append_locked`
+wrote the pair's two member records as two `write_all` calls, and
+`append_raw` was `seek(End) + write_all` with no rollback. Two shapes left a
+tail no retry could repair: a crash between the two writes (one whole member
+past the last Completion, which `scan` refused as "partial trailing pair;
+history is not rewritten"), and a write error partway through a record
+(ENOSPC, EIO), which left a ragged file every later open, read-only included,
+refused for good. Admission V3/V4 had the same class and were fixed by D-0916;
+`frontier.rs` already truncates back with `set_len`.
+
+**The change.**
+
+- Both members are encoded into one buffer and written in one call.
+- `append_raw` goes through `append_with_rollback`, which records the end
+  offset and, on a write error, truncates back to it and names both errors when
+  the truncation fails too. It covers the member and the Completion append.
+- `scan` accepts exactly one whole trailing member when it is the NIFTY member
+  of the next sequence. It is retained with its sequence zeroed, never
+  rewritten. A writer completes it only for the exact retry whose NIFTY member
+  equals it, by appending the BANKNIFTY member alone and then the Completion.
+  A foreign retry is refused and the bytes are left as they are. A lone
+  BANKNIFTY member, or a NIFTY member at the wrong sequence, still refuses.
+- `require_append_capacity` counts members from the Completions
+  (`2 × next pairs`), so a retained orphan is not charged twice.
+
+**What is not covered.** A crash in the middle of one `write_all` can still
+leave a partial record. That is a torn write, not a record prefix, and it is
+still refused rather than guessed at. Stored bytes for a clean append are
+unchanged: the same two records in the same order. No identity, digest or
+format changed.
+
+**What it proves.**
+`cli::anchored_search_lineage_v4::tests::full_synced_tail_is_retryable_but_partial_or_foreign_tail_refuses`
+now requires the lone NIFTY member to be readable, a foreign retry to refuse
+without touching it, the exact retry to finish it to exactly two members and
+one Completion, a rerun to reuse, and a lone BANKNIFTY or late member to
+refuse.
+`cli::anchored_search_lineage_v4::tests::a_failed_member_or_completion_write_truncates_back_and_stays_readable`
+injects a short write into each file and requires the file byte-identical
+afterwards and the committed pair still readable.
+
+The dead V2 and V3 lineage modules keep the old `append_raw`; see D-1631.
+
+### D-1629 — Shrink the admission block index to the populations it holds after the open scan — 2026-10-03
+
+**What was wrong (W2-cli1-6).** `scan_decisions` reserved the block map, the
+order vector and the seen set at the DECISION count, because the population
+count is unknown until the scan ends. `blocks` and `order` were moved into the
+ledger with that capacity, and a `HashMap` never shrinks, so retained index
+space was O(decisions), not O(populations).
+
+**The change.** `blocks.shrink_to_fit()` and `order.shrink_to_fit()` before
+the scan returns. One rehash per open, O(populations). Nothing stored changes.
+
+**What it proves.**
+`cli::admission_store::tests::the_retained_block_index_is_sized_by_populations_not_decisions`
+commits 100 decisions of one population and requires the reopened index to
+hold fewer than 16 slots.
+
+### D-1630 — The admission ledger finishes a crash prefix of a decision block for its exact retry — 2026-10-03
+
+**What was wrong (W2-cli1-4).** `append_decisions` wrote one 544-byte record
+per `write_all` and rolled back only on an in-process I/O error. A process
+killed after k of n records left a whole-record prefix. `check_header`
+accepted the length, `scan_decisions` made it the trailing orphan with
+`count = k`, `verify_supplied_decisions` refused the exact retry on
+`block.count != supplied_count`, and every other population was refused
+"must be recovered before". The ledger was wedged for good.
+
+**The change.** The block is written as one buffer. On a retry of the
+trailing orphan population, `complete_orphan_decisions` reads every stored
+record and requires it to equal the supplied record at the same index, and
+requires the block to end exactly at the end of the decision file; it then
+appends the missing suffix (one write, rolled back on error) and the
+Completion. A stored block longer than the retry, a differing record, an
+empty retry, or a block that does not end the file still refuses. The
+finished file is byte-identical to a clean commit's.
+
+**What it proves.**
+`cli::admission_store::tests::a_crash_prefix_of_a_decision_block_is_completed_by_the_exact_retry`
+writes every prefix length 1..3 of a four-decision block, requires a changed
+and a shorter retry to refuse with the file untouched, the exact retry to
+append, both files to equal a clean commit's bytes, a fresh page to read all
+four, and a rerun to reuse.
+
+### D-1631 — Search Lineage V2 and V3 are dead outside tests; their costs and append are stated, not fixed — 2026-10-03
+
+**What was found (W2-cli1-3, W2-cli1-2; and the V2/V3 half of c4b-1).**
+`anchored_search_lineage_v2` and `_v3` rescan their whole files on every
+append (`append_completion` ends in `self.scan()`), each lookup rehashes
+every file, and `append_raw` has no rollback. Both modules are compiled into
+non-test builds only under `allow(dead_code)` / `expect(dead_code)` in
+`crates/cli/src/lib.rs`; no production caller exists. V4 is the live ledger
+(`step3_orchestrator.rs` imports it) and carries the fixes in D-1620.
+
+**The decision.** Not changed. A fix to code nothing runs adds mutation and
+coverage surface for no operator effect. `docs/06-limits.md` now states the
+cost and the dead status, so the module docs are not the only record. If
+either module gains a caller, D-1620's rollback and orphan rule must be
+ported in the same change.

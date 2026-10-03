@@ -929,7 +929,7 @@ impl AdmissionAuthorityLedger {
                     hex(&population_id)
                 ));
             }
-            self.verify_supplied_decisions(population_id, decisions)?;
+            self.complete_orphan_decisions(population_id, decisions)?;
         } else if decisions.is_empty() {
             if self.blocks.contains_key(&population_id) {
                 return Err(format!(
@@ -946,25 +946,105 @@ impl AdmissionAuthorityLedger {
         Ok(AdmissionCommitOutcomeV1::Appended(receipt))
     }
 
+    /// Finishes the trailing orphan block for its exact retry.
+    ///
+    /// A process killed between decision writes left a whole-record PREFIX of
+    /// the block. `verify_supplied_decisions` refused it on count, and every
+    /// other population was refused until it was recovered, so the ledger was
+    /// wedged for good (W2-cli1-4). Now a stored prefix that equals the
+    /// supplied decisions record for record, and ends exactly at the end of
+    /// the decision file, is completed by appending the missing suffix. A
+    /// longer stored block, a differing record or a block not at the tail is
+    /// still refused. D-1630.
+    fn complete_orphan_decisions(
+        &mut self,
+        population_id: [u8; 32],
+        decisions: &[AdmissionDecisionRecordV1],
+    ) -> Result<(), AdmissionStoreRefusal> {
+        let Some(block) = self.blocks.get(&population_id).copied() else {
+            return self.verify_supplied_decisions(population_id, decisions);
+        };
+        let supplied_count = u64::try_from(decisions.len())
+            .map_err(|_| "admission decision count does not fit u64".to_owned())?;
+        if decisions.is_empty() || block.count >= supplied_count {
+            return self.verify_supplied_decisions(population_id, decisions);
+        }
+        let stored = usize::try_from(block.count)
+            .map_err(|_| "stored admission decision count does not fit usize".to_owned())?;
+        let (prefix, suffix) = decisions
+            .split_at_checked(stored)
+            .ok_or_else(|| "admission orphan prefix is longer than the retry".to_owned())?;
+        for (index, supplied) in prefix.iter().enumerate() {
+            let sequence = u64::try_from(index)
+                .map_err(|_| "admission decision sequence does not fit u64".to_owned())?;
+            let held = read_decision_in_block(
+                &mut self.decision_file,
+                &self.decision_path,
+                block,
+                sequence,
+            )?;
+            if held != *supplied {
+                return Err(format!(
+                    "population {} orphan admission decision {sequence} differs from its prepared bytes",
+                    hex(&population_id)
+                ));
+            }
+        }
+        let block_end = block
+            .count
+            .checked_mul(ADMISSION_DECISION_STRIDE)
+            .and_then(|bytes| block.first.checked_add(bytes))
+            .ok_or_else(|| "admission orphan block end overflowed u64".to_owned())?;
+        if block_end != self.decision_generation.len {
+            return Err(format!(
+                "population {} orphan admission block does not end the decision file",
+                hex(&population_id)
+            ));
+        }
+        self.write_decisions(population_id, block.first, block_end, suffix, decisions.len())
+    }
+
     fn append_decisions(
         &mut self,
         population_id: [u8; 32],
         decisions: &[AdmissionDecisionRecordV1],
     ) -> Result<(), AdmissionStoreRefusal> {
         let at = self.decision_generation.len;
+        self.write_decisions(population_id, at, at, decisions, decisions.len())
+    }
+
+    /// Writes `decisions` at `at` as ONE buffer, so a kill can no longer stop
+    /// between records of one call, and rolls a failed write back to `at`.
+    /// The block that results starts at `first` and holds `total` records.
+    fn write_decisions(
+        &mut self,
+        population_id: [u8; 32],
+        first: u64,
+        at: u64,
+        decisions: &[AdmissionDecisionRecordV1],
+        total: usize,
+    ) -> Result<(), AdmissionStoreRefusal> {
+        let bytes = decisions
+            .len()
+            .checked_mul(ADMISSION_DECISION_STRIDE_BYTES)
+            .ok_or_else(|| "admission decision block bytes overflowed usize".to_owned())?;
+        let mut buffer = Vec::new();
+        buffer
+            .try_reserve_exact(bytes)
+            .map_err(|why| format!("admission decision block could not reserve {bytes}: {why}"))?;
+        for decision in decisions {
+            buffer.extend_from_slice(&decision.to_bytes()?);
+        }
         self.decision_file
             .seek(SeekFrom::Start(at))
             .map_err(|why| format!("{} append seek failed: {why}", self.decision_path.display()))?;
-        for decision in decisions {
-            let raw = decision.to_bytes()?;
-            if let Err(why) = self.decision_file.write_all(&raw) {
-                return Err(rollback_message(
-                    &self.decision_file,
-                    at,
-                    "admission decision block",
-                    &why,
-                ));
-            }
+        if let Err(why) = self.decision_file.write_all(&buffer) {
+            return Err(rollback_message(
+                &self.decision_file,
+                at,
+                "admission decision block",
+                &why,
+            ));
         }
         if let Err(why) = self.decision_file.sync_all() {
             return Err(rollback_message(
@@ -975,10 +1055,10 @@ impl AdmissionAuthorityLedger {
             ));
         }
         self.decision_generation = file_generation(&self.decision_file, &self.decision_path)?;
-        let count = u64::try_from(decisions.len())
+        let count = u64::try_from(total)
             .map_err(|_| "admission decision count does not fit u64".to_owned())?;
         self.blocks
-            .insert(population_id, DecisionBlock { first: at, count });
+            .insert(population_id, DecisionBlock { first, count });
         self.trailing_orphan = Some(population_id);
         Ok(())
     }
@@ -1257,6 +1337,12 @@ fn scan_decisions(
     if let Some((identity, block, _)) = current {
         blocks.insert(identity, block);
     }
+    // Reserved at the DECISION count because the population count is unknown
+    // until the scan ends; the retained index is then shrunk to the
+    // populations it holds, so its space is O(populations) as documented,
+    // not O(decisions). One rehash per open (W2-cli1-6, D-1629).
+    blocks.shrink_to_fit();
+    order.shrink_to_fit();
     Ok(DecisionScan { blocks, order })
 }
 
@@ -2314,6 +2400,117 @@ mod tests {
                 .completion(population_id)
                 .expect("completion after recovery")
                 .is_some()
+        );
+        drop(reopened);
+        cleanup(&root);
+    }
+
+    /// W2-cli1-4, D-1630: a kill between decision writes left a whole-record
+    /// prefix that wedged the ledger. The exact retry now completes it, the
+    /// bytes equal a clean commit's, and every other retry still refuses.
+    #[test]
+    fn a_crash_prefix_of_a_decision_block_is_completed_by_the_exact_retry() {
+        let clean_root = root("prefix-clean");
+        let policy = policy();
+        let population_id = digest(16);
+        let decisions = four_decisions(population_id);
+        let mut clean = AdmissionAuthorityLedger::open(&clean_root).expect("clean ledger");
+        clean
+            .commit(population_id, digest(8), &policy, &decisions)
+            .expect("clean commit");
+        drop(clean);
+        let clean_decisions =
+            std::fs::read(AdmissionAuthorityLedger::decision_path(&clean_root)).expect("clean");
+        let clean_completions =
+            std::fs::read(AdmissionAuthorityLedger::completion_path(&clean_root)).expect("clean");
+
+        for written in 1..decisions.len() {
+            let root = root("prefix");
+            drop(AdmissionAuthorityLedger::open(&root).expect("create files"));
+            let path = AdmissionAuthorityLedger::decision_path(&root);
+            let mut raw_file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open raw decision sidecar");
+            for decision in decisions.get(..written).expect("prefix") {
+                raw_file
+                    .write_all(&decision.to_bytes().expect("decision bytes"))
+                    .expect("write prefix");
+            }
+            drop(raw_file);
+            let prefix_bytes = std::fs::read(&path).expect("prefix bytes");
+
+            let mut reopened = AdmissionAuthorityLedger::open(&root).expect("reopen prefix");
+            let mut changed = decisions.clone();
+            changed[0] = decision(population_id, 0, 3);
+            assert!(
+                reopened
+                    .commit(population_id, digest(8), &policy, &changed)
+                    .is_err(),
+                "a retry whose prefix differs must refuse"
+            );
+            let shorter = decisions.get(..written - 1).expect("shorter").to_vec();
+            assert!(
+                reopened
+                    .commit(population_id, digest(8), &policy, &shorter)
+                    .is_err(),
+                "a retry shorter than the stored prefix must refuse"
+            );
+            assert_eq!(std::fs::read(&path).expect("unchanged"), prefix_bytes);
+            assert!(matches!(
+                reopened.commit(population_id, digest(8), &policy, &decisions),
+                Ok(AdmissionCommitOutcomeV1::Appended(_))
+            ));
+            drop(reopened);
+            assert_eq!(std::fs::read(&path).expect("completed"), clean_decisions);
+            assert_eq!(
+                std::fs::read(AdmissionAuthorityLedger::completion_path(&root)).expect("done"),
+                clean_completions
+            );
+            let mut fresh = AdmissionAuthorityLedger::open(&root).expect("fresh reopen");
+            assert_eq!(
+                fresh
+                    .page(population_id, 0, 4)
+                    .expect("page")
+                    .map(|page| page.len()),
+                Some(4)
+            );
+            assert!(matches!(
+                fresh.commit(population_id, digest(8), &policy, &decisions),
+                Ok(AdmissionCommitOutcomeV1::Reused(_))
+            ));
+            drop(fresh);
+            cleanup(&root);
+        }
+        cleanup(&clean_root);
+    }
+
+    /// W2-cli1-6, D-1629: the retained block index is sized by populations,
+    /// not by the decision count it was reserved at during the scan.
+    #[test]
+    fn the_retained_block_index_is_sized_by_populations_not_decisions() {
+        let root = root("index-capacity");
+        let population_id = digest(17);
+        let decisions: Vec<_> = (0_u64..100)
+            .map(|sequence| {
+                decision(
+                    population_id,
+                    sequence,
+                    u8::try_from(sequence % 4).expect("status"),
+                )
+            })
+            .collect();
+        let mut ledger = AdmissionAuthorityLedger::open(&root).expect("ledger");
+        ledger
+            .commit(population_id, digest(8), &policy(), &decisions)
+            .expect("commit 100 decisions");
+        drop(ledger);
+        let reopened = AdmissionAuthorityLedger::open(&root).expect("reopen");
+        assert_eq!(reopened.blocks.len(), 1);
+        assert!(
+            reopened.blocks.capacity() < 16,
+            "one population retained {} slots",
+            reopened.blocks.capacity()
         );
         drop(reopened);
         cleanup(&root);

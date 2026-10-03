@@ -6216,3 +6216,12 @@ old line regex the same input and watched it pass.
 | CUH-06 | One candidate-trade `Summary` hashes its catalog once across thirty page-level reads, a `read` summary adds none, and a replaced or removed catalog is still refused on every page surface (D-0991) | `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change` | ✓ |
 | CUH-07 | An empty candidate-trade catalog is verified once and its absent tier is refused (D-0991) | `cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses` | ✓ |
 | CUH-08 | A capture derives slice facts once for all of its candidate sides, records a side with no trading cell with no rows, and issues exactly four `fsync`s per candidate side (D-0991) | `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side` | ✓ |
+
+### Audit fixer 3 follow-ups (D-1620 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| FX3-01 | A Search Lineage V4 pair's members are written in one call; a failed member or Completion write truncates back and leaves the file byte-identical and readable (D-1620) | `cli::anchored_search_lineage_v4::tests::a_failed_member_or_completion_write_truncates_back_and_stays_readable` | ✓ |
+| FX3-02 | One whole NIFTY member of the next sequence past the last Completion is readable, untouched by a foreign retry, and finished only by the exact retry; a lone BANKNIFTY or out-of-sequence member still refuses (D-1620) | `cli::anchored_search_lineage_v4::tests::full_synced_tail_is_retryable_but_partial_or_foreign_tail_refuses` | ✓ |
+| FX3-03 | The retained admission block index is sized by populations, not decisions (D-1629) | `cli::admission_store::tests::the_retained_block_index_is_sized_by_populations_not_decisions` | ✓ |
+| FX3-04 | A whole-record prefix of an admission decision block is finished only by the exact retry, to bytes equal to a clean commit; a differing or shorter retry refuses with the file untouched (D-1630) | `cli::admission_store::tests::a_crash_prefix_of_a_decision_block_is_completed_by_the_exact_retry` | ✓ |

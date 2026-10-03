@@ -13911,3 +13911,23 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Search Lineage V2 and V3 rescan on every append, and are dead — D-1631, 3 October 2026
+
+`anchored_search_lineage_v2` and `anchored_search_lineage_v3` are compiled
+outside tests only under `allow(dead_code)` / `expect(dead_code)`; nothing in
+a production path calls them. Stated so the cost is not recorded only in
+their module docs:
+
+- **Append is O(file bytes + pairs).** `append_completion` rehashes the
+  Completion file and ends in `self.scan()`, which rebuilds the receipt index
+  from every pair. Cumulative cost over N appends is Θ(N²).
+- **Lookup is O(file bytes).** V2's `structural_receipt` hashes all three
+  files through `require_unchanged`; V3's lookup calls it twice.
+- **A failed write is not rolled back.** `append_raw` is `seek(End) +
+  write_all`. A short write leaves a ragged tail every later open refuses.
+  The live V4 ledger rolls back and recovers a lone NIFTY member (D-1620);
+  V2 and V3 do not.
+
+These are not fixed because no run reaches them. A change that gives either
+module a caller must port D-1620 and restate this section.
