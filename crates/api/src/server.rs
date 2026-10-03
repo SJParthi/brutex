@@ -15450,6 +15450,49 @@ fn bars_refusal(
     )
 }
 
+/// The feed a `/bars` request names, under either spelling.
+///
+/// `feed=` is how every sibling read route spells it (`/bars.json`,
+/// `/bars/window.json`, `/store`); this page read only `vendor=`, so
+/// `/bars?feed=groww` was answered with Dhan's month under 200 (P1-02-03,
+/// D-1765). Both are read now. `vendor=` stays because the links this server
+/// renders carry it. A request carrying both with different values is
+/// refused: neither can be chosen without guessing.
+///
+/// # Errors
+///
+/// `Err(())` when `feed` and `vendor` are both present and differ, compared
+/// case-blind as [`ingest::parse_vendor`] compares.
+fn bars_feed_word(query: &str) -> Result<String, ()> {
+    let feed = param(query, "feed");
+    let vendor = param(query, "vendor");
+    match (feed.is_empty(), vendor.is_empty()) {
+        (false, false) if !feed.eq_ignore_ascii_case(&vendor) => Err(()),
+        (false, _) => Ok(feed),
+        _ => Ok(vendor),
+    }
+}
+
+/// The vendor a `/bars` request names, or the sentence its refusal carries.
+///
+/// ONE PARSER, shared with the pull form. This route had its own copy that
+/// compared with `==` while `ingest::parse_vendor` used `eq_ignore_ascii_case`,
+/// so `?vendor=Groww` meant a different vendor here than there — one question,
+/// two answers, and BOTH silently fell back to Dhan. Being served Dhan's copy
+/// of a month after asking for Groww's, under HTTP 200, is the worst class of
+/// defect in this repository: a wrong answer wearing the shape of a right one.
+fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
+    let word = bars_feed_word(query).map_err(|()| {
+        "`feed` and `vendor` name different feeds. Refused rather than \
+         answered from either: the page cannot know which one was meant."
+    })?;
+    ingest::parse_vendor(&word).ok_or(
+        "that is not a vendor this build has a feed for. Refused rather \
+         than answered from another vendor's prefix — a month served from \
+         the wrong feed looks exactly like the right one.",
+    )
+}
+
 /// The exchange and segment to read one symbol's bars from.
 ///
 /// [`Unlocated`] means **nothing placed under that name and nothing asked** — the
@@ -15511,49 +15554,6 @@ fn bars_refusal(
 /// Only that census can say where that feed filed the name, so when it cannot
 /// be read and the caller did not give the pair, the route refuses and names
 /// it, as `/calendar.json` does.
-/// The feed a `/bars` request names, under either spelling.
-///
-/// `feed=` is how every sibling read route spells it (`/bars.json`,
-/// `/bars/window.json`, `/store`); this page read only `vendor=`, so
-/// `/bars?feed=groww` was answered with Dhan's month under 200 (P1-02-03,
-/// D-1765). Both are read now. `vendor=` stays because the links this server
-/// renders carry it. A request carrying both with different values is
-/// refused: neither can be chosen without guessing.
-///
-/// # Errors
-///
-/// `Err(())` when `feed` and `vendor` are both present and differ, compared
-/// case-blind as [`ingest::parse_vendor`] compares.
-fn bars_feed_word(query: &str) -> Result<String, ()> {
-    let feed = param(query, "feed");
-    let vendor = param(query, "vendor");
-    match (feed.is_empty(), vendor.is_empty()) {
-        (false, false) if !feed.eq_ignore_ascii_case(&vendor) => Err(()),
-        (false, _) => Ok(feed),
-        _ => Ok(vendor),
-    }
-}
-
-/// The vendor a `/bars` request names, or the sentence its refusal carries.
-///
-/// ONE PARSER, shared with the pull form. This route had its own copy that
-/// compared with `==` while `ingest::parse_vendor` used `eq_ignore_ascii_case`,
-/// so `?vendor=Groww` meant a different vendor here than there — one question,
-/// two answers, and BOTH silently fell back to Dhan. Being served Dhan's copy
-/// of a month after asking for Groww's, under HTTP 200, is the worst class of
-/// defect in this repository: a wrong answer wearing the shape of a right one.
-fn bars_vendor(query: &str) -> Result<Vendor, &'static str> {
-    let word = bars_feed_word(query).map_err(|()| {
-        "`feed` and `vendor` name different feeds. Refused rather than \
-         answered from either: the page cannot know which one was meant."
-    })?;
-    ingest::parse_vendor(&word).ok_or(
-        "that is not a vendor this build has a feed for. Refused rather \
-         than answered from another vendor's prefix — a month served from \
-         the wrong feed looks exactly like the right one.",
-    )
-}
-
 fn locate_series(site: &Site, query: &str, symbol: &str) -> Result<(String, String), Unlocated> {
     let asked_exchange = param(query, "exchange");
     let asked_segment = param(query, "segment");

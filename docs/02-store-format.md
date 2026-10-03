@@ -463,7 +463,7 @@ byte 0                 32768                                       EOF
 a constant on the read path. 32768 divides by both strides, so an entry is
 64-byte aligned at either one and never straddles a cache line.
 
-### 11.3 One header slot — 64 bytes, both versions
+### 11.3 One header slot — 64 bytes, every version
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|

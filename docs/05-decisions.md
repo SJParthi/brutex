@@ -54836,3 +54836,30 @@ misdirected parameter as a different request and answered it under 200.
 
 The emitted-events accounting in `api::emitted` moves 61 to 63 sites and 31 to
 33 rows; both new Warns are driven and read back off the installed sink.
+
+### D-1766 — Round 1's own fixes, corrected where pass 2 found them wrong — 2026-10-03
+
+The second pass over round 1's fixes found seven defects in them, and one
+older gap in the dev proxy.
+
+- The dev-proxy drift test (`web/tests/proxy.test.js`) found routes only through
+  callees named `fetch`, `ask` or an `ask` import alias. The `$lib` readers take
+  their fetcher as an injected `request`, so `/expression-search.json`,
+  `/candidate-trades.json`, `/index-stop-vix.json`, `/index-stop-candles.json`
+  and `/index-stop-ranking.json` were called, served and absent from
+  `vite.config.js` ROUTES, answered under `npm run dev` by the HTML fallback.
+  The scan now also reads every absolute `.json` literal, and the five are
+  listed (P2-02-01).
+- D-1762 named `/audit.json` for the invocation-id change. The route changed is
+  `/backtest/audit.json` (`operation_audit::parse`); `/audit.json` is the pull
+  journal and takes neither parameter. D-1762 stands as written, since the
+  ledger is append-only; this entry is the correction, and ZR-26 and ZR-27 add
+  the invariant rows D-1761 and D-1762 lacked (P2-01-03).
+- The frontier doc-binding test was inserted inside the stride test's doc
+  comment, and `bars_feed_word` and `bars_vendor` between `locate_series` and
+  its doc. Each doc is back on its own function (P2-01-01, P2-01-02).
+- `note_unreadable_records` was documented as having two call sites after
+  D-1762 added a third. The doc, `docs/06-limits.md` and the test that binds
+  them now name all three, and the test pins that `read_in_time` is reached
+  only from `window` (P2-01-04).
+- `docs/02-store-format.md` §11.3 said "both versions" over three.

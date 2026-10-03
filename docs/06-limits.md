@@ -3250,9 +3250,11 @@ the rejected design. Gate 12 flagged it as an unproven cost claim, which was
 correct — the resolution is the `UNVERIFIED` marker the gate provides, not a
 fabricated benchmark.
 
-**What is bounded, and is not unverified:** `note_unreadable_records` is called
-from exactly two places — `page` and `window` — each once per request and outside
-every loop over files or records; it returns on its first line when `faults` is
+**What is bounded, and is not unverified:** `note_unreadable_records`
+has three call sites — `page`, `window`'s seek branch, and `read_in_time`, which
+only `window` calls, once — each reached once per request and outside every loop
+over files or records (this said "exactly two places" after D-1762 added the
+third; P2-01-04, D-1766); it returns on its first line when `faults` is
 empty, and otherwise emits once. At most one event per request, whatever the
 files do. (This paragraph used to name a `read_page` that does not exist in
 `bars.rs`, while the call sat inside `slots`, which a window runs once per month

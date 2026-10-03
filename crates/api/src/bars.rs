@@ -371,9 +371,10 @@ fn open_classified(
 /// reason for the shape below, not as a measurement. `CLAUDE.md` §3 rule 6, and
 /// `docs/06-limits.md` §44.
 ///
-/// **What IS bounded here, structurally:** this function is called from
-/// exactly two places — [`page`] and [`window`] — each once per request and
-/// outside every loop over files or records, and it returns on the first line
+/// **What IS bounded here, structurally:** this function has three call
+/// sites — [`page`], [`window`]'s seek branch, and `read_in_time`, which only
+/// [`window`] calls, once — each reached once per request and outside every
+/// loop over files or records, and it returns on the first line
 /// when `faults` is empty and otherwise emits once. So the real cost is at most
 /// one event per request regardless of how many records, or how many of a
 /// window's up to [`MAX_WINDOW_MONTHS`] files, refuse, which is the property the
@@ -2471,12 +2472,19 @@ mod window_tests {
             .expect("slots ends")
             .0;
         assert!(!slots.contains("note_unreadable_records"));
-        // `page`, the seek branch and the reading branch of `window`: three
-        // call sites, each after its loop.
+        // `page`, the seek branch of `window`, and `read_in_time`: three call
+        // sites, each after its loop, plus the definition.
         assert_eq!(code.matches("note_unreadable_records(").count(), 4);
+        // `read_in_time` is reached only from `window`, once, so its call is
+        // still one per request (P2-01-04, D-1766).
+        assert_eq!(code.matches("read_in_time(").count(), 2);
         assert!(!code.contains("[`read_page`]"));
         let limits = include_str!("../../../docs/06-limits.md");
-        assert!(limits.contains("from exactly two places — `page` and `window`"));
+        assert!(
+            limits.contains(
+                "has three call sites — `page`, `window`'s seek branch, and `read_in_time`"
+            )
+        );
     }
 
     /// Null open interest sorts LAST in both directions, as `SortKey`

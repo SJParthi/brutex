@@ -6302,3 +6302,5 @@ old line regex the same input and watched it pass.
 | ZR-23 | `POST /universe/resolve` refuses an absent or unknown feed with 400 (D-1765) | `api::server::universe_route_tests::a_crawl_with_no_feed_or_an_unknown_one_is_refused_with_400` | ✓ |
 | ZR-24 | `/store` applies and shows the bar length it is given (D-1765) | `api::server::universe_route_tests::the_store_filter_reads_the_bar_length_it_is_given` | ✓ |
 | ZR-25 | `/engine/top.json` canonicalises a feed and refuses an unknown one (D-1765) | `api::topjson::tests::top_queries_and_unreadable_files_refuse_without_creating_a_store` | ✓ |
+| ZR-26 | `/backtest/audit.json` refuses an `invocation` or `before` inside the reserved id namespace with 400, not 503 (D-1762, D-1766) | `api::operation_audit::tests::queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages` | ✓ |
+| ZR-27 | A master row cut short of a right-most vendor-id column is unreadable and names the shortfall, never a routine skip (D-1761, D-1766) | `api::master::tests::a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall` | ✓ |

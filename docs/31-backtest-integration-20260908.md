@@ -1,5 +1,7 @@
 # Backtest integration verification — 8 September 2026
 
+> **The `target/` paths cited below are session artifacts, not permanent evidence.** `target/` is gitignored, so none of them exists in this repository and none can be opened from it. They record what a local session measured at the time; a claim here is reproducible only through the named test or command beside it. (They were Markdown links, every one dead in the tree — P2-02-03, D-1766.)
+
 **The complete historical sweep is not cleared yet.** The existing Backtest
 page now connects a saved search setting to its saved strategy tester.
 The launch, audit and recovery-safety connections are implemented. The current
@@ -66,17 +68,17 @@ campaign scope; it exposed those missing prerequisites and disabled launch.
 The following are local retained evidence directories, not links to a broker
 or trading service:
 
-- [Combined source and frontend logs](../target/sweep-audit-20260908/source-gates/).
-- [Durable invocation checks](../target/sweep-audit-20260908/audit-closure/implementation-notes.md).
-- [Recovery checks and unchanged-file evidence](../target/sweep-audit-20260908/recovery-closure/README.md).
-- [Research acceptance audit](../target/sweep-audit-20260908/research-acceptance/assessment.md).
-- [Dependency boundary assessment](../target/sweep-audit-20260908/dependency-closure/assessment.md).
-- [Actual browser pages and durable restart proof](../target/sweep-audit-20260908/browser-closure/browser-verification.md).
-- [Independent final production-source and archive comparison](../target/sweep-audit-20260908/browser-closure/final-source-provenance.md).
-- [Actual native-to-frontend launch contract](../target/sweep-audit-20260908/launch-closure/native-frontend-contract.json).
-- [Fresh D test totals and exact source comparison](../target/sweep-audit-20260908/source-gates/workspace-d-summary.md).
-- [Finite parser attack matrix](../target/sweep-audit-20260908/launch-closure/parser-adversarial/summary.md).
-- [Current browser and bounded-read recovery](../target/sweep-audit-20260908/browser-launch-d/verification.md).
+- Combined source and frontend logs (session artifact `target/sweep-audit-20260908/source-gates/`, not in this repository).
+- Durable invocation checks (session artifact `target/sweep-audit-20260908/audit-closure/implementation-notes.md`, not in this repository).
+- Recovery checks and unchanged-file evidence (session artifact `target/sweep-audit-20260908/recovery-closure/README.md`, not in this repository).
+- Research acceptance audit (session artifact `target/sweep-audit-20260908/research-acceptance/assessment.md`, not in this repository).
+- Dependency boundary assessment (session artifact `target/sweep-audit-20260908/dependency-closure/assessment.md`, not in this repository).
+- Actual browser pages and durable restart proof (session artifact `target/sweep-audit-20260908/browser-closure/browser-verification.md`, not in this repository).
+- Independent final production-source and archive comparison (session artifact `target/sweep-audit-20260908/browser-closure/final-source-provenance.md`, not in this repository).
+- Actual native-to-frontend launch contract (session artifact `target/sweep-audit-20260908/launch-closure/native-frontend-contract.json`, not in this repository).
+- Fresh D test totals and exact source comparison (session artifact `target/sweep-audit-20260908/source-gates/workspace-d-summary.md`, not in this repository).
+- Finite parser attack matrix (session artifact `target/sweep-audit-20260908/launch-closure/parser-adversarial/summary.md`, not in this repository).
+- Current browser and bounded-read recovery (session artifact `target/sweep-audit-20260908/browser-launch-d/verification.md`, not in this repository).
 
 Tests use adversarial fixtures to exercise failures. The displayed market
 observations above come from the retained real-OHLCV research archive. Those
@@ -90,6 +92,6 @@ output directories. Re-exporting the retained profiles with 89 byte-distinct
 native objects included all 62 started targets and all 13 crates. LLVM still
 reported 2,916 functions with mismatched data; the interrupted and later unrun
 tests remain missing. The resulting counts are diagnostic, not a coverage
-approval for either C or D. See the [coverage measurement and limits](../target/sweep-audit-20260908/coverage-c/measurement.md)
-and [final incomplete diagnostic receipt](../target/sweep-audit-20260908/coverage-c/README.md),
-including the [explicit-object diagnostic table](../target/sweep-audit-20260908/coverage-c/exact-unique-objects/coverage-summary.md).
+approval for either C or D. See the coverage measurement and limits (session artifact `target/sweep-audit-20260908/coverage-c/measurement.md`, not in this repository)
+and final incomplete diagnostic receipt (session artifact `target/sweep-audit-20260908/coverage-c/README.md`, not in this repository),
+including the explicit-object diagnostic table (session artifact `target/sweep-audit-20260908/coverage-c/exact-unique-objects/coverage-summary.md`, not in this repository).

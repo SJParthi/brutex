@@ -109,6 +109,14 @@ const ROUTES = [
 	'/engine/index-stop-launch.json',
 	'/index-stop.json',
 	'/index-stop-qualification.json',
+	// Five readers in `$lib` reached through an injected `request`, which the
+	// drift test could not see until P2-02-01 (D-1766) widened it to every
+	// absolute `.json` literal. Each is served by `crates/api`.
+	'/index-stop-vix.json',
+	'/index-stop-candles.json',
+	'/index-stop-ranking.json',
+	'/candidate-trades.json',
+	'/expression-search.json',
 	// ONE RUN'S ROUND TRIPS. The per-trade table on the backtest page rendered
 	// a padlock in every cell, because nothing wrote the file it reads and no
 	// route served it. `cli::trades` writes it now and `/trades.json` serves it,

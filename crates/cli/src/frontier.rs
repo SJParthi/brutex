@@ -2004,22 +2004,6 @@ mod tests {
         assert!(!v.win_rate && !v.reward_to_risk && !v.return_over_drawdown);
     }
 
-    /// The stride is what the writer writes, not what a comment claims.
-    ///
-    /// Version 2 added six money fields — `trades`, `cell_wins`, `pessimistic`,
-    /// `worst_trade`, `max_drawdown`, `min_win` — because the operator's ranking
-    /// is a question about money and version 1 stored none of it. The stride
-    /// moved from 144 to 192, and this assertion is what made that a decision
-    /// rather than an accident: it failed the moment the fields were added and
-    /// the number was not.
-    ///
-    /// IT DID IT AGAIN AT VERSION 3, which is the whole justification for keeping
-    /// it. `gross_win` and `gross_loss` were appended and `STRIDE` was moved to
-    /// 208 in the same edit; this line failed on the next `cargo test` because
-    /// the SUM below had not been told. Two of the operator's eleven ranking
-    /// criteria — average win and average loss — were structurally always zero
-    /// without those two sums, since `Cell::avg_win` is `gross_win / wins` and
-    /// `..Default::default()` had been supplying a zero for it.
     /// `docs/02-store-format.md` §13 states the version, the stride and the
     /// seal offset this build writes. It described version 4 (272-byte rows,
     /// seal at 264) three versions after the code moved (P1-16-02, D-1763).
@@ -2045,6 +2029,22 @@ mod tests {
         )));
     }
 
+    /// The stride is what the writer writes, not what a comment claims.
+    ///
+    /// Version 2 added six money fields — `trades`, `cell_wins`, `pessimistic`,
+    /// `worst_trade`, `max_drawdown`, `min_win` — because the operator's ranking
+    /// is a question about money and version 1 stored none of it. The stride
+    /// moved from 144 to 192, and this assertion is what made that a decision
+    /// rather than an accident: it failed the moment the fields were added and
+    /// the number was not.
+    ///
+    /// IT DID IT AGAIN AT VERSION 3, which is the whole justification for keeping
+    /// it. `gross_win` and `gross_loss` were appended and `STRIDE` was moved to
+    /// 208 in the same edit; this line failed on the next `cargo test` because
+    /// the SUM below had not been told. Two of the operator's eleven ranking
+    /// criteria — average win and average loss — were structurally always zero
+    /// without those two sums, since `Cell::avg_win` is `gross_win / wins` and
+    /// `..Default::default()` had been supplying a zero for it.
     #[test]
     fn the_stride_is_exactly_what_the_writer_writes() {
         //           identity  rank  mask      hits/n/mean/t/payoff/wins
