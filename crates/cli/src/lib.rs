@@ -15235,6 +15235,15 @@ pub fn range_over_for_attempt(
     )
 }
 
+/// The stop check before a range table is rendered (hunt-api-2, D-1551).
+fn rungs_not_cancelled(vendor_word: &str, underlying: &str, rungs: usize) -> Result<(), String> {
+    crate::cancel::check(|| {
+        format!(
+            "the {rungs} rung(s) of {underlying} on {vendor_word}, before their table was rendered"
+        )
+    })
+}
+
 /// Sweeps independent rungs in parallel while preserving their input order.
 ///
 /// [`SharedBy`] divides the machine candidate ceiling among exactly the rungs
@@ -15420,12 +15429,7 @@ fn range_over_inner(
     // A STOP ASKED FOR DURING THE RUNGS REFUSES THE WHOLE TABLE. Rungs that
     // finished before it are real, but a table missing the rest would read as
     // the complete comparison it is not (hunt-api-2, D-1551).
-    if let Err(why) = crate::cancel::check(|| {
-        format!(
-            "the {} rung(s) of {underlying} on {vendor_word}, before their table was rendered",
-            rows.len()
-        )
-    }) {
+    if let Err(why) = rungs_not_cancelled(vendor_word, underlying, rows.len()) {
         return format!("refused: {why}\n");
     }
     // EVERY RUNG REFUSED IS A REFUSAL, NOT A REPORT.
