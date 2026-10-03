@@ -453,6 +453,9 @@ impl ExecutionRunV1 {
         self.mask
     }
 
+    /// Test-only since D-1495: the one production caller now digests once and
+    /// calls [`Self::require_matches_terms`] itself.
+    #[cfg(test)]
     fn require_matches(
         self,
         series: ExecutionSeriesV1<'_>,
@@ -470,11 +473,12 @@ impl ExecutionRunV1 {
     /// The five run-identity checks, in their fixed order, against series
     /// terms the caller has already digested.
     ///
-    /// [`Self::require_matches`] digests the series here and now, which is one
-    /// BLAKE3 pass over every execution bar. An attested door has already
-    /// proved those digests equal to its resolution's own, so it passes the
-    /// resolution's copies instead and pays no pass. Both callers reach one
-    /// list of checks; there is no second copy to drift.
+    /// The replay door digests the series once and passes that digest here,
+    /// reusing it for its own `oos_data_digest` (D-1495). An attested door has
+    /// already proved those digests equal to its resolution's own, so it
+    /// passes the resolution's copies instead and pays no pass. Every caller
+    /// reaches one list of checks; there is no second copy to drift. The
+    /// test-only `require_matches` digests and calls this.
     fn require_matches_terms(
         self,
         instrument: &InstrumentKey,
