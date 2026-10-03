@@ -278,7 +278,8 @@ async fn window_pages_preserve_integer_values_month_gaps_and_change_provenance()
     let (_, first) = fixture.get("dir=asc&limit=1").await;
     assert!(first["bars"][0]["oi"].is_null());
     assert_eq!(first["bars"][0]["oichg_why"], "oi_null");
-    for options in ["offset=4", "limit=0", "sort=v&offset=99"] {
+    // `limit=0` is refused since D-1765 and is pinned with the other refusals.
+    for options in ["offset=4", "sort=v&offset=99"] {
         let (status, empty) = fixture.get(options).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(empty["bars"], serde_json::json!([]));

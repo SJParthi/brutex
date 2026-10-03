@@ -21654,7 +21654,7 @@ mod tests {
             "reasons",
             Some(&format!(
                 "{GROWW_HEAD}\
-                 NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,\n\
+                 NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,,NSE-SOMEBOND\n\
                  NSE,CASH,,SOMESME,EQ,SM,INE002A01018,,,NSE-SOMESME\n"
             )),
             None,
@@ -21695,10 +21695,10 @@ mod tests {
         let dir = masters(
             "routinebond",
             Some(&format!(
-                "{GROWW_HEAD}NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,\n"
+                "{GROWW_HEAD}NSE,CASH,,SOMEBOND,EQ,N2,INE002A01018,,,NSE-SOMEBOND\n"
             )),
             Some(&format!(
-                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,SOMEBOND,SOME BOND,DEB,N2,,,\n"
+                "{DHAN_HEAD}NSE,E,INE002A01018,EQUITY,SOMEBOND,SOME BOND,DEB,N2,,,,9999\n"
             )),
         );
         let (text, clean) = report(&dir);
@@ -22021,8 +22021,8 @@ mod tests {
             Some(&format!(
                 "{GROWW_HEAD}\
                  NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
-                 NSE,CASH,,NIFTY.100,IDX,,NIFTY,,\n\
-                 NSE,CASH,,NIFTY.200,IDX,,NIFTY,,\n"
+                 NSE,CASH,,NIFTY.100,IDX,,NIFTY,,,NSE-NIFTY.100\n\
+                 NSE,CASH,,NIFTY.200,IDX,,NIFTY,,,NSE-NIFTY.200\n"
             )),
             None,
         );

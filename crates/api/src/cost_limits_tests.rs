@@ -203,9 +203,12 @@ fn w1_api5_4_the_window_still_reads_its_range_and_orders_only_the_page() {
         ],
     );
     let window = item(BARS, "pub fn window(");
+    // The read moved into `read_in_time`, which carries the lookback across
+    // months (D-1762); the window still calls it for every non-seek request.
+    let read = item(BARS, "fn read_in_time(");
     assert!(
-        window.contains("slots(file, 0, held)"),
-        "every bar is read: {window}"
+        window.contains("read_in_time(") && read.contains("slots(file, 0, held)"),
+        "every bar is read: {window}\n{read}"
     );
     assert!(
         window.contains("page_of(all, offset, limit, order)"),

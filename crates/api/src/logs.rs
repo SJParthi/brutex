@@ -1962,8 +1962,9 @@ mod tests {
             bad.ignored,
             vec![("level", "eror".to_owned()), ("run", "12x".to_owned())]
         );
-        for word in ["+3", "03", "3.0", "-3"] {
-            let one = asked(&format!("run={word}"));
+        // `+` is a space on the wire, so a literal plus arrives as `%2B`.
+        for (wire, word) in [("%2B3", "+3"), ("03", "03"), ("3.0", "3.0"), ("-3", "-3")] {
+            let one = asked(&format!("run={wire}"));
             assert_eq!(one.run, 0, "{word}");
             assert_eq!(one.ignored, vec![("run", word.to_owned())], "{word}");
         }

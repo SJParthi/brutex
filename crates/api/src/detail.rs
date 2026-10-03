@@ -958,7 +958,7 @@ mod tests {
             assert!(why.contains("detail query field"), "{query}: {why}");
         }
         for (query, field) in [
-            (format!("identity={id}&page=+1"), "`page`"),
+            (format!("identity={id}&page=%2B1"), "`page`"),
             (format!("identity={id}&page=003"), "`page`"),
             (format!("identity={id}&limit=016"), "`limit`"),
         ] {
@@ -969,7 +969,7 @@ mod tests {
             );
         }
         assert!(Selector::parse(set(), &format!("identity={id}&page=0&limit=16")).is_ok());
-        assert!(Page::parse("page=+1").is_err());
+        assert!(Page::parse("page=%2B1").is_err());
     }
 
     #[test]
