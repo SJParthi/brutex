@@ -54609,3 +54609,32 @@ reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
 **Not changed.** The wall-clock cost of these reads is not measured. Holding
 one calendar slot for a whole range audit means a long range can make the
 calendar route answer 429 sooner; that is a bound, stated, not a queue.
+
+### D-1509 — Gate 8 proves it refuses a planted O(n) before it measures — 2026-10-03
+
+**What was observed.** The batch-1 audit marked `gate8` PARTIAL: production
+functions are timed (D-0924, C-BC-01..03, D-1436), but Gate 8 was only
+`cargo bench --workspace --locked`, and nothing in `ci.yml` or any
+`benches/ratio.rs` showed that a bench FAILS when an O(n) cost is planted. A
+ratio check that had rotted into a pass (a ceiling raised, a breach no longer
+turned into an exit code, a filler the scan stops on) would stay green.
+
+**The decision.** Gate 8 runs a self-test before the real measurement, in the
+shape Gate 18's D-1119 self-test already uses. It inserts one line at the top of
+the real benched function `core::vendor::decode_master_row`, ahead of its width
+gate, that folds every byte of `trading_symbol`; runs
+`cargo bench --locked -p core --bench ratio`; restores the file with
+`git checkout` and refuses if it is not restored; and fails the gate unless the
+bench exited non-zero AND printed the `C-09 decode, field 4 MiB` row as
+`BREACH`. A non-zero exit for any other reason (a compile error, a C-10 or C-09b
+breach alone) is not counted as a catch.
+
+**Measured, this machine, 2026-10-03.** Planted: `C-09 decode, field 4 MiB`
+172,342 ps -> 112,556,294 ps, ratio 653.098x, BREACH, exit 1, gate step passes.
+Unplanted: the same row 0.121x ok. With the planted line replaced by an inert
+comment the self-test fails the gate ("was NOT refused (exit 0)").
+
+**Not changed.** The self-test proves the refusal for one bench, `crates/core`,
+whose binary builds in seconds; the other twelve benches share the same
+`ratio`/`exit(1)` shape but are not each re-planted, which would double Gate 8's
+cost. AGC-01.

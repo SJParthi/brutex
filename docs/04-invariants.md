@@ -6277,3 +6277,9 @@ old line regex the same input and watched it pass.
 | AUF-03 | `/calendar.json`'s `withheld` runs expand to every day they name, inclusive, and to their months; an absent list withholds nothing; a malformed run is refused, never dropped back into holidays, so the `/ingest` page never shows a withheld day as an NSE holiday (D-1507) | `web/tests/calendar-owed.test.js`: `withheld runs become every day they name, inclusive, and their months (D-1507)`, `a malformed withheld run is refused, never dropped back into holidays` | ✓ |
 | AUF-04 | `detail::run_store_read` runs its work off the Tokio worker, admits at most `MAX_STORE_READ_CONCURRENT` = 8 at once and refuses the next before it queues, is a pool separate from the calendar pool, and re-admits once a slot is released; a refusal is 429 (saturated) or 503 (join failed) naming what and the bound (D-1508) | `api::detail::tests::a_store_read_runs_off_the_worker_and_refuses_past_its_bound`, `api::detail::tests::a_refused_admission_names_what_its_bound_and_why` | ✓ |
 | AUF-05 | `/gaps.json`'s every `audit_one` and `audit_cash_schedule`, `/folder.json`'s `answer` and `/indexmap.json`'s catalogue read sit inside an admitted blocking closure, never inline in the async handler (D-1508) | `api::server::calendar_route_tests::the_gap_audit_folder_and_index_map_read_on_the_blocking_pool` | ✓ |
+
+### Audit fixer 7 follow-ups (D-1509 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AGC-01 | Gate 8 refuses a planted O(n): before the workspace bench runs, a byte fold over `trading_symbol` inserted at the top of `core::vendor::decode_master_row` must make `cargo bench -p core --bench ratio` exit non-zero with the `C-09 decode, field 4 MiB` row marked `BREACH`, and the file must be restored, or the gate fails (D-1509) | the self-test inside `.github/workflows/ci.yml` Gate 8, run before `cargo bench --workspace` | ✓ |
