@@ -156,6 +156,10 @@ impl AnchoredWalkForwardBottomHalfRateV1 {
 ///
 /// One pass plus one sort of display projections: `O(folds log folds)` time
 /// and `O(folds)` temporary space. No bench row measures it yet.
+///
+/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it;
+/// only this module's tests call it. `docs/07-plan.md` names no surface for it,
+/// so wiring it would be a design this crate does not have.
 #[must_use]
 pub fn anchored_walk_forward_bottom_half_rate_v1(
     placements: &[PlacementV1],

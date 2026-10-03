@@ -172,6 +172,105 @@ pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED
      requires such a window to be refused with its date named; no\n  \
      threshold for that detector is sourced, so none was applied.";
 
+/// The largest move from one session's last close to the next session's
+/// first open, in a slice of bars. D-1540 (audit-20261003 gaps-6).
+///
+/// # Why a measurement and not a detector
+///
+/// D-0018 asks for a suspected split or bonus to refuse its window, and
+/// names no threshold; `docs/00-charter.md` names no corporate-action
+/// source. So nothing here decides that a move IS a corporate action. It
+/// names the single largest overnight move by its session and its size, so a
+/// reader of a stock's report can check that one date against the
+/// exchange's record instead of being told only that nothing was checked.
+///
+/// # What a split does and does not do to these results
+///
+/// Measured over generated bars with every price halved from one session on
+/// (D-1540): every trade is intraday with a forced square-off, so no trade
+/// spans the split and no trade's P&L is inflated by it; post-split trades
+/// are in the new price scale, so a paisa total mixes two scales. What the
+/// split DOES distort is every condition that reads a previous session --
+/// pivots, previous-day high and low, gap levels, the five-session ladder,
+/// EMA200 -- for days after it. A ranked mask can therefore be selected on
+/// a fake signal while its trades are real ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OvernightMove {
+    /// The IST day (days since 1970-01-01, [`indicators::ist_day`]) of the
+    /// session that OPENED at [`Self::open`].
+    pub day: i64,
+    /// The previous session's last close, in paisa.
+    pub prior_close: i64,
+    /// This session's first open, in paisa.
+    pub open: i64,
+    /// `(open - prior_close) / prior_close`, in parts per million, truncated
+    /// toward zero.
+    pub ppm: i64,
+}
+
+/// The [`OvernightMove`] of largest magnitude in `bars`, or `None` when the
+/// bars hold fewer than two sessions with a positive prior close.
+///
+/// A tie keeps the earlier session, so the answer is a pure function of the
+/// bars. One pass, O(bars), at a once-per-report boundary.
+#[must_use]
+pub fn largest_overnight_move(bars: &[indicators::Candle]) -> Option<OvernightMove> {
+    let mut best: Option<OvernightMove> = None;
+    for pair in bars.windows(2) {
+        let [before, after] = pair else { continue };
+        let day = indicators::ist_day(after.ts_micros);
+        if day == indicators::ist_day(before.ts_micros) || before.close <= 0 {
+            continue;
+        }
+        let ratio = i128::from(after.open.saturating_sub(before.close)) * 1_000_000
+            / i128::from(before.close);
+        let ppm = i64::try_from(ratio).unwrap_or(if ratio < 0 { i64::MIN } else { i64::MAX });
+        if best.is_none_or(|kept| ppm.unsigned_abs() > kept.ppm.unsigned_abs()) {
+            best = Some(OvernightMove {
+                day,
+                prior_close: before.close,
+                open: after.open,
+                ppm,
+            });
+        }
+    }
+    best
+}
+
+/// What a stock's report says when its bars hold no overnight to measure:
+/// one session, or none. Said rather than omitted, so the absence of the
+/// [`overnight_line`] is never read as "no large move was found".
+pub const NO_OVERNIGHT_MEASURED: &str = "  LARGEST OVERNIGHT MOVE IN THESE BARS: none measured; they hold fewer\n  \
+     than two sessions (D-1540).\n\n";
+
+/// Paisa as rupees with two decimals, in integers (`CLAUDE.md` §7).
+fn rupees(paisa: i64) -> String {
+    let sign = if paisa < 0 { "-" } else { "" };
+    let whole = paisa.unsigned_abs();
+    format!("{sign}{}.{:02}", whole / 100, whole % 100)
+}
+
+/// The line a stock's report carries under [`CORPORATE_ACTIONS_UNCHECKED`]:
+/// the [`largest_overnight_move`] in its bars, with `date` naming the session.
+///
+/// It states a measurement and claims no threshold, because none is sourced.
+#[must_use]
+pub fn overnight_line(found: &OvernightMove, date: &str) -> String {
+    let sign = if found.ppm < 0 { "-" } else { "+" };
+    let size = found.ppm.unsigned_abs();
+    format!(
+        "  LARGEST OVERNIGHT MOVE IN THESE BARS: {sign}{}.{:02}% into the {date}\n  \
+         session (close {} to open {}). NO THRESHOLD is applied to it\n  \
+         (D-0018, D-1540); check that date against the exchange's\n  \
+         corporate-action record before trusting a result that fires on or\n  \
+         after it.\n\n",
+        size / 10_000,
+        (size % 10_000) / 100,
+        rupees(found.prior_close),
+        rupees(found.open),
+    )
+}
+
 /// The charge statement for an index-spot run, byte-identical to the header
 /// every run printed before D-0681.
 ///
@@ -3197,6 +3296,131 @@ mod tests {
             top.trim_start().starts_with(&chosen),
             "the table must lead with the variant that reached the same total \
              with less machinery\nbest(): {chosen}\nrow:    {top}\n{out}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod overnight_tests {
+    use super::{OvernightMove, largest_overnight_move, overnight_line};
+    use indicators::Candle;
+
+    /// Thirty generated sessions with every price halved from session 20 on:
+    /// an unadjusted 1:2 split, which is what D-0018 says a stock's bars do.
+    fn split_at_twenty() -> (Vec<Candle>, usize) {
+        let raw = crate::synthetic::sessions(30);
+        let first = 20 * 375;
+        let split_day = indicators::ist_day(raw[first].ts_micros);
+        let bars = raw
+            .iter()
+            .map(|b| {
+                if indicators::ist_day(b.ts_micros) >= split_day {
+                    Candle::new(
+                        b.ts_micros,
+                        b.open / 2,
+                        b.high / 2,
+                        b.low / 2,
+                        b.close / 2,
+                        b.volume,
+                        b.open_interest,
+                    )
+                } else {
+                    *b
+                }
+            })
+            .collect();
+        (bars, first)
+    }
+
+    /// AN UNADJUSTED SPLIT IS NAMED BY ITS DATE AND ITS SIZE, WITH NO
+    /// THRESHOLD. gaps-6, D-1540.
+    #[test]
+    fn an_unadjusted_split_is_the_largest_overnight_move_and_is_named_by_its_session() {
+        let (bars, first) = split_at_twenty();
+        let found = largest_overnight_move(&bars).expect("thirty sessions have overnights");
+        assert_eq!(found.day, indicators::ist_day(bars[first].ts_micros));
+        assert_eq!(found.prior_close, bars[first - 1].close);
+        assert_eq!(found.open, bars[first].open);
+        assert!(
+            (-510_000..=-490_000).contains(&found.ppm),
+            "a 1:2 split is a move of about -50%: {found:?}"
+        );
+    }
+
+    /// ONLY A SESSION BOUNDARY IS AN OVERNIGHT MOVE. A jump inside a session
+    /// is a market move this measure does not describe.
+    #[test]
+    fn an_intraday_jump_is_not_an_overnight_move_and_one_session_has_none() {
+        let mut bars = crate::synthetic::sessions(3);
+        let inside = 375 + 100;
+        let bar = bars[inside];
+        bars[inside] = Candle::new(
+            bar.ts_micros,
+            bar.open * 3,
+            bar.high * 3,
+            bar.low * 3,
+            bar.close * 3,
+            bar.volume,
+            bar.open_interest,
+        );
+        let found = largest_overnight_move(&bars).expect("three sessions");
+        assert!(
+            found.ppm.abs() < 10_000,
+            "the tripled bar sits inside a session and must not be reported: {found:?}"
+        );
+        assert_eq!(
+            largest_overnight_move(&crate::synthetic::sessions(1)),
+            None,
+            "one session has no overnight"
+        );
+        assert_eq!(largest_overnight_move(&[]), None);
+    }
+
+    /// THE LINE STATES THE MEASURED FACT, CLAIMS NO THRESHOLD, AND NEVER
+    /// READS AS A REFUSAL.
+    #[test]
+    fn the_overnight_line_names_date_size_and_prices_and_claims_no_threshold() {
+        let line = overnight_line(
+            &OvernightMove {
+                day: 0,
+                prior_close: 200_000,
+                open: 100_000,
+                ppm: -500_000,
+            },
+            "2024-06-14",
+        );
+        let flat = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        for fact in [
+            "LARGEST OVERNIGHT MOVE IN THESE BARS",
+            "-50.00%",
+            "2024-06-14",
+            "2000.00",
+            "1000.00",
+            "NO THRESHOLD",
+        ] {
+            assert!(flat.contains(fact), "missing {fact:?}:\n{line}");
+        }
+        assert!(line.ends_with('\n'), "{line}");
+        for each in line.lines().filter(|each| !each.is_empty()) {
+            assert!(each.starts_with("  "), "indented like the note: {each:?}");
+        }
+        let small = overnight_line(
+            &OvernightMove {
+                day: 0,
+                prior_close: 100_000,
+                open: 99_995,
+                ppm: -50,
+            },
+            "2024-06-14",
+        );
+        assert!(
+            small.contains("-0.00%"),
+            "a sub-basis-point fall keeps its sign:\n{small}"
         );
     }
 }

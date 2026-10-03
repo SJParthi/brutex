@@ -54499,3 +54499,265 @@ interpreter or `web/` toolchain is involved, so §2's engine boundary holds.
 Moving the files into a crate was rejected: they would become members, add
 arrows to the measured graph, and stop being the standalone tools their
 READMEs describe.
+### D-1540 — Name the largest overnight move on a stock's stored reports; detect no corporate action, refuse no window — 2026-10-03
+
+**Finding (audit-20261003 gaps-6, high for the objective).** No split, bonus or
+demerger is detected on the 208 swept shares. D-0694 labels every stock report
+"CORPORATE ACTIONS ARE UNCHECKED", which tells the reader nothing was checked
+and not where to look.
+
+**Measured first, as the fix workflow asked.** A probe over thirty generated
+sessions with every price halved from session twenty on (an unadjusted 1:2
+split), `ConditionMask::ZERO`, long, at horizons 15, 60 and 400 bars:
+
+- **No trade spans the split.** 574, 150 and 25 trades on both series, and
+  zero whose entry and exit fall on different IST days: every trade is
+  intraday with the forced 15:10 square-off, so a split's overnight gap is
+  never inside a trade and inflates no trade's P&L.
+- **Post-split trades are in the new price scale**, so a paisa total mixes
+  two scales (the summed worst-case P&L at H=15 went from -67,158 to -53,648
+  paisa; the best trade at H=60 and H=400 was unchanged because it sat
+  before the split).
+- **The conditions are what a split distorts.** Seventy-nine positions
+  changed on the split day and after it, among them `close_below_pdl` and
+  every pivot S1–S5 band on all 375 bars of the split session,
+  `near_fib_prev5_0` on 1,500 bars (four sessions), `close_below_ema200` on
+  677 bars, `ema20_below_ema200` on 668, and the gap-level family. A ranked
+  mask can therefore be selected on a fake signal while its trades are real.
+
+**Decision.** D-0018 asks for a suspected split's window to be refused with
+its date named, "an unexplained overnight gap beyond a threshold". No
+threshold is sourced in `docs/00-charter.md` and D-0018 names none, so a
+detector cannot be built without inventing its number (`CLAUDE.md` §3 rule
+1), and the operator chose on 2026-09-23 to keep equities in discovery
+(D-0694). This change adds a MEASUREMENT and no threshold:
+`runner::audit::largest_overnight_move` finds the single largest move from a
+session's last close to the next session's first open in a slice, and
+`runner::audit::overnight_line` states it, by IST session, size and both
+prices, under D-0694's sentence, with "NO THRESHOLD is applied" and an
+instruction to check that date against the exchange's corporate-action record.
+A stock whose bars hold fewer than two sessions says so
+(`NO_OVERNIGHT_MEASURED`); an index or a contract prints nothing.
+
+**Where.** `cli::stored::overnight_note`, on the doors whose report is built
+with the bars in hand: `sweep-stored` and `sweep-audited-stored` (the shared
+month kernel), `audit-stored`, `audit-range`, `screen` and the strict audited
+range (`span_banner`), and `auto-stored`. Every other stock surface keeps
+D-0694's sentence alone; `docs/06-limits.md` lists them. No window is
+refused and no run identity moves: the line is report text.
+
+**Test.** `runner::audit::overnight_tests` (three) and
+`cli::audited_stored::tests::every_stored_stock_report_names_its_largest_overnight_move`,
+which fails on the previous tree (`RELIANCE sweep-stored`) and requires every
+one of the six doors to print "-50.49% into the 2025-05-09 session (close
+1010.00 to open 500.00). NO THRESHOLD" for a stock and nothing for NIFTY.
+
+**Still open.** A detector that refuses needs a charter-sourced threshold or
+corporate-action record. UNVERIFIED: no such source exists in this
+repository.
+
+### D-1541 — A target first touched on the time-exit bar no longer outranks the time exit in the pessimistic reading — 2026-10-03
+
+**Finding (audit-20261003 hunt-runner-1, medium).** `grid::ExitChoices::of`
+offered `Time` only when no order fired. A fixed target first touched on the
+candidate's own time-exit bar was therefore credited in both readings,
+although that bar's time exit fills from its OPEN, the deadline price, and a
+level touched inside it is touched no earlier. `Cell::pessimistic`, which
+every selector ranks on, was biased upward for target-carrying cells.
+
+**Change.** `ExitChoices::of` takes `on_time_exit_bar` (`pess_off == span`).
+When the time-exit bar is the exit bar and only the target fired, `Time` is a
+reachable attribution beside it, so `read_trip`'s pessimistic reading is the
+worse of the two and the optimistic reading may still book the target. An
+adverse order on that bar is unchanged: a stop or a pre-bar trail already
+prices at or below the time exit's worst fill. The rule applies to the
+forced square-off bar the same way: its time exit also fills from that bar's
+open, so a target touched inside it is the same ambiguity.
+
+**Test.** `runner::grid::tests::a_target_touched_only_on_the_time_exit_bar_books_the_time_exit_pessimistically`
+fails on the previous rule with `left: 5000, right: -1000`. The wide-bar
+fingerprint fixture produced the same value with and without the change.
+Run identities are unchanged; the `commit` term moves, as for any code change.
+
+### D-1542 — Seed the EMAs and the ATR with the simple mean of their first period — 2026-10-03
+
+**Finding (audit-20261003 hunt-indicators-1, medium).** `trend::Ema` and
+`trend::Atr` seeded from ONE value and opened the warm gate after exactly
+`period` values, when the seed still carried about 13.8% of an EMA200 and
+38.7% of an ATR10. The audit's probe set `close_below_ema200` where the
+SMA-seeded EMA200 was below the close.
+
+**Change.** Both keep one `i128` running sum while the first `period` values
+fold; the value is their running mean, and at warm it is exactly the simple
+mean of the first `period` (Wilder's seed for the ATR, the TA-Lib seed for
+the EMA). The recursion follows from there. The doc's reason for the old
+seed ("an SMA needs `period` candles of buffer") was wrong: a running sum is
+constant space. `Evaluator` grew 48 bytes to 1,776 and its ceiling moved
+1,760 to 1,808; `TrendState` to 544 under a ceiling of 576; both keep 32
+bytes of slack and `docs/10-shared-core.md` states the new figures.
+
+**Vocabulary.** Positions 0-5, 64-65 and the EMA and SuperTrend crossings now
+emit different answers on the same bars. No bit is renumbered, retired,
+voided or widened, so `vocab::VOCAB_VERSION` stays 3, as for every earlier
+evaluator correction (D-0780, D-1441): the run identity's `commit` term is
+what separates runs before and after. Stored results computed before this
+commit keep their identities and are not comparable row for row with reruns.
+
+**Tests.** `indicators::trend::tests::an_average_is_warm_on_the_simple_mean_of_its_first_period`
+(previous tree: `Some(28240)` against `Some(25000)`) and
+`indicators::trend::tests::a_range_is_warm_on_the_mean_of_its_first_period_of_true_ranges`
+(`Some(177)` against `Some(200)`). The whole-evaluator digest in
+`gap::tests::complete_sessions_through_the_evaluator_are_byte_identical` was
+re-taken; its gap-family count did not move.
+
+### D-1543 — Five candlestick predicates take their classical shapes — 2026-10-03
+
+**Findings (audit-20261003 hunt-indicators-2 and -3, low).** Engulfing and
+harami were both inclusive, so an equal-body reversal lit 157 with 159 and
+158 with 160. `pat_homing_pigeon` (228) wanted two white bodies of identical
+size; the table row calls it "a harami whose bodies share a colour".
+`pat_identical_three_crows` (230) wanted three equal opens. The tasuki gaps
+(213, 214) let the third bar close the gap. `pat_unique_three_river` (221)
+wanted the third bar to close above the second's open.
+
+**Change.** Engulfing needs a strictly larger body and harami a strictly
+smaller one, the table's own words. 228 is two black bodies, the second
+inside the first. 230 requires each crow to open at the previous close. 213
+and 214 require the third bar to open inside the second body and close
+inside the gap. 221 is a long black bar, a black bar inside its body with a
+lower low, then a small white bar opening above that low and closing below
+the second close. These are the classical conventions (Nison; the TA-Lib
+predicates of the same names). Like every threshold in `pattern.rs` they are
+conventions, UNVERIFIED against any source `docs/00-charter.md` records. The
+exemplar cases for 213, 214, 221, 228 and 230 and the inclusive-engulfing
+sweep in `tests/sweep_predicate_readiness.rs` were rewritten to the new
+shapes. `VOCAB_VERSION` stays 3 for D-1542's reason.
+
+**Tests.** `indicators::pattern::exemplars::an_equal_body_reversal_lights_neither_engulfing_nor_harami`
+(previous tree: "157 lit on equal bodies") and
+`indicators::pattern::exemplars::four_patterns_take_their_classical_shapes`
+(previous tree: "228: classical shape"). hunt-indicators-6 (176/177, F-918CA8)
+is not touched here.
+
+### D-1544 — Record five validation primitives as unwired, with the reason, and pin the record — 2026-10-03
+
+**Finding (audit-20261003 gaps-3, medium).** `significance::benjamini_hochberg`,
+`pbo::anchored_walk_forward_bottom_half_rate_v1`,
+`validate::walk_forward_projected_prepared_anchored_search_v3` and
+`admission::AnchoredAdmissionStatisticsV2::evaluate_v2_projection` /
+`evaluate_v3_projection` are built and tested and no `cli` verb or `api`
+route reaches them. A reader of the runner API would take FDR control to be
+available.
+
+**Decision.** Not wired. `docs/07-plan.md` names no surface for any of them,
+and wiring one would be a design this change would have to invent.
+Benjamini-Hochberg has a second reason: `significance::p_value` loses
+relative accuracy in the tail and returns exactly 0 above t of about 8.3
+(hunt-runner-3), far coarser than the thresholds a search-scale FDR needs.
+Each function's doc now says "**No production caller (D-1544).**".
+
+**Test.** `runner/tests/unwired_validation_record.rs` requires the sentence
+on each and refuses any non-test `cli` or `api` source that names one, so
+wiring a function fails the build until its doc changes.
+
+### D-1545 — An invalid caller stop ladder or step is refused by the grid, not priced as no ladder — 2026-10-03
+
+**Finding (audit-20261003 errpaths-3, low).** `grid::evaluate_timed` built the
+caller's stop ladder with `Ladder::new(stops_ppm).unwrap_or_default()`, so
+`[80, 40, 20]`, `[40, 40]` or `[-5, 10]` priced a grid with no stop axis and
+no refusal; a non-positive `step_ppm` fell back to the quantile ladder.
+
+**Change.** `Grid` gains `refused_levels: Option<&'static str>`. Before any
+ladder is derived, `levels_refusal` refuses a non-empty `stops_ppm` that
+`Ladder::new` refuses and a `step_ppm` at or below zero: the grid has no cell
+and names why. `None` on every grid that priced. The wide-bar fingerprint was
+re-taken because the `Debug` rendering gained the field; no cell moved.
+
+**Test.** `runner::grid::exit_family_tests::an_invalid_stop_ladder_or_step_is_refused_and_named`;
+on the previous tree `[80, 40, 20]` gave `stops: Ladder { rungs: [] }` with
+cells priced.
+
+### D-1546 — A checked constructor refuses swapped or baseless evaluator widths — 2026-10-03
+
+**Finding (audit-20261003 errpaths-4, low, latent).** `Evaluator::new`
+accepts any `Widths`. With the Fibonacci and pivot widths swapped, every
+`near_*` call gets `WrongBand` from `set_near`, the twenty-two callers
+discard it, and the run withholds the band positions of both families while
+`census().refused()` stays 0.
+
+**Change.** `Widths::new(fib, pivot)` refuses a `fib` not measured on
+`SessionRange` or a `pivot` not on `CprWidth`, with `VocabError::WrongBand`
+naming the first table position of that family. `Widths::pinned` is
+unchanged. **Partial, and why:** the struct's public fields stay, because
+five readiness suites (`current_day_fib`, `session`, `orb`, `gap` and
+`trend_known_readiness`) build a mismatched width on purpose to prove the
+family is then withheld as UNKNOWN and never answered false. Making the
+fields private would delete that tested degradation path; that is a larger
+decision than this finding. Every production caller uses `Widths::pinned()`.
+
+**Test.** `indicators::evaluator::tests::swapped_or_baseless_widths_are_refused_by_name`;
+on the previous tree (an unchecked constructor) the swapped pair came back `Ok`.
+
+### D-1547 — A malformed or zero `BRUTEX_GRID_RUNGS` is refused on the legacy walk-forward door — 2026-10-03
+
+**Finding (audit-20261003 errpaths-9; the fix task's "runner validate.rs
+fold_rungs silent default").** `validate::fold_rungs` turned garbage, zero
+or a negative into `DEFAULT_RUNGS` with no word, while its doc said a zero is
+refused.
+
+**Change.** `fold_rungs()` returns `Result<usize, String>`: unset is
+`DEFAULT_RUNGS`, a whole number above zero is itself, anything else is a
+refusal naming the variable and its value. `walk_forward_shaped` records it
+in `Validated::refused` and runs no fold. No ceiling is added: the
+machine-safe clamp is `cli`'s on the explicit doors, and this door has no
+binary caller.
+
+**Test.** `runner::validate::tests::a_malformed_or_zero_rung_count_is_refused_and_unset_is_the_default`.
+
+### D-1548 — White's and SPA's `clears` use the same inclusive 5% boundary as Romano-Wolf — 2026-10-03
+
+**Finding (audit-20261003 hunt-runner-2, low).** `Verdict::clears` was
+`p < 0.05`; Romano-Wolf rejects when `(1 + count) / (B + 1) <= alpha`. At
+p = 0.05 exactly, the report printed White and SPA as not clearing beside a
+stepdown that rejected the same strategy "at the same 5%".
+
+**Change.** `clears` is `p_value <= 0.05`, the usual "reject when p <= alpha"
+and Romano-Wolf's own rule. Only a p-value of exactly 0.05 changes answer,
+which needs `(B + 1)` divisible by 20.
+
+**Test.** `runner::bootstrap::tests::an_exact_five_percent_p_value_clears_where_the_stepdown_rejects`.
+
+### D-1549 — State that SPA and Romano-Wolf studentize by an i.i.d. standard error — 2026-10-03
+
+**Finding (audit-20261003 hunt-runner-5, low).** Hansen (2005) uses a
+long-run standard deviation; `bootstrap::summarise` gives the i.i.d. one.
+
+**Decision: documented, not changed.** The only Newey-West code here,
+`outcome::OverlapWindow`, is specific to overlapping H-bar windows and has
+no bandwidth rule a return series could reuse, and choosing one would be an
+unsourced number. `spa`'s doc and `docs/06-limits.md` state the deviation and
+its effect (which strategies the recentring gate drops). No code changed, so
+no test was added.
+
+### D-1550 — State that `forward`'s exits can move backwards, and what that costs — 2026-10-03
+
+**Finding (audit-20261003 o1eng2-1, low).** `WindowExtremes`' doc said
+`forward` never issues a backward query and `OverlapWindow::observe` said
+exits only advance. Since D-1410 the exit uses a prefix median cadence that
+can step down, and the audit measured 111 backward exits among 227 priced
+bars on a fixture with every third minute dropped.
+
+**Decision: documented.** Both comments now state the premise holds only
+while the cadence is constant. `docs/06-limits.md` states the Θ(H) rebuild
+per backward query and the Newey-West drain's consequence (a queued hit
+whose exit precedes the front's stays queued and its pairs count as
+overlapping; effect on `edge`'s t-statistic UNVERIFIED). An exit-ordered
+drain is O(log H) per hit and is not done here. Doc-only; no test.
+
+**Same pass, stale sentences corrected in place (no decision needed):**
+hunt-runner-4 (`significance.rs` said the shipped grid is 325 cells; it is
+625, `grid::variants(4, 4, 4)`, and the shipped-ceiling literal and its
+"80x" became 625 and "40x"), o1eng2-2 (`engine::column` cited the deleted
+`every_subset_is_frequent`), o1eng2-3 (`docs/06-limits.md` said a minute
+owns at most 25 intents; it is 200) and o1eng2-4 (two `engine` docs
+described the deleted `seen` set in the present tense).

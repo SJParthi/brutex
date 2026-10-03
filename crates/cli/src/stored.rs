@@ -2159,6 +2159,29 @@ pub(crate) fn equity_note(key: &InstrumentKey) -> String {
         .map_or_else(String::new, runner::audit::CostScope::report_note)
 }
 
+/// The largest overnight move in a stock's bars, named by its session, for
+/// the line under [`equity_note`]. D-1540 (audit-20261003 gaps-6).
+///
+/// [`runner::audit::largest_overnight_move`] measures it and applies no
+/// threshold, because D-0018 names none. A stock whose bars hold fewer than
+/// two sessions says so; an index or a contract gets nothing, as it gets no
+/// [`equity_note`].
+pub(crate) fn overnight_note(key: &InstrumentKey, bars: &[Candle]) -> String {
+    if key.kind != Kind::Equity {
+        return String::new();
+    }
+    runner::audit::largest_overnight_move(bars).map_or_else(
+        || runner::audit::NO_OVERNIGHT_MEASURED.to_owned(),
+        |found| {
+            let date = u32::try_from(found.day)
+                .ok()
+                .and_then(|days| pull::session::Day::from_days(days).ok())
+                .map_or_else(|| format!("IST day {}", found.day), |day| day.to_string());
+            runner::audit::overnight_line(&found, &date)
+        },
+    )
+}
+
 /// [`equity_note`] for a symbol as the operator typed it.
 ///
 /// A symbol [`swept_index`] refuses gets nothing: the run it would head

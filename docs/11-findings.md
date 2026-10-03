@@ -744,3 +744,27 @@ diagnostic replay; they are not counted as caught production mutants.
 | testgaps-7 / -8 ignored and macOS-only tests | D-1613, documented |
 | testgaps-10 two assertion-free tests | D-1614, AFE-11 |
 | testgaps-11..13, gaps-13 stale limits and plan rows | D-1614 |
+### Audit 2026-10-03, fix worker 2 — dispositions — 2026-10-03
+
+Narrative only. No row is added to the table above, so its disposition tally
+is unchanged.
+
+- **gaps-6** (corporate actions): measured by a probe. A split inflates no
+  trade, since every trade is intraday, but it distorts about seventy-nine
+  conditions on and after the split session and mixes two price scales in
+  paisa totals. The largest overnight move is now named on six stored stock
+  doors, with no threshold. A refusing detector remains UNVERIFIED for want
+  of a sourced threshold. D-1540, AFB-01.
+- **hunt-runner-1**: fixed. D-1541, AFB-02.
+- **hunt-indicators-1**: fixed. D-1542, AFB-03.
+- **hunt-indicators-2** and **hunt-indicators-3**: fixed. D-1543, AFB-04.
+- **gaps-3**: recorded as unwired and pinned by a source test. D-1544, AFB-05.
+- **errpaths-3**: fixed. D-1545, AFB-06.
+- **errpaths-4**: partial. A checked constructor exists, and the public
+  fields stay for the tested degradation path. D-1546, AFB-07.
+- **errpaths-9** (`fold_rungs`): fixed. D-1547, AFB-08.
+- **hunt-runner-2**: fixed. D-1548, AFB-09.
+- **hunt-runner-5**: documented, not changed. D-1549.
+- **o1eng2-1**: documented in `docs/06-limits.md`. D-1550.
+- **hunt-runner-4**, **o1eng2-2**, **o1eng2-3** and **o1eng2-4**: stale text
+  corrected (see D-1550).
