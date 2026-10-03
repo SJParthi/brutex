@@ -265,3 +265,26 @@ fn a_zero_stop_ceiling_is_no_ceiling_and_never_the_points_refusal() {
         "the CLI door agrees with its own USAGE: {report}"
     );
 }
+
+/// W2-cli8-11. One support domain for both doors: argv and the knob agree on
+/// every boundary, and a million (100%) is refused by both.
+#[test]
+fn argv_and_the_knob_share_one_support_domain() {
+    assert!(
+        parse_support_ppm("1000000").is_err(),
+        "100% support is refused"
+    );
+    let _serial = crate::knobs::serially();
+    for text in ["0", "1", "999999", "1000000", "1000001", "+5", "-1", "ten"] {
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_SUPPORT_PPM", text);
+        assert_eq!(
+            parse_support_ppm(text).ok(),
+            support_from_knob(),
+            "argv and BRUTEX_SUPPORT_PPM disagree on {text:?}"
+        );
+    }
+    crate::knobs::clear_all();
+    assert_eq!(parse_support_ppm("999999"), Ok(999_999));
+    assert_eq!(parse_support_ppm("1"), Ok(1));
+}

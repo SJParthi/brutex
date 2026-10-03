@@ -2453,21 +2453,30 @@ fn parse_sessions(text: &str) -> Result<i64, &'static str> {
 /// defect `engine::Ladder::with_min_hits` raises zero to one to prevent, arriving
 /// through a different door.
 ///
-/// A million is 100% support: a combination that fires on EVERY bar. Above that
-/// nothing can be frequent and the sweep is guaranteed to find nothing, so it is
-/// refused rather than run — a report of zero combinations that took an hour to
-/// produce is a waste, not a finding.
+/// A million is 100% support: a combination that fires on EVERY bar, and
+/// D-0080 excludes exactly that shape (`AlwaysTrue`) before k=1. At or above a
+/// million nothing sweepable can be frequent and the sweep is guaranteed to
+/// find nothing, so it is refused rather than run — a report of zero
+/// combinations that took an hour to produce is a waste, not a finding.
+///
+/// # One domain for both doors (W2-cli8-11, D-1722)
+///
+/// This refused only ABOVE a million while `BRUTEX_SUPPORT_PPM` refused AT it,
+/// so the same 100% was a run from argv and a named refusal from the knob,
+/// under a comment in `one_rung` claiming both refused it. `support_from_knob`
+/// now calls this function, so the two doors cannot disagree again.
 ///
 /// # Errors
 ///
-/// A non-number, zero, or anything above 1,000,000.
+/// A non-number, zero, or 1,000,000 and anything above it.
 fn parse_support_ppm(text: &str) -> Result<u64, &'static str> {
     match text.parse::<u64>() {
         Err(_) => Err("SUPPORT_PPM is not a whole number"),
         Ok(0) => Err("SUPPORT_PPM must be 1 or more; 0 would disable extinction"),
-        Ok(ppm) if ppm > 1_000_000 => Err(
-            "SUPPORT_PPM is parts per million, so 1000000 is 100%. Above \
-                 that nothing can be frequent",
+        Ok(ppm) if ppm >= 1_000_000 => Err(
+            "SUPPORT_PPM is parts per million, so 1000000 is 100%: a pattern on \
+                 every bar, which D-0080 excludes, so at or above it nothing can \
+                 be frequent",
         ),
         Ok(ppm) => Ok(ppm),
     }
@@ -8316,12 +8325,12 @@ const fn min_hits_for(bars: usize, support_ppm: u64) -> u64 {
 /// recorded by [`crate::knobs::refused`].
 fn support_from_knob() -> Option<u64> {
     let raw = crate::knobs::var("BRUTEX_SUPPORT_PPM")?;
-    match raw.trim().parse::<u64>() {
-        Ok(ppm) if ppm > 0 && ppm < 1_000_000 => Some(ppm),
-        _ => {
-            crate::knobs::refuse_value("BRUTEX_SUPPORT_PPM", &raw);
-            None
-        }
+    // THE ARGV DOOR'S OWN VALIDATOR, so the two cannot drift (D-1722).
+    if let Ok(ppm) = parse_support_ppm(raw.trim()) {
+        Some(ppm)
+    } else {
+        crate::knobs::refuse_value("BRUTEX_SUPPORT_PPM", &raw);
+        None
     }
 }
 
@@ -13518,7 +13527,8 @@ fn one_rung(
     // Refused at zero and at a million: zero makes every combination frequent
     // so the frontier never empties and the walk has no end, and a million
     // demands a pattern present on every bar, which D-0080 excludes as
-    // `AlwaysTrue` before k=1. Both are the same refusal `screen` already makes.
+    // `AlwaysTrue` before k=1. Both are the same refusal `screen` already makes:
+    // `support_from_knob` and argv share `parse_support_ppm` (D-1722).
     // `or_else`, not `or`: an explicit argument wins without even reading the
     // process knob. Recording a malformed value that this run did not use would
     // make the warning itself false.

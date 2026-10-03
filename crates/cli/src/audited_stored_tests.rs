@@ -631,7 +631,7 @@ fn generated_public_command_flow(root: &std::path::Path) -> Result<(), Box<dyn s
             "5",
         ],
         &[
-            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "1000000", "1", "200",
+            "screen", "zerodha", "NIFTY", "1min", "2025", "5", "2025", "5", "999999", "1", "200",
             "1",
         ],
     ];

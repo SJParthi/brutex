@@ -53463,3 +53463,26 @@ stricter door, not this defect, and is reported for its own fix.
 result. That is the old refusal under a new name. Treating zero as "the derived
 ladder's own maximum" ceiling. That forces a stop the operator did not ask
 for, and `Rules::admits` already gives zero its meaning.
+
+### D-1722 — One support domain, `1..1_000_000` ppm, for argv and `BRUTEX_SUPPORT_PPM` — 2026-10-03
+
+**Finding.** W2-cli8-11 (low bug).
+
+**What was wrong.** `parse_support_ppm`, the argv door, refused only values
+ABOVE 1,000,000, so 100% support ran. `support_from_knob` refused 1,000,000
+itself. A comment in `one_rung` said both doors refuse zero and a million.
+For argv that was false.
+
+**The decision.** The bound is `1..=999_999`. At 1,000,000 a pattern must fire
+on every bar. D-0080 excludes that shape (`AlwaysTrue`) before k=1, so nothing
+sweepable can be frequent and the sweep finds nothing by construction.
+`support_from_knob` now calls `parse_support_ppm` on the trimmed value, so the
+two doors share one validator and cannot drift apart. The `one_rung` comment
+names the shared validator. `audited_stored_tests.rs`'s public-command flow
+typed `1000000` to get a cheap screen that finds nothing. It now types
+`999999`, which still prunes every condition the synthetic month does not hold
+on 2,999 of 3,000 bars. The test still asserts a recorded result.
+
+**Rejected.** Widening the knob to accept 1,000,000. That accepts a value the
+search can never answer, which is the hour-long empty report the argv
+refusal's own doc calls waste.
