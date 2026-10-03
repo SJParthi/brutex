@@ -2223,6 +2223,13 @@ impl PopulationStatisticsV3Ledger {
                 .ok_or_else(|| "Statistics V3 remaining records underflowed".to_owned())?;
             if remaining < planned {
                 validate_prefix(&mut self.data_file, cursor, remaining, manifest)?;
+                // An orphan repeating a completed authority is refused
+                // (D-1904, slice24-F3).
+                if self.audits.contains_key(&manifest.authority_id) {
+                    return Err(
+                        "Statistics V3 trailing orphan duplicates a completed authority".to_owned(),
+                    );
+                }
                 self.orphan = Some(OrphanV3 {
                     first_record: cursor,
                     present_records: remaining,
@@ -2389,10 +2396,23 @@ impl PopulationStatisticsV3Ledger {
             return Ok(PopulationStatisticsV3Commit::Reused(existing));
         }
 
+        if let Some(orphan) = self.orphan
+            && orphan.manifest.authority_id != produced.manifest.authority_id
+        {
+            // A FOREIGN RECEIPT-LESS ORPHAN IS SCRATCH (D-1905, pop2-4): no
+            // Completion acknowledged it, and refusing every other authority
+            // because of it wedged the ledger for good.
+            crate::fixed_tail::discard_orphan(
+                &self.data_file,
+                &self.data_path,
+                record_offset(orphan.first_record)?,
+                "a foreign Statistics V3 authority",
+            )?;
+            self.orphan = None;
+            self.data_generation =
+                file_generation(&self.data_file, &self.data_path, self.bounds.file_bytes)?;
+        }
         if let Some(orphan) = self.orphan {
-            if orphan.manifest.authority_id != produced.manifest.authority_id {
-                return Err("Statistics V3 foreign retry cannot replace trailing prefix".to_owned());
-            }
             let planned = produced.records(orphan.manifest.sequence, orphan.first_record)?;
             compare_prefix(
                 &mut self.data_file,
@@ -2405,15 +2425,20 @@ impl PopulationStatisticsV3Ledger {
                 .len()
                 .checked_sub(1)
                 .ok_or_else(|| "Statistics V3 retry completion is absent".to_owned())?;
+            let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
             for raw in planned
                 .get(present..completion_ordinal)
                 .ok_or_else(|| "Statistics V3 retry evidence range is invalid".to_owned())?
             {
-                append_raw(&mut self.data_file, raw)?;
+                append_raw(&mut self.data_file, &self.data_path, block, raw)?;
             }
-            self.data_file
-                .sync_all()
-                .map_err(|why| format!("cannot sync Statistics V3 retry evidence: {why}"))?;
+            crate::fixed_tail::sync_or_roll_back(
+                &self.data_file,
+                &self.data_path,
+                block,
+                File::sync_all,
+            )
+            .map_err(|why| format!("cannot sync Statistics V3 retry evidence: {why}"))?;
             let completion = planned
                 .last()
                 .ok_or_else(|| "Statistics V3 retry completion is absent".to_owned())?;
@@ -2433,10 +2458,15 @@ impl PopulationStatisticsV3Ledger {
             if current_records != completion_physical {
                 return Err("Statistics V3 retry evidence did not end before Completion".to_owned());
             }
-            append_raw(&mut self.data_file, completion)?;
-            self.data_file
-                .sync_all()
-                .map_err(|why| format!("cannot sync Statistics V3 retry completion: {why}"))?;
+            let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
+            append_raw(&mut self.data_file, &self.data_path, block, completion)?;
+            crate::fixed_tail::sync_or_roll_back(
+                &self.data_file,
+                &self.data_path,
+                block,
+                File::sync_all,
+            )
+            .map_err(|why| format!("cannot sync Statistics V3 retry completion: {why}"))?;
             let audit =
                 validate_complete_block(&mut self.data_file, orphan.first_record, orphan.manifest)?;
             self.audits.insert(audit.authority_id(), audit);
@@ -2471,21 +2501,33 @@ impl PopulationStatisticsV3Ledger {
             .len()
             .checked_sub(1)
             .ok_or_else(|| "Statistics V3 planned block lacks Completion".to_owned())?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         for raw in planned.iter().take(non_completion) {
-            append_raw(&mut self.data_file, raw)?;
+            append_raw(&mut self.data_file, &self.data_path, block, raw)?;
         }
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync Statistics V3 evidence: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync Statistics V3 evidence: {why}"))?;
+        let block = crate::fixed_tail::start(&mut self.data_file, &self.data_path.display())?;
         append_raw(
             &mut self.data_file,
+            &self.data_path,
+            block,
             planned
                 .last()
                 .ok_or_else(|| "Statistics V3 Completion disappeared".to_owned())?,
         )?;
-        self.data_file
-            .sync_all()
-            .map_err(|why| format!("cannot sync Statistics V3 Completion: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(
+            &self.data_file,
+            &self.data_path,
+            block,
+            File::sync_all,
+        )
+        .map_err(|why| format!("cannot sync Statistics V3 Completion: {why}"))?;
         let mut written_manifest = produced.manifest;
         written_manifest.sequence = self.completed;
         let audit = validate_complete_block(&mut self.data_file, first, written_manifest)?;
@@ -2830,9 +2872,20 @@ fn ensure_header(file: &mut File, path: &Path) -> Result<(), PopulationStatistic
             .and_then(|_| file.write_all(&bytes))
             .and_then(|()| file.sync_all())
             .map_err(|why| format!("cannot initialize {}: {why}", path.display()))?;
-        return Ok(());
+        // The new names are durable too (D-1903, pop2-5).
+        return sync_parent(path);
     }
     verify_header(file, path)
+}
+
+/// Makes the directory entries of `path`'s parent durable.
+fn sync_parent(path: &Path) -> Result<(), PopulationStatisticsV3Refusal> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|why| format!("cannot sync {}: {why}", parent.display()))
 }
 
 fn verify_header(file: &mut File, path: &Path) -> Result<(), PopulationStatisticsV3Refusal> {
@@ -2900,13 +2953,17 @@ fn read_raw(
     Ok(raw)
 }
 
+/// Appends one record of the block that began at `block`. A write error cuts
+/// the file back to `block`, so no ragged tail survives it (D-1900).
 fn append_raw(
     file: &mut File,
+    path: &Path,
+    block: u64,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationStatisticsV3Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Statistics V3 record: {why}"))
+    crate::fixed_tail::write_at_end(file, &path.display(), block, raw, |file, raw| {
+        file.write_all(raw)
+    })
 }
 
 fn open_file(
@@ -3820,6 +3877,132 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// slice24-F1, D-1900: a short write or failed barrier on the evidence or
+    /// the Completion is cut back; the exact rerun commits.
+    #[test]
+    fn a_failed_write_or_barrier_is_cut_and_the_rerun_commits() -> Result<(), String> {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        let root = TestDir::new()?;
+        let produced = produced_fixture(
+            StatisticsFamilyTerminalV3::Evaluated,
+            StatisticsFamilyTerminalV3::NaturallyExtinct,
+            41,
+        )?;
+        for (case, (kind, skip)) in [
+            (
+                Kind::Write {
+                    keep: RECORD_BYTES / 2,
+                },
+                0,
+            ),
+            (
+                Kind::Write {
+                    keep: RECORD_BYTES / 2,
+                },
+                1,
+            ),
+            (Kind::Sync, 0),
+            (Kind::Sync, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let case_root = root.child(&format!("fault-{case}"))?;
+            let armed = Armed::arm_after(DATA_FILE, kind, skip);
+            let refusal = produced
+                .append_and_reopen(&case_root, bounds()?)
+                .err()
+                .unwrap_or_default();
+            assert!(!Armed::pending(), "case {case} fired");
+            drop(armed);
+            assert!(refusal.contains("injected"), "case {case}: {refusal}");
+            let len = std::fs::metadata(case_root.join(DATA_FILE))
+                .map_err(|why| format!("cannot stat fault file: {why}"))?
+                .len();
+            assert_eq!(
+                len.saturating_sub(HEADER_BYTES as u64) % RECORD_BYTES as u64,
+                0,
+                "case {case} ends on a whole record"
+            );
+            drop(PopulationStatisticsV3Ledger::open_read(
+                &case_root,
+                bounds()?,
+            )?);
+            assert!(matches!(
+                produced.append_and_reopen(&case_root, bounds()?)?,
+                PopulationStatisticsV3Commit::Written(_)
+            ));
+        }
+        Ok(())
+    }
+
+    /// pop2-4 (D-1905) and slice24-F3 (D-1904): a foreign receipt-less
+    /// orphan is discarded by the next writer, and an orphan repeating a
+    /// completed authority is refused at open.
+    #[test]
+    fn a_foreign_orphan_is_discarded_and_a_duplicate_orphan_is_refused() -> Result<(), String> {
+        let root = TestDir::new()?;
+        let produced = produced_fixture(
+            StatisticsFamilyTerminalV3::Evaluated,
+            StatisticsFamilyTerminalV3::NaturallyExtinct,
+            51,
+        )?;
+        let foreign = produced_fixture(
+            StatisticsFamilyTerminalV3::Evaluated,
+            StatisticsFamilyTerminalV3::NaturallyExtinct,
+            52,
+        )?;
+        let orphaned = root.child("foreign")?;
+        let planned = produced.records(0, 0)?;
+        let mut file = File::create(orphaned.join(DATA_FILE))
+            .map_err(|why| format!("cannot create orphan file: {why}"))?;
+        file.write_all(&header()?)
+            .and_then(|()| file.write_all(&planned[0]))
+            .and_then(|()| file.sync_all())
+            .map_err(|why| format!("cannot write orphan: {why}"))?;
+        drop(file);
+        assert!(matches!(
+            foreign.append_and_reopen(&orphaned, bounds()?)?,
+            PopulationStatisticsV3Commit::Written(_)
+        ));
+        assert!(matches!(
+            produced.append_and_reopen(&orphaned, bounds()?)?,
+            PopulationStatisticsV3Commit::Written(_)
+        ));
+
+        let duplicate = root.child("duplicate")?;
+        produced.append_and_reopen(&duplicate, bounds()?)?;
+        let next = produced.records(1, u64_of(planned.len(), "fixture records")?)?;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(duplicate.join(DATA_FILE))
+            .map_err(|why| format!("cannot reopen duplicate file: {why}"))?;
+        file.write_all(&next[0])
+            .and_then(|()| file.sync_all())
+            .map_err(|why| format!("cannot write duplicate orphan: {why}"))?;
+        drop(file);
+        let refusal = PopulationStatisticsV3Ledger::open_read(&duplicate, bounds()?)
+            .err()
+            .unwrap_or_default();
+        assert!(
+            refusal.contains("duplicates a completed authority"),
+            "{refusal}"
+        );
+        Ok(())
+    }
+
+    /// pop2-5, D-1903: creating the data file syncs its directory.
+    #[test]
+    fn creating_the_data_file_syncs_its_directory() {
+        let src = include_str!("population_statistics_v3.rs");
+        let shipping = src.split("\nmod tests {").next().unwrap_or(src);
+        let (_, body) = shipping
+            .split_once("fn ensure_header(")
+            .expect("ensure_header exists");
+        let body = body.split_once("\nfn ").map_or(body, |(head, _)| head);
+        assert!(body.contains("return sync_parent(path);"), "{body}");
     }
 
     #[test]

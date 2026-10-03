@@ -370,8 +370,8 @@ fn torn_journal(shot: &Path) -> bool {
 }
 
 /// Readers may refuse or report Running, never a completion without its
-/// acknowledged rows; a later writer is refused loudly only by a torn global
-/// journal, and otherwise receives a token no durable start already names.
+/// acknowledged rows; a later writer cuts a torn global journal tail and
+/// receives a token no durable start already names.
 fn judge(shot: &Path, identities: &[[u8; 32]], published: &Published) -> Result<(), String> {
     let mut seen: Vec<Evidence> = identities
         .iter()
@@ -396,22 +396,22 @@ fn judge(shot: &Path, identities: &[[u8; 32]], published: &Published) -> Result<
     }
     let used = used_tokens(shot)?;
     let _quiet = BarrierWatch::modelled(|_| Ok(()));
-    match begin(shot, FRESH, Operation::Sweep) {
-        Ok(attempt) => {
-            assert!(
-                !used.contains(&attempt.token()),
-                "{}: token {} was reused",
-                shot.display(),
-                attempt.token()
-            );
-            std::mem::forget(attempt); // A stopped process writes no terminal.
-        }
-        Err(why) => assert!(
-            torn_journal(shot) && why.contains("torn or short"),
-            "{}: {why}",
-            shot.display()
-        ),
-    }
+    // A torn journal tail names no token, so the next writer cuts it and
+    // continues (D-1901, sweep-2); it used to refuse every later start.
+    let attempt = begin(shot, FRESH, Operation::Sweep)
+        .map_err(|why| format!("{}: a later writer was refused: {why}", shot.display()))?;
+    assert!(
+        !used.contains(&attempt.token()),
+        "{}: token {} was reused",
+        shot.display(),
+        attempt.token()
+    );
+    assert!(
+        !torn_journal(shot),
+        "{}: the writer left the journal torn",
+        shot.display()
+    );
+    std::mem::forget(attempt); // A stopped process writes no terminal.
     Ok(())
 }
 
@@ -647,6 +647,68 @@ fn a_refused_journal_while_dropping_is_loud_and_never_completes() -> Result<(), 
         matches!(tail, Some((attempt, Completion::Running | Completion::Refused)) if attempt == token),
         "{tail:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn a_refused_journal_barrier_cuts_the_rows_it_wrote() -> Result<(), String> {
+    // cli2-1, D-1900: a write or barrier failure on the global journal cuts
+    // the rows that call wrote, so no torn or unconfirmed row is left for a
+    // later start to trust or to refuse.
+    let fixture = Fixture::new()?;
+    let first = {
+        let _quiet = BarrierWatch::modelled(|_| Ok(()));
+        begin(&fixture.0, [98; 32], Operation::Sweep)?
+    };
+    let journal = base(&fixture.0).join("attempts.bin");
+    let before = fs::metadata(&journal).map_err(text)?.len();
+    let refusing = BarrierWatch::modelled(|path| {
+        if path.ends_with("attempts.bin") {
+            Err(std::io::Error::other("injected journal barrier"))
+        } else {
+            Ok(())
+        }
+    });
+    let refusal = begin(&fixture.0, [99; 32], Operation::Sweep)
+        .err()
+        .unwrap_or_default();
+    drop(refusing);
+    assert!(refusal.contains("injected journal barrier"), "{refusal}");
+    assert!(refusal.contains("truncated back to"), "{refusal}");
+    assert_eq!(fs::metadata(&journal).map_err(text)?.len(), before);
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    let next = begin(&fixture.0, [99; 32], Operation::Sweep)?;
+    assert_eq!(
+        next.token(),
+        first.token() + 1,
+        "the refused rows named no token"
+    );
+    std::mem::forget(next);
+    std::mem::forget(first);
+    Ok(())
+}
+
+#[test]
+fn a_torn_journal_tail_is_cut_by_the_writer_and_refused_by_a_reader() -> Result<(), String> {
+    // sweep-2, D-1901: bytes past the last whole row of a journal are never a
+    // row. A reader still refuses them; the next writer under the lock cuts them.
+    let fixture = Fixture::new()?;
+    let path = fixture.0.join("torn-events.bin");
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    {
+        let mut file = open_append(&path)?;
+        assert_eq!(shape::<EVENT_BYTES>(&mut file, &path, EVENTS, true)?, 0);
+        file.seek(SeekFrom::End(0)).map_err(text)?;
+        file.write_all(&[7; 40]).map_err(text)?;
+    }
+    let refused = count_optional::<EVENT_BYTES>(&path, EVENTS, LIMIT)
+        .err()
+        .unwrap_or_default();
+    assert!(refused.contains("torn or short"), "{refused}");
+    let count = append_events(&path, |_, _| Ok(Vec::new()))?;
+    assert_eq!(count, 0);
+    assert_eq!(fs::metadata(&path).map_err(text)?.len(), HEADER);
+    assert_eq!(count_optional::<EVENT_BYTES>(&path, EVENTS, LIMIT)?, 0);
     Ok(())
 }
 

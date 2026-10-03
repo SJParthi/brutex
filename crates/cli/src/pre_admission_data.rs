@@ -1332,9 +1332,7 @@ impl PreAdmissionDataLedgerV1 {
             }
             let completion = orphan.value.record(RecordKindV1::Completion)?;
             self.require_append_bytes(1)?;
-            append_record(&mut self.data_file, &completion)?;
-            self.data_file
-                .sync_data()
+            append_synced(&mut self.data_file, &self.data_path, &completion)
                 .map_err(|why| format!("cannot sync pre-admission completion: {why}"))?;
             let audit = PreAdmissionDataReopenAuditV1 {
                 data_record_index: orphan.record_index,
@@ -1373,18 +1371,14 @@ impl PreAdmissionDataLedgerV1 {
             .completed_rows
             .checked_mul(2)
             .ok_or_else(|| "pre-admission data-record index overflowed u64".to_owned())?;
-        append_record(&mut self.data_file, &data_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &data_record)
             .map_err(|why| format!("cannot sync pre-admission Data record: {why}"))?;
         self.orphan = Some(OrphanDataV1 {
             record_index: data_record_index,
             value,
         });
         self.data_generation = file_generation(&self.data_file, &self.data_path)?;
-        append_record(&mut self.data_file, &completion_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &completion_record)
             .map_err(|why| format!("cannot sync pre-admission completion: {why}"))?;
         let audit = PreAdmissionDataReopenAuditV1 {
             data_record_index,
@@ -2554,9 +2548,7 @@ impl PreAdmissionDataLedgerV2 {
             }
             self.require_append_bytes(1)?;
             let completion = orphan.value.record(RecordKindV2::Completion)?;
-            append_record_v2(&mut self.data_file, &completion)?;
-            self.data_file
-                .sync_data()
+            append_synced(&mut self.data_file, &self.data_path, &completion)
                 .map_err(|why| format!("cannot sync pre-admission V2 completion: {why}"))?;
             let audit = PreAdmissionDataReopenAuditV2 {
                 data_record_index: orphan.record_index,
@@ -2595,18 +2587,14 @@ impl PreAdmissionDataLedgerV2 {
             .completed_rows
             .checked_mul(2)
             .ok_or_else(|| "pre-admission V2 data-record index overflowed u64".to_owned())?;
-        append_record_v2(&mut self.data_file, &data_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &data_record)
             .map_err(|why| format!("cannot sync pre-admission V2 Data record: {why}"))?;
         self.orphan = Some(OrphanDataV2 {
             record_index: data_record_index,
             value,
         });
         self.data_generation = file_generation_v2(&self.data_file, &self.data_path)?;
-        append_record_v2(&mut self.data_file, &completion_record)?;
-        self.data_file
-            .sync_data()
+        append_synced(&mut self.data_file, &self.data_path, &completion_record)
             .map_err(|why| format!("cannot sync pre-admission V2 completion: {why}"))?;
         let audit = PreAdmissionDataReopenAuditV2 {
             data_record_index,
@@ -3592,10 +3580,12 @@ fn read_record(
     PreAdmissionDataV1::decode(&raw)
 }
 
-fn append_record(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PreAdmissionDataRefusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append pre-admission record: {why}"))
+/// Appends one fixed record and makes it durable. A short write or a failed
+/// barrier cuts the record back to where the file ended, so one ENOSPC or EIO
+/// no longer leaves a ragged tail that refuses every committed authority on
+/// every later open, read-only included (D-1900, search-2).
+fn append_synced(file: &mut File, path: &Path, raw: &[u8]) -> Result<(), PreAdmissionDataRefusal> {
+    crate::fixed_tail::append_block(file, path, [Ok::<_, String>(raw)], File::sync_data).map(|_| ())
 }
 
 fn open_file(path: &Path, writable: bool, create: bool) -> Result<File, PreAdmissionDataRefusal> {
@@ -3814,15 +3804,6 @@ fn read_record_v2(
     PreAdmissionDataV2::decode(&raw)
 }
 
-fn append_record_v2(
-    file: &mut File,
-    raw: &[u8; RECORD_BYTES_V2],
-) -> Result<(), PreAdmissionDataRefusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append pre-admission V2 record: {why}"))
-}
-
 fn file_generation_v2(
     file: &File,
     path: &Path,
@@ -3935,6 +3916,26 @@ pub(crate) use tests::{
               nothing -- an unreachable arm is one."
 )]
 mod tests {
+    /// Fixture writer: one raw record at the end, no barrier, no rollback.
+    fn append_record(
+        file: &mut File,
+        raw: &[u8; RECORD_BYTES],
+    ) -> Result<(), PreAdmissionDataRefusal> {
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(raw))
+            .map_err(|why| format!("cannot append pre-admission record: {why}"))
+    }
+
+    /// Fixture writer for V2 records.
+    fn append_record_v2(
+        file: &mut File,
+        raw: &[u8; RECORD_BYTES_V2],
+    ) -> Result<(), PreAdmissionDataRefusal> {
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(raw))
+            .map_err(|why| format!("cannot append pre-admission V2 record: {why}"))
+    }
+
     use super::*;
 
     type TestResult<T = ()> = Result<T, String>;
@@ -4557,6 +4558,110 @@ mod tests {
             )?
             .contains("above explicit maximum")
         );
+        Ok(())
+    }
+
+    /// search-2, D-1900: a short write or failed barrier on the Data or the
+    /// Completion record is cut back; committed authority stays readable and
+    /// the exact retry commits. Faults fire through the ledger's own path.
+    #[test]
+    fn a_failed_append_is_cut_back_and_committed_authority_stays_readable() -> TestResult {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        for nth in 0..2_u8 {
+            for kind in [
+                Kind::Write {
+                    keep: RECORD_BYTES / 2,
+                },
+                Kind::Sync,
+            ] {
+                let root = test_dir()?;
+                let configured = bounds(4)?;
+                let committed = fixture(40)?;
+                let next = fixture(41)?;
+                let mut ledger = must(
+                    PreAdmissionDataLedgerV1::open(root.path(), configured),
+                    "ledger initializes",
+                )?;
+                must(ledger.append_complete(&committed), "committed pair writes")?;
+                // `nth` 0 faults the Data record, 1 its Completion.
+                let armed = Armed::arm_after(DATA_FILE, kind, usize::from(nth));
+                let refusal =
+                    must_refuse(ledger.append_complete(&next), "the faulted append refuses")?;
+                assert!(!Armed::pending(), "{nth} {kind:?} fired");
+                drop(armed);
+                assert!(refusal.contains("injected"), "{nth} {kind:?}: {refusal}");
+                drop(ledger);
+                let len = must(
+                    std::fs::metadata(root.path().join(DATA_FILE)),
+                    "data metadata",
+                )?
+                .len();
+                assert_eq!(
+                    len.saturating_sub(HEADER_BYTES as u64) % RECORD_BYTES as u64,
+                    0,
+                    "{nth} {kind:?}: the file ends on a whole record"
+                );
+                let reader = must(
+                    PreAdmissionDataLedgerV1::open_read(root.path(), configured),
+                    "committed authority stays readable",
+                )?;
+                assert!(must(reader.reopen_audit(&committed.authority_id()), "audit")?.is_some());
+                drop(reader);
+                let mut rerun = must(
+                    PreAdmissionDataLedgerV1::open(root.path(), configured),
+                    "the writer reopens",
+                )?;
+                assert!(matches!(
+                    must(rerun.append_complete(&next), "the exact retry commits")?,
+                    PreAdmissionProductionCommitV1::Written(_)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_v2_append_is_cut_back_and_committed_authority_stays_readable() -> TestResult {
+        use crate::fixed_tail::fault::{Armed, Kind};
+        for kind in [
+            Kind::Write {
+                keep: RECORD_BYTES_V2 / 2,
+            },
+            Kind::Sync,
+        ] {
+            let root = test_dir()?;
+            let configured = bounds_v2(4)?;
+            let committed = zero_fixture_v2(190)?;
+            let next = zero_fixture_v2(191)?;
+            let mut ledger = must(
+                PreAdmissionDataLedgerV2::open(root.path(), configured),
+                "V2 ledger initializes",
+            )?;
+            must(
+                ledger.append_complete(&committed),
+                "committed V2 pair writes",
+            )?;
+            let armed = Armed::arm(DATA_FILE_V2, kind);
+            let refusal = must_refuse(ledger.append_complete(&next), "the faulted append refuses")?;
+            assert!(!Armed::pending());
+            drop(armed);
+            assert!(refusal.contains("injected"), "{kind:?}: {refusal}");
+            drop(ledger);
+            let reader = must(
+                PreAdmissionDataLedgerV2::open_read(root.path(), configured),
+                "committed V2 authority stays readable",
+            )?;
+            assert!(must(reader.reopen_audit(&committed.authority_id()), "audit")?.is_some());
+            drop(reader);
+            let mut rerun = must(
+                PreAdmissionDataLedgerV2::open(root.path(), configured),
+                "the V2 writer reopens",
+            )?;
+            assert!(matches!(
+                must(rerun.append_complete(&next), "the exact V2 retry commits")?,
+                PreAdmissionProductionCommitV2::Written(_)
+            ));
+        }
         Ok(())
     }
 

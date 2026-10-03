@@ -54863,3 +54863,114 @@ older gap in the dev proxy.
   them now name all three, and the test pins that `read_in_time` is reached
   only from `window` (P2-01-04).
 - `docs/02-store-format.md` §11.3 said "both versions" over three.
+### D-1900 — Every ledger append rolls back on a write or barrier failure, and a failed barrier is never confirmed by a second one — 2026-10-03
+
+**The findings.** cli2-1 (sweep evidence), pop1-2 (Population V6, Observation
+V1/V2), sel-1 (Execution V4), search-2 (Pre-Admission V1/V2) and slice24-F1
+(Finalization V3/V4, Statistics V2) each appended with a plain
+`seek(End)` + `write_all` + `sync`. A short write (ENOSPC, EIO) left a ragged
+tail that refused every later open, read-only included, for good. resources-1
+and pop1-4 found the other half: after a failed `sync_all`, the `Err(first)`
+arms in `lib.rs` and Population V1's retry "confirmed" the bytes with a second
+barrier. On Linux a failed `fsync` marks the dirty pages clean, so the second
+barrier returns success having written nothing — the old `results.rs` argument
+that a re-sync proves durability was wrong.
+
+**The decision.** One rule for every fixed-stride append in `cli`: a write
+error or a failed barrier truncates the file back to the length it had before
+the call (`set_len` + `sync_all`), and if that rollback fails the refusal names
+both failures. A failed barrier is also remembered for its path in this
+process, and a reuse/confirm path refuses that path rather than issuing a
+second barrier. `results.rs`, `frontier.rs`, `trades.rs`, `result_set.rs`,
+`sweep_evidence.rs`, Execution V3/V4, Pre-Admission V1/V2, Population V1/V6,
+Observation V1/V2, Finalization V3/V4, Statistics V2/V3 and Admission V3/V4 all
+go through `crate::fixed_tail` (D-1902). A sweep-evidence file whose first
+append was refused is cut to zero bytes, header included, so a sweep-evidence
+reader now counts an empty file as no rows, exactly as it counts an absent one.
+
+**Evidence.** The ZL-01..ZL-12 rows in `docs/04-invariants.md`. Each test arms
+a write or barrier fault inside the ledger's own commit path and proves the
+file ends on a whole record, the committed authority stays readable, and the
+exact rerun commits.
+
+### D-1901 — A writer cuts a provably uncommitted torn tail under its exclusive lock; a reader never does — 2026-10-03
+
+**The findings.** sweep-2 (frontier, trades, detail sets, `runs.bin`, the
+sweep-evidence journals) and cli3-3 (`admission_store`,
+`institutional_statistics`, `stored_data_completeness`). A kill inside
+`write(2)` leaves a sub-record tail. No record is acknowledged before its
+whole stride passed its barrier, so those bytes name nothing — but every open
+refused them forever, and an operator had to cut the file by hand.
+
+**The decision.** The next WRITER, holding the ledger's exclusive lock, cuts
+bytes past the last whole record (`fixed_tail::heal_torn_tail`), makes the cut
+durable and emits a `cli.ledger` warn event naming the path, the length found
+and the length kept. It cuts only when the file begins with its own magic (and
+version where the header carries one), so a foreign or legacy file is never
+touched. The sweep-evidence journals also cut a file that is a strict prefix of
+its own header (`fixed_tail::heal_torn_header`): header and first rows are one
+write behind one barrier, so a short header names nothing either. Readers keep
+refusing. This narrows the older "`runs.bin` is refused, not healed" rule: the
+writer now heals under its lock. `frontier` and `trades` writers now take the
+exclusive lock in `open`, because measuring a tail without it could land inside
+a live append (cli2-3).
+
+### D-1902 — One shared helper, `cli::fixed_tail`, and a thread-local fault injector — 2026-10-03
+
+Rollback, failed-barrier memory, torn-tail cutting, orphan discarding and
+header cutting live in `crates/cli/src/fixed_tail.rs`. Ledgers keep their own
+encodings and messages and call it. The local `append_with_rollback` copies in
+Admission V3/V4 were replaced. A `#[cfg(test)]` thread-local fault
+(`fixed_tail::fault::Armed`) fails the next write (after `keep` bytes) or
+barrier whose subject names a file, so tests exercise each ledger's own commit
+path rather than a copy of it. It is compiled out of production.
+
+### D-1903 — Files created on the first append get a directory barrier — 2026-10-03
+
+pop2-5 and slice24-F2: Statistics V2/V3 and Observation V1/V2 created their
+data and lock files and never synced the directory, so a power loss could lose
+the names of files whose contents were durable. Each now syncs its root after
+writing a new header (`sync_parent` / `sync_observation_root`). A source-shape
+test pins each call, because a directory entry's durability cannot be observed
+without a power cut.
+
+### D-1904 — A trailing orphan that repeats a completed identity is refused at open — 2026-10-03
+
+slice24-F3: Statistics V2 and Observation V1/V2 accepted a trailing receipt-less
+block whose identity was already complete, then refused every other append
+because of it. A writer checks for reuse before it writes, so no crash can leave
+one. The scan now refuses it by name, for readers and writers alike. Statistics
+V3 got the same check. Finalization V4 and Admission V3/V4 already refused it.
+
+### D-1905 — A receipt-less orphan that is not this exact retry is scratch — 2026-10-03
+
+pop2-4: a whole-record trailing block without its Completion or receipt, left
+by a crashed writer of a DIFFERENT identity, refused every later append in
+Statistics V2/V3, Finalization V4, Admission V3/V4 and Population V1. Nobody
+was ever told that block committed. The next writer, under its exclusive lock,
+now completes it when it is byte-identical to its own block (the existing exact
+retry). Otherwise the writer cuts it back to where it began
+(`fixed_tail::discard_orphan`, which emits a `cli.ledger` warn event) and writes
+its own block. Everything before the orphan was proven complete by the scan.
+
+### D-1906 — The exact retry completes a whole-row prefix of its own block — 2026-10-03
+
+pop2-1 / slice23-F1 (Admission V3) and pop1-1 (Population V1): a write cut
+between rows left a whole-row prefix of the block. Admission V3 accepted only a
+complete trailing block. Population V1 indexed the prefix as a short block and
+refused it as "different row facts". Admission V3 now appends the missing
+decisions behind one barrier and then the Completion. Population V1 cuts its
+receipt-less trailing block when it is not exactly the offered rows and
+rewrites the whole block (D-1905). The resulting bytes are the same.
+
+### D-1907 — A store month whose append barrier failed takes no further append in this process — 2026-10-03
+
+store1-2: `store::file::BarFile::append` returned the error of a failed
+`sync_all`, but a retry on the same handle rewrote the same records and
+"committed" them behind a second barrier. A reopened handle answered
+`AlreadyPresent` from a page-cache header slot whose barrier had failed. Every
+append barrier (records, sidecar, header slot) now records its path in a
+process-wide set when it fails. `append` refuses such a path with the new
+`StoreError::BarrierFailed` before any other check, including the duplicate
+check. `store` cannot depend on `cli`, so this is its own small copy of the
+D-1900 rule.

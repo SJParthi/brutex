@@ -439,6 +439,15 @@ pub enum StoreError {
         /// Which operation refused.
         action: Action,
     },
+    /// A durability barrier on this month already failed in this process.
+    ///
+    /// Linux marks the pages of a failed `fsync` clean, so a second barrier
+    /// would report success without proving anything reached the device. The
+    /// month takes no further append from this process. D-1907.
+    BarrierFailed {
+        /// The month whose barrier failed.
+        path: PathBuf,
+    },
     /// The host refused for a reason this module does not classify.
     ///
     /// Carries the kind and the raw `errno` rather than collapsing to "I/O
@@ -887,6 +896,7 @@ impl fmt::Display for StoreError {
             Self::Missing { path, action } => {
                 write!(f, "{} does not exist, {action} it", path.display())
             }
+            Self::BarrierFailed { path } => write_barrier_failed(f, path),
             Self::Io {
                 path,
                 action,
@@ -1872,7 +1882,7 @@ impl BarFile {
                 &sum.to_le_bytes(),
             )?;
         }
-        fault(crc.sync_all(), &self.bars_path, Action::Sync)
+        barrier(crc, &self.bars_path)
     }
 
     /// Verifies the old tail block's committed prefix against its existing
@@ -1985,6 +1995,27 @@ impl BarFile {
         })
     }
 
+    /// The checks every append makes before it reads a bar.
+    fn may_append<R: Row>(&self) -> Result<(), StoreError> {
+        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
+        // 24-byte record into a 56-byte geometry lays every field at the wrong
+        // offset and the CRC would still pass, because the bytes written are
+        // the bytes read back. Refused here, once, before any of them move.
+        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
+            return Err(StoreError::NotABarPath {
+                found: FileKind::Overlay,
+            });
+        }
+        // A MONTH WHOSE BARRIER FAILED TAKES NO FURTHER APPEND IN THIS
+        // PROCESS (D-1907, store1-2). Linux marks the pages of a failed
+        // `fsync` clean, so a second barrier returns success without writing
+        // them: re-issuing the same append would "commit" records that may
+        // never have reached the device, and the duplicate check below would
+        // answer `AlreadyPresent` from the page cache for a header slot whose
+        // barrier failed. Both are refused by name instead.
+        refuse_after_failed_barrier(&self.bars_path)
+    }
+
     /// Appends a batch and publishes it.
     ///
     /// The sequence is `docs/02-store-format.md` §5: the records are written
@@ -2019,15 +2050,7 @@ impl BarFile {
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
     /// [`StoreError::Denied`], [`StoreError::Io`].
     pub fn append<R: Row>(&mut self, batch: &[R]) -> Result<Appended, StoreError> {
-        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
-        // 24-byte record into a 56-byte geometry lays every field at the wrong
-        // offset and the CRC would still pass, because the bytes written are
-        // the bytes read back. Refused here, once, before any of them move.
-        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
-            return Err(StoreError::NotABarPath {
-                found: FileKind::Overlay,
-            });
-        }
+        self.may_append::<R>()?;
         let (first_ts, last_ts) = survey(batch)?;
         self.admission.admit(batch)?;
         let count = len_u64(batch.len());
@@ -2147,7 +2170,7 @@ impl BarFile {
         // below `commit.durable_through` is on stable storage when the second
         // write is issued.
         write_fully(&self.bars, &self.bars_path, at, &image)?;
-        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+        barrier(&self.bars, &self.bars_path)?;
 
         // THE CHECKSUMS, BETWEEN THE RECORDS AND THE COMMIT. The ORDER is the
         // whole guarantee, and the other order is unsafe:
@@ -2167,7 +2190,7 @@ impl BarFile {
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
         write_fully(&self.bars, &self.bars_path, commit.offset, &commit.bytes)?;
-        fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
+        barrier(&self.bars, &self.bars_path)?;
 
         self.header = commit.header;
         // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
@@ -3276,6 +3299,54 @@ fn lock_fault(path: &Path, refusal: TryLockError) -> StoreError {
     }
 }
 
+/// [`StoreError::BarrierFailed`]'s sentence.
+fn write_barrier_failed(f: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
+    write!(
+        f,
+        "a durability barrier on {} already failed in this process; a second barrier cannot prove its bytes reached the device, so it takes no further append",
+        path.display()
+    )
+}
+
+/// Every month whose durability barrier failed in this process. Process-wide,
+/// because a second handle on the same path shares the same page cache.
+static FAILED_BARRIERS: Mutex<std::collections::BTreeSet<PathBuf>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// The durability barrier of an append. A failure is remembered for `path`
+/// before it is returned, so no later append confirms it with a second one.
+fn barrier(file: &File, path: &Path) -> Result<(), StoreError> {
+    #[cfg(test)]
+    let synced = if tests::sync_fault_fires() {
+        Err(io::Error::other("injected sync fault"))
+    } else {
+        file.sync_all()
+    };
+    #[cfg(not(test))]
+    let synced = file.sync_all();
+    synced.map_err(|refusal| {
+        FAILED_BARRIERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_path_buf());
+        classify(path, Action::Sync, &refusal)
+    })
+}
+
+/// Refuses an append to a month whose barrier already failed in this process.
+fn refuse_after_failed_barrier(path: &Path) -> Result<(), StoreError> {
+    if FAILED_BARRIERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(path)
+    {
+        return Err(StoreError::BarrierFailed {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Lifts an [`io::Result`] into this module's errors.
 fn fault<T>(result: io::Result<T>, path: &Path, action: Action) -> Result<T, StoreError> {
     match result {
@@ -3314,6 +3385,68 @@ fn len_u64(len: usize) -> u64 {
 )]
 mod tests {
     use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        /// Barriers to let pass on this thread before one fails.
+        static SYNC_FAULT: Cell<Option<u32>> = const { Cell::new(None) };
+    }
+
+    /// Whether the armed barrier fault fires now; it fires once.
+    pub(super) fn sync_fault_fires() -> bool {
+        SYNC_FAULT.with(|armed| match armed.get() {
+            Some(0) => {
+                armed.set(None);
+                true
+            }
+            Some(left) => {
+                armed.set(Some(left - 1));
+                false
+            }
+            None => false,
+        })
+    }
+
+    /// store1-2, D-1907: a failed append barrier is never confirmed. The
+    /// same handle, a reopened handle, and the duplicate check all refuse the
+    /// month by name rather than "committing" or answering `AlreadyPresent`
+    /// from a page cache whose barrier failed.
+    #[test]
+    fn a_failed_append_barrier_is_never_confirmed_by_a_later_append() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+        for skip in [0_u32, 1, 2] {
+            let (path, mut file) = month(&format!("failed-barrier-{skip}"));
+            let batch: Vec<Bar> = (0..3).map(bar).collect();
+            SYNC_FAULT.with(|armed| armed.set(Some(skip)));
+            let refusal = file.append(&batch);
+            assert!(
+                matches!(
+                    refusal,
+                    Err(StoreError::Io {
+                        action: Action::Sync,
+                        ..
+                    })
+                ),
+                "barrier {skip}: {refusal:?}"
+            );
+            assert!(!sync_fault_fires(), "barrier {skip} fired");
+            let barred = Err(StoreError::BarrierFailed { path: path.clone() });
+            assert_eq!(file.append(&batch), barred, "the same handle");
+            drop(file);
+            let mut reopened = reopen(&path).expect("the month reopens");
+            assert_eq!(reopened.append(&batch), barred, "a reopened handle");
+            assert_eq!(reopened.append(&[bar(3)]), barred, "any later append");
+            assert!(
+                barred
+                    .clone()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot prove"),
+                "the refusal says why"
+            );
+            drop(reopened);
+            let _ignored = std::fs::remove_file(&path);
+        }
+    }
 
     use super::{
         Action, Appended, Bar, BarFile, FormatError, Layout, NO_BLOCK, Positional, StoreError,

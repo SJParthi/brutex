@@ -860,6 +860,21 @@ impl Results {
         }
         let path = Self::path(root);
         let (mut file, lock) = open_result_file(&path, writable)?;
+        // THE WRITER'S DOOR CUTS A TORN TAIL, under the exclusive lock
+        // `open_result_file` just took (D-1901, sweep-2). Every record is
+        // acknowledged only after its whole stride was written and synced, so
+        // bytes past the last whole record are no record anyone was told of.
+        // Only a current-version file is cut: an older version is read and
+        // never appended to, at a stride this one does not address.
+        if writable && lock.is_some() {
+            crate::fixed_tail::heal_torn_tail(
+                &file,
+                &path,
+                HEADER,
+                STRIDE,
+                &crate::fixed_tail::magic_and_version(MAGIC, VERSION),
+            )?;
+        }
 
         let len = file
             .metadata()
@@ -944,10 +959,11 @@ impl Results {
             // whichever byte lands on `halted`. In that run it happened to be
             // non-zero and the row was skipped — luck, not design.
             //
-            // Refused rather than healed. Truncating the orphan would be a
-            // silent repair of a file whose history §3 rule 8 protects, and §4
-            // bans a fallback that hides a failure. The count of intact records
-            // is named so an operator can see exactly what survived.
+            // A READER REFUSES, AND NAMES WHAT SURVIVED. The WRITER's door cut
+            // the orphan above, before this check, with a `cli.ledger` event
+            // (D-1901): a part-record was never acknowledged, so cutting it
+            // repairs no history §3 rule 8 protects, and it is said, not
+            // silent.
             let payload = len.saturating_sub(HEADER);
             let stride = stride_of(version);
             let orphan = payload % stride;
@@ -956,9 +972,9 @@ impl Results {
                     "{} ends with {orphan} bytes that are not a whole record: \
                      {} complete records occupy {} bytes after the {HEADER}-byte \
                      header, and the file is {len}. A write was interrupted. \
-                     Nothing here is repaired automatically — the intact records \
-                     are readable and the orphan bytes are not, and truncating \
-                     them is a decision about history that belongs to you.",
+                     A reader leaves the orphan bytes alone; the next writer \
+                     cuts them under its lock, since a part-record was never \
+                     acknowledged.",
                     path.display(),
                     payload / stride,
                     payload - orphan,
@@ -1243,6 +1259,10 @@ impl Results {
     /// row, then calls this barrier before treating the prior append as a
     /// committed success. No byte is rewritten.
     pub(crate) fn confirm_durable(&mut self) -> Result<(), Refusal> {
+        // A barrier that already failed on this file in this process is never
+        // confirmed by a second one (resources-1, D-1900): the failed pages
+        // stay readable but clean, so the second `sync_all` proves nothing.
+        crate::fixed_tail::refuse_after_failed_barrier(&self.path)?;
         self.file
             .lock()
             .map_err(|why| format!("the results file could not be locked: {why}"))?;
@@ -1266,6 +1286,18 @@ impl Results {
     /// including the refusals — an early `return` inside the locked region would
     /// otherwise strand the lock until the process exited.
     fn append_locked(&mut self, record: &Record) -> Result<u64, Refusal> {
+        self.append_locked_with(record, std::io::Write::write_all, File::sync_all)
+    }
+
+    /// The append body with an injectable write and barrier, used to prove
+    /// rollback against a real file. Production passes `write_all` and
+    /// `sync_all`.
+    fn append_locked_with(
+        &mut self,
+        record: &Record,
+        write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+        sync: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<u64, Refusal> {
         self.absorb_new_records()?;
         if self.holds(&record.identity) {
             return Err(format!(
@@ -1279,97 +1311,43 @@ impl Results {
             .file
             .seek(SeekFrom::End(0))
             .map_err(|why| format!("the results file could not be extended: {why}"))?;
-        self.file
-            .write_all(&record.to_bytes())
-            // `sync_all`, NOT `flush`, AND THE DIFFERENCE IS THE WHOLE RECORD.
-            //
-            // `Write::flush` on a `std::fs::File` is a DOCUMENTED NO-OP: `File`
-            // holds no user-space buffer, so there is nothing for it to push and
-            // it returns `Ok(())` without asking the operating system for
-            // anything. This line read `flush` and therefore promised a
-            // durability it never delivered -- the bytes sat in the page cache
-            // and the call reported success.
-            //
-            // That was not cosmetic. At the time, the caller wrote ledger,
-            // frontier, trades, and depended on the first write being durable
-            // before either child. `flush` made the opposite survive a power
-            // loss. D-0404 later reversed the protocol: both detail blocks are
-            // synced first and this ledger row is now the final commit marker.
-            // The barrier remains load-bearing -- a visible marker whose bytes
-            // are not durable can disappear after its already-durable children.
-            //
-            // THE SYNC IS **NOT** CHAINED HERE, AND CHAINING IT DESTROYED DATA.
-            //
-            // It was `.and_then(|()| self.file.sync_all())` on this line, which
-            // put the barrier INSIDE the rollback's error path below. A
-            // `write_all` that fully succeeded followed by a `sync_all` that
-            // failed -- `ENOTSUP` on a device that cannot fsync, `EIO` on one
-            // that can and did not -- then truncated back to `at`, DELETING A
-            // RECORD THAT WAS COMPLETELY AND SUCCESSFULLY WRITTEN, and reported
-            // "the record could not be written", which was untrue.
-            //
-            // The rollback exists for a partial `write_all` and only for that.
-            // Its own comment below is precise about the reasoning and the
-            // chaining silently widened it to a case the reasoning does not
-            // cover. The sync therefore happens AFTER the rollback arm, on its
-            // own, where its failure cannot truncate anything.
-            //
-            // Found by an adversarial pass over the commit that introduced it.
-            // A FAILED WRITE IS ROLLED BACK, AND THIS IS THE ONE PLACE THAT IS
-            // NOT A SILENT REPAIR.
-            //
-            // `write_all` on a full filesystem can put SOME of the 261 bytes
-            // down before it fails, and `Results::open` refuses a ledger whose
-            // tail is a part-record — correctly, since it cannot know what put
-            // the bytes there. So one `ENOSPC` would leave a ledger that every
-            // later process refuses to open, over bytes that were never a record
-            // and that nobody wants.
-            //
-            // Here the cause IS known: this call just failed, and `at` is where
-            // the file ended before it started. Truncating back to `at` removes
-            // bytes this function wrote and nothing else. That is not the
-            // history §3 rule 8 protects — a record that was never completed was
-            // never a record — and it is the difference between a disk that
-            // filled up and a ledger that has to be repaired by hand.
-            //
-            // The refusal still names the write failure, so nothing is hidden.
-            // If the rollback ITSELF fails, both reasons are reported: an
-            // operator facing a truncate that cannot run needs to know the tail
-            // is still there.
-            .map_err(|why| match self.file.set_len(at) {
-                Ok(()) => format!(
-                    "the record could not be written: {why}. The partial write \
-                     was rolled back, so the ledger still ends on a whole record."
-                ),
-                Err(and) => format!(
-                    "the record could not be written: {why}. Rolling the partial \
-                     write back ALSO failed: {and}. The file may now end mid-record \
-                     and will be refused on the next open until its tail is cut \
-                     back to byte {at}."
-                ),
-            })?;
-        // THE DURABILITY BARRIER, AFTER THE ROLLBACK ARM AND NOT INSIDE IT.
+        // `sync_all`, NOT `flush`, AND THE DIFFERENCE IS THE WHOLE RECORD.
         //
-        // `sync_all` rather than `sync_data`: a record extends the file, so the
-        // length is part of what has to survive. `trades.rs` may use `sync_data`
-        // because a torn length there costs a detail row; a torn length here
-        // costs the run those rows belong to.
+        // `Write::flush` on a `std::fs::File` is a DOCUMENTED NO-OP: `File`
+        // holds no user-space buffer, so it returns `Ok(())` without asking the
+        // operating system for anything. This line once read `flush` and
+        // promised a durability it never delivered. D-0404 made this row the
+        // final commit marker, after both detail blocks are synced, so a
+        // visible marker whose bytes are not durable can disappear after its
+        // already-durable children.
         //
-        // A FAILURE HERE DOES NOT TRUNCATE. The bytes are down and complete --
-        // `write_all` returned `Ok` -- so the record exists and will very likely
-        // reach the platter; on Linux a failed `fsync` also clears the dirty-page
-        // error state, which makes this the worst possible moment to discard it.
-        // What is unknown is whether it SURVIVES a power loss, and that is what
-        // the refusal says. The caller sees an error, the ledger keeps the row,
-        // and the two facts are reported separately because they are separate.
-        self.file.sync_all().map_err(|why| {
-            format!(
-                "the record was written but could not be flushed to disk: {why}. \
-                 It IS in the ledger and readable now; what is not guaranteed is \
-                 that it survives a power loss. Nothing was rolled back -- \
-                 discarding a record that was written completely would lose work \
-                 over a barrier that failed, which is the larger harm."
-            )
+        // A FAILED WRITE IS ROLLED BACK. `write_all` on a full filesystem can
+        // put SOME of the 261 bytes down before it fails. Here the cause is
+        // known and `at` is where the file ended, so truncating back removes
+        // only bytes this call wrote: a record that was never completed was
+        // never a record, and it is the difference between a disk that filled
+        // up and a ledger that has to be repaired by hand.
+        //
+        // A FAILED BARRIER IS ROLLED BACK TOO, and this reverses what this
+        // comment used to argue (D-1900, resources-1). It said a complete
+        // record whose `sync_all` failed "will very likely reach the platter".
+        // On Linux the opposite holds: the failed pages are marked CLEAN while
+        // their contents stay in the page cache, so they may never be written,
+        // yet every read in this boot finds them and a second `sync_all`
+        // returns `Ok`. Keeping them let `ensure_run_record` report
+        // `Committed::Reused` for a marker the device never held. The record
+        // is cut under the same exclusive lock that wrote it, before anyone
+        // can read it, and the refusal says the run was not recorded.
+        crate::fixed_tail::write_at_end(
+            &mut self.file,
+            &self.path.display(),
+            at,
+            &record.to_bytes(),
+            write,
+        )
+        .map_err(|why| format!("the record could not be written: {why}"))?;
+        crate::fixed_tail::sync_or_roll_back(&self.file, &self.path, at, sync).map_err(|why| {
+            format!("the record could not be flushed to disk, so it was not recorded: {why}")
         })?;
         self.seen.insert(record.identity, at);
         self.scanned = at.saturating_add(STRIDE);
@@ -1875,7 +1853,7 @@ mod tests {
                 .expect("the partial write lands");
             drop(f);
 
-            let why = Results::open(&r).expect_err("a torn ledger is refused");
+            let why = Results::open_read(&r).expect_err("a reader refuses a torn ledger");
             assert!(
                 why.contains(&orphan.to_string()),
                 "the refusal must name how many bytes are orphaned, or the \
@@ -1887,7 +1865,47 @@ mod tests {
                 "and how many records survived, which is what makes it \
                  actionable rather than merely alarming: {why}"
             );
+            // sweep-2, D-1901: the writer's door cuts the part-record, which
+            // was never acknowledged, and the ledger records again.
+            let mut writer = Results::open(&r).expect("the writer cuts the torn tail");
+            assert_eq!(
+                std::fs::metadata(&path).expect("cut").len(),
+                HEADER + 2 * STRIDE
+            );
+            writer.append(&record(3)).expect("a later run records");
+            assert_eq!(writer.read(2).expect("the new row"), record(3));
         }
+    }
+
+    /// resources-1, D-1900: a record whose barrier failed is cut under the
+    /// lock that wrote it, and the ledger is never confirmed durable by a
+    /// second barrier in this process.
+    #[test]
+    fn a_record_whose_barrier_failed_is_cut_and_never_confirmed() {
+        let r = root("failed-barrier");
+        let mut store = Results::open(&r).expect("opens");
+        store.append(&record(1)).expect("the first row commits");
+        let path = Results::path(&r);
+        let before = std::fs::metadata(&path).expect("len").len();
+        store.file.lock().expect("the append lock");
+        let why = store
+            .append_locked_with(&record(2), std::io::Write::write_all, |_| {
+                Err(std::io::Error::other("injected EIO at fsync"))
+            })
+            .expect_err("the injected barrier refuses");
+        store.file.unlock().expect("the append unlock");
+        assert!(why.contains("injected EIO at fsync"), "{why}");
+        assert!(why.contains("not recorded"), "{why}");
+        assert_eq!(std::fs::metadata(&path).expect("len").len(), before);
+        let mut reopened = Results::open(&r).expect("reopens");
+        assert!(!reopened.holds(&record(2).identity), "nothing to reuse");
+        let refused = reopened
+            .confirm_durable()
+            .expect_err("a failed barrier is never confirmed by a second");
+        assert!(
+            refused.contains("already failed in this process"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -2631,55 +2649,46 @@ mod tests {
 
         let syncs = code.iter().filter(|l| l.contains(".sync_all()")).count();
         assert_eq!(
-            syncs, 3,
-            "exactly three durability barriers are expected: one in \
-             `append_locked`, one after the fresh header is read back, and one \
-             in `confirm_durable` for recovery of a complete prior write whose \
-             original barrier did not return success."
+            syncs, 2,
+            "exactly two direct durability barriers are expected: one after the \
+             fresh header is read back, and one in `confirm_durable`. The record \
+             append's barrier is `fixed_tail::sync_or_roll_back` (D-1900)."
         );
 
-        // AND THE HEADER'S BARRIER COMES AFTER ITS READ-BACK, which is the order
-        // the refusal depends on: `sync_all` on `/dev/null` returns `ENOTSUP`,
-        // so syncing first replaces "accepted a header and did not keep it" --
-        // the message that names the cause -- with a generic flush failure that
-        // names a symptom. `a_ledger_that_does_not_keep_what_it_is_given_is_refused`
-        // is what fails when this order is reversed; this assertion says why.
-        // THE APPEND'S SYNC MUST NOT SIT INSIDE THE ROLLBACK CHAIN, and this is
-        // the assertion that would have caught a real data-loss defect.
-        //
-        // It was written `.and_then(|()| self.file.sync_all())` immediately
-        // above the `.map_err(|why| match self.file.set_len(at)` rollback, which
-        // put the barrier inside the error path: a `write_all` that fully
-        // succeeded followed by a `sync_all` that failed truncated back to `at`,
-        // DELETING A COMPLETE RECORD, and reported that it could not be written.
-        //
-        // The first version of this guard counted `.sync_all()` occurrences and
-        // said nothing about where they sit, so it passed on the broken code.
-        // Counting is not ordering.
-        // OVER THE COMMENT-STRIPPED LINES, not the raw source. The first draft
-        // of this assertion searched `shipping` and failed on the fixed code,
-        // because the comment ABOVE the rollback quotes the broken spelling in
-        // order to explain it -- the same "text in a comment is text" defect
-        // several guards in this workspace have already been caught by, found
-        // here by the guard catching itself.
+        // THE APPEND'S BARRIER ROLLS BACK ON FAILURE NOW (D-1900, resources-1),
+        // reversing what this guard used to pin. A failed `fsync` on Linux
+        // leaves the pages readable but clean, so a record kept after it was
+        // later "confirmed" by a second barrier that proved nothing. The write
+        // comes first, its barrier second, and both cut back to `at`.
         let stripped = code.join("\n");
         let append = stripped
-            .split_once("fn append_locked")
+            .split_once("fn append_locked_with")
             .map(|(_, after)| after)
             .expect("the append path must still exist");
-        let rollback_at = append
-            .find("match self.file.set_len(at)")
-            .expect("the rollback must still exist");
+        let write_at = append
+            .find("fixed_tail::write_at_end(")
+            .expect("the append must roll a failed write back");
         let sync_at = append
-            .find(".sync_all()")
-            .expect("the append must still have a durability barrier");
+            .find("fixed_tail::sync_or_roll_back(")
+            .expect("the append must roll a failed barrier back");
         assert!(
-            sync_at > rollback_at,
-            "`append_locked`'s `sync_all` must come AFTER the rollback arm, not \
-             be chained into it. Chained, a failed sync truncates a record that \
-             `write_all` had already written in full -- losing work over a \
-             barrier that failed, and reporting a write failure that did not \
-             happen."
+            sync_at > write_at,
+            "`append_locked_with` writes first and makes durable second"
+        );
+        let confirm = stripped
+            .split_once("fn confirm_durable")
+            .map(|(_, after)| after)
+            .expect("the recovery barrier must still exist");
+        let refuse_at = confirm
+            .find("refuse_after_failed_barrier(")
+            .expect("a failed barrier must never be confirmed by a second");
+        let resync_at = confirm
+            .find(".sync_all()")
+            .expect("the recovery barrier must still sync");
+        assert!(
+            refuse_at < resync_at,
+            "`confirm_durable` refuses a path whose barrier already failed \
+             before it syncs again"
         );
 
         let (_, after_refusal) = shipping
