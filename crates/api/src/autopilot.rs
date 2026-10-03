@@ -906,7 +906,7 @@ pub const RUNGS: [pull::vendor::Granularity; 2] = [
 const _: () = assert!(RUNGS.len().is_power_of_two());
 
 /// The rung tick number `tick` of the autopilot drives: [`RUNGS`] in turn,
-/// from the first. One remainder and one array read — O(1).
+/// from the first: one remainder and one array read.
 ///
 /// A function rather than an expression inside `fly` so the alternation is
 /// tested directly: `fly` is an endless loop over a live store, and a choice
