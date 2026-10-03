@@ -585,7 +585,10 @@ fn stopping(site: &Site) -> bool {
 
 /// Explicit entry point. Uses the same encoded legs as /pull/run, but never
 /// invokes that route's whole-basket retry loop.
-pub(crate) async fn start(State(site): State<Loaded>, body: String) -> RecoveryReply {
+pub(crate) async fn start(
+    State(site): State<Loaded>,
+    server::FormBody(body): server::FormBody,
+) -> RecoveryReply {
     let result = ingest::today_ist()
         .map_err(failure)
         .and_then(|today| submission(&body, today));
@@ -2063,7 +2066,7 @@ mod tests {
                 encode(&inner)
             ))
         );
-        let (status, _, answer) = start(State(Loaded::clone(&site)), body).await;
+        let (status, _, answer) = start(State(Loaded::clone(&site)), server::FormBody(body)).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
         let reply: serde_json::Value = serde_json::from_str(&answer).unwrap();
         assert_eq!(reply["windows"], 1);
@@ -2133,7 +2136,11 @@ mod tests {
         let root = crate::scratch::path("recovery-no-work");
         let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
         assert!(!resume(Loaded::clone(&site)).unwrap());
-        let response = start(State(Loaded::clone(&site)), "invalid=scope".to_owned()).await;
+        let response = start(
+            State(Loaded::clone(&site)),
+            server::FormBody("invalid=scope".to_owned()),
+        )
+        .await;
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert!(response.2.contains("\"started\":false"));
         assert!(!root.exists());
@@ -2712,7 +2719,8 @@ mod tests {
                         .contains("missing after a recorded activation")
                 );
             }
-            let (status, _, answer) = start(State(Loaded::clone(&site)), body.clone()).await;
+            let (status, _, answer) =
+                start(State(Loaded::clone(&site)), server::FormBody(body.clone())).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
             assert!(answer.contains("original window states"));
             assert!(!plan_path(&site, id).exists());
@@ -2729,7 +2737,11 @@ mod tests {
         let asked = submission(&request, today()).unwrap();
         let before = history_bytes(&site);
         assert_ne!(asked.id, old);
-        let (status, _, response) = start(State(Loaded::clone(&site)), request.clone()).await;
+        let (status, _, response) = start(
+            State(Loaded::clone(&site)),
+            server::FormBody(request.clone()),
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED, "{response}");
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["started"], false);
@@ -2744,7 +2756,9 @@ mod tests {
         }
         let prepared = history_bytes(&site);
         assert_eq!(
-            start(State(Loaded::clone(&site)), request).await.0,
+            start(State(Loaded::clone(&site)), server::FormBody(request))
+                .await
+                .0,
             StatusCode::CREATED
         );
         assert_eq!(
@@ -2822,7 +2836,8 @@ mod tests {
         let held = Journal::open_existing(&plan_path(&site, asked.id)).unwrap();
         let before = history_bytes(&site);
         for request in [request, successor_form(&body, old, [18; 32], false)] {
-            let (status, _, answer) = start(State(Loaded::clone(&site)), request).await;
+            let (status, _, answer) =
+                start(State(Loaded::clone(&site)), server::FormBody(request)).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
             assert!(site.run.lock().unwrap().is_none());
             assert_eq!(history_bytes(&site), before);
@@ -2836,16 +2851,23 @@ mod tests {
         let (scratch, site, body, old) = missing_fixture("recovery-successor-start-contract");
         let activate = successor_form(&body, old, [23; 32], false);
         let before = history_bytes(&site);
-        let (status, _, answer) = start(State(Loaded::clone(&site)), activate.clone()).await;
+        let (status, _, answer) = start(
+            State(Loaded::clone(&site)),
+            server::FormBody(activate.clone()),
+        )
+        .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
         assert!(site.run.lock().unwrap().is_none());
         assert_eq!(history_bytes(&site), before);
         let request = successor_form(&body, old, [23; 32], true);
         assert_eq!(
-            start(State(Loaded::clone(&site)), request).await.0,
+            start(State(Loaded::clone(&site)), server::FormBody(request))
+                .await
+                .0,
             StatusCode::CREATED
         );
-        let (status, _, answer) = start(State(Loaded::clone(&site)), activate).await;
+        let (status, _, answer) =
+            start(State(Loaded::clone(&site)), server::FormBody(activate)).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{answer}");
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while site.run.lock().unwrap().as_ref().unwrap().running() {

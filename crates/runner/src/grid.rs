@@ -1515,6 +1515,13 @@ struct Candidate {
     /// Such a path is present only to hold the position. It can never enter a
     /// cell's money or trade count, whatever its crossing table says.
     block_only: bool,
+    /// The offset from `entry` of the first hole on a path whose time exit was
+    /// unpriceable ONLY because of it: [`crate::trade::Occupancy::hole_offset`].
+    /// A variant whose exit is strictly before it is priced; one at or after it
+    /// blocks to `time_exit`, as a block-only path does (D-1514). Unlike a
+    /// refused bar, a missing minute is invisible to the crossing table, which
+    /// is why the walk's location is carried rather than re-derived.
+    hole: Option<usize>,
     cross: Crossings,
     /// The entry fill under the WORST reading: the execution bar's adverse
     /// extreme it PRINTED: a buy at the high for a long and a sell at
@@ -1537,6 +1544,48 @@ struct Candidate {
     /// The entry fill under the BEST reading: the execution bar's open, a price
     /// that printed.
     entry_opt: i64,
+}
+
+impl Candidate {
+    /// Whether this path could not be measured whole: block-only, a refused bar
+    /// on its crossing table, or a hole the walk located (D-1514). This is the
+    /// `refused_paths` count; whether a given VARIANT is priced is
+    /// [`Self::refused_at`]'s question.
+    fn unmeasured(&self) -> bool {
+        self.block_only || self.cross.refused() > 0 || self.hole.is_some()
+    }
+
+    /// Whether a variant exiting at `exit_offset` from `entry` cannot be priced
+    /// on this path: it is block-only, or a hole lies AT OR BEFORE that exit.
+    ///
+    /// Every crossing strictly before the first hole was read off accepted,
+    /// contiguous bars only, so the order that fired there is the first that
+    /// fired (D-1183 for a refused bar, D-1514 for the walk's located hole,
+    /// which also covers a missing minute). A hole at the exit offset itself
+    /// still refuses: that is the bar that cannot be read. A refused-bar count
+    /// with no location keeps the conservative answer. O(1), UNVERIFIED as a
+    /// measurement; `docs/06-limits.md` states it (D-1514).
+    fn refused_at(&self, exit_offset: usize) -> bool {
+        let crossing_hole = self
+            .cross
+            .first_refused()
+            .map_or(self.cross.refused() > 0, |hole| hole <= exit_offset);
+        self.block_only || crossing_hole || self.hole.is_some_and(|hole| hole <= exit_offset)
+    }
+}
+
+/// The pessimistic exit offset of variant `v` on candidate `c`: the first of
+/// its stop, target, trailing stop, trailing take-profit and time exit to fire.
+/// The one definition [`one_variant`] prices and the V1 replay classifies by,
+/// so the two cannot disagree about which exit a hole is compared with. O(1),
+/// UNVERIFIED as a measurement; `docs/06-limits.md` states it (D-1514).
+fn pessimistic_offset(c: &Candidate, v: Variant, trails_rungs: &[Ppm]) -> usize {
+    let span = c.time_exit.saturating_sub(c.entry);
+    let stop_at = v.stop.map_or(NEVER, |r| c.cross.stop_at(r));
+    let target_at = v.target.map_or(NEVER, |r| c.cross.target_at(r));
+    let live = Trailing::live(&c.cross, v.tsl, trails_rungs);
+    let armed = Trailing::armed(&c.cross, v.ttp, trails_rungs);
+    span.min(stop_at).min(target_at).min(live.at).min(armed.at)
 }
 
 /// Every `stop * ratio`, deduped and ascending — the targets ladder the ratio
@@ -2289,7 +2338,8 @@ fn evaluate_timed_with_exact_ladders(
                 signal: path.signal_bar,
                 entry: path.entry_bar,
                 time_exit: path.exit_bar,
-                block_only: !path.priceable,
+                block_only: !path.priceable && path.hole_offset().is_none(),
+                hole: path.hole_offset(),
                 entry_pess,
                 entry_opt: entry_price,
                 cross: crossings_checked(
@@ -2311,7 +2361,7 @@ fn evaluate_timed_with_exact_ladders(
     let refused_paths = u64::try_from(
         candidates
             .iter()
-            .filter(|candidate| candidate.block_only || candidate.cross.refused() > 0)
+            .filter(|candidate| candidate.unmeasured())
             .count(),
     )
     .unwrap_or(u64::MAX);
@@ -3267,7 +3317,8 @@ pub(crate) fn replay_universe_v1(
             signal: path.signal_bar,
             entry: path.entry_bar,
             time_exit: path.exit_bar,
-            block_only: !path.priceable,
+            block_only: !path.priceable && path.hole_offset().is_none(),
+            hole: path.hole_offset(),
             entry_pess,
             entry_opt: entry_price,
             cross: crossings_checked(
@@ -3400,7 +3451,12 @@ fn replay_candidate_path_v1(
     entry_micros: i64,
     one_row: &mut Vec<TradeRow>,
 ) -> Result<(usize, i64, ReplayPathV1, bool), crate::exit_grid_policy::ExitGridErrorV1> {
-    if candidate.block_only || candidate.cross.refused() > 0 {
+    // THE SAME RULE THE CELL PRICED BY (D-1514). This read "block-only or any
+    // refused bar", a count, while `one_variant` asks whether the hole is at or
+    // before THIS variant's exit, so a candidate the cell priced replayed as
+    // refused. No shipping path reached the difference while the walk marked
+    // every holed path block-only; once it stopped, the two had to agree.
+    if candidate.refused_at(pessimistic_offset(candidate, variant, rungs.2)) {
         let (bar, stamp, path) = refused_candidate_path_v1(bars, candidate, entry_micros)?;
         Ok((bar, stamp, path, true))
     } else {
@@ -3437,7 +3493,12 @@ fn refused_candidate_path_v1(
             ),
         );
     }
-    let path = match (candidate.block_only, candidate.cross.refused() > 0) {
+    // A located hole is the block-only fact it was before D-1514, so a refused
+    // variant on a holed path carries the same label it always did.
+    let path = match (
+        candidate.block_only || candidate.hole.is_some(),
+        candidate.cross.refused() > 0,
+    ) {
         (true, true) => ReplayPathV1::BlockOnlyAndCrossingRefused,
         (true, false) => ReplayPathV1::BlockOnly,
         (false, true) => ReplayPathV1::CrossingRefused,
@@ -3799,7 +3860,8 @@ fn replay_candidates(
                 signal: path.signal_bar,
                 entry: path.entry_bar,
                 time_exit: path.exit_bar,
-                block_only: !path.priceable,
+                block_only: !path.priceable && path.hole_offset().is_none(),
+                hole: path.hole_offset(),
                 entry_pess,
                 entry_opt: entry_price,
                 cross: crossings_checked(
@@ -3844,7 +3906,7 @@ fn replay_candidates(
     let refused_paths = u64::try_from(
         candidates
             .iter()
-            .filter(|candidate| candidate.block_only || candidate.cross.refused() > 0)
+            .filter(|candidate| candidate.unmeasured())
             .count(),
     )
     .unwrap_or(u64::MAX);
@@ -4194,18 +4256,16 @@ fn row_of(
 /// which. Blocking to the time exit can only ever refuse a later signal, never
 /// invent one — the direction an unmeasurable case has to err in.
 ///
-/// # Only a hole AT OR BEFORE this variant's exit un-prices it (D-1183)
+/// # Only a hole AT OR BEFORE this variant's exit un-prices it (D-1183, D-1514)
 ///
 /// `exit_offset` is the variant's pessimistic exit offset from `c.entry`, the
 /// `pess_off` `one_variant` prices. This used to read `c.cross.refused() > 0`,
 /// a count, so a refused bar AFTER a stop, target or trail had already closed
 /// the position still un-priced the trade and blocked to the time exit: a bar
 /// after the exit decided whether the exit counted (audit W3-runner2-7).
-/// [`crate::excursion::Crossings::first_refused`] locates the first hole, and
-/// every crossing strictly before it was read off accepted bars only, so an
-/// order that fired there is the first order that fired. A hole at the exit
-/// offset itself still refuses: the exit bar is the one that cannot be read.
-/// `block_only` is unchanged -- such a path never had a priceable exit.
+/// D-1183 fixed that here, and D-1514 fixed the walk, which had marked every
+/// such path block-only before it reached this test. [`Candidate::refused_at`]
+/// is the rule.
 fn blocks_without_pricing(
     c: &Candidate,
     exit_offset: usize,
@@ -4218,13 +4278,7 @@ fn blocks_without_pricing(
     if open_until.is_some_and(|until| c.entry <= until) {
         return true;
     }
-    // A count with no location cannot be placed against the exit, so it keeps
-    // the conservative answer. `crossings_with` locates every hole it counts.
-    let hole_reaches_exit = c
-        .cross
-        .first_refused()
-        .map_or(c.cross.refused() > 0, |hole| hole <= exit_offset);
-    if c.block_only || hole_reaches_exit {
+    if c.refused_at(exit_offset) {
         *open_until = Some(c.time_exit);
         return true;
     }
@@ -4268,7 +4322,6 @@ fn one_variant(
     let mut gain_on_winners: i64 = 0;
 
     for c in candidates {
-        let span = c.time_exit.saturating_sub(c.entry);
         let stop_at = stop.map_or(NEVER, |r| c.cross.stop_at(r));
         let target_at = target.map_or(NEVER, |r| c.cross.target_at(r));
         // TWO TRAILING ORDERS NOW, NOT ONE, AND EACH READS ITS OWN TABLE.
@@ -4302,7 +4355,7 @@ fn one_variant(
         // FOUR ORDERS COMPETE NOW. Whichever fires first ends the position, and
         // an order that never fires is `NEVER`, so it drops out of the `min`
         // without a branch.
-        let pess_off = span.min(stop_at).min(target_at).min(live.at).min(armed.at);
+        let pess_off = pessimistic_offset(c, v, trails_rungs);
         // TWO REASONS TO SKIP AND THEY ARE DIFFERENT, which is why the decision
         // is named rather than inlined. See [`blocks_without_pricing`]. It is
         // asked AFTER `pess_off` because a refused bar only un-prices a variant
@@ -5816,6 +5869,7 @@ mod exit_family_tests {
             priceable: true,
             first_refused: None,
             first_missing: None,
+            priceable_before_hole: false,
         };
         let bar = |price: i64| indicators::Candle {
             open: price,
@@ -7313,6 +7367,7 @@ mod tests {
                     entry: 0,
                     time_exit: 2,
                     block_only: false,
+                    hole: None,
                     cross,
                     entry_pess: 2_500_100,
                     entry_opt: 2_500_000,
@@ -7358,6 +7413,7 @@ mod tests {
                 entry: 0,
                 time_exit: 3,
                 block_only: false,
+                hole: None,
                 cross: crossings_checked(&bars, 0, 3, entry_opt, Side::Long, ladders, accepted),
                 entry_pess,
                 entry_opt,
@@ -7394,6 +7450,122 @@ mod tests {
             0,
             "a hole at or before the exit leaves the exit unknowable"
         );
+    }
+
+    /// D-1514. On a WALK-BUILT path (the shipping path, not a hand-made
+    /// candidate), a stop that closed before a hole is priced by the cell AND
+    /// by the V1 replay, at the same exit, while the time-exit variant of the
+    /// same path is refused and keeps the label it always carried: block-only
+    /// with a refused crossing for a refused record, block-only for a missing
+    /// minute the crossing table cannot see.
+    #[test]
+    fn a_walk_built_stop_before_a_hole_is_priced_by_the_cell_and_the_replay_alike() {
+        let mut clean = crate::synthetic::sessions(8);
+        for (index, bar) in clean.iter_mut().enumerate() {
+            let shift = (i64::try_from(index % 7).expect("small") - 3).saturating_mul(400);
+            bar.open = bar.open.saturating_add(shift);
+            bar.high = bar.high.saturating_add(shift);
+            bar.low = bar.low.saturating_add(shift);
+            bar.close = bar.close.saturating_add(shift);
+        }
+        let stops = probe_ladder(&[300]);
+        let wide = probe_ladder(&[900_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &wide,
+            trails: &wide,
+        };
+        let horizon = Horizon::bars(30).expect("non-zero");
+        let stop = super::Chosen {
+            stop: Some(0),
+            target: None,
+            tsl: None,
+            ttp: None,
+        };
+        let time = super::Chosen {
+            stop: None,
+            target: None,
+            tsl: None,
+            ttp: None,
+        };
+        let build = |bars: &[indicators::Candle]| Column::build(bars, &mut evaluator());
+        let column = build(&clean);
+        let (_, rows) = super::per_trade(
+            &clean,
+            &column,
+            &ConditionMask::ZERO,
+            horizon,
+            Side::Long,
+            ladders,
+            stop,
+        )
+        .expect("the clean slice trades");
+        let probe = rows
+            .iter()
+            .copied()
+            .find(|row| row.exit_bar > row.entry_bar && row.exit_bar + 2 < row.entry_bar + 30)
+            .expect("a stop well inside its hold");
+        let hole = probe.exit_bar + 1;
+        let mut refused = clean.clone();
+        let bar = refused.get_mut(hole).expect("inside");
+        bar.close = bar.high.saturating_add(1);
+        let mut missing = clean.clone();
+        missing.remove(hole);
+        for (bars, label) in [
+            (refused, super::ReplayPathV1::BlockOnlyAndCrossingRefused),
+            (missing, super::ReplayPathV1::BlockOnly),
+        ] {
+            let column = build(&bars);
+            let facts = crate::trade::SliceFacts::of(&bars, &column);
+            let replay = |chosen| {
+                super::replay_universe_v1(
+                    &bars,
+                    &column,
+                    &ConditionMask::ZERO,
+                    horizon,
+                    Side::Long,
+                    ladders,
+                    chosen,
+                    &facts,
+                )
+                .expect("a V1 replay")
+            };
+            let priced = replay(stop);
+            let member = priced
+                .candidates
+                .iter()
+                .find(|candidate| candidate.entry_bar == probe.entry_bar)
+                .expect("the probe's path is a candidate");
+            assert!(
+                matches!(member.path, super::ReplayPathV1::Priceable(_)),
+                "{label:?}: the stop before the hole replays as priced: {:?}",
+                member.path
+            );
+            assert_eq!(member.occupied_through_bar, probe.exit_bar, "{label:?}");
+            let cell = super::with_levels(
+                &bars,
+                &column,
+                &ConditionMask::ZERO,
+                horizon,
+                Side::Long,
+                ladders,
+                stop,
+            )
+            .expect("a cell");
+            assert_eq!(
+                priced.cell.map(|c| c.trades),
+                Some(cell.trades),
+                "{label:?}"
+            );
+            let timed = replay(time);
+            let member = timed
+                .candidates
+                .iter()
+                .find(|candidate| candidate.entry_bar == probe.entry_bar)
+                .expect("the probe's path is a candidate");
+            assert_eq!(member.path, label, "the time exit reads the hole");
+            assert!(member.occupied_through_bar >= hole, "{label:?}");
+        }
     }
 
     /// FNV-1a over a rendering, so no field can be left out of a fingerprint.
@@ -7939,6 +8111,7 @@ mod tests {
             entry,
             time_exit,
             block_only: false,
+            hole: None,
             entry_pess,
             entry_opt,
             cross: crossings_checked(bars, entry, time_exit, entry_opt, side, ladders, accepted),
@@ -8378,6 +8551,7 @@ mod tests {
             entry: 0,
             time_exit: 2,
             block_only: false,
+            hole: None,
             cross,
             entry_pess,
             entry_opt,
@@ -8447,6 +8621,7 @@ mod tests {
             entry: 0,
             time_exit: 1,
             block_only: false,
+            hole: None,
             cross,
             entry_pess,
             entry_opt,
@@ -8506,6 +8681,7 @@ mod tests {
                 entry: 0,
                 time_exit: 1,
                 block_only: false,
+                hole: None,
                 cross,
                 entry_pess,
                 entry_opt,
@@ -8572,6 +8748,7 @@ mod tests {
                 entry: 0,
                 time_exit: 1,
                 block_only: false,
+                hole: None,
                 cross,
                 entry_pess,
                 entry_opt,
@@ -8750,6 +8927,7 @@ mod tests {
                     entry,
                     time_exit,
                     block_only: false,
+                    hole: None,
                     cross: crate::excursion::crossings(
                         &bars,
                         entry,
@@ -8796,6 +8974,7 @@ mod tests {
                 entry,
                 time_exit,
                 block_only: false,
+                hole: None,
                 cross: crate::excursion::crossings(
                     &bars,
                     entry,
@@ -8840,6 +9019,7 @@ mod tests {
                 entry,
                 time_exit,
                 block_only,
+                hole: None,
                 cross: crate::excursion::crossings(
                     &bars,
                     entry,
@@ -8958,6 +9138,7 @@ mod tests {
                     entry,
                     time_exit,
                     block_only: false,
+                    hole: None,
                     entry_pess,
                     entry_opt,
                     cross: crate::excursion::crossings(
@@ -9184,6 +9365,7 @@ mod tests {
             entry: 0,
             time_exit: 2,
             block_only: false,
+            hole: None,
             cross,
             entry_pess,
             entry_opt,
@@ -9880,6 +10062,7 @@ mod arming_tests {
             entry: 0,
             time_exit: 2,
             block_only: false,
+            hole: None,
             cross,
             entry_pess,
             entry_opt,

@@ -43,7 +43,7 @@ use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
     ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, ResolvedExitGridV1,
-    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v1,
+    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v2,
 };
 use runner::grid::{Chosen, Ttp};
 use runner::identity::Params;
@@ -123,7 +123,7 @@ pub fn exact_execution_law_digest_v1() -> [u8; 32] {
     hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
     hasher.update(&[FORCED_EXIT_POLICY_TAG]);
     hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
-    hasher.update(&printed_ohlcv_cost_model_id_v1());
+    hasher.update(&printed_ohlcv_cost_model_id_v2());
     hasher.finalize()
 }
 
@@ -189,11 +189,10 @@ impl ExecutionParametersV1 {
         if resolved.policy().execution_resolution() != ExecutionResolutionV1::OneMinuteOhlcv {
             return Err("execution capability requires exact one-minute OHLCV policy".to_owned());
         }
-        if resolved.policy().cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(
-                "execution capability requires the implemented printed-OHLCV model".to_owned(),
-            );
-        }
+        runner::exit_grid_policy::implemented_cost_model(resolved.policy().cost_model_id())
+            .map_err(|why| {
+                format!("execution capability requires the implemented printed-OHLCV model: {why}")
+            })?;
         let mut parameters = Self {
             parameter_id: [0; 32],
             population_id: population_v4.population_id(),
@@ -347,9 +346,8 @@ impl ExecutionParametersV1 {
         if self.policy.side() != side_of_direction(self.direction) {
             return Err("execution parameter direction and policy side differ".to_owned());
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err("execution parameter cost model is unsupported".to_owned());
-        }
+        runner::exit_grid_policy::implemented_cost_model(self.policy.cost_model_id())
+            .map_err(|why| format!("execution parameter cost model is unsupported: {why}"))?;
         if self.training_bars == 0 || self.training_first_ts_micros > self.training_last_ts_micros {
             return Err("execution parameter training geometry is invalid".to_owned());
         }
@@ -3217,9 +3215,8 @@ impl ParameterScalarV1 {
         if self.execution_resolution != ExecutionResolutionV1::OneMinuteOhlcv {
             return Err("execution parameter resolution is not one-minute OHLCV".to_owned());
         }
-        if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
-            return Err("execution parameter fill/cost model is unsupported".to_owned());
-        }
+        runner::exit_grid_policy::implemented_cost_model(self.cost_model_id)
+            .map_err(|why| format!("execution parameter fill/cost model is unsupported: {why}"))?;
         if self.execution_law_digest != exact_execution_law_digest_v1() {
             return Err("execution parameter next-minute/15:10 law digest differs".to_owned());
         }
@@ -3604,7 +3601,7 @@ mod tests {
             RatioLimitsV1::new(100, 500, 10_000).expect("test ratio limits"),
             1_000_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             0,
             0,

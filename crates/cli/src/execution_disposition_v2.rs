@@ -3425,7 +3425,7 @@ pub(crate) mod v2_tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridPolicyV1,
         ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1,
-        ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+        ResolvedExitGridV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
     };
     use runner::identity::{Direction, Params, Run};
     use runner::outcome::Horizon;
@@ -3519,7 +3519,7 @@ pub(crate) mod v2_tests {
             RatioLimitsV1::new(1, 100_000, 64).expect("fixture ratio limits"),
             10_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             1_000,
             1_000,

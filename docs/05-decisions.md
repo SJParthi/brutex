@@ -54638,3 +54638,253 @@ comment the self-test fails the gate ("was NOT refused (exit 0)").
 whose binary builds in seconds; the other twelve benches share the same
 `ratio`/`exit(1)` shape but are not each re-planted, which would double Gate 8's
 cost. AGC-01.
+
+### D-1510 — A request body has ten seconds from its head, and a late one is answered `408` and closed — 2026-10-03
+
+**What was observed (probeapi-1 remainder).** D-1200 gave the HEAD a deadline
+and nothing else: once a head's blank line arrived, a client that promised a
+`Content-Length` and dripped the body held its connection for as long as it
+liked. The audit held one for about 25 s, and 256 of them fill
+`MAX_CONNECTIONS`, which is the descriptor-exhaustion shape D-1200 closed for
+heads. `docs/06-limits.md` stated the gap ("The head deadline covers the HEAD,
+not the body").
+
+**The change.** `serve_limited` wraps every router in `body_deadline`, a
+middleware that gives a request with a body `BODY_READ_TIMEOUT` (10 s, the same
+as `HEAD_READ_TIMEOUT`) from the moment its head was delivered. The body is
+wrapped in `DeadlineBody`: bytes that have arrived are always delivered, and
+only a reader that must WAIT for owed bytes past the deadline gets a
+`TimedOut` error, which also sets a flag. Whatever the handler then answered
+is replaced by `408 Request Timeout` with `Connection: close` and the sentence
+`REFUSED: the request body did not arrive in time; this connection is closed.`
+A request with no body, a handler that already has its whole body, and one
+that never reads its body are never cut by it. `ConnectionLimits` carries
+`body_read_timeout`, and `api` names `http-body` (already locked at 1.1.0
+under `axum` and `hyper`) for the `Frame` type the wrapper returns.
+
+**Tests.** `api::server::head_deadline_tests::a_dripped_body_is_refused_with_408_at_the_deadline`,
+`a_silent_or_stalled_chunked_body_is_refused_with_408`,
+`a_body_completed_before_the_deadline_is_served`,
+`a_slow_handler_with_its_body_or_none_read_is_not_cut`,
+`a_crowd_of_body_drippers_cannot_starve_a_real_request` and
+`the_served_body_deadline_matches_the_head_deadline`. AGC-02.
+
+### D-1511 — Blank lines before a request line do not end its head — 2026-10-03
+
+**What was observed (h-api-1).** `HeadDeadline::observe` decided a head had
+ended on the first `\n\n` or `\n\r\n` in the byte stream and stopped the clock.
+httparse, and so hyper, skips empty lines BEFORE the request line, so a client
+that opened with `\r\n\r\n` and then sent a partial head, or nothing, was still
+owed a head while the clock had stopped. The audit's probe was still open with
+no reply after ten deadlines; 256 such sockets stop `accept` for good.
+
+**The change.** Until a byte of the request line has arrived, CR and LF neither
+start the head nor advance its end. A blank line after real head bytes still
+ends it, exactly as before.
+
+**Test.** `api::server::head_deadline_tests::leading_blank_lines_do_not_stop_the_head_clock`
+sends `\r\n\r\n`, `\n\n` and a mixed run before a partial head and requires
+`408` at the deadline; the same leads before a complete request are served
+`200`; blank lines alone are closed with no reply. AGC-03.
+
+### D-1512 — A form that names a single-value field twice is refused with `400`, naming the field — 2026-10-03
+
+**What was observed (h-api-2).** D-1202 (probeapi-5) refuses a repeated key
+only in the URL query. Every POST form was read with `server::param`, which
+answers the FIRST match, so in a body `vendor=dhan&vendor=bogus` was a Dhan
+request and `from=2022-01-08&...&from=2099-01-01` was answered over the first
+window, the second value never read: a request silently made into a different
+one, which `CLAUDE.md` §4 forbids. `param`'s own doc claimed the first match
+was the only one.
+
+**The change.** `server::FormBody` is the extractor every form route takes
+(`/pull/spot`, `/pull/fno`, `/pull/run`, `/pull/recovery`, `/universe/resolve`,
+`/autopilot/control`, `/ingest/queue`). It refuses a body naming any key twice
+with `400` and `REFUSED — the form names "<key>" more than once ... Nothing
+was read or run.`, before the handler runs. `REPEATABLE_FORM_FIELDS` (`leg`,
+`member`, `cash_identity`) are the fields read with `params` and may repeat.
+A pull-run or recovery leg's payload reaches `pull_spot` and `pull_fno`
+without the extractor, so `pullrun::legs_from` applies the same rule to each
+payload and refuses the whole run, naming the key. Keys compare as sent,
+undecoded, exactly as `param` matches them. `param`'s doc now names both gates.
+The JSON routes already refuse a duplicate declared field (`sweeprun::WireBody`).
+
+**Tests.** `api::server::tests::a_repeated_single_value_form_field_is_refused_on_every_form_route`,
+`api::server::tests::repeated_form_key_names_the_first_repeated_single_value_field`,
+`api::pullrun::tests::a_leg_whose_payload_repeats_a_single_value_field_refuses_the_run`.
+AGC-04.
+
+### D-1513 — A client error writes a line on the 1st, 2nd, 4th, 8th, ... occurrence, with its count — 2026-10-03
+
+**What was observed (h-api-3).** `logs::note_request` wrote one `Warn` line
+per 4xx, above the served `Info` floor and with no limit. Any page in the
+operator's browser can loop a request this server refuses (`<img src>` at a
+missing path is a 404, a cross-site POST a 403), and a few hundred thousand
+lines roll the sink's whole 64 MiB window and erase the pull and sweep
+evidence, which D-0072 forbids. `assets::Assets::note_missing` already
+summarised its own 404 line by powers of two, and `note_request` wrote the
+same 404 unthrottled beside it.
+
+**The change.** Each router counts the 4xx it has answered in its own
+`logs::ClientErrors`, handed to `note_request` as middleware state. A 4xx
+line is written on the 1st, 2nd, 4th, 8th, ... and carries `seen`, the
+running count, plus that request's path and status; the ones between are only
+counted. The count saturates at `u64::MAX`, which is not a power of two, so a
+saturated count writes nothing more. A 5xx is unchanged: one `Error` line each.
+The bound is in `docs/06-limits.md`.
+
+**Tests.** `api::logs::tests::client_errors_are_summarised_on_powers_of_two`
+(including the top of the range) and, over a live socket,
+`api::server::tests::the_run_events_and_the_request_event_reach_the_installed_sink`,
+which requires the first 404 written with `seen` 1 and, of six more, only the
+2nd and 4th. AGC-05.
+
+### D-1514 — A level exit before a hole is priced on the shipping path, under grid cost model V2 — 2026-10-03
+
+**What was observed (lookahead, the excursion half).** D-1183 made
+`grid::blocks_without_pricing` un-price a variant only for a refused bar at or
+before its own exit, and said in its own text that the look-ahead was "still
+live one step upstream": `trade::walk_core` marked a whole path
+`priceable: false` whenever `SliceFacts::path_accepts(entry, time_exit)`
+failed, and every grid built its candidates from that walk with
+`block_only: !path.priceable`. So a refused record or a missing minute AFTER a
+stop, target or trail had closed the position removed that trade from every
+cell and held the next signal to the time exit: a bar after the exit decided
+whether the exit counted, which `CLAUDE.md` §3 rule 7 forbids. D-1191 recorded
+where each path's holes are and used neither.
+
+**The change.**
+
+- `trade::Occupancy` gains `priceable_before_hole`, set only on a path refused
+  by `path_accepts` whose entry is priceable both ways, and
+  `Occupancy::hole_offset`, the earlier of `first_refused` and `first_missing`
+  as an offset from the entry. Every other unpriceable path (a missing horizon
+  bar, a slice cut before its square-off, an unpriceable exit record) is
+  unchanged and block-only, because nothing before a hole made it so.
+- `grid::Candidate` carries `hole`; such a path is not block-only.
+  `Candidate::refused_at(exit_offset)` is the one rule: block-only, a refused
+  crossing at or before the exit, or the located hole at or before the exit.
+  The located hole is what covers a missing minute, which the crossing table
+  cannot see. A refused variant still blocks to the time exit.
+- `grid::pessimistic_offset` is the one definition of a variant's exit offset,
+  read by `one_variant` and by the V1 replay. The replay
+  (`replay_candidate_path_v1`) used "block-only or any refused crossing", a
+  count, while the cell compared the hole with the exit; it now asks the same
+  `refused_at`, so the replay prices exactly what the cell prices. A refused
+  replay path on a holed candidate keeps its old label (`BlockOnly`, or
+  `BlockOnlyAndCrossingRefused` when the hole is a refused record).
+- `refused_paths` counts the same paths as before: `Candidate::unmeasured`
+  includes a located hole.
+
+**Which results change, and the new version.** Wherever a walk path holds a
+refused record or a missing minute strictly after some variant's level exit,
+that variant's cell gains the trade (money, counts, MAE, drawdown, rows) and
+may admit a later signal that the old time-exit block refused; its time-exit
+variant, and any variant exiting at or after the hole, is unchanged. That
+reaches every grid door (`evaluate*`, `with_levels`, `per_trade`,
+`materialize_*`, the resolved-policy and expression grids, walk-forward
+scoring through `validate`) and the V1 replay universe, its candidate paths
+and every digest sealed over them (global replay V1, V2 and V3). On a slice
+with no hole on any held path, every cell and replay path is byte-identical.
+The time-exit walk (`trade::walk*`), `outcome::forward` and the engine's sweep
+are not changed. Because cell money changed, the grid is a new cost model:
+`exit_grid_policy::printed_ohlcv_cost_model_id_v2` is what this build
+implements and every production policy now names; the V1 identity's value is
+unchanged and is refused by name, `ExitGridErrorV1::SupersededCostModelIdV1`,
+by resolution and by both resolved grids' runtime integrity checks, and by
+`cli::execution_capability`'s three cost-model checks through
+`implemented_cost_model`. The policy digest hashes the id, and
+`exact_execution_law_digest_v1` hashes the implemented id, so every
+`ExitGridPolicyV1` digest, resolved-grid digest, execution parameter id and
+execution-law digest computed by this build differs from one computed before
+it, on clean data too, and a stored artefact carrying the V1 model is refused
+rather than replayed under arithmetic that did not produce it.
+
+**Tests.** `runner::hole_after_exit::a_refused_record_after_a_stop_leaves_the_stop_priced`
+and `a_missing_minute_after_a_stop_leaves_the_stop_priced` damage the bar after
+a stop on a generated sawtooth slice and require the stop's row unchanged,
+every row that closed before the hole unchanged, and no time exit across the
+hole; both fail with the walk's flag forced off.
+`a_refused_stop_bar_is_never_priced` keeps the hole ON the exit refused.
+`runner::grid::tests::a_walk_built_stop_before_a_hole_is_priced_by_the_cell_and_the_replay_alike`
+fails with the old replay test. `runner::trade::tests::a_path_held_only_by_a_hole_says_where_it_can_still_be_priced`,
+`hole_offset_is_the_earlier_hole_and_only_on_a_path_priced_before_it`,
+`a_holed_path_whose_entry_cannot_be_filled_stays_block_only` and
+`runner::exit_grid_policy::tests::a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name`.
+`runner::research_family_readiness::legacy_resolution_identity_matches_the_recorded_pre_extraction_library`
+keeps its four digests captured from the earlier runner as the V1 record,
+pins the four V2 digests from this build (labelled as not an independent
+capture), requires each to differ from its V1 record, and requires a V1
+policy over the same bars to be refused by name. AGC-06, AGC-07.
+
+### D-1515 — Landing is checked by commit, and the one piece a branch-name landing dropped is landed — 2026-10-03
+
+**What was observed (GAP17-33).** The audit found that the fix pieces were
+landed by branch NAME: every piece branch conflicted with `fix/c2-final` and
+with the others, and "landing by branch name can silently carry nothing". Its
+rule: a group counts as landed only when every commit it names is an ancestor
+of the branch it landed on, or, for a squash, when the tree it produced is
+that branch's tree. A verifier marked it NOT-FIXED because no such check had
+been run, and could not see `fix/c2-final`.
+
+**The check, run on 2026-10-03 against `331b05c6` (the base of this branch).**
+
+- `origin/fix/c2-final` (tip `5de02e06`) is not an ancestor, because it
+  landed as the squash `2c209309` (#19). Its tree, `967a04a2`, is byte for byte
+  the tree of `2c209309`, and `2c209309` is an ancestor of `331b05c6`: landed.
+- The lookahead piece never had its own branch on `origin`; its cadence half
+  is `c0fc71cd` (D-1410), an ancestor. Its excursion half is D-1514.
+- Every `origin/fix/c4-*` branch is an ancestor except `fix/c4-store-02`
+  (`8afa25b1`, D-0978 and D-0979 on that branch), which lane 4 dropped as "a
+  duplicate of PR #26" by name. Its first half is a duplicate: D-0980 gives
+  `checksum_audit` the per-architecture `crate::open_flags::O_NOFOLLOW`. Its
+  second half, W3-store1-9, was NOT: `header.rs`'s `committed` still assigned
+  `refusal = refused` on every candidate, so when both header slots decoded
+  and both failed `validate`, the OLDER slot's reason was reported, while
+  `Header::read_region` documents the newest. Neither D-0978 nor D-0979 is in
+  this ledger.
+- Three more `origin` branches carry a decision this ledger does not hold:
+  `fix/cloud-GAP13-15` (`ed77b732`, D-0964), `fix/cloud-GAP4-46` (`5811ab25`,
+  D-0963) and `fix/cloud-W2-cli8-9` (`e6530c67`, D-0968). Their findings are
+  open audit items owned by other fixers; they are named here and not landed.
+
+**The change.** W3-store1-9 is landed from `8afa25b1` unchanged in substance:
+`committed` keeps the FIRST refusal (candidates arrive newest first) and falls
+back to `NoValidHeader` only when no slot decoded. It renumbers the citation
+to this entry. Landing from now on is verified by commit ancestry, or by tree
+equality for a squash, never by branch name.
+
+**Test.** `store::fault::when_both_slots_decode_and_fail_the_newest_slots_refusal_is_reported`
+writes two decoding slots that fail for different reasons, in both
+assignments, and requires the newer slot's refusal; on `331b05c6` it gets the
+older one. AGC-08.
+
+### D-1516 — docs-web-01's four findings are named beside the fixes that closed them — 2026-10-03
+
+**What was observed.** The batch-1 verifier marked docs-web-01 PARTIAL: "Only 3
+finding ids are named for 4 claimed findings ... I cannot identify the 4th".
+D-0790, D-0791 and D-0792 name no finding id at all; the ids are only in the
+commit messages on `fix/c4-docs-web`, and `4e50c0ae` names the fourth:
+"ET-bars-candles-store-6, -11, -13". So the fourth is ET-bars-candles-store-11,
+and it was fixed, by D-0790, in the same commit as the other two store
+findings; it was never named in a tracked file.
+
+**The four, re-checked against this tree.**
+
+| Finding | Fixed by | Proven by |
+|---|---|---|
+| ET-bars-candles-store-6 and -11 | D-0790 | C4-DOCS-WEB-01, -03, -07, -08 |
+| ET-bars-candles-store-13 | D-0790, D-0792 | C4-DOCS-WEB-02, C4-DOCS-WEB-09 |
+| ET-vocabulary-conditions-bits-4 | D-0791 | C4-DOCS-WEB-04 to C4-DOCS-WEB-06 |
+
+`4e50c0ae` names -6 and -11 together for the sentences D-0790 lists besides
+the header one: §4's read-only mapping (and `header.rs`'s heading saying the
+same), §6's citation of C-07 for per-read verification (C-07 seals a block in
+memory and reads no file), and the claim in `read_record`'s doc and
+`docs/06-limits.md` that no bench times a syscall while C-28 and C-29 time
+`read_record`, one `pread`. Which of the two ids named which sentence is not
+recorded anywhere this repository can read, so it is not assigned here; both
+are closed by the same rows. `2bfff4eb` (D-0792) names -13 as "the half
+D-0790 left standing". `store::docs` (the eight tests behind C4-DOCS-WEB-01 to -03 and -07
+to -09) and `vocab::table`'s four (C4-DOCS-WEB-04 to -06) pass on this tree.
+No code or document sentence changes; this entry is the missing name.

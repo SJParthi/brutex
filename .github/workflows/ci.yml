@@ -7677,7 +7677,11 @@ jobs:
           set -e
           git checkout -- "$probe"
           git diff --quiet -- "$probe" || { echo "GATE 8 SELF-TEST did not restore $probe"; exit 1; }
-          if [ "$probe_status" -eq 0 ] || ! grep -q 'C-09 decode, field 4 MiB .*BREACH' /tmp/gate8-probe.log; then
+          caught=no
+          if [ "$probe_status" -ne 0 ] && grep -q 'C-09 decode, field 4 MiB .*BREACH' /tmp/gate8-probe.log; then
+            caught=yes
+          fi
+          if [ "$caught" != yes ]; then
             cat /tmp/gate8-probe.log
             echo "GATE 8 SELF-TEST: a planted O(n) in decode_master_row was NOT refused"
             echo "(exit $probe_status). The ratio check cannot see a data-dependent cost."

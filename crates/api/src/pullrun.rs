@@ -445,12 +445,22 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         {
             return Err(Refusal::Malformed(decoded));
         }
+        // A LEG'S PAYLOAD IS A FORM TOO, and it reaches `pull_spot` and
+        // `pull_fno` without passing their `FormBody` extractor, so a repeated
+        // single-value field inside it is refused here, before any leg runs
+        // (h-api-2, D-1512).
+        let body = percent_decode(payload);
+        if let Some(key) = crate::server::repeated_form_key(&body) {
+            return Err(Refusal::Malformed(format!(
+                "{decoded} (its form names {key:?} more than once)"
+            )));
+        }
         legs.push(Leg {
             route,
             vendor: vendor.to_owned(),
             dir: dir.to_owned(),
             label: label.to_owned(),
-            body: percent_decode(payload),
+            body,
         });
     }
     if legs.is_empty() {
@@ -683,13 +693,19 @@ fn leg_outcome(status: axum::http::StatusCode, html: &str) -> LegOutcome {
 async fn request_leg(site: Loaded, leg: Leg) -> (axum::http::StatusCode, String) {
     match leg.route {
         Route::Spot => {
-            let (status, _receipt, body) =
-                crate::server::pull_spot(axum::extract::State(site), leg.body).await;
+            let (status, _receipt, body) = crate::server::pull_spot(
+                axum::extract::State(site),
+                crate::server::FormBody(leg.body),
+            )
+            .await;
             (status, body.0)
         }
         Route::Fno => {
-            let (status, body) =
-                crate::server::pull_fno(axum::extract::State(site), leg.body).await;
+            let (status, body) = crate::server::pull_fno(
+                axum::extract::State(site),
+                crate::server::FormBody(leg.body),
+            )
+            .await;
             (status, body.0)
         }
     }
@@ -1178,6 +1194,43 @@ mod tests {
         assert_eq!(legs[0].vendor, "dhan");
         assert_eq!(legs[0].dir, "1day");
         assert_eq!(legs[0].label, "Spot · 1 day");
+    }
+
+    /// h-api-2, D-1512: a leg's payload is a form that reaches `pull_spot` and
+    /// `pull_fno` without their extractor, so a repeated single-value field in
+    /// it refuses the WHOLE run, naming the key, while a repeated `member` in
+    /// the same payload is a list and passes.
+    #[test]
+    fn a_leg_whose_payload_repeats_a_single_value_field_refuses_the_run() {
+        let good = field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "ok",
+            "member=A&member=B&from=x",
+        );
+        let twice = field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "bad",
+            "from=x&vendor=a&from=y",
+        );
+        assert_eq!(legs_from(&good).expect("a list is not a repeat").len(), 1);
+        match legs_from(&format!("{good}&{twice}")) {
+            Err(Refusal::Malformed(why)) => {
+                assert!(
+                    why.ends_with("(its form names \"from\" more than once)"),
+                    "{why}"
+                );
+                assert!(
+                    Refusal::Malformed(why)
+                        .why()
+                        .contains("NOTHING was started")
+                );
+            }
+            other => panic!("a repeated payload field must refuse the run: {other:?}"),
+        }
     }
 
     /// Several legs, and the order they were sent in is the order they arrive.

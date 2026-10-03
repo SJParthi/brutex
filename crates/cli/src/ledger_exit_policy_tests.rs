@@ -23,7 +23,7 @@ fn original_five(side: Side) -> Result<ExitGridPolicyV1, String> {
         RatioLimitsV1::new(300, i64::MAX, u64::MAX).map_err(debug)?,
         16_384,
         ExitGridSelectorV1::GuaranteedFloor,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v2(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,

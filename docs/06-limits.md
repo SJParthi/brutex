@@ -12323,6 +12323,10 @@ not:
 
 ## Runner lane-2b follow-ups — D-1183 onward, 2 October 2026
 
+- **Closed by D-1514; kept as the record of what was.** A hole after a level
+  exit no longer blocks the path: the walk marks such a path
+  `priceable_before_hole` and the grid prices any exit strictly before the
+  hole. The bullet below described the state before D-1514.
 - **A hole after a level exit still blocks the path in the walk (D-1183).** The
   grid now prices a variant whose exit precedes `first_refused`. But
   `trade::walk_core` marks a whole path block-only when `path_accepts(entry,
@@ -12372,6 +12376,8 @@ not:
   and execution column) per disposition. That rebuild is O(signal bars +
   execution bars) per selected candidate. It is left because hoisting it would
   change the durable fold records each witness writes. Not timed.
+- **Hole locations are used since D-1514.** The bullet below is the state
+  D-1191 left; `Occupancy::hole_offset` now feeds the grid.
 - **Hole locations are recorded, not used (D-1191).** This narrows the D-1183
   bullet above. Each `Occupancy` now carries its path's first refused record
   and first missing minute, read in O(1) from two per-slice tables. Those
@@ -12410,10 +12416,14 @@ not:
 
 ## Slow clients, the connection cap and gap-address refusal — D-1200, 2 October 2026
 
-- **The head deadline covers the HEAD, not the body.** Once a request's blank
-  line has arrived, no deadline runs until the response is written. A client
-  that sends a complete head and then a body one byte at a time is bounded
-  only by `DefaultBodyLimit` (size, not time) and by the connection cap.
+- **The head deadline covers the HEAD; the body has its own since D-1510.**
+  This bullet said a body dripped one byte at a time was bounded only by
+  `DefaultBodyLimit` (size, not time) and the connection cap. `serve_limited`
+  now gives every request body `BODY_READ_TIMEOUT` (10 s) from the moment its
+  head was delivered, absolute rather than idle, and answers `408` with
+  `Connection: close` when a reader had to wait past it. It runs only while a
+  reader is waiting for owed bytes: a handler that has its whole body, or
+  reads none, is never cut by it. See the D-1510 section below.
 - **The cap queues, it does not refuse.** With `MAX_CONNECTIONS` (256) slots
   held, `accept` waits and the kernel backlog holds new connections. A local
   client that opens partial connections faster than the deadline frees them
@@ -14166,3 +14176,39 @@ and H the committed blocks in `global-selection-v6.bin` (at most
 
 None of these is O(1), and none grows with the request alone. They are not
 reduced here (D-1642).
+
+## Audit fixer 7: body deadline, form repeats, 4xx summary, holes after an exit — D-1510 onward, 3 October 2026
+
+- **Body deadline (D-1510).** `BODY_READ_TIMEOUT` is 10 s from the moment
+  `body_deadline` sees the head, absolute, not an idle timer. Each poll of a
+  request body is one poll of the inner body, plus one poll of a pinned
+  `tokio::time::Sleep` only when the inner body is pending: O(1) per frame.
+  The `408` replaces whatever the handler answered once a reader waited past
+  the deadline. A body whose bytes all arrived in time but which a handler
+  reads only after the deadline is still delivered, because arrived bytes are
+  returned before the alarm is asked. Not timed: no bench row covers it.
+- **Leading blank lines (D-1511).** The head scan skips CR and LF before the
+  first byte of a request line, as httparse does, so `\r\n\r\n` sent first
+  no longer ends the head and stops its clock. Still O(1) per byte.
+- **Repeated form fields (D-1512).** `FormBody` scans a form body once and
+  does one `HashSet` insert per field: O(fields), over a body
+  `DefaultBodyLimit` has already capped at `MAX_FORM_BYTES`. A pull-run or
+  recovery leg's payload is scanned the same way inside `legs_from`. Keys are
+  compared as sent, undecoded, exactly as `param` matches them, so
+  `vend%6Fr` is a different key to both; `param` never reads it as `vendor`.
+- **4xx lines (D-1513).** `logs::note_request` writes a client-error line on
+  the 1st, 2nd, 4th, 8th, ... 4xx one router has answered, each with `seen`,
+  the running count. A flood of N refused requests therefore writes
+  ⌊log2 N⌋ + 1 lines, not N. The lines between carry no path, so which paths
+  a scanner tried is not on the record, only how many. A 5xx is still one
+  `Error` line each. One relaxed atomic update per 4xx, plus compare-and-swap
+  retries under contention.
+- **Holes after a level exit (D-1514).** `Occupancy` grows by one `bool`;
+  the walk spends one `entry_is_priceable` check per holed path; the grid one
+  O(1) comparison per variant and path. The replay now computes the variant's
+  pessimistic exit offset once per candidate (O(1)) to classify it. Not timed.
+  **What it does not price:** a level exit AT or after the first hole, a path
+  whose horizon bar is missing, a slice cut before its square-off, and an
+  exit record that cannot be priced; each still blocks to its time exit, the
+  conservative extent, because nothing before a hole was what made them
+  unpriceable.
