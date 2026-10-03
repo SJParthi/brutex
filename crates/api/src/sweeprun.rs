@@ -3022,7 +3022,8 @@ pub async fn command(
 
 /// [`command`], with the build's commit stamp passed in.
 ///
-/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why/// that reason survived `build.rs` changing which arm is the reachable one.
+/// Split for the reason [`run_with`] gives, and see [`stamp_refusal`] for why
+/// that reason survived `build.rs` changing which arm is the reachable one.
 pub(crate) fn command_with(
     site: &crate::server::Loaded,
     body: &str,

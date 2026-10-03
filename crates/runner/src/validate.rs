@@ -4688,7 +4688,7 @@ fn walk_forward_core(
         // that is trivial beside the pricing it compares.
         //
         // DETERMINISM (CLAUDE.md S3 rule 5) IS HELD BY SHAPE, the same argument
-        // `rank::walk` and `batch::sweep_under` already make: rayon's INDEXED
+        // `rank::offer_part` and `cli::batch::sweep_under` already make: rayon's INDEXED
         // `collect` preserves order, so `scored` is the identical sequence
         // whatever order the threads finish in. `best` is then chosen by
         // scanning that ordered vector with the same strict `>` the sequential

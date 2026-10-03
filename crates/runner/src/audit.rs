@@ -1421,7 +1421,16 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
     // looking at the verdict. So it prints here. D-0172.
     if let Some(v) = rc.or(spa) {
         let _ = writeln!(out);
-        let _ = writeln!(out, "  sample: {}", v.calibration());
+        // THE ACTUAL COUNT, THEN THE BAND. `calibration` names the measured
+        // row the sample falls in, so 57 periods printed "30 periods: ..."
+        // and the count itself was never shown (ET-strategies-trades-ranking-
+        // costs-6, D-1498). The band stays: it is the measurement.
+        let _ = writeln!(
+            out,
+            "  sample: {} period(s); nearest measured row at or below it -- {}",
+            v.periods,
+            v.calibration()
+        );
         if v.periods < 100 {
             let _ = writeln!(
                 out,
@@ -1457,6 +1466,20 @@ mod tests {
         let mut out = String::new();
         bootstrap(&mut out, Some(&short), None, 1);
         assert!(out.contains("37.1%"), "the measured rate is shown:\n{out}");
+        assert!(
+            out.contains("  sample: 3 period(s);"),
+            "and the count itself:\n{out}"
+        );
+        // BETWEEN TWO ROWS, THE COUNT IS NOT THE ROW'S (D-1498). 57 periods
+        // takes the 30-period row and must still say 57.
+        let between = crate::bootstrap::Verdict {
+            periods: 57,
+            ..short
+        };
+        let mut said = String::new();
+        bootstrap(&mut said, Some(&between), None, 1);
+        assert!(said.contains("  sample: 57 period(s);"), "{said}");
+        assert!(said.contains("30 periods: measured 13.3%"), "{said}");
         assert!(
             out.contains("READ THE TWO ROWS ABOVE"),
             "and a short sample is called out rather than left to the reader:\n{out}"

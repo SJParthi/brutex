@@ -1106,21 +1106,11 @@ async fn reconcile_pending(
             continue;
         }
         match assess(site, &item.body, lifecycle).await {
-            Ok(found) => {
-                item.missing = found.missing;
-                item.unverified = found.unverified;
-                item.diagnostics = item.diagnostics.saturating_add(found.evidence_issues);
-                item.status = if found.retry_days.is_empty() {
-                    // Complete source readback does not reconstruct a lost HTTP
-                    // receipt, so this state remains explicitly qualified.
-                    item.diagnostics = item.diagnostics.saturating_add(1);
-                    Status::Unverified
-                } else if item.attempts >= ATTEMPT_LIMIT {
-                    Status::Exhausted
-                } else {
-                    Status::Queued
-                };
-            }
+            Ok(found) => match reassessed(&item, &found) {
+                Some(next) => item = next,
+                // NOTHING NEW TO RECORD (W1-api4-6, D-1500).
+                None => continue,
+            },
             Err(why) => {
                 item.status = Status::Blocked;
                 item.diagnostics = item.diagnostics.saturating_add(1);
@@ -1130,6 +1120,42 @@ async fn reconcile_pending(
         append_attempt(journal, attempts, item)?;
     }
     Ok(())
+}
+
+/// What one pending attempt's reassessment records, or `None` when it would
+/// record nothing new.
+///
+/// **A rerun over an unchanged store appends nothing (W1-api4-6, D-1500).**
+/// `Unverified` stays pending so that a later change, such as a gap that
+/// reappears, is picked up. But every rerun that found the same facts added the
+/// evidence count and one more to `diagnostics` again and appended the record
+/// to both journals, so an idle store grew its journal and its diagnostic count
+/// on every pass, against `CLAUDE.md` §3 rule 5. An `Unverified` attempt that
+/// reassesses to the same missing and unverified quantities with no day to
+/// retry is now left as it is.
+fn reassessed(item: &Record, found: &Assessment) -> Option<Record> {
+    if found.retry_days.is_empty()
+        && item.status == Status::Unverified
+        && item.missing == found.missing
+        && item.unverified == found.unverified
+    {
+        return None;
+    }
+    let mut next = item.clone();
+    next.missing = found.missing;
+    next.unverified = found.unverified;
+    next.diagnostics = next.diagnostics.saturating_add(found.evidence_issues);
+    next.status = if found.retry_days.is_empty() {
+        // Complete source readback does not reconstruct a lost HTTP
+        // receipt, so this state remains explicitly qualified.
+        next.diagnostics = next.diagnostics.saturating_add(1);
+        Status::Unverified
+    } else if next.attempts >= ATTEMPT_LIMIT {
+        Status::Exhausted
+    } else {
+        Status::Queued
+    };
+    Some(next)
 }
 
 #[derive(Default, Debug)]
@@ -1797,6 +1823,70 @@ fn page_html(
 )]
 mod tests {
     use super::*;
+
+    /// **A RERUN OVER AN UNCHANGED STORE RECORDS NOTHING (W1-api4-6, D-1500).**
+    ///
+    /// An `Unverified` attempt that reassesses to the same quantities with no
+    /// day to retry yields no record, however many evidence issues are seen
+    /// and however often. Any change still records: a different missing or
+    /// unverified count, a day to retry (queued, or exhausted at the limit),
+    /// and a first `Unverified` verdict from `Queued` or `InFlight`.
+    #[test]
+    fn an_unchanged_unverified_attempt_records_nothing_on_a_rerun() {
+        let mut held = record("target=equities&member=ABC".to_owned());
+        held.status = Status::Unverified;
+        held.missing = 3;
+        held.unverified = 2;
+        held.diagnostics = 7;
+        let same = Assessment {
+            missing: 3,
+            unverified: 2,
+            evidence_issues: u64::MAX,
+            ..Assessment::default()
+        };
+        for _ in 0..3 {
+            assert!(
+                reassessed(&held, &same).is_none(),
+                "nothing new, nothing appended"
+            );
+        }
+
+        let moved = Assessment { missing: 4, ..same };
+        let next = reassessed(&held, &moved).expect("a changed count records");
+        assert_eq!(next.missing, 4);
+        assert_eq!(next.status, Status::Unverified);
+        assert_eq!(next.diagnostics, u64::MAX, "saturates rather than wraps");
+
+        let day = Day::new(2024, 1, 2).expect("a day");
+        let retry = Assessment {
+            retry_days: vec![day],
+            ..Assessment {
+                missing: 3,
+                unverified: 2,
+                ..Assessment::default()
+            }
+        };
+        assert_eq!(
+            reassessed(&held, &retry).expect("retry").status,
+            Status::Queued
+        );
+        held.attempts = ATTEMPT_LIMIT;
+        assert_eq!(
+            reassessed(&held, &retry).expect("retry").status,
+            Status::Exhausted
+        );
+
+        for first in [Status::Queued, Status::InFlight] {
+            let mut fresh = record("target=equities&member=ABC".to_owned());
+            fresh.status = first;
+            let next = reassessed(&fresh, &Assessment::default()).expect("first verdict");
+            assert_eq!(next.status, Status::Unverified, "{first:?}");
+            assert_eq!(
+                next.diagnostics, 1,
+                "{first:?}: the lost receipt is counted once"
+            );
+        }
+    }
 
     fn date(year: u16, month: u8, day: u8) -> Day {
         Day::new(year, month, day).unwrap()

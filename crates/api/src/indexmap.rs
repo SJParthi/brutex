@@ -16,6 +16,15 @@ use pull::nseindex::{Basis, Catalogue, Unresolved, collapse};
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// The largest catalogue file [`Published::read`] reads, in bytes.
+///
+/// NSE's index list is about 150 `index_name,category` rows, a few KiB. One
+/// MiB is two orders of magnitude past that and still a bound: the file is read
+/// on every `/indexmap.json` request, and it had none (UC-19, D-1502). A file
+/// past it is refused naming the size, the way `master::MAX_MASTER_BYTES` is,
+/// instead of being read whole into memory.
+pub const MAX_CATALOGUE_BYTES: u64 = 1024 * 1024;
+
 /// NSE's published index list — matchable, and still readable.
 ///
 /// [`Catalogue`] collapses every name so a match can ignore the separators
@@ -38,9 +47,23 @@ impl Published {
     /// no empty fallback: a join against nothing resolves nothing and would
     /// report 136 refusals as though the exchange had disowned them, which is
     /// the failure wearing a success's clothes `CLAUDE.md` §4 bans.
+    /// A file larger than [`MAX_CATALOGUE_BYTES`] is refused naming the bound.
+    /// The read itself is capped one byte past it, so a file that grows between
+    /// a size check and the read cannot slip past (UC-19, D-1502).
     pub fn read(path: &Path) -> Result<Self, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|why| format!("{}: {why}", path.display()))?;
+        use std::io::Read as _;
+        let file = std::fs::File::open(path).map_err(|why| format!("{}: {why}", path.display()))?;
+        let mut text = String::new();
+        file.take(MAX_CATALOGUE_BYTES.saturating_add(1))
+            .read_to_string(&mut text)
+            .map_err(|why| format!("{}: {why}", path.display()))?;
+        if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_CATALOGUE_BYTES {
+            return Err(format!(
+                "{}: larger than {MAX_CATALOGUE_BYTES} bytes, which this reader \
+                 holds at most; NSE's index list is a few KiB, so this is not it",
+                path.display()
+            ));
+        }
         let parsed = Self::from_text(&text);
         if parsed.is_empty() {
             return Err(format!("{}: no index names", path.display()));
@@ -349,6 +372,28 @@ mod tests {
                 .expect_err("empty")
                 .contains("no index names")
         );
+    }
+
+    /// **A CATALOGUE PAST ITS BOUND IS REFUSED BY SIZE (UC-19, D-1502).**
+    ///
+    /// Exactly `MAX_CATALOGUE_BYTES` reads; one byte more is refused naming
+    /// the bound, never parsed.
+    #[test]
+    fn a_catalogue_past_its_bound_is_refused_by_size() {
+        let dir = crate::scratch::path("indexmap-bound");
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("nse_indices.csv");
+        let row = "NIFTY PRIVATE BANK,sectoral\n";
+        let at = usize::try_from(super::MAX_CATALOGUE_BYTES).expect("fits");
+        let mut text = row.repeat(at / row.len());
+        text.push_str(&"\n".repeat(at - text.len()));
+        assert_eq!(text.len(), at);
+        std::fs::write(&path, &text).expect("write");
+        assert_eq!(Published::read(&path).expect("at the bound reads").len(), 1);
+        text.push('\n');
+        std::fs::write(&path, &text).expect("write");
+        let why = Published::read(&path).expect_err("one byte past is refused");
+        assert!(why.contains("larger than 1048576 bytes"), "{why}");
     }
 
     #[test]

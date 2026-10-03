@@ -477,3 +477,91 @@ fn malformed_stored_command_numbers_refuse_before_any_store_access() {
         }
     }
 }
+
+/// A writer that refuses every byte with one chosen error, as a closed pipe or
+/// a full disk does.
+struct Refusing(std::io::ErrorKind);
+impl std::io::Write for Refusing {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::from(self.0))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::from(self.0))
+    }
+}
+
+/// A writer that takes every byte and refuses only the flush.
+struct FlushRefused(Vec<u8>);
+impl std::io::Write for FlushRefused {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+    }
+}
+
+/// **The binary's output is written, never printed, and a failed write is
+/// said and decides the code.** v53-2, D-1484. `println!` panicked on a
+/// closed stdout and `cli sweep 6 100 | true` exited 101.
+#[test]
+fn a_report_that_cannot_be_written_is_said_and_never_panics() {
+    use crate::deliver;
+    // Written whole: the code is the run's, and stderr hears nothing.
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    assert_eq!(deliver(OK, "report\n", &mut out, &mut err), OK);
+    assert_eq!(out, b"report\n");
+    assert!(err.is_empty());
+
+    // A closed pipe: every code stands, and the drop is said.
+    for code in [OK, FAILED, MISUSED] {
+        let mut err = Vec::new();
+        let earned = deliver(
+            code,
+            "report\n",
+            &mut Refusing(std::io::ErrorKind::BrokenPipe),
+            &mut err,
+        );
+        assert_eq!(
+            earned, code,
+            "a reader that stopped reading changes no code"
+        );
+        let said = String::from_utf8_lossy(&err).into_owned();
+        assert!(said.contains("stdout is not writable"), "{said}");
+        assert!(said.contains("7 bytes"), "{said}");
+        assert!(said.contains("closed the pipe"), "{said}");
+    }
+
+    // Any other failure: a clean run is no longer clean; a refusal stays one.
+    for (code, wanted) in [(OK, FAILED), (FAILED, FAILED), (MISUSED, MISUSED)] {
+        let mut err = Vec::new();
+        let earned = deliver(
+            code,
+            "report\n",
+            &mut Refusing(std::io::ErrorKind::StorageFull),
+            &mut err,
+        );
+        assert_eq!(earned, wanted, "from {code}");
+        let said = String::from_utf8_lossy(&err).into_owned();
+        assert!(said.contains("not a clean exit"), "{said}");
+    }
+
+    // A flush that fails after every byte was taken is still a failure.
+    let mut flushed = FlushRefused(Vec::new());
+    let mut err = Vec::new();
+    assert_eq!(deliver(OK, "report\n", &mut flushed, &mut err), FAILED);
+    assert_eq!(flushed.0, b"report\n");
+    assert!(!err.is_empty());
+
+    // And a stderr that is gone too is not a panic either.
+    assert_eq!(
+        deliver(
+            OK,
+            "report\n",
+            &mut Refusing(std::io::ErrorKind::BrokenPipe),
+            &mut Refusing(std::io::ErrorKind::BrokenPipe),
+        ),
+        OK
+    );
+}

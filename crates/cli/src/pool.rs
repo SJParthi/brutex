@@ -973,13 +973,18 @@ fn render_pooled(
         rule_bp / 100,
         rule_bp % 100
     );
-    let _ = writeln!(
-        out,
-        "  {:>4} {:<5}{:>6}{:>8}{:>6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>5}  fired on",
-        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>="
-    );
-    for (rank, p) in pooled.iter().take(rules.top.max(1)).enumerate() {
-        let Some(candidate) = union.get(p.candidate) else {
+    let shown: Vec<(usize, &Pooled, Option<&Candidate>)> = pooled
+        .iter()
+        .take(rules.top.max(1))
+        .enumerate()
+        .map(|(rank, p)| (rank, p, union.get(p.candidate)))
+        .collect();
+    let laid = laid_pooled(&shown);
+    let _ = writeln!(out, "  {}  fired on", laid.header);
+    let mut lines = laid.rows.iter();
+    for &(rank, p, candidate) in &shown {
+        let (Some(candidate), Some(line)) = (candidate, candidate.and_then(|_| lines.next()))
+        else {
             let _ = writeln!(
                 out,
                 "refused: pooled rank {} names missing candidate {}; no row was fabricated",
@@ -990,21 +995,7 @@ fn render_pooled(
         };
         let _ = writeln!(
             out,
-            "  {:>4} {:<5}{:>6}{:>8}{:>6}{:>12}{:>12}{:>10}{:>10}{:>12}{:>5}  {}{}",
-            rank + 1,
-            match candidate.direction {
-                Direction::Long => "long",
-                Direction::Short => "short",
-            },
-            p.fired,
-            p.trades,
-            p.wins,
-            p.worst,
-            p.min_win,
-            ratio_cell(p.tail_bp()),
-            ratio_cell(p.profit_factor_bp()),
-            p.net,
-            p.dd_bound,
+            "  {line}  {}{}",
             p.names.join(" "),
             if p.fired > count(p.names.len()) {
                 format!(" +{} more", p.fired.saturating_sub(count(p.names.len())))
@@ -1037,6 +1028,59 @@ fn render_pooled(
         }
     }
     out.push_str(crate::IN_SAMPLE_WARNING);
+}
+
+/// The pass-2 rows whose candidate exists, laid out under their header.
+///
+/// LAID OUT TOGETHER (v4-2, GAP13-16, D-1487). This was one `format!` of
+/// adjacent width specifiers, the shape D-1420 removed from every other cli
+/// table and left here: a 12-wide `net` beside a 5-wide `dd>=`, or raw paisa
+/// at `i64::MIN` (20 characters) in `worst`, `min_win` or `net`, ran into its
+/// neighbour and slid every column after it off its header. The widths stay as
+/// minimums, so a table whose figures fit renders as it did.
+fn laid_pooled(shown: &[(usize, &Pooled, Option<&Candidate>)]) -> crate::columns::Laid {
+    use crate::columns::{left, right};
+    let columns = [
+        right(4),
+        left(5).after(1),
+        right(6),
+        right(8),
+        right(6),
+        right(12),
+        right(12),
+        right(10),
+        right(10),
+        right(12),
+        right(5),
+    ];
+    let header = [
+        "rank", "side", "fired", "trades", "wins", "worst", "min_win", "tail", "pf", "net", "dd>=",
+    ];
+    let cells: Vec<Vec<String>> = shown
+        .iter()
+        .filter_map(|&(rank, p, candidate)| {
+            candidate.map(|candidate| {
+                vec![
+                    (rank + 1).to_string(),
+                    match candidate.direction {
+                        Direction::Long => "long",
+                        Direction::Short => "short",
+                    }
+                    .to_owned(),
+                    p.fired.to_string(),
+                    p.trades.to_string(),
+                    p.wins.to_string(),
+                    p.worst.to_string(),
+                    p.min_win.to_string(),
+                    ratio_cell(p.tail_bp()),
+                    ratio_cell(p.profit_factor_bp()),
+                    p.net.to_string(),
+                    p.dd_bound.to_string(),
+                ]
+            })
+        })
+        .collect();
+    crate::columns::with_header(&columns, &header, cells)
 }
 
 /// A ratio in hundredths as `12.34x`, or `never lost` for the sentinel.
@@ -2621,5 +2665,73 @@ mod tests {
                 .expect("separated and aligned");
         }
         assert_eq!(lines.len() - at - 1, screened.len(), "{out}");
+    }
+
+    /// v4-2, GAP13-16, D-1487: the pooled pass-2 table at the extremes a row
+    /// can carry. Raw paisa at `i64::MIN` is 20 characters in a 12-character
+    /// column; before the table was laid out together `worst`, `min_win`,
+    /// `net` and `dd>=` ran into one another and slid off their headers.
+    #[test]
+    #[allow(clippy::indexing_slicing, reason = "a missing line must fail the test")]
+    fn the_pooled_table_keeps_extreme_figures_apart_and_under_their_headers() {
+        use crate::columns::Align::{Left as L, Right as R};
+        let union = candidates(3);
+        let pooled_at = |candidate: usize, extreme: i64, count: u64| Pooled {
+            candidate,
+            fired: count,
+            trades: count,
+            wins: count,
+            net: extreme,
+            // `worst` and `gross_loss` at `i64::MIN` keep both ratios finite,
+            // so every cell is one word; `min_win` and `gross_win` are never
+            // negative in a real fold.
+            worst: i64::MIN,
+            min_win: extreme.max(0),
+            gross_win: extreme.max(0),
+            gross_loss: i64::MIN,
+            dd_bound: extreme,
+            names: vec!["AAA".to_owned()],
+        };
+        let pooled = vec![
+            pooled_at(0, i64::MIN, u64::MAX),
+            pooled_at(1, i64::MAX, u64::MAX),
+            pooled_at(2, -1, 1),
+            pooled_at(7, 0, 1),
+        ];
+        let mut rules = rules_at(300);
+        rules.top = pooled.len();
+        let surface = vec!["AAA".to_owned()];
+        let priced: Vec<Result<Vec<super::Priced>, String>> = vec![Ok(Vec::new())];
+        let mut out = String::new();
+        super::render_pooled(&mut out, &union, &surface, &priced, &pooled, rules);
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("rank"))
+            .expect("a header");
+        let header = lines[at]
+            .strip_suffix("  fired on")
+            .expect("the trailing label");
+        let mut rows = 0;
+        for row in &lines[at + 1..] {
+            if row.trim_start().starts_with("mask ") || row.is_empty() {
+                continue;
+            }
+            if row.starts_with("refused: pooled rank 4 names missing candidate 7") {
+                rows += 1;
+                continue;
+            }
+            let Some(row) = row
+                .strip_suffix("  AAA +18446744073709551614 more")
+                .or_else(|| row.strip_suffix("  AAA"))
+            else {
+                break;
+            };
+            crate::columns::assert_under(header, row, &[R, L, R, R, R, R, R, R, R, R, R])
+                .expect("separated and aligned");
+            rows += 1;
+        }
+        assert_eq!(rows, pooled.len(), "{out}");
+        assert!(out.contains(&i64::MIN.to_string()), "{out}");
     }
 }

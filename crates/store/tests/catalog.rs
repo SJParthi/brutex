@@ -488,7 +488,8 @@ fn a_store_root_that_cannot_be_searched_is_refused() {
     );
 }
 
-/// The test above, run where the mode bits bind (D-0995, D-1526).
+/// The test above, run where the mode bits bind: as root a mode-000
+/// directory is still searchable and the premise fails (audit-root, D-1485).
 fn a_store_root_that_cannot_be_searched_is_refused_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("root000");
@@ -557,7 +558,8 @@ fn a_directory_the_walk_cannot_list_is_counted_not_dropped() {
     );
 }
 
-/// The test above, run where the mode bits bind (D-0995, D-1526).
+/// The test above, run where the mode bits bind: as root a mode-000
+/// directory is still searchable and the premise fails (audit-root, D-1485).
 fn a_directory_the_walk_cannot_list_is_counted_not_dropped_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("unreadable");

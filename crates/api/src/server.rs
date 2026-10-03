@@ -49,7 +49,14 @@ pub const DEFAULT_ADDR: SocketAddr =
 /// only thing standing between this server and that allocation was a
 /// dependency's default value. A request past this answers `413` — the refusal
 /// is the framework's and it is loud, not a truncation.
-const MAX_FORM_BYTES: usize = 8 * 1024;
+///
+/// **Two routes read more than this, and they are named.** `/pull/spot` and
+/// `/ingest/queue` take repeated `member` fields, and 750 ticked instruments do
+/// not fit 8 KiB, so `ingest::TooManyMembers` could never be reached: the
+/// framework's 413 answered first (W1-api3-6, D-1499). Those two routes carry
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] instead; every other form keeps
+/// this bound.
+pub(crate) const MAX_FORM_BYTES: usize = 8 * 1024;
 
 /// One line of operator-facing text on stdout, written without a panic.
 ///
@@ -2626,25 +2633,57 @@ async fn gaps_json(
             Err(why) => return calendar_admission_refused(&why),
         }
     };
-    let mut months = Vec::with_capacity(span.len());
-    for month in &span {
-        let schedule = audit_cash_schedule(&site, &asked, *month).await;
-        let mut audited = audit_one(
-            &site,
-            &asked,
-            *month,
-            peers.calendar.as_ref(),
-            schedule.as_ref().ok().and_then(Option::as_ref),
-        );
-        audited.evidence_error = schedule.err();
-        months.push(audited);
-    }
+    let (months, peers) = match audit_span(&site, asked, span.clone(), peers).await {
+        Ok(done) => done,
+        Err(why) => return calendar_admission_refused(&why),
+    };
 
     (
         axum::http::StatusCode::OK,
         json(),
         gaps_body(&months, &span, &peers, truncated_range),
     )
+}
+
+/// Every month of a `/gaps.json` span, audited OFF THE ASYNC WORKERS.
+///
+/// Each month's bar file and its dated cash-session evidence are read in the
+/// calendar pool the peer vote already used, in one admission for the whole
+/// span. The evidence reader is an `async fn` whose local variant never awaits
+/// a fetch, but it reads and locks files inline, so it is driven to completion
+/// on the blocking thread by the runtime's handle rather than on a worker.
+/// `peers` goes in and comes back, because the answer renders from it.
+/// Split from `gaps_json` for the workspace's 100-line ceiling. W1-api2-11,
+/// D-1508.
+///
+/// # Errors
+///
+/// [`crate::detail::RunError`] when the calendar pool refuses or cannot join.
+async fn audit_span(
+    site: &Loaded,
+    asked: Addressed,
+    span: Vec<store::path::YearMonth>,
+    peers: PeerCalendar,
+) -> Result<(Vec<AuditedMonth>, PeerCalendar), crate::detail::RunError> {
+    let runtime = tokio::runtime::Handle::current();
+    let audit_site = std::sync::Arc::clone(site);
+    crate::detail::run_calendar(move || {
+        let mut months = Vec::with_capacity(span.len());
+        for month in &span {
+            let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, *month));
+            let mut audited = audit_one(
+                &audit_site,
+                &asked,
+                *month,
+                peers.calendar.as_ref(),
+                schedule.as_ref().ok().and_then(Option::as_ref),
+            );
+            audited.evidence_error = schedule.err();
+            months.push(audited);
+        }
+        (months, peers)
+    })
+    .await
 }
 
 /// The audit's whole answer, from the months it walked.
@@ -16327,7 +16366,15 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             }),
         )
         .route("/pull", axum::routing::get(pull_get))
-        .route("/pull/spot", axum::routing::post(pull_spot))
+        // THE TWO MEMBER FORMS READ A LARGER BODY (W1-api3-6, D-1499). A
+        // route-level limit is inner to the router's, so it is the one the
+        // `String` extractor reads.
+        .route(
+            "/pull/spot",
+            axum::routing::post(pull_spot).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ingest::MAX_MEMBER_FORM_BYTES,
+            )),
+        )
         .route("/pull/fno", axum::routing::post(pull_fno))
         // THE ONE PRESS. `/pull/spot` and `/pull/fno` above are unchanged and
         // still serve one leg each; this starts a run that drives them itself,
@@ -16376,7 +16423,12 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             "/ingest/status.json",
             axum::routing::get(crate::ingest::status_json),
         )
-        .route("/ingest/queue", axum::routing::post(crate::ingest::queue))
+        .route(
+            "/ingest/queue",
+            axum::routing::post(crate::ingest::queue).layer(axum::extract::DefaultBodyLimit::max(
+                crate::ingest::MAX_MEMBER_FORM_BYTES,
+            )),
+        )
         // THE AUDIT'S TWO. `/audit.json` is what the browser console reads and
         // `/audit` is the no-script page, unchanged. Before the JSON route
         // existed the console fetched the PAGE and parsed its table back out
@@ -17939,13 +17991,92 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // this one, and the file named two pids. The length is set after the write,
     // so a refused reader sees this stamp's line first at every moment, and the
     // reader quotes only that line. R9-api-cx-2, D-1446.
-    let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes())
-        .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)));
+    //
+    // A STAMP THAT FAILS IS NEVER DISCARDED (v3b-2, D-1481). Its result was
+    // bound to `_ignored_stamp`, so a full disk or an I/O error after the lock
+    // was taken left the PREVIOUS holder's line in the file, and a refused
+    // second instance quoted that dead pid as the one holding the store -- the
+    // misattribution R9-api-cx-2 fixed, back through the error path.
+    if let Err(refusal) = stamp_serve_lock(&file, addr, &path) {
+        drop(file);
+        release_root(&key);
+        return Err(refusal);
+    }
     Ok(ServeLock {
         held: Some(file),
         root: key,
     })
+}
+
+/// Writes this instance's `addr=… pid=…` line into the held serve lock, cut to
+/// its own length, and decides what a failure leaves (v3b-2, D-1481): a
+/// cleared file is served with one WARN event and a stderr line, an uncleared
+/// one is the refusal returned.
+fn stamp_serve_lock(
+    file: &store::flock::Flock<std::fs::File>,
+    addr: std::net::SocketAddr,
+    path: &Path,
+) -> Result<(), String> {
+    let stamp = format!("addr={addr} pid={}\n", std::process::id());
+    let stamped = stamp_outcome(
+        || {
+            std::io::Write::write_all(&mut &**file, stamp.as_bytes())
+                .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)))
+        },
+        || file.set_len(0),
+        path,
+    )?;
+    if let Some(warning) = stamped {
+        let _noted = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "api.serve",
+                "the serve lock is held but could not be stamped",
+            )
+            .with("why", telemetry::Value::Str(&warning)),
+        );
+        warn_line!("{warning}");
+    }
+    Ok(())
+}
+
+/// What a failed serve-lock stamp leaves, decided over two operations a test
+/// can fail on demand (v3b-2, D-1481).
+///
+/// `stamp` writes this holder's line and cuts the file to it; `clear` cuts the
+/// file to nothing. `Ok(None)`: stamped. `Ok(Some(warning))`: the stamp failed
+/// and the file was emptied, so a refused instance reads "an instance that had
+/// not yet stamped the file" -- true, if incomplete -- and the warning names
+/// the error; the lock itself is held, so mutual exclusion is intact and this
+/// degrades loudly rather than refusing. `Err`: the stamp failed AND the file
+/// could not be emptied, so it may still name a previous holder or a garbled
+/// mix of two; serving would make every refused instance name the wrong
+/// process, so this refuses.
+fn stamp_outcome(
+    stamp: impl FnOnce() -> std::io::Result<()>,
+    clear: impl FnOnce() -> std::io::Result<()>,
+    path: &Path,
+) -> Result<Option<String>, String> {
+    let Err(why) = stamp() else {
+        return Ok(None);
+    };
+    match clear() {
+        Ok(()) => Ok(Some(format!(
+            "the one-server lock {} is held, but this instance's address and pid \
+             could not be written into it — {why}. The file was emptied instead, \
+             so a refused second instance will say the holder had not yet \
+             stamped it rather than name a previous one.",
+            path.display()
+        ))),
+        Err(left) => Err(format!(
+            "REFUSED: the one-server lock {} was taken, but this instance's \
+             address and pid could not be written into it — {why} — and the \
+             file could not be emptied either — {left}. It may still name a \
+             previous holder, so a refused second instance would quote the \
+             wrong process as the one serving this store.",
+            path.display()
+        )),
+    }
 }
 
 /// Drops a root out of the in-process set after a failed take.
@@ -21239,6 +21370,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A FAILED SERVE-LOCK STAMP IS NEVER DISCARDED.** v3b-2, D-1481. The
+    /// stamp's result was dropped, so a full disk left the previous holder's
+    /// line for a refused instance to quote. Each arm of the decision is driven
+    /// with the error the host gives, and the refusal is driven end to end
+    /// through a lock name that resolves to `/dev/full`, where every write
+    /// fails with ENOSPC and no length can be set.
+    #[test]
+    fn a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale() {
+        let path = Path::new("/store/serve.lock");
+        assert_eq!(
+            stamp_outcome(|| Ok(()), || unreachable!("not cleared"), path),
+            Ok(None)
+        );
+
+        let full = || Err(std::io::Error::from_raw_os_error(28));
+        let warned = stamp_outcome(full, || Ok(()), path).expect("cleared, so it serves");
+        let warned = warned.expect("and says why");
+        assert!(warned.contains("/store/serve.lock"), "{warned}");
+        assert!(warned.contains("os error 28"), "the host's words: {warned}");
+        assert!(warned.contains("emptied"), "{warned}");
+
+        let refused = stamp_outcome(full, || Err(std::io::Error::from_raw_os_error(5)), path)
+            .expect_err("neither stamped nor cleared");
+        assert!(refused.starts_with("REFUSED:"), "{refused}");
+        assert!(
+            refused.contains("os error 28") && refused.contains("os error 5"),
+            "{refused}"
+        );
+
+        let root = crate::scratch::path("serve-lock-dev-full");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let lock_path = root.join(SERVE_LOCK);
+        std::os::unix::fs::symlink("/dev/full", &lock_path).expect("the /dev/full name");
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("an address");
+        let refused = take_serve_lock(&root, addr).expect_err("an unstampable lock refuses");
+        assert!(refused.contains("could not be written"), "{refused}");
+        // The refusal released both the file lock and the in-process key: with
+        // a regular lock file at the name, the same store is taken at once.
+        std::fs::remove_file(&lock_path).expect("unlink");
+        let taken = take_serve_lock(&root, addr).expect("the store is free again");
+        assert!(
+            taken.held.is_some(),
+            "a real file lock, not the in-process pass"
+        );
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A configured store is an existing capability, never a directory the
     /// server is allowed to invent. This is the hot-unplug regression: the old
     /// `create_dir_all` made a missing external mount path on the internal
@@ -23234,11 +23414,14 @@ mod tests {
             // Just outside: the field is padded past MAX_FORM_BYTES. It is
             // refused for its SIZE, before any parser sees it -- so the reply
             // carries neither the accepted page nor a named field refusal.
+            // `/pull/fno`, not `/pull/spot`: the two member forms read the
+            // larger `ingest::MAX_MEMBER_FORM_BYTES` (D-1499), and their bound
+            // is the next test's.
             let huge = format!(
-                "target=swept&from=2024-01-01&to=2024-01-31&pad={}",
+                "underlying=NIFTY&series=fut&expiry=2020-01-30&from=2020-01-01&to=2020-01-30&pad={}",
                 "x".repeat(MAX_FORM_BYTES + 1)
             );
-            let refused = post(addr, "/pull/spot", &huge).await;
+            let refused = post(addr, "/pull/fno", &huge).await;
             assert!(
                 refused
                     .lines()
@@ -23251,6 +23434,80 @@ mod tests {
                 !refused.contains("REFUSED ·"),
                 "and it never reached the form parser: {refused}"
             );
+        })
+        .await;
+    }
+
+    /// **EVERY TICKED MEMBER FITS, AND ONE TOO MANY IS NAMED, NOT A 413**
+    /// (W1-api3-6, D-1499).
+    ///
+    /// Under the shared 8 KiB form bound, 750 ticked instruments answered the
+    /// framework's 413 and `TooManyMembers` was unreachable over HTTP. On both
+    /// member routes: 750 full-width symbols reach the parser, 2,001 reach the
+    /// named refusal, 2,000 symbols percent-encoded at the worst 3x still
+    /// reach it, and one byte past `MAX_MEMBER_FORM_BYTES` is a 413.
+    #[tokio::test]
+    async fn every_ticked_member_fits_and_one_too_many_is_named_not_a_413() {
+        let status = |reply: &str| {
+            reply
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .map(str::to_owned)
+        };
+        let members = |n: usize, encode: bool| -> String {
+            use std::fmt::Write as _;
+            let mut out = String::new();
+            for i in 0..n {
+                let symbol = format!("S{i:0>23}");
+                out.push_str("&member=");
+                if encode {
+                    for b in symbol.bytes() {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                } else {
+                    out.push_str(&symbol);
+                }
+            }
+            out
+        };
+        assert_eq!(crate::ingest::MAX_MEMBER_FORM_BYTES, 168_192);
+        with_server("memberlimit", move |addr| async move {
+            for path in ["/ingest/queue", "/pull/spot"] {
+                let all = format!(
+                    "target=equities&from=2024-01-01&to=2024-01-31{}",
+                    members(750, false)
+                );
+                assert!(all.len() > MAX_FORM_BYTES, "the case the old bound refused");
+                let reply = post(addr, path, &all).await;
+                assert_ne!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+
+                let over = format!(
+                    "target=equities&from=2024-01-01&to=2024-01-31{}",
+                    members(2_001, false)
+                );
+                let reply = post(addr, path, &over).await;
+                assert_ne!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+                assert!(
+                    reply.contains("names 2001 instrument(s)"),
+                    "{path}: the named refusal, not a 413: {reply}"
+                );
+
+                let at_cap = format!(
+                    "target=equities&from=2024-01-01&to=2024-01-31{}",
+                    members(2_000, true)
+                );
+                assert!(at_cap.len() <= crate::ingest::MAX_MEMBER_FORM_BYTES);
+                let reply = post(addr, path, &at_cap).await;
+                assert_ne!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+
+                let past = format!(
+                    "target=equities&pad={}",
+                    "x".repeat(crate::ingest::MAX_MEMBER_FORM_BYTES)
+                );
+                let reply = post(addr, path, &past).await;
+                assert_eq!(status(&reply).as_deref(), Some("413"), "{path}: {reply}");
+            }
         })
         .await;
     }
@@ -33088,6 +33345,24 @@ async fn indexmap_json(
             no_such_feed_json(&asked),
         );
     };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: the catalogue is read from disk on
+    // every request. W1-api2-11, D-1508.
+    match crate::detail::run_store_read(move || indexmap_reading(&site, feed)).await {
+        Ok((status, body)) => (status, [(axum::http::header::CONTENT_TYPE, json)], body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "index map read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (status, [(axum::http::header::CONTENT_TYPE, json)], body)
+        }
+    }
+}
+
+/// Everything [`indexmap_json`] does once the feed is parsed, on the blocking
+/// pool. D-1508.
+fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, String) {
     let read = masters_dir()
         .map(|dir| dir.join("nse_indices.csv"))
         .and_then(|path| crate::indexmap::Published::read(&path));
@@ -33100,7 +33375,6 @@ async fn indexmap_json(
             // §4 bans.
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CONTENT_TYPE, json)],
                 format!("{{\"error\":{}}}", crate::pullrun::quote_for_json(&why)),
             );
         }
@@ -33122,7 +33396,6 @@ async fn indexmap_json(
     let rows = crate::indexmap::join(&nse, feed, symbols);
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, json)],
         crate::indexmap::json(&nse, &rows),
     )
 }

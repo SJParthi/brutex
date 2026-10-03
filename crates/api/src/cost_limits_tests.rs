@@ -320,7 +320,14 @@ fn w1_api5_9_the_index_map_rereads_its_catalogue_and_walks_the_universe() {
             "O(file bytes + U)",
         ],
     );
-    let route = item(SERVER, "async fn indexmap_json(");
+    // The read moved onto the blocking pool with its walk (D-1508); the cost
+    // stated is unchanged, so it is checked where it now runs.
+    let handler = item(SERVER, "async fn indexmap_json(");
+    assert!(
+        handler.contains("run_store_read(move || indexmap_reading(&site, feed))"),
+        "{handler}"
+    );
+    let route = item(SERVER, "fn indexmap_reading(");
     assert!(
         route.contains("crate::indexmap::Published::read(&path)"),
         "{route}"

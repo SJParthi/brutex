@@ -306,3 +306,67 @@ fn a_refused_calendar_admission_names_why_and_the_bound() {
     let parsed: Value = serde_json::from_str(&body).expect("JSON");
     assert!(parsed["error"].is_string());
 }
+
+/// **THE REST OF W1-api2-11: NO STORE OR MASTERS READ ON AN ASYNC WORKER.**
+/// D-1508.
+///
+/// `/gaps.json`'s month audits, `/folder.json`'s folder walk and
+/// `/indexmap.json`'s catalogue read ran inline in their handlers. Read off the
+/// source, as the calendar half is, because what is claimed is where each
+/// call sits: inside the admitted closure, and nowhere outside it.
+#[test]
+fn the_gap_audit_folder_and_index_map_read_on_the_blocking_pool() {
+    let server = include_str!("server.rs");
+    let folder = include_str!("folder.rs");
+    let body_of = |source: &str, head: &str| {
+        let at = source.find(head).expect("the handler exists");
+        let rest = &source[at..];
+        rest[..rest.find("\n}\n").expect("the handler ends")].to_owned()
+    };
+
+    let handler = body_of(server, "async fn gaps_json(");
+    assert!(
+        handler.contains("audit_span(&site, asked, span.clone(), peers).await"),
+        "/gaps.json audits its span through the admitted helper:\n{handler}"
+    );
+    for call in ["audit_one(", "audit_cash_schedule("] {
+        assert!(!handler.contains(call), "and calls no {call} inline");
+    }
+    let gaps = body_of(server, "async fn audit_span(");
+    let pool = gaps
+        .rfind("crate::detail::run_calendar(move ||")
+        .expect("the audits are admitted to the calendar pool");
+    for call in ["audit_one(", "audit_cash_schedule("] {
+        let at: Vec<usize> = gaps.match_indices(call).map(|(i, _)| i).collect();
+        assert!(!at.is_empty(), "/gaps.json calls {call}");
+        assert!(
+            at.iter().all(|&i| i > pool),
+            "every {call} in /gaps.json sits inside the admitted closure:\n{gaps}"
+        );
+    }
+    assert!(
+        gaps.contains("runtime.block_on(audit_cash_schedule("),
+        "the evidence reader is driven on the blocking thread, not awaited on a worker"
+    );
+    assert!(
+        !gaps.contains("audit_cash_schedule(&site, &asked, *month).await"),
+        "and is never awaited inline"
+    );
+
+    let walk = body_of(folder, "pub async fn folder_json(");
+    assert!(
+        walk.contains("crate::detail::run_store_read(move || answer(feed, shape, &root))"),
+        "/folder.json walks the folder in the store-read pool:\n{walk}"
+    );
+    assert_eq!(walk.matches("answer(").count(), 1, "and nowhere else");
+
+    let map = body_of(server, "async fn indexmap_json(");
+    assert!(
+        map.contains("crate::detail::run_store_read(move || indexmap_reading(&site, feed))"),
+        "/indexmap.json reads its catalogue in the store-read pool:\n{map}"
+    );
+    assert!(
+        !map.contains("Published::read") && !map.contains("masters_dir()"),
+        "and never inline in the handler"
+    );
+}

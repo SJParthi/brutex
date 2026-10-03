@@ -106,53 +106,16 @@ fn a_link_back_to_an_ancestor_is_one_linked_entry() {
     assert_eq!(out.held.len(), 1);
 }
 
-/// Runs `body` in a child of this test binary whose permission bits bind:
-/// as root the child is uid 65534 (`nobody`), whose `setuid` away from root
-/// drops `CAP_DAC_OVERRIDE`, so a mode-000 directory refuses it exactly as it
-/// refuses an ordinary user. D-0995 moved the integration tests to
-/// `tests/support`'s copy of this and missed these two, so they failed on every
-/// root container (audit-20261003 hunt-store-7, D-1526). `test` is the full
-/// module path the harness knows the caller by.
-fn where_permission_binds(test: &str, body: impl FnOnce()) {
-    use std::os::unix::fs::MetadataExt as _;
-    use std::os::unix::process::CommandExt as _;
-    const CHILD: &str = "BRUTEX_PERMISSION_BINDS_CHILD";
-    const NOBODY: u32 = 65_534;
-    if std::env::var_os(CHILD).is_some() {
-        body();
-        return;
-    }
-    // This process's effective uid, as the owner of a file it just made.
-    let probe = scratch("uid-probe");
-    let uid = std::fs::metadata(&probe.0)
-        .expect("the probe's status")
-        .uid();
-    drop(probe);
-    let uid = Some(uid).filter(|&uid| uid != 0).unwrap_or(NOBODY);
-    let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
-        .args(["--exact", test, "--nocapture", "--test-threads=1"])
-        .env(CHILD, "1")
-        .uid(uid)
-        .output()
-        .expect("the child test process starts");
-    let (stdout, stderr) = (
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    let ran = output.status.success() && stdout.contains("1 passed");
-    let said = format!("child {test} (uid {uid}) failed or ran no test:\n{stdout}\n{stderr}");
-    assert!(ran, "{said}");
-}
-
+/// Re-run where the mode bits bind: as root `read_dir` of a mode-000
+/// directory succeeds and the premise fails (audit-root, D-1485, D-0995).
 #[test]
 fn a_locked_directory_is_one_unreadable_entry() {
-    where_permission_binds(
+    crate::support::where_permission_binds(
         "catalog::catalog_tests::a_locked_directory_is_one_unreadable_entry",
         a_locked_directory_is_one_unreadable_entry_body,
     );
 }
 
-/// The test above, run where the mode bits bind (D-1526).
 fn a_locked_directory_is_one_unreadable_entry_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("locked");
@@ -216,15 +179,16 @@ fn a_non_utf8_component_is_counted_and_never_dropped() {
     );
 }
 
+/// Re-run where the mode bits bind: as root a mode-000 root is still
+/// searchable and the `os error 13` arm never runs (audit-root, D-1485).
 #[test]
 fn only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused() {
-    where_permission_binds(
+    crate::support::where_permission_binds(
         "catalog::catalog_tests::only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused",
         only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused_body,
     );
 }
 
-/// The test above, run where the mode bits bind (D-1526).
 fn only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("probe");

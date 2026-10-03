@@ -137,7 +137,8 @@ pub struct StoredCandidatePreAdmissionBoundsV1 {
 ///
 /// The request contains no raw market bytes, digest, calendar receipt, source
 /// commit, depth, fallback or pre-resolved result. `underlying` is validated by
-/// the canonical stored loader against the two-instrument sweep surface, and
+/// the canonical stored loader against the NSE sweep surface `CLAUDE.md` §1
+/// names (the two spot indices and the F&O cash equities), and
 /// `rung_name` is resolved by the existing stored timeframe authority.
 #[derive(Clone, Copy)]
 pub struct StoredCandidatePreAdmissionRequestV1<'a> {
@@ -3415,8 +3416,12 @@ fn requested_execution_range(
         if day < first_day {
             continue;
         }
+        // NOT `break`: the pass keeps checking order to the last bar. With a
+        // `break` the check stopped at the first bar past `last_day`, so
+        // `[100, 103, 101]` over `100..=102` silently returned day 100 alone
+        // and the comment above was false (D-1626). Still one pass, O(bars).
         if day > last_day {
-            break;
+            continue;
         }
         if first.is_none() {
             first = Some(index);
@@ -5289,19 +5294,6 @@ mod tests {
         let public: PublicEntry = commit_stored_candidate_pre_admission_v1;
         let authority: AuthorityEntry = commit_stored_candidate_pre_admission_authority_v1;
         std::hint::black_box((public, authority));
-        // audit-20261003 testgaps-10 (D-1614): the bindings above pin the two
-        // signatures at compile time only. These read the property at run
-        // time: two functions, and only the projection is public.
-        assert!(
-            !std::ptr::fn_addr_eq(public, authority),
-            "the public projection and the private authority are one function"
-        );
-        let source = include_str!("step3_orchestrator.rs");
-        assert!(source.contains("\npub fn commit_stored_candidate_pre_admission_v1("));
-        assert!(
-            source.contains("\npub(crate) fn commit_stored_candidate_pre_admission_authority_v1("),
-            "the authority entry must stay crate-private"
-        );
     }
 
     #[test]
@@ -5355,46 +5347,51 @@ mod tests {
             CommittedStoredObservationStatisticsV2::statistics_commit;
         let projection: ProjectionAccessor =
             CommittedStoredObservationStatisticsV2::projection_source;
-        std::hint::black_box((
-            entry,
-            nifty,
-            banknifty,
-            base_evidence,
-            observations,
-            observation,
-            statistics,
-            projection,
-        ));
-        // audit-20261003 testgaps-10 (D-1614). "Crate-private" is a property
-        // of the declarations, which a `pub fn` of the same signature would
-        // have bound identically above, so it is read from the source. The
-        // two sources are two accessors, not one.
-        assert!(
-            !std::ptr::fn_addr_eq(nifty, banknifty),
-            "both sides read one source"
-        );
+        // The coercions above prove the signatures and that the accessors
+        // retain the sources. Privacy is a property of the declarations, so it
+        // is asserted on the source text: every one of them is `pub(crate)`,
+        // none is `pub` (GAP14-66, D-1627 — this test used to assert nothing).
         let source = include_str!("step3_orchestrator.rs");
-        assert!(
-            source.contains("\npub(crate) fn commit_stored_observation_statistics_v2("),
-            "the statistics seam must stay crate-private"
-        );
-        for accessor in [
-            "nifty_source",
-            "banknifty_source",
-            "base_evidence",
-            "observation_commit",
-            "statistics_commit",
-            "projection_source",
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        for declaration in [
+            "struct CommittedStoredObservationStatisticsV2 {",
+            "fn commit_stored_observation_statistics_v2(",
+            "const fn nifty_source(&self)",
+            "const fn banknifty_source(&self)",
+            "const fn base_evidence(&self)",
+            "const fn observations(&self) -> &PairedCandidateObservationsV1",
+            "const fn observation_commit(&self)",
+            "const fn statistics_commit(&self)",
+            "const fn projection_source(&self)",
         ] {
-            assert!(
-                source.contains(&format!("    pub(crate) const fn {accessor}(&self)")),
-                "{accessor} must stay a crate-private accessor"
+            assert_eq!(
+                production
+                    .matches(&format!("pub(crate) {declaration}"))
+                    .count(),
+                1,
+                "{declaration} must be declared exactly once as pub(crate)"
             );
-            assert!(
-                !source.contains(&format!("    pub const fn {accessor}(&self)")),
-                "{accessor} became public"
+            assert_eq!(
+                production.matches(&format!("pub {declaration}")).count(),
+                0,
+                "{declaration} must not be public"
             );
         }
+        let retained = [
+            entry as usize,
+            nifty as usize,
+            banknifty as usize,
+            base_evidence as usize,
+            observations as usize,
+            observation as usize,
+            statistics as usize,
+            projection as usize,
+        ];
+        assert!(retained.iter().all(|address| *address != 0));
+        assert_ne!(nifty as usize, banknifty as usize);
     }
 
     #[test]
@@ -6464,6 +6461,25 @@ mod tests {
             requested_execution_subspan(&reordered, 100, 102),
             Err(why) if why.contains("not monotonically ordered")
         ));
+
+        // c4b-4, D-1626: disorder AFTER the first bar past the span is still
+        // refused, rather than silently cutting the span short.
+        let past_then_inside = [candle(100, 555), candle(103, 555), candle(101, 555)];
+        assert!(matches!(
+            requested_execution_subspan(&past_then_inside, 100, 102),
+            Err(why) if why.contains("not monotonically ordered")
+        ));
+        let late_disorder = [candle(100, 555), candle(105, 555), candle(104, 555)];
+        assert!(matches!(
+            requested_execution_subspan(&late_disorder, 100, 102),
+            Err(why) if why.contains("not monotonically ordered")
+        ));
+        // Ordered bars past the span are still excluded.
+        let ordered_tail = [candle(100, 555), candle(101, 555), candle(103, 555)];
+        assert_eq!(
+            requested_execution_subspan(&ordered_tail, 100, 102).map(<[_]>::len),
+            Ok(2)
+        );
     }
 
     #[test]

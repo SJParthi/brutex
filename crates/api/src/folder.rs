@@ -143,7 +143,18 @@ pub async fn folder_json(
             );
         }
     };
-    let (status, out) = answer(feed, shape, &root);
+    // OFF THE ASYNC WORKERS, AND ADMITTED: `read_census` walks the folder and
+    // decodes what it holds, which blocked a Tokio worker for the whole walk.
+    // W1-api2-11, D-1508.
+    let (status, out) =
+        match crate::detail::run_store_read(move || answer(feed, shape, &root)).await {
+            Ok(answered) => answered,
+            Err(why) => crate::detail::admission_refused(
+                "folder read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            ),
+        };
     (status, head, out)
 }
 

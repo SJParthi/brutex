@@ -2625,12 +2625,13 @@ mod tests {
     /// order -- the retaining walk's own survivors, pushed through the same
     /// retention, must land on the same bytes.
     #[test]
+    #[allow(clippy::expect_used, reason = "test-only: a small cap always reserves")]
     fn two_streamed_runs_of_one_sweep_serialise_to_the_same_bytes() {
         let (live, column) = a_climbing_column();
         let ladder = Ladder::with_min_hits(1);
 
         let run = || {
-            let mut best = keep::Best::with_capacity(11);
+            let mut best = keep::Best::try_with_capacity(11).expect("a small cap reserves");
             let out =
                 ladder.walk_column_streamed(&column, &live, &mut |f, _, _| best.offer_level(f));
             (
@@ -2648,7 +2649,7 @@ mod tests {
         assert_eq!(first, run(), "and a third");
 
         let retained = ladder.walk_column(&column, &live, &|_, _, _| {});
-        let mut from_retained = keep::Best::with_capacity(11);
+        let mut from_retained = keep::Best::try_with_capacity(11).expect("a small cap reserves");
         for itemset in retained.all_frequent() {
             from_retained.offer(*itemset);
         }
@@ -2667,6 +2668,7 @@ mod tests {
     /// the exact level a reader needs. See [`Halt`] for why a halt is not a
     /// depth parameter.
     #[test]
+    #[allow(clippy::expect_used, reason = "test-only: a small cap always reserves")]
     fn a_streamed_walk_that_halts_reports_the_breach_and_the_partial_level() {
         let (live, column) = a_climbing_column();
         let ladder = Ladder::with_min_hits(1).with_ceiling(1);
@@ -2700,6 +2702,7 @@ mod tests {
     /// is a 58.7 MB owned copy on a real rung, so it is worth proving it copies
     /// the same column rather than assuming it.
     #[test]
+    #[allow(clippy::expect_used, reason = "test-only: a small cap always reserves")]
     fn the_copying_streamed_walk_agrees_with_the_column_one() {
         let live: Vec<u32> = (0..8).collect();
         let spec: Vec<Vec<u32>> = (0..64_u32)
@@ -2709,10 +2712,10 @@ mod tests {
         let masks = bars(&rows);
         let ladder = Ladder::with_min_hits(1);
 
-        let mut from_masks = keep::Best::with_capacity(5);
+        let mut from_masks = keep::Best::try_with_capacity(5).expect("a small cap reserves");
         let a = ladder.walk_streamed(&masks, &live, &mut |f, _, _| from_masks.offer_level(f));
 
-        let mut from_column = keep::Best::with_capacity(5);
+        let mut from_column = keep::Best::try_with_capacity(5).expect("a small cap reserves");
         let b = ladder.walk_column_streamed(&Column::from_rows(&masks), &live, &mut |f, _, _| {
             from_column.offer_level(f);
         });

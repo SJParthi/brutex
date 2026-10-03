@@ -272,6 +272,32 @@ impl<'a> Capture<'a> {
         Self::begin_with(root, attempt, bars, column, Some(expression))
     }
 
+    /// [`Self::begin_expression`] for a caller that already holds
+    /// `runner::identity::data_digest(bars)` for these exact bars.
+    ///
+    /// The expression search prices every candidate over one immutable month,
+    /// and hashing all of its bars again per candidate was O(bars) of
+    /// identical work each time (W2-cli5-2, D-1641). The digest is the caller's
+    /// to keep honest: `expression_pricing::Prepared` computes it once in
+    /// `new` from the bars it owns and never mutates.
+    pub(crate) fn begin_expression_with_digest(
+        root: &Path,
+        attempt: &crate::sweep_evidence::Attempt,
+        bars: &'a [indicators::Candle],
+        column: &'a Column,
+        expression: &'a Expression,
+        execution_digest: [u8; 32],
+    ) -> Result<Self, String> {
+        Self::begin_digested(
+            root,
+            attempt,
+            bars,
+            column,
+            Some(expression),
+            execution_digest,
+        )
+    }
+
     fn begin_with(
         root: &Path,
         attempt: &crate::sweep_evidence::Attempt,
@@ -279,10 +305,21 @@ impl<'a> Capture<'a> {
         column: &'a Column,
         expression: Option<&'a Expression>,
     ) -> Result<Self, String> {
+        let execution_digest = runner::identity::data_digest(bars);
+        Self::begin_digested(root, attempt, bars, column, expression, execution_digest)
+    }
+
+    fn begin_digested(
+        root: &Path,
+        attempt: &crate::sweep_evidence::Attempt,
+        bars: &'a [indicators::Candle],
+        column: &'a Column,
+        expression: Option<&'a Expression>,
+        execution_digest: [u8; 32],
+    ) -> Result<Self, String> {
         let model = model_of(expression);
         let directory = directory_for(root, &attempt.identity(), attempt.token(), model);
         fs::create_dir_all(&directory).map_err(io_error)?;
-        let execution_digest = runner::identity::data_digest(bars);
         let mut start = Encoder::default();
         start.bytes(&attempt.identity());
         start.word(attempt.token());
