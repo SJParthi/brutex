@@ -53679,3 +53679,280 @@ in the source at all. No code changed.
 **Proof.** `pull::unit::no_manifest_doc_claims_a_worst_case_constant_probe`
 reads `manifest.rs` flattened and lower-cased, refuses "o(1) worst case", and
 requires the expected-cost statements to stay. M-36.
+### D-1490 — Every JSON decode shape applies one count rule: a negative volume or open interest skips its row — 2026-10-03
+
+**What was observed (c4a-1, c4a-2).** `pull::http::kept_rows`, the columnar
+shape Dhan answers in, skipped a row whose equity volume was negative and a
+row whose open interest was negative (the `i64::MIN` sentinel aside), and
+counted both. `decode_positional` (Zerodha, Groww) refused the WHOLE window
+over one negative equity volume, through `one_volume`, and passed a negative
+open interest straight into the window; `decode_objects` did the same. Probe:
+a Zerodha row with volume `-5` refused the window; a row with open interest
+`-7` decoded as `Some(-7)`. Same vendor fault, opposite outcome, chosen by the
+response shape. D-0323 and D-0332 record the same "one door missed" pattern.
+
+**The decision.** One function, `count_verdict`, holds the rule and its
+reasons, and all three shapes call it before pushing a column. A skipped row
+is counted and reported once per window through the existing
+`note_negative_volume_bars` and `note_negative_interest_bars`. An index's
+negative volume is still recorded as zero (P-60), `i64::MIN` open interest is
+still refused by name, and zero is still a reading.
+
+**What it changes.** A positional or object window that used to be refused now
+lands without the bad rows; a negative open interest that used to land is now
+skipped. Valid bars are byte-identical. No run identity term moves.
+
+**Rejected.** Making every shape refuse: D-0323's measured `-125` on ADANIENT
+showed that refusal costs an instrument every intraday rung it has.
+
+### D-1491 — The rolling-options reader refuses an unreadable timestamp or volume instead of filing a zero — 2026-10-03
+
+**What was observed (c4a-3, W1-pull3-7).** `pull::rolling::read` read every
+timestamp and volume cell through `number`, which answered `0` for a `null`,
+text or missing cell and passed a negative through. A `null` stamp filed a bar
+at the epoch, and `saturating_mul(1_000_000)` turned a stamp past the
+microsecond range into `i64::MAX`. Probe: `timestamp:[null,"x",9999999999999]`,
+`volume:["abc",-50,null]` read as `(0,0),(0,-50),(i64::MAX,0)`. D-0952 fixed
+open interest and recorded that these two still went through `number`.
+
+**The decision.** `number` is removed. A timestamp is read by `stamp`: an
+integer or a whole-number decimal of seconds, refused when `null`, text,
+fractional, `i64::MIN`, or when its microseconds overflow `i64`
+(`RollingError::Unstampable`). A negative stamp is still accepted, matching
+`http::one_number` and `session::IstMoment`. A volume is read by `count`,
+the open-interest reader: a non-negative whole number, refused otherwise,
+`null` included. The columnar intraday path for the same vendor already
+refuses a null volume, and no vendor document says a null volume here is zero.
+
+**What it changes.** Only malformed cells: a body that used to land with a
+fabricated zero, epoch stamp or saturated stamp is now refused by name. Valid
+bodies decode to the same bars.
+
+### D-1492 — The rolling reader refuses a negative price and a non-zero price that snaps to zero — 2026-10-03
+
+**What was observed (GAP16-23).** `pull::rolling`'s `paisa` converted rupee
+text half-up with no sign check and no zero-snap check, so `-5` was stored as
+a negative price and `0.0001` or `-0.001` as a real zero. `http::one_price`
+has refused both since D-0143 and its zero-snap guard.
+
+**The decision.** The same two guards, on the text, for every rolling price
+field (OHLC, spot, strike), through `RollingError::NotAPrice`. `0`, `0.00` and
+`-0.0` stay a real zero.
+
+**What it changes.** Only cells that are negative or sub-half-paisa non-zero,
+which now refuse instead of landing. No run identity term moves.
+
+### D-1493 — The request-minute coverage audit floors each stamp to its minute, and states its uncapped output — 2026-10-03
+
+**What was observed (c4a-4, W1-pull3-4).** `request_minutes::audit` compared
+raw stamps against a minute cursor and counted a gap as `(to - from) / 60`.
+A stamp such as 09:15:59 opened a gap of 0 minutes and moved the cursor to
+09:16:59, so a real missing 09:16 before a 09:17:00 row was reported as
+"0 missing scheduled minutes". Its only caller, `ingest::from_window`,
+refuses an off-grid stamp first, so shipped input is aligned and no shipped
+report was wrong; the function was correct only because of that call order.
+Separately, its cost header said O(rows + days + gaps) with no limits entry,
+and each gap is one `String`, one `Failure` and one telemetry event, uncapped.
+
+**The decision.** Each stamp is floored to its minute (`div_euclid(60) * 60`)
+before any comparison, so a stamp counts as the minute it falls in. The
+uncapped output is stated in `docs/06-limits.md` rather than capped: a cap
+would hide which minutes are missing, and the bound is already set by the
+session length.
+
+**What it changes.** Nothing for aligned input. No run identity term moves.
+
+### D-1494 — Say where rupee prices are snapped, and state when the JSON parse in front of that snap is exact — 2026-10-03
+
+**What was observed.** GAP16-28: `core::price`'s module doc said the one
+rupee-to-paisa conversion is `Paisa::from_rupees_half_up` (an `f64`
+conversion) "once at the ingest boundary"; `core::vendor` said strikes go
+through it; `pull::fetch::to_paisa` and `pull::csv::paisa` said the single
+snap is "at the write boundary"; `pull::fno` said there is one law. In fact
+every vendor price in `pull` is snapped half-up from TEXT by
+`Paisa::from_rupee_text_half_up` where it is decoded, the store's append
+snaps nothing, `csv::paisa` refuses a third decimal on purpose (D-0321), and
+`from_rupees_half_up`'s one non-test caller is `lake`'s bar reader.
+GAP16-24: `serde_json` (no `arbitrary_precision`) parses each wire number into
+an `f64` before `one_price` reads its shortest text back, and the doc said
+there was "no float in a price here, not even briefly". GAP2-45: the
+credential-read event said it fires "once per run"; it fires per read, and a
+broker leg reads per instrument.
+
+**The decision.** The comments now say what the code does. The double
+rounding is stated, not removed: for a price text of at most fifteen
+significant digits (every NSE price, and every measured Dhan float such as
+`35922.6016`) the `f64` parse is exact and its shortest text is the vendor's
+own digits, so there is one rounding; past that it is not, and the widest
+`i64` paisa price is refused through JSON though it reads as text. A test
+checks 160,000 texts and that extreme. Enabling `serde_json`'s
+`arbitrary_precision` would remove the second rounding, but it changes
+`serde_json::Number` workspace-wide, including in `api` and `cli`, and could
+change stored bytes for a pathological input, so it is left to a decision
+that owns those crates.
+
+**What it changes.** Comments, one test and a limits entry. No code path.
+
+### D-1495 — An OOS universe replay hashes its execution bars once — 2026-10-03
+
+**What was observed (c4a-5).** `ResolvedExitGridPolicyV1::replay_selected_universe_with`
+called `ExecutionRunV1::require_matches`, which runs `identity::data_digest`
+over the OOS bars, and then ran `data_digest` over the same bars again for the
+replay's `oos_data_digest`. The global-replay callers run it once per selected
+candidate, so every candidate paid two BLAKE3 passes over its OOS series
+where one gives both answers. The D-1184 and D-1190 limits entries named the
+per-call slice facts and attestation, not this repeat.
+
+**The decision.** The digest is computed once, before the run checks, and
+handed to `require_matches_terms`, the door that already exists for callers
+holding a digest. The checks run in the same order on the same values.
+
+**What it changes.** One pass per call instead of two. The digest, the run
+checks, the refusal reported for a faulty input and every output byte are
+unchanged.
+
+### D-1496 — `closed` says when a halted sweep leaves its closure unproved, and its cost and its "always present" claim are corrected — 2026-10-03
+
+**What was observed.** c4a-7 and W3-runner1-3: `runner::closed::closed` zips
+adjacent `sweep.levels` and never reads `sweep.halted`. On a halted sweep the
+top level is partial, so the top level has no successor and the level below
+it has a partial one, and both report sets as closed that are not.
+`validate`'s `FoldResult::halted` doc measured 1,407 kept at extinction
+against 318,862 when halted. The module doc said the equal-support superset
+"is always PRESENT to be seen". AC-whp-cx-2: it is also absent when
+`engine`'s join refuses it as an uninformative pair (its meaning prune),
+and `vocab::implication`'s doc still said `closed` keeps the long
+`{above_s2, above_s3, above_s4, above_s5}`. c4a-6: `redundant_between` is
+O(k) probes per itemset and builds an O(|lower|) map per call, with only an
+UNVERIFIED comment and no limits entry.
+
+**The decision.** `Closed` gains `closure_complete`, `true` only when the
+sweep went extinct. `kept` is NOT changed for a halted sweep: dropping or
+re-marking those sets would change the walk-forward candidate set and every
+selection built on it, which needs a decision that owns those outputs. The
+streamed rankers already mark both levels `Unknown`, because `engine` lends
+no successor to either. The two doc sentences now say when the superset is
+absent and why the meaning prune's answer is the intended one. The cost of
+`redundant_between` is stated in its doc and in `docs/06-limits.md`.
+
+**What it changes.** One new field; no existing output, digest or run
+identity term moves.
+
+### D-1497 — `keep::Best` holds a mask at most once and refuses an impossible capacity — 2026-10-03
+
+**What was observed.** v4-4: `Best::offer` pushed while there was room with no
+membership check, so three offers of one itemset at cap 3 held it three
+times; the top list then names one combination repeatedly and pushes a
+distinct one out. The `ranks_below` doc assumed distinct offers.
+W3-engine1-4: `Best::with_capacity` reserved with `Vec::with_capacity`, which
+panics past `isize::MAX` bytes and aborts when the allocator refuses.
+
+**The decision.** `Best` keeps a pre-reserved set of its held masks (the
+engine's fixed-seed `MaskSet`). An offer whose mask is held is counted in a
+new `repeated()` and not held or discarded, so offered = held + discarded +
+repeated. An evicted mask leaves the set. `with_capacity` is replaced by
+`try_with_capacity`, which reserves both through `try_reserve` and returns
+the `TryReserveError`. Linear search for the duplicate was rejected: Gate 11
+refuses a membership scan, and the probe is expected O(1).
+
+**What it changes.** `Best` has no production caller (D-0762), so no run,
+report or identity moves. Its memory is now `cap` itemsets plus `cap` masks.
+
+### D-1498 — Correct runner's false manifest comments and column-digest doc, print the bootstrap sample count, and compare every ranking lens incrementally — 2026-10-03
+
+**What was observed.** c4a-8 and ET-strategies-trades-ranking-costs-7:
+`crates/runner/Cargo.toml` said the crate had only ever been driven with
+generated bars (`cli sweep-stored` drives it with real stored bars), that
+`CLAUDE.md` §5 lists neither `costs` nor `runner` (it draws both), that
+`trade` prices through `costs::fill::worst_case_fills` (it calls `fills_at`
+and `costs::trip::price`), and that `rank::walk` calls `outcome::edge` (no
+`rank::walk` exists); `validate` cited the same `rank::walk`.
+ET-strategies-trades-ranking-costs-6: the bootstrap render printed only
+`Verdict::calibration`'s band label, so 57 periods printed "30 periods: ..."
+and `periods` was never shown. W3-runner2-8: `column_digest_v1`'s doc said it
+hashes "every durable field" and it does not hash `Column::known()`.
+AC-whp-tb-2: the incremental-versus-retained ranker test compared only
+`Detectability` and `Payoff`.
+
+**The decision.** The comments say what the code does. The render prints
+`sample: N period(s); nearest measured row at or below it -- <band>`. The
+digest doc names the omission; the digest itself is NOT changed, because
+adding `known()` changes every recorded V1 column digest and the cell and
+selection digests over it, which needs a V2 codec and its own decision. The
+ranker test covers all four lenses.
+
+**Not done here.** `cli` still has no production path that builds
+`Lens::Asymmetry`, `cli`'s identity test still compares only two lenses, and
+`cli::lib` still cites `WALK_FORWARD_SPLITS` in cost prose: `crates/cli` is
+owned by another change.
+
+**What it changes.** One audit render line gains the period count. No digest,
+selection or run identity moves.
+
+### D-1499 — The two member forms read a body large enough for every member they allow — 2026-10-03
+
+**What was observed (W1-api3-6).** Every form route shared `MAX_FORM_BYTES`,
+8 KiB. `/pull/spot` and `/ingest/queue` take repeated `member` fields, and
+`ingest::MAX_MEMBERS` (2,000) says a caller "may legitimately tick all" 750 of
+the widest set. 750 member fields exceed 8 KiB, so ticking them answered the
+framework's 413, and `Refusal::TooManyMembers` could not be reached over HTTP.
+
+**The decision.** Those two routes carry a route-level `DefaultBodyLimit` of
+`ingest::MAX_MEMBER_FORM_BYTES` = `MAX_FORM_BYTES` + `MAX_MEMBERS` x
+(`member=` + 3 x `SYMBOL_CAPACITY` + 1) = 168,192 bytes, derived from the two
+bounds so it cannot drift from them. Every other form keeps 8 KiB. The body
+limit test for 8 KiB now posts to `/pull/fno`.
+
+**What it costs.** `param` scans the body once per field, so on those two
+routes each scan is bounded by 168,192 bytes instead of 8,192 (stated in
+`docs/06-limits.md`). No run identity term moves.
+
+### D-1500 — A recovery rerun over an unchanged store records nothing for an Unverified attempt — 2026-10-03
+
+**What was observed (W1-api4-6).** `recovery::reconcile_pending` keeps
+`Unverified` attempts pending, and each pass that reassessed one with no day
+to retry added its evidence count and one more to `diagnostics`, set it
+`Unverified` again, and appended it to both journals. A rerun over an
+unchanged store therefore grew both journals and the diagnostic count every
+time, against `CLAUDE.md` §3 rule 5.
+
+**The decision.** The reassessment moves into `reassessed`, which returns
+`None`, and nothing is appended, when an `Unverified` attempt finds the same
+missing and unverified quantities and no day to retry. A changed quantity, a
+day to retry, or a first verdict from `Queued` or `InFlight` still records
+exactly as before. `Unverified` stays pending so a later change is seen.
+
+**What it changes.** Idle reruns append nothing. No coverage verdict changes.
+
+### D-1501 — A scrub names a month a writer holds as busy, and `verify`'s cost and order docs are corrected — 2026-10-03
+
+**What was observed.** W1-api6-7: `pull::scrub::one` mapped every open
+failure except `Missing` to `Unreadable`, `Locked` included, so a month a pull
+was appending to was reported by `api::verify` as one that "reads as held
+while the disk says otherwise". W1-api6-0: `verify`'s module and function docs
+said "O(1) per entry ... nothing is read whole"; `Manifest::newest` walks the
+whole append log and the scrub runs on the request's task. c4a-9:
+`Report::named` said its order is "the order the census holds them";
+`Manifest::newest` walks the log backward, so it is newest write first.
+
+**The decision.** `Finding::Busy` and `Tally::busy`. A busy month is neither
+agreement nor disagreement; `Tally::disagreed` excludes it; `clean()` is false
+while one is busy, because it was not checked. `Report::say` says "none
+disagrees" when only busy months stand in the way, and names the busy count
+either way. The docs now state the log walk, the per-entry opens, the
+blocking task and the order.
+
+**What it changes.** `/verify.json`'s sentence for a busy month. A store with
+no busy month reads exactly as before.
+
+### D-1502 — Bound the NSE catalogue read, and state the qualification page's fold walk — 2026-10-03
+
+**What was observed.** UC-19: `indexmap::Published::read` read the catalogue
+whole with no size bound, on every `/indexmap.json` request. W1-api2-8:
+`booleanqualification_projection::row_detail` maps every fold of a row into
+the page, and no limits entry stated it. W1-api3-1's limits entry did not say
+that the conductor's ticker runs `census_now` on a runtime task.
+
+**The decision.** `MAX_CATALOGUE_BYTES` (1 MiB); the read is capped one byte
+past it and a larger file is refused naming the bound. The two costs are
+stated in `docs/06-limits.md`.

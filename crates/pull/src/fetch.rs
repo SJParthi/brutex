@@ -666,9 +666,12 @@ pub struct Landed {
 /// Converts a vendor price to paisa.
 ///
 /// A vendor quoting rupees is multiplied by 100; one already quoting paisa is
-/// taken as is. **There is no rounding here and that is deliberate** —
-/// `CLAUDE.md` §7 puts the single snap on the tick grid at the write boundary,
-/// and a second rounding site is a second answer.
+/// taken as is. **There is no rounding here and that is deliberate.** The
+/// single half-up snap onto the tick grid (`CLAUDE.md` §7) has already happened
+/// where the vendor's text was decoded — `http::one_price` and `rolling`'s
+/// `paisa`, through `Paisa::from_rupee_text_half_up` — and a second rounding
+/// site here would be a second answer. (This said the snap was at the write
+/// boundary until D-1494; the store's append snaps nothing.)
 const fn to_paisa(raw: i64, scale: PriceScale) -> Option<i64> {
     match scale {
         PriceScale::Paisa => Some(raw),

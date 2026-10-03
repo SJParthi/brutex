@@ -343,6 +343,8 @@ pub struct Run<'a> {
 /// name, because either would let two different columns share an identity.
 #[must_use]
 pub fn data_digest(bars: &[Candle]) -> [u8; OUT_LEN] {
+    #[cfg(test)]
+    DATA_DIGESTS.with(|count| count.set(count.get().saturating_add(1)));
     let mut hasher = Hasher::new();
     // The bar COUNT first, so a column cannot be confused with a longer one that
     // happens to start with it. Framing, for the same reason every term below is
@@ -529,6 +531,9 @@ thread_local! {
     /// [`crate::exit_grid_policy::DailyReferenceRunSourceV1`] is minted once and
     /// reused rather than re-hashing every stream per run. D-0990.
     pub(crate) static DAILY_REFERENCE_DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// [`data_digest`] passes taken on this thread, so a test can prove a
+    /// replay hashes its bars once (c4a-5, D-1495).
+    pub(crate) static DATA_DIGESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Bind the signal rung, exact one-minute path, stored one-day references,

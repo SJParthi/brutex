@@ -897,9 +897,11 @@ pub async fn get_parameter(
     //
     // The `name` is deliberately absent: it IS the parameter path.
     //
-    // `Info`, and once per run. A pull that dies on its credential is the most
-    // common way a backfill ends, and until this line the log said nothing at
-    // all about whether the secret was ever read.
+    // `Info`, and once per read: per secret per instrument on a broker leg,
+    // because the caller reads per instrument (see `pooled_client`). This said
+    // "once per run" until D-1494 (GAP2-45). A pull that dies on its
+    // credential is the most common way a backfill ends, and until this line
+    // the log said nothing at all about whether the secret was ever read.
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::info("pull.ssm", "credential read")
             .with("region", telemetry::Value::Str(region))

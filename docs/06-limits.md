@@ -13935,3 +13935,72 @@ bounds are all nonzero.
     O(d) in the run's rotations; "Audit fixes -- D-1480 onward" above
     states it.
 ~~~~
+
+## Audit fixer 2 follow-ups — D-1490 onward, 3 October 2026
+
+- **The request-minute coverage audit's output is not capped (W1-pull3-4,
+  D-1493).** `pull::ingest::request_minutes::audit` walks the rows once and
+  each civil day once: O(rows + days + gaps). Each gap is one `String`, one
+  `Failure` and one `pull.request_minutes` telemetry event. Gaps alternate
+  with held minutes, so a day yields at most about half its scheduled
+  minutes (188 for a 375-minute session), and a window of D sessions at most
+  about 188·D. A cap was rejected because it would hide which minutes are
+  missing. Not timed: no bench covers it.
+- **A JSON rupee price is parsed through an `f64` before its half-up snap
+  (GAP16-24, D-1494).** `serde_json` is built without `arbitrary_precision`,
+  so `http::one_price` and `rolling`'s `paisa` read the shortest
+  round-tripping text of an `f64`, not the vendor's bytes. That is exact,
+  one rounding in all, for a text of at most fifteen significant digits,
+  which covers every NSE price and every measured Dhan float. Past fifteen
+  digits the parse is a second rounding: a value within one `f64` step of a
+  half-paisa boundary can snap the other way, and the widest `i64` paisa
+  price, `92233720368547758.07`, is refused through JSON though it reads as
+  text. Checked over 160,000 texts by
+  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`;
+  not proved for every fifteen-digit text.
+- **The closure check is O(k) per itemset and copies a level per call (c4a-6,
+  D-1496).** `runner::closed::redundant_between` builds a
+  `HashMap<ConditionMask, u64>` of the whole lower level, O(|F_k|) time and
+  about 56 bytes plus hashing overhead per survivor, then probes it once per
+  set bit of each upper itemset: O(k) per itemset, k at most 384. It runs once
+  per retired level in `rank` and `run_prepared_population_by_reporting`, and
+  once per level pair in `closed` and `redundant_count`. The transient map is
+  outside the engine's `DEFAULT_CEILING` memory model, so a level near the
+  ceiling briefly needs that much again. Probing the engine's own sorted
+  level instead was not done here. Not timed: no bench row covers it.
+- **A halted sweep's closed set is an over-count (c4a-7, W3-runner1-3,
+  D-1496).** `runner::closed::closed` cannot prove closure for the top two
+  levels of a halted sweep and now says so through `closure_complete`; it
+  still returns those sets in `kept`. `validate` records `halted` beside its
+  candidate count, and the streamed rankers mark the two levels `Unknown`.
+- **`keep::Best` probes a hash set on every offer (v4-4, D-1497).** The
+  duplicate check is the insert into a pre-reserved `MaskSet` (no `contains`
+  scan, so Gate 11 rule 7 is not engaged): expected O(1), hashing six words,
+  not a worst-case bound. A refusal when full removes that mask again, and an
+  eviction removes the evicted one, all inside a `cap + 1` reservation. The
+  O(log cap) sift stated above is unchanged, and the "one root comparison"
+  refusal above now also pays this insert and removal. Memory is `cap`
+  itemsets plus `cap + 1` masks. Not timed.
+- **The two member forms read up to 168,192 bytes (W1-api3-6, D-1499).**
+  `/pull/spot` and `/ingest/queue` carry `ingest::MAX_MEMBER_FORM_BYTES`, so
+  D-1202's "`param` scans a form body of at most 8,192 bytes" is 168,192 bytes
+  on those two routes: k fields cost k scans of at most that. Still constant
+  per request, because the length is capped. Not timed.
+- **`/verify.json` walks the census log and opens every held month, on the
+  request's task (W1-api6-0, D-1501).** O(log length) for
+  `Manifest::newest`, then one open, one header read and two record reads per
+  held entry, inline in `async fn verify_json`, so the runtime worker serving
+  it is blocked for the whole scrub. Moving it to a blocking pool was not done
+  here. Not timed.
+- **The conductor's row count runs on a runtime task (W1-api3-1, D-1502).**
+  The D-1382 entry above states the cost of `pullrun::rows_now`; its ticker
+  calls it inside `tokio::spawn`, so a miss (a whole-manifest read and sort)
+  blocks that runtime worker while it runs. Not timed.
+- **A Boolean qualification row renders every one of its folds (W1-api2-8,
+  D-1502).** `booleanqualification_projection::row_detail` maps all of a
+  row's folds into the page: O(F) per row and O(page x F) per page, F bounded
+  by the saved run's `max_folds`, which `cli`'s Boolean OOS validation
+  enforces. The api crate states no bound of its own. Not timed.
+- **The NSE catalogue is read whole per request, at most 1 MiB (UC-19,
+  D-1502).** W1-api5-9's O(file bytes + U) now has a byte bound,
+  `indexmap::MAX_CATALOGUE_BYTES`.
