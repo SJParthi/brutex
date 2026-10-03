@@ -2633,25 +2633,57 @@ async fn gaps_json(
             Err(why) => return calendar_admission_refused(&why),
         }
     };
-    let mut months = Vec::with_capacity(span.len());
-    for month in &span {
-        let schedule = audit_cash_schedule(&site, &asked, *month).await;
-        let mut audited = audit_one(
-            &site,
-            &asked,
-            *month,
-            peers.calendar.as_ref(),
-            schedule.as_ref().ok().and_then(Option::as_ref),
-        );
-        audited.evidence_error = schedule.err();
-        months.push(audited);
-    }
+    let (months, peers) = match audit_span(&site, asked, span.clone(), peers).await {
+        Ok(done) => done,
+        Err(why) => return calendar_admission_refused(&why),
+    };
 
     (
         axum::http::StatusCode::OK,
         json(),
         gaps_body(&months, &span, &peers, truncated_range),
     )
+}
+
+/// Every month of a `/gaps.json` span, audited OFF THE ASYNC WORKERS.
+///
+/// Each month's bar file and its dated cash-session evidence are read in the
+/// calendar pool the peer vote already used, in one admission for the whole
+/// span. The evidence reader is an `async fn` whose local variant never awaits
+/// a fetch, but it reads and locks files inline, so it is driven to completion
+/// on the blocking thread by the runtime's handle rather than on a worker.
+/// `peers` goes in and comes back, because the answer renders from it.
+/// Split from `gaps_json` for the workspace's 100-line ceiling. W1-api2-11,
+/// D-1508.
+///
+/// # Errors
+///
+/// [`crate::detail::RunError`] when the calendar pool refuses or cannot join.
+async fn audit_span(
+    site: &Loaded,
+    asked: Addressed,
+    span: Vec<store::path::YearMonth>,
+    peers: PeerCalendar,
+) -> Result<(Vec<AuditedMonth>, PeerCalendar), crate::detail::RunError> {
+    let runtime = tokio::runtime::Handle::current();
+    let audit_site = std::sync::Arc::clone(site);
+    crate::detail::run_calendar(move || {
+        let mut months = Vec::with_capacity(span.len());
+        for month in &span {
+            let schedule = runtime.block_on(audit_cash_schedule(&audit_site, &asked, *month));
+            let mut audited = audit_one(
+                &audit_site,
+                &asked,
+                *month,
+                peers.calendar.as_ref(),
+                schedule.as_ref().ok().and_then(Option::as_ref),
+            );
+            audited.evidence_error = schedule.err();
+            months.push(audited);
+        }
+        (months, peers)
+    })
+    .await
 }
 
 /// The audit's whole answer, from the months it walked.
@@ -32769,6 +32801,24 @@ async fn indexmap_json(
             no_such_feed_json(&asked),
         );
     };
+    // OFF THE ASYNC WORKERS, AND ADMITTED: the catalogue is read from disk on
+    // every request. W1-api2-11, D-1508.
+    match crate::detail::run_store_read(move || indexmap_reading(&site, feed)).await {
+        Ok((status, body)) => (status, [(axum::http::header::CONTENT_TYPE, json)], body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "index map read",
+                crate::detail::MAX_STORE_READ_CONCURRENT,
+                &why,
+            );
+            (status, [(axum::http::header::CONTENT_TYPE, json)], body)
+        }
+    }
+}
+
+/// Everything [`indexmap_json`] does once the feed is parsed, on the blocking
+/// pool. D-1508.
+fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, String) {
     let read = masters_dir()
         .map(|dir| dir.join("nse_indices.csv"))
         .and_then(|path| crate::indexmap::Published::read(&path));
@@ -32781,7 +32831,6 @@ async fn indexmap_json(
             // §4 bans.
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                [(axum::http::header::CONTENT_TYPE, json)],
                 format!("{{\"error\":{}}}", crate::pullrun::quote_for_json(&why)),
             );
         }
@@ -32803,7 +32852,6 @@ async fn indexmap_json(
     let rows = crate::indexmap::join(&nse, feed, symbols);
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, json)],
         crate::indexmap::json(&nse, &rows),
     )
 }

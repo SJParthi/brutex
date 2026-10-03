@@ -54444,3 +54444,168 @@ stays: the replay is how a resume proves an acknowledged child still says
 what its pin says, and a cache of verified frames would be a new durable
 authority with its own invalidation rule. That is a design change, not an
 audit fix.
+### D-1505 — The runner's join test checks distinct k-sets, not the literal zero the engine writes — 2026-10-03
+
+**What was observed.** D-1440 removed every `duplicates == 0` assertion at
+k>=2 from `engine`, because `joined_frontier` writes `duplicates: 0` as a
+literal and counts nothing, so the assertion could never fail (CLAUDE.md §4,
+"a test that asserts nothing"). One copy survived outside the crate:
+`crates/runner/tests/join_answer_is_unchanged.rs`,
+`the_join_no_longer_walks_a_pair_it_will_discard`, asserted it over every
+level from k=2 up (audit v2-3, AC-whp-tb-5 PARTIAL).
+
+**The decision.** The assertion is replaced by the property its message
+named, checked on the answer: every mask a level keeps has exactly `k` bits,
+and no mask is kept twice (one `HashSet::insert` per kept set). A last
+assertion requires some k>=2 level to keep at least two sets, so the
+distinctness check cannot pass vacuously on a fixture that keeps one.
+
+**Rejected.** Making `joined_frontier` count duplicates: the prefix join is
+injective, so a counter would be a second literal zero with extra work, and
+CLAUDE.md §3 rule 4 already says there is no dedup operation on that path.
+
+### D-1503 — Gate 14 layer 5 reads gate 8 through `source_scan step-runs`, as D-1102 said it already did — 2026-10-03
+
+**What was observed.** D-1102 recorded that both copies of the
+`runs_unconditionally` awk, gate 13's and gate 14's, were replaced by
+`source_scan step-runs`, and that the false comment "gate 8 carries
+`if: always()`" was corrected. Only gate 13's copy was. Gate 14 layer 5 still
+ran the denylist awk, which refuses an `if:` only when it collapses to
+`false`, `0`, `failure()` or `cancelled()`. The audit (v2-1, with
+AC-gates-o1-3 and AC-gates-cx-2 PARTIAL) inserted `if: false && true` under
+gate 8's bench step in a copy of the workflow and layer 5 printed "present".
+Re-run for this change against the pre-fix file: "present" twice, `bad=0`.
+Gate 8's step carries no `if:` at all, so the comment was false too.
+
+**The decision.** Layer 5's two checks call `"$scan" step-runs "$wf"` with
+the needles `cargo bench --workspace --locked` and
+`echo "GATE 8 MEASURED NOTHING`, the allowlist gate 13 uses: a step whose
+script has a line beginning with the needle must set no `continue-on-error`
+other than `false`, carry no step or job `if:` other than `always()`,
+`success()`, `!cancelled()` or the build job's crate probe, and sit in a job
+`ci-ok` needs. The awk and its false sentence are deleted.
+
+Because `step-runs` matches a line PREFIX, the bench check also requires a
+whole line `cargo bench --workspace --locked` in the workflow; every line with
+that prefix is in a step `step-runs` accepted, so the whole line is too. Without
+it `cargo bench --workspace --locked || true` passed.
+
+**Evidence.** Probes on scratch copies, layer 5 run under `set -euo pipefail`
+as CI runs it: `if: false && true`, `if: github.run_attempt == 0` and
+`continue-on-error: true` under the bench step each refuse both checks
+(`bad=1`); `|| true` on the bench line refuses the bench check; `if: always()`
+passes. Gate 14 on the real workflow: OK, rc 0.
+
+**Not changed.** A shell-level bypass inside the script (`if false; then`)
+is out of scope, as it is for gate 13.
+
+### D-1506 — The cold block-verify read is measured, and two sentences said it was not — 2026-10-03
+
+**What was observed.** D-0914 added C-BC-01 (the cold `read_record` is flat
+in the file at 1×, 10× and 100×), C-BC-02 (its own 10,000-floor budget) and
+C-BC-03 (its verify allocates nothing on the heap), and Gate 8 runs them
+(`crates/store/benches/ratio.rs`, both called from `main`). D-1434, merged
+beside it, left two statements saying the opposite: `docs/06-limits.md`'s
+`first_at_or_after` section said "They do not measure a cold block verify or
+a cold device. Neither does anything else in the workspace, and
+ET-bars-candles-store-9 tracks that gap", and `BarFile::read_record`'s doc
+said "The cold block verify a random index pays, and a cold device, are
+UNVERIFIED." The finding named as the tracker is closed (audit v1-1). A
+claim that a measurement was never taken, when it is taken, is the
+CLAUDE.md §3 rule 6 defect in the other direction.
+
+**The decision.** Both are corrected in place and say what each bench
+measures. What remains UNVERIFIED is stated: a cold DEVICE (page cache
+dropped) is measured by nothing, and a whole `first_at_or_after` or
+`already_stored` call has no bench of its own, so its time is the computed
+probe count times the measured per-probe cost, labelled an extrapolation.
+`store::docs::no_document_says_the_cold_block_verify_is_unmeasured` refuses
+the three stale phrases in `file.rs`, `docs/06-limits.md` and
+`docs/02-store-format.md`, and fails if the bench stops defining or running
+either cold row, so the test's premise cannot go stale silently.
+
+### D-1504 — Gate 14 layer 3 pins are exact counts, and store and engine are re-pinned at 11 and 13 — 2026-10-03
+
+**What was observed.** D-1117 set every layer-3 pin to "that count at this
+commit". The audit (v2-2) ran Gate 14's own counter (`source_scan code` plus
+its awk) on every bench: store held 11 measurement points against a pin of 9,
+engine 13 against 12 (C-E-12 landed after the pin), every other bench equal.
+Re-run for this change: the same 11 and 13. The check was `npt >= pts`, so
+two store points and one engine point could be deleted with the gate green,
+and the pins had drifted because nothing made raising them necessary.
+
+**The decision.** Store is pinned at 11 and engine at 13, and the check is
+equality: a bench that gains a measurement fails layer 3 until its pin is
+raised in the same change, so a pin cannot fall behind its bench again. The
+message names both numbers (`N-measurement-points-but-pinned-at-M`).
+
+**Evidence.** Gate 14 on the changed workflow: every bench `= pin`, OK, rc 0.
+A scratch copy with engine's pin left at 12 refuses engine's row.
+
+**Rejected.** A warning when count > pin: a warning is the decorative check
+this gate's history keeps replacing.
+
+### D-1507 — The `/ingest` page reads `/calendar.json`'s `withheld` and stops calling those days holidays — 2026-10-03
+
+**What was observed.** D-1443 made `/calendar.json` name, in `withheld`,
+every in-span stretch whose daily rung was not read or failed its checks, so
+the API no longer serves those days as closed. The page that reads the
+calendar did not read the field: it treated every in-span day absent from
+`days` as "NSE holiday, no session", and counted the month's expectation
+from the remaining days. `docs/06-limits.md` said so (R9-api-law-0 PARTIAL).
+
+**The decision.** `web/src/lib/calendar-owed.js` gains `withheldDays`, which
+expands the inclusive epoch-day runs into ISO days and their months and
+REFUSES a malformed run (not two integers, or backwards) by throwing, which
+the page's existing catch turns into "no measured calendar" — dropping the run
+would turn its days back into holidays. An absent field (an older API) is no
+runs. On the page a withheld day is not "known": its session is ASSUMED for a
+weekday, as outside the span; its tooltip and the newest-day sentence say the
+calendar WITHHOLDS it and why instead of the span sentence, which would be
+false for it; a month holding one is not covered, so its verdict is unknown
+rather than counted against a partial denominator; a window containing one
+opens the census caveat; and the day cell carries its own mark (`.unk`,
+dotted underline). `web/build` is rebuilt (Gate W1).
+
+**Evidence.** `web/tests/calendar-owed.test.js`: inclusive ends of a leap
+February, a one-day run, an absent/null/empty list, and six malformed lists,
+each refused. Baseline: `npm run build` on the unchanged source reproduced the
+committed `web/build` byte for byte under Node 22, so the rebuilt bundle is
+this source's.
+
+**Cost.** One step per withheld day to expand; the window check walks the
+withheld set, not the window.
+
+### D-1508 — `/gaps.json`'s audits, `/folder.json` and `/indexmap.json` read off the async workers — 2026-10-03
+
+**What was observed.** D-1443 moved `/calendar.json` and `/gaps.json`'s peer
+vote onto the blocking pool behind `detail::MAX_CALENDAR_CONCURRENT`, and
+`docs/06-limits.md` stated what it left: `folder::answer`,
+`indexmap::Published::read` and the rest of `/gaps.json` (`audit_one`) still
+read the store inline on an async worker (W1-api2-11 PARTIAL). `audit_one`
+reads one minute file per month for up to `MAX_AUDIT_MONTHS`; `read_census`
+walks and decodes a whole archive folder; the index map re-reads its
+catalogue every request. Each held a Tokio worker for the whole read. The
+dated cash-session evidence `audit_cash_schedule` prepares is an `async fn`,
+but its local variant never awaits a fetch and locks and reads files inline.
+
+**The decision.** `/gaps.json` runs every month's evidence read and audit in
+one calendar-pool admission after the peer vote; the evidence future is driven
+to completion on that blocking thread with `Handle::block_on`, which is legal
+off the async context and blocks no worker. `/folder.json` and
+`/indexmap.json` run in a third pool, `detail::run_store_read`,
+`MAX_STORE_READ_CONCURRENT` = 8, separate from the detail pool's 4 and the
+calendar pool's 8 for the reason D-1443 gave its own. A refused admission is
+429 (saturated) or 503 (join failed) through `detail::admission_refused`,
+naming what was refused and the bound. Nothing queues without bound.
+
+**Evidence.** `api::detail::tests::a_store_read_runs_off_the_worker_and_refuses_past_its_bound`
+runs work on a thread other than the test's worker, fills all eight slots and
+sees the ninth refused before it queues while the calendar pool still admits,
+and sees a released slot admit again. `api::server::calendar_route_tests::the_gap_audit_folder_and_index_map_read_on_the_blocking_pool`
+reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
+`answer` or catalogue read outside the admitted closure.
+
+**Not changed.** The wall-clock cost of these reads is not measured. Holding
+one calendar slot for a whole range audit means a long range can make the
+calendar route answer 429 sooner; that is a bound, stated, not a queue.

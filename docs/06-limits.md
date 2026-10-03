@@ -11807,17 +11807,27 @@ below is timed.
   misses on one series and stamp derive once and share the answer; a follower
   waits on a condition variable for the leader. Followers do not count
   against the admission bound twice, but each holds a blocking thread while it
-  waits. Not changed: `folder::answer`, `indexmap::Published::read` and the
-  rest of `/gaps.json` (`audit_one`) still read the store inline on an async
-  worker, which W1-api2-11 also names. Their cost is not measured.
+  waits. `/gaps.json`'s month audits (`audit_one`) now run in that same
+  calendar pool, in one admission for the whole span, with each month's
+  dated cash-session evidence read on the same blocking thread.
+  `/folder.json` (`folder::answer`) and `/indexmap.json`
+  (`indexmap::Published::read` and the join) run in a third pool,
+  `detail::MAX_STORE_READ_CONCURRENT` = 8, and a ninth is answered 429 naming
+  the bound. (This paragraph said those three still read inline on an async
+  worker; D-1508 moved them.) Their wall-clock cost is not measured.
 * **Days a month's daily rung did not prove are withheld, not closed.** A
   month inside the span that the census holds only at another rung, that it
   does not hold at all, or whose daily records failed their checks is now
   `Unmeasured` day by day and named in `/calendar.json`'s `withheld` runs
-  (R9-api-law-0, W1-api2-9). **The `/ingest` page does not read `withheld`
-  yet.** It still treats an in-span day absent from `days` as a holiday, so
-  the page shows those days as "NSE holiday" until `web/` reads the field and
-  `web/build` is rebuilt (Gate W1). That rebuild was not done in this change.
+  (R9-api-law-0, W1-api2-9). **The `/ingest` page reads `withheld`
+  (D-1507).** A withheld day is no longer a holiday there: its session is
+  ASSUMED for a weekday, as outside the span, its tooltip says the calendar
+  withholds it and why, its month has no measured denominator (verdict
+  unknown), and a window containing one opens the census caveat. A malformed
+  `withheld` list fails the whole calendar loudly rather than dropping its
+  days back into holidays. `web/build` was rebuilt in that change. (This
+  paragraph said the page did not read the field yet.) Reading the runs costs
+  one step per withheld day.
 
 ## JSON renderers: cold admissions and per-request walks — D-1444, 2 October 2026
 
@@ -12079,13 +12089,19 @@ not the average.
   that extends the month never reaches it. This is the ingest boundary. It
   runs once per re-offered batch and never inside the sweep.
 
-**UNVERIFIED.** The wall-clock cost of either lookup has not been measured.
-C-28 and C-29 time `read_record`, including its `pread`, but only warm: one
-fixed index, so the page is resident and the block cached after the first
-call. They do not measure a cold block verify or a cold device. Neither does
-anything else in the workspace, and ET-bars-candles-store-9 tracks that gap.
-The probe and verify counts above are proven or computed. The time per probe
-is not.
+**What is measured, and what is not.** C-28 and C-29 time `read_record`,
+including its `pread`, warm: one fixed index, so the page is resident and the
+block cached after the first call. The COLD read every bisection probe pays is
+timed too: C-BC-01 cycles fourteen indices in fourteen distinct blocks and
+checks the cold read is flat in the file at 1×, 10× and 100×, C-BC-02 holds it
+to its own 10,000-floor budget, and C-BC-03 proves its verify allocates
+nothing on the heap (`crates/store/benches/ratio.rs`, D-0914). (This paragraph
+said nothing in the workspace measured a cold block verify, and pointed at
+ET-bars-candles-store-9 for the gap, after D-0914 had closed both; D-1506.)
+**UNVERIFIED:** a whole `first_at_or_after` or `already_stored` call has no
+wall-clock bench of its own, so its time is the computed probe count times the
+measured per-probe cost, an extrapolation; and a cold DEVICE, the page cache
+dropped, is not measured by anything.
 
 **Not changed.** The bisection already uses the fewest reads a comparison
 search over `n_valid` sorted records can use, so no cheaper probe order was

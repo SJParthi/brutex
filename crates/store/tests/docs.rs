@@ -277,3 +277,39 @@ fn the_header_module_doc_says_the_file_door_refuses_a_slot_ahead_of_its_data() {
         "header.rs must cite D-0792, the decision that corrected this sentence, not D-0790"
     );
 }
+
+/// **No document says the cold block verify is unmeasured.** C-BC-01 and
+/// C-BC-02 time it (D-0914); two sentences kept saying nothing did, one of
+/// them naming a closed finding as the tracker of the gap. D-1506.
+#[test]
+fn no_document_says_the_cold_block_verify_is_unmeasured() {
+    for row in [
+        "fn cold_record_read_is_flat_in_the_file(",
+        "fn cold_record_read_stays_within_its_budget(",
+        "cold_record_read_is_flat_in_the_file();",
+        "cold_record_read_stays_within_its_budget();",
+    ] {
+        assert!(
+            BENCH.contains(row),
+            "the bench no longer defines and runs `{row}`, so the cold read is \
+             unmeasured again and this test's premise is gone"
+        );
+    }
+    for (name, text) in [
+        ("crates/store/src/file.rs", FILE_RS),
+        ("docs/06-limits.md", LIMITS_DOC),
+        ("docs/02-store-format.md", FORMAT_DOC),
+    ] {
+        let text = flat(text).replace("/// ", "");
+        for stale in [
+            "They do not measure a cold block verify",
+            "ET-bars-candles-store-9 tracks that gap",
+            "verify a random index pays, and a cold device, are UNVERIFIED",
+        ] {
+            assert!(
+                !text.contains(stale),
+                "{name} still says the cold block verify is unmeasured: `{stale}`"
+            );
+        }
+    }
+}

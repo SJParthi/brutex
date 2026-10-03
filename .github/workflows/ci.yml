@@ -6530,10 +6530,17 @@ jobs:
           # Layer 3 now counts call sites of a helper whose name ends in
           # `ratio` in `source_scan code` output (comments blank, declarations
           # excluded), and every pin below is that count at this commit.
+          #
+          # AND THEY DRIFTED AGAIN (D-1504, audit v2-2): store carried 11
+          # points against a pin of 9 and engine 13 against 12 (C-E-12 landed
+          # after the pin), because `>=` let a bench grow past its pin with
+          # this gate green, and the next two deletions with it. The pin is
+          # now an EXACT count: adding a measurement fails until its pin is
+          # raised in the same change, so a pin cannot fall behind silently.
           cover='
           core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
           pull   crates/pull/benches/ratio.rs   6  C-11 C-12 C-13 C-26
-          store  crates/store/benches/ratio.rs  9  C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02
+          store  crates/store/benches/ratio.rs  11 C-01 C-07 C-08 C-28 C-29 C-BC-01 C-BC-02
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
           lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
@@ -6541,7 +6548,7 @@ jobs:
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
           vocab     crates/vocab/benches/ratio.rs     12 C-V-01 C-V-02 C-V-03 C-V-04 C-V-05 C-V-06
           indicators crates/indicators/benches/ratio.rs 6  C-I-01 C-I-02 C-I-03 C-I-04 C-I-05 C-I-06 C-I-07
-          engine    crates/engine/benches/ratio.rs    12 C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11 C-E-12
+          engine    crates/engine/benches/ratio.rs    13 C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11 C-E-12
           runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04 C-R-05
           cli       crates/cli/benches/ratio.rs       4  C-CLI-01 C-CLI-02 C-CLI-03 C-CLI-04 C-CLI-05 C-CLI-06
           '
@@ -6797,13 +6804,13 @@ jobs:
             nce=$( { grep -c 'CEILING' "$b" || true; } | tr -d ' ')
             miss=''
             [ "$nce" -ge 2 ] || miss="${miss} a-named-ceiling-compared-against"
-            [ "$npt" -ge "$pts" ] || miss="${miss} ${npt}-of-${pts}-measurement-points"
+            [ "$npt" -eq "$pts" ] || miss="${miss} ${npt}-measurement-points-but-pinned-at-${pts}"
             grep -q 'Instant' "$b"      || miss="${miss} nothing-is-timed"
             grep -q 'black_box' "$b"    || miss="${miss} no-black_box"
             grep -q 'println!' "$b"     || miss="${miss} prints-nothing"
             grep -qE 'process::exit' "$b" || miss="${miss} cannot-exit-non-zero"
             if [ -z "$miss" ]; then
-              printf '  ok       %s — %s point(s) >= %s, ceiling compared, prints, exits\n' \
+              printf '  ok       %s — %s point(s) = pin %s, ceiling compared, prints, exits\n' \
                      "$b" "$npt" "$pts"
             else
               printf '  REFUSED  %s is not a ratio bench:%s\n' "$b" "$miss"
@@ -6846,68 +6853,42 @@ jobs:
           # green. Gate 11 rule 5b guards the clippy lint table for the same
           # reason, and gate 13 layer 4 guards deny.toml.
           #
-          # Both patterns are ANCHORED to a whole line, which is what stops
-          # them being satisfied by the two `if grep` lines you are reading:
-          # those begin with `if`, so neither anchor matches.
+          # Both needles match only a line that BEGINS with them, which is
+          # what stops them being satisfied by the `if "$scan"` lines you are
+          # reading: those begin with `if`.
           echo
           echo "layer 5: gate 8 still runs what this gate counted"
-          # A line's PRESENCE is not a line's EXECUTION, and this is the repair.
-          # An audit confirmed by running it that a step carrying `if: false`
-          # satisfies every grep below while the command never runs -- so all four
-          # of these checks were decorative. Each pattern is now tested against the
-          # enclosing STEP: the line must be there AND its step must be REACHABLE.
+          # A line's PRESENCE is not a line's EXECUTION. The first repair here
+          # was an awk DENYLIST of always-skip `if:` forms (`false`, `0`,
+          # `failure()`, `cancelled()`), and D-1102 recorded it as replaced
+          # by `source_scan step-runs` beside gate 13's copy. Only gate 13's
+          # copy was replaced. An audit ran this layer verbatim against a copy
+          # of the workflow with `if: false && true` under gate 8's bench step
+          # and it printed "present" (D-1503). The denylist also carried a
+          # false sentence: gate 8's step has no `if:` at all.
           #
-          # `[ \t]` and not `[[:space:]]`, because the latter matches a newline and
-          # would let a pattern span lines in the buffered step text.
+          # `source_scan step-runs` is the ALLOWLIST gate 13 uses: every step
+          # with a line beginning with the needle must set no
+          # `continue-on-error` other than `false`, carry no `if:` (step or
+          # job) other than `always()`, `success()`, `!cancelled()` or the
+          # build job's crate probe, and sit in a job ci-ok `needs`.
           #
-          # A job-level `if:` would disable this gate too, and a skipped job is
-          # visible in the checks list rather than reported as a pass, so it is out
-          # of scope here deliberately.
-          runs_unconditionally () {
-            awk -v pat="$1" '
-              function finish() {
-                if (buf ~ pat) {
-                  found = 1
-                  # Only an `if:` THAT CAN BE FALSE is refused, and getting here
-                  # took two wrong rules. "No `if:` at all" refused the real
-                  # workflow, because gate 3 legitimately carries
-                  # `if: steps.probe.outputs.has_crates ==`. "No `if:` without a
-                  # context reference" also refused it, because gate 8 carries
-                  # `if: always()` -- constant TRUE, the opposite of a bypass.
-                  #
-                  # So the rule names the always-skip forms instead. `false` in any
-                  # quoting, `0`, and `failure()`/`cancelled()` -- which run the step
-                  # only when something has already gone wrong, and so skip it on
-                  # every green run. Everything else, constant or not, is allowed.
-                  n = split(buf, L, "\n")
-                  for (i = 1; i <= n; i++) {
-                    if (L[i] !~ /^[ \t]+if:[ \t]/) continue
-                    e = L[i]
-                    sub(/^[ \t]+if:[ \t]*/, "", e)
-                    gsub(/\$\{\{|\}\}|[ \t]/, "", e)
-                    e = tolower(e)
-                    # The character class permits the quoting a YAML scalar may
-                    # carry, without needing a quote literal inside this program.
-                    if (e ~ /^[^a-z0-9]*(false|0|failure\(\)|cancelled\(\))[^a-z0-9]*$/) {
-                      dead = 1
-                    }
-                  }
-                }
-                buf = ""
-              }
-              /^      - / { finish() }
-              { buf = buf "\n" $0 }
-              END { finish(); exit (found && !dead) ? 0 : 1 }
-            ' "$wf"
-          }
-          if runs_unconditionally '(^|\n)[ \t]+cargo bench --workspace --locked[ \t]*(\n|$)'; then
-            echo "  present  gate 8 invokes cargo bench --workspace --locked"
+          # step-runs matches a line PREFIX, so `cargo bench --workspace
+          # --locked || true` would satisfy it. The whole-line grep beside it
+          # closes that: an exact line must exist, and since every line with
+          # the prefix is in a step step-runs accepted, the exact one is too.
+          wf=.github/workflows/ci.yml
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          if "$scan" step-runs "$wf" 'cargo bench --workspace --locked' | sed 's/^/  /' \
+             && grep -qE '^[[:space:]]+cargo bench --workspace --locked[[:space:]]*$' "$wf"; then
+            echo "  present  gate 8 invokes cargo bench --workspace --locked, unconditionally"
           else
-            echo "  REFUSED  nothing in this workflow runs the benches. Every"
-            echo "           ceiling above is then an assertion no machine makes."
+            echo "  REFUSED  nothing in this workflow RUNS the benches so that their"
+            echo "           failure fails the run. Every ceiling above is then an"
+            echo "           assertion no machine makes. Reasons above."
             bad=1
           fi
-          if runs_unconditionally '(^|\n)[ \t]*echo "GATE 8 MEASURED NOTHING'; then
+          if "$scan" step-runs "$wf" 'echo "GATE 8 MEASURED NOTHING' | sed 's/^/  /'; then
             echo "  present  gate 8 still refuses an empty bench set"
           else
             echo "  REFUSED  gate 8 no longer fails when no bench exists. A skip"
