@@ -279,6 +279,18 @@ pub struct Report {
     pub records_read: u64,
 }
 
+impl Report {
+    /// Whether this derivation withheld a month or could not read one — the
+    /// condition under which [`derived_and_kept`] warns the operator.
+    ///
+    /// A method rather than an inline condition so the decision is tested on
+    /// its own: the warning it guards goes to the process-wide sink, which a
+    /// unit test cannot read without racing every other test. D-1454.
+    fn says_what_it_lacks(&self) -> bool {
+        !self.withheld.is_empty() || !self.unreadable.is_empty()
+    }
+}
+
 /// One file [`derive`] asked for and could not open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unopened {
@@ -673,6 +685,48 @@ fn ist(ts_micros: i64) -> (i64, u16) {
 pub(crate) mod tests {
     use super::*;
     use pull::calendar::{DayKind, Session};
+
+    /// **THE WARNING FIRES ON EITHER LACK, AND ONLY ON A LACK.** A month
+    /// withheld and a month unreadable are each enough on their own; a clean
+    /// derivation says nothing. All four corners, so neither half of the `||`
+    /// and neither negation can change without a failure here. D-1454.
+    #[test]
+    fn a_report_warns_on_a_withheld_or_unreadable_month_and_never_otherwise() {
+        let month = YearMonth::new(2026, 1).expect("a real month");
+        let clean = Report::default();
+        let withheld = Report {
+            withheld: vec![month],
+            ..Report::default()
+        };
+        let unreadable = Report {
+            unreadable: vec![String::from("2026-01: no such file")],
+            ..Report::default()
+        };
+        let both = Report {
+            withheld: vec![month],
+            unreadable: vec![String::from("2026-02: checksum mismatch")],
+            ..Report::default()
+        };
+        assert!(!clean.says_what_it_lacks(), "a clean derivation is silent");
+        assert!(withheld.says_what_it_lacks(), "a withheld month is said");
+        assert!(
+            unreadable.says_what_it_lacks(),
+            "an unreadable month is said"
+        );
+        assert!(both.says_what_it_lacks(), "both at once is said");
+    }
+
+    /// **THE CACHE DEBUGS AS ITSELF.** Its maps hold whole calendars, so the
+    /// hand-written `Debug` names the type and the one gauge and elides the
+    /// rest; a formatter that wrote nothing would make a panic message or a
+    /// log line about a `Cache` an empty string. D-1454.
+    #[test]
+    fn the_cache_debugs_as_its_name_and_its_waiting_gauge() {
+        let cache = Cache::default();
+        assert_eq!(format!("{cache:?}"), "Cache { waiting: 0, .. }");
+        cache.waiting.store(3, std::sync::atomic::Ordering::Release);
+        assert_eq!(format!("{cache:?}"), "Cache { waiting: 3, .. }");
+    }
 
     /// **THE COUNTER SHORT-CIRCUIT IS THE WHOLE COST ARGUMENT, SO IT IS TESTED.**
     ///
@@ -2174,7 +2228,7 @@ fn derived_and_kept(
     // per derivation. `read_days` refused such a month and nothing was logged,
     // so the only trace of it was a month missing from a 200. W1-api2-9,
     // D-1443.
-    if !report.withheld.is_empty() || !report.unreadable.is_empty() {
+    if report.says_what_it_lacks() {
         let first = report.unreadable.first().map_or("", String::as_str);
         let _dropped_when_filtered = telemetry::emit_if!(
             telemetry::Level::Warn,
