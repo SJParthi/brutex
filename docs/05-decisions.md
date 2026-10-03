@@ -53446,3 +53446,35 @@ lock is taken. PIF-08.
 NotADirectory or InvalidFilename": the dangling symlink is `NotFound` and
 would still defer, and the kind set differs by host. The name is the evidence,
 not the errno.
+
+### D-1481 — A serve-lock stamp that fails empties the file and warns, or refuses; it is never discarded — 2026-10-03
+
+**What was observed (v3b-2).** `api::server::take_serve_lock` wrote its
+`addr=… pid=…` line into `serve.lock` after taking the lock and bound the
+result of the write and the `set_len` to `_ignored_stamp`. A full disk or an
+I/O error at that moment left the PREVIOUS holder's line in the file, and a
+refused second instance quoted that dead pid as the process serving the
+store: the misattribution R9-api-cx-2 (D-1446) fixed, back through the error
+path, behind a doc comment that still promised "the value a refused instance
+reads was written by the instance that actually holds it".
+
+**The decision.** `stamp_outcome` decides over the stamp and a clear
+(`set_len(0)`). Stamped: serve. Stamp failed, file emptied: serve, and say so
+loudly -- one `api.serve` WARN event and a stderr line naming the lock path
+and the host's error. The lock itself is held, so mutual exclusion is intact,
+and an empty file makes a refused instance say the holder "had not yet
+stamped" it, which is true. Stamp failed AND the file could not be emptied:
+refuse, release the file lock and the in-process key, because serving would
+make every refused instance name the wrong process. `CLAUDE.md` §4: degrade
+loudly or refuse, never silently.
+
+**Proof.** `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+drives the three arms with the host's own errors (ENOSPC, EIO), then drives
+the refusal end to end through a `serve.lock` symlinked to `/dev/full`, where
+every write fails and no length can be set, and checks that the same store is
+taken at once with a regular lock file in its place. APIC-07.
+
+**Rejected.** Refusing on any stamp failure: the lock is correctly held and
+an emptied file is truthful, so refusing would turn an attribution problem
+into an outage. Truncating before the write: a refused reader would then see
+an empty file between the two calls on every start, not only on failure.

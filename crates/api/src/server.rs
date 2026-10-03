@@ -17677,13 +17677,83 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // this one, and the file named two pids. The length is set after the write,
     // so a refused reader sees this stamp's line first at every moment, and the
     // reader quotes only that line. R9-api-cx-2, D-1446.
+    //
+    // A STAMP THAT FAILS IS NEVER DISCARDED (v3b-2, D-1481). Its result was
+    // bound to `_ignored_stamp`, so a full disk or an I/O error after the lock
+    // was taken left the PREVIOUS holder's line in the file, and a refused
+    // second instance quoted that dead pid as the one holding the store -- the
+    // misattribution R9-api-cx-2 fixed, back through the error path.
     let stamp = format!("addr={addr} pid={}\n", std::process::id());
-    let _ignored_stamp = std::io::Write::write_all(&mut &*file, stamp.as_bytes())
-        .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)));
+    let stamped = stamp_outcome(
+        || {
+            std::io::Write::write_all(&mut &*file, stamp.as_bytes())
+                .and_then(|()| file.set_len(u64::try_from(stamp.len()).unwrap_or(u64::MAX)))
+        },
+        || file.set_len(0),
+        &path,
+    );
+    match stamped {
+        Ok(None) => {}
+        Ok(Some(warning)) => {
+            let _noted = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Warn,
+                    "api.serve",
+                    "the serve lock is held but could not be stamped",
+                )
+                .with("why", telemetry::Value::Str(&warning)),
+            );
+            warn_line!("{warning}");
+        }
+        Err(refusal) => {
+            drop(file);
+            release_root(&key);
+            return Err(refusal);
+        }
+    }
     Ok(ServeLock {
         held: Some(file),
         root: key,
     })
+}
+
+/// What a failed serve-lock stamp leaves, decided over two operations a test
+/// can fail on demand (v3b-2, D-1481).
+///
+/// `stamp` writes this holder's line and cuts the file to it; `clear` cuts the
+/// file to nothing. `Ok(None)`: stamped. `Ok(Some(warning))`: the stamp failed
+/// and the file was emptied, so a refused instance reads "an instance that had
+/// not yet stamped the file" -- true, if incomplete -- and the warning names
+/// the error; the lock itself is held, so mutual exclusion is intact and this
+/// degrades loudly rather than refusing. `Err`: the stamp failed AND the file
+/// could not be emptied, so it may still name a previous holder or a garbled
+/// mix of two; serving would make every refused instance name the wrong
+/// process, so this refuses.
+fn stamp_outcome(
+    stamp: impl FnOnce() -> std::io::Result<()>,
+    clear: impl FnOnce() -> std::io::Result<()>,
+    path: &Path,
+) -> Result<Option<String>, String> {
+    let Err(why) = stamp() else {
+        return Ok(None);
+    };
+    match clear() {
+        Ok(()) => Ok(Some(format!(
+            "the one-server lock {} is held, but this instance's address and pid \
+             could not be written into it — {why}. The file was emptied instead, \
+             so a refused second instance will say the holder had not yet \
+             stamped it rather than name a previous one.",
+            path.display()
+        ))),
+        Err(left) => Err(format!(
+            "REFUSED: the one-server lock {} was taken, but this instance's \
+             address and pid could not be written into it — {why} — and the \
+             file could not be emptied either — {left}. It may still name a \
+             previous holder, so a refused second instance would quote the \
+             wrong process as the one serving this store.",
+            path.display()
+        )),
+    }
 }
 
 /// Drops a root out of the in-process set after a failed take.
@@ -20907,6 +20977,55 @@ mod tests {
         );
         assert!(!refused.contains("4294967295"), "{refused}");
         drop(squatter);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A FAILED SERVE-LOCK STAMP IS NEVER DISCARDED.** v3b-2, D-1481. The
+    /// stamp's result was dropped, so a full disk left the previous holder's
+    /// line for a refused instance to quote. Each arm of the decision is driven
+    /// with the error the host gives, and the refusal is driven end to end
+    /// through a lock name that resolves to `/dev/full`, where every write
+    /// fails with ENOSPC and no length can be set.
+    #[test]
+    fn a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale() {
+        let path = Path::new("/store/serve.lock");
+        assert_eq!(
+            stamp_outcome(|| Ok(()), || unreachable!("not cleared"), path),
+            Ok(None)
+        );
+
+        let full = || Err(std::io::Error::from_raw_os_error(28));
+        let warned = stamp_outcome(full, || Ok(()), path).expect("cleared, so it serves");
+        let warned = warned.expect("and says why");
+        assert!(warned.contains("/store/serve.lock"), "{warned}");
+        assert!(warned.contains("os error 28"), "the host's words: {warned}");
+        assert!(warned.contains("emptied"), "{warned}");
+
+        let refused = stamp_outcome(full, || Err(std::io::Error::from_raw_os_error(5)), path)
+            .expect_err("neither stamped nor cleared");
+        assert!(refused.starts_with("REFUSED:"), "{refused}");
+        assert!(
+            refused.contains("os error 28") && refused.contains("os error 5"),
+            "{refused}"
+        );
+
+        let root = crate::scratch::path("serve-lock-dev-full");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let lock_path = root.join(SERVE_LOCK);
+        std::os::unix::fs::symlink("/dev/full", &lock_path).expect("the /dev/full name");
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("an address");
+        let refused = take_serve_lock(&root, addr).expect_err("an unstampable lock refuses");
+        assert!(refused.contains("could not be written"), "{refused}");
+        // The refusal released both the file lock and the in-process key: with
+        // a regular lock file at the name, the same store is taken at once.
+        std::fs::remove_file(&lock_path).expect("unlink");
+        let taken = take_serve_lock(&root, addr).expect("the store is free again");
+        assert!(
+            taken.held.is_some(),
+            "a real file lock, not the in-process pass"
+        );
+        drop(taken);
         let _ = std::fs::remove_dir_all(&root);
     }
 
