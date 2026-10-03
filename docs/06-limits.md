@@ -14016,3 +14016,17 @@ witness as well; §169 states it.
 - **Max-gated rates are floored (GAP15-17).** Not a cost: an exact rate just
   above a `max_*_rate_ppm` ceiling floors onto it and is admitted. D-1640
   records why it is not changed here.
+
+## A Boolean search detail page rechecks every retained journal record twice — D-1641, 3 October 2026
+
+`boolean_search_projection::RungReader::rows` calls `require_current()`
+before and after reading one page of at most 256 rows. That fans out to the
+parent search reader, the qualified-campaign reader and the source; the first
+two loop `for old in &self.history` and re-read and seal-check every retained
+journal record (`boolean_search_reader.rs`, `boolean_qualified_observer.rs`).
+One page therefore costs O(H + H') record reads with hashing, twice, for H
+search journal records and H' qualified-campaign records, both growing with
+batches and retries. The reader doc says only "recheck every retained journal
+record" (W2-cli2-5). Not reduced here: the recheck is what lets a page refuse
+a journal that changed under it, and a cheaper generation check would be a
+change to that reader's authority.

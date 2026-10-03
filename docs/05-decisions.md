@@ -53810,3 +53810,43 @@ whole population chain, and the instruction for this audit lane is to stop
 and report such a change rather than make it. The fix belongs in a new
 evidence version (or an admission-side exact comparison that carries
 `part` and `total`), decided on its own.
+
+### D-1641 — Hoist two per-candidate and per-row recomputations, and test `produce`'s admission refusal — 2026-10-03
+
+**What was wrong.**
+
+- **W2-cli5-2.** `expression_pricing::Prepared::capture` called
+  `Capture::begin_expression` for every priced candidate, and `begin_with`
+  hashed the whole execution month (`runner::identity::data_digest`) each
+  time: O(bars) of identical work per candidate.
+- **W2-cli3-5.** `validate_population_capabilities` called
+  `require_binding` per population row, and that began with
+  `parameters.validate()`, which rehashes the side policy's percentile atoms
+  (O(A)). Preparation was O(R·A); `docs/06-limits.md` §139 says O(R + A).
+- **GAP14-59.** No test drove `boolean_statistics_v1::produce` into
+  `admit`'s refusal; the bound tests called `admit_shape` directly, so the
+  mutant `admit -> Ok(())` survived.
+
+**The change.** `Prepared::new` computes the execution digest once from the
+bars it owns (it is lent only immutably to the search), and `capture` passes
+it to the new `Capture::begin_expression_with_digest`; `start.bin` bytes are
+identical. `validate_population_capabilities` calls the new
+`require_binding_of_validated`, because `from_population_v4` validates both
+side parameters once before the row loop; the public `require_binding` still
+validates. A new test drives `produce` over real committed sources with each
+physical bound set below the work.
+
+**What it proves.**
+`cli::candidate_trades::tests::a_held_execution_digest_writes_the_same_start_as_hashing_per_capture`
+requires the held-digest start record to be byte-identical to the hashing one
+and a wrong digest to conflict.
+`cli::execution_capability::tests::population_rows_bind_without_revalidating_parameters_per_row`
+requires the row loop to call no `validate` and no re-validating binding, and
+the parameter pair to be validated before it.
+`cli::candidate_universe::boolean_candidate_v1::statistics::tests::produce_refuses_through_admit_before_any_attempt_or_statistics`
+requires each of six tight bounds to refuse with `admit`'s exact message, no
+statistics directory and no new sweep-evidence attempt, and the unrestricted
+bounds to commit.
+
+`W2-cli2-5` (Boolean search detail pages recheck every retained journal
+record twice per page) is stated in `docs/06-limits.md` under this number.
