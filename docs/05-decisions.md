@@ -53581,3 +53581,44 @@ same assertions as root and as anyone else.
 
 **Proof.** `cargo test -p store --lib` as root: 100 passed, 0 failed (it
 failed 2 before). No new invariant: the two tests' own rows are unchanged.
+
+### D-1486 — Three stale doc sentences corrected, one more read back by `stale_claims`, and D-1204's misnamed test file — 2026-10-03
+
+**What was observed.**
+
+* **v3b-3.** `crates/api/src/sweeprun.rs`, the doc of `command_with`, had a
+  lost line break: "…for why/// that reason survived…", so rustdoc rendered a
+  literal `///` mid-sentence. Split into two doc lines.
+* **AC-gates-o1-4 (PARTIAL).** D-1448 corrected `CLAUDE.md` §5 and the crate
+  sentence, but the doc of `cli::grid_entered_event` still said the path was
+  "`cli`, called once per rung, holding no loop over bars and none over
+  candidates". Read against the code: the event is built once per rung, and
+  right after it `SliceFacts::of` walks every bar of the slice and
+  `screen_cascade` walks every candidate (`screen`'s `by_evidence.par_iter()`),
+  pricing each with `grid::evaluate_over` over the bars. The doc now says so,
+  and that those loops emit only `note_grid_progress`, one per `stride`
+  candidates. `note_grid_progress`'s doc, which quoted the false sentence to
+  correct it, now paraphrases it. `vocab/tests/stale_claims.rs`'s
+  `the_corrected_sentences_do_not_return` adds the phrase "holding no loop
+  over bars and none over candidates" for `crates/cli/src/lib.rs`, so neither
+  spelling can return there; the test flattens whitespace, so a re-wrapped
+  copy is caught too.
+* **fold-1.** `runner::trade::walk_with`'s doc said every call pays one
+  `median_step_micros`. That function is `#[cfg(test)]` since D-1410 and the
+  call builds a whole `SliceFacts::of` instead: the cadence (a per-bar prefix
+  median, O(B log B), on a native column), a timestamp `HashMap`, two prefix
+  vectors with their next-marked tables and its own square-off table, so the
+  table a caller passes spares only the fallback `forced_exits`. The
+  paragraph states that cost, labelled UNVERIFIED as a measurement, and the
+  two intra-doc links to the test-only function became plain code.
+
+**A misnamed file in D-1204, recorded here because the ledger is
+append-only.** D-1204 says "`crates/runner/tests/limits_doc_drift.rs` reads
+the three sections". No such file exists; the test is
+`crates/cli/tests/limits_doc_drift.rs`, which D-1450's fold list already
+names correctly. D-1204 is left as written.
+
+**Proof.** `vocab::stale_claims::the_corrected_sentences_do_not_return`
+(passes on this tree and would fail on the previous `grid_entered_event` doc,
+which contains the phrase); `runner::trade::tests::the_per_candidate_walk_derives_nothing_and_sorts_nothing`
+unchanged and passing. Documentation only otherwise; no invariant row.

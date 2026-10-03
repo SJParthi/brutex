@@ -18273,8 +18273,17 @@ fn signal_spacing_minutes(bars: &[indicators::Candle]) -> u32 {
 ///
 /// The gate silences `vocab engine indicators runner` because those hold the
 /// innermost loops, and its own remedy prescribes the shape: *"plain integer
-/// counters … emitted ONCE at a structural boundary"*. This is `cli`, called
-/// once per rung, holding no loop over bars and none over candidates.
+/// counters … emitted ONCE at a structural boundary"*. This event is that
+/// boundary: it is built once per rung, before the grid starts. The path it
+/// marks is NOT loop-free, and this sentence said it was until D-1486
+/// (AC-gates-o1-4): right after it, `SliceFacts::of` walks every bar of the
+/// slice, and `screen_cascade` walks every candidate (`screen`'s
+/// `by_evidence.par_iter()`), pricing each one with `grid::evaluate_over`
+/// over the bars. Those loops emit nothing per iteration; their only event is
+/// [`note_grid_progress`], one in every `stride` candidates. `cli` is not on
+/// gate 17's silenced list, so the gate does not refuse them; it is the
+/// boundary discipline, not an absence of loops, that keeps this crate's
+/// events affordable.
 fn grid_entered_event(
     recording: Option<Recording<'_>>,
     bars: usize,
@@ -18385,11 +18394,11 @@ impl<'a> GridProgress<'a> {
 ///
 /// # Gate 17, and a correction to what the sibling doc claims
 ///
-/// [`grid_entered_event`] says this path is *"`cli`, called once per rung,
-/// holding no loop over bars and none over candidates."* The first half is
-/// true and the second is not: `screen` runs `by_evidence.par_iter()` over
-/// every candidate and calls `grid::evaluate_over` inside it. That loop is the
-/// phase being timed here.
+/// [`grid_entered_event`]'s doc said this path was called once per rung and
+/// looped over neither bars nor candidates. The first half is true and the
+/// second was not: `screen` runs `by_evidence.par_iter()` over every candidate
+/// and calls `grid::evaluate_over` inside it. That loop is the phase being
+/// timed here. D-1486 corrected the sibling doc.
 ///
 /// It is still `cli`, which is not on gate 17's silenced list, and the cost is
 /// one relaxed `fetch_add` per candidate — the counter is O(1) and the emit

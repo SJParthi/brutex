@@ -365,8 +365,8 @@ pub fn walk(
 /// ratio gate can therefore see.
 ///
 /// **A second per-slice quantity was left in the loop, and it is the more
-/// expensive of the two.** `walk_with` called [`median_step_micros`] on every
-/// entry under a comment reading *"MEASURED ONCE: the bar spacing is a property
+/// expensive of the two.** `walk_with` called `median_step_micros` (test-only
+/// since D-1410) on every entry under a comment reading *"MEASURED ONCE: the bar spacing is a property
 /// of the slice, not of a signal"* — true of the quantity and false of the call,
 /// which happened once per CANDIDATE. That function allocates a `Vec<i64>` of
 /// `bars.len() − 1`; the version the audit found also sorted it. The selection
@@ -811,11 +811,20 @@ pub fn walk_expression_over(
 ///
 /// # THIS ENTRY POINT IS SUPERSEDED AND STILL REALLOCATES
 ///
-/// It hoists the square-off table and NOT the bar spacing, so even the `Some`
-/// path pays one [`median_step_micros`] — a `Vec<i64>` of `bars.len() − 1` — on
-/// every call. That is another full-slice allocation beside the O(bars) table it
-/// was written to avoid rebuilding, and it is exactly the shape its own
-/// paragraph above warns cannot be seen by a ratio gate.
+/// It hoists the square-off table and NOT the rest of the slice facts, so even
+/// the `Some` path builds one whole [`SliceFacts::of`] on every call: a copy of
+/// the acceptance verdict when a bar is off the minute grid, the cadence (a
+/// per-bar prefix median for a native column, O(B log B), or a constant for a
+/// filled one), a `HashMap` of up to B accepted timestamps, two prefix
+/// vectors of B + 1 and their next-marked tables, and a square-off table of
+/// its own -- so the table passed in spares only the fallback
+/// [`forced_exits`], not the one `SliceFacts` builds. O(B) allocation and at
+/// least O(B) time per call, O(B log B) on a native column. This paragraph
+/// named a per-call `median_step_micros` until D-1486 (fold-1): that function
+/// is test-only since D-1410 and `SliceFacts::of` replaced it here.
+/// **UNVERIFIED as a measurement**: read off `SliceFacts::of`, not timed. It
+/// is exactly the shape the paragraph above warns cannot be seen by a ratio
+/// gate.
 ///
 /// It is kept so every existing caller compiles unchanged. **A per-candidate
 /// loop must move to [`walk_over`]**, which takes both facts and allocates
