@@ -1,6 +1,6 @@
 # GDFL build: exact prompts, scripts and per-part state
 
-Generated 2026-10-03 18:53 UTC from the Mac resume kit. The scripts are JavaScript workflow scripts for Claude Code's Workflow tool. They are kept here as Markdown because this repository tracks no .js (CLAUDE.md section 2). To use them, copy each block back into a .js file on the Mac; they already exist on the Mac at the paths named.
+Generated 2026-10-03 20:09 UTC from the Mac resume kit. The scripts are JavaScript workflow scripts for Claude Code's Workflow tool. They are kept here as Markdown because this repository tracks no .js (CLAUDE.md section 2). To use them, copy each block back into a .js file on the Mac; they already exist on the Mac at the paths named.
 
 ## `state/resume-kit/scripts/build-wave1-continue.js`
 
@@ -266,94 +266,18 @@ Each part: the last builder or repairer report, the review round it is in, and t
  "store-grid": {
   "rep": {
    "branch": "feat/gdfl-store-grid",
-   "head": "2312a41d8eaa7b32ec6f0b413b5e817667a2fb60",
-   "summary": "Both blocking findings are fixed, and every should-fix and nit is fixed except the two listed as still open. Commit 2312a41d on feat/gdfl-store-grid, not pushed.\n\nBLOCKING (both reviewers): the directory writer resealed a rotted committed record. I added `Member::verify_old_tail` in /Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/wt/G-store-grid/crates/store/src/second_grid.rs. It does for the grid store what D-0910 does for BarFile. When the tail block is only partly covered, it reads the committed bytes, the bytes past the commit up to the block's nominal end, and the stored sum, then calls `block::verify_through`, the same D-0688 proof that `Month::load` uses. A mismatch refuses `StoreError::Format{BlockChecksum}` with the block's name. `Member::append` calls it before it writes anything. `append_day` also calls it on the directory before the grid is written, so a damaged directory leaves no orphan grid block. No grid block is ever read this way, because a day is 225 whole blocks.\n\nTests, written first and seen red:\n- `a_record_changed_between_two_appends_is_refused_not_resealed` flips bytes 20 and 140 of a record and runs both `append_day` and `append_refused_day`. It asserts the refusal by name, that all four members are byte-identical (grid included), and that a reopen refuses.\n- `an_open_writer_still_admits_a_tail_sealed_past_the_commit` shows the proof is still honoured.\n- New invariant GS-04o.\n- D-0804 gains a paragraph applying D-0910, including the withdrawn heal of the second-interrupted-append state. Store format §27.4 item 5 and the module docs are updated, and 06-limits gets cost rows and a section.\n\nShould-fix (GS-02): two cell cases each break only one conjunct ({9,10,12,11} and {13,10,12,11}). With either conjunct deleted, the tests now fail.\n\nNits:\n- Added `blocks_for(31)==2` (plus 52 and 53) for GS-45.\n- `a_31_day_month_opens_with_its_62_records` now asserts n_valid 62, `blocks_for(62)==3` and a 12-byte sidecar (GS-56). The test is listed under GS-45 and GS-56.\n- Renamed the test to `layout_differs_but_every_day_and_digest_is_identical_after_backfill`, with the invariant rows updated.\n- \"four syncs\" is corrected to three per member, six in all, plus the open's `fsync_dir`.\n- The store not checking the day kind is stated as an honest limit (D-0804, §27.4 item 8, 06-limits, module docs). The reason: `store` cannot name `pull`'s calendar without a cycle.\n- D-0804 moved to the end of docs/05-decisions.md, after main's D-0910. The diff",
+   "head": "5ef5c37738151ef6d706758d3d381806cd9b4caf",
+   "summary": "I fixed all 12 round-2 findings on feat/gdfl-store-grid; the one open item is whole-crate coverage, which waits on the operator. The stopped agent's uncommitted edits were checked and found correct, so I kept them, added source notes to the constants, and committed everything on top in two commits (head 5ef5c377).\n\n- **Session constants:** core::second's UTC_OFFSET_S, SESSION_OPEN_SOD and SLOTS are tied to pull::session by three compile-time asserts and the test core_second_repeats_this_modules_session_facts (GS-01c). Each constant now cites docs/00-charter.md section 3 and the pull::session value it copies. pull already depends on core, so no new crate arrow.\n- **NSE only:** a grid path always renders grids/gdfl/NSE/...; the exchange is no longer a parameter, and a key on BSE is refused with PathError::ExchangeNotGridded (GS-04q).\n- **symbol_id:** GridPath::symbol_id works it out from the path (low 32 bits of fnv1a of the symbol), and GridWriter::open / GridReader::open no longer take it from the caller. A month copied under another instrument's path is refused with SymbolMismatch by the store itself (GS-14b).\n- **No silent defaults:** DaySeconds::at, Month::state_of and Month::record_of now index directly under a reasoned allow, instead of falling back to a made-up value (CLAUDE.md section 4).\n- **O(1) shape test:** GS-01b reads the source of each lookup function and refuses any loop, iterator, search or chunk walk, and any unwrap_or on the three lookups above.\n- **Dependency check:** GS-14 now asserts store has exactly two dependencies (brutex_core and telemetry), so any mapping crate is refused, not only memmap2.\n- **Second interrupted append:** GS-04p builds that state on the grid directory and shows it is refused by both appends and on both opens, with the bytes left unchanged.\n- **Coverage wording:** D-0804's coverage paragraph is now an open request to the operator instead of an exception the building session recorded for itself. docs/06-limits.md has the re-measured numbers, now including pull.\n- **Integration note:** it already cites the owning branch's head 27d2dcd3 and now also says the merge keeps that branch's five pull::session asserts.\n\nDocs updated: 02-store-format, 04-invariants (GS-01b, GS-01c, GS-04p, GS-04q, GS-14, GS-14b), 05-decisions D-0804 and 06-limits.\n\nAll definition-of-done checks pass except whole-crate coverage: fmt, clippy, the full workspace tests (run outside the sandbox, which blocks pull's network tests), cargo deny, mut",
    "still_open": [
-    "The coverage exception in D-0804 is still waiting for the operator to confirm it. CLAUDE.md section 9's whole-crate 100% is not met for core (1 line, 26 branches missed) or store (48 lines, 10 branches missed). Every miss predates this branch and is on origin/main. Closing them is work on main, so until the operator confirms or main closes them, the definition of done's whole-crate clause is still",
-    "Nit about tests being written before code in the step-4 history: it is not fixable without rewriting history (no rebase allowed). The commit in this repair does show it: the red run was taken before the fix."
+    "Coverage of the whole crate (CLAUDE.md section 9) is still not met for core, store or pull. Every miss is on lines already on origin/main, and the branch's own diff is fully covered. D-0804 now asks the operator to confirm or decline that a part is held only to its own diff; the earlier text recorded this as an exception the session gave itself. Until the operator answers, the part is not done und",
+    "Round-3 test-first history: the stopped session made the round-3 edits before it recorded any red runs, so the commit history does not show the tests coming first. As evidence instead, each new test was run against its fix reverted and failed (recorded in D-0804). GS-04p and GS-14b guard behaviour the code already had; neither reproduces a fault.",
+    "Step-4 test-first history (commit 38255368) can only be fixed with a rebase, which this part may not do. Left as recorded.",
+    "Merge work at integration with feat/gdfl-core-second (head 27d2dcd3), as the second.rs integration note lists. Item 1: rewrite the DayError binding as a match. Item 2: change the store tests that build a bad day through DaySeconds::new. Item 3: delete store's link_deltas. Item 5: drop this branch's three pull::session asserts in favour of the owner's five, which I checked at 27d2dcd3.",
+    "Reviewer finding 6 (another process building mutants into a shared target dir) is about the environment and needed no code change. All runs this session used this part's own target dirs."
    ]
   },
-  "round": 2,
-  "verdicts": {
-   "law-and-design": {
-    "refuted": false,
-    "reviewed_head": "2312a41d8eaa7b32ec6f0b413b5e817667a2fb60",
-    "issues": [
-     {
-      "severity": "should-fix",
-      "description": "CLAUDE.md section 9's Definition of Done is not met: core and store are not at 100% line and branch coverage across the whole crate. D-0804 also enters an exception to the law into the append-only ledger ('This entry records an exception for exactly those pre-existing misses'). The building session granted that exception to itself, under a design delegation, and the operator has not confirmed it. If the operator declines, the ledger keeps a law waiver that was never authorised. Until the operator confirms or main closes the misses, the part is not done under section 9. It would be safer to word the paragraph as an open request rather than a recorded exception.",
-      "evidence": "docs/05-decisions.md D-0804, paragraph 'Coverage exception, recorded (review round 2, 2026-10-02)': '...records an exception for exactly those pre-existing misses ... awaits the operator's confirmation'. docs/06-limits.md: 'CLAUDE.md §9's whole-crate 100% is therefore not met by this branch'. The builder's still_open list says the same. I did not re-measure coverage myself."
-     },
-     {
-      "severity": "should-fix",
-      "description": "The core::second subset on this branch repeats pull::session's IST facts without binding them: UTC_OFFSET_S = 19_800, SESSION_OPEN_SOD = 33_300 and SLOTS = 22_500. Nothing on this branch checks them against pull::session, which CLAUDE.md section 5 names the canonical IST session authority. The owning branch closes exactly this gap with compile-time assertions in crates/pull/src/session.rs. If store-grid lands before core-second, main carries a second, unchecked IST/session authority. The module's integration note does not list this as merge work.",
-      "evidence": "`git grep -n 'second::' -- crates/pull` on 2312a41d returns nothing. In contrast, `git -C wt/G-core-second diff origin/main 27d2dcd3 -- crates/pull/src/session.rs` adds `const _: () = assert!(brutex_core::second::UTC_OFFSET_S == 19_800);`, `assert!(brutex_core::second::SESSION_OPEN_SOD == SESSION_OPEN_MINUTE * 60)`, the SLOTS == 375*60 assertion, and the test core_second_repeats_this_modules_session_facts. crates/core/src/second.rs on this branch cites neither docs/00-charter.md section 3 (which has '09:15 - 15:30 IST' at line 69) nor pull::session for these constants."
-     },
-     {
-      "severity": "nit",
-      "description": "The integration note names the owning branch's head as 03e30b09, but feat/gdfl-core-second has moved on to 27d2dcd3. I re-ran the swap check at 27d2dcd3 and the note still holds: there is exactly one compile error, at the irrefutable DayError binding, and with that patched the store compiles. Only the cited head is stale. The newer owner also binds the constants in pull::session (see the previous issue), which the note does not mention.",
-      "evidence": "I copied G-core-second 27d2dcd3:crates/core/src/second.rs into a throwaway worktree of 2312a41d and ran `cargo check -p store --tests --locked`. Result: 'error[E0005]: refutable pattern in local binding --> crates/store/src/second_grid.rs:678:9', EXIT 101. After turning day_length into a match with a wildcard arm, the same command finished with EXIT 0. Afterwards the source was restored and the worktree removed."
-     },
-     {
-      "severity": "nit",
-      "description": "GridPath takes any upper-case exchange and renders grids/gdfl/<EXCHANGE>/..., so 'BSE' is accepted. The design fixes the exchange to NSE, and CLAUDE.md section 1 limits the engine surface to NSE. This widening is not among the departures D-0804 lists.",
-      "evidence": "Design §3.4 GridPath row: `exchange: &str /*\"NSE\"*/`, '...whose one Display renders grids/gdfl/NSE/<INDEX|CASH>/<SYMBOL>/1s/v<version>/r<fold_rule>/<yyyy-mm><ext>'. crates/store/src/second_grid.rs GridPath::new checks only `check_segment(\"exchange\", exchange, SegmentCase::Upper)`. D-0804 item 3 writes `grids/gdfl/<EXCHANGE>/...` and its 'Where this entry departs from the design' list does not mention it."
-     },
-     {
-      "severity": "nit",
-      "description": "Some lookups fall back to a default that cannot be reached: DaySeconds::at returns &SecondCell::ABSENT on a miss, and Month::state_of / record_of fall back to DAY_UNATTEMPTED / NO_RECORD. The arms are unreachable, but on a price lookup this is the 'fallback that hides a failure' shape CLAUDE.md section 4 bans. The owning branch indexes directly, with a reasoned allow.",
-      "evidence": "crates/core/src/second.rs (2312a41d): `self.cells.get(slot.index()).unwrap_or(&SecondCell::ABSENT)`. G-core-second 27d2dcd3 second.rs:583: `&self.cells[s.index()]` under `#[allow(clippy::indexing_slicing, reason = ...)]`."
-     },
-     {
-      "severity": "nit",
-      "description": "The history does not show the step-4 tests being written before the code. The builder already acknowledged this, and it cannot be fixed without a rebase.",
-      "evidence": "`git show --stat 38255368` adds second_grid.rs (1,583 lines) together with tests/second_grid.rs (1,919) and second_grid_tests.rs (215) in one commit. Only the latest repair (2312a41d) records a red run taken before its fix."
-     }
-    ]
-   },
-   "tests-bite": {
-    "refuted": false,
-    "reviewed_head": "2312a41d8eaa7b32ec6f0b413b5e817667a2fb60",
-    "issues": [
-     {
-      "severity": "should-fix",
-      "description": "CLAUDE.md section 9 requires 100% line and branch coverage on every touched crate, and the store crate as a whole does not reach it. Nothing in the diff is unreached and every miss is on pre-existing main lines, but the exception D-0804 records is still waiting for the operator to confirm it. Until then the whole-crate clause of the definition of done is unmet. This finding was already open and is restated, not new.",
-      "evidence": "cargo llvm-cov --branch -p store --locked --no-report (nightly) on the 2312a41d tree. I exported each of the 13 store test objects separately with llvm-cov show and unioned the results per line and per branch: 'lines 6859/6907 branches 540/550'. The misses are in catalog.rs, checksum_audit.rs, checksum_audit_tests.rs, emits.rs, file.rs (18 lines plus branch 2289:12), flock_tests.rs, repair.rs and repair_tests.rs. I intersected them with the 228 added lines of the store src files in git diff -U0 origin/main..HEAD (file.rs, format.rs, layout.rs, header.rs, lib.rs) and got an empty overlap. second_grid.rs alone (lib plus second_grid objects): every line and all 69 branch locations covered on both sides. This matches the builder's reported numbers exactly."
-     },
-     {
-      "severity": "nit",
-      "description": "GS-14 says 'store takes no mapping crate', but no_mmap_in_second_grid only checks that the manifest does not contain the string 'memmap2'. A different mapping crate added to crates/store/Cargo.toml (for example memmap, mmap-rs or fmmap) would pass this test, so the row claims more than its test asserts.",
-      "evidence": "crates/store/tests/second_grid.rs:2116-2120: `let manifest = include_str!(\"../Cargo.toml\"); assert!(!manifest.contains(\"memmap2\"), \"store takes no mapping crate\");`. The source scan of second_grid.rs above it, for mmap, Mmap, memmap, map_mut and MmapOptions, is sound."
-     },
-     {
-      "severity": "nit",
-      "description": "docs/02-store-format.md section 27.4 item 5 now says the second-interrupted-append state 'is refused on open and by every append' for the grid directory. No grid-store test builds that state, meaning bytes past the commit rewritten without a re-seal, and then appends to it. GS-04o's two tests cover a changed committed record and an admitted torn tail. The claim follows from the same verify_through path, and AF-42 pins it only for BarFile.",
-      "evidence": "grep for interrupt, past, torn and rewr among the test names in crates/store/tests/second_grid.rs finds torn_day_*, reingest_after_torn_day_*, a_directory_append_torn_after_its_checksum_*, an_open_writer_still_admits_a_tail_sealed_past_the_commit, torn_directory_block_refuses_by_crc, interrupted_ingest_* and an_interrupted_append_in_a_later_directory_block_*. None of them rewrites the past-commit bytes after the seal and then appends."
-     }
-    ]
-   },
-   "behaviour-extremes-o1": {
-    "refuted": false,
-    "reviewed_head": "2312a41d8eaa7b32ec6f0b413b5e817667a2fb60",
-    "issues": [
-     {
-      "severity": "nit",
-      "description": "The O(1) addressing claims in the module docs and docs/06-limits.md cover instant to slot, day to block or state, and block plus slot to offset. They hold by mechanism: I read GridReader::cell_offset_at, Month::state_of, Month::record_of, DayDirectory::state_of and cell_offset, and none has a loop, scan or search. But no test pins that constant-time shape. offset_formula and GS-01 prove only the arithmetic and the bytes at the offset. A later edit that put a walk into state_of or record_of would keep every test green. The limits row honestly marks the cost as unmeasured, and design step 12 schedules the Gate 8 rows, so this is not a law breach. A source-shape test like core-second's first_at_or_after_is_one_read (no loop or iterator on these lookup paths) would turn the claim into a proof.",
-      "evidence": "grep -n 'include_str\\|O(1)\\|no loop\\|binary_search' crates/store/tests/second_grid.rs crates/store/src/second_grid_tests.rs -> only no_mmap_in_second_grid, store_test_harnesses_open_bar_files_through_the_bar_table and grid_header_step_never_calls_header_advance read source; none checks the lookup shape. docs/06-limits.md (diff): 'Nothing here is measured ... read off the source'."
-     },
-     {
-      "severity": "nit",
-      "description": "GridWriter::open and GridReader::open take symbol_id from the caller, separately from the GridPath they are given. Nothing in the store derives it from the path's symbol, although docs/02-store-format.md section 1 says symbol_id is 'resolved from the path; a cross-check'. One month's files misfiled under another instrument's path are refused only when the caller follows the fnv1a(path symbol) convention. Misfiling across months, fold rules and member kinds is caught by the store itself; I checked each first-hand.",
-      "evidence": "second_grid.rs:1730 `pub fn open(root: &Path, path: GridPath<'_>, symbol_id: u32)`; :1238 compares header.symbol_id with the caller's value. Callers elsewhere use brutex_core::universe::fnv1a(key.underlying) (cli/src/stored.rs:2267). Probe p07 (throwaway): April files copied under the 2024-05 path -> Err(DayOutsideMonth{day:19814}); .sec and .sdd swapped -> Err(Format{UnknownVersion(257)}) for both reader and writer."
-     },
-     {
-      "severity": "nit",
-      "description": "An environment problem, not a defect in the branch. Another process was building mutated store sources into the target dir this lens was told to use (/Volumes/WD_BLACK/brutex/fresh-20260919/work-20260925/tgt/gv-store-grid-behaviour-extremes-o1). It rebuilt libstore and the second_grid test binary every few seconds while my worktree was clean. My first February probes in that dir refused every day of February 2024 with DayOutsideMonth, inconsistently from run to run. Re-run in a private target dir, every probe and the whole store+core suite pass. Results any reviewer takes from that shared target dir may be mutant output.",
-      "evidence": "`ls -lt .../tgt/gv-store-grid-behaviour-extremes-o1/debug/deps` sampled every 15 s, 18:40:38 to 18:41:53: store-9a8239b7ce4f5f37 and second_grid-cb538ec6fa9667cb rebuilt repeatedly at varying sizes (2087760 / 2088048 bytes) while `git status` showed only my probe file. With CARGO_TARGET_DIR=.../tgt/gv-store-grid-beo1-r2-own: p08_feb_days 'mismatches []' for 2023-02, 2024-01, 2024-02, 2024-03, 2024-12 and 2025-01; `cargo test -p store -p core --locked` TESTEXIT 0 (584 passed, 0 failed); `cargo clippy -p store -p core --all-targets --locked -- -D warnings` EXIT 0."
-     }
-    ]
-   }
-  }
+  "round": 3,
+  "verdicts": {}
  },
  "gdfl-cm": {
   "rep": {
