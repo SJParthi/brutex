@@ -14818,16 +14818,26 @@ fn descent_table(out: &mut String, steps: Vec<(u64, Result<crate::results::Recor
     }
 }
 
-/// One completed or refused support step in the legacy descent table.
+/// One completed or refused support step, as the `descend` progress line on
+/// stderr announces it the moment it lands.
+///
+/// ONE LITERAL SPACE BETWEEN EVERY FIELD (v4-3, D-1487). The fields were
+/// adjacent width specifiers, the shape D-1420 removed from the stdout tables:
+/// `min_hits` at `u64::MAX` (20 digits) in a 10-wide field, or `pessimistic`
+/// at `i64::MIN` (20 characters), ran into the field beside it and read as
+/// one number. The progress line is printed row by row as each step finishes,
+/// so no later row's width is known and [`crate::columns`] cannot lay it out
+/// jointly; a literal separator keeps any two figures apart whatever their
+/// width. The stdout report is [`descent_table`], laid out with `columns`.
 fn descent_line(support: u64, row: Result<crate::results::Record, String>) -> String {
     match row {
         Err(why) => format!(
-            "  {:<10}REFUSED: {}",
+            "  {:<10} REFUSED: {}",
             format!("{support}ppm"),
             why.lines().next().unwrap_or(&why)
         ),
         Ok(record) => format!(
-            "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
+            "  {:<10} {:>10} {:>14} {:>7} {:>10} {:>9} {:>12} {:>12} {:>14}",
             format!("{support}ppm"),
             record.min_hits,
             record.combinations,

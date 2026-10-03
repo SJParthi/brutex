@@ -53622,3 +53622,31 @@ names correctly. D-1204 is left as written.
 (passes on this tree and would fail on the previous `grid_entered_event` doc,
 which contains the phrase); `runner::trade::tests::the_per_candidate_walk_derives_nothing_and_sorts_nothing`
 unchanged and passing. Documentation only otherwise; no invariant row.
+
+### D-1487 — The pooled pass-2 table and the `descend` progress line keep their figures apart — 2026-10-03
+
+**What was observed (v4-2 with GAP13-16, and v4-3).** D-1420 laid every cli
+terminal table out with `crate::columns` so that no two figures can touch, and
+named two exceptions it did not change. The pooled pass-2 table in
+`crates/cli/src/pool.rs` (`render_pooled`) was "another lane's finding
+(GAP13-16)", and no commit ever fixed GAP13-16: it was still one `format!` of
+adjacent width specifiers, so raw paisa at `i64::MIN` (20 characters) in
+`worst`, `min_win`, `net` or `dd>=` ran into its neighbour and slid every
+column after it off its header. The `descend` progress line on stderr
+(`descent_line`) had the same shape, although its stdout table was fixed.
+
+**The decision.** `render_pooled` builds its cells and lays them out with
+`crate::columns::with_header`, the widths written before kept as minimums, so
+a table whose figures fit renders as it did; the trailing `fired on` names and
+the per-row `mask` line are written after each laid-out row, and a missing
+candidate still prints its `refused:` line in rank order. `descent_line` is
+printed as each step lands, so no later row's width can be known and a joint
+layout is impossible; it puts one literal space between every field instead,
+which keeps any two figures apart whatever their width.
+
+**Proof.** `cli::pool::tests::the_pooled_table_keeps_extreme_figures_apart_and_under_their_headers`
+renders `i64::MIN`, `i64::MAX` and `u64::MAX` rows plus a missing candidate
+and checks every row with `columns::assert_under`.
+`cli::columns_tests::the_descent_progress_line_keeps_extreme_figures_apart`
+checks that each figure of the progress line at every extreme is its own word
+and that a 23-character support does not touch its refusal. TC-04.
