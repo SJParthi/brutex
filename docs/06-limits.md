@@ -8396,9 +8396,15 @@ those witnesses. Header admission is O(1) per stored month, but constructing
 one `StoredPostTrainingOosCohortV1` is O(M + S + D + Q): it loads complete
 bounded streams, validates calendar continuity, derives previous-day and
 exact-minute causal columns and hashes the retained snapshot. Space is
-O(S + D + Q) for the owned snapshot and derived column. Minting every witness
-is proportional to the authenticated Runner replay over its OOS bars and exit
-paths, and full future V4 preflight/scheduling is at least O(P + C) before
+O(S + D + Q) for the owned snapshot and derived column. Minting a witness is
+the authenticated Runner replay over its OOS bars and exit paths PLUS
+Θ(S + Q + D + E) of cohort-invariant work that is recomputed for every
+witness: `require_integrity` runs twice (each re-derives the cohort identity
+by hashing S, D and Q again), an execution calendar receipt is rebuilt, and
+`CandidateGlobalReplayOosSourceV1::new` refolds the candidate columns and
+digests them again. Over P witnesses that is P × Θ(S + Q + D + E), up to 25
+times per rung, not "proportional to the replay" as this said until D-1636
+(W2-cli16-1). Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 
@@ -13967,3 +13973,14 @@ new durable authority, and none exists.
   removed: carrying the loaded context from sizing into the family commit
   changes the guard lifetime of the strict inputs, which this change does not
   take on.
+
+## Stored completeness re-walks execution bars per cell — D-1636, 3 October 2026
+
+`StoredDataCompletenessAuthorityV1::require_population` ends with
+`StreamFactsV1::of("population execution", population.execution_series.bars())`
+and compares it to the receipt. That is a pairwise walk over every execution
+bar plus a full `data_digest`, O(E). It runs once per institutional-evidence
+binding, which is once per strategy cell, so a population of C cells pays
+O(C·E). The existing preparation statement covers the one-time preparation
+only (W2-cli15-2). Stored post-training OOS repeats cohort-invariant work per
+witness as well; §169 states it.

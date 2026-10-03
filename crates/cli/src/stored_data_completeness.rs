@@ -41,6 +41,9 @@ use crate::stored::calendar_receipt_v2;
 /// Operator-facing refusal from the stored-data completeness boundary.
 pub type StoredDataCompletenessRefusal = String;
 
+/// Highest `runner::identity::ReferenceIntegrity::byte` this receipt names:
+/// `ChecksumReceiptV1`. Pinned by a test against the runner vocabulary.
+const MAX_INTEGRITY_BYTE: u8 = 1;
 const RECEIPT_VERSION_V1: u32 = 1;
 const RECEIPT_CONTENT_DOMAIN_V1: &[u8] = b"brutex.stored-data-completeness.receipt.v1\0";
 const DAILY_POLICY_DOMAIN_V1: &[u8] = b"brutex.stored-data-completeness.daily-policy.v1\0";
@@ -322,7 +325,12 @@ impl StoredDataCompletenessReceiptV1 {
         ] {
             require_digest(name, &digest)?;
         }
-        if self.daily_integrity > 0 || self.minute_integrity > 0 {
+        // `runner::identity::ReferenceIntegrity` is an append-only byte
+        // vocabulary: 0 = `UnverifiedNoReceipt`, 1 = `ChecksumReceiptV1`. This
+        // refused every byte above 0, so the strict route, which binds
+        // `ChecksumReceiptV1`, could never seal a receipt here (W2-cli15-4,
+        // D-1635). A byte the vocabulary does not name is still refused.
+        if self.daily_integrity > MAX_INTEGRITY_BYTE || self.minute_integrity > MAX_INTEGRITY_BYTE {
             return Err(
                 "stored-data completeness receipt carries an unknown integrity-evidence byte"
                     .to_owned(),
@@ -1541,6 +1549,41 @@ mod tests {
                 self.reference(),
             )
             .expect("canonical stored-data completeness preparation")
+        }
+    }
+
+    /// W2-cli15-4, D-1635: the strict route's `ChecksumReceiptV1` byte is a
+    /// valid receipt byte and round-trips; a byte outside the vocabulary is not.
+    #[test]
+    fn a_checksum_receipt_integrity_byte_seals_and_an_unknown_byte_refuses() {
+        assert_eq!(
+            ReferenceIntegrity::ChecksumReceiptV1([1; 32]).byte(),
+            super::MAX_INTEGRITY_BYTE
+        );
+        assert_eq!(ReferenceIntegrity::UnverifiedNoReceipt.byte(), 0);
+        let fixture = fixture();
+        let base = fixture.prepared().receipt;
+        for (daily, minute) in [(1, 0), (0, 1), (1, 1)] {
+            let mut receipt = base;
+            receipt.daily_integrity = daily;
+            receipt.minute_integrity = minute;
+            receipt.validate().expect("a named integrity byte is valid");
+            let raw = receipt.to_bytes().expect("encode strict receipt");
+            assert_eq!(
+                super::StoredDataCompletenessReceiptV1::from_bytes(&raw).expect("decode strict receipt"),
+                receipt
+            );
+        }
+        for (daily, minute) in [(2, 0), (0, 2), (u8::MAX, u8::MAX)] {
+            let mut receipt = base;
+            receipt.daily_integrity = daily;
+            receipt.minute_integrity = minute;
+            assert!(
+                receipt
+                    .validate()
+                    .expect_err("unknown byte")
+                    .contains("unknown integrity-evidence byte")
+            );
         }
     }
 

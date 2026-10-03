@@ -6230,3 +6230,6 @@ old line regex the same input and watched it pass.
 | FX3-07 | A frontier row whose fill-headroom rule is outside `0..=i32::MAX` is refused before any byte is written; `i32::MAX` round-trips exactly (D-1623) | `cli::frontier::tests::an_unstorable_fill_headroom_is_refused_not_clamped` | ✓ |
 | FX3-08 | The trade calendar's Hour key is the IST clock hour `0..=23` (D-1624) | `cli::trades::period_tests::the_hour_key_is_the_ist_clock_hour` | ✓ |
 | FX3-09 | Trade-calendar money totals are exact past `i64`, never clamped (D-1625) | `cli::trades::period_tests::bucket_totals_past_i64_are_exact_not_clamped` | ✓ |
+| FX3-10 | The exact-minute execution range refuses an IST-day disorder anywhere in the context, including after the requested span (D-1626) | `cli::step3_orchestrator::tests::requested_execution_is_the_exact_day_bounded_subspan` | ✓ |
+| FX3-11 | The Observation-to-Statistics V2 seam and its seven accessors are declared `pub(crate)` and never `pub` (D-1627) | `cli::step3_orchestrator::tests::paired_observation_statistics_seam_is_crate_private_and_source_retaining` | ✓ |
+| FX3-12 | A stored-data completeness receipt admits integrity bytes 0 and 1 (`ChecksumReceiptV1`) and refuses any other (D-1635) | `cli::stored_data_completeness::tests::a_checksum_receipt_integrity_byte_seals_and_an_unknown_byte_refuses` | ✓ |

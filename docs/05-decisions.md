@@ -53639,3 +53639,70 @@ O(H + T) and cumulative Θ(N·H) cost and that the writer open has no byte
 ceiling. A persistent index or a held writer would be a new on-disk format or
 a process-lifetime cache, neither of which this change adds.
 `docs/06-limits.md` gains the sizing reload (W2-cli16-3) beside it.
+
+### D-1626 — The exact-minute execution range checks IST-day order to the last bar — 2026-10-03
+
+**What was wrong (c4b-4).** `step3_orchestrator::requested_execution_range`
+said its single pass "makes a future ordering regression loud", but it
+`break`s at the first bar past `last_day`, so order after that bar was never
+checked. `[100, 103, 101]` over `100..=102` returned day 100 alone and the
+range silently stopped short. The later calendar receipt catches a missing
+day, so harm was limited; the claim was still false and untested.
+
+**The change.** The loop `continue`s past the span instead of breaking, so
+every bar's IST day is checked against its predecessor. Still one pass,
+O(bars). For ordered input the returned range is unchanged; only disordered
+input, which was mis-sliced before, now refuses.
+
+**What it proves.**
+`cli::step3_orchestrator::tests::requested_execution_is_the_exact_day_bounded_subspan`
+adds `[100, 103, 101]` and `[100, 105, 104]` over `100..=102`, both refused
+as not monotonic, and an ordered tail past the span still excluded.
+
+### D-1627 — The Observation-to-Statistics seam test asserts its privacy — 2026-10-03
+
+**What was wrong (GAP14-66).**
+`paired_observation_statistics_seam_is_crate_private_and_source_retaining`,
+cited by OS-01, ended in `std::hint::black_box(..)` and asserted nothing. A
+function-pointer coercion proves a signature, not a visibility.
+
+**The change.** The test now reads the module's own non-test source and
+requires each of the nine declarations (the struct, the commit function and
+seven accessors) to appear exactly once as `pub(crate)` and never as `pub`,
+and requires the coerced pointers to be distinct where they must be.
+
+### D-1635 — A stored-data completeness receipt accepts the strict route's checksum-receipt integrity byte — 2026-10-03
+
+**What was wrong (W2-cli15-4).** `StoredDataCompletenessReceiptV1::validate`
+refused any `daily_integrity` or `minute_integrity` above 0 as "unknown".
+`runner::identity::ReferenceIntegrity` is an append-only byte vocabulary in
+which 1 is `ChecksumReceiptV1`, and the strict Step-3 route binds exactly that
+(`strict_v6_inputs.rs`). So a strict population could never seal a
+completeness receipt here.
+
+**The change.** `validate` refuses only a byte above `MAX_INTEGRITY_BYTE`
+(1). The receipt layout, version and stride are unchanged; byte 1 was always
+encodable and is now admitted on write and on decode. No receipt that was
+written before changes. No production path calls
+`prepare_stored_data_completeness_v1` today, so no shipping output changes;
+the strict route can now use it.
+
+**What it proves.**
+`cli::stored_data_completeness::tests::a_checksum_receipt_integrity_byte_seals_and_an_unknown_byte_refuses`
+pins `MAX_INTEGRITY_BYTE` to `ChecksumReceiptV1.byte()`, round-trips every
+combination of 0 and 1, and refuses 2 and 255.
+
+### D-1636 — Stored completeness and stored OOS costs that repeat per cell or per witness are stated — 2026-10-03
+
+**What was found.** W2-cli15-2: `StoredDataCompletenessAuthorityV1::require_population`
+recomputes `StreamFactsV1::of` over every execution bar (a pairwise walk plus
+`data_digest`) for every institutional-evidence binding, so O(E) per strategy
+cell and O(C·E) per population. W2-cli16-1: `mint_witness_inner` re-derives
+the cohort identity, rebuilds an execution calendar receipt and refolds the
+candidate columns per witness, and `docs/06-limits.md` §169 said minting was
+proportional to the replay.
+
+**The decision.** Both are stated in `docs/06-limits.md`; §169 is corrected
+in place. Neither is removed in this change: each recomputation is the
+module's re-authentication of bytes it was handed, and caching it is a
+trust-boundary change that needs its own design, not an audit patch.
