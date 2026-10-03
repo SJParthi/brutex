@@ -205,11 +205,11 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
         "the 7 notionals up to a crore x 7 rates must all reach the guarded \
          invariants above; only {checked} did"
     );
-    assert!(
-        refused >= 1,
-        "the top of the type must refuse somewhere, or invariant 6 was never \
-         exercised"
-    );
+    // Every shipped rate is below `RATE_SCALE`, so no levy ceiling here leaves
+    // `i64`; the one refusal in the surface is the rupee rounding at the top of
+    // the type, which the test below drives. `refused` is still counted so the
+    // two columns sum to the cells.
+    assert_eq!(checked + refused, cells, "every cell is in one column");
 }
 
 /// 3. A CHARGE NEVER FALLS AS THE NOTIONAL RISES.
