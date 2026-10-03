@@ -13984,3 +13984,17 @@ binding, which is once per strategy cell, so a population of C cells pays
 O(C·E). The existing preparation statement covers the one-time preparation
 only (W2-cli15-2). Stored post-training OOS repeats cohort-invariant work per
 witness as well; §169 states it.
+
+## Global Replay V3/V4 exit quality is checked per row only; evidence cells re-derive the population — D-1638, 3 October 2026
+
+- **No aggregate quality ceiling (GAP15-19).** Global Replay V1 refused when
+  a stream's admitted ambiguous bars or gap fills, summed, passed its frozen
+  exit policy's `max_ambiguous_bars` / `max_gap_fills`. V3 and V4 refuse a
+  single row with more than one of either and keep no sum, so a stream can
+  admit many one-ambiguity trades past its policy's total. This is a missing
+  rule, not a cost; D-1638 says why it is not restored here.
+- **Evidence cell projection is O(E) (W2-cli7-0).** With a `Measured`
+  population authority, `complete_population_values` calls
+  `derive_population_id_v1` per cell, which hashes the one-minute execution
+  series; a `Complete` data source adds `require_population`'s O(E) walk
+  (D-1636). O(C·E) per population of C cells.

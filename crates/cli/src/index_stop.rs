@@ -393,7 +393,7 @@ fn produce_catalog_inner(
             original
                 .require_catalog_bytes(crate::index_stop_store::encoded_bytes(&evaluations)?)?;
         }
-        let body = crate::index_stop_store::encode(identity, &evaluations, limits.bytes)?;
+        let body = crate::index_stop_store::encode(identity, &evaluations, limits.bytes, limits.records)?;
         let bytes = u64::try_from(body.len()).map_err(display)?;
         let payload = hash(&body);
         let pending =

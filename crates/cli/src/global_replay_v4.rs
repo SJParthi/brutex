@@ -225,10 +225,7 @@ fn commit_recorded(
         sum.checked_add(codec::count(snapshot.winners.len())?)
             .ok_or_else(|| "Global Replay V4 selected count overflow".to_owned())
     })?;
-    let candidate_budget =
-        bounds.records.checked_sub(10 + selected_count).ok_or(
-            "Global Replay V4 record cap cannot hold its exact roster and selected streams",
-        )? / 2;
+    let candidate_budget = candidate_budget(bounds.records, selected_count)?;
     let witnesses = selection.replay(snapshots, request, candidate_budget, observer)?;
     let prepared = prepare(snapshots, witnesses, request, bounds, store_root)?;
     prepared.strict_inputs.require_current()?;
@@ -432,6 +429,26 @@ fn check_candidate(
     }
     Ok(())
 }
+
+/// Candidates the record ceiling can hold in the worst case.
+///
+/// Each replayed candidate writes a candidate row and a decision row, and an
+/// admitted priceable decision also writes a VIX row (`account_decision`). The
+/// budget divided by two ignored that third row, so a replay admitted under the
+/// budget could still hit the ceiling in `push` after all OOS work was done
+/// (GAP15-18). Dividing by three makes the pre-replay check sufficient:
+/// `10 + selected + 3 × budget <= records`. D-1637.
+fn candidate_budget(records: u64, selected_count: u64) -> Result<u64, String> {
+    let fixed = selected_count
+        .checked_add(10)
+        .ok_or("Global Replay V4 selected count overflow")?;
+    Ok(records.checked_sub(fixed).ok_or(
+        "Global Replay V4 record cap cannot hold its exact roster and selected streams",
+    )? / RECORDS_PER_CANDIDATE)
+}
+
+/// Candidate row, decision row and, when admitted and priceable, a VIX row.
+const RECORDS_PER_CANDIDATE: u64 = 3;
 
 fn push(
     records: &mut Vec<Record>,

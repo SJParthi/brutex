@@ -53706,3 +53706,69 @@ proportional to the replay.
 in place. Neither is removed in this change: each recomputation is the
 module's re-authentication of bytes it was handed, and caching it is a
 trust-boundary change that needs its own design, not an audit patch.
+
+### D-1628 — The single-stop publisher's pre-publication decode applies the record limit, not the byte limit — 2026-10-03
+
+**What was wrong (W2-cli6-3).** `index_stop_store::encode_admitted` decoded
+its own bytes "using the same cold-read gates" before publication, but called
+`decode(&bytes, identity, max_bytes)` where `decode`'s third parameter is
+`max_records`. The record gates (`count > max_records`,
+`charged > max_records`) were checked against a byte count, so a catalog the
+cold reader (`Reader::open(.., max_bytes, max_records)`) refuses could be
+published first and only refused when read back.
+
+**The change.** `encode` takes `max_records` and passes it through;
+`index_stop::commit` passes `limits.records`, the value it already hands
+`Reader::open`. Bytes of an admitted catalog are unchanged; a catalog over the
+record limit is refused before publication instead of after.
+
+**What it proves.**
+`cli::index_stop_store::tests::the_publisher_applies_the_cold_readers_record_limit`
+finds the least record limit the cold decoder accepts, requires the publisher
+to accept exactly that limit with identical bytes and refuse every lower one,
+and refuses a body over its record limit even under a `u64::MAX` byte budget.
+
+### D-1637 — The Global Replay V4 candidate budget reserves the VIX row — 2026-10-03
+
+**What was wrong (GAP15-18).** `commit_recorded` budgeted candidates as
+`(records − 10 − selected) / 2`: a candidate row and a decision row. Every
+admitted priceable decision also pushes a VIX row (`account_decision`), so a
+replay admitted under the budget could still reach the ceiling in `push`
+after all the OOS work, refusing late instead of up front.
+
+**The change.** `candidate_budget` divides by `RECORDS_PER_CANDIDATE = 3`,
+so `10 + selected + 3 × budget <= records` and the pre-replay check is
+sufficient. This is a behaviour change at the margin: a replay whose
+candidates fit two records each but not three is now refused before replay,
+where before it either succeeded (few admitted) or refused after replay. The
+production ceiling is `CEILING_BYTES / GLOBAL_REPLAY_V4_RECORD_BYTES`
+records, far above any measured candidate count, so no published replay is
+expected to change; that is a statement from the bound, not a measurement.
+No stored format, digest or identity changes.
+
+**What it proves.**
+`cli::global_replay_v4::tests::the_candidate_budget_reserves_three_records_per_candidate`
+checks, from 10 records to `u64::MAX`, that three records per budgeted
+candidate plus the fixed rows fit and one more candidate would not, and that
+an impossible roster refuses.
+
+### D-1638 — Global Replay V3/V4 have no aggregate exit-quality ceiling, and an evidence cell projection is O(E) — stated, not changed — 2026-10-03
+
+**What was found.**
+
+- **GAP15-19.** Global Replay V1 summed admitted ambiguous bars and gap fills
+  per stream and refused when either passed the frozen exit policy's
+  `max_ambiguous_bars` / `max_gap_fills`. V3 and V4 check only each row
+  (`ambiguous_bars() > 1 || gap_fills() > 1`) and keep no aggregate. The V4
+  attempt carries no per-stream policy ceilings to compare against.
+- **W2-cli7-0.** `institutional_evidence::complete_population_values`
+  re-derives the population identity per cell, O(E), and its module doc said
+  each cell projection was O(1).
+
+**The decision.** The module doc is corrected and both are stated in
+`docs/06-limits.md`. The quality ceiling is not ported here: carrying each
+selected strategy's frozen ceilings into the V4 witness projection and
+refusing on the aggregate would turn replays that publish today into
+refusals. That changes the shipping Global Replay result and needs its own
+decision with the operator's rule for what an exceeded ceiling does
+(refuse the replay, as V1 did, or reject further trades of that stream).
