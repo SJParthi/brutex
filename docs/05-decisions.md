@@ -54608,7 +54608,16 @@ existing `NO TIER MET, INCLUDING THE MILDEST` text, now preceded by every
 tier's UNMET line. An empty ladder prints that no tier was screened.
 
 **Cost, stated honestly.** On a span where nothing admits, the cascade now
-pays every tier (up to eight full re-screens) instead of one. That is the
+pays every tier instead of one. The ladder is not eight tiers: `tiers`
+generates `stops × ratios × rates`, 960 at eight grid rungs and 4,800 at forty,
+so the worst case is 960 to 4,800 full re-screens. Measured on the debug test
+`tests::the_audit_renders_every_stage_of_the_institutional_stack`: 6.0 s with
+the probe (`8cdac60`), and not finished after 2,960 s with this walk. This
+entry is OPEN until that cost is accepted or a sound cheaper walk replaces it.
+The probe was unsound on more than the grid: the ladder is sorted by
+`rr × win rate / points`, not by dominance, and each win-rate rung carries its
+own `min_trades` from `trades_needed_for`, so the last tier is not the
+loosest on every floor either. That is the
 case the probe was written to make cheap, and the operator's log put one
 60min pass at about 20 seconds over 577 candidates. That figure is a log
 reading, not a measurement taken for this change; `docs/06-limits.md` states

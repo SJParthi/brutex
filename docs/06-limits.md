@@ -14152,8 +14152,13 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   a full re-screen, because a tier's `max_mae_ppm` is merged into the stop
   ladder as `grid::Levels::forced`, so each tier prices a different grid.
   `walk_ladder` screens strictest first and stops at the first tier that
-  admits, so `T` is that tier's rank plus one, and the WHOLE ladder (up to
-  eight screens) when nothing admits. That worst case is paid on exactly the
+  admits, so `T` is that tier's rank plus one, and the WHOLE ladder when nothing
+  admits. `tiers` generates `stops × ratios × rates` tiers, 960 at eight grid
+  rungs and 4,800 at forty, so a span where nothing admits costs up to 960 to
+  4,800 full re-screens where the probe cost one. MEASURED on the debug test
+  `tests::the_audit_renders_every_stage_of_the_institutional_stack`: 6.0 s at
+  `8cdac60` (probe), and still running after 2,960 s with the full walk
+  (killed, not finished). That worst case is paid on exactly the
   spans with no answer. D-1720's mildest-first probe cut it to one screen, and
   D-1731 removed it: a stricter tier's forced stop can price a rung the
   mildest grid lacks, so "the mildest admits nothing" does not prove "no tier
