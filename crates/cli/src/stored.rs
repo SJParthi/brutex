@@ -2956,10 +2956,15 @@ pub(crate) fn daily_context_from_span(
     })?;
     for bar in daily.bars {
         let day = indicators::ist_day(bar.ts_micros);
-        // A same-day record is not sealed at the instant an intraday signal is
-        // evaluated, and a future record is look-ahead.  They are omitted from
-        // the offered reference stream rather than relying on the evaluator to
-        // ignore bytes the run identity then misleadingly claims it consumed.
+        // BOUNDS THE OFFERED SET TO RECORDS SOME SIGNAL DAY CAN CONSUME, so the
+        // census's `remaining()` is zero after a full build and the identity
+        // claims no unread bytes. It drops only days at or after the LAST
+        // signal day: an earlier day's same-day record IS offered, and it is
+        // `AnchoredEvaluator::advance_before` that keeps each signal bar from
+        // reading its own day or later. Per-row causality is the evaluator's;
+        // this filter is bookkeeping. This comment said same-day records were
+        // omitted "rather than relying on the evaluator", which was true only
+        // of the last day (GAP4-48, D-1664).
         if day >= last_signal_day {
             continue;
         }
@@ -4673,6 +4678,73 @@ mod tests {
         // pivot ladder for five sessions -- the same mechanism the two
         // disaster-recovery Saturdays were excluded for.
         assert_eq!(CHARTER_NON_REGULAR_IST_DAYS.len(), 9);
+    }
+
+    /// GAP4-48, D-1664: the offered daily stream is exactly what the signal
+    /// days consume. Over a three-day daily span and two signal days, an
+    /// earlier day's same-day record IS offered (the filter drops only the last
+    /// signal day and later), the evaluator consumes every offered record by the
+    /// end of the build, and the first day's rows equal a build over that day
+    /// alone, whose own context offers one record fewer.
+    #[test]
+    fn the_offered_daily_stream_is_consumed_whole_and_a_prefix_build_agrees() {
+        use indicators::anchored::AnchoredEvaluator;
+        use indicators::evaluator::Widths;
+        use indicators::pattern::Thresholds;
+
+        let daily = || {
+            daily_span(vec![
+                candle_on_ist_day(OPEN_MONDAY_2026_08_03, 2_500_000),
+                candle_on_ist_day(OPEN_TUESDAY_2026_08_04, 2_500_100),
+                candle_on_ist_day(OPEN_WEDNESDAY_2026_08_05, 2_500_200),
+            ])
+        };
+        let signal: Vec<Candle> = [OPEN_TUESDAY_2026_08_04, OPEN_WEDNESDAY_2026_08_05]
+            .into_iter()
+            .flat_map(|day| {
+                (555..558).map(move |minute| minute_on_ist_day(day, minute, 2_600_000 + minute))
+            })
+            .collect();
+        let rows = |signal: &[Candle]| {
+            let context = daily_context_from_span(daily(), signal).expect("causal daily stream");
+            let mut evaluator = AnchoredEvaluator::new(
+                Widths::pinned().expect("pinned widths"),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+                &context.references,
+            )
+            .expect("ordered references");
+            let masks: Vec<_> = signal
+                .iter()
+                .map(|bar| evaluator.step(bar).expect("a sane bar"))
+                .collect();
+            (
+                context.references.len(),
+                evaluator.reference_census(),
+                masks,
+            )
+        };
+        let (offered, census, full) = rows(&signal);
+        assert_eq!(
+            offered, 2,
+            "Monday and Tuesday: Tuesday's same-day record is offered"
+        );
+        assert_eq!(census.offered, 2);
+        assert_eq!(census.remaining(), 0, "every offered record was consumed");
+        assert!(census.reconciles());
+
+        let prefix = signal.get(..3).expect("Tuesday's bars");
+        let (prefix_offered, prefix_census, alone) = rows(prefix);
+        assert_eq!(
+            prefix_offered, 1,
+            "a Tuesday-only build is offered Monday alone"
+        );
+        assert_eq!(prefix_census.remaining(), 0);
+        assert_eq!(
+            full.get(..3),
+            Some(alone.as_slice()),
+            "Tuesday's same-day record, offered to the full build, changed no Tuesday row"
+        );
     }
 
     #[test]

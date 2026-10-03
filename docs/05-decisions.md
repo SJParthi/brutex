@@ -53563,3 +53563,23 @@ into the cli's stored path is the fix for both, and is left open.
 
 **Rejected.** Treating every swept equity as CAS-eligible: membership is
 dated and the list in hand is not.
+
+### D-1664 — Say what the daily-reference filter does: bound the offered set, not enforce causality — 2026-10-03
+
+**Finding.** GAP4-48 (low, doc-false). The comment over `if day >=
+last_signal_day` in `daily_context_from_span` said same-day and future daily
+records "are omitted from the offered reference stream rather than relying on
+the evaluator". The filter drops only days at or after the LAST signal day; an
+earlier signal day's same-day record is offered, and
+`AnchoredEvaluator::advance_before` is what keeps a signal bar from reading it.
+
+**Decision.** The comment now says the filter bounds the offered set to records
+some signal day can consume, so the census's `remaining()` is zero after a full
+build, and that per-row causality is the evaluator's. No behaviour changes.
+`the_offered_daily_stream_is_consumed_whole_and_a_prefix_build_agrees` pins
+both halves: a same-day record is offered and fully consumed, and the first
+day's rows equal a build over that day alone.
+
+**Rejected.** Dropping every same-day record per signal day: the offered
+stream is one slice for the whole span, and the evaluator already enforces the
+per-row rule.
