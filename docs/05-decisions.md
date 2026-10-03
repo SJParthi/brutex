@@ -53403,3 +53403,46 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1480 — Refuse a census lock name occupied by a socket or a dangling symlink, instead of running the ingest unlocked — 2026-10-03
+
+**What was observed (v3b-1).** `pull::ingest::CensusLock::take` refused a
+lock open that failed with `PermissionDenied` or `IsADirectory` and deferred
+every other failure to the install, on the reasoning that every other failure
+is the PATH's and the install reports it a moment later. A UNIX socket bound
+at `<vendor>.man.lock` breaks that reasoning: the open fails with ENXIO
+(`No such device or address`, kind `Uncategorized`), the defer arm returned a
+guard holding nothing, and the install never touches the lock's name, so the
+ingest read-modified-wrote the census unserialised with nothing said. The
+comment below the open said a socket was "refused by name"; it never reached
+that check. A dangling symlink whose target directory is missing fails the
+open with `NotFound`, the path-failure kind itself, and went the same way.
+
+**The decision.** When the open fails with any other kind, `take` now asks
+`fs::symlink_metadata` of the lock's own name. If that succeeds and the entry
+is not a regular file, the directory is sound and the one name is misfiled:
+refused, naming the path and the entry's type in words (`entry_kind`: "a UNIX
+socket", "a FIFO", "a character device", "a block device", "a symbolic link
+that does not lead to an openable file", "a directory"). `FileType`'s `Debug`
+printed three `false`s for a socket, which named nothing, so the opened-FIFO
+refusal uses the same words. A genuine path failure (no directory, a file
+where the directory belongs, a name past the host's limit) fails
+`symlink_metadata` as well and still defers, so
+`a_census_that_cannot_be_measured_stops_the_run` and
+`a_census_that_cannot_be_installed_names_what_is_left_uncounted` keep the
+install's wording. A REGULAR file that will not open for another reason
+(a read-only filesystem, say) still defers: the census beside it is on the
+same host and fails the same way.
+
+**Proof.** `pull::ingest::tests::a_socket_at_the_lock_path_is_refused_rather_than_run_unlocked`
+binds a `UnixListener` at the lock name, checks the premise that the open
+fails with a kind the old refusal arm did not name, and asserts the refusal
+names `man.lock`, "not a regular file" and "a UNIX socket"; then a dangling
+symlink is refused naming "a symbolic link"; a file where the manifest
+directory belongs still defers (`_held` is `None`); with the name cleared the
+lock is taken. PIF-08.
+
+**Rejected.** Inverting the arm to "refuse unless the kind is NotFound,
+NotADirectory or InvalidFilename": the dangling symlink is `NotFound` and
+would still defer, and the kind set differs by host. The name is the evidence,
+not the errno.
