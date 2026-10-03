@@ -16407,7 +16407,7 @@ pub fn audit_range(
 
 /// [`audit_range`] for one rung of [`one_rung_cached`], under its browser
 /// attempt, over the root and vendor that rung already resolved, and through
-/// `cache`. The refusals and their order are [`audit_range_inner`]'s. D-1557.
+/// `cache`. The commit refusal is [`audit_range_inner`]'s. D-1557.
 fn audit_range_cached(
     root: &std::path::Path,
     vendor: Vendor,
@@ -16416,8 +16416,12 @@ fn audit_range_cached(
     min_hits: u64,
     cache: &mut AuditCache,
 ) -> String {
-    let audited = swept_rung(ask.rung)
-        .and_then(|()| commit.ok_or_else(unstamped_audit_refusal))
+    // NO RUNG CHECK HERE: every caller's rung is one of `EVERY_RUNG`
+    // (`range_over` and `pool::run` refuse any other, `descend` finds it in
+    // the list), which is exactly what `audit_range_inner`'s check admits, and
+    // `stored::load_span` above it refuses an unswept rung by name.
+    let audited = commit
+        .ok_or_else(unstamped_audit_refusal)
         .and_then(|commit| {
             audit_range_kernel_cached(
                 StoredRangeAuditRequest {
@@ -27705,6 +27709,27 @@ mod derived_floor_tests {
                 shared += 1;
                 continue;
             }
+            if before_end.contains("data_digest: *executed_digest,") {
+                // D-1557: the range audit takes its data term from the digest
+                // `load_audit_inputs` held beside the bytes it digested, and
+                // that digest is the two-series composition.
+                let (_, owner) = source[..at]
+                    .rsplit_once("\nfn ")
+                    .expect("the held digest has an enclosing production function");
+                assert!(
+                    owner.starts_with(concat!("audit_range_kernel_", "cached(")),
+                    "only the range audit may take a held digest"
+                );
+                let loader = compact_source(stored_function(source, "load_audit_inputs"));
+                assert!(
+                    loader.contains(concat!(
+                        "letexecuted_digest=stored_executed_",
+                        "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+                    )),
+                    "the held digest is the two-series composition"
+                );
+                continue;
+            }
             assert!(
                 before_end.contains("data_digest: stored_executed_digest("),
                 "a stored run identity derives its data term from something \
@@ -28239,12 +28264,19 @@ mod derived_floor_tests {
             "data_digest:stored_executed_",
             "digest(&span.bars,exact_minute,daily,execution_slice)?"
         );
+        // D-1557: the range audit holds its digest beside its inputs, so its
+        // binding is the held one in `load_audit_inputs`.
+        let held_bound = concat!(
+            "letexecuted_digest=stored_executed_",
+            "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+        );
         assert_eq!(
             (
                 code.matches(span_bound).count(),
+                code.matches(held_bound).count(),
                 code.matches(screen_bound).count()
             ),
-            (1, 1),
+            (0, 1, 1),
             "audit-range and screen-range must bind signal, exact-minute context, daily references and the actual separately loaded execution slice"
         );
         assert_eq!(

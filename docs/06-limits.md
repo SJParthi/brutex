@@ -11345,8 +11345,11 @@ the counts the tests assert: no bench times the fold.
   Threading the loaded span and column into the kernel would remove the
   second pair; it is not done because the kernel re-derives both from the
   bars that survive its own withholding and binds them to the preparation
-  digest. Stated from the code's shape; not timed. Held to the code by
-  `a_rungs_second_load_and_build_are_stated_and_still_paid` in
+  digest. Since D-1557 both loads go through one `AuditCache` per command
+  (`one_rung_cached`, and `load_audit_inputs` for the kernel), so a `descend`
+  pays the pair once for its whole ladder, not once per step; a single rung
+  still pays both. Stated from the code's shape; not timed. Held to the code
+  by `a_rungs_second_load_and_build_are_stated_and_still_paid` in
   `crates/cli/tests/limits_o1cli_2.rs`.
 
 ## Condition names resolve through a compile-time index (audit o1engine-24)

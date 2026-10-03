@@ -69,7 +69,8 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
         );
     }
     let sweep = body("\nfn sweep_rungs(");
-    assert!(sweep.contains(".par_iter()") && sweep.contains("one_rung("));
+    // D-1556: the rungs run as ordered lanes, still in parallel.
+    assert!(sweep.contains("ordered::map(") && sweep.contains("one_rung("));
     let exact = STORED
         .split_once("pub fn load_exact_minute_context(")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
@@ -92,9 +93,10 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
         .expect("its retry loop")
         .1;
     assert!(retried.contains("load_exact_minute_context("));
-    let kernel = body("\nfn audit_range_kernel(");
+    // D-1557: the kernel's loads moved into its cached loader.
+    let kernel = body("\nfn load_audit_inputs(");
     for call in [
-        "stored::load_span(&root, vendor, underlying, EXECUTION_RUNG",
+        "stored::load_span(root, vendor, underlying, EXECUTION_RUNG",
         "column_withholding_at_build(",
         "exact_minute_withholding_unsourceable_days(",
     ] {
@@ -103,5 +105,5 @@ fn the_parallel_rungs_repeated_minute_reads_are_stated_and_still_paid() {
             "the kernel no longer calls {call}: update the limit"
         );
     }
-    assert!(body("\nfn one_rung(").contains("column_withholding_unsourceable_days("));
+    assert!(body("\nfn one_rung_cached(").contains("column_withholding_unsourceable_days("));
 }
