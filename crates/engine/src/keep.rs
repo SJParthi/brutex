@@ -259,8 +259,9 @@ fn weaker(held: &[Itemset], lower: usize, upper: usize) -> bool {
 pub struct Best {
     cap: usize,
     held: Vec<Itemset>,
-    /// The masks in `held`, so a repeat is found by one expected-O(1) probe
-    /// instead of a scan of the heap.
+    /// The masks in `held`, so a repeat is found by one hash probe instead of
+    /// a scan of the heap. Expected, not worst-case, and UNVERIFIED as a
+    /// measured figure: no bench row times it (D-1497).
     masks: crate::MaskSet,
     discarded: u64,
     repeated: u64,
@@ -290,8 +291,10 @@ impl Best {
     pub fn try_with_capacity(cap: usize) -> Result<Self, TryReserveError> {
         let mut held = Vec::new();
         held.try_reserve_exact(cap)?;
+        // One more than `cap`: a full retention inserts the candidate's mask
+        // before it knows whether the candidate stays.
         let mut masks = crate::MaskSet::default();
-        masks.try_reserve(cap)?;
+        masks.try_reserve(cap.saturating_add(1))?;
         Ok(Self {
             cap,
             held,
@@ -352,11 +355,11 @@ impl Best {
     ///
     /// # Cost: O(1) to refuse, O(log cap) to admit
     ///
-    /// Every offer first probes the held-mask set once: expected O(1), not a
-    /// worst-case bound, and it hashes six words. A refusal is then one
-    /// comparison against the root. An admission adds one set insert (and, when
-    /// full, one removal), which never grows the set past its reservation, and
-    /// a heap
+    /// Every offer first inserts its mask into the held-mask set, which is the
+    /// repeat probe: expected O(1), not a worst-case bound, and it hashes six
+    /// words. A refusal is then one comparison against the root and one set
+    /// removal. An admission when full adds one removal for the evicted mask,
+    /// and the set never grows past its `cap + 1` reservation. Then a heap
     /// sift -- `sift_up` while filling, `take_root`'s `sift_down` then
     /// `sift_up` when full -- and each sift walks at most `floor(log2(cap))`
     /// levels, so the admit cost grows with the retention's capacity, not with
@@ -366,12 +369,14 @@ impl Best {
     /// itemsets, fixed; the vector was reserved for `cap` when the retention
     /// was built.
     pub fn offer(&mut self, candidate: Itemset) {
-        if self.masks.contains(&candidate.mask) {
+        // ONE PROBE THAT IS ALSO THE INSERT. `insert` answers `false` when the
+        // mask is already held; a candidate the cap then refuses is taken back
+        // out below, so the set always names exactly the held masks.
+        if !self.masks.insert(candidate.mask) {
             self.repeated = self.repeated.saturating_add(1);
             return;
         }
         if self.held.len() < self.cap {
-            self.masks.insert(candidate.mask);
             self.held.push(candidate);
             self.sift_up(self.held.len().saturating_sub(1));
             return;
@@ -389,9 +394,10 @@ impl Best {
             if let Some(evicted) = self.take_root() {
                 self.masks.remove(&evicted.mask);
             }
-            self.masks.insert(candidate.mask);
             self.held.push(candidate);
             self.sift_up(self.held.len().saturating_sub(1));
+        } else {
+            self.masks.remove(&candidate.mask);
         }
     }
 

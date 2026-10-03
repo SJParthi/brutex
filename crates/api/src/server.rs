@@ -22919,17 +22919,20 @@ mod tests {
                 .map(str::to_owned)
         };
         let members = |n: usize, encode: bool| -> String {
-            (0..n)
-                .map(|i| {
-                    let symbol = format!("S{i:0>23}");
-                    let symbol = if encode {
-                        symbol.bytes().map(|b| format!("%{b:02X}")).collect()
-                    } else {
-                        symbol
-                    };
-                    format!("&member={symbol}")
-                })
-                .collect()
+            use std::fmt::Write as _;
+            let mut out = String::new();
+            for i in 0..n {
+                let symbol = format!("S{i:0>23}");
+                out.push_str("&member=");
+                if encode {
+                    for b in symbol.bytes() {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                } else {
+                    out.push_str(&symbol);
+                }
+            }
+            out
         };
         assert_eq!(crate::ingest::MAX_MEMBER_FORM_BYTES, 168_192);
         with_server("memberlimit", move |addr| async move {

@@ -13950,10 +13950,13 @@ bounds are all nonzero.
   still returns those sets in `kept`. `validate` records `halted` beside its
   candidate count, and the streamed rankers mark the two levels `Unknown`.
 - **`keep::Best` probes a hash set on every offer (v4-4, D-1497).** The
-  duplicate check is one probe of a pre-reserved `MaskSet`: expected O(1),
-  hashing six words, not a worst-case bound. An admission adds one insert and,
-  when full, one removal, inside the reservation. The O(log cap) sift stated
-  above is unchanged. Memory is `cap` itemsets plus `cap` masks. Not timed.
+  duplicate check is the insert into a pre-reserved `MaskSet` (no `contains`
+  scan, so Gate 11 rule 7 is not engaged): expected O(1), hashing six words,
+  not a worst-case bound. A refusal when full removes that mask again, and an
+  eviction removes the evicted one, all inside a `cap + 1` reservation. The
+  O(log cap) sift stated above is unchanged, and the "one root comparison"
+  refusal above now also pays this insert and removal. Memory is `cap`
+  itemsets plus `cap + 1` masks. Not timed.
 - **The two member forms read up to 168,192 bytes (W1-api3-6, D-1499).**
   `/pull/spot` and `/ingest/queue` carry `ingest::MAX_MEMBER_FORM_BYTES`, so
   D-1202's "`param` scans a form body of at most 8,192 bytes" is 168,192 bytes

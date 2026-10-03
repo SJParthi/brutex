@@ -176,6 +176,7 @@ fn missing(failures: &mut Vec<String>, day: Day, base: i128, from: i128, to: i12
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "test-only assertions")]
 mod tests {
     use super::*;
     use crate::fetch::BarRequest;
@@ -244,7 +245,8 @@ mod tests {
         let none = audit(&[], plan);
         assert_eq!(none.len(), 1);
         assert!(
-            none[0].contains("375 missing scheduled minutes"),
+            none.first()
+                .is_some_and(|line| line.contains("375 missing scheduled minutes")),
             "{none:?}"
         );
     }
