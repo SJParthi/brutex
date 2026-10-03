@@ -53650,3 +53650,24 @@ and checks every row with `columns::assert_under`.
 `cli::columns_tests::the_descent_progress_line_keeps_extreme_figures_apart`
 checks that each figure of the progress line at every extreme is its own word
 and that a 23-character support does not touch its refusal. TC-04.
+
+### D-1488 — The manifest's hash probes are expected O(1), not worst case — 2026-10-03
+
+**What was observed (v4-1).** Four doc sentences in
+`crates/pull/src/manifest.rs` called a `HashMap` probe or insert "O(1) worst
+case": the `Manifest` type's lookup paragraph and its append paragraph,
+`Manifest::closes`, and the first bullet of `Manifest::record`'s cost.
+`CLAUDE.md` §3 rule 4 says such a probe "is expected/amortised O(1), not an
+adversarial worst-case hash-table guarantee", and C4-API-04-02 removed the
+same claim from `api`'s `merge.rs`. `docs/06-limits.md` §23 repeated it for
+the first `n_valid` calls to `record`.
+
+**The decision.** Each sentence now says what holds: one hash probe or
+insert, expected O(1); and for the first `n_valid` appends after a load, no
+rehash (the reservation is unchanged and M-19 still proves it). The historical
+quotes that spelled the old claim were reworded so the phrase does not stand
+in the source at all. No code changed.
+
+**Proof.** `pull::unit::no_manifest_doc_claims_a_worst_case_constant_probe`
+reads `manifest.rs` flattened and lower-cased, refuses "o(1) worst case", and
+requires the expected-cost statements to stay. M-36.

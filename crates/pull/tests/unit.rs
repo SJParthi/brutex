@@ -8141,3 +8141,36 @@ fn the_governor_clock_is_monotonic() {
         last = now;
     }
 }
+
+/// **No manifest doc calls a hash probe a worst-case constant.** v4-1, D-1488.
+///
+/// `Manifest::entry`, `Manifest::closes` and `Manifest::record` are each one
+/// probe or insert into a `HashMap`, which is expected O(1) and not an
+/// adversarial worst-case bound (`CLAUDE.md` §3 rule 4). Four doc sentences
+/// said "O(1) worst case"; api's `merge.rs` had the same claim and
+/// `no_comment_claims_a_worst_case_constant_probe` removed it there. This reads
+/// the source, flattened, so a re-wrapped copy is caught as well.
+#[test]
+fn no_manifest_doc_claims_a_worst_case_constant_probe() {
+    let source = include_str!("../src/manifest.rs")
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let source = source.replace("/// ", "").replace("//! ", "");
+    for claim in ["o(1) worst case", "lookup — o(1) worst"] {
+        assert!(
+            !source.contains(claim),
+            "manifest.rs claims {claim:?} again"
+        );
+    }
+    for kept in [
+        "lookup — expected o(1).",
+        "**expected o(1)**, the same bound",
+    ] {
+        assert!(
+            source.contains(kept),
+            "the expected-cost statement {kept:?} is kept"
+        );
+    }
+}

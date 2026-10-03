@@ -1057,8 +1057,10 @@ The reservation is `min(n_valid · 2, MAX_ENTRIES)`. `Manifest::walk` inserts
 index holds at most `n_valid` elements when the load returns and at least
 `n_valid` slots are free. Therefore:
 
-* **the first `n_valid` calls to `record` after a load are O(1) worst case** —
-  none of them can rebuild the table (M-19);
+* **the first `n_valid` calls to `record` after a load never rehash** — none
+  of them can rebuild the table (M-19), so each is one hash insert, expected
+  O(1) rather than an adversarial worst-case bound (this said "O(1) worst
+  case" until D-1488);
 * **from `n_valid >= MAX_ENTRIES / 2` upward it is unconditional** —
   `ManifestHeader::advance` refuses a counter past `MAX_ENTRIES`, so the capped
   reservation covers every append that will ever be accepted (M-18);
