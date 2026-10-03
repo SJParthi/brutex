@@ -33,3 +33,8 @@ Scope: verify all 547 earlier findings (250 batch-2 in fix-queue/lane{1,2,3}{,-b
 - Fix batches A-C combined on local branch audit-combined (= wip/audit-fixes + -2 + -3 merged, union-resolved docs tails). fmt+clippy clean.
 - Local cargo-mutants 26.2.0 (nextest, max-fail=1) running on 249 mutants of the combined diff vs 1087e544. PR #74 CI run 37092404876 still running Gate 18; push only once, after it finishes or after local mutation is clean.
 - Batch D (wip/audit-fixes-4, D-1503..1519): v2-1/-2/-3, v1-1, R9-api-law-0 web page, W1-api2-11 — in progress.
+
+## State 2026-10-03 12:35 UTC
+- PUSHED: all audit fixes (batches A-D) on final/all-fixes 331b05c6 (fast-forward from 1087e544). Artifact v2 updated.
+- Still running locally: full workspace test of 331b05c6, cargo-mutants --iterate on 268 changed-line mutants (49 earlier: all caught/unviable). Any survivor/failure -> fix as a normal commit on final/all-fixes (fetch+merge first).
+- Waiting on user decision card: GAP15-19, GAP15-17, W2-cli5-4, W3-runner2-8 (recommended: leave documented).

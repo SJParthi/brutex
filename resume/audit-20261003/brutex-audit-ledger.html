@@ -53,7 +53,7 @@ tfoot td { font-weight: 600; background: var(--tint); }
 </header>
 
 <div class="callout">
-  <p><b>Where this stands.</b> The fixes are written, tested per crate, and combined on one branch (fmt and clippy clean). They go onto PR #74 in a single push once local mutation testing of the 249 mutants on the changed lines finishes, so PR #74's running Gate 18 is not cancelled. Four findings need your call before they change; they are listed at the bottom.</p>
+  <p><b>Where this stands.</b> Every fix is on PR #74 (final/all-fixes 331b05c6), pushed once after fmt, clippy and twelve CI gate scripts passed on the combined head. The full workspace tests and mutation testing of the 268 changed-line mutants are still running locally, and CI re-runs both. Four findings need your call before they change; they are listed at the bottom.</p>
 </div>
 
 <section>
@@ -66,20 +66,20 @@ tfoot td { font-weight: 600; background: var(--tint); }
       <tr><th></th><th></th><th class="split" colspan="4">On PR #74 now</th><th class="split" colspan="4">With this audit's fixes</th><th></th></tr></thead>
     <tbody>
       <tr><td>Lane 1 (batch 2)</td><td class="n">79</td><td class="n split f">20</td><td class="n d">2</td><td class="n p">2</td><td class="n o">55</td><td class="n split f">21</td><td class="n d">2</td><td class="n p">2</td><td class="n o">54</td><td>The 55 lost lane1-b fixes are being redone by the lane 1 thread. This audit fixed GAP13-16.</td></tr>
-      <tr><td>Lane 2 (batch 2)</td><td class="n">82</td><td class="n split f">73</td><td class="n d">4</td><td class="n p">5</td><td class="n zero">0</td><td class="n split f">73</td><td class="n d">4</td><td class="n p">5</td><td class="n zero">0</td><td>Three partials (Gate 14 layer 5, a dead duplicates assert) are being fixed now.</td></tr>
-      <tr><td>Lane 3 (batch 2)</td><td class="n">89</td><td class="n split f">58</td><td class="n d">27</td><td class="n p">3</td><td class="n o">1</td><td class="n split f">59</td><td class="n d">27</td><td class="n p">2</td><td class="n o">1</td><td>The two partials left (web ingest page, inline reads) are being fixed now. The NF is GAP17-33, a process item with no code.</td></tr>
+      <tr><td>Lane 2 (batch 2)</td><td class="n">82</td><td class="n split f">73</td><td class="n d">4</td><td class="n p">5</td><td class="n zero">0</td><td class="n split f">76</td><td class="n d">4</td><td class="n p">2</td><td class="n zero">0</td><td>Gate 14 layer 5 and a dead duplicates assert fixed (D-1503, D-1505).</td></tr>
+      <tr><td>Lane 3 (batch 2)</td><td class="n">89</td><td class="n split f">58</td><td class="n d">27</td><td class="n p">3</td><td class="n o">1</td><td class="n split f">61</td><td class="n d">27</td><td class="n zero">0</td><td class="n o">1</td><td>Web ingest page and inline reads fixed (D-1507, D-1508). The NF is GAP17-33, a process item with no code.</td></tr>
       <tr><td>Verification audit, 2 Oct</td><td class="n">53</td><td class="n split f">43</td><td class="n d">9</td><td class="n p">1</td><td class="n zero">0</td><td class="n split f">44</td><td class="n d">9</td><td class="n zero">0</td><td class="n zero">0</td><td>Root-only store tests now run as an unprivileged user (D-1485).</td></tr>
       <tr><td>Batch 1, 48 traced groups</td><td class="n">48</td><td class="n split f">42</td><td class="n d">2</td><td class="n p">4</td><td class="n zero">0</td><td class="n split f">43</td><td class="n d">2</td><td class="n p">3</td><td class="n zero">0</td><td>poolcols now fixed. gate8, lookahead and docs-web-01 stay partial.</td></tr>
       <tr><td>Batch 1, 16 lost groups</td><td class="n">60</td><td class="n split f">3</td><td class="n d">6</td><td class="n p">7</td><td class="n o">44</td><td class="n split f">33</td><td class="n d">22</td><td class="n p">2</td><td class="n o">3</td><td>Never fixed, and their text was recovered from your Mac. The 3 still open need your call.</td></tr>
-      <tr><td>New in this audit</td><td class="n">30</td><td class="n split zero">0</td><td class="n zero">0</td><td class="n zero">0</td><td class="n o">30</td><td class="n split f">26</td><td class="n zero">0</td><td class="n zero">0</td><td class="n p">4</td><td>The four left (v1-1, v2-1, v2-2, v2-3) are being fixed now.</td></tr>
+      <tr><td>New in this audit</td><td class="n">30</td><td class="n split zero">0</td><td class="n zero">0</td><td class="n zero">0</td><td class="n o">30</td><td class="n split f">30</td><td class="n zero">0</td><td class="n zero">0</td><td class="n zero">0</td><td>All fixed.</td></tr>
     </tbody>
   </table></div>
-  <p class="sub">The 16 lost batch-1 groups were counted as 16 groups in the first pass; once their text was recovered they turned out to hold 60 findings, which is why that row counts findings rather than groups. Lane 2's after-column will move when the fix in progress lands.</p>
+  <p class="sub">The 16 lost batch-1 groups were counted as 16 groups in the first pass; once their text was recovered they turned out to hold 60 findings, which is why that row counts findings rather than groups. Lane 2's two remaining partials are the ones its own report left open.</p>
 </section>
 
 <section>
   <h2>New findings from this audit</h2>
-  <p class="sub">Found while checking the fixes and attacking edge cases. Every one is fixed on the combined branch except those marked in progress.</p>
+  <p class="sub">Found while checking the fixes and attacking edge cases. All 30 are fixed on PR #74.</p>
   <div class="wrap"><table>
     <thead><tr><th>ID</th><th>Sev</th><th>Crate</th><th>What was wrong</th><th>Now</th><th>Decision</th></tr></thead>
     <tbody>
@@ -88,7 +88,7 @@ tfoot td { font-weight: 600; background: var(--tint); }
       <tr><td class="id">c4a-2</td><td><span class="chip sev-medium">medium</span></td><td>pull</td><td>A negative open interest passed into the decoded window unchanged on two of three shapes.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1490</td></tr>
       <tr><td class="id">c4a-3</td><td><span class="chip sev-medium">medium</span></td><td>pull</td><td>The Dhan rolling reader turned a null stamp into epoch 0, text volume into 0, and accepted negative volume.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1491</td></tr>
       <tr><td class="id">c4b-1</td><td><span class="chip sev-medium">medium</span></td><td>cli</td><td>One crash or full disk between two writes wedged the search-lineage ledger for good.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1620</td></tr>
-      <tr><td class="id">v2-1</td><td><span class="chip sev-medium">medium</span></td><td>ci</td><td>Gate 14 layer 5 still used the old check, so a disabled Gate 8 bench step read as present.</td><td><span class="chip st-prog">in progress</span></td><td class="id">D-15xx</td></tr>
+      <tr><td class="id">v2-1</td><td><span class="chip sev-medium">medium</span></td><td>ci</td><td>Gate 14 layer 5 still used the old check, so a disabled Gate 8 bench step read as present.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1503</td></tr>
       <tr><td class="id">v3a-1</td><td><span class="chip sev-low">low</span></td><td>api</td><td>On F&amp;O walks, a re-read could resend a token the vendor had already rejected.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1482</td></tr>
       <tr><td class="id">v3b-2</td><td><span class="chip sev-low">low</span></td><td>api</td><td>A failed serve-lock stamp write was discarded, leaving the previous holder's pid.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1481</td></tr>
       <tr><td class="id">v3b-3</td><td><span class="chip sev-low">low</span></td><td>api</td><td>A doc comment had a stray <code>///</code> mid-line.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1486</td></tr>
@@ -110,9 +110,9 @@ tfoot td { font-weight: 600; background: var(--tint); }
       <tr><td class="id">c4b-5</td><td><span class="chip sev-low">low</span></td><td>cli</td><td>Two ledgers had no rollback after a short write.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1622</td></tr>
       <tr><td class="id">c4b-6</td><td><span class="chip sev-low">low</span></td><td>cli</td><td>Per-period money totals clamped silently on overflow; now exact in i128.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1625</td></tr>
       <tr><td class="id">fold-1</td><td><span class="chip sev-low">low</span></td><td>runner</td><td><code>walk_with</code>'s doc named a per-call cost that is test-only since D-1410.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1486</td></tr>
-      <tr><td class="id">v1-1</td><td><span class="chip sev-low">low</span></td><td>store</td><td>Two statements say a read is never measured, though Gate 8 now measures it.</td><td><span class="chip st-prog">in progress</span></td><td class="id">D-15xx</td></tr>
-      <tr><td class="id">v2-2</td><td><span class="chip sev-low">low</span></td><td>ci</td><td>Gate 14 pins lag the measured counts, so a measurement could be deleted unnoticed.</td><td><span class="chip st-prog">in progress</span></td><td class="id">D-15xx</td></tr>
-      <tr><td class="id">v2-3</td><td><span class="chip sev-low">low</span></td><td>runner</td><td>A test asserted a literal zero the engine always writes.</td><td><span class="chip st-prog">in progress</span></td><td class="id">D-15xx</td></tr>
+      <tr><td class="id">v1-1</td><td><span class="chip sev-low">low</span></td><td>store</td><td>Two statements say a read is never measured, though Gate 8 now measures it.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1506</td></tr>
+      <tr><td class="id">v2-2</td><td><span class="chip sev-low">low</span></td><td>ci</td><td>Gate 14 pins lag the measured counts, so a measurement could be deleted unnoticed.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1504</td></tr>
+      <tr><td class="id">v2-3</td><td><span class="chip sev-low">low</span></td><td>runner</td><td>A test asserted a literal zero the engine always writes.</td><td><span class="chip st-fixed">fixed</span></td><td class="id">D-1505</td></tr>
     </tbody>
   </table></div>
 </section>
