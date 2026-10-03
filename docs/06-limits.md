@@ -12531,16 +12531,29 @@ not:
   loaded months; the price is a barrier per window, so a window finishes at
   the pace of its slowest month. NOT MEASURED against the former unwindowed
   walk.
-- **Completion order elsewhere (D-1564).** `range-all` (`sweep_rungs`),
-  `pool` pass 1 and the Boolean family pools run whole audits or candidate
-  productions per worker. Their attempt tokens and the order of the rows they
-  append to `runs.bin` follow completion order, not input order. Reports are
-  gathered in input order and every ledger lookup is by identity.
-- **Plain `descend` (D-1567).** Every ladder step after the first is a full
-  `one_rung`: the signal span, the 1-min execution span, the daily and minute
-  contexts are reloaded and the anchored column rebuilt, so a ladder of S steps
-  costs S times one rung's load and build on top of its sweeps. `cli elite`'s
-  `ScreenCache` (D-0997) does not reach this path.
+- **Ordered lanes (D-1556; replaces the completion-order statement D-1564
+  made here).** `range-all` (`sweep_rungs`), `pool` pass 1 and the Boolean
+  family pools now run each item as a `cli::ordered::map` lane on its own
+  thread, `ordered::WINDOW` (8) at a time. Their evidence-journal and ledger
+  writes land sorted by (round, lane), a function of the inputs, so attempt
+  tokens and `runs.bin` order no longer follow completion order. The price:
+  a lane's k-th shared write waits until every lower lane has made its k-th
+  and every higher lane its (k-1)-th, so a fast lane can idle at a write
+  while a slow lane computes towards the same round, and a window ends at the
+  pace of its slowest lane plus those waits. One `Mutex` and `Condvar` per
+  window; a wait checks every lane of the window, O(WINDOW). The pool's
+  concurrency is now the constant window, not the Rayon pool's width. NOT
+  MEASURED against the former unordered fan-out.
+- **Plain `descend` (D-1557; replaces the D-1567 statement made here).** A
+  descent prepares its inputs once: the raw signal span, both spans, the
+  withholding, both contexts, the anchored column under its one preparation
+  attempt and the executed-data digest are held in one `AuditCache` keyed by
+  root, feed, instrument, rung, span and build. A later step loads nothing,
+  folds nothing and writes no preparation attempt. It still pays, per step,
+  a memory copy of the held signal bars and column (O(bars), handed to the
+  audit, which consumes them), the O(bars) scans that derive its horizon,
+  grid rungs, floors and policy from the held bars, and its own sweep. NOT
+  MEASURED.
 - **`latest_for` (D-1567).** O(runs) per call: it opens the results ledger,
   which builds the identity index and hashes the file, before its backward
   scan. Called once per rung of `range-all`, `pool` pass 1 and every `descend`

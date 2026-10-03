@@ -89,8 +89,11 @@
 //!
 //! # Parallelism and reproducibility
 //!
-//! Both passes are `par_iter` over INSTRUMENTS with indexed `collect`, so the
-//! order of every table is the sorted symbol order and never the scheduler's.
+//! Pass 1 runs each instrument as a `crate::ordered::map` lane and pass 2 is
+//! `par_iter` over INSTRUMENTS with indexed `collect`, so the order of every
+//! table is the sorted symbol order and never the scheduler's, and pass 1's
+//! shared ledger and evidence writes land in an order fixed by the surface
+//! (D-1556).
 //! Pass 1's per-instrument runs are the same runs `range-rung` makes, so their
 //! identities and rows are byte-identical to running each by hand. The pooled
 //! fold runs sequentially over the collected cells. §3 rule 5.
@@ -290,14 +293,16 @@ fn run_under(
     );
 
     // ── PASS 1: every instrument, exactly as `range-rung` screens one ──
-    let screened: Vec<Screened> = surface
-        .par_iter()
-        .map(|symbol| Screened {
-            symbol: symbol.clone(),
-            outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None)
-                .outcome,
-        })
-        .collect();
+    //
+    // EACH INSTRUMENT IS AN ORDERED LANE. The page was already in surface
+    // order; the attempt tokens and ledger rows each `one_rung` writes followed
+    // completion order until D-1556 (audit-20261003 hunt-conc-1). They now
+    // land in an order fixed by the surface, `crate::ordered::WINDOW`
+    // instruments at a time.
+    let screened: Vec<Screened> = crate::ordered::map(&surface, |symbol| Screened {
+        symbol: symbol.clone(),
+        outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None).outcome,
+    })?;
     let screened_ok = screened.iter().filter(|s| s.outcome.is_ok()).count();
     crate::note(
         &telemetry::Event::info("cli.pool", "pass 1 finished")

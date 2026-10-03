@@ -6353,3 +6353,13 @@ old line regex the same input and watched it pass.
 | AUF-03 | `/calendar.json`'s `withheld` runs expand to every day they name, inclusive, and to their months; an absent list withholds nothing; a malformed run is refused, never dropped back into holidays, so the `/ingest` page never shows a withheld day as an NSE holiday (D-1507) | `web/tests/calendar-owed.test.js`: `withheld runs become every day they name, inclusive, and their months (D-1507)`, `a malformed withheld run is refused, never dropped back into holidays` | ✓ |
 | AUF-04 | `detail::run_store_read` runs its work off the Tokio worker, admits at most `MAX_STORE_READ_CONCURRENT` = 8 at once and refuses the next before it queues, is a pool separate from the calendar pool, and re-admits once a slot is released; a refusal is 429 (saturated) or 503 (join failed) naming what and the bound (D-1508) | `api::detail::tests::a_store_read_runs_off_the_worker_and_refuses_past_its_bound`, `api::detail::tests::a_refused_admission_names_what_its_bound_and_why` | ✓ |
 | AUF-05 | `/gaps.json`'s every `audit_one` and `audit_cash_schedule`, `/folder.json`'s `answer` and `/indexmap.json`'s catalogue read sit inside an admitted blocking closure, never inline in the async handler (D-1508) | `api::server::calendar_route_tests::the_gap_audit_folder_and_index_map_read_on_the_blocking_pool` | ✓ |
+
+### Audit fix worker 7 (D-1556 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AFF-20 | The evidence journal and run ledger written by an `ordered::map` fan-out hold the same rows in the same order whatever the thread count, whichever worker computes fastest, and on a rerun (D-1556) | `cli::ordered::tests::shared_durable_writes_follow_the_inputs_not_the_schedule` | ✓ |
+| AFF-21 | `sweep_rungs`, `pool` pass 1 and both Boolean family pools fan out through `ordered::map`, with no indexed parallel map or private thread pool (D-1556) | `cli::ordered::tests::every_whole_command_fan_out_is_an_ordered_lane` | ✓ |
+| AFF-22 | A turn taken outside a lane, or nested in a turn the thread holds, never waits (D-1556) | `cli::ordered::tests::a_turn_outside_a_lane_or_inside_a_held_one_never_waits` | ✓ |
+| AFF-23 | A range descent prepares its stored inputs once, a cached audit prints the page a fresh one does, and a different key prepares afresh (D-1557) | `cli::audited_stored::tests::a_range_descent_prepares_its_stored_inputs_once` | ✓ |
+| AFF-24 | An unsealed Selection V6 tail neither hides committed blocks nor blocks a new source; it is moved aside whole before an append (D-1569) | `cli::selection_v6::tests::an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_source` | ✓ |

@@ -768,3 +768,12 @@ is unchanged.
 - **o1eng2-1**: documented in `docs/06-limits.md`. D-1550.
 - **hunt-runner-4**, **o1eng2-2**, **o1eng2-3** and **o1eng2-4**: stale text
   corrected (see D-1550).
+
+### audit-20261003 — fix worker 7 — 2026-10-03
+
+Narrative only. No row is added to the table above.
+
+- **audit-20261003 hunt-conc-1** (`range-all`, `pool` pass 1): fixed. D-1556, AFF-20, AFF-21.
+- **audit-20261003 hunt-conc-2** (Boolean family pools): fixed. D-1556, AFF-20, AFF-21.
+- **audit-20261003 hunt-cli-a-5**: fixed. D-1569, AFF-24.
+- **audit-20261003 o1surface2-1**: fixed. D-1557, AFF-23.
