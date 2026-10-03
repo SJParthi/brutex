@@ -482,7 +482,10 @@ fn a_bars_link_to_a_real_directory_is_walked() {
 /// census while a month sat on disk (found by a review of D-0765).
 #[test]
 fn a_store_root_that_cannot_be_searched_is_refused() {
-    support::where_permission_binds("a_store_root_that_cannot_be_searched_is_refused", a_store_root_that_cannot_be_searched_is_refused_body);
+    support::where_permission_binds(
+        "a_store_root_that_cannot_be_searched_is_refused",
+        a_store_root_that_cannot_be_searched_is_refused_body,
+    );
 }
 
 /// The test above, run where the mode bits bind: as root a mode-000
@@ -549,7 +552,10 @@ fn the_walk_descends_rather_than_guessing_the_depth() {
 /// (its contents are unknown), but the census now names it.
 #[test]
 fn a_directory_the_walk_cannot_list_is_counted_not_dropped() {
-    support::where_permission_binds("a_directory_the_walk_cannot_list_is_counted_not_dropped", a_directory_the_walk_cannot_list_is_counted_not_dropped_body);
+    support::where_permission_binds(
+        "a_directory_the_walk_cannot_list_is_counted_not_dropped",
+        a_directory_the_walk_cannot_list_is_counted_not_dropped_body,
+    );
 }
 
 /// The test above, run where the mode bits bind: as root a mode-000
