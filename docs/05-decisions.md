@@ -54647,3 +54647,24 @@ own test (AHA-02). The test injects a half-record write into every file the
 ledger appends to, requires the file to be byte-identical afterwards, and then
 requires the next append, an exact-prefix retry or a same-handle append, to
 succeed.
+
+### D-1851 — The explicit stored-expression report states a stock's corporate actions are unchecked — 2026-10-03
+
+**What was wrong (h-cli-2).** `expression.rs` opened its report with the bare
+`STORED_PROVENANCE`. For a swept cash equity it therefore left out the D-0694
+statements: gross of every charge, and corporate actions unchecked. Its
+sibling `expression-search-stored` printed both for the same instrument. The
+true, false and unknown counts on a stock come from split-unadjusted bars, and
+the report did not say so.
+
+**The change.** The report is now rendered by `expression::Report::render`,
+which starts with `crate::stored_provenance_of(&loaded.key)`. For an index the
+output is byte-identical to before. For a stock the two statements now follow
+the banner. Only the printed text changes. The identity and the evidence files
+do not.
+
+**What it proves.**
+`cli::expression::tests::a_stock_report_states_corporate_actions_unchecked_and_an_index_report_does_not`
+renders RELIANCE, TCS, NIFTY and BANKNIFTY. It requires the head to equal
+`stored_provenance(symbol)`, the corporate-actions statement exactly once for
+a stock and never for an index, and the counts body to be byte-exact.
