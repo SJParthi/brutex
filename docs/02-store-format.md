@@ -428,7 +428,7 @@ way this build could misread one if that assumption is ever wrong.
 
 ---
 
-## 11. The census file — `BRUTEXM`, versions 1 and 2
+## 11. The census file — `BRUTEXM`, versions 1, 2 and 3
 
 Everything above is a **bar** file. The per-vendor census at
 `manifest/<vendor>.man` is a different format in the same store, and until
@@ -467,9 +467,9 @@ a constant on the read path. 32768 divides by both strides, so an entry is
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|
-| 0 | 8 | `magic` | `b"BRUTEXM1"` or `b"BRUTEXM2"` — the last byte is the version |
-| 8 | 2 | `format_version` | `1` or `2`. **Selects the geometry.** |
-| 10 | 2 | `entry_stride` | `64` at version 1, `128` at version 2. Read it; never assume it, and check it against what the version declares. |
+| 0 | 8 | `magic` | `b"BRUTEXM1"` at version 1, `b"BRUTEXM2"` at versions 2 and 3 — the magic names the GEOMETRY, not the version |
+| 8 | 2 | `format_version` | `1`, `2` or `3`. **Selects the geometry and the meaning of reserved bytes.** |
+| 10 | 2 | `entry_stride` | `64` at version 1, `128` at versions 2 and 3. Read it; never assume it, and check it against what the version declares. |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | the commit counter: entries readable |
 | 32 | 8 | `n_keys` | distinct `(instrument, timeframe, month)` keys among them |
@@ -478,13 +478,15 @@ a constant on the read path. 32768 divides by both strides, so an entry is
 | 54 | 6 | reserved | zero |
 | 60 | 4 | `crc` | CRC-32C over bytes `0..60`, one contiguous run |
 
-The slot layout is **identical across both versions**: only the magic, the
-version and the stride differ, which is why one decoder reads both and dispatch
-is a table lookup rather than a second parser.
+The slot layout is **identical across all three versions**: only the magic, the
+version and the stride differ, which is why one decoder reads them all and
+dispatch is a table lookup rather than a second parser.
 
-A slot whose magic and version field disagree is refused **by version**. There
-is no way to tell which of the two is the lie, and the version field is the
-thing that selects the geometry.
+A slot whose magic is not the one its version declares (`BRUTEXM1` for 1,
+`BRUTEXM2` for 2 and 3) is refused **by version**. There is no way to tell which
+of the two is the lie, and the version field is the thing that selects the
+geometry. This table said the magic's last byte is the version until P1-16-01
+(D-1763); a version-3 slot begins `BRUTEXM2`.
 
 ### 11.4 Entry, version 1 — 64 bytes
 
@@ -545,8 +547,30 @@ and it is refused rather than half-believed. A negative close that is not the
 sentinel is refused for the same reason: the sentinel must be one value, not a
 range.
 
-Reserved bytes are zero and stay zero. A future field takes reserved space in a
-**new version**, never by reinterpreting version 2 — §2's rule, unchanged.
+Reserved bytes are zero and stay zero at version 2. A future field takes
+reserved space in a **new version**, never by reinterpreting version 2 — §2's
+rule, unchanged. Version 3 is that new version.
+
+### 11.5a Entry, version 3 — 128 bytes, the contract in reserved space
+
+Version 3 is version 2's geometry with the derivative contract written into
+bytes the closes half reserved. The magic stays `BRUTEXM2`, because the stride
+and every version-2 field are unchanged; the version field is what separates
+them. A spot row leaves the contract bytes zero, so a version-3 spot row is
+byte-identical to its version-2 image, and only option and futures rows differ.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 64 | a version-1 entry image | its own CRC at 60 |
+| 64 | 8 | `first_close_paisa` | as version 2 |
+| 72 | 8 | `last_close_paisa` | as version 2 |
+| 80 | 24 | `contract` | ASCII contract text (`core::instrument::Contract`), zero-padded; all zero for spot |
+| 104 | 1 | `contract_len` | `0` for spot, otherwise `1..=24` |
+| 105 | 19 | reserved | zero |
+| 124 | 4 | `crc` | CRC-32C over bytes `64..124` |
+
+A length past 24, or text that does not parse as a contract, is not read as a
+shorter or different contract: a truncated contract is a different series.
 
 ### 11.6 Old files stay readable, and the upgrade is a rewrite
 
@@ -557,8 +581,9 @@ steps would decode every second entry as the tail of the one before it and
 return plausible integers, which is §9's "a wrong value that is well-formed"
 arriving through the front door.
 
-This build **writes** version 2 only. A census loaded from a version-1 file is
-published at version 2, and because the two strides disagree from the first
+This build **writes** version 3 only (`Layout::CURRENT`; this said version 2
+until P1-16-01, D-1763). A census loaded from a version-1 file is published at
+version 3, and because the two strides disagree from the first
 entry onward, the publish is a whole-file rewrite rather than a positional
 append — the same path a repair and a first write already take. It is checked
 after the "nothing moved" gate, so a run that records nothing leaves a version-1
@@ -700,15 +725,22 @@ realised fills or MAE/MFE that the row does carry.
 
 ---
 
-## 13. Ranked frontier — `results/frontier.bin`, version 4
+## 13. Ranked frontier — `results/frontier.bin`, version 7
 
 The ranked frontier is append-only and fixed-stride. Its 16-byte header is
-`BRUTEXFR` at bytes `0..8`, little-endian version `4` at `8..12`, and four
+`BRUTEXFR` at bytes `0..8`, little-endian version `7` at `8..12`, and four
 reserved zero bytes at `12..16`. A non-zero reserved header byte is an unknown
 schema and is refused; the reader does not wait for it to affect a later field
 before noticing it.
 
-Each row is 272 bytes. All integer fields are little-endian:
+Each row is 280 bytes. All integer fields are little-endian. Versions 4 to 6
+are refused by version, never reread under version 7 meanings: version 5 took
+byte 195 for the protective-exit rule, version 6 took `196..200` for the
+fill-headroom rule, and version 7 widened the row by eight bytes for the
+average-payoff floor and moved the seal to `272..280`. This section described
+version 4 (272-byte rows, a reserve at `195..200`, the seal at `264`) until
+P1-16-02 (D-1763).
+
 
 | Offset | Size | Field |
 |---:|---:|---|
@@ -730,7 +762,8 @@ Each row is 272 bytes. All integer fields are little-endian:
 | 178 | 8 | gross winning paisa, `i64` |
 | 186 | 8 | gross losing paisa, `i64` |
 | 194 | 1 | direction: `0=long`, `1=short`; every other byte is refused |
-| 195 | 5 | reserved, all zero; any non-zero byte is refused |
+| 195 | 1 | `require_protective_exits`: `0=off`, `1=required`; every other byte is refused |
+| 196 | 4 | `min_fill_headroom_bp`, `i32`; a negative value is refused |
 | 200 | 8 | `max_mae_ppm`, `i64` |
 | 208 | 8 | `min_rr_bp`, `i64` |
 | 216 | 8 | `min_win_rate_bp`, `i64` |
@@ -739,10 +772,12 @@ Each row is 272 bytes. All integer fields are little-endian:
 | 240 | 8 | `min_ret_over_dd_bp`, `i64` |
 | 248 | 8 | `min_trades`, `u64` |
 | 256 | 8 | `top`, `u64` on disk and saturated to the target `usize` on read |
-| 264 | 8 | first eight BLAKE3 bytes over `0..264` |
+| 264 | 8 | `min_avg_rr_bp`, `i64` |
+| 272 | 8 | first eight BLAKE3 bytes over `0..272` |
 
 The seal detects accidental byte damage; it does not assign meaning. A sealed
-row with an unknown direction or non-zero reserve is therefore still refused.
+row with an unknown direction, an undefined protective-exit byte or a negative
+fill headroom is therefore still refused.
 Its sealed identity remains usable only as the block-index key, so an interrupted
 exact rerun finds the invalid prepared block and refuses instead of appending a
 second block around it. No invalid row reaches a public frontier response.
@@ -915,27 +950,37 @@ its fixed payload followed by a full 32-byte BLAKE3 seal of that payload.
 
 | Path | Magic | Payload | Stride |
 |---|---:|---:|---:|
-| `results/execution-parameters-v1.bin` | `BRUTXEP1` | 608 | 640 |
+| `results/execution-parameters-v1.bin` | `BRUTXEP1` | 616 | 648 |
 | `results/execution-percentiles-v1.bin` | `BRUTXEG1` | 96 | 128 |
 | `results/execution-capabilities-v1.bin` | `BRUTXEC1` | 288 | 320 |
 | `results/execution-capability-completions-v1.bin` | `BRUTXEF1` | 384 | 416 |
 
-The 608-byte parameter payload is:
+The 616-byte parameter payload is:
 
 | Payload offset | Size | Field |
 |---:|---:|---|
 | 0 | 192 | parameter, population, Population V4, policy, expected-resolution and training digests; six 32-byte values |
-| 192 | 155 | exact evaluation-spec fingerprint |
-| 347 | 9 | direction, family, execution/range/selector/forced-stop, next-minute-entry and forced-exit tags; one reserved zero byte |
-| 356 | 24 | signal rung, horizon, execution seconds and stop/target/trail atom counts; six `u32`s |
-| 380 | 2 | entry delay, exactly one minute |
-| 382 | 2 | forced-exit IST minute, exactly `910` (15:10) |
-| 384 | 40 | four runner parameters and maximum levels per axis; five `u64`s |
-| 424 | 16 | minimum and maximum reward/risk hundredths; two `i64`s |
-| 440 | 64 | ratio-pair/cell bounds, forced-stop ppm, ambiguity/gap bounds, training count and training endpoints |
-| 504 | 96 | ordered-percentile, cost-model and exact-execution-law digests |
-| 600 | 8 | reserved, zero |
-| 608 | 32 | BLAKE3 seal over payload `0..608` |
+| 192 | 163 | exact evaluation-spec fingerprint |
+| 355 | 9 | direction, family, execution/range/selector/forced-stop, next-minute-entry and forced-exit tags; one reserved zero byte |
+| 364 | 24 | signal rung, horizon, execution seconds and stop/target/trail atom counts; six `u32`s |
+| 388 | 2 | entry delay, exactly one minute |
+| 390 | 2 | forced-exit IST minute, exactly `910` (15:10) |
+| 392 | 40 | four runner parameters and maximum levels per axis; five `u64`s |
+| 432 | 16 | minimum and maximum reward/risk hundredths; two `i64`s |
+| 448 | 64 | ratio-pair/cell bounds, forced-stop ppm, ambiguity/gap bounds, training count and training endpoints |
+| 512 | 96 | ordered-percentile, cost-model and exact-execution-law digests |
+| 608 | 8 | reserved, zero |
+| 616 | 32 | BLAKE3 seal over payload `0..616` |
+
+**This record grew in place, and that is a recorded breach of §2, not a
+second geometry this reader accepts.** The evaluation-spec fingerprint widened
+from 155 to 163 bytes when the charter gained its ninth non-regular day, and
+the record went from 608/640 to 616/648 bytes while the magic stayed
+`BRUTXEP1` and the version stayed `1`. The header's own stride field is what
+separates the two, so a file whose header says 640 is refused by name: its
+records carry the eight-day calendar's fingerprint and name runs no current
+build reproduces. A 648-byte file is read. This table showed the 608/640
+layout until P1-16-03 (D-1763).
 
 Dynamic rung arrays are not truncated into the scalar record. Each 96-byte
 percentile payload stores parameter id `0..32`, population id `32..64`, axis
@@ -1162,13 +1207,14 @@ stride, then four reserved zero bytes.
 
 | Path | Magic | Payload | Stride |
 |---|---:|---:|---:|
-| `results/execution-disposition-parameters-v2.bin` | `BRUX2PR1` | 608 | 640 |
+| `results/execution-disposition-parameters-v2.bin` | `BRUX2PR1` | 616 | 648 |
 | `results/execution-disposition-percentiles-v2.bin` | `BRUX2PC1` | 96 | 128 |
 | `results/execution-row-dispositions-v2.bin` | `BRUTXED2` | 480 | 512 |
 | `results/execution-capability-completions-v2.bin` | `BRUTXEF2` | 512 | 544 |
 
 The first two files reuse the exact sealed V1 scalar-parameter and percentile
-record codecs. One 480-byte row payload stores thirteen 32-byte digests at
+record codecs, so the parameter file grew from 640 to 648 bytes with them and a
+640-byte one is refused by name, as §17 says. One 480-byte row payload stores thirteen 32-byte digests at
 `0..416`: disposition, population, Population V4 completion, admission
 completion, population-row payload, strategy, sparse capability, dynamic
 parameter, runner disposition, training resolution, training run, complete

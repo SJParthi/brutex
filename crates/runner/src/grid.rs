@@ -6162,21 +6162,19 @@ mod tests {
     /// visibly wrong rather than coincidentally right: the four-win run comes
     /// AFTER the three-loss run, so a winning counter that the losses did not
     /// clear would read seven.
-    /// **A win inside its own pricing bracket is not the floor — D-0595.**
+    /// **The floor is the smallest win under the worst reading, whatever its
+    /// bracket — D-0602, reversing D-0595.**
     ///
     /// `min_win` is the numerator of the operator's `min(win) >= 3x max(loss)`
-    /// rule, and it took the smallest STRICTLY POSITIVE trade. One trade that
-    /// gained a single paisa therefore set the floor to one paisa and collapsed
-    /// the ratio however large the real winners were.
+    /// rule. D-0595 excluded a win no larger than its own `best - worst`
+    /// bracket; D-0602 found that backwards: `pess > 0` means the trade won
+    /// under the WORST admissible reading, so the bracket is uncertainty about
+    /// the win's size, never its sign. The middle case below, a win of 20
+    /// whose readings span 80, is therefore the floor. This doc still stated
+    /// D-0595's rule while the body asserted D-0602's (Z1-slice23-F2, D-1763).
     ///
-    /// The test that matters is the middle case: a win of 20 whose two readings
-    /// span 80 is a win under one admissible ordering and a loss under another,
-    /// so it cannot be the evidence a ratio rests on — while a win of 300 whose
-    /// readings span 100 survives either reading and can.
-    ///
-    /// Every OTHER count is asserted unchanged in the same pass, because a
-    /// scratch really did win and `TradeAggregatesV2::validate` requires
-    /// `losses == trades - wins`. Only the floor moves.
+    /// Every OTHER count is asserted in the same pass: every win is still in
+    /// the gross, the ceiling and the streak.
     #[test]
     fn the_floor_is_the_smallest_win_under_the_worst_reading_whatever_its_bracket() {
         let mut cell = Cell::default();

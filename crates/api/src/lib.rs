@@ -102,8 +102,9 @@ pub mod master;
 ///
 /// Separate from `/pull/*` on purpose: that moves BARS and spends the vendor's
 /// quota per instrument-month; this moves four files, three of them free public
-/// CDN downloads. `Site::load` parses the masters once at startup with no reload
-/// path, so this also answers whether a restart is required. D-0308.
+/// CDN downloads. A refresh re-parses the masters in place through
+/// `Site::reparse`; this also answers whether a restart is still required.
+/// D-0308, D-1762.
 pub mod mastersrun;
 pub mod merge;
 pub mod operation_audit;

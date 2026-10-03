@@ -371,11 +371,19 @@ fn open_classified(
 /// reason for the shape below, not as a measurement. `CLAUDE.md` §3 rule 6, and
 /// `docs/06-limits.md` §44.
 ///
-/// **What IS bounded here, structurally:** this function has exactly one call
-/// site — [`read_page`], outside every loop — and it returns on the first line
+/// **What IS bounded here, structurally:** this function is called from
+/// exactly two places — [`page`] and [`window`] — each once per request and
+/// outside every loop over files or records, and it returns on the first line
 /// when `faults` is empty and otherwise emits once. So the real cost is at most
-/// one event per request regardless of how many records a file refuses, which is
-/// the property the shape was chosen for.
+/// one event per request regardless of how many records, or how many of a
+/// window's up to [`MAX_WINDOW_MONTHS`] files, refuse, which is the property the
+/// shape was chosen for.
+///
+/// It was called from inside [`slots`], which a window calls once per month
+/// file, so a sorted or `extremes=1` window over 240 damaged months emitted up
+/// to 240 lines for one request while this doc said one (Z1-slice11-F3,
+/// D-1762). `file` is the FIRST file that refused a record; `faults` counts
+/// every refusal across all of them.
 ///
 /// The faults were already counted in a
 /// `Vec` the caller renders; this reports its length and the first reason, which
@@ -416,7 +424,9 @@ fn note_unreadable_records(file: &BarFile, faults: &[String], rows: usize, skip:
 #[must_use]
 pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>) {
     let (read, faults) = slots(file, skip, take);
-    (read.into_iter().flatten().collect(), faults)
+    let rows: Vec<Bar> = read.into_iter().flatten().collect();
+    note_unreadable_records(file, &faults, rows.len(), skip);
+    (rows, faults)
 }
 
 /// [`page`], with every POSITION kept: `None` where the record would not read.
@@ -429,7 +439,6 @@ fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, Vec<Str
     let n = file.header().n_valid;
     let mut rows = Vec::with_capacity(take.min(PAGE_BARS));
     let mut faults = Vec::new();
-    let mut read = 0usize;
     for i in skip..skip.saturating_add(take) {
         let Ok(index) = u64::try_from(i) else {
             break;
@@ -438,20 +447,17 @@ fn slots(file: &BarFile, skip: usize, take: usize) -> (Vec<Option<Bar>>, Vec<Str
             break;
         }
         match file.read_record(index) {
-            Ok(bar) => {
-                read += 1;
-                rows.push(Some(bar));
-            }
+            Ok(bar) => rows.push(Some(bar)),
             // COUNTED IN THE `Vec`, NOT EMITTED HERE. This arm is inside the
-            // per-record loop; a line placed at it would be bounded by the data
-            // and not by the request. The aggregate is one call below.
+            // per-record loop, and `slots` itself runs once per month file of
+            // a window; a line placed at either would be bounded by the data
+            // and not by the request. The caller emits the aggregate once.
             Err(why) => {
                 rows.push(None);
                 faults.push(format!("record {index}: {why}"));
             }
         }
     }
-    note_unreadable_records(file, &faults, read, skip);
     (rows, faults)
 }
 
@@ -565,7 +571,13 @@ pub enum SortKey {
     Close,
     /// Traded volume.
     Volume,
-    /// Open interest, nulls last.
+    /// Open interest, nulls last IN BOTH DIRECTIONS.
+    ///
+    /// A null is "this feed stamps none", not a small number, so it never
+    /// leads a page. Mapping it to `i64::MIN` alone put every null FIRST on an
+    /// ascending page while this line said last (Z1-slice11-F5, D-1762); the
+    /// window's comparator now ranks null-ness ahead of the value and does not
+    /// invert it with the direction.
     OpenInterest,
 }
 
@@ -593,9 +605,10 @@ impl SortKey {
 
     /// The field this orders on, for one bar.
     ///
-    /// `OI_NULL` is mapped to `i64::MIN` — which it already is — so a null open
-    /// interest sorts as the smallest value rather than as a real number. Zero
-    /// means zero here exactly as `CLAUDE.md` §7 says it does.
+    /// `OI_NULL` is `i64::MIN`, and the value is returned as it is: the
+    /// window's comparator puts null rows last before it compares this, so a
+    /// null is never ordered as a real number. Zero means zero here exactly as
+    /// `CLAUDE.md` §7 says it does.
     #[must_use]
     const fn of(self, bar: &Bar) -> i64 {
         match self {
@@ -819,17 +832,65 @@ fn extremes_of(bars: &[WindowBar]) -> Extremes {
 /// page needs the record before it or the cell is blank. Reading one back costs
 /// a single extra seek and fills it — which is strictly better than the browser
 /// managed while holding whole months, because there the first row of EVERY
-/// month had nothing behind it. The only row that still has none is the first
-/// record of the first file, where none exists.
+/// month had nothing behind it.
+///
+/// A ROW THAT OPENS A MONTH FILE READS THE PREVIOUS MONTH'S LAST RECORD. This
+/// doc said that already and the code did not: `start.checked_sub(LOOKBACK)`
+/// is `None` at the start of EVERY file, so the first bar of every month in a
+/// window answered `first_bar_in_file` while the month before it sat open in
+/// the same request (Z1-slice11-F4, D-1762). [`earlier_in_time`] names, for
+/// each file, the nearest earlier non-empty file of the window, and both paths
+/// measure against its last record. The only row that still has none is the
+/// first record of the window's earliest non-empty file, where none was read.
 const LOOKBACK: usize = 1;
+
+/// For each file of a window, the nearest EARLIER-IN-TIME file holding at
+/// least one record, or `None`, in the order of `files`.
+///
+/// `files` are in time order, newest first when `newest_first`. One pass, so
+/// it is `O(months)` header reads however the empty months fall — a lookback
+/// that walked back per file would be `O(months²)` over a sparse window.
+fn earlier_in_time(files: &[BarFile], newest_first: bool) -> Vec<Option<&BarFile>> {
+    let mut last: Option<&BarFile> = None;
+    let mut out: Vec<Option<&BarFile>> = Vec::with_capacity(files.len());
+    if newest_first {
+        for file in files.iter().rev() {
+            out.push(last);
+            if file.header().n_valid > 0 {
+                last = Some(file);
+            }
+        }
+        out.reverse();
+    } else {
+        for file in files {
+            out.push(last);
+            if file.header().n_valid > 0 {
+                last = Some(file);
+            }
+        }
+    }
+    out
+}
+
+/// The last record of `file` as a lookback: a bar, or a named gap.
+fn last_of(file: &BarFile) -> Behind {
+    file.header()
+        .n_valid
+        .checked_sub(1)
+        .map_or(Behind::Nothing, |last| {
+            file.read_record(last)
+                .map_or(Behind::Unreadable, Behind::Bar)
+        })
+}
 
 fn seek_page(
     files: &[BarFile],
     desc: bool,
     offset: usize,
     limit: usize,
-) -> (Vec<WindowBar>, Vec<String>) {
+) -> (Vec<WindowBar>, Vec<String>, Option<&BarFile>) {
     let mut bars: Vec<WindowBar> = Vec::with_capacity(limit.min(PAGE_BARS));
+    let mut first_faulted = None;
     let mut faults = Vec::new();
     let mut seen = 0usize;
     /* POSITIONS USED, NOT ROWS RETURNED. An unreadable record still occupies
@@ -838,7 +899,8 @@ fn seek_page(
     gap from the next file, and the next offset page returned those same rows
     a second time (W1-api1-10, D-0730). */
     let mut filled = 0usize;
-    for file in files {
+    let earlier = earlier_in_time(files, desc);
+    for (at, file) in files.iter().enumerate() {
         if filled >= limit {
             break;
         }
@@ -869,7 +931,11 @@ fn seek_page(
         `faults`: it is not a row of this page, and the page that covers it
         names it, so a reader walking every page meets each fault once. */
         let behind = match start.checked_sub(LOOKBACK) {
-            None => Behind::Nothing,
+            None => earlier
+                .get(at)
+                .copied()
+                .flatten()
+                .map_or(Behind::Nothing, last_of),
             Some(before) => file
                 .read_record(u64::try_from(before).unwrap_or(u64::MAX))
                 .map_or(Behind::Unreadable, Behind::Bar),
@@ -881,9 +947,54 @@ fn seek_page(
             folded.reverse();
         }
         bars.append(&mut folded);
+        if !bad.is_empty() {
+            first_faulted = first_faulted.or(Some(file));
+        }
         faults.append(&mut bad);
     }
-    (bars, faults)
+    (bars, faults, first_faulted)
+}
+
+/// Every record of a window's files, change-folded IN TIME ORDER, for the
+/// reading path. `files` are newest first when `newest_first`. Faults are
+/// returned, and reported once for the request (Z1-slice11-F3).
+fn read_in_time(
+    files: &[BarFile],
+    newest_first: bool,
+    total: u64,
+) -> (Vec<WindowBar>, Vec<String>) {
+    let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+    let mut record_faults = Vec::new();
+    let mut first_faulted = None;
+    /* IN TIME ORDER, so each file's first row is measured against the last
+    record of the month before it (Z1-slice11-F4). `ordered` was reversed
+    above only when the order is newest-first by time. */
+    let mut in_time: Vec<&BarFile> = files.iter().collect();
+    if newest_first {
+        in_time.reverse();
+    }
+    let mut behind = Behind::Nothing;
+    for file in in_time {
+        let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+        let (rows, mut bad) = slots(file, 0, held);
+        // AN EMPTY MONTH LEAVES THE LOOKBACK WHERE IT WAS: the bar before the
+        // next month's first row is still the last one read before it.
+        let next = match rows.last() {
+            None => behind,
+            Some(Some(bar)) => Behind::Bar(*bar),
+            Some(None) => Behind::Unreadable,
+        };
+        all.append(&mut with_change(behind, rows));
+        behind = next;
+        if !bad.is_empty() {
+            first_faulted = first_faulted.or(Some(file));
+        }
+        record_faults.append(&mut bad);
+    }
+    if let Some(file) = first_faulted {
+        note_unreadable_records(file, &record_faults, all.len(), 0);
+    }
+    (all, record_faults)
 }
 
 /// One page of bars across a range of months, in one request.
@@ -989,7 +1100,10 @@ pub fn window(
         .fold(0u64, u64::saturating_add);
 
     if !sort.scans() && !want_extremes {
-        let (bars, mut record_faults) = seek_page(&files, desc, offset, limit);
+        let (bars, mut record_faults, first_faulted) = seek_page(&files, desc, offset, limit);
+        if let Some(file) = first_faulted {
+            note_unreadable_records(file, &record_faults, bars.len(), offset);
+        }
         faults.append(&mut record_faults);
         return Ok(Window {
             total,
@@ -1006,13 +1120,8 @@ pub fn window(
     against the previous bar in TIME and a sorted page has no time
     neighbours. Folding after the sort would compute each row against
     whichever row happened to land above it. */
-    let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
-    for file in &files {
-        let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
-        let (rows, mut bad) = slots(file, 0, held);
-        all.append(&mut with_change(Behind::Nothing, rows));
-        faults.append(&mut bad);
-    }
+    let (all, mut record_faults) = read_in_time(&files, desc && !sort.scans(), total);
+    faults.append(&mut record_faults);
 
     let extremes = want_extremes.then(|| extremes_of(&all));
 
@@ -1021,10 +1130,16 @@ pub fn window(
     through them would see one row twice and another never. The timestamp is
     unique within a series, so it is the tie-break and it is NOT inverted
     with the direction. */
+    let null_last =
+        |row: &WindowBar| matches!(sort, SortKey::OpenInterest) && row.bar.open_interest == OI_NULL;
     let order = |a: &WindowBar, b: &WindowBar| {
         let (x, y) = (sort.of(&a.bar), sort.of(&b.bar));
         let primary = if desc { y.cmp(&x) } else { x.cmp(&y) };
-        primary.then_with(|| a.bar.ts_micros.cmp(&b.bar.ts_micros))
+        // NULL OPEN INTEREST LAST, whichever way the page runs (F5).
+        null_last(a)
+            .cmp(&null_last(b))
+            .then(primary)
+            .then_with(|| a.bar.ts_micros.cmp(&b.bar.ts_micros))
     };
 
     // THE PAGE IS BOUNDED, SO THE ORDERING IS TOO -- AND IT WAS NOT.
@@ -2213,6 +2328,223 @@ mod window_tests {
             false,
         )
         .expect("a legal window")
+    }
+
+    fn window_over(
+        root: &std::path::Path,
+        to: YearMonth,
+        sort: SortKey,
+        desc: bool,
+        offset: usize,
+        limit: usize,
+        extremes: bool,
+    ) -> Window {
+        window(
+            root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            SYMBOL,
+            Timeframe::MINUTE_1,
+            None,
+            YearMonth::new(2026, 1).expect("m"),
+            to,
+            sort,
+            desc,
+            offset,
+            limit,
+            extremes,
+        )
+        .expect("a legal window")
+    }
+
+    /// **A ROW THAT OPENS A MONTH IS MEASURED AGAINST THE MONTH BEFORE IT.**
+    ///
+    /// `LOOKBACK`'s doc said only the window's very first record has nothing
+    /// behind it; the code gave `first_bar_in_file` to the first bar of EVERY
+    /// month, mid-window, on the seek path and the reading path alike
+    /// (Z1-slice11-F4, D-1762). Both directions, both paths, and a missing
+    /// month in between, which must not reset the lookback.
+    #[test]
+    fn a_row_opening_a_month_is_measured_against_the_last_bar_of_the_month_before() {
+        let root = scratch("cross-month");
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 10, 1_000);
+        write_month(&root, YearMonth::new(2026, 2).expect("m"), 10, 2_000);
+        // March has no file at all; April's first row stands behind February.
+        write_month(&root, YearMonth::new(2026, 4).expect("m"), 10, 4_000);
+        let april = YearMonth::new(2026, 4).expect("m");
+        let jan_to_feb = crate::server::basis_points(1_009, 2_000).expect("a change");
+        let feb_to_apr = crate::server::basis_points(2_009, 4_000).expect("a change");
+        let change_at = |bars: &[WindowBar], close: i64| {
+            let row = bars
+                .iter()
+                .filter(|row| row.bar.close == close)
+                .collect::<Vec<_>>();
+            assert_eq!(row.len(), 1, "close {close} is on the page once");
+            (row[0].chg, row[0].chg_why)
+        };
+
+        // SEEK, ascending: 1008, 1009, 2000, 2001.
+        let page = window_over(&root, april, SortKey::Ts, false, 8, 4, false);
+        assert_eq!(page.bars.len(), 4);
+        assert_eq!(change_at(&page.bars, 2_000), (Some(jan_to_feb), ""));
+        assert_eq!(change_at(&page.bars, 2_001).0, Some(5));
+        // SEEK, ascending, a page that OPENS on April: offset 20 is April's first.
+        let page = window_over(&root, april, SortKey::Ts, false, 20, 2, false);
+        assert_eq!(change_at(&page.bars, 4_000), (Some(feb_to_apr), ""));
+        // SEEK, descending: April 4009..4000 are offsets 0..9, then Feb.
+        let page = window_over(&root, april, SortKey::Ts, true, 8, 4, false);
+        assert_eq!(
+            page.bars
+                .iter()
+                .map(|row| row.bar.close)
+                .collect::<Vec<_>>(),
+            vec![4_001, 4_000, 2_009, 2_008]
+        );
+        assert_eq!(change_at(&page.bars, 4_000), (Some(feb_to_apr), ""));
+        let page = window_over(&root, april, SortKey::Ts, true, 18, 4, false);
+        assert_eq!(change_at(&page.bars, 2_000), (Some(jan_to_feb), ""));
+
+        // READING path, by close, both directions, and the time-ordered
+        // extremes read in both directions.
+        for (sort, extremes) in [(SortKey::Close, false), (SortKey::Ts, true)] {
+            for desc in [false, true] {
+                let page = window_over(&root, april, sort, desc, 0, 30, extremes);
+                assert_eq!(page.bars.len(), 30);
+                assert_eq!(change_at(&page.bars, 2_000), (Some(jan_to_feb), ""));
+                assert_eq!(change_at(&page.bars, 4_000), (Some(feb_to_apr), ""));
+                // The window's earliest record is the one row with nothing behind it.
+                assert_eq!(change_at(&page.bars, 1_000), (None, "first_bar_in_file"));
+                assert_eq!(
+                    page.bars
+                        .iter()
+                        .filter(|row| row.chg_why == "first_bar_in_file")
+                        .count(),
+                    1
+                );
+            }
+        }
+        // And the seek path agrees that January's first row has none.
+        let page = window_over(&root, april, SortKey::Ts, false, 0, 1, false);
+        assert_eq!(change_at(&page.bars, 1_000), (None, "first_bar_in_file"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An unreadable LAST record of the month before is a named gap for the
+    /// next month's first row, not "first in file" and not a number measured
+    /// across the gap (Z1-slice11-F4).
+    #[test]
+    fn an_unreadable_last_record_of_the_month_before_is_named_not_measured_across() {
+        let root = scratch("cross-month-damaged");
+        let jan = YearMonth::new(2026, 1).expect("m");
+        let feb = YearMonth::new(2026, 2).expect("m");
+        write_month(&root, jan, 200, 1_000);
+        write_month(&root, feb, 10, 2_000);
+        // Records 146..200 are January's last checksum block.
+        damage_record(&root, jan, 199);
+        let seek = window_over(&root, feb, SortKey::Ts, false, 200, 1, false);
+        assert_eq!(seek.bars[0].bar.close, 2_000);
+        assert_eq!(seek.bars[0].chg, None);
+        assert_eq!(seek.bars[0].chg_why, "previous_unreadable");
+        let scan = window_over(&root, feb, SortKey::Close, true, 9, 1, false);
+        assert_eq!(scan.bars[0].bar.close, 2_000);
+        assert_eq!(scan.bars[0].chg_why, "previous_unreadable");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `records unreadable` is emitted once per REQUEST, never per month file:
+    /// `slots` runs once per file of a window and must not emit
+    /// (Z1-slice11-F3, D-1762). Shape test, because the sink is process-global.
+    #[test]
+    fn unreadable_records_are_reported_once_per_request_not_once_per_file() {
+        let source = include_str!("bars.rs");
+        let code = source
+            .split_once("\n#[cfg(test)]\n")
+            .expect("the tests follow the code")
+            .0;
+        let slots = code
+            .split_once("fn slots(")
+            .expect("slots exists")
+            .1
+            .split_once("\n}\n")
+            .expect("slots ends")
+            .0;
+        assert!(!slots.contains("note_unreadable_records"));
+        // `page`, the seek branch and the reading branch of `window`: three
+        // call sites, each after its loop.
+        assert_eq!(code.matches("note_unreadable_records(").count(), 4);
+        assert!(!code.contains("[`read_page`]"));
+        let limits = include_str!("../../../docs/06-limits.md");
+        assert!(limits.contains("from exactly two places — `page` and `window`"));
+    }
+
+    /// Null open interest sorts LAST in both directions, as `SortKey`
+    /// documents, and real values, zero included, keep their order ahead of it
+    /// (Z1-slice11-F5, D-1762).
+    #[test]
+    fn null_open_interest_sorts_last_in_both_directions() {
+        let root = scratch("oi-nulls");
+        // `write_month` stamps no open interest, so every January row is null.
+        write_month(&root, YearMonth::new(2026, 1).expect("m"), 3, 1_000);
+        let parts = PathParts {
+            vendor: Vendor::Dhan,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: SYMBOL,
+            contract: None,
+            timeframe: Timeframe::MINUTE_1,
+            month: YearMonth::new(2026, 2).expect("m"),
+            file: FileKind::Bars,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the same 32-bit id `write_month` folds"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a(SYMBOL) as u32;
+        let mut file = store::file::BarFile::open_or_create(
+            &root,
+            StorePath::new(parts).expect("a legal path"),
+            symbol_id,
+        )
+        .expect("a bar file");
+        let start = month_start_micros(YearMonth::new(2026, 2).expect("m"));
+        let rows: Vec<Bar> = [7, 0, 3]
+            .into_iter()
+            .zip(0i64..)
+            .map(|(oi, nth)| Bar {
+                ts_micros: start + nth * 60_000_000,
+                open: 2_000,
+                high: 2_010,
+                low: 1_990,
+                close: 2_000,
+                volume: 1,
+                open_interest: oi,
+            })
+            .collect();
+        file.append(&rows).expect("the batch appends");
+        drop(file);
+        let feb = YearMonth::new(2026, 2).expect("m");
+        let interest = |desc| {
+            window_over(&root, feb, SortKey::OpenInterest, desc, 0, 6, false)
+                .bars
+                .iter()
+                .map(|row| row.bar.open_interest)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(interest(false), vec![0, 3, 7, OI_NULL, OI_NULL, OI_NULL]);
+        assert_eq!(interest(true), vec![7, 3, 0, OI_NULL, OI_NULL, OI_NULL]);
+        // The nulls keep the timestamp tie-break among themselves.
+        let nulls = window_over(&root, feb, SortKey::OpenInterest, false, 3, 3, false);
+        assert_eq!(
+            nulls
+                .bars
+                .iter()
+                .map(|row| row.bar.close)
+                .collect::<Vec<_>>(),
+            vec![1_000, 1_001, 1_002]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **AN UNREADABLE LOOKBACK RECORD MUST NOT EAT THE PAGE'S FIRST ROW.**

@@ -254,12 +254,31 @@ fn queries_reject_aliases_duplicates_overflow_and_mixed_exact_pages() {
             limit: 32
         }
     ));
+    let before = ID_BASE + 4;
     assert!(matches!(
-        parse("before=4&limit=2").unwrap(),
+        parse(&format!("before={before}&limit=2")).unwrap(),
         Asked::Page {
-            before: Some(4),
+            before: Some(b),
             limit: 2
-        }
+        } if b == before
+    ));
+    // An id at or below `ID_BASE` names no durable record: a caller error
+    // (400), never the journal's 503 (Z1-slice13-F3, D-1762).
+    for query in [
+        "invocation=5".to_owned(),
+        "before=5".to_owned(),
+        format!("invocation={ID_BASE}"),
+        format!("before={ID_BASE}"),
+    ] {
+        assert_eq!(
+            parse(&query).err().as_deref(),
+            Some("audit IDs must lie in the durable invocation namespace"),
+            "{query}"
+        );
+    }
+    assert!(matches!(
+        parse(&format!("invocation={}", ID_BASE + 1)).unwrap(),
+        Asked::Exact(id) if id == ID_BASE + 1
     ));
 }
 

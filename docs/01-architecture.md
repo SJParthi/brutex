@@ -185,10 +185,14 @@ instead is `CLAUDE.md` §2: no crate may depend on its toolchain to build, test 
 run, which is the arrow that actually matters and is enforced by `cargo build`
 succeeding on a machine with no Node at all.
 
-The payoff: every display rule — how a price renders, how a percentage is
-computed, what counts as a valid mask — lives in `core` and is compiled twice,
-once native and once to WASM. One implementation, two targets, no drift
-between what the server believes and what the browser shows.
+**There is no WASM build, so there is no "compiled twice" payoff.** This
+paragraph said every display rule lives in `core` and compiles once native and
+once to WASM, with no drift between server and browser. Nothing compiles to
+WASM: the browser formats in JavaScript under `web/`, which is a second
+implementation. What keeps the two from drifting is the server serving the
+facts instead of the browser re-deriving them: `/vocab.json` serves the
+condition table once (D-0288), and routes such as `/bars/window.json` send the
+computed change and its reason. P1-16-07, D-1763.
 
 ---
 
@@ -202,9 +206,9 @@ raw candles ──► validate ──► paisa integers ──► store::append
                                                     │  pwrite, then
                                                     │  publish n_valid
                                                     ▼
-                                            bars/<exch>/<seg>/<sym>/<tf>/<yyyy-mm>.bin
+                                            bars/<vendor>/<exch>/<seg>/<sym>/<tf>/<yyyy-mm>.bin
                                                     │
-                                            store::open (read-only mmap)
+                                            BarFile open (positional reads, no mapping)
                                                     │
                                             store::Bar ──► indicators::Candle
                                                     │      (a plain seven-field record;
@@ -283,9 +287,11 @@ proof, remaining authority gap and cost boundary.
 
 Three properties matter more than the boxes:
 
-1. **The disk is touched once per slice per launch.** After the initial open,
-   every bar read is pointer arithmetic against a mapping that is already
-   resident.
+1. **A bar read is one positional read and one block check.** No crate maps a
+   bar file (`store` forbids `unsafe`, D-0790): `BarFile::read_record` is one
+   `pread` of the record's bytes plus the CRC check of its block, so a cold
+   block touches the disk. This said every read was pointer arithmetic against
+   a resident mapping (P1-16-05, D-1763).
 2. **Condition bits are computed once and shared read-only** across every
    thread and every candidate. In the predecessor system this recomputation
    was the dominant cost — roughly eleven thousand times the per-mask cost —
@@ -363,14 +369,18 @@ bars/groww/NSE/INDEX/NIFTY/1min/2024-03.bin
      └───────────────────────────── vendor (D-0019)
 ```
 
-Locating a slice is a string join and an open. There is no catalogue to
-consult, no index to rebuild, no registry that can disagree with the
-filesystem. Adding a symbol requires no registration: the first write creates
-the directory.
+Locating a slice is a string join and an open. There is no index to rebuild
+and no registry that can disagree with the filesystem. Adding a symbol requires
+no registration: the first write creates the directory.
 
-Directory listings are never globbed on a read path. A read computes the exact
-path it wants; if the file is absent, that is a specific, named absence rather
-than a scan that returned nothing.
+A read of a NAMED slice never lists a directory: it computes the exact path it
+wants, and an absent file is a specific, named absence rather than a scan that
+returned nothing. **The one exception is the multi-month sweep.**
+`store::catalog::walk` lists the store root to find what `sweep-all` and the
+pool (`cli::batch`, `cli::pool`) should read, and it is `O(entries under root)`.
+It derives the holdings from the filesystem on every call, so it cannot
+disagree with it. This section said no directory is ever listed on a read path
+(P1-16-08, D-1763).
 
 ---
 
@@ -382,7 +392,7 @@ than a scan that returned nothing.
 | `indicators` | single pass, sequential by construction (state carries forward) | none |
 | `engine` | ~~data parallel over candidates via `rayon`~~ — **THIS WAS NEVER TRUE, AND IT CANNOT BE.** No crate took the `rayon` arrow at all: an audit grepped every manifest and every source file and found this row was the only mention in the tree, so the ladder was entirely single-threaded. It cannot be made true here either — CI gate 22 pins `vocab indicators engine` to `vocab` alone, so `engine` may not declare `rayon`. Parallelism over candidates needs a law change, not a patch. D-0232 | none — bar bits are read-only, each shard owns its own output |
 | `cli` | data parallel over **instrument-months** in `batch::sweep_under`, via `rayon` | none — each month is its own file, evaluator, ladder and identity. Determinism holds by shape: indexed `collect` preserves order and `Tally` is folded sequentially afterwards, so no output depends on thread scheduling (§3 rule 5). D-0232 |
-| `store` append | one writer, positional writes, commit counter published last | the counter, published with a release store |
+| `store` append | one writer, positional writes, commit counter published last | the counter, published by one checksummed header-slot `pwrite` after the records are synced (`docs/02-store-format.md` §5). There is no atomic and no release store in `store`; this cell said there was (P1-16-06, D-1763) |
 | `api` | async, request-scoped | none |
 
 The rule that makes this hold: **a sweep never mutates anything a reader can

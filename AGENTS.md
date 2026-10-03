@@ -52,7 +52,7 @@ that the workspace builds with the front end moved aside — is untouched by it.
 Exactly one tracked file uses it, `.claude/launch.json`, which carries the two
 run configurations `docs/07-plan.md` §0 names. It was written into gate 1 and
 gate 1b first and into this list second; gate 1's own comment refused to close
-the gap on its own, in these words: *"Resolving that is a `AGENTS.md` edit and a
+the gap on its own, in these words: *"Resolving that is a CLAUDE.md edit and a
 `docs/05-decisions.md` entry, which a CI gate must not make on its own — a gate
 that widens the law to match the tree is the shape this whole file exists to
 refuse."* D-0210 is that entry, and this sentence is that edit.
@@ -296,7 +296,7 @@ What survives from that reasoning is the half about gate 22, and it is the half
 that carries the rule: `cli` declines to be a *swept* crate, not to be a caller.
 
 It is **not** on gate 22's list and must never be added to one: clause A pins
-`vocab`, `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
+`vocab` to no dependency at all and `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
 as `runner` is.
 
 Every report it renders is led by a **provenance banner, and there are two of
@@ -407,9 +407,19 @@ Report failures plainly. Do not paper over a red gate.
 
 **The table was eight rows while fourteen documents existed**, so six carried no
 stated authority at all and a reader had no way to know whether they bound
-anything. All fourteen are listed now. Two numbers are used twice — `07-` and
-`09-` — which is a naming defect, not two documents pretending to be one; both
-of each pair are named above and neither is authoritative over the other.
+anything. The fourteen above are the documents with authority. Two numbers are
+used twice among them — `07-` and `09-` — which is a naming defect, not two
+documents pretending to be one; both of each pair are named above and neither
+is authoritative over the other.
+
+**`docs/12-` to `docs/35-` and `docs/research-policy/` hold no authority.** They
+are audit, readiness, research and integration reports: evidence of what was
+measured or decided at the time, cited by the decisions that act on them. Where
+one disagrees with a document in the table, the table's document wins and the
+report is the stale copy. `22-` is used twice (`22-expression-search.md`,
+`22-research-policy.md`), the same naming defect as `07-` and `09-`. This
+paragraph said "all fourteen are listed now" while 25 more documents existed
+(P1-15-02, D-1764).
 
 If this file and a document disagree, **this file wins** and the document is
 the stale copy to fix — **with one caveat that has already bitten.** That rule

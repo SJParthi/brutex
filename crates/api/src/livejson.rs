@@ -18,9 +18,11 @@
 //!
 //! `/frontier.json` calls `Row::derived()` and `Row::verdict()` and serves a
 //! `meets` block. This must not, and the reason is not style: a live row is
-//! written by `publish_ranked` BEFORE the exit grid runs, so `trades`, `wins`,
-//! `pessimistic`, `worst_trade`, `max_drawdown`, `min_win`, `gross_win` and
-//! `gross_loss` are all structural zeros. A win rate computed from them is 0%, a
+//! written by `publish_ranked` BEFORE the exit grid runs, so `trades`,
+//! `cell_wins`, `pessimistic`, `worst_trade`, `max_drawdown`, `min_win`,
+//! `gross_win` and `gross_loss` are all structural zeros. (`wins` is NOT one of
+//! them: it is the sweep's own count, `scored.edge.wins`, real at publish time
+//! and served as `edge_wins`.) A win rate computed from them is 0%, a
 //! reward-to-risk is 0.00x, and a verdict is FAIL — three figures nobody
 //! measured, wearing the shape of three that somebody did. `CLAUDE.md` §4 bans
 //! exactly that.

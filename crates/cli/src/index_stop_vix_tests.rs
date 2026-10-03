@@ -477,7 +477,15 @@ fn index_stop_vix_corrupt_publication_prevents_completed_native_attempt_without_
         .join(crate::identity_hex(&saved.identity()))
         .join("body.bin");
     let native = fs::read(&native_path).map_err(display)?;
-    fs::write(directory(&fixture, &saved).join("complete.bin"), b"torn").map_err(display)?;
+    // A WHOLE receipt with the wrong bytes is corrupt published history and
+    // still refuses; a SHORTER one is an attempt cut short, which D-1760
+    // resumes (`index_stop_vix_publication_cut_short_before_its_receipt_resumes`).
+    let receipt = directory(&fixture, &saved).join("complete.bin");
+    let mut corrupt = fs::read(&receipt).map_err(display)?;
+    if let Some(first) = corrupt.first_mut() {
+        *first ^= 0xff;
+    }
+    fs::write(&receipt, corrupt).map_err(display)?;
     let context = loaded.prepare(limits())?;
     assert!(
         crate::index_stop::produce_catalog(
@@ -737,9 +745,26 @@ fn index_stop_vix_publication_cut_short_before_its_receipt_resumes() -> Result<(
     )?;
     // A kill after `prepare_in_namespace` created the directory, part-way
     // through the body, and before `finish` wrote the receipt (D-1760).
-    for kept in [0, whole.len() / 2] {
+    // The last case is a whole body from a capture that saw another VIX
+    // store, beside a torn receipt: still scratch, never published.
+    let mut other = whole.clone();
+    if let Some(last) = other.last_mut() {
+        *last ^= 1;
+    }
+    for (body, torn) in [
+        (whole.get(..0).unwrap_or_default(), 0),
+        (whole.get(..whole.len() / 2).unwrap_or_default(), 0),
+        (other.as_slice(), 40),
+    ] {
         fs::remove_file(directory.join("complete.bin")).map_err(display)?;
-        fs::write(directory.join("body.bin"), &whole[..kept]).map_err(display)?;
+        fs::write(directory.join("body.bin"), body).map_err(display)?;
+        if torn > 0 {
+            fs::write(
+                directory.join("complete.bin"),
+                receipt.get(..torn).unwrap_or_default(),
+            )
+            .map_err(display)?;
+        }
         let reader = publish(
             &fixture.output,
             &fixture.root,
@@ -748,8 +773,14 @@ fn index_stop_vix_publication_cut_short_before_its_receipt_resumes() -> Result<(
             bounds(),
         )?;
         assert_eq!(reader.image.meta.feed, "zerodha");
-        assert_eq!(fs::read(directory.join("body.bin")).map_err(display)?, whole);
-        assert_eq!(fs::read(directory.join("complete.bin")).map_err(display)?, receipt);
+        assert_eq!(
+            fs::read(directory.join("body.bin")).map_err(display)?,
+            whole
+        );
+        assert_eq!(
+            fs::read(directory.join("complete.bin")).map_err(display)?,
+            receipt
+        );
     }
     Ok(())
 }

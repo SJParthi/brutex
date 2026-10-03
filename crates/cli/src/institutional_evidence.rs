@@ -1630,16 +1630,14 @@ pub(crate) fn reconcile_trade_rows(
                 .checked_add(row.worst)
                 .ok_or_else(|| "chosen-cell gross-win row sum overflowed i64".to_owned())?;
             best_trade = best_trade.max(row.worst);
-            // THE SAME BRACKET TEST `grid::tally_trade` APPLIES -- D-0595.
+            // THE SAME FLOOR `grid::tally_trade` FOLDS: `min(worst)` over the
+            // wins (D-0602, reversing D-0595's bracket test, which was
+            // backwards and inflated the 3:1 rule).
             //
             // This is the THIRD place a `min_win` is folded from trade rows and
             // reconciled against the evaluated cell, and all three must agree
             // exactly or this function returns "chosen-cell trade detail does
-            // not reconcile ...". A win no larger than its own `best - worst`
-            // bracket is a win under one admissible ordering and a loss under
-            // another, so it is not the floor a 3:1 rule may rest on.
-            // `min(worst)` over the wins -- the bracket test this replaces was
-            // backwards and inflated the 3:1 rule. See `grid::tally_trade`. D-0602.
+            // not reconcile ...".
             if row.worst > 0 && (min_win == 0 || row.worst < min_win) {
                 min_win = row.worst;
             }

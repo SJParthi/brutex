@@ -370,17 +370,10 @@ struct TradeAggregatesV2 {
     gross_win: i64,
     gross_loss: i64,
     best_trade: i64,
-    /// The smallest win that EXCEEDED its own execution bracket — D-0595.
-    ///
-    /// # The counter that is deliberately NOT beside it
-    ///
-    /// Zero now carries two meanings — nothing won, or nothing won by more than
-    /// its own pricing uncertainty — and a `scratch_wins` field would separate
-    /// them. It is not added: this struct has `encode_aggregates` and
-    /// `decode_aggregates` at a FIXED width, so a new field is a new file
-    /// version at its own stride under `CLAUDE.md` §4, and §3 rule 8 forbids
-    /// mutating a format in place. The ambiguity is recorded here rather than
-    /// paid for with a format version nothing else needs yet.
+    /// The smallest pessimistic (worst-reading) P&L over the trades with
+    /// `worst > 0` — D-0602, which reverses D-0595's bracket rule. Zero means
+    /// only that no trade won. This doc described the reversed rule until
+    /// Z1-slice23-F2 (D-1763).
     min_win: i64,
     worst_trade: i64,
     max_drawdown: i64,
@@ -1054,41 +1047,9 @@ fn fold_trade_rows(
                 .ok_or(BaseEvidenceRefusalV2::Arithmetic("winning trade count"))?;
             gross_win = checked_i64_add(gross_win, row.worst, "gross win")?;
             best_trade = best_trade.max(row.worst);
-            // A SCRATCH IS NOT THE SMALLEST WIN, AND THE THRESHOLD IS NOT A
-            // NUMBER -- D-0595.
-            //
-            // The operator's rule is `min(win) >= 3x max(loss)`, and `min_win`
-            // took the smallest STRICTLY POSITIVE trade. One trade that gained
-            // a single paisa therefore set it to 1 and collapsed the ratio to
-            // nearly zero, however large the real winners were. That was the
-            // rule working exactly as written and it was still the wrong answer
-            // to the question the rule asks.
-            //
-            // The repair is not a constant. `row.best` and `row.worst` are ONE
-            // trade priced under the best and the worst reading of both legs,
-            // so their difference is that trade's own execution uncertainty. A
-            // gain no larger than that bracket is a win only under one of two
-            // equally admissible readings -- flip the intra-bar ordering and it
-            // is a loss. It cannot be the evidence a 3:1 rule rests on.
-            //
-            // So a win counts toward `min_win` when it EXCEEDS its own bracket,
-            // and is a scratch otherwise. Self-scaling across instruments and
-            // rungs, measured rather than declared, and with no parameter that
-            // can be set wrongly -- which is §6's argument, honoured by having
-            // nothing to set.
-            //
-            // NOT the direction `Rules::fills_hold` takes. That rule demands
-            // `optimistic >= 2 * pessimistic` -- that the uncertainty be LARGE
-            // beside the profit. This demands the profit be large beside the
-            // uncertainty. They are opposite tests and only one of them is
-            // about evidence.
-            //
-            // `wins`, `gross_win`, `best_trade` and every streak are untouched:
-            // a scratch really did win, and `TradeAggregatesV2::validate`
-            // requires `losses == trades - wins`. Only the question "what is
-            // the smallest win this rule may rest on" changes.
-            // `min(worst)` over the wins -- the bracket test this replaces was
-            // backwards and inflated the 3:1 rule. See `grid::tally_trade`. D-0602.
+            // `min(worst)` over the wins. D-0595's bracket test was backwards
+            // and inflated the 3:1 rule; D-0602 reversed it. See
+            // `grid::tally_trade`.
             if row.worst > 0 && (min_win == 0 || row.worst < min_win) {
                 min_win = row.worst;
             }

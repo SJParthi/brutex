@@ -99,6 +99,33 @@ const ENTRY_DELAY_MINUTES: u16 = 1;
 const FORCED_EXIT_IST_MINUTE: u16 = 15 * 60 + 10;
 
 const _: () = assert!(EXECUTION_PARAMETER_STRIDE == 648);
+
+/// The scalar-parameter stride before the evaluation-spec fingerprint widened
+/// 155 -> 163 (the charter's ninth non-regular day).
+///
+/// **The record grew IN PLACE: magic and version stayed `BRUTXEP1` / 1**, which
+/// `CLAUDE.md` §3 rule 8 forbids and which cannot now be undone without
+/// stranding the 648-byte files this build has written under that header
+/// (P1-16-03, D-1763). What separates the two geometries is the header's own
+/// stride field, so a 640-byte file is refused BY NAME here rather than as an
+/// anonymous stride mismatch: its records carry the eight-day calendar's
+/// fingerprint, so they name runs no current build can reproduce, and there is
+/// nothing to read them for.
+pub(crate) const RETIRED_PARAMETER_STRIDE: u32 = 640;
+
+/// The sentence for a parameter file whose header names the retired stride,
+/// or `None` for any other mismatch.
+pub(crate) fn retired_parameter_stride(read: u32, expected: usize) -> Option<String> {
+    (read == RETIRED_PARAMETER_STRIDE && expected == EXECUTION_PARAMETER_STRIDE).then(|| {
+        format!(
+            "holds {RETIRED_PARAMETER_STRIDE}-byte execution-parameter records, written \
+             before the evaluation-spec fingerprint widened from 155 to \
+             {EVALUATION_SPEC_FINGERPRINT_V1_LEN} bytes; they name the eight-day calendar \
+             and are retired. Move the file aside and rerun to rebuild it at \
+             {EXECUTION_PARAMETER_STRIDE} bytes"
+        )
+    })
+}
 const _: () = assert!(EXECUTION_PERCENTILE_STRIDE == 128);
 const _: () = assert!(EXECUTION_CAPABILITY_STRIDE == 320);
 const _: () = assert!(EXECUTION_COMPLETION_STRIDE == 416);
@@ -1347,7 +1374,8 @@ pub struct ExecutionCapabilityLedger {
 }
 
 impl ExecutionCapabilityLedger {
-    /// Scalar parameter records (640-byte stride).
+    /// Scalar parameter records (648-byte stride; 640 before the fingerprint
+    /// widened, which [`retired_parameter_stride`] names).
     #[must_use]
     pub fn parameter_path(root: &Path) -> PathBuf {
         root.join("results").join("execution-parameters-v1.bin")
@@ -2338,7 +2366,11 @@ fn check_record_file(
     if decoder.u32()? != u32::try_from(HEADER_BYTES_USIZE).unwrap_or(u32::MAX) {
         return Err(format!("{} has a different header width", path.display()));
     }
-    if decoder.u32()? != u32::try_from(stride).unwrap_or(u32::MAX) {
+    let read_stride = decoder.u32()?;
+    if read_stride != u32::try_from(stride).unwrap_or(u32::MAX) {
+        if let Some(why) = retired_parameter_stride(read_stride, stride) {
+            return Err(format!("{} {why}", path.display()));
+        }
         return Err(format!(
             "{} has a different fixed record stride",
             path.display()
@@ -3635,6 +3667,40 @@ mod tests {
         value.parameter_id = value.derived_id().expect("test parameter identity");
         value.validate().expect("valid test parameters");
         value
+    }
+
+    /// A parameter file whose header names the retired 640-byte stride is
+    /// refused BY NAME, by the writer and the reader alike, and is left as it
+    /// was (P1-16-03, D-1763). Any other stride keeps the generic refusal.
+    #[test]
+    fn a_retired_640_byte_parameter_file_is_refused_by_name_and_kept() {
+        let root = root("retired-640");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("results")).expect("results");
+        let path = ExecutionCapabilityLedger::parameter_path(&root);
+        let mut header = Vec::with_capacity(HEADER_BYTES_USIZE + 640);
+        header.extend_from_slice(&PARAMETER_MAGIC);
+        header.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        header.extend_from_slice(&24_u32.to_le_bytes());
+        header.extend_from_slice(&640_u32.to_le_bytes());
+        header.extend_from_slice(&[0; 4]);
+        header.extend_from_slice(&[7; 640]);
+        std::fs::write(&path, &header).expect("a v1 file at the old stride");
+        for opened in [
+            ExecutionCapabilityLedger::open(&root).err(),
+            ExecutionCapabilityLedger::open_read(&root).err(),
+        ] {
+            let why = opened.expect("a retired stride is refused");
+            assert!(
+                why.contains("holds 640-byte execution-parameter records"),
+                "{why}"
+            );
+            assert!(why.contains("rebuild it at 648 bytes"), "{why}");
+        }
+        assert_eq!(std::fs::read(&path).expect("kept"), header);
+        assert!(retired_parameter_stride(640, EXECUTION_PERCENTILE_STRIDE).is_none());
+        assert!(retired_parameter_stride(641, EXECUTION_PARAMETER_STRIDE).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn root(tag: &str) -> PathBuf {

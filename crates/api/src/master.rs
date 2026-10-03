@@ -272,6 +272,7 @@ impl Columns {
         // happen here — and a branch no test can enter is a branch nobody has
         // checked. `option_side` chains in only for the vendor that has one.
         [
+            self.vendor_id,
             self.segment,
             self.trading_symbol,
             self.instrument_type,
@@ -926,13 +927,34 @@ mod tests {
         // can ever cover it.
         let reason = &got.errors[0].1;
         assert!(
-            reason.contains("row has 5 field(s)") && reason.contains("run to 9"),
+            reason.contains("row has 5 field(s)") && reason.contains("run to 10"),
             "got {reason}"
         );
         assert!(
             got.skipped.is_empty(),
             "a truncated share is not a routine decline: {:?}",
             got.skipped
+        );
+    }
+
+    #[test]
+    fn a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall() {
+        // `widest` once left the vendor-id column out, so a row cut just
+        // before a right-most `groww_symbol` slipped the gate, decoded an
+        // empty id, and was filed as a routine skip rather than unreadable.
+        let body = "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,expiry_date,strike_price,groww_symbol\nNSE,CASH,,CHOLAFIN,EQ,EQ,INE121A01024,,\n";
+        let got = load(&tmp("cut-vendor-id", body), Vendor::Groww).expect("loads");
+        assert!(got.kept.is_empty());
+        assert!(
+            got.skipped.is_empty(),
+            "not a routine skip: {:?}",
+            got.skipped
+        );
+        assert_eq!(got.errors.len(), 1);
+        let reason = &got.errors[0].1;
+        assert!(
+            reason.contains("row has 9 field(s)") && reason.contains("run to 10"),
+            "got {reason}"
         );
     }
 
@@ -956,7 +978,7 @@ mod tests {
             vec![
                 ("malformed instrument identifier", 2, 2),
                 (
-                    "row has 2 field(s); the columns this vendor needs run to 9",
+                    "row has 2 field(s); the columns this vendor needs run to 10",
                     1,
                     3
                 ),

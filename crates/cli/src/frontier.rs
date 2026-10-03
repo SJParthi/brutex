@@ -178,7 +178,7 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 
 /// Bytes per row.
 ///
-/// 144, and the last eight are the seal. The layout is in [`Row::to_bytes`], and
+/// 280, and the last eight are the seal (format version 7; this doc said 144). The layout is in [`Row::to_bytes`], and
 /// `the_stride_is_exactly_what_the_writer_writes` asserts this constant against
 /// what that function actually fills rather than against a hand count.
 pub const STRIDE: u64 = 280;
@@ -1881,7 +1881,7 @@ fn check_header(file: &mut File, path: &Path, len: u64) -> Result<(), Refusal> {
 mod tests {
     use super::{
         DIRECTION_AT, Frontier, HEADER_BYTES, HEADER_RESERVED, MAGIC, PAYLOAD_BYTES, ROW_RESERVED,
-        Row, SEAL_BYTES, STRIDE, STRIDE_BYTES, seal_of,
+        Row, SEAL_BYTES, STRIDE, STRIDE_BYTES, VERSION, seal_of,
     };
 
     fn root(tag: &str) -> std::path::PathBuf {
@@ -2020,6 +2020,31 @@ mod tests {
     /// criteria — average win and average loss — were structurally always zero
     /// without those two sums, since `Cell::avg_win` is `gross_win / wins` and
     /// `..Default::default()` had been supplying a zero for it.
+    /// `docs/02-store-format.md` §13 states the version, the stride and the
+    /// seal offset this build writes. It described version 4 (272-byte rows,
+    /// seal at 264) three versions after the code moved (P1-16-02, D-1763).
+    #[test]
+    fn the_store_format_doc_states_the_frontier_this_build_writes() {
+        let doc = include_str!("../../../docs/02-store-format.md");
+        let section = doc
+            .split_once("## 13. Ranked frontier")
+            .expect("the frontier section exists")
+            .1;
+        let section = section.split_once("\n## ").map_or(section, |(own, _)| own);
+        assert!(section.starts_with(&format!(" — `results/frontier.bin`, version {VERSION}\n")));
+        assert!(section.contains(&format!("little-endian version `{VERSION}` at `8..12`")));
+        assert!(section.contains(&format!("Each row is {STRIDE} bytes.")));
+        assert!(section.contains(&format!(
+            "| {PAYLOAD_BYTES} | {SEAL_BYTES} | first eight BLAKE3 bytes over `0..{PAYLOAD_BYTES}` |"
+        )));
+        assert!(section.contains(&format!("| {DIRECTION_AT} | 1 | direction:")));
+        assert!(section.contains(&format!(
+            "| {} | {} | `min_fill_headroom_bp`, `i32`",
+            ROW_RESERVED.start,
+            ROW_RESERVED.len()
+        )));
+    }
+
     #[test]
     fn the_stride_is_exactly_what_the_writer_writes() {
         //           identity  rank  mask      hits/n/mean/t/payoff/wins

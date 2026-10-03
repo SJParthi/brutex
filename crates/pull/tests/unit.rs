@@ -7404,6 +7404,26 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
         "version 1's magic keeps meaning version 1"
     );
     assert_eq!(MAGIC_V2, *b"BRUTEXM2");
+    assert_eq!(
+        Layout::V3.magic(),
+        MAGIC_V2,
+        "version 3 keeps the geometry's magic"
+    );
+
+    // AND THE DOCUMENT SAYS VERSION 3 (P1-16-01, D-1763): §11 described only
+    // versions 1 and 2 and said this build wrote version 2.
+    let doc = include_str!("../../../docs/02-store-format.md");
+    let census = doc
+        .split_once("## 11. The census file")
+        .expect("§11 exists")
+        .1
+        .split_once("\n## 12.")
+        .expect("§12 follows")
+        .0;
+    assert!(census.starts_with(" — `BRUTEXM`, versions 1, 2 and 3"));
+    assert!(census.contains("This build **writes** version 3 only"));
+    assert!(census.contains("| 80 | 24 | `contract` |"));
+    assert!(census.contains("| 104 | 1 | `contract_len` |"));
 
     // The header slot's fields sit where the document puts them, and the
     // stride is READ from the file rather than assumed.

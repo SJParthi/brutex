@@ -1211,11 +1211,14 @@ async fn instruments_json(
     let (censuses, entries) = census_now(&site);
     // ONE PASS OVER THE CENSUS, NOT ONE PER INSTRUMENT. See `bars_by_symbol`.
     let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), entries.iter());
-    let bars_of =
-        |sym: brutex_core::symbol::Symbol| -> u64 { held.get(&sym).copied().unwrap_or(0) };
+    let bars_of = |key: &brutex_core::instrument::InstrumentKey| -> u64 {
+        held.get(&(key.exchange, key.segment, key.underlying))
+            .copied()
+            .unwrap_or(0)
+    };
     listing.sort_unstable_by_key(|(key, _)| {
         (
-            bars_of(key.underlying) == 0,
+            bars_of(key) == 0,
             key.kind != brutex_core::instrument::Kind::Index,
             key.underlying,
         )
@@ -1223,7 +1226,7 @@ async fn instruments_json(
 
     let mut out = String::from("[");
     for (n, (key, entry)) in listing.into_iter().enumerate() {
-        let bars = bars_of(key.underlying);
+        let bars = bars_of(key);
         // THE TRACKED UNIVERSE ONLY — the same predicate the page uses.
         //
         // This iterated the whole master and shipped 2,780 listings while the
@@ -1350,10 +1353,19 @@ async fn instruments_json(
 /// other citation in this file already avoids.
 ///
 /// The iterator is taken generically for that test: it counts what it yields.
+///
+/// # What one count is
+///
+/// The ONE-MINUTE SPOT bars of one listing: keyed by exchange, segment and
+/// symbol, with every contract series and every other rung left out. It was
+/// keyed by the symbol alone, so the NIFTY index row summed its 1-minute and
+/// 1-day bars and every stored NIFTY option, an index whose only data was
+/// options showed as held and charted nothing, and `NSE-CASH-X` and
+/// `BSE-CASH-X` showed one number (Z1-slice14-F1, D-1762).
 fn bars_by_symbol<'a>(
     census: Option<&census::VendorCensus>,
     entries: impl IntoIterator<Item = &'a (census::Series, store::path::YearMonth)>,
-) -> std::collections::HashMap<brutex_core::symbol::Symbol, u64> {
+) -> std::collections::HashMap<ListingKey, u64> {
     // PRE-SIZED FROM THE ENTRIES, not from the census. Gate 11 rule 3 refuses a
     // map that grows by rehashing, and this function exists to remove a cost —
     // it replaced an O(entries x universe) nested scan, so a map that rehashes
@@ -1371,12 +1383,24 @@ fn bars_by_symbol<'a>(
         return held;
     };
     for (series, month) in entries {
+        if series.contract.is_some() || series.timeframe != store::path::Timeframe::MINUTE_1 {
+            continue;
+        }
         if let Some(rows) = census.rows_for(&series.at(*month)) {
-            *held.entry(series.symbol).or_insert(0) += rows;
+            *held
+                .entry((series.exchange, series.segment, series.symbol))
+                .or_insert(0) += rows;
         }
     }
     held
 }
+
+/// The part of an instrument key that names its spot series in the store.
+type ListingKey = (
+    brutex_core::instrument::Exchange,
+    brutex_core::instrument::Segment,
+    brutex_core::symbol::Symbol,
+);
 
 /// The sentence every route answers with when `feed=` names a vendor this
 /// build cannot read.
@@ -3312,6 +3336,29 @@ impl WindowAsk {
                     .map_err(|_| format!("{raw:?} is not a whole number for {key:?}"))
             }
         };
+        // ABSENT MEANS DESCENDING, which is what the grid opens on and what a
+        // reader of a store asks for first: the newest row. Anything else that
+        // is not `asc` or `desc` is refused: `dir=ASC` once answered newest
+        // first with a 200 (Z1-slice14-F3, D-1762).
+        let desc = match param(query, "dir").as_str() {
+            "" | "desc" => true,
+            "asc" => false,
+            other => {
+                return Err(format!(
+                    "{other:?} is not a direction. Accepted: asc, desc."
+                ));
+            }
+        };
+        // Same rule: `extremes=yes` once dropped the extremes silently.
+        let want_extremes = match param(query, "extremes").as_str() {
+            "" | "0" | "false" => false,
+            "1" | "true" => true,
+            other => {
+                return Err(format!(
+                    "{other:?} is not an extremes flag. Accepted: 0, 1, false, true."
+                ));
+            }
+        };
         Ok(Self {
             vendor,
             timeframe,
@@ -3319,12 +3366,10 @@ impl WindowAsk {
             from,
             to,
             sort,
-            // ABSENT MEANS DESCENDING, which is what the grid opens on and what
-            // a reader of a store asks for first: the newest row.
-            desc: !matches!(param(query, "dir").as_str(), "asc"),
+            desc,
             offset: number("offset", 0)?,
             limit: number("limit", bars::PAGE_BARS)?,
-            want_extremes: matches!(param(query, "extremes").as_str(), "1" | "true"),
+            want_extremes,
         })
     }
 }
@@ -4204,12 +4249,14 @@ const fn can_be_rebased(segment: brutex_core::instrument::Segment) -> bool {
 /// price — gives 2,147,490,000 bp, past `i32::MAX`. Proven by
 /// `api::server::basis_points_do_not_fit_i32_and_an_ordinary_price_proves_it`.
 ///
-/// # Preconditions, carried by the type rather than by a comment
+/// # No precondition on the sign
 ///
-/// Both arguments come from `pull::manifest::Closes::paisa`, and
-/// `Closes::known` refuses every negative, so both are in `0..=i64::MAX`. That
-/// is what makes the subtraction below unable to overflow, and it is why there
-/// is no `checked_sub` arm no input could ever enter.
+/// The manifest caller passes `pull::manifest::Closes::paisa`, which refuses
+/// every negative, but `bars::with_change` passes a raw stored close or open
+/// interest, and a store read does not validate prices (an unsealed month is
+/// read with no checksum). One corrupt bar of `i64::MIN` made the subtraction
+/// overflow, and the release profile aborts on that, taking the whole server
+/// down from one GET (CE-2, D-1761). The subtraction is therefore checked.
 ///
 /// # Errors
 ///
@@ -4221,9 +4268,9 @@ pub(crate) fn basis_points(first_paisa: i64, last_paisa: i64) -> Result<i64, Unk
     if first_paisa <= 0 {
         return Err(Unknown::BaseNotPositive);
     }
-    // Both operands are in `0..=i64::MAX`, so this is in `-i64::MAX ..=
-    // i64::MAX` and cannot overflow. See the precondition above.
-    let delta = last_paisa - first_paisa;
+    let Some(delta) = last_paisa.checked_sub(first_paisa) else {
+        return Err(Unknown::Overflow);
+    };
     let Some(scaled) = delta.checked_mul(10_000) else {
         return Err(Unknown::Overflow);
     };
@@ -5079,13 +5126,10 @@ pub const HTTP_LIVE: &str = "THE HTTP PATH IS WIRED TO THIS ROUTE. The credentia
      anything is spent, the feed's rate budget is charged through \
      pull::rate::Governor, held per feed on the site so its buckets survive \
      between requests — a request that will not be issued costs no credential \
-     read and no socket. WHAT IS STILL MISSING, so this sentence does not \
-     overstate itself the way its predecessors did: a window longer than the \
-     vendor's per-request cap is still sent whole rather than split, so a \
-     multi-year range is refused by the vendor or silently truncated by it \
-     (pull::session::split_window computes the chunks and has no caller yet); \
-     a window that stores nothing still reports STORED; and the expired-F&O \
-     endpoints are not modelled at all.";
+     read and no socket. A window longer than the vendor's per-request cap is \
+     split by pull::session::split_window into chunks that never cross a month, \
+     and expired F&O contracts are asked for through pull::rolling. A window \
+     that stores no bar is receipted STORED NOTHING, never STORED.";
 
 /// What the page says when the broker is NOT reachable from this process.
 ///
@@ -7098,9 +7142,12 @@ fn note_run_finished(out: &BrokerRun, balanced: bool, claimed: Option<u64>) {
 ///
 /// # Why it lives here and not in `crates/pull`
 ///
-/// `crates/pull` declares no telemetry dependency and does not gain one: that
-/// would add an edge `CLAUDE.md` §5's graph does not carry. The event is
-/// emitted at the `api` layer, beside the two that were already here.
+/// `crates/pull` does depend on `telemetry` (its `Cargo.toml`, and the
+/// `pull -> telemetry` arrow in `CLAUDE.md` §5), but `pull::ingest` hands the
+/// failed member back as a value rather than reporting it, and the route that
+/// knows the feed, rung and month the operator asked for is this one, so the
+/// event is emitted here. (This once said `pull` had no telemetry dependency;
+/// Z1-slice14-F4, D-1762.)
 fn note_member_failure(
     failure: &pull::ingest::Failure,
     month: &str,
@@ -16401,9 +16448,10 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         )
         // THE MASTERS, SEPARATE FROM THE BARS. `/pull/*` spends the vendor's
         // quota per instrument-month; this moves four files, three of them free
-        // public CDN downloads. `Site::load` parses them once at startup with
-        // no reload path, so the status route answers whether a restart is
-        // required rather than pretending one is not. D-0308.
+        // public CDN downloads. A refresh re-parses them in place through
+        // `Site::reparse`; the status route answers whether a restart is still
+        // required (a refused reparse, or a file changed by another hand).
+        // D-0308, D-1762.
         // AND THE PAGE THAT REACHES THEM. D-0308 shipped the two routes below
         // and no way to reach either: refreshing a master required having read
         // this table. D-0312.
@@ -21308,8 +21356,13 @@ mod tests {
             );
             for name in symbols {
                 let symbol = brutex_core::symbol::Symbol::new(name).expect("a symbol");
+                let key = (
+                    brutex_core::instrument::Exchange::Nse,
+                    brutex_core::instrument::Segment::Index,
+                    symbol,
+                );
                 assert_eq!(
-                    held.get(&symbol),
+                    held.get(&key),
                     Some(&(4 * ONE_PASS_ROWS)),
                     "{name} holds four months of {ONE_PASS_ROWS} rows"
                 );
@@ -21341,6 +21394,49 @@ mod tests {
                 "and it is still one visit per entry when every probe misses"
             );
         }
+    }
+
+    /// One count is one listing's one-minute SPOT bars: an option on the same
+    /// symbol, the same symbol's daily rung, and the same symbol on another
+    /// exchange each stay out of it (Z1-slice14-F1, D-1762).
+    #[test]
+    fn an_instrument_counts_only_its_own_one_minute_spot_bars() {
+        use brutex_core::instrument::{Contract, Exchange, Segment};
+        let symbol = brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol");
+        let spot = census::Series {
+            contract: None,
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol,
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let option = census::Series {
+            contract: Some(Contract::parse("2026-01-29-2500000-CE").expect("a contract")),
+            segment: Segment::Fno,
+            ..spot
+        };
+        let daily = census::Series {
+            timeframe: store::path::Timeframe::DAY_1,
+            ..spot
+        };
+        let bse = census::Series {
+            exchange: Exchange::Bse,
+            ..spot
+        };
+        let at = month_of(2026, 1);
+        let entries = [(spot, at), (option, at), (daily, at), (bse, at)];
+        let census = one_pass_census(&entries);
+        let held = bars_by_symbol(Some(&census), entries.iter());
+        assert_eq!(
+            held.get(&(Exchange::Nse, Segment::Index, symbol)),
+            Some(&ONE_PASS_ROWS)
+        );
+        assert_eq!(
+            held.get(&(Exchange::Bse, Segment::Index, symbol)),
+            Some(&ONE_PASS_ROWS)
+        );
+        assert_eq!(held.get(&(Exchange::Nse, Segment::Fno, symbol)), None);
+        assert_eq!(held.len(), 2, "{held:?}");
     }
 
     /// The rows every fixture month in [`one_pass_census`] is recorded with.
@@ -21898,7 +21994,7 @@ mod tests {
         assert!(text.contains("groww: 1 kept"), "{text}");
         assert!(text.contains("1 unreadable"), "{text}");
         assert!(
-            text.contains("row has 5 field(s); the columns this vendor needs run to 9"),
+            text.contains("row has 5 field(s); the columns this vendor needs run to 10"),
             "the shortfall is named: {text}"
         );
         assert!(
@@ -31812,6 +31908,32 @@ mod percentage_tests {
             "{over} is past i32::MAX = {}, from a base of ₹0.01 and a close of ₹2,147.50",
             i32::MAX
         );
+    }
+
+    /// `HTTP_LIVE` said chunking had "no caller yet" and expired F&O was "not
+    /// modelled at all" after both landed (Z1-slice14-F2, D-1762). Each claim
+    /// it now makes names a path this test reads.
+    #[test]
+    fn the_live_broker_banner_names_only_what_exists() {
+        assert!(!HTTP_LIVE.contains("no caller yet"));
+        assert!(!HTTP_LIVE.contains("not modelled"));
+        let me = include_str!("server.rs");
+        assert!(me.contains("pull::session::split_window(asked_window"));
+        let pull = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pull/src/lib.rs");
+        let pull = std::fs::read_to_string(pull).expect("crates/pull/src/lib.rs");
+        assert!(pull.contains("pub mod rolling"));
+        assert!(include_str!("audit.rs").contains("Self::Empty => \"STORED NOTHING\""));
+    }
+
+    /// A corrupt stored bar reaches `basis_points` raw through
+    /// `bars::with_change`, so a delta that leaves `i64` is a refusal and
+    /// never the abort it was (CE-2, D-1761).
+    #[test]
+    fn a_corrupt_close_past_i64_is_an_overflow_refusal_not_an_abort() {
+        assert_eq!(basis_points(100, i64::MIN), Err(Unknown::Overflow));
+        assert_eq!(basis_points(1, i64::MIN + 1), Err(Unknown::Overflow));
+        assert_eq!(basis_points(2, i64::MIN + 2), Err(Unknown::Overflow));
+        assert_eq!(basis_points(100, -100), Ok(-20_000));
     }
 
     /// **NO EQUITY RENDERS A NUMBER WHILE NO THRESHOLD IS SOURCED.**

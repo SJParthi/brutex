@@ -4875,7 +4875,7 @@
   /** Why one bar's percentage is not a number. One code, one sentence. */
   const BAR_WHY = {
     first_bar_in_file:
-      'this is the first bar in its month file, so the close it would be measured against is in the previous month - and this request read one month. It is not a zero.',
+      'this is the first bar of the earliest month this request read, so the close it would be measured against is in a month the request did not read. It is not a zero.',
     previous_close_zero:
       'the previous close is zero paisa, and a ratio against zero is not a number.',
     oi_null:

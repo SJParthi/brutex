@@ -2982,7 +2982,13 @@ fn check_record_file(
             path.display()
         ));
     }
-    if decoder.u32()? != expected_stride {
+    let read_stride = decoder.u32()?;
+    if read_stride != expected_stride {
+        if let Some(why) =
+            crate::execution_capability::retired_parameter_stride(read_stride, stride)
+        {
+            return Err(format!("{} {why}", path.display()));
+        }
         return Err(format!(
             "{} has a different execution-disposition record stride",
             path.display()

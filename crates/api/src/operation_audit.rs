@@ -241,7 +241,14 @@ fn parse(query: &str) -> Result<Asked, String> {
         if slot.is_some() {
             return Err("duplicate audit query field".to_owned());
         }
-        *slot = Some(integer(raw)?);
+        let value = integer(raw)?;
+        // Every durable id is above `ID_BASE`; one at or below it can never
+        // name a record, so it is the caller's error (400), not the 503 the
+        // journal's own refusal would map to (Z1-slice13-F3, D-1762).
+        if key != "limit" && value <= journal::ID_BASE {
+            return Err("audit IDs must lie in the durable invocation namespace".to_owned());
+        }
+        *slot = Some(value);
     }
     if let Some(id) = id {
         if before.is_some() || limit.is_some() {

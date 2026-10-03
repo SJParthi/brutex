@@ -387,18 +387,10 @@ pub(crate) fn publish(
     // directory exists from the first step of `prepare_in_namespace`, so a run
     // cut short before `finish` must fall through and resume rather than be
     // read as published and refused on every rerun (D-1760).
-    match std::fs::symlink_metadata(directory.join("complete.bin")) {
-        Ok(_) => {
-            let saved = Reader::open(root, identity, pin, bounds)?;
-            if saved.image.meta.feed != feed.as_str() {
-                return Err("saved VIX reference feed differs from the native source".into());
-            }
-            return Ok(saved);
-        }
-        Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
-        Err(why) => return Err(display(why)),
+    if persistence::committed(&directory)? {
+        return saved(root, identity, pin, feed, bounds);
     }
-    catalog.with_current(|| {
+    let published = catalog.with_current(|| {
         let image = capture(store, feed, catalog, bounds)?;
         let body = codec::encode(&image, bounds.bytes)?;
         require_read_cost(
@@ -411,8 +403,28 @@ pub(crate) fn publish(
         pending.verify_body(digest, body.len() as u64)?;
         pending.finish(lookup, digest, body.len() as u64)?;
         Ok(())
-    })?;
-    Reader::open(root, identity, pin, bounds)
+    });
+    match published {
+        Ok(()) => Reader::open(root, identity, pin, bounds),
+        // A concurrent publisher of the same catalog finished first, and its
+        // capture saw a different VIX store: its receipt is the answer.
+        Err(_) if persistence::committed(&directory)? => saved(root, identity, pin, feed, bounds),
+        Err(why) => Err(why),
+    }
+}
+
+fn saved(
+    root: &Path,
+    identity: [u8; 32],
+    pin: [u8; 32],
+    feed: Vendor,
+    bounds: Bounds,
+) -> Result<Reader, String> {
+    let saved = Reader::open(root, identity, pin, bounds)?;
+    if saved.image.meta.feed != feed.as_str() {
+        return Err("saved VIX reference feed differs from the native source".into());
+    }
+    Ok(saved)
 }
 
 #[derive(Clone, Copy)]

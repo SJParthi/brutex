@@ -3250,10 +3250,13 @@ the rejected design. Gate 12 flagged it as an unproven cost claim, which was
 correct — the resolution is the `UNVERIFIED` marker the gate provides, not a
 fabricated benchmark.
 
-**What is bounded, and is not unverified:** `note_unreadable_records` has exactly
-one call site — `read_page`, outside every loop — returns on its first line when
-`faults` is empty, and otherwise emits once. At most one event per request,
-whatever the file does. That is a structural property of the call graph, stated
+**What is bounded, and is not unverified:** `note_unreadable_records` is called
+from exactly two places — `page` and `window` — each once per request and outside
+every loop over files or records; it returns on its first line when `faults` is
+empty, and otherwise emits once. At most one event per request, whatever the
+files do. (This paragraph used to name a `read_page` that does not exist in
+`bars.rs`, while the call sat inside `slots`, which a window runs once per month
+file — up to 240 events for one request. Z1-slice11-F3, D-1762.) That is a structural property of the call graph, stated
 here so the `UNVERIFIED` above cannot be read as "the cost of this function is
 unknown". It is not. Only the cost of the alternative is, and that alternative
 does not exist.

@@ -1,5 +1,11 @@
 # Handover — the bar store seals a checksum it never verifies
 
+> **RESOLVED — kept as history, not as a current defect.** Every bar read now
+> verifies its block: `BarFile::read_record` → `verify_block_of`
+> (`crates/store/src/file.rs`), which reads the `.crc` sidecar and runs the body
+> of `block::verify`. Everything below describes the store as it was on 23 Aug
+> 2026. P1-15-07, D-1764.
+
 **For the session that owns `crates/store`.** Measured 23 Aug 2026 on branch `feat/pull`.
 Nothing in `crates/store` was edited to produce this; it is a report, not a change.
 

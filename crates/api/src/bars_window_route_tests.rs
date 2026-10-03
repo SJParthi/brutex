@@ -241,8 +241,19 @@ async fn window_pages_preserve_integer_values_month_gaps_and_change_provenance()
     assert!(page["bars"][0]["chg_why"].is_null());
     assert_eq!(page["bars"][0]["oichg_why"], "oi_null_before");
     assert_eq!(page["bars"][1]["c"], 200);
-    assert!(page["bars"][1]["chg"].is_null());
-    assert_eq!(page["bars"][1]["chg_why"], "first_bar_in_file");
+    // June's first bar stands behind May's last, read in the same request
+    // (Z1-slice11-F4, D-1762), so it has a change and May's zero OI names why
+    // the OI change has none.
+    assert_eq!(
+        page["bars"][1]["chg"],
+        crate::server::basis_points(110, 200).expect("a change")
+    );
+    assert!(page["bars"][1]["chg_why"].is_null());
+    assert_eq!(page["bars"][1]["oichg_why"], "previous_oi_zero");
+    let (_, opening) = fixture.get("dir=asc&offset=0&limit=1").await;
+    assert_eq!(opening["bars"][0]["c"], 100);
+    assert!(opening["bars"][0]["chg"].is_null());
+    assert_eq!(opening["bars"][0]["chg_why"], "first_bar_in_file");
     let (_, scan) = fixture.get("sort=c&extremes=true&limit=2").await;
     assert_eq!(scan["scanned"], true);
     assert_eq!(scan["extremes"]["range"], 80);
@@ -398,5 +409,36 @@ async fn window_malformed_inputs_refuse_instead_of_answering_another_page() {
                 .as_str()
                 .is_some_and(|reason| !reason.is_empty())
         );
+    }
+}
+
+/// An unknown `dir` or `extremes` is refused and named, never read as the
+/// default: `dir=ASC` once answered newest first with 200, and `extremes=yes`
+/// dropped the extremes silently (Z1-slice14-F3, D-1762).
+#[test]
+fn an_unknown_direction_or_extremes_flag_is_refused_not_defaulted() {
+    let base = "feed=zerodha&from=2025-01&to=2025-02&timeframe=1min&sort=ts";
+    for (extra, desc, extremes) in [
+        ("", true, false),
+        ("&dir=desc", true, false),
+        ("&dir=asc", false, false),
+        ("&extremes=0", true, false),
+        ("&extremes=false", true, false),
+        ("&extremes=1", true, true),
+        ("&extremes=true", true, true),
+    ] {
+        let ask = WindowAsk::parse(&format!("{base}{extra}")).expect(extra);
+        assert_eq!((ask.desc, ask.want_extremes), (desc, extremes), "{extra}");
+    }
+    for (extra, named) in [
+        ("&dir=ASC", "\"ASC\" is not a direction"),
+        ("&dir=ascending", "\"ascending\" is not a direction"),
+        ("&extremes=yes", "\"yes\" is not an extremes flag"),
+        ("&extremes=2", "\"2\" is not an extremes flag"),
+    ] {
+        let why = WindowAsk::parse(&format!("{base}{extra}"))
+            .err()
+            .expect("an unknown value must be refused");
+        assert!(why.contains(named), "{extra}: {why}");
     }
 }

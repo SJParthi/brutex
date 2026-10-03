@@ -116,7 +116,20 @@ pub(crate) fn prepare_in_namespace(
     if owner.metadata().map_err(display)?.len() != 0 {
         return Err("Boolean candidate owner contains unexpected bytes".to_owned());
     }
-    write_or_equal(&directory_path.join("body.bin"), body)?;
+    let body_path = directory_path.join("body.bin");
+    if committed(&directory_path)? {
+        write_or_equal(&body_path, body)?;
+    } else {
+        // No whole receipt: nothing here was ever published, and this caller
+        // holds the owner lock, so a torn receipt and any earlier body are
+        // scratch from an attempt that was cut short. Rewrite them rather
+        // than compare: a capture that reads a growing store (the VIX
+        // companion) is not byte-identical on retry, and refusing would
+        // wedge the identity for good (D-1760).
+        discard(&directory_path.join("complete.bin"))?;
+        discard(&body_path)?;
+        write_or_equal(&body_path, body)?;
+    }
     File::open(&directory_path)
         .map_err(display)?
         .sync_all()
@@ -133,6 +146,30 @@ pub(crate) fn prepare_in_namespace(
     })
 }
 
+/// The length of a whole completion receipt.
+const RECEIPT_BYTES: usize = 112;
+const RECEIPT_LEN: u64 = RECEIPT_BYTES as u64;
+
+/// Whether `directory` holds a whole completion receipt, so its body is
+/// published history. A missing or shorter receipt is an attempt that was
+/// cut short before `finish` returned.
+pub(crate) fn committed(directory: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(directory.join("complete.bin")) {
+        Ok(meta) => Ok(meta.len() == RECEIPT_LEN),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(why) => Err(display(why)),
+    }
+}
+
+/// Removes an uncommitted file. A symbolic link is unlinked, never followed.
+fn discard(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(why) => Err(display(why)),
+    }
+}
+
 pub(super) fn verify(
     directory: &Path,
     identity: [u8; 32],
@@ -141,7 +178,7 @@ pub(super) fn verify(
     completion: [u8; 32],
 ) -> Result<(), String> {
     let expected = receipt(identity, payload, bytes);
-    let before = read_exact(&directory.join("complete.bin"), 112)?;
+    let before = read_exact(&directory.join("complete.bin"), RECEIPT_LEN)?;
     if before != expected || hash(&before) != completion {
         return Err("Boolean completion receipt changed".to_owned());
     }
@@ -149,7 +186,7 @@ pub(super) fn verify(
     if body.len() as u64 != bytes || hash(&body) != payload {
         return Err("Boolean candidate body no longer matches completion".to_owned());
     }
-    let after = read_exact(&directory.join("complete.bin"), 112)?;
+    let after = read_exact(&directory.join("complete.bin"), RECEIPT_LEN)?;
     if before != after {
         return Err("Boolean completion changed during body verification".to_owned());
     }
@@ -157,7 +194,7 @@ pub(super) fn verify(
 }
 
 fn receipt(identity: [u8; 32], payload: [u8; 32], bytes: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(112);
+    let mut out = Vec::with_capacity(RECEIPT_BYTES);
     out.extend_from_slice(b"BRBLCM01");
     out.extend_from_slice(&identity);
     out.extend_from_slice(&payload);
@@ -186,40 +223,24 @@ fn directory(parent: &Path, path: &Path) -> Result<(), String> {
         .map_err(display)
 }
 
-/// Writes `body` once, accepts an identical existing file, and finishes a
-/// torn one.
-///
-/// Every caller holds the namespace's exclusive owner lock and writes the
-/// receipt last, so an existing file that is a strict prefix of `body` is a
-/// write that was cut short (a kill, ENOSPC or EIO between `create_new` and
-/// `sync_all`), never committed history: nothing reads a body before its
-/// receipt exists, and a receipt is only read whole. Refusing it would wedge
-/// that identity for good, because every rerun derives the same path
-/// (D-1760). Anything that is NOT a prefix of the intended bytes, or is longer
-/// than them, is a different publication and is still refused.
+/// Writes `body` once and accepts only an identical existing file. Callers
+/// reach it for a body only once that body is committed history or the
+/// scratch from an earlier attempt has been discarded, so any difference
+/// here is a different publication and is refused.
 fn write_or_equal(path: &Path, body: &[u8]) -> Result<(), String> {
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(file) => file,
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
-            let limit = (body.len() as u64).saturating_add(1);
-            let existing = read_exact(path, limit)?;
-            if existing == body {
-                return Ok(());
-            }
-            if existing.len() >= body.len() || !body.starts_with(&existing) {
-                return Err("Boolean evidence already exists with different bytes; history preserved".to_owned());
-            }
-            let mut file = OpenOptions::new().append(true).open(path).map_err(display)?;
-            if file.metadata().map_err(display)?.len() != existing.len() as u64 {
-                return Err("Boolean evidence changed while its torn write was resumed".to_owned());
-            }
-            file.write_all(&body[existing.len()..]).map_err(display)?;
-            return retained(&file, path, body.len());
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(body).map_err(display)?;
+            retained(&file, path, body.len())
         }
-        Err(why) => return Err(display(why)),
-    };
-    file.write_all(body).map_err(display)?;
-    retained(&file, path, body.len())
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read_exact(path, body.len() as u64)? != body {
+                return Err("Boolean evidence already exists with different or incomplete bytes; history preserved".to_owned());
+            }
+            Ok(())
+        }
+        Err(why) => Err(display(why)),
+    }
 }
 
 fn retained(file: &File, path: &Path, bytes: usize) -> Result<(), String> {

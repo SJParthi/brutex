@@ -1552,7 +1552,7 @@ impl Ladder {
                     reason: Why::AlwaysTrue,
                 });
             } else if hits >= self.min_hits {
-                first.push(Itemset { mask: m, hits });
+                primitives::append(&mut first, Itemset { mask: m, hits });
             } else {
                 // Counted here, not derived afterwards. `infrequent` used to be
                 // `generated - frequent - excluded`, which absorbed every silently
@@ -2496,6 +2496,25 @@ mod manifest;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CLAUDE.md` §3 rule 4: result append goes through
+    /// `primitives::append` AT EVERY k. The k=1 loop pushed into `first`
+    /// directly, so the primitive `C-E-11` times was not the one k=1 ran
+    /// (P1-15-04, D-1764). The shipping region names no other `push(Itemset`.
+    #[test]
+    fn every_level_appends_its_survivors_through_the_one_primitive() {
+        let source = include_str!("lib.rs");
+        let shipping = source
+            .split_once("\n#[cfg(test)]\n")
+            .map_or("", |(code, _)| code);
+        assert!(
+            !shipping.is_empty(),
+            "the shipping region precedes the tests"
+        );
+        assert!(shipping.contains("primitives::append(&mut first, Itemset { mask: m, hits });"));
+        assert!(shipping.contains("primitives::append(out, Itemset { mask: *mask, hits });"));
+        assert!(!shipping.contains(".push(Itemset"));
+    }
 
     /// Eight positions over sixty-four bars -- a column the ladder climbs.
     ///

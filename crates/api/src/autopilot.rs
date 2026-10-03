@@ -922,6 +922,8 @@ pub struct Place {
     pub dry: u8,
     /// That rung's [`FeedState::backoff`].
     pub backoff: u32,
+    /// That rung's [`FeedState::store_refused`].
+    pub store_refused: bool,
 }
 
 impl Place {
@@ -933,6 +935,7 @@ impl Place {
             attempts: 0,
             dry: 0,
             backoff: 0,
+            store_refused: false,
         }
     }
 }
@@ -943,8 +946,10 @@ impl Place {
 /// This is not a second copy of the halt reason: the reason is the sentence an
 /// operator reads and it stays verbatim on the page. This is the machine's own
 /// answer to "is there anything I could *measure* that would tell me this has
-/// been fixed", and there are exactly three answers because there are exactly
-/// three halt sites.
+/// been fixed", and there are exactly four answers because there are exactly
+/// four halt sites — three in [`FeedState::observe`] and one in [`survey`].
+/// This said three of each after [`Halt::Configuration`] was added
+/// (Z1-slice11, D-1762).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Halt {
     /// The broker credential is dead and re-reading it returned the same value.
@@ -1053,6 +1058,13 @@ pub struct FeedState {
     pub dry: u8,
     /// How many backoffs in a row, which is the exponent.
     pub backoff: u32,
+    /// Whether the last failure at the frontier month was a store refusal.
+    ///
+    /// The halt rule is "the same store refusal twice", and `attempts` counts
+    /// failures of every class, so a transport failure followed by ONE disk
+    /// refusal used to halt the feed with a sentence saying the store refused
+    /// twice (Z1-slice11-F2, D-1762). This is what "twice" reads.
+    pub store_refused: bool,
     /// Terminal, with the reason.
     ///
     /// **No route can clear it, and that has not changed.** The feed table is a
@@ -1124,6 +1136,7 @@ impl FeedState {
             attempts: 0,
             dry: 0,
             backoff: 0,
+            store_refused: false,
             halted: None,
             halt_kind: None,
             probe: None,
@@ -1151,17 +1164,20 @@ impl FeedState {
             attempts: self.attempts,
             dry: self.dry,
             backoff: self.backoff,
+            store_refused: self.store_refused,
         };
         let Place {
             frontier,
             attempts,
             dry,
             backoff,
+            store_refused,
         } = std::mem::replace(&mut self.parked, live);
         self.frontier = frontier;
         self.attempts = attempts;
         self.dry = dry;
         self.backoff = backoff;
+        self.store_refused = store_refused;
         self.rung = rung;
     }
 
@@ -1215,6 +1231,7 @@ impl FeedState {
         self.attempts = 0;
         self.dry = 0;
         self.backoff = 0;
+        self.store_refused = false;
     }
 
     /// Go terminal: record the reason verbatim, record the class, and arm
@@ -1364,8 +1381,8 @@ impl FeedState {
             return Next::Retry;
         }
         if let Some(reason) = out.reason.clone() {
-            let repeat = classify(&reason) == Trouble::Store && self.attempts > 0;
-            if repeat {
+            let store = classify(&reason) == Trouble::Store;
+            if store && self.store_refused {
                 let why = format!(
                     "the store refused the same write twice: {reason}. This is not \
                      retryable — nothing further is FETCHED until the disk is dealt with. \
@@ -1376,6 +1393,7 @@ impl FeedState {
                 self.halt(Halt::Store, why.clone());
                 return Next::Halt { reason: why };
             }
+            self.store_refused = store;
             self.attempts = self.attempts.saturating_add(1);
             if self.attempts >= MAX_MONTH_ATTEMPTS {
                 let why = format!(
@@ -1929,12 +1947,13 @@ impl Default for Control {
 /// the only thing that starts it at all.
 pub const AUTOPILOT_ENV: &str = "BRUTEX_AUTOPILOT";
 
-/// The one value that still starts it explicitly.
+/// The ONLY value that starts it.
 ///
-/// Kept accepted although it is no longer required: an existing shell alias or
-/// launcher that exports `BRUTEX_AUTOPILOT=run` must not silently start meaning
-/// something else. It flies, exactly as it always did — it is simply no longer
-/// the only way to.
+/// [`stays_paused_from`] grounds every other value, an absent variable
+/// included, so `BRUTEX_AUTOPILOT=run` is required for the autopilot to fly
+/// at all. This doc said it was "no longer required" and "no longer the only
+/// way to" fly — the default from before the polarity was reversed
+/// (Z1-slice11-F6, D-1762).
 pub const AUTOPILOT_RUN: &str = "run";
 
 /// A spelling kept accepted for an operator who already sets it.
@@ -2054,8 +2073,13 @@ impl Control {
             ));
     }
 
-    /// The control a SERVING process gets: **flying**, unless the environment
-    /// says [`AUTOPILOT_PAUSE`].
+    /// The control a SERVING process gets: **paused**, unless the environment
+    /// says exactly [`AUTOPILOT_RUN`].
+    ///
+    /// This line said "flying, unless the environment says
+    /// [`AUTOPILOT_PAUSE`]" — the polarity [`stays_paused_from`] reversed —
+    /// on the one function a reader asking "does starting the binary contact a
+    /// vendor" is sent to (Z1-slice11-F6, D-1762).
     ///
     /// This is the one place the default lives. `Control::new` stays a pure
     /// constructor so tests mean what they say; policy belongs here, where a
@@ -2944,11 +2968,24 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
                             made: attempt,
                             due_unix: now.saturating_add(i64::try_from(wait).unwrap_or(i64::MAX)),
                         });
+                        // THE LAST PROBE NAMES NO NEXT ONE. `made` reaches
+                        // `STORE_PROBES` here and the next pass answers
+                        // `Due::Spent`, so "the next probe is in 3600s" promised
+                        // a probe that never runs (Z1-slice11-F7, D-1762).
+                        let next = if attempt >= STORE_PROBES {
+                            String::from(
+                                "That was the last automatic probe: the allowance is spent, \
+                                 so this feed stays halted until the disk is dealt with and \
+                                 the server is restarted",
+                            )
+                        } else {
+                            format!("The next probe is in {wait}s")
+                        };
                         let _ = write!(
                             said,
                             " {feed} stays halted: write probe {attempt} of {STORE_PROBES} \
-                             failed too — {why}. The next probe is in {wait}s and nothing is \
-                             being asked of any vendor meanwhile."
+                             failed too — {why}. {next}, and nothing is being asked of any \
+                             vendor meanwhile."
                         );
                     }
                 }
@@ -3029,12 +3066,16 @@ impl Settled {
         })
     }
 
-    /// Whether this verdict stops the backfill rather than idling it.
+    /// Whether this verdict is drawn as HALTED rather than idle.
     ///
-    /// An empty universe cannot change while the process runs — the masters are
-    /// read once, at startup — so idling on it would be a countdown to an event
-    /// that cannot occur. `Halted` is the honest phase and the page already
-    /// draws it loudly.
+    /// An empty universe does not change by waiting: only a masters refresh
+    /// (`mastersrun::reload`, through `Site::reparse`) or a restart with a
+    /// fixed masters directory changes it. So "idle" beside a countdown would
+    /// read as "it is working", and `Halted` is the loud phase. The task still
+    /// re-checks every [`IDLE_POLL_SECS`], and `SeriesCache` rebuilds on the
+    /// reparse's new generation, so a refresh that loads a universe resumes the
+    /// backfill with no restart. This doc used to say the masters are "read
+    /// once, at startup" (Z1-slice11-F7, D-1762).
     const fn halts(self) -> bool {
         matches!(self, Self::NoUniverse)
     }
@@ -3070,9 +3111,11 @@ impl Settled {
                     "NOT COMPLETE — NOTHING IS TRACKED. No instrument reached the work \
                      list, so no month was ever a candidate and no feed was ever asked. \
                      This is NOT an up-to-date store: the universe is empty because the \
-                     masters did not load. Universe status: {}. {why}. The masters are \
-                     read once, at startup, so this cannot resolve itself — fix the \
-                     masters directory and restart.{probed}",
+                     masters did not load. Universe status: {}. {why}. Waiting will not \
+                     fix this: refresh the masters from the Masters page (a refresh \
+                     re-parses them in place), or fix the masters directory and \
+                     restart. This re-checks once a minute, so a refresh that loads a \
+                     universe resumes the backfill on its own.{probed}",
                     read.status()
                 )
             }
@@ -3601,12 +3644,12 @@ impl Action {
 /// The sentence every refused resume opens with.
 ///
 /// One constant so the claim is made once and can be checked once. Every word
-/// of it is a fact about this module: [`FeedState::halted`] is set at three
-/// sites — twice in [`FeedState::observe`] and once in [`survey`] — and the
+/// of it is a fact about this module: [`FeedState::halted`] is set at four
+/// sites — three times in [`FeedState::observe`] and once in [`survey`] — and the
 /// `Vec<FeedState>` holding them is a local of [`fly`]. No handler is given a
 /// reference to it, so no route can clear a halt however it answers.
 ///
-/// **The last sentence is new and it is load-bearing.** Two of the three halt
+/// **The last sentence is new and it is load-bearing.** Two of the four halt
 /// classes now clear themselves on EVIDENCE — a manifest that loads, a disk that
 /// accepts a write — and a refusal that did not say so would send an operator to
 /// restart a server that was about to recover by itself. That is not a
@@ -5310,6 +5353,36 @@ mod tests {
             panic!("a repeated disk failure must halt");
         };
         assert!(reason.contains("disk full"));
+
+        // ONE store refusal after a TRANSPORT failure is not "twice": it
+        // waits, and only a second store refusal in a row halts
+        // (Z1-slice11-F2, D-1762).
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        let timeout = TickOutcome {
+            reason: Some("operation timed out".to_owned()),
+            ..full.clone()
+        };
+        assert!(matches!(state.observe(&timeout), Next::Wait { .. }));
+        assert!(matches!(state.observe(&full), Next::Wait { .. }));
+        assert!(state.store_refused);
+        assert!(matches!(state.observe(&full), Next::Halt { .. }));
+
+        // A transport failure between two store refusals breaks the run.
+        let mut state = FeedState::new(
+            pull::vendor::Feed::Groww,
+            brutex_core::vendor::Vendor::Groww,
+            month(2020, 5),
+        );
+        assert!(matches!(state.observe(&full), Next::Wait { .. }));
+        assert!(matches!(state.observe(&timeout), Next::Wait { .. }));
+        assert!(!state.store_refused);
+        // The third failed attempt stalls the month on the attempt budget;
+        // it is not read as a repeated store refusal.
+        assert!(matches!(state.observe(&full), Next::Stall { .. }));
     }
 
     /// Progress resets the bound, so a month that needs several passes is not
@@ -6730,6 +6803,64 @@ mod tests {
             empty.contains("UNAVAILABLE"),
             "and it carries the read's own reason: {empty}"
         );
+    }
+
+    /// The LAST failed write probe names no next probe: `made` reaches
+    /// [`STORE_PROBES`] and the next pass answers `Due::Spent`, so the old
+    /// "the next probe is in 3600s" promised one that never ran. The one before
+    /// it still names its wait (Z1-slice11-F7, D-1762).
+    #[test]
+    fn the_last_failed_write_probe_names_no_next_probe() {
+        let site = empty_site("last-probe");
+        // A MISSING ROOT REFUSES THE PROBE: `probe_io` never recreates it.
+        let _ = std::fs::remove_dir_all(&site.store_root);
+        let said = |made: u32| {
+            let mut state = FeedState::new(
+                pull::vendor::Feed::Groww,
+                brutex_core::vendor::Vendor::Groww,
+                month(2020, 5),
+            );
+            state.halt(Halt::Store, String::from("disk full"));
+            state.probe = Some(Probe { made, due_unix: 0 });
+            let said = probe_store_halts(&site, std::slice::from_mut(&mut state));
+            assert_eq!(state.probe.map(|probe| probe.made), Some(made + 1));
+            said
+        };
+        let last = said(STORE_PROBES - 1);
+        assert!(
+            last.contains(&format!("write probe {STORE_PROBES} of {STORE_PROBES}")),
+            "{last}"
+        );
+        assert!(!last.contains("next probe is in"), "{last}");
+        assert!(last.contains("the allowance is spent"), "{last}");
+        let earlier = said(STORE_PROBES - 2);
+        assert!(earlier.contains("The next probe is in "), "{earlier}");
+        assert!(!earlier.contains("allowance is spent"), "{earlier}");
+        // And the pass after the last one is `Spent`, which is why.
+        assert!(matches!(
+            store_due(
+                Some(&Probe {
+                    made: STORE_PROBES,
+                    due_unix: 0
+                }),
+                0
+            ),
+            Due::Spent { .. }
+        ));
+    }
+
+    /// An empty universe does not tell the operator a restart is the only
+    /// way out: a masters refresh re-parses in place and the task re-checks
+    /// every minute (Z1-slice11-F7, D-1762).
+    #[test]
+    fn an_empty_universe_names_the_refresh_that_resumes_it() {
+        let site = empty_site("no-universe-refresh");
+        let empty = Settled::over(&[]).say(&site.universe().read, "", "");
+        assert!(!empty.contains("read once, at startup"), "{empty}");
+        assert!(!empty.contains("cannot resolve itself"), "{empty}");
+        assert!(empty.contains("refresh the masters"), "{empty}");
+        assert!(empty.contains("re-checks once a minute"), "{empty}");
+        assert_eq!(IDLE_POLL_SECS, 60, "\"once a minute\" is this constant");
     }
 
     /// **The same claim, through a whole round, which is where it was

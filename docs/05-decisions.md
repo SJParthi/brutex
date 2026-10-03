@@ -54609,3 +54609,192 @@ reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
 **Not changed.** The wall-clock cost of these reads is not measured. Holding
 one calendar slot for a whole range audit means a long range can make the
 calendar route answer 429 sooner; that is a bound, stated, not a queue.
+
+### D-1760 — An unreceipted publication is scratch: a rerun rewrites it, a receipted one is history — 2026-10-03
+
+**The defect.** Every receipt-last authority (the eleven Boolean and
+index-stop namespaces in `boolean_candidate_persistence`) wrote `body.bin`
+with `create_new` and treated any existing file as committed: a retry
+compared bytes and refused on any difference. A kill, ENOSPC or EIO after the
+directory or a partial `body.bin` existed, but before `finish` wrote
+`complete.bin`, therefore wedged that identity for good, because every rerun
+derives the same path (Z1-slice15-F1, search-1). The VIX companion made it
+worse: `index_stop_vix::publish` read "directory exists" as "published" and
+went straight to `Reader::open` (Z1-slice20-F1, cli3-1), and its body is a
+capture of a growing VIX store, so a retry is not byte-identical even after a
+whole body was written (replay-2); a concurrent publisher that lost the race
+was refused although a valid companion now existed.
+
+**The decision.** A whole 112-byte `complete.bin` is the only mark of
+published history (`persistence::committed`). Under the owner lock,
+`prepare_in_namespace` compares an existing body only when the receipt is
+whole; otherwise it unlinks a torn receipt and any earlier body (unlink, never
+follow, so a planted link cannot redirect the write) and writes this call's
+body fresh. `index_stop_vix::publish` shortcuts to the saved companion only on
+a whole receipt, and when its own attempt fails after a concurrent publisher
+committed, it answers with that committed companion.
+
+**Evidence.** `cli::candidate_universe::boolean_candidate_v1::persistence::persistence_tests` (`an_unreceipted_body_with_other_bytes_is_scratch_and_is_rewritten`,
+`a_committed_body_is_history_and_other_bytes_are_refused`,
+`an_unreceipted_body_link_is_unlinked_never_followed`,
+`a_publication_cut_short_after_its_directory_resumes_to_a_receipt`) and
+`cli::index_stop_vix::tests::index_stop_vix_publication_cut_short_before_its_receipt_resumes`
+(empty body, half body, and a whole body of other bytes beside a torn receipt).
+
+**Not changed.** indexstop-1 (a transient VIX lock captured as a permanent
+"unavailable" month) is a separate defect.
+
+### D-1761 — `basis_points` checks its subtraction; a corrupt stored bar is a refusal, not an abort — 2026-10-03
+
+`bars::with_change` passes raw stored closes and open interest to
+`server::basis_points`, whose comment claimed both came from the
+non-negative manifest closes and so left `last - first` unchecked. One
+`i64::MIN` bar in an unsealed month made `GET /bars/window.json` overflow, and
+the release profile (`overflow-checks`, `panic = "abort"`) took the server
+down (CE-2). The subtraction is `checked_sub` mapped to `Unknown::Overflow`,
+proven by `api::server::percentage_tests::a_corrupt_close_past_i64_is_an_overflow_refusal_not_an_abort`.
+The same commit closes CE-1: `master::Columns::widest` now folds the vendor-id
+column, so a row cut before a right-most `groww_symbol` is unreadable with its
+shortfall named rather than a routine "no vendor id" skip
+(`api::master::tests::a_row_cut_just_before_a_last_vendor_id_column_names_the_shortfall`).
+
+### D-1762 — `api` says what its routes do: zero-findings round 1, slices 11, 13 and 14 — 2026-10-03
+
+Round 1 of the zero-findings audit found fifteen places in `api` where a
+route, a page or a doc stated something the code does not do. Each is fixed in
+the code where the behaviour was wrong and in the prose where only the prose
+was.
+
+**Behaviour changed.**
+
+- `/instruments.json` counted every series sharing a symbol — other
+  exchanges, other segments, every rung and every F&O contract — as that
+  instrument's bars. `bars_by_symbol` now keys by `(exchange, segment,
+  symbol)` and counts only one-minute spot series (Z1-slice14-F1).
+- `/bars/window.json` read an unknown `dir` as descending and an unknown
+  `extremes` as off. Both now refuse with the accepted spellings
+  (Z1-slice14-F3).
+- The three-piece date fields accepted `+8` and over-wide pieces, which
+  `parse_day` refuses in the ISO spelling (D-0905). The padding now passes a
+  non-digit or over-wide piece through unchanged, so `parse_day` refuses it
+  (Z1-slice13-F2).
+- `/audit.json` answered `invocation=` or `before=` at or below
+  `journal::ID_BASE` with a 503. It now answers 400, so a 503 only ever means
+  the store or lock is unavailable (Z1-slice13-F3).
+- `/backtest.json` reported `appendable:true` for a ledger with a torn tail
+  that every `cli` append refuses. `appendable` now also requires
+  `!partial_tail` (Z1-slice11-F1).
+- The autopilot halted a feed as "the store refused the same write twice"
+  after one store refusal that followed a transport failure. `FeedState`
+  now carries `store_refused`, which is set only when the previous failure was
+  a store refusal and is cleared with the month (Z1-slice11-F2).
+- `records unreadable` was emitted from `slots`, once per month file, so a
+  window of 240 damaged months could emit 240 lines. It is now emitted once
+  per request, from `page` and `window`, naming the first file and counting
+  every fault (Z1-slice11-F3; `docs/06-limits.md` §44 corrected).
+- The first bar of every month in a window answered `first_bar_in_file`
+  while the previous month was open in the same request. Both the seek path
+  and the reading path now measure it against the last record of the nearest
+  earlier non-empty month (`earlier_in_time`, one pass). Only the window's
+  earliest record has nothing behind it (Z1-slice11-F4). The web page's
+  sentence for `first_bar_in_file` now says "the earliest month this request
+  read".
+- `SortKey::OpenInterest` said "nulls last" while an ascending page led with
+  every null. The comparator now ranks null-ness first, without inverting it
+  with the direction (Z1-slice11-F5).
+- The eighth failed write probe said "the next probe is in 3600s", but no
+  ninth probe runs. It now says the allowance is spent. The empty-universe
+  halt said the masters are read once at startup. It now names the masters
+  refresh, which re-parses in place, and the once-a-minute re-check
+  (Z1-slice11-F7).
+
+**Prose only.** The masters page, `mastersrun`'s and `lib`'s docs, and their
+test now say that a refresh re-parses through `Site::reparse` and that a
+restart is needed only when that is refused (Z1-slice13-F1). The `livejson`
+doc names `cell_wins` as the structural zero, not `wins` (Z1-slice13-F4). The
+ingest page's live-broker text no longer says chunking and expired F&O are
+missing (Z1-slice14-F2). `note_member_failure` no longer says `pull` has no
+telemetry dependency (Z1-slice14-F4). `Control::serving` and
+`AUTOPILOT_RUN` now state the real polarity: paused unless the value is
+exactly `run` (Z1-slice11-F6). Also corrected: `backtest.rs` on `api`'s
+dependency set and on `vocab`; `audit.rs`'s "eight terms" (now nine, with
+`feed`); and `Halt` / `RESUME_CANNOT_CLEAR`'s "three" halt classes and sites
+(now four).
+
+**Evidence.** The tests named in `docs/04-invariants.md` ZR-04 to ZR-13.
+
+### D-1763 — The format and architecture documents describe what this build writes — 2026-10-03
+
+Round 1 of the zero-findings audit found the byte-layout authority and the
+architecture document stating formats and mechanisms the code had left behind.
+
+- `docs/02-store-format.md` §13 described frontier version 4 (272-byte rows, a
+  reserve at `195..200`, the seal at 264). The code writes version 7: byte 195
+  is the protective-exit rule, `196..200` the fill headroom, `264..272` the
+  average-payoff floor, and the seal is at `272..280`. Rewritten, and
+  `cli::frontier::tests::the_store_format_doc_states_the_frontier_this_build_writes`
+  now binds the section's version, stride, seal and rule offsets to the
+  constants (P1-16-02). `STRIDE`'s own doc said 144.
+- §11 described census versions 1 and 2 and said this build writes version 2.
+  It writes version 3: version 2's geometry and magic, with the derivative
+  contract at entry bytes `80..104` and its length at 104. §11.5a documents it,
+  and the magic is now described as naming the geometry rather than the
+  version (P1-16-01). `the_manifest_geometry_is_what_the_format_document_says`
+  checks the section.
+- §17 and §21 gave the execution-parameter record as 608/640 bytes. It is
+  616/648, and it grew **in place** under magic `BRUTXEP1` version 1 when the
+  evaluation-spec fingerprint widened 155 -> 163. That breach of `CLAUDE.md`
+  §3 rule 8 is recorded rather than repaired by a new magic: the 648-byte files
+  this build has written carry that header, and a new magic would strand them.
+  The header's stride field separates the two geometries, so a 640-byte file is
+  now refused **by name** (its records name the eight-day calendar) instead of
+  as an anonymous stride mismatch, by both `ExecutionCapabilityLedger` and
+  Execution Disposition V2 (P1-16-03).
+- `docs/01-architecture.md` said bar reads go through a read-only mmap with
+  pointer arithmetic (P1-16-05), that the store's commit counter is published
+  with a release store (P1-16-06), that display rules compile to WASM
+  (P1-16-07), and that no read path lists a directory (P1-16-08), and drew the
+  bar path without its vendor segment. Each is corrected: one `pread` plus a
+  block CRC per read, one checksummed header-slot `pwrite`, no WASM build, and
+  `store::catalog::walk` named as the multi-month sweep's one directory walk.
+- The Base Evidence V2 `min_win` doc, its fold comment, the runner test doc and
+  the institutional-evidence comment still described D-0595's bracket rule,
+  which D-0602 reversed (Z1-slice23-F2). Index Consistency V2's doc now says
+  the same principle was later found backwards and that V4's
+  `SignUnderBothReadings` is the corrected rule; V2 and V3 stay as shipped.
+
+**Not done here.** P1-16-04 (formats with no byte layout in any document:
+`runs.bin`, population rows, live, Pre-Admission V2, Execution V3/V4, Global
+Replay V3, Population Statistics V3) is queued as its own piece of work.
+
+### D-1764 — The law file, the README and the handovers say what the tree does — 2026-10-03
+
+Round 1's documentation pass found the governing files stating behaviour the
+code no longer has.
+
+- `CLAUDE.md` §3 rule 7 said `cli` and `runner` pass `Availability::Absent`.
+  Stored callers choose availability by instrument kind: `Present` for eligible
+  cash equities since D-0507, `Absent` for spot indices. `AGENTS.md` already
+  said so; `CLAUDE.md` now does too (P1-15-01).
+- `CLAUDE.md` and `AGENTS.md` §10 said "all fourteen are listed now" while 25
+  more documents existed. The fourteen in the table are the documents with
+  authority; `docs/12-` to `docs/35-` and `docs/research-policy/` are reports
+  with none, and lose to the table's documents where they disagree. `22-` is a
+  third doubled prefix. This is a locked choice: a report does not bind
+  (P1-15-02).
+- §5 said gate 22 clause A pins `vocab` to `vocab` alone; it pins `vocab` to
+  no dependency (P1-15-03).
+- §3 rule 4 says result append goes through `engine::primitives::append` at
+  every k, and k=1 pushed directly. The k=1 loop now calls the primitive, and
+  `engine::tests::every_level_appends_its_survivors_through_the_one_primitive`
+  pins that no shipping line pushes an `Itemset` any other way (P1-15-04).
+- `AGENTS.md` quoted gate 1's comment as "a `AGENTS.md` edit"; the gate says
+  `CLAUDE.md` (P1-15-05).
+- `README.md` said the web UI has zero JavaScript, the vocabulary has 74
+  conditions, exactly two instruments are swept, look-ahead is stopped by an
+  index-guarded accessor, and drew a `web` crate under a `core`-rooted tree.
+  Each is replaced by the current fact or a pointer to the `CLAUDE.md` section
+  that states it (P1-15-06).
+- The two root handovers are marked resolved and done, with the current
+  pointers: every bar read verifies its block (P1-15-07), and the backtest
+  route exists over a 261-byte version-3 ledger (P1-15-08).

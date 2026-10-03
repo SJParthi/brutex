@@ -58,9 +58,9 @@
 //! # What a record does NOT identify, said plainly
 //!
 //! `CLAUDE.md` §3 rule 3: a run is identified by `blake3(mask ‖ direction ‖
-//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)`.
-//! **No record written here carries that identity, and not one of the eight
-//! terms is on disk.** That is written down under §3 rule 6 rather than left
+//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit ‖
+//! feed)`. **No record written here carries that identity, and not one of the
+//! nine terms is on disk.** That is written down under §3 rule 6 rather than left
 //! for a reader to discover, because a file called an audit journal invites the
 //! assumption that a run can be reproduced from it, and this one cannot.
 //!

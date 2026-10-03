@@ -20,17 +20,15 @@
 //!
 //! # The staleness answer is the half that matters
 //!
-//! `Site::load` parses the masters **once, at startup**, and there is no reload
-//! path. So an operator who refreshes the masters while the server is running
-//! gets new bytes on disk and the same universe in memory — and every page keeps
-//! answering from the boot parse with nothing saying so. [`status_json`] is what
-//! says so: it compares each master's mtime against the moment the site was
-//! loaded and reports which are newer.
-//!
-//! **That does not fix it, and this module does not claim to.** Hot-reloading
-//! needs the master set behind a swap inside `Site`, which every route shares;
-//! until that lands, the honest thing is a refresh that tells the operator a
-//! restart is required rather than one that silently does half the job.
+//! `Site::load` parses the masters at startup, and a refresh re-parses them in
+//! place: [`refresh`] calls `reload`, which calls `Site::reparse` to swap a
+//! fresh parse into the site every route shares, with a new parse time and
+//! generation, and answers `"restart_required": false`. A restart is needed
+//! only when that reparse is refused (`"reloaded": false`, its reason named),
+//! or when a master changed on disk by some other hand, which [`status_json`]
+//! reports by comparing each master's mtime against the moment of the current
+//! parse. This module said "there is no reload path" for several commits after
+//! the reload landed (Z1-slice13-F1, D-1762).
 
 use std::path::Path;
 
@@ -649,10 +647,10 @@ pub async fn refresh(
 /// `GET /masters/status.json` — what is on disk, and whether it is newer than
 /// the parse this process is answering from.
 ///
-/// **The staleness answer, which is the one an operator needs after a refresh.**
-/// `Site::load` parses the masters once at startup and there is no reload path,
-/// so a master refreshed while the server runs is new bytes behind an old
-/// universe. Nothing said so before this route; the page looked identical.
+/// **The staleness answer.** A refresh through this module re-parses in place
+/// (`Site::reparse`), so after one this answers "not newer". A master changed
+/// on disk any other way, or a refresh whose reparse was refused, is new bytes
+/// behind the parse still in memory, and this is what says so.
 pub async fn status_json(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
 ) -> (axum::http::StatusCode, JsonHeaders, String) {
@@ -805,12 +803,10 @@ fn page_html() -> String {
          <th>On disk</th><th>Last refresh</th></tr></thead><tbody>{rows}</tbody></table>\
          <div id=\"ledger\"></div>\
          <div id=\"xverify\" class=\"att\"></div>\
-         <p class=\"foot\">A refresh writes new bytes to disk and does <b>not</b> reload the \
-         parsed universe: <code>Site::load</code> parses the masters once, at startup. When a \
-         file changes under a running server this page says a restart is required. Restart the server \
-         after a refresh, because \
-         saying nothing would leave every other page answering from the boot parse with \
-         nothing to indicate it.</p>\
+         <p class=\"foot\">A refresh writes new bytes to disk and re-parses the universe in \
+         place, so every page answers from the new files without a restart. A restart is \
+         required only when that re-parse is refused, or when a file changed on disk some \
+         other way; this page says so on the row when either happens.</p>\
          <script src=\"/masters.js\" defer></script>",
         // THE REAL NAV, NOT A SECOND COPY OF IT. This page was self-contained
         // following `crate::logs`, and inherited its defect with it: a page
@@ -1518,13 +1514,16 @@ mod tests {
     }
 
     #[test]
-    fn the_page_says_a_restart_is_required_rather_than_pretending_otherwise() {
-        // `Site::load` PARSES ONCE AT STARTUP. A page that refreshed the bytes
-        // and said nothing would leave every other page answering from the boot
-        // parse, which is the failure wearing a success's clothes §4 bans.
+    fn the_page_says_a_refresh_reloads_and_names_when_a_restart_is_required() {
+        // A refresh re-parses through `Site::reparse` (D-1762). The footer
+        // once told the operator to restart after every refresh, which sent
+        // them to restart a server that had already reloaded; it must name
+        // the two cases that do need a restart, and no others.
         let html = super::page_html();
-        assert!(html.contains("restart is required"), "on the row");
-        assert!(html.contains("Restart the server"), "and after a refresh");
+        assert!(html.contains("re-parses the universe in place"), "{html}");
+        assert!(html.contains("A restart is required only when"), "{html}");
+        assert!(!html.contains("Restart the server"), "{html}");
+        assert!(!html.contains("does <b>not</b> reload"), "{html}");
     }
 
     #[test]

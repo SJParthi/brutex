@@ -13,11 +13,12 @@
 //! # This is a READER. The writer is `cli`, and there is exactly one
 //!
 //! The byte layout below is re-declared rather than imported, and that is a
-//! deliberate choice with a cost. `api`'s dependency set is `core, pull, store,
-//! telemetry`; taking `cli` to borrow one struct would pull `engine`,
-//! `indicators`, `vocab`, `costs` and `runner` behind it — five crates this
-//! surface never calls, into the crate that must build fastest because every
-//! page waits on it.
+//! deliberate choice with a cost. `api` now depends on `cli` and `vocab` too
+//! (`CLAUDE.md` §5, D-0288), and this reader still re-declares the layout
+//! rather than importing it from `cli::results`, so the cost below and the
+//! three checks that contain it still apply. (This paragraph said `api`'s set
+//! was `core, pull, store, telemetry` and that the `cli` arrow was avoided;
+//! both stopped being true — Z1-slice11, D-1762.)
 //!
 //! The cost is that two files now state one layout, and a format with two
 //! statements of itself is a format that can diverge. Three things hold it
@@ -476,10 +477,11 @@ pub struct Run {
     /// version travels with the ledger and the page says "this ledger predates
     /// the mask" for the one and "no combination was recorded" for the other.
     ///
-    /// Not decoded to condition names here: that needs `vocab`, and `api` does
-    /// not depend on it. Adding the arrow to render a field would be a §5 crate
-    /// graph change made for a convenience, so the words are served raw and the
-    /// front end names them.
+    /// Not decoded to condition names here, although `api` does depend on
+    /// `vocab`: decoding per record would repeat the vocabulary on every run of
+    /// every page, so the words are served raw and `/vocab.json` serves the
+    /// table once for the front end to name them (`CLAUDE.md` §5, D-0288). This
+    /// doc said `api` does not depend on `vocab` (Z1-slice11, D-1762).
     pub mask_words: [u64; 6],
     /// Whether the record's own `blake3` seal matches the bytes read back.
     ///
@@ -914,7 +916,11 @@ impl Ledger {
         let _ = write!(
             out,
             r#","appendable":{}"#,
-            self.version == VERSION && self.refusal.is_none()
+            // A RAGGED TAIL IS NOT APPENDABLE. `cli::results` refuses a ledger
+            // whose payload is not a whole number of strides, so a page that
+            // said `true` here sent the operator into a sweep whose every
+            // recording was refused (Z1-slice11-F1, D-1762).
+            self.version == VERSION && self.refusal.is_none() && !self.partial_tail
         );
         // THE SECOND THING A RUN NEEDS, AND IT IS A FACT ABOUT THE BINARY.
         //
@@ -1850,6 +1856,9 @@ mod tests {
         assert_eq!(ledger.total, 2, "only whole records are counted");
         assert_eq!(ledger.runs.len(), 2, "and they are still served");
         assert_eq!(ledger.refusal, None, "a ragged tail is not fatal");
+        let json = ledger.to_json();
+        assert!(json.contains(r#""appendable":false"#), "{json}");
+        assert!(json.contains(r#""partial_tail":true"#), "{json}");
     }
 
     #[test]
