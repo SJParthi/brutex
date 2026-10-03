@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -2747,10 +2747,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Admission V2 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), PopulationAdmissionV2Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Admission V2 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root_directory(
@@ -3005,6 +3006,7 @@ fn hash_file(
 )]
 mod tests {
     use super::*;
+    use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
@@ -3462,6 +3464,29 @@ mod tests {
             ledger.trailing_barrier_order_code, 123,
             "exact retry must sync decisions, then Completion, then directory"
         );
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestRoot::new("append-rollback");
+        initialize_empty(root.path());
+        let value = prepared();
+        write_decisions(root.path(), &value.decisions);
+        for (name, width) in [
+            (DECISION_FILE, POPULATION_ADMISSION_V2_DECISION_BYTES),
+            (COMPLETION_FILE, POPULATION_ADMISSION_V2_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let committed = persist_population_admission_v2(root.path(), bounds(), &value)
+            .expect("the next append completes the exact orphan after the rollback");
+        assert!(matches!(committed, PopulationAdmissionV2Commit::Written(_)));
+        PopulationAdmissionV2Ledger::open_read(root.path(), bounds())
+            .expect("the ledger stays readable");
     }
 
     #[test]

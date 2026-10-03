@@ -52,6 +52,8 @@ compile_error!(
     "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
 );
 
+/// The one append-with-rollback every fixed-stride ledger appends through (D-1850).
+mod append_rollback;
 #[cfg(test)]
 mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.

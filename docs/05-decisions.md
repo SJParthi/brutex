@@ -54609,3 +54609,41 @@ reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
 **Not changed.** The wall-clock cost of these reads is not measured. Holding
 one calendar slot for a whole range audit means a long range can make the
 calendar route answer 429 sooner; that is a bound, stated, not a queue.
+
+### D-1850 — Sixteen more fixed-stride ledgers roll a failed append back, through one shared helper — 2026-10-03
+
+**What was wrong (h-cli-1).** D-1622 fixed the wedge in Selection V5 and
+institutional statistics only. Sixteen other append-only `cli` ledgers still
+appended with `seek(End) + write_all` and no rollback: Execution V3 and V4,
+Population Admission V2, Finalization V2, V3 and V4, Statistics V2 and V3,
+Population V5 and V6, Pre-admission data V1 and V2, and Selection V1, V2, V3
+and V4. Each refuses a ragged or torn file when it opens, so one short write
+(ENOSPC, EIO) left a partial record that blocked the ledger for good. The four
+Selection writers also kept their handle after the failure, so the next append
+in the same process landed after the torn bytes.
+
+**The change.** A new module, `cli::append_rollback`, holds the D-1622 shape
+once: record the end offset, write, and on a write error `set_len` back to the
+offset, naming the ledger, the write error and the rollback; when the
+truncation also fails, both errors are named. All sixteen appends go through
+it, with their old labels. The four Selection ledgers split `append` into
+`append_with(receipt, write)`, so a test can inject the write. After a
+successful rollback they keep the file generation of the restored length, as a
+successful append keeps its own, so the same handle can append again. After a
+failed rollback the generation is left stale, and the next append refuses.
+Stored bytes of a successful append are unchanged. No format, digest or
+evidence version changes. The cost is one seek, one write and, only on
+failure, one `set_len`.
+
+The five earlier copies (Selection V5, institutional statistics, Admission V3
+and V4, and Search Lineage V4) are left as they are. They are tested
+equivalents of this helper, and folding them in would change files outside
+this finding.
+
+**What it proves.** `cli::append_rollback::tests` covers the helper: a short
+write, a write that wrote nothing, a failed truncation on a read-only handle,
+and an append whose cursor was elsewhere. Each of the sixteen ledgers has its
+own test (AHA-02). The test injects a half-record write into every file the
+ledger appends to, requires the file to be byte-identical afterwards, and then
+requires the next append, an exact-prefix retry or a same-handle append, to
+succeed.
