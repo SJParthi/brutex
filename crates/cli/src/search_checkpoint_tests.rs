@@ -259,7 +259,7 @@ fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Res
 /// `read` refused forever ("checkpoint marker width mismatch"), so no rerun of
 /// that search could ever resume. The state is built with real files: a fully
 /// synced payload for reservation 2 plus the empty marker the old protocol
-/// left. D-1640.
+/// left. D-1740.
 #[test]
 fn an_empty_marker_left_by_a_kill_is_an_interrupted_reservation() -> Result<(), String> {
     let scratch = Scratch::new().map_err(error)?;
@@ -297,7 +297,7 @@ fn an_empty_marker_left_by_a_kill_is_an_interrupted_reservation() -> Result<(), 
 /// past the entry ceiling discovery admits, so every later `Journal::open` and
 /// `Snapshot::open` refused the search for good. The ceiling is lowered on this
 /// thread so it is reached with real directories: owner.lock plus three
-/// reservations is exactly the limit of four. D-1640.
+/// reservations is exactly the limit of four. D-1740.
 #[test]
 fn publishing_never_acknowledges_a_checkpoint_discovery_cannot_reopen() -> Result<(), String> {
     LIMIT.with(|limit| limit.set(Some(4)));

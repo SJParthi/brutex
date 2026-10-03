@@ -239,7 +239,7 @@ impl Journal {
         }
         // Discovery admits at most `directory_limit()` entries. A reservation
         // that would make one more is refused here, before it exists, so no
-        // acknowledged checkpoint can leave the namespace unreopenable (D-1640).
+        // acknowledged checkpoint can leave the namespace unreopenable (D-1740).
         let entries = self
             .entries
             .checked_add(1)
@@ -304,7 +304,7 @@ impl Journal {
     }
 }
 
-/// Make `complete` appear whole or not at all (D-1640). The seal is written
+/// Make `complete` appear whole or not at all (D-1740). The seal is written
 /// and synced under a temporary name and only then renamed into place, then
 /// the reservation directory is synced. A kill before the rename leaves at
 /// most `complete.tmp`, which discovery never reads, so the reservation is an
@@ -507,7 +507,7 @@ fn discover_through(directory: &Path, through: Option<u64>) -> Result<Discovered
             continue;
         }
         match fs::symlink_metadata(entry.path().join("complete")) {
-            // The empty marker the pre-D-1640 protocol left when it was killed
+            // The empty marker the pre-D-1740 protocol left when it was killed
             // between creating `complete` and writing its seal. It never
             // acknowledged anything: it is an interrupted reservation.
             Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {

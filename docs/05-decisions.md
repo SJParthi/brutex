@@ -53404,7 +53404,7 @@ like a red build with no failing step.
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
 
-### D-1640 — A search checkpoint's completion marker is published by rename, and a publication refuses before it would pass discovery's directory limit — 2026-10-03
+### D-1740 — A search checkpoint's completion marker is published by rename, and a publication refuses before it would pass discovery's directory limit — 2026-10-03
 
 **Findings.** GAP11-0 and W2-cli13-5, both in
 `crates/cli/src/search_checkpoint.rs` `Journal::publish_inner`.
