@@ -20742,7 +20742,7 @@ mod tests {
             // such files are what this reader's own defence still faces. Laid
             // by hand: unsealed (flags 0, the legacy shape the reader accepts
             // without a `.crc`), genesis in slot 0, the commit in slot 1.
-            let genesis = store::header::Header::genesis(id, 60, 0);
+            let genesis = store::header::Header::genesis_at(store::layout::Layout::V2, id, 60, 0); // unsealed is version 2 (D-1571)
             let committed = genesis
                 .advance(
                     u64::try_from(rows.len()).unwrap(),

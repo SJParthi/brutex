@@ -266,7 +266,8 @@ fn drive_header_unreadable(_root: &Path) -> Handed {
 /// so `read_region` walks back to generation 0 instead of condemning the file,
 /// which is exactly the recovery that used to happen in silence.
 fn drive_header_fell_back(_root: &Path) -> Handed {
-    let genesis = Header::genesis(SYMBOL, 60, 0);
+    // Sealed: version 3 refuses to commit a slot without the flag (D-1571).
+    let genesis = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS);
     let unsupported = genesis
         .advance(1_000, T0, T0 + MINUTE)
         .expect("advancing by 1000 records is arithmetically fine");
@@ -292,7 +293,7 @@ fn drive_header_fell_back(_root: &Path) -> Handed {
 /// site through `commit_image`. The offset is the arm reachable without
 /// hand-building a header state no constructor produces.
 fn drive_commit_refused(_root: &Path) -> Handed {
-    let past_the_end = Header::genesis(SYMBOL, 60, 0)
+    let past_the_end = Header::genesis(SYMBOL, 60, FLAG_CHECKSUMS)
         .advance(u64::MAX, T0, T0)
         .expect("a counter of u64::MAX is arithmetically fine; its offset is not");
     let refused = past_the_end

@@ -56011,3 +56011,35 @@ argued peak is about twice D-1203's ~16x; stated on `decode_body` and in
 **Proof.** `pull::http::tests::a_json_price_is_snapped_from_the_vendors_own_text`
 and `pull::rolling::tests::a_rolling_price_is_snapped_from_the_vendors_own_text`
 (on the previous tree: 10013 for 10012, and 35413 for 35412). AFF-40.
+
+### D-1571 — Store format version 3: block checksums are mandatory; version 2 stays readable — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-8, recorded as a limit by
+D-1528. Block verification follows the header's `FLAG_CHECKSUMS`. Clearing it
+in both slots and recomputing their CRCs turned verification off for a sealed
+month, and the `.crc` beside it was ignored: a flipped price and a
+`ts = i64::MIN` record were served. D-1528 left it because closing it needs
+"sealed" recorded in a way the flag cannot undo, which is a new format version.
+
+**The decision.** Version 3 is minted (`MAGIC = b"BRUTEXB3"`,
+`FORMAT_VERSION = 3`, `Layout::V3`). Its geometry is version 2's byte for
+byte; its one rule is that block checksums are mandatory
+(`Layout::requires_checksums`). `Header::decode` refuses a version-3 slot
+without the flag as `FormatError::ChecksumsRequired(3)`, and `Header::commit`
+refuses to write one. `Layout::CURRENT` is version 3, so every new month is
+born at it. `BAR_TABLE` holds `[V2, V3]`: a version-2 month is opened,
+appended to and read at version 2 for its whole life, flag optional as before,
+and is never rewritten (§3 rule 8). Version 2's magic is now `MAGIC_V2`.
+
+**Not closed, and stated.** Version 2's optional flag is its meaning and is
+kept. An actor who rewrites a version-3 month's magic and version to 2 in both
+slots and recomputes the CRCs presents an unsealed version-2 month; the CRC is
+integrity, not authentication, and that actor can rewrite the `.crc` too.
+`docs/06-limits.md` says so. The read path still does no month or order check
+on records (format.rs: checked at the write boundary).
+
+**Proof.** `store::file::tests::a_new_month_is_version_three_and_a_cleared_checksum_flag_is_refused`
+(on the previous tree it does not compile: no `ChecksumsRequired`, and a new
+month was version 2), `store::file::tests::a_version_two_month_still_reads_and_appends_at_version_two`,
+and the updated constant pins in `store/tests/unit.rs` and `write.rs`.
+Recorded in `docs/02-store-format.md` §2.1. AFF-41, AFF-42.

@@ -14030,13 +14030,15 @@ bounds are all nonzero.
 
 ## Audit fixes of 2026-10-03 — what they leave unbounded — D-1528, D-1535, D-1536, D-1537
 
-* **A cleared header checksum flag is not detected (D-1528, audit-20261003
-  attackdata-8).** Block verification follows the header's `FLAG_CHECKSUMS`.
-  Clearing it in both slots and recomputing their CRCs turns verification off
-  for a sealed month, and the `.crc` beside it is ignored. Random rot cannot do
-  this, because the slot CRC covers the flag. The CRC is integrity, not
-  authentication. Closing it would need "sealed" recorded outside the header,
-  which is a new store format version, not an in-place change.
+* **A cleared header checksum flag is refused at version 3 (D-1528, closed for
+  new months by D-1571; audit-20261003 attackdata-8).** Every month created
+  since D-1571 is version 3, whose checksums are mandatory: a slot with
+  `FLAG_CHECKSUMS` cleared is refused as `ChecksumsRequired(3)`. What remains:
+  a version-2 month written before D-1571 keeps the optional flag (it is never
+  rewritten in place), and an actor who rewrites a version-3 month's `magic`
+  and `format_version` to version 2 in both slots and recomputes their CRCs
+  presents an unsealed version-2 month. The CRC is integrity, not
+  authentication; that actor can equally rewrite the `.crc`.
 * **A deleted month file is not detected (D-1520).** The writer refuses to
   re-initialise a month file truncated or zeroed in place when its `.crc`
   proves records were committed. A `.bin` deleted whole, sidecar left behind,
