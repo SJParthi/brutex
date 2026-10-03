@@ -3117,6 +3117,60 @@ pub(crate) fn note(event: &telemetry::Event<'_>) {
     let _ = telemetry::emit(event);
 }
 
+/// Writes the binary's whole output to `out`, and returns the exit code the
+/// run earns once that write is known (v53-2, D-1484).
+///
+/// `main` printed with `println!` and `print!`, which PANIC on a closed
+/// stdout: `cli sweep 6 100 | true` exited 101 with a backtrace after the
+/// work was done, and a `> report.txt` on a full disk did the same. The shape
+/// is `api`'s `say_line` (probeapi-7, D-1202): written with `write_all`, never
+/// a panic, and a failure SAID on `fallback` with one `cli.output` event.
+///
+/// The code depends on why. A closed pipe (`BrokenPipe`) is a reader that
+/// stopped reading -- `| head` is the ordinary case -- so the computed code
+/// stands, as it does for any Unix filter. Any other error means the report
+/// was meant to land and did not, so a run that would have exited [`OK`]
+/// exits [`FAILED`]: zero would say "everything went as asked" over a report
+/// nobody has. A run that already earned a non-zero code keeps it. If
+/// `fallback` is gone too there is nobody left to tell; the event remains.
+pub fn deliver(
+    code: u8,
+    text: &str,
+    out: &mut impl std::io::Write,
+    fallback: &mut impl std::io::Write,
+) -> u8 {
+    let Err(why) = out.write_all(text.as_bytes()).and_then(|()| out.flush()) else {
+        return code;
+    };
+    let closed = why.kind() == std::io::ErrorKind::BrokenPipe;
+    let earned = if closed || code != OK { code } else { FAILED };
+    let said = why.to_string();
+    note(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "cli.output",
+            "stdout is not writable; the report was not shown whole",
+        )
+        .with("why", telemetry::Value::Str(&said))
+        .with(
+            "bytes",
+            telemetry::Value::Uint(u64::try_from(text.len()).unwrap_or(u64::MAX)),
+        )
+        .with("exit", telemetry::Value::Uint(u64::from(earned))),
+    );
+    let _told = writeln!(
+        fallback,
+        "stdout is not writable ({why}); the report ({} bytes) was not shown whole. {}",
+        text.len(),
+        if closed {
+            "The reader closed the pipe, so the run's own exit code stands."
+        } else {
+            "The report was meant to land and did not, so this is not a clean exit."
+        }
+    );
+    earned
+}
+
 /// Emits one structural event under an exact browser-attempt key when one was
 /// supplied, without changing the process-wide telemetry run held by unrelated
 /// work. Terminal runs have no browser attempt and keep the ordinary path.

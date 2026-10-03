@@ -53530,3 +53530,30 @@ puts every ASCII byte but the declared one at each separator offset of both
 formats and expects `None`, swaps the two formats' separators, and decodes
 five GDFL rows with wrong separators through `decode`, each refused as
 `DateMalformed` on line 2. PIF-09.
+
+### D-1484 — The cli binary writes its output and never panics on a closed stdout — 2026-10-03
+
+**What was observed (v53-2).** `crates/cli/src/main.rs` printed its report
+with `println!` and `print!`, which panic when stdout is closed:
+`cli sweep 6 100 | true` exited 101 with a backtrace after the run had done
+its work. The same defect probeapi-7 fixed in the `api` binary (D-1202).
+
+**The decision.** `main` hands its whole output to `cli::deliver`, which writes
+with `write_all` and `flush` and never panics. A failure is said on stderr
+(how many bytes were not shown, and why) and recorded as one `cli.output` WARN
+event. The exit code depends on the cause: a closed pipe (`BrokenPipe`) is a
+reader that stopped reading, as `| head` does, so the run's own code stands;
+any other error (a full disk under `> report.txt`, EIO) means the report was
+meant to land and did not, so a run that would have exited `OK` exits
+`FAILED`, and a run that already earned a non-zero code keeps it. The
+preflight refusal goes through the same path. Gate 23's declared print surface
+loses `cli/src/main.rs` `print!:1` and `println!:2` and declares its two stream
+handles in clause A2.
+
+**Proof.** `cli::operator_boundary_tests::a_report_that_cannot_be_written_is_said_and_never_panics`
+drives every arm with writers that refuse: a closed pipe keeps `OK`, `FAILED`
+and `MISUSED`; `StorageFull` turns `OK` into `FAILED` and keeps the others; a
+flush that fails after every byte was taken is a failure; a closed stderr as
+well is still not a panic. `tests/binary.rs::a_closed_stdout_is_said_on_stderr_and_never_panics`
+runs the binary with a pipe whose read end was closed before it started and
+asserts exit 0, no panic, and the stderr sentence. C-V53-02.

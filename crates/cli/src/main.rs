@@ -37,6 +37,10 @@
 /// rather than written as it is produced, so that every arm of the library is
 /// drivable from a test with no stdout to capture.
 fn main() -> std::process::ExitCode {
+    // WRITTEN, NEVER PRINTED (v53-2, D-1484). `println!` panics on a closed
+    // stdout, so `cli sweep 6 100 | true` exited 101 after the work was done.
+    // `cli::deliver` writes, says a failure on stderr, and decides the code.
+    let (mut stdout, mut stderr) = (std::io::stdout(), std::io::stderr());
     // THE STORE IS PROVED BEFORE THE FIRST POSSIBLE WRITE.
     //
     // `preflight_store_root` does not create the resolved path and does not
@@ -44,8 +48,9 @@ fn main() -> std::process::ExitCode {
     // or a regular file therefore stops here: no log sink is installed and no
     // command is dispatched against a different directory.
     if let Err(why) = cli::preflight_store_root() {
-        println!("refused: {why}");
-        return std::process::ExitCode::from(cli::FAILED);
+        let refused = format!("refused: {why}\n");
+        let code = cli::deliver(cli::FAILED, &refused, &mut stdout, &mut stderr);
+        return std::process::ExitCode::from(code);
     }
 
     // THE SINK, INSTALLED BEFORE THE COMMAND RUNS AND NOWHERE ELSE.
@@ -72,7 +77,6 @@ fn main() -> std::process::ExitCode {
     // failure, so a run whose events landed somewhere `/logs` does not read
     // looked exactly like a run that was fully observable. `install_log`'s doc
     // carries the measurement.
-    println!("{where_events_went}");
-    print!("{out}");
-    std::process::ExitCode::from(code)
+    let shown = format!("{where_events_went}\n{out}");
+    std::process::ExitCode::from(cli::deliver(code, &shown, &mut stdout, &mut stderr))
 }

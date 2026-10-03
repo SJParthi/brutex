@@ -3345,7 +3345,9 @@ jobs:
           #     names -- stderr is what a watching operator has, and there is no
           #     file yet to hand them afterwards.
           #
-          #   cli/src/main.rs println! 1 -> 2. Neither is a diagnostic. One is
+          #   cli/src/main.rs println! 1 -> 2 -> 0, print! 1 -> 0 (D-1484: now
+          #     written through `cli::deliver`, declared in clause A2). Neither
+          #     was a diagnostic. One is
           #     `refused: {why}` from `preflight_store_root`, which runs before
           #     any sink is installed for the same reason as above; the other
           #     names where the events went, and prints on SUCCESS too -- its
@@ -3374,8 +3376,6 @@ jobs:
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
           cli/src/lib.rs:eprintln!:3
-          cli/src/main.rs:print!:1
-          cli/src/main.rs:println!:2
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:7
@@ -3434,7 +3434,11 @@ jobs:
           # the 26 server.rs prints clause A used to count, and the ones that
           # are diagnostics on a production path still emit the event beside
           # them. A new handle anywhere else is still refused. D-1450.
-          declared_handles='api/src/server.rs:handle:3'
+          # cli/src/main.rs names `stdout()` and `stderr()` once each (v53-2,
+          # D-1484): its three prints became one `cli::deliver` write, which
+          # says a failed stdout on stderr and emits `cli.output`.
+          declared_handles='api/src/server.rs:handle:3
+          cli/src/main.rs:handle:2'
           # Both sides normalised the same way, because an empty `printf` emits a
           # blank line and an empty file emits nothing, and comparing those two
           # would fail on the healthy case forever.
