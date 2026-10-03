@@ -4908,6 +4908,9 @@ jobs:
           #   * A row whose "Proven by" cell is prose, a const assertion or a
           #     CI gate rather than a qualified token or an explicit name in
           #     a source file. Those prose-only rows are not checked.
+          #   * D-1606: invariant_paths.rs now also resolves `a::b` tokens and
+          #     bare names (3+ underscores) in a status row's proof cell, but a
+          #     module-first `a::b` only to "declared somewhere".
           #
           # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files`, the document,
           # and the static patterns below. Gate 1c's discipline.

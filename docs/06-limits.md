@@ -13911,3 +13911,20 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## CI gate limits stated by the audit-20261003 w5 fixes — D-1600 onward, 3 October 2026
+
+- **Gate 10, module-first two-segment tokens (D-1606).** `grid::name` is
+  resolved only to "`name` is declared in some tracked source file", not to
+  the file of module `grid`: an inline `mod grid { … }` has no file the
+  declarations table can bind it to. A crate-first `api::name` is bound to the
+  crate. Three-segment and longer tokens keep their stricter rule.
+- **Gate 10, bare proof names (D-1606).** Only names with three or more
+  underscores, in the cell before a status glyph, are read. A shorter name,
+  or one in prose, is still checked by nothing.
+- **Gate 0 `spawns` (D-1603).** Reads only a string literal passed straight
+  to `Command::new`. A program held in a variable (`api`'s browser opener,
+  D-1202) or built at run time is not seen, and `sh`/`bash` are not shadowed
+  on gate 1e's PATH because the `git` the tests spawn may start a shell.
+- **The `.github/*.rs` gate tools (D-1600).** Gate 6c holds them to rustfmt
+  and clippy `-D warnings`; no coverage or mutation measure applies to them.

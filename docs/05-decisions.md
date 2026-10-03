@@ -53494,3 +53494,43 @@ the same count as the broadest row-id shape, and none is duplicated, so no
 row needed renumbering. Proven by running the step on a copy of the document
 with a second `FV4-01` appended: the old pattern printed OK, the new one
 names the duplicate and exits 1.
+
+### D-1606 — Gate 10 resolves two-segment tokens and bare proof names; four phantom citations are replaced by tests that exist and assert the row — 2026-10-03
+
+**What was observed (audit-20261003 testgaps-1..5).** Gate 10 checked only
+`a::b::c` tokens and names written "`name` in `crates/…`". 303 two-segment
+and 857 bare proof tokens were checked by nothing, and four `✓` rows cited
+tests that do not exist: ER-01 (`grid::every_trade_ends_by_exactly_one_of_the_five_exits`),
+MR-23 (`the_cross_verification_is_also_bound_to_a_press`), AD-02
+(`exact_codecs_bind_every_status_and_refuse_reserves_and_seals`) and ED-01
+(`parameterized_fixture_proves_banknifty_hourly_top25_capacity`). Running the
+extended checker on the old document also found SW-19 citing the removed
+`cli::points_to_ppm`, a row citing `pattern::exemplars` (an inline module, no
+test name), and two rows (P-02, A-20) that backticked an abandoned name as
+history.
+
+**The decision.** `invariant_paths.rs` now refuses, in any table row, an
+`a::b` token (both segments snake case) whose `b` is neither a function nor a
+module in crate `a`, or — when `a` is not a crate — is declared nowhere (an
+inline `tests`/`*_tests` module is accepted; `std`, `alloc`, `tokio`, `str`,
+`crate`, `self`, `super` and `process` roots are skipped). It also refuses a
+bare backticked name with three or more underscores, not ending in `_`, in
+the proof cell of a row whose last cell is a status glyph (`✓ ◐ — ✗ ~`),
+when no tracked source declares it as a function or module. The rows:
+- ER-01 cites a new `runner::grid::tests::every_trade_ends_by_exactly_one_of_the_five_exits`,
+  which proves each of the five exit shapes moves exactly one, distinct
+  counter and that a grid which traded on both sides sums its counters to
+  `trades` (the old test passed vacuously on zero trades).
+- MR-23 cites `api::indexmap::tests::every_outcome_reaches_the_wire_including_the_refusals`
+  and a new node test in `web/tests/masters-load.test.js` that presses
+  Verify and reads the refused symbols in the rendered table (proven to fail
+  when the page stops naming them).
+- AD-02 cites the renamed V1 codec test and the four-status counter kernel.
+- ED-01 cites the renamed `…_but_v1_blocks_top25_admission`, which asserts
+  what the row now says.
+- SW-19 names `cli::points_to_ppm_at`; the exemplar row names its two tests;
+  P-02 and A-20 quote their abandoned names in quotation marks, not code.
+
+**Limit.** A module-first two-segment token is resolved only to "declared
+somewhere", because an inline module has no file to bind it to. Stated in
+`docs/06-limits.md`.
