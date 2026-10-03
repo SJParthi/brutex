@@ -384,3 +384,29 @@ fn the_rung_work_lists_are_built_once_per_masters_parse() {
     assert_eq!(cache.builds, 4, "a reparse costs one rebuild per rung");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **The slots fill in order, and a third timeframe evicts the FIRST slot.**
+///
+/// `SeriesCache::get` documents that slots fill in order and that a third
+/// timeframe reuses the first slot. Asked `DAY_1`, then `MINUTE_1`, then `MINUTE_5`:
+/// `DAY_1` sits in the first slot and is the one evicted, so `MINUTE_1` is still
+/// held in the second (no rebuild) and `DAY_1` costs one. Four builds in all; a
+/// cache that filled the second slot first would evict `MINUTE_1` instead and
+/// pay five.
+#[test]
+fn a_third_timeframe_evicts_the_first_filled_slot_not_the_second() {
+    let dir = crate::scratch::path("autopilot-series-cache-third");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let site = Loaded::new(Site::load(&dir, &dir));
+    let mut cache = SeriesCache::default();
+    for tf in [Timeframe::DAY_1, Timeframe::MINUTE_1, Timeframe::MINUTE_5] {
+        cache.get(&site, tf);
+    }
+    assert_eq!(cache.builds, 3, "three distinct timeframes, three builds");
+    cache.get(&site, Timeframe::MINUTE_1);
+    assert_eq!(cache.builds, 3, "MINUTE_1 survived in the second slot");
+    cache.get(&site, Timeframe::DAY_1);
+    assert_eq!(cache.builds, 4, "DAY_1 was the evicted first slot");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -17087,7 +17087,9 @@ pub async fn serve_limited(
     clippy::panic
 )]
 mod head_deadline_tests {
-    use super::{ConnectionLimits, HEAD_READ_TIMEOUT, serve, serve_limited};
+    use super::{
+        ConnectionLimits, HEAD_READ_TIMEOUT, HeadDeadline, Slot, Slots, serve, serve_limited,
+    };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -17167,6 +17169,36 @@ mod head_deadline_tests {
             got.extend_from_slice(&chunk[..n]);
         }
         String::from_utf8_lossy(&got).into_owned()
+    }
+
+    /// **THE WRAPPER ADVERTISES THE SOCKET'S VECTORED WRITES.** hyper asks
+    /// `is_write_vectored` to choose between one gathered `writev` of a
+    /// response's head and body and flattening them into one buffer first.
+    /// `HeadDeadline` forwards `poll_write_vectored` to the socket, so it must
+    /// report exactly what the socket reports; a wrapper answering `false`
+    /// over a vectored socket would make every response pay a copy.
+    #[tokio::test]
+    async fn the_head_deadline_reports_its_sockets_vectored_writes() {
+        use tokio::io::AsyncWrite as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (io, _) = listener.accept().await.unwrap();
+        let socket = io.is_write_vectored();
+        assert!(socket, "a tokio TCP socket writes vectored");
+        let slots = std::sync::Arc::new(Slots {
+            live: std::sync::atomic::AtomicUsize::new(1),
+            cap: 1,
+            freed: tokio::sync::Notify::new(),
+        });
+        let wrapped = HeadDeadline::new(io, Slot(std::sync::Arc::clone(&slots)), T);
+        assert_eq!(wrapped.is_write_vectored(), socket);
+        drop(wrapped);
+        assert_eq!(
+            slots.live.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the slot is given back with the wrapper"
+        );
     }
 
     /// THE PROBE ITSELF, against the server the operator runs: a partial

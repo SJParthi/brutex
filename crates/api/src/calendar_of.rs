@@ -1207,6 +1207,39 @@ pub(crate) mod tests {
         i64::from(first.days_from_epoch())..=i64::from(first.end_of_month().days_from_epoch())
     }
 
+    /// **AN UNPROVED MONTH IS NAMED WITHHELD ONLY WHEN A DAY WAS WITHHELD.**
+    /// D-1443.
+    ///
+    /// The span 5-6 January 2026 holds two open days and no closed one, and
+    /// no month is proved, so `withhold_closed` changes nothing: January must
+    /// NOT be reported withheld, because no day of it was. The span 2-5
+    /// January holds a weekend (3-4 January, closed) in the same unproved
+    /// month: both days turn `Unmeasured` and January IS named, once.
+    #[test]
+    fn an_unproved_month_with_nothing_closed_is_not_reported_withheld() {
+        let january = YearMonth::new(2026, 1).expect("a real month");
+        let open = |day| pull::calendar::Observed { day, session: None };
+        let none = std::collections::BTreeSet::new();
+
+        let mut calendar =
+            Calendar::from_observed(&[open(epoch_day(2026, 1, 5)), open(epoch_day(2026, 1, 6))]);
+        let mut report = Report::default();
+        withhold_unproved(&mut calendar, &none, &mut report);
+        assert_eq!(report.withheld, Vec::<YearMonth>::new());
+        for day in epoch_day(2026, 1, 5)..=epoch_day(2026, 1, 6) {
+            assert_ne!(calendar.kind_of(day), DayKind::Unmeasured, "day {day}");
+        }
+
+        let mut calendar =
+            Calendar::from_observed(&[open(epoch_day(2026, 1, 2)), open(epoch_day(2026, 1, 5))]);
+        let mut report = Report::default();
+        withhold_unproved(&mut calendar, &none, &mut report);
+        assert_eq!(report.withheld, vec![january]);
+        for day in epoch_day(2026, 1, 3)..=epoch_day(2026, 1, 4) {
+            assert_eq!(calendar.kind_of(day), DayKind::Unmeasured, "day {day}");
+        }
+    }
+
     /// **A MONTH THE DAILY RUNG DID NOT PROVE IS WITHHELD, NOT A RUN OF
     /// HOLIDAYS.** R9-api-law-0, D-1443.
     ///

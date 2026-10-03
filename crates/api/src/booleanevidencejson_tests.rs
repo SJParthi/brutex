@@ -578,3 +578,55 @@ fn an_evidence_pages_currency_cost_per_linked_catalog_is_stated() {
         );
     }
 }
+
+/// **A held reader answers only the exact key it was opened for.** The cache
+/// slot is keyed by root, model, identity and budget; the identical key is a
+/// reuse, an empty slot is not, and changing any ONE of the four fields alone
+/// must make the slot answer nothing, so a reader opened for another tree,
+/// model or budget is never served for this one.
+#[test]
+fn a_held_reader_is_reused_only_for_the_identical_root_model_identity_and_budget()
+-> Result<(), String> {
+    const OTHER: &str = "3434343434343434343434343434343434343434343434343434343434343434";
+    let root = Path::new("/evidence/a");
+    let budget = crate::detail::BooleanObservationBudget::from_value(None)?;
+    let asked = Asked::parse(&format!("identity={ID}"), Model::Statistics)?;
+    let slot = Some(Held {
+        key: Key::of(root, &asked, budget),
+        reader: 7_u8,
+    });
+    let same = Key::of(root, &asked, budget);
+    assert_eq!(
+        held_for(slot.as_ref(), &same).map(|held| held.reader),
+        Some(7)
+    );
+    assert!(held_for(None::<&Held<u8>>, &same).is_none());
+    let other_budget =
+        crate::detail::BooleanObservationBudget::from_value(Some(std::ffi::OsStr::new("1")))?;
+    for (field, key) in [
+        ("root", Key::of(Path::new("/evidence/b"), &asked, budget)),
+        (
+            "model",
+            Key::of(
+                root,
+                &Asked::parse(&format!("identity={ID}"), Model::Admission)?,
+                budget,
+            ),
+        ),
+        (
+            "identity",
+            Key::of(
+                root,
+                &Asked::parse(&format!("identity={OTHER}"), Model::Statistics)?,
+                budget,
+            ),
+        ),
+        ("budget", Key::of(root, &asked, other_budget)),
+    ] {
+        assert!(
+            held_for(slot.as_ref(), &key).is_none(),
+            "a differing {field} alone must not reuse the held reader"
+        );
+    }
+    Ok(())
+}
