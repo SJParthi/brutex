@@ -58,7 +58,7 @@ D-1551..D-1555 (used 1551-1553); AFF-01..AFF-19 (used 01-04).
 2. **hunt-api-3:** cross-site failure logging is capped at 50 lines a minute (D-1583), but same-origin clients are still logged in full. Bound the same-origin path too, with a counted, named suppression line. Test both paths.
 3. **errpaths-4:** Widths::new refuses swapped widths (D-1546), but public fields still let a caller build a swapped Widths. Make the fields private, route the degraded-path tests through a constructor or a test-only builder, and prove a swapped Widths can't be built outside the module.
 
-### w7 (cli), IN PROGRESS on audit-fix/w7
+### w7 (cli), DONE on origin audit-fix/w7 @ 858c8bb, not yet on PR #74
 Commits so far: 5b6ce01 (D-1569) and 6516811 (D-1556, D-1557). D-1556..D-1559 and D-1569; AFF-20..AFF-39.
 1. **hunt-conc-1:** sweep-all files rows in walk order (D-1564), but range-all and pool still file in completion order. Make both deterministic, and test byte-identical output across thread counts and reruns.
 2. **hunt-conc-2:** the ordered phases were left as "needs transaction re-plumbing". Do the re-plumbing, and test the ordering under concurrency.

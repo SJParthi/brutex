@@ -1,6 +1,6 @@
-# Per-finding status, all 91 (generated 2026-10-03 from scratchpad status.js and fix-board sweep.tsv)
+# Per-finding status, all 91 (updated 2026-10-03 from scratchpad status.js and fix-board sweep.tsv)
 
-Board states: found, fixing, branch, pushed, green. Also mirrored at /mnt/project-files/fix-board/status/sweep.tsv (id, state, commit) for the Fix Board; keep both current.
+Board states: found, fixing, branch, pushed, green. Mirrored at /mnt/project-files/fix-board/status/sweep.tsv.
 
 | id | severity | finding | fix status | board state | commit | note |
 |---|---|---|---|---|---|---|
@@ -31,8 +31,8 @@ Board states: found, fixing, branch, pushed, green. Also mirrored at /mnt/projec
 | gaps-5 | medium | Cross-sectional winner table is in-sample only | open | found |  | Needs an out-of-sample split and correction across 210 instruments: a new feature, not a bug fix. |
 | gaps-7 | medium | Survivorship bias in the equity universe | open | found |  | Needs point-in-time F&O membership data, which the charter does not source. |
 | gaps-8 | medium | No equity charges and zero slippage | open | found |  | Needs a charter-sourced equity charge stack. |
-| o1surface2-1 | medium | cli descend rebuilds a whole rung per step | documented | fixing | 78ce90f | Reusing the column is unsafe here (identity-bound); per-step bound now in limits (D-1567). |
-| hunt-conc-1 | medium | Ledger row order follows thread timing (known) | partial | fixing | 78ce90f | sweep-all now files rows in walk order (D-1564); range-all and pool documented. |
+| o1surface2-1 | medium | cli descend rebuilds a whole rung per step | fixed | branch | 858c8bb | cli descend prepares its stored inputs once per descent via an identity-keyed cache (D-1557); remaining per-step copies stated in limits. |
+| hunt-conc-1 | medium | Ledger row order follows thread timing (known) | fixed | branch | 858c8bb | range-all and pool pass 1 run as ordered lanes; every shared durable write follows input order, byte-identical across 1-12 threads (D-1556). |
 | hunt-cli-a-3 | low | Two sealed rows with one identity accepted on open | fixed | pushed | a21d031 | Cold open refuses duplicate sealed identities (D-1561). |
 | hunt-cli-b-1 | low | Re-running a finished search keeps adding checkpoints | fixed | pushed | a21d031 | Exhausted rerun publishes nothing (D-1562). |
 | hunt-pull-3 | low | Exceptional-session warning repeated per bucket | fixed | pushed | a21d031 | Named once per day (D-1533). |
@@ -55,7 +55,7 @@ Board states: found, fixing, branch, pushed, green. Also mirrored at /mnt/projec
 | errpaths-2 | low | A symlink loop reads as 'no receipt' | fixed | pushed | a21d031 | symlink_metadata; only NotFound is absent (D-1561). |
 | errpaths-3 | low | An invalid stop ladder silently becomes empty | fixed | pushed | a21d031 | Invalid stop ladders refused (D-1545). |
 | errpaths-4 | low | Swapped tolerance widths accepted | fixed | branch | 700e644 | Widths fields private; a swapped pair cannot be built outside the crate (compile_fail doctests, D-1553). |
-| hunt-conc-2 | low | Catalog and later-period commands write from workers | documented | fixing | 78ce90f | Ordered phases need transaction re-plumbing; bound stated (D-1564). |
+| hunt-conc-2 | low | Catalog and later-period commands write from workers | fixed | branch | 858c8bb | Boolean family pools use the same ordered lanes; fixed worker count on every machine (D-1556). |
 | hunt-conc-3 | low | Refusal text depends on HashMap order | fixed | pushed | a21d031 | Reconcile walks identities in sorted order (D-1565). |
 | attackdata-2 | low | −0.0 Greek reported AlreadyPresent | fixed | pushed | a21d031 | Byte equality; greek domain enforced (D-1524). |
 | attackdata-3 | low | Repeated JSON keys keep the last value silently | fixed | pushed | a21d031 | Repeated JSON keys refused (D-1531). |
@@ -88,7 +88,7 @@ Board states: found, fixing, branch, pushed, green. Also mirrored at /mnt/projec
 | rustonly2-10 | info | core-foundation-sys compiles on macOS | documented | found |  | macOS-only native dependency; no change needed on Linux. |
 | webcontract-5 | info | Static assets sent without cache headers | fixed | pushed | a21d031 | Content-hashed assets served immutable (D-1591). |
 | hunt-api-6 | info | Browser-launch child never reaped | fixed | pushed | a21d031 | Browser-launch child reaped (D-1590). |
-| hunt-cli-a-5 | info | One interrupted V6 write blocks that rung | open | fixing | 78ce90f | Not addressed in this pass. |
+| hunt-cli-a-5 | info | One interrupted V6 write blocks that rung | fixed | branch | 858c8bb | An abandoned Selection V6 tail is moved aside and logged, never hides history or wedges the rung (D-1569). |
 | hunt-conc-4 | info | Budget doc says bigger machines earn more | fixed | pushed | a21d031 | Doc corrected. |
 | o1eng2-3 | info | Limits says 25 intents per minute; code allows 200 | fixed | pushed | a21d031 | Doc corrected. |
 | o1store2-2 | info | Limits doc still lists heap buffers on the cold path | fixed | pushed | a21d031 | Doc corrected (D-1527). |
