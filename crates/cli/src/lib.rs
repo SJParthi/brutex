@@ -8286,7 +8286,10 @@ struct ListingWindow {
 }
 
 /// One newest-first pass over `count` ledger rows, retaining `O(1)` records
-/// (D-1729): the first [`LIST_ROWS`] matches and a running best.
+/// (D-1729): the first [`LIST_ROWS`] matches and a running best. Proven equal
+/// to full retention, and bounded, by
+/// `cli::screen_policy_tests::the_listing_window_equals_full_retention_and_keeps_at_most_forty`
+/// (invariant SCB-10).
 ///
 /// The best is the one `best_complete_newest_first` picks over all matches:
 /// the largest `pessimistic` among complete rows, and the NEWEST of a tie.
@@ -11482,7 +11485,10 @@ pub const YOUR_RULES_UNMET: &str = "YOUR RULES: UNMET";
 /// mildest-tier probe in [`walk_ladder`] keeps `T` at ONE when nothing admits.
 /// Making a tier O(1) would need one grid holding every tier's forced stop at
 /// once, which is a different grid and a different run identity: rejected in
-/// D-1720 and stated in `docs/06-limits.md`.
+/// D-1720 and stated in `docs/06-limits.md`. The screen COUNTS are proven by
+/// `cli::screen_policy_tests::the_tier_walk_stops_on_admission_and_probes_the_mildest_first`
+/// (invariant SCB-01); the per-screen cost is UNVERIFIED as a measurement, as
+/// no bench times a cascade.
 ///
 /// # It never invents a tier
 ///
