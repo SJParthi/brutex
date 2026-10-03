@@ -61,6 +61,18 @@ jobs:
             echo "GATE 0 FAILED: the workflow lines above are refused. See D-1100."
             exit 1
           fi
+          # D-1601: ci-ok needs every job, runs `if: always()`, accepts only
+          # success. D-1603: no crate code spawns a shell or an interpreter by
+          # a literal name or path, which gate 1e's PATH stubs cannot see.
+          if ! "$tool" aggregator .github/workflows/ci.yml; then
+            echo "GATE 0 FAILED: ci-ok no longer guards every gate. See D-1601."
+            exit 1
+          fi
+          # shellcheck disable=SC2046
+          if ! "$tool" spawns $(git ls-files 'crates/*.rs'); then
+            echo "GATE 0 FAILED: crate code above starts a shell or interpreter. D-1603."
+            exit 1
+          fi
           echo "OK — the scanner passed its own tests and the workflow is clean."
 
       - name: Gate 1 — extension allowlist
@@ -4466,8 +4478,10 @@ jobs:
           # same invariant. That is a judgement, not a string comparison.
           #
           # NO UNTRUSTED INPUT: one tracked document and the pattern below.
+          # D-1608: a digit may follow the first letter (`FV4-01`); 179 rows
+          # were invisible to uniqueness until it could.
           f=docs/04-invariants.md
-          ids=$(grep -oE '^\| *`?[A-Z][A-Z-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
+          ids=$(grep -oE '^\| *`?[A-Z][A-Z0-9-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
                 | sed -E 's/^\| *`?//; s/`? *\|$//')
           n=$( { printf '%s\n' "$ids" | grep -c . || true; } )
           # A pattern that stops matching is the failure mode gate 8 shipped
@@ -7114,6 +7128,21 @@ jobs:
       - name: Gate 6b — clippy
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Gate 6c — the .github/*.rs gate tools meet fmt and clippy
+        run: |
+          set -euo pipefail
+          # D-1600 (hunt-ci-5). They are built by bare rustc, so 6a and 6b
+          # never read them. Test and non-test builds both, as gate 0 does.
+          tools=$(git ls-files '.github/*.rs')
+          [ -n "$tools" ] || { echo "GATE 6c READ NO TOOL."; exit 1; }
+          out="${RUNNER_TEMP:-/tmp}/gate-6c"
+          for f in $tools; do
+            rustfmt --edition 2024 --check "$f"
+            clippy-driver --edition=2024 -D warnings "$f" -o "$out"
+            clippy-driver --edition=2024 --test -D warnings "$f" -o "$out-t"
+          done
+          echo "OK — $(wc -w <<< "$tools") tool(s) are formatted and clippy-clean."
 
       - name: Gate 5 — unsafe is denied, exceptions are counted
         run: |

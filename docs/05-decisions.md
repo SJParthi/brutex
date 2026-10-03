@@ -53403,3 +53403,94 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1600 — The `.github/*.rs` gate tools meet the workspace's fmt and clippy bar (Gate 6c) — 2026-10-03
+
+**What was observed (audit-20261003 hunt-ci-5).** The three CI tools under
+`.github/` decide a dozen gates and are built by bare `rustc`, so Gate 6a
+(`cargo fmt --all --check`) and Gate 6b (`cargo clippy --workspace`) never
+read them. `clippy-driver --edition=2024 -D warnings .github/source_scan.rs`
+failed with nine errors (a manual prefix strip, two identical `if` blocks,
+five collapsible `if`s, one very complex type).
+
+**The decision.** The nine are fixed without changing behaviour (the scanner's
+own 40 tests pass unchanged), and a new build-job step, Gate 6c, runs
+`rustfmt --edition 2024 --check` and `clippy-driver --edition=2024 -D warnings`
+(non-test and `--test`) on every tracked `.github/*.rs`, refusing an empty
+listing. Coverage and mutation testing of these tools are still not measured;
+that limit is unchanged and stays stated in `docs/06-limits.md`.
+
+### D-1601 — `step-runs` reads whether the line decides its step, and `ci-ok`'s own shape is a gate — 2026-10-03
+
+**What was observed.** hunt-ci-3: `source_scan step-runs` accepted any line
+*beginning* with the needle, so `cargo deny check || true`, or the line inside
+`if false; then … fi`, passed the meta-gate that is meant to prove gate 3
+blocks. hunt-ci-4: nothing checked `ci-ok` itself. Branch protection requires
+only that check, GitHub counts a skipped required job as passing, and a job
+left out of `needs` makes its gate advisory.
+
+**The decision.** `swallowed` refuses a needle line that sits inside an
+`if`/loop/`case`/brace group or function, inside a heredoc, after `set +e`, or
+is followed by `|`, `&` or `;`. A new `source_scan aggregator` subcommand,
+run by Gate 0, refuses a `ci-ok` whose flow-style `needs` is not exactly every
+other job, whose job-level `if:` is not exactly `always()`, which sets
+`continue-on-error` or a step `if:`, or which no longer carries the
+`join(needs.*.result, ' ')` input and the success-only loop. Invariants
+AFE-01 and AFE-02.
+
+### D-1602 — Gate 0 refuses every inline-program form, not only `node -e` — 2026-10-03
+
+**What was observed (rustonly2-2).** Gate 0's matcher caught only the exact
+word pairs `node -e/--eval/-p/--print`, `perl -e/-E`, `php -r`, `py… -c` and
+`deno eval`. A heredoc or here-string into an interpreter, a pipe into one,
+`perl -ne`, `node -pe`, `py… -Bc`, `--eval=…` and a quoted program name all
+passed.
+
+**The decision.** `inline_programs` reads, per logical shell line: any
+single-dash flag cluster carrying the inline letter for that interpreter
+(`e`/`p` for node and bun, `e`/`E` for perl and ruby, `r` for php, `e` for
+lua, `c` for the py family), `--eval`/`--print` with or without `=`, `-` as
+the program, any later `<<` (heredoc or here-string), and a pipe stage whose
+first word is an interpreter given no script. Quotes around the program name
+and a leading path are stripped. `awk` is not refused: its 73 uses are the
+gates themselves, and whether shell in a workflow is a second language is the
+law question the prior pass raised and left to the operator. Invariant AFE-04.
+
+### D-1603 — Gate 1 counts only what is built; build scripts and crate code may not start a program indirectly — 2026-10-03
+
+**What was observed.** rustonly2-1: `compiled_roots` counted every
+`.github/*.rs` and every `crates/*/src/lib.rs`, so a tracked `.github/notes.rs`
+or a non-member `crates/zz/src/lib.rs` holding Python passed gate 1 and its
+"every .rs outside web/ is compiled" line. rustonly2-3: gate 2 refused only
+naming a process API; a build script could write `.cargo/config.toml`
+(a `rustc-wrapper` the next cargo runs), print `rustc-link-arg=-fuse-ld=…`,
+or call `duct`/`xshell`. rustonly2-4: gate 1e shadows interpreters by name
+on PATH, so `Command::new("sh")` or `Command::new("/usr/bin/<interpreter>")`
+in test or production code passed every gate.
+
+**The decision.** A crate file is a root only when its directory is listed in
+the root `Cargo.toml` `workspace.members`, and a `.github/*.rs` only when a
+non-comment workflow line hands it to `rustc`; an unreadable manifest or
+workflow is an error. Gate 2's token scan also refuses a string literal
+naming `.cargo`, `rustc-link-arg` or `fuse-ld`, and the identifiers `duct`,
+`xshell`, `cmd_lib`, `subprocess`, `run_script` and `popen`. A new
+`source_scan spawns`, run by Gate 0 over every tracked `crates/**/*.rs`,
+refuses `Command::new("<literal>")` whose program's base name is a shell
+(`sh`, `bash`, `dash`, `zsh`, `ksh`, `fish`), `env`, or an interpreter.
+**Limit:** a program held in a variable is not read (`api`'s browser opener,
+D-1202, is one); `sh` and `bash` are not added to gate 1e's PATH stubs
+because `git`, which the tests spawn, may start a shell itself. Invariants
+AFE-03, AFE-05, AFE-06.
+
+### D-1608 — Gate 27 reads row ids whose prefix carries a digit — 2026-10-03
+
+**What was observed (hunt-ci-6).** Gate 27's id pattern
+`[A-Z][A-Z-]*-[0-9]{2,3}` allowed no digit in the prefix, so 179 rows
+(`FV4-01`, `PS3-01`, `C-O1CLI1-01`, `S-PROBESTORE3-01`, …) were never checked
+for uniqueness; a second `FV4-01` passed.
+
+**The decision.** The prefix is `[A-Z][A-Z0-9-]*`. The tree reads 1,494 ids,
+the same count as the broadest row-id shape, and none is duplicated, so no
+row needed renumbering. Proven by running the step on a copy of the document
+with a second `FV4-01` appended: the old pattern printed OK, the new one
+names the duplicate and exits 1.
