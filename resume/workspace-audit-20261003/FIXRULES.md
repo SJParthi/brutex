@@ -1,0 +1,20 @@
+# Rules for every fix worker (read fully, follow exactly)
+
+- You fix audit findings in YOUR OWN git worktree only (named in your prompt), on its local branch audit-fix/wN, based on origin/final/all-fixes 1087e54. Never touch /home/claude/brutex or another worker's worktree. Never push, never open PRs, never call mcp__hearthbot__ tools. Commit locally on your branch (small commits, clear messages, each ending with the two lines:
+  Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+  Claude-Session: https://claude.ai/code/session_01UJCDytdhv4BHdHyAmxutjL
+  ). Do not put any model name anywhere else.
+- Read CLAUDE.md in your worktree fully first; it is the law (Rust only outside web/; no fallback that hides a failure; no test that asserts nothing; no invention: if a fix needs a vendor/exchange/cost fact not sourced in docs/00-charter.md, write UNVERIFIED and do not invent it).
+- Findings and their evidence: /tmp/claude-0/-home-claude-brutex/1e694b3f-0b9b-5fae-8d41-2cb758b4eff1/scratchpad/out/<report>.md (and the table in scratchpad/brutex-workspace-audit.html). Re-read the cited code at HEAD before changing anything; if a finding turns out wrong, say so with evidence and skip it.
+- Every fix: (1) first write a Rust test that FAILS on the current code (run it, keep the failing output), (2) fix, (3) the test passes. Tests go where the crate already keeps its tests. The test must assert the property, not just is_ok.
+- Repo conventions that CI enforces (violating them turns PR #74 red):
+  * Every locked choice gets a docs/05-decisions.md entry. Use ONLY your assigned D-number range. Append entries at the end of the file in the existing heading style.
+  * Every new invariant gets a row in docs/04-invariants.md beside the exact test path that proves it (full crate::module::test path, at least three :: segments). Use ONLY your assigned invariant id prefix (letters only, then -NN, e.g. AFA-01). Append at the end in the existing table style.
+  * A new non-O(1) bound goes in docs/06-limits.md; a corrected stale doc sentence is just edited.
+  * docs/11-findings.md is append-only; add a row per fixed finding at the end if that file's format has a natural place, citing the audit id (e.g. "audit-20261003 hunt-pull-2").
+  * Gate 11 refuses in production code: .iter().find( / .iter().position( (use other forms), local #[allow(...)] on production lines, a #[path] test file without #![cfg(test)] on line 1. Gate 1c: no new lowercase string literal in crates/pull (read the gate in .github/workflows/ci.yml if you touch crates/pull). Keep .github/workflows/ci.yml well under 524,288 bytes.
+  * Workspace lints deny unwrap/expect/panic/indexing/truncating casts in production code.
+  * Merge commits only, never rebase or amend after another worker might have pulled (you are alone on your branch, so normal commits are fine).
+- Build hygiene (4-core box shared with 4 other workers): export CARGO_BUILD_JOBS=2 and CARGO_TARGET_DIR=<your worktree>/target. Only run cargo for the crates you touch: cargo fmt --all; cargo clippy -p <crate> --all-targets --locked -- -D warnings; cargo test -p <crate> --locked (add the dependent crates that use what you changed, e.g. if you change store, also cargo check -p cli -p api --all-targets). Never cargo clean another dir. Run tests that need non-root with setpriv --reuid=65534 if a test is permission-based (you are root).
+- Before finishing: cargo fmt --all --check clean; clippy -D warnings clean on touched crates and their dependents; tests green on touched crates; git status clean (everything committed, no probe files).
+- Final message (under 400 words): per finding id: FIXED (commit sha, test name) / SKIPPED (why, with evidence) / UNVERIFIED (what fact is missing). Then the D-numbers and invariant ids you used, and the exact commands you ran with their final result lines.
