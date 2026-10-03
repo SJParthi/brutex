@@ -934,6 +934,17 @@ pub struct Grid {
     /// **Zero on every sound slice**, so a non-zero here is the signal that the
     /// store handed this run something it should not have.
     pub refused_paths: u64,
+    /// Why the caller's [`Levels`] could not be built into ladders, when they
+    /// could not: then there is no cell and nothing is priced. `None` on every
+    /// grid that priced.
+    ///
+    /// [`crate::excursion::Ladder::new`] refuses an unsorted, repeated or
+    /// non-positive rung list rather than fixing it, and
+    /// [`crate::excursion::Ladder::stepped`] refuses a non-positive step. The
+    /// grid used to turn the first into an EMPTY stop ladder and the second
+    /// into the quantile ladder, so an invalid request priced a different grid
+    /// and said nothing (errpaths-3, D-1545).
+    pub refused_levels: Option<&'static str>,
 }
 
 impl Grid {
@@ -2045,6 +2056,13 @@ fn evaluate_timed(
     if !money_envelope_fits(bars, &timed.occupancy, facts.acceptance()) {
         return envelope_refused(timed);
     }
+    if let Some(why) = levels_refusal(stops_ppm, step_ppm) {
+        return Grid {
+            signals: timed.signals,
+            refused_levels: Some(why),
+            ..Grid::default()
+        };
+    }
 
     // PASS TWO: the ladders, from what this combination's own trades did. A
     // provisional walk with no levels supplies the excursion sample, so the
@@ -2342,6 +2360,7 @@ fn evaluate_timed_with_exact_ladders(
         targets,
         trails,
         refused_paths,
+        refused_levels: None,
     }
 }
 
@@ -2401,6 +2420,22 @@ fn money_envelope_fits(
         .checked_mul(count)
         .and_then(|value| value.checked_mul(4))
         .is_some_and(|bound| bound <= i128::from(i64::MAX))
+}
+
+/// Why a caller's stop ladder or step cannot be built, or `None` when both
+/// can. Checked before any ladder is derived, so an invalid request is refused
+/// by name rather than replaced by a ladder nobody asked for (D-1545).
+fn levels_refusal(stops_ppm: &[Ppm], step_ppm: Option<Ppm>) -> Option<&'static str> {
+    if !stops_ppm.is_empty() && Ladder::new(stops_ppm.to_vec()).is_none() {
+        return Some(
+            "the caller's stop ladder is not strictly ascending positive ppm, so it \
+             cannot be priced as asked",
+        );
+    }
+    if step_ppm.is_some_and(|step| step <= 0) {
+        return Some("the ladder step must be a positive ppm");
+    }
+    None
 }
 
 /// The grid a slice outside [`money_envelope_fits`] gets: no cell, every path
@@ -4316,7 +4351,7 @@ fn one_variant(
             live,
             armed,
         };
-        let choices = ExitChoices::of(firing, pess_off);
+        let choices = ExitChoices::of(firing, pess_off, pess_off == span);
         // NO `entry_price` HERE ANY MORE, AND ITS ABSENCE IS THE FIX.
         //
         // This read the execution bar's OPEN and handed the SAME price to both
@@ -5098,7 +5133,16 @@ struct ExitChoices {
 
 impl ExitChoices {
     /// Builds the exact selected-order bracket on `chosen` and no later bar.
-    fn of(f: Firing, chosen: usize) -> Self {
+    ///
+    /// `on_time_exit_bar` is whether `chosen` is the candidate's own time-exit
+    /// bar. That bar's time exit fills from its OPEN, the deadline price, and a
+    /// target first touched inside the same bar is touched no earlier, so the
+    /// time exit stays a reachable attribution beside it and the pessimistic
+    /// reading can book it. Without this a target touched only on that bar
+    /// was credited in both readings (hunt-runner-1, D-1541). Adverse orders
+    /// are unchanged: a stop or a pre-bar trail on that bar already prices at
+    /// or below the time exit's worst fill.
+    fn of(f: Firing, chosen: usize, on_time_exit_bar: bool) -> Self {
         let Firing {
             stop_at,
             target_at,
@@ -5135,12 +5179,14 @@ impl ExitChoices {
         let trail_raised =
             (trail.at != NEVER && trail.raised != trail.before).then(|| trail.ended(false));
         let no_order = !stop_fired && !target_fired && trail_before.is_none();
+        let deadline_target =
+            on_time_exit_bar && target_fired && !stop_fired && trail_before.is_none();
         Self {
             stop: stop_fired.then_some(Ended::Stop),
             target: target_fired.then_some(Ended::Target),
             trail_before,
             trail_raised,
-            timed: no_order.then_some(Ended::Time),
+            timed: (no_order || deadline_target).then_some(Ended::Time),
         }
     }
 
@@ -5679,6 +5725,67 @@ mod exit_family_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// AN INVALID CALLER LADDER IS REFUSED BY NAME, NOT PRICED AS NO LADDER.
+    /// errpaths-3, D-1545.
+    ///
+    /// `Ladder::new` refuses an unsorted, repeated or non-positive rung list
+    /// rather than fixing it for the caller. The grid replaced that refusal
+    /// with an empty ladder, so `[80, 40, 20]` priced a grid with no stop axis
+    /// and said nothing. A non-positive step fell back to the quantile ladder
+    /// the same way.
+    #[test]
+    fn an_invalid_stop_ladder_or_step_is_refused_and_named() {
+        let bars = crate::synthetic::sessions(8);
+        let column = column(&bars);
+        let mask = ConditionMask::default();
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        let sound = super::evaluate(
+            &bars,
+            &column,
+            &mask,
+            horizon,
+            Side::Long,
+            Levels {
+                stops_ppm: &[20, 40, 80],
+                ..Levels::derived(3)
+            },
+        );
+        assert_eq!(sound.refused_levels, None, "premise: a sound ladder prices");
+        assert!(sound.cells.iter().any(|cell| cell.stop.is_some()));
+        for (stops, step) in [
+            (&[80_i64, 40, 20][..], None),
+            (&[40, 40][..], None),
+            (&[-5, 10][..], None),
+            (&[][..], Some(0)),
+            (&[][..], Some(-25)),
+        ] {
+            let grid = super::evaluate(
+                &bars,
+                &column,
+                &mask,
+                horizon,
+                Side::Long,
+                Levels {
+                    stops_ppm: stops,
+                    step_ppm: step,
+                    ..Levels::derived(3)
+                },
+            );
+            assert!(
+                grid.refused_levels.is_some(),
+                "{stops:?} {step:?}: {grid:?}"
+            );
+            assert!(
+                grid.cells.is_empty(),
+                "{stops:?} {step:?}: nothing is priced"
+            );
+            assert!(
+                grid.best().is_none(),
+                "{stops:?} {step:?}: nothing is chosen"
+            );
         }
     }
 
@@ -7472,7 +7579,12 @@ mod tests {
             fingerprint(&rendered),
             // RE-TAKEN alongside the cell counts above, for the reason given
             // there. Was 4_541_430_464_614_536_018 over the three-target grid.
-            11_636_914_018_498_032_287,
+            //
+            // RE-TAKEN AGAIN for D-1545, and only the rendering moved: the
+            // `Debug` text gained `refused_levels: None`. The same value came
+            // out with D-1541's time-exit choice switched off and on, so no
+            // cell of this fixture moved; was 11_636_914_018_498_032_287.
+            3_310_703_317_024_171_291,
             "every cell of both grids, byte for byte"
         );
     }
@@ -8419,6 +8531,77 @@ mod tests {
         );
     }
 
+    /// A TARGET FIRST TOUCHED ON THE TIME-EXIT BAR DOES NOT OUTRANK THE TIME
+    /// EXIT IN THE PESSIMISTIC READING. hunt-runner-1, D-1541.
+    ///
+    /// The time exit's best fill is that bar's OPEN, the deadline price; a
+    /// level touched inside the same bar is touched no earlier. Both are
+    /// reachable on that bar, so the pessimistic reading is the worse of the
+    /// two -- here the time exit, priced exactly as the level-less baseline
+    /// prices it -- and the optimistic reading may still book the target.
+    #[test]
+    fn a_target_touched_only_on_the_time_exit_bar_books_the_time_exit_pessimistically() {
+        let bars = vec![
+            candle(0, 100_000, 100_000, 100_000, 100_000),
+            candle(1, 100_000, 100_400, 99_600, 100_000),
+            candle(2, 100_000, 106_000, 99_000, 100_000),
+        ];
+        let fixed = crate::excursion::Ladder::new(vec![50_000]).expect("one rung");
+        let trails = crate::excursion::Ladder::default();
+        let cross = crate::excursion::crossings(
+            &bars,
+            0,
+            2,
+            100_000,
+            Side::Long,
+            crate::excursion::Ladders {
+                stops: &fixed,
+                targets: &fixed,
+                trails: &trails,
+            },
+        );
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+        let candidates = vec![super::Candidate {
+            signal: 0,
+            entry: 0,
+            time_exit: 2,
+            block_only: false,
+            cross,
+            entry_pess,
+            entry_opt,
+        }];
+        let rungs = (fixed.rungs(), fixed.rungs(), trails.rungs());
+        let variant = |target| super::Variant {
+            stop: None,
+            target,
+            tsl: None,
+            ttp: None,
+        };
+        let baseline =
+            super::one_variant(&bars, &candidates, rungs, variant(None), Side::Long, None);
+        let targeted = super::one_variant(
+            &bars,
+            &candidates,
+            rungs,
+            variant(Some(0)),
+            Side::Long,
+            None,
+        );
+        assert_eq!(
+            baseline.pessimistic, -1_000,
+            "premise: the time exit's worst fill is the bar's low"
+        );
+        assert_eq!(
+            targeted.pessimistic, baseline.pessimistic,
+            "the time exit is reachable on its own bar, so it bounds the pessimistic reading"
+        );
+        assert_eq!(
+            targeted.optimistic, 5_000,
+            "the target is still a reachable fill on that bar"
+        );
+        assert_eq!(targeted.ambiguous_bars, 1, "two attributions share the bar");
+    }
+
     #[test]
     fn one_exit_bar_is_counted_once_when_fixed_and_trailing_readings_both_differ() {
         let bars = vec![
@@ -8632,7 +8815,7 @@ mod tests {
             live,
             armed: super::Trailing::never_fired(super::TrailKind::Armed),
         };
-        let choices: Vec<_> = super::ExitChoices::of(firing, 1).iter().collect();
+        let choices: Vec<_> = super::ExitChoices::of(firing, 1, false).iter().collect();
         let pess = choices.first().copied().expect("the pre-bar anchor");
         let opt = choices.get(1).copied().expect("the raised anchor");
         assert_eq!(
