@@ -300,7 +300,7 @@ fn all_vwap_predicates_and_negations_match_independent_integer_levels() {
     // zero-volume observations compare their closes without changing either.
     let width = Widths::pinned()
         .expect("width used by the actual evaluator")
-        .fib
+        .fib()
         .milli();
     let near = |close: i64, level: i64| (close - level).abs() * 1000 <= width * 50;
     for (offset, close) in (1..=451).step_by(2).enumerate() {
