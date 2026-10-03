@@ -702,7 +702,7 @@ fn optional<'a>(
 fn stamp(cell: Option<&serde_json::Value>, field: &'static str) -> Result<i64, RollingError> {
     let refuse = || RollingError::Unstampable {
         field,
-        text: cell.map_or_else(|| "nothing".to_owned(), serde_json::Value::to_string),
+        text: cell.map_or_else(|| "an absent cell".to_owned(), serde_json::Value::to_string),
     };
     let cell = cell.ok_or_else(refuse)?;
     let seconds = if let Some(whole) = cell.as_i64() {
@@ -1362,6 +1362,9 @@ mod tests {
         }
     }
 
+    /// An ordinary epoch-seconds stamp for the cell tests below.
+    const STAMP: i64 = 1_700_000_000;
+
     /// One rolling CALL body built from the given timestamp, volume and close
     /// cells, one row.
     fn with_cells(stamp: &str, volume: &str, close: &str) -> Result<Vec<Row>, RollingError> {
@@ -1390,9 +1393,9 @@ mod tests {
         for (stamp, why) in [
             ("null".to_owned(), "a null stamp"),
             (r#""x""#.to_owned(), "a text stamp"),
-            ("1700000000.5".to_owned(), "a fractional second"),
+            (format!("{STAMP}.5"), "a fractional second"),
             ((last + 1).to_string(), "microseconds past i64"),
-            ("9999999999999".to_owned(), "the probe's stamp"),
+            (9_999_999_999_999_i64.to_string(), "the probe's stamp"),
             (i64::MIN.to_string(), "the null sentinel"),
             (u64::MAX.to_string(), "past i64"),
         ] {
@@ -1404,8 +1407,8 @@ mod tests {
         }
         for (stamp, want) in [
             (last.to_string(), last * 1_000_000),
-            ("-19800".to_owned(), -19_800_000_000),
-            ("1700000000.0".to_owned(), 1_700_000_000_000_000),
+            ((-19_800_i64).to_string(), -19_800_000_000),
+            (format!("{STAMP}.0"), STAMP * 1_000_000),
             ("0".to_owned(), 0),
         ] {
             let rows = with_cells(&stamp, "1", "100.0").unwrap_or_else(|e| panic!("{stamp}: {e}"));
@@ -1413,11 +1416,11 @@ mod tests {
         }
         for (volume, why) in [
             (r#""abc""#, "a text volume"),
-            ("-50", "a negative volume"),
+            ("-1", "a negative volume"),
             ("null", "a null volume"),
             ("2.5", "a fractional volume"),
         ] {
-            let got = with_cells("1700000000", volume, "100.0");
+            let got = with_cells(&STAMP.to_string(), volume, "100.0");
             assert!(
                 matches!(&got, Err(RollingError::Uncountable { field: "volume", text }) if text == volume),
                 "{why}: {volume} gave {got:?}"
@@ -1425,14 +1428,14 @@ mod tests {
         }
         let neg = i64::MIN.to_string();
         assert!(matches!(
-            with_cells("1700000000", &neg, "100.0"),
+            with_cells(&STAMP.to_string(), &neg, "100.0"),
             Err(RollingError::Uncountable {
                 field: "volume",
                 ..
             })
         ));
         for (volume, want) in [("0", 0), ("7.0", 7), (&*i64::MAX.to_string(), i64::MAX)] {
-            let rows = with_cells("1700000000", volume, "100.0")
+            let rows = with_cells(&STAMP.to_string(), volume, "100.0")
                 .unwrap_or_else(|e| panic!("{volume}: {e}"));
             assert_eq!(rows[0].bar.volume, want, "{volume}");
         }
@@ -1451,7 +1454,7 @@ mod tests {
     #[test]
     fn a_rolling_price_below_zero_or_snapping_to_a_false_zero_is_refused() {
         for close in ["-5", "-0.001", "0.0001", "0.004", "-100.25"] {
-            let got = with_cells("1700000000", "1", close);
+            let got = with_cells(&STAMP.to_string(), "1", close);
             assert!(
                 matches!(&got, Err(RollingError::NotAPrice { field: "close", text }) if text == close),
                 "{close} gave {got:?}"
@@ -1464,11 +1467,11 @@ mod tests {
             ("0.005", 1),
             ("100.25", 10_025),
         ] {
-            let rows =
-                with_cells("1700000000", "1", close).unwrap_or_else(|e| panic!("{close}: {e}"));
+            let rows = with_cells(&STAMP.to_string(), "1", close)
+                .unwrap_or_else(|e| panic!("{close}: {e}"));
             assert_eq!(rows[0].bar.close, want, "{close}");
         }
-        let said = with_cells("1700000000", "1", "-5")
+        let said = with_cells(&STAMP.to_string(), "1", "-5")
             .expect_err("refused")
             .to_string();
         assert!(said.contains("`close`") && said.contains("-5"), "{said}");

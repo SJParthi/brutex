@@ -1338,8 +1338,11 @@ pub const DECODED_PRICE_SCALE: PriceScale = PriceScale::Paisa;
 /// The second scaled before rounding — `24500.75 × 100` — which is *arithmetically*
 /// right and still wrong for this repository: `clippy::float_arithmetic` is
 /// denied workspace-wide, precisely so that `CLAUDE.md` §7's "never a float"
-/// cannot be walked back one expression at a time. The lint was correct. There
-/// is no float in a price here, not even briefly.
+/// cannot be walked back one expression at a time. The lint was correct. No
+/// float ARITHMETIC touches a price here. The wire number is still parsed by
+/// `serde_json` into an `f64` before `Display` renders it back to text, so the
+/// text read below is exact only when that parse is: D-1494 and
+/// `docs/06-limits.md` state when (GAP16-24).
 ///
 /// # What it does instead
 ///
@@ -4488,6 +4491,50 @@ mod tests {
         assert_eq!(window.rows.len(), 1, "array of objects");
     }
 
+    /// **THE JSON PARSE IS EXACT FOR A VENDOR'S PRICE TEXT, AND NOT PAST 15
+    /// SIGNIFICANT DIGITS (GAP16-24, D-1494).**
+    ///
+    /// `serde_json` holds a number as an `f64` and `one_price` reads back its
+    /// shortest round-tripping text. For every text below — all three-decimal
+    /// values in two ranges and all four-decimal ones around a measured Dhan
+    /// float — that round trip yields the same paisa as reading the vendor's
+    /// text directly, so there is one rounding, not two. Past fifteen
+    /// significant digits it is not exact, and the extreme is asserted so the
+    /// limit cannot be forgotten: the largest `i64` paisa price, read as text,
+    /// fits, and through the JSON parse it does not.
+    #[test]
+    fn the_json_parse_is_exact_for_price_text_up_to_fifteen_digits() {
+        let direct = |text: &str| {
+            brutex_core::price::Paisa::from_rupee_text_half_up(text)
+                .map(brutex_core::price::Paisa::raw)
+        };
+        let through_json = |text: &str| {
+            let value: serde_json::Value = serde_json::from_str(text).expect("a JSON number");
+            let number = value.as_number().expect("a number").to_string();
+            brutex_core::price::Paisa::from_rupee_text_half_up(&number)
+                .map(brutex_core::price::Paisa::raw)
+        };
+        let mut checked = 0u32;
+        for (whole, decimals) in [(0..40, 3u32), (24_000..24_100, 3), (35_922..35_924, 4)] {
+            let steps = 10_i64.pow(decimals);
+            for w in whole {
+                for f in 0..steps {
+                    let text = format!("{w}.{f:0width$}", width = decimals as usize);
+                    assert_eq!(through_json(&text), direct(&text), "{text}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 40_000 + 100_000 + 20_000);
+        let widest = "92233720368547758.07";
+        assert_eq!(direct(widest), Ok(i64::MAX));
+        assert_ne!(
+            through_json(widest),
+            direct(widest),
+            "past fifteen significant digits the f64 parse is a second rounding"
+        );
+    }
+
     /// **ALL THREE SHAPES APPLY ONE COUNT RULE (c4a-1, c4a-2, D-1490).**
     ///
     /// The positional shape (Zerodha, Groww) refused the whole window over one
@@ -4524,7 +4571,7 @@ mod tests {
         let shapes = |volume: &str, interest: &str| {
             [
                 (
-                    "positional",
+                    "the positional shape",
                     format!(
                         "{{\"candles\":[[1751337900,100.00,100.00,100.00,100.00,9,41],\
                           [1751337960,100.00,100.00,100.00,100.00,{volume},{interest}]]}}"
@@ -4532,7 +4579,7 @@ mod tests {
                     positional,
                 ),
                 (
-                    "objects",
+                    "the object shape",
                     format!(
                         "[{{\"open\":100.00,\"high\":100.00,\"low\":100.00,\"close\":100.00,\
                            \"volume\":9,\"timestamp\":1751337900,\"open_interest\":41}},\
@@ -4542,7 +4589,7 @@ mod tests {
                     objects,
                 ),
                 (
-                    "columnar",
+                    "the columnar shape",
                     format!(
                         "{{\"open\":[100.00,100.00],\"high\":[100.00,100.00],\
                            \"low\":[100.00,100.00],\"close\":[100.00,100.00],\
@@ -4554,13 +4601,15 @@ mod tests {
             ]
         };
         let worst = (i64::MIN + 1).to_string();
+        let seven = 7.to_string();
+        let seven = seven.as_str();
         for (volume, interest) in [
-            ("-1", "7"),
-            (worst.as_str(), "7"),
-            ("-0.5", "7"),
-            ("7", "-1"),
-            ("7", worst.as_str()),
-            ("7", "-5.0"),
+            ("-1", seven),
+            (worst.as_str(), seven),
+            ("-0.5", seven),
+            (seven, "-1"),
+            (seven, worst.as_str()),
+            (seven, "-5.0"),
         ] {
             for (name, body, shape) in shapes(volume, interest) {
                 let window = decode_body(&body, &shape, crate::vendor::Listing::Derivative)
@@ -4577,14 +4626,14 @@ mod tests {
             }
         }
         // AN INDEX'S NEGATIVE VOLUME IS STILL ITS ZERO, IN EVERY SHAPE.
-        for (name, body, shape) in shapes("-125", "7") {
+        for (name, body, shape) in shapes("-125", seven) {
             let window = decode_body(&body, &shape, crate::vendor::Listing::Index)
                 .unwrap_or_else(|why| panic!("{name}: an index keeps the row: {why}"));
             assert_eq!(window.rows.len(), 2, "{name}: both rows kept");
             assert_eq!(window.rows[1].volume, 0, "{name}: recorded as zero");
         }
         // AND THE SENTINEL IS STILL REFUSED BY NAME, IN EVERY SHAPE.
-        for (name, body, shape) in shapes("7", &i64::MIN.to_string()) {
+        for (name, body, shape) in shapes(seven, &i64::MIN.to_string()) {
             let why = decode_body(&body, &shape, crate::vendor::Listing::Derivative)
                 .expect_err("the sentinel is refused, not skipped");
             assert!(

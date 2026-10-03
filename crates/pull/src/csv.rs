@@ -367,8 +367,10 @@ pub fn is_ghost(member: &str) -> bool {
 ///
 /// Rejects a third decimal place rather than rounding it: the tick grid is two
 /// places (`CLAUDE.md` §7), so a third digit is the vendor sending something
-/// this build does not understand, and rounding it here would be a second
-/// snapping site competing with the one at the write boundary.
+/// this build does not understand. The JSON decoders snap a third decimal
+/// half-up instead, through `Paisa::from_rupee_text_half_up` (D-0321), because
+/// there it is measured vendor float error; this reader is for archive text and
+/// for counts, where it is not, so the two rules differ on purpose (D-1494).
 pub(crate) fn paisa(text: &str) -> Option<i64> {
     let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
     if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {

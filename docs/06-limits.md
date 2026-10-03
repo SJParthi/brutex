@@ -13922,3 +13922,15 @@ bounds are all nonzero.
   minutes (188 for a 375-minute session), and a window of D sessions at most
   about 188·D. A cap was rejected because it would hide which minutes are
   missing. Not timed: no bench covers it.
+- **A JSON rupee price is parsed through an `f64` before its half-up snap
+  (GAP16-24, D-1494).** `serde_json` is built without `arbitrary_precision`,
+  so `http::one_price` and `rolling`'s `paisa` read the shortest
+  round-tripping text of an `f64`, not the vendor's bytes. That is exact,
+  one rounding in all, for a text of at most fifteen significant digits,
+  which covers every NSE price and every measured Dhan float. Past fifteen
+  digits the parse is a second rounding: a value within one `f64` step of a
+  half-paisa boundary can snap the other way, and the widest `i64` paisa
+  price, `92233720368547758.07`, is refused through JSON though it reads as
+  text. Checked over 160,000 texts by
+  `pull::http::tests::the_json_parse_is_exact_for_price_text_up_to_fifteen_digits`;
+  not proved for every fifteen-digit text.

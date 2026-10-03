@@ -53486,3 +53486,34 @@ would hide which minutes are missing, and the bound is already set by the
 session length.
 
 **What it changes.** Nothing for aligned input. No run identity term moves.
+
+### D-1494 — Say where rupee prices are snapped, and state when the JSON parse in front of that snap is exact — 2026-10-03
+
+**What was observed.** GAP16-28: `core::price`'s module doc said the one
+rupee-to-paisa conversion is `Paisa::from_rupees_half_up` (an `f64`
+conversion) "once at the ingest boundary"; `core::vendor` said strikes go
+through it; `pull::fetch::to_paisa` and `pull::csv::paisa` said the single
+snap is "at the write boundary"; `pull::fno` said there is one law. In fact
+every vendor price in `pull` is snapped half-up from TEXT by
+`Paisa::from_rupee_text_half_up` where it is decoded, the store's append
+snaps nothing, `csv::paisa` refuses a third decimal on purpose (D-0321), and
+`from_rupees_half_up`'s one non-test caller is `lake`'s bar reader.
+GAP16-24: `serde_json` (no `arbitrary_precision`) parses each wire number into
+an `f64` before `one_price` reads its shortest text back, and the doc said
+there was "no float in a price here, not even briefly". GAP2-45: the
+credential-read event said it fires "once per run"; it fires per read, and a
+broker leg reads per instrument.
+
+**The decision.** The comments now say what the code does. The double
+rounding is stated, not removed: for a price text of at most fifteen
+significant digits (every NSE price, and every measured Dhan float such as
+`35922.6016`) the `f64` parse is exact and its shortest text is the vendor's
+own digits, so there is one rounding; past that it is not, and the widest
+`i64` paisa price is refused through JSON though it reads as text. A test
+checks 160,000 texts and that extreme. Enabling `serde_json`'s
+`arbitrary_precision` would remove the second rounding, but it changes
+`serde_json::Number` workspace-wide, including in `api` and `cli`, and could
+change stored bytes for a pathological input, so it is left to a decision
+that owns those crates.
+
+**What it changes.** Comments, one test and a limits entry. No code path.

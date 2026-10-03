@@ -1199,10 +1199,11 @@ fn paisa_of(text: &str) -> Option<i64> {
     // half and then ADDED the unsigned fractional part, so `"-19200.05"` came
     // back as -1_919_995 (Rs -19,199.95) instead of -1_920_005. `crate::csv::paisa`
     // strips the sign, combines the halves, and applies the sign to the total,
-    // which is the same order `Paisa::from_rupees_half_up` uses.
+    // which is the same order `Paisa::from_rupee_text_half_up` uses.
     //
-    // `CLAUDE.md` s7 fixes ONE law for rupees to paisa. A second spelling of it
-    // is a second thing to get wrong, and this one already had been -- so the
-    // repair is to delete the spelling rather than to correct it in place.
+    // A second spelling of the conversion is a second thing to get wrong, and
+    // this one already had been -- so the repair was to delete the spelling
+    // rather than correct it in place. `csv::paisa` refuses a third decimal
+    // where the JSON decoders snap it; that difference is deliberate (D-1494).
     crate::csv::paisa(text)
 }
