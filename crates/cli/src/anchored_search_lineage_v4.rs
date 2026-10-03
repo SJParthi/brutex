@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -819,7 +819,9 @@ impl AnchoredSearchLineageV4Ledger {
                 // Anything else in that slot still refuses.
                 let orphan = decode_member(&read_fixed_at::<
                     ANCHORED_SEARCH_LINEAGE_V4_MEMBER_BYTES,
-                >(&mut self.member_file, covered_members)?)?;
+                >(
+                    &mut self.member_file, covered_members
+                )?)?;
                 if orphan.block_sequence != completion_records
                     || orphan.family != SearchFamilyV4::Nifty
                 {
@@ -1633,7 +1635,7 @@ fn record_count(
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), AnchoredSearchLineageV4Refusal> {
-    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
+    append_with_rollback(file, raw, Write::write_all)
 }
 
 /// Appends `raw`, and on a write error (ENOSPC, EIO, a short write) truncates
@@ -2414,6 +2416,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walks the complete, orphan-NIFTY, bad-orphan and foreign tails so each case shares the same prepared pair"
+    )]
     fn full_synced_tail_is_retryable_but_partial_or_foreign_tail_refuses() {
         let (nifty, banknifty) = projections();
         let prepared = PreparedPairV4::from_opaque(&nifty, &banknifty).expect("prepare V4 pair");
@@ -2499,8 +2505,9 @@ mod tests {
                 ANCHORED_SEARCH_LINEAGE_V4_COMPLETION_BYTES as u64
             )
         );
-        let again = persist_anchored_search_lineage_v4(partial.path(), bounds(), &nifty, &banknifty)
-            .expect("rerun reuses");
+        let again =
+            persist_anchored_search_lineage_v4(partial.path(), bounds(), &nifty, &banknifty)
+                .expect("rerun reuses");
         assert!(matches!(
             again,
             AnchoredSearchLineageV4AuthenticatedCommit::Reused(_)

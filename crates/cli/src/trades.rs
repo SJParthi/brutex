@@ -2536,8 +2536,14 @@ mod period_tests {
         // 2024-01-15 03:50 UTC is 09:20 IST.
         let nine_twenty_ist = 1_705_290_600_000_000;
         assert_eq!(Period::Hour.bucket(nine_twenty_ist), 9);
-        assert_eq!(Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000 - 1), 9);
-        assert_eq!(Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000), 10);
+        assert_eq!(
+            Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000 - 1),
+            9
+        );
+        assert_eq!(
+            Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000),
+            10
+        );
     }
 
     /// The extremes are seeded from the first trade, not from zero.

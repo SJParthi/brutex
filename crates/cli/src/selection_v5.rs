@@ -34,7 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -3026,7 +3026,7 @@ fn sync_directory(file: &File, root: &Path) -> Result<(), SelectionV5Refusal> {
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), SelectionV5Refusal> {
-    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
+    append_with_rollback(file, raw, Write::write_all)
 }
 
 /// Appends one record, and on a write error (ENOSPC, EIO, a short write)

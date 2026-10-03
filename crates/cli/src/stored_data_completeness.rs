@@ -1570,7 +1570,8 @@ mod tests {
             receipt.validate().expect("a named integrity byte is valid");
             let raw = receipt.to_bytes().expect("encode strict receipt");
             assert_eq!(
-                super::StoredDataCompletenessReceiptV1::from_bytes(&raw).expect("decode strict receipt"),
+                super::StoredDataCompletenessReceiptV1::from_bytes(&raw)
+                    .expect("decode strict receipt"),
                 receipt
             );
         }

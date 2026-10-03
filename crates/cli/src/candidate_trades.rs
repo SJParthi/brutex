@@ -288,7 +288,14 @@ impl<'a> Capture<'a> {
         expression: &'a Expression,
         execution_digest: [u8; 32],
     ) -> Result<Self, String> {
-        Self::begin_digested(root, attempt, bars, column, Some(expression), execution_digest)
+        Self::begin_digested(
+            root,
+            attempt,
+            bars,
+            column,
+            Some(expression),
+            execution_digest,
+        )
     }
 
     fn begin_with(

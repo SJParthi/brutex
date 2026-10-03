@@ -442,9 +442,10 @@ fn candidate_budget(records: u64, selected_count: u64) -> Result<u64, String> {
     let fixed = selected_count
         .checked_add(10)
         .ok_or("Global Replay V4 selected count overflow")?;
-    Ok(records.checked_sub(fixed).ok_or(
-        "Global Replay V4 record cap cannot hold its exact roster and selected streams",
-    )? / RECORDS_PER_CANDIDATE)
+    Ok(records
+        .checked_sub(fixed)
+        .ok_or("Global Replay V4 record cap cannot hold its exact roster and selected streams")?
+        / RECORDS_PER_CANDIDATE)
 }
 
 /// Candidate row, decision row and, when admitted and priceable, a VIX row.

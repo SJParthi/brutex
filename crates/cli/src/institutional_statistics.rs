@@ -1402,7 +1402,7 @@ fn open_read(path: &Path) -> Result<File, String> {
 }
 
 fn append_sync(file: &mut File, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    append_sync_with(file, path, bytes, |file, bytes| file.write_all(bytes))
+    append_sync_with(file, path, bytes, std::io::Write::write_all)
 }
 
 /// Appends and syncs `bytes`; a write error (ENOSPC, EIO, a short write)

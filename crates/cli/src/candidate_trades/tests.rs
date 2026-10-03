@@ -831,8 +831,9 @@ fn a_held_execution_digest_writes_the_same_start_as_hashing_per_capture() {
     let digest = runner::identity::data_digest(bars);
     let hashed_root = root();
     let hashed_attempt = attempt(&hashed_root);
-    let hashed = Capture::begin_expression(&hashed_root, &hashed_attempt, bars, column, &expression)
-        .expect("hashing capture");
+    let hashed =
+        Capture::begin_expression(&hashed_root, &hashed_attempt, bars, column, &expression)
+            .expect("hashing capture");
     let held_root = root();
     let held_attempt = attempt(&held_root);
     let held = Capture::begin_expression_with_digest(

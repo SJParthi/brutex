@@ -1001,7 +1001,13 @@ impl AdmissionAuthorityLedger {
                 hex(&population_id)
             ));
         }
-        self.write_decisions(population_id, block.first, block_end, suffix, decisions.len())
+        self.write_decisions(
+            population_id,
+            block.first,
+            block_end,
+            suffix,
+            decisions.len(),
+        )
     }
 
     fn append_decisions(

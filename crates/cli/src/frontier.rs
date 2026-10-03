@@ -2088,7 +2088,13 @@ mod tests {
         let mut store = Frontier::open(&dir).expect("a fresh file opens");
         let path = dir.join("results").join("frontier.bin");
         let before = std::fs::read(&path).expect("header bytes");
-        for bad in [i64::from(i32::MAX) + 1, 3_000_000_000, i64::MAX, -1, i64::MIN] {
+        for bad in [
+            i64::from(i32::MAX) + 1,
+            3_000_000_000,
+            i64::MAX,
+            -1,
+            i64::MIN,
+        ] {
             let mut over = row(0x41, 1);
             over.rules.min_fill_headroom_bp = bad;
             let refusal = store.append_all(&[over]).expect_err("must refuse");
@@ -2097,7 +2103,7 @@ mod tests {
         }
         let mut edge = row(0x42, 1);
         edge.rules.min_fill_headroom_bp = i64::from(i32::MAX);
-        assert_eq!(store.append_all(&[edge.clone()]).expect("i32::MAX fits"), 1);
+        assert_eq!(store.append_all(&[edge]).expect("i32::MAX fits"), 1);
         drop(store);
         let mut reopened = Frontier::open_read(&dir).expect("reopen");
         let stored = reopened.read(0).expect("the row reads back");

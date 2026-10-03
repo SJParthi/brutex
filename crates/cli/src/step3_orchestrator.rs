@@ -5368,7 +5368,9 @@ mod tests {
             "const fn projection_source(&self)",
         ] {
             assert_eq!(
-                production.matches(&format!("pub(crate) {declaration}")).count(),
+                production
+                    .matches(&format!("pub(crate) {declaration}"))
+                    .count(),
                 1,
                 "{declaration} must be declared exactly once as pub(crate)"
             );
@@ -6467,11 +6469,7 @@ mod tests {
             requested_execution_subspan(&past_then_inside, 100, 102),
             Err(why) if why.contains("not monotonically ordered")
         ));
-        let late_disorder = [
-            candle(100, 555),
-            candle(105, 555),
-            candle(104, 555),
-        ];
+        let late_disorder = [candle(100, 555), candle(105, 555), candle(104, 555)];
         assert!(matches!(
             requested_execution_subspan(&late_disorder, 100, 102),
             Err(why) if why.contains("not monotonically ordered")
