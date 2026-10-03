@@ -781,9 +781,18 @@ pub fn parse_query(raw: &str) -> String {
 /// One scan of `raw` per call and no allocation until the value is decoded. A
 /// route that reads seven fields scans its query seven times; that is bounded
 /// rather than parsed once, because every query reaching a handler is at most
-/// [`MAX_REQUEST_TARGET_BYTES`] and every form body at most [`MAX_FORM_BYTES`],
-/// and [`request_bounds_refusal`] has already refused a repeated query key, so
-/// the first match is the only one. `docs/06-limits.md` states the bound.
+/// [`MAX_REQUEST_TARGET_BYTES`] and every form body at most [`MAX_FORM_BYTES`].
+///
+/// # The first match is the only one, and two gates make it so
+///
+/// [`request_bounds_refusal`] refuses a query that names a key twice, and
+/// [`FormBody`] refuses a form body that names a single-value key twice
+/// (h-api-2, D-1512). The body half was missing until D-1512: `vendor=dhan&
+/// vendor=bogus` in a POST body was read as Dhan and the second value never
+/// seen. A handler that reads a form body with this function must take it as
+/// [`FormBody`], not as a bare `String`. The fields that legitimately repeat,
+/// [`REPEATABLE_FORM_FIELDS`], are read with [`params`], never with this.
+/// `docs/06-limits.md` states the bound.
 #[must_use]
 pub fn param(raw: &str, name: &str) -> String {
     raw.split('&')
@@ -10905,7 +10914,7 @@ fn json_headers() -> axum::http::HeaderMap {
 /// the size of the window being asked for.
 pub(crate) async fn pull_run(
     axum::extract::State(site): axum::extract::State<Loaded>,
-    body: String,
+    crate::server::FormBody(body): crate::server::FormBody,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
     let legs = match crate::pullrun::legs_from(&body) {
         Ok(legs) => legs,
@@ -11013,7 +11022,7 @@ pub(crate) async fn pull_run_stop(
 
 pub(crate) async fn pull_spot(
     axum::extract::State(site): axum::extract::State<Loaded>,
-    body: String,
+    crate::server::FormBody(body): crate::server::FormBody,
 ) -> (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
@@ -14832,7 +14841,7 @@ fn fno_complete(
 /// Starting an expired-series pull. **POST only.**
 pub(crate) async fn pull_fno(
     axum::extract::State(site): axum::extract::State<Loaded>,
-    body: String,
+    crate::server::FormBody(body): crate::server::FormBody,
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let now = std::time::SystemTime::now();
     let journal = site.journal();
@@ -16053,6 +16062,77 @@ fn request_bounds_refusal(
     })
 }
 
+/// The form fields a POST body may legitimately name more than once, each read
+/// with [`params`] by its handler: a pull-run or recovery `leg`, an ingest
+/// `member` and an ingest `cash_identity` choice. Every other field is read once
+/// with [`param`], so [`FormBody`] refuses a second value for it.
+pub const REPEATABLE_FORM_FIELDS: [&str; 3] = ["leg", "member", "cash_identity"];
+
+/// A form body, refused with `400` when it names a single-value field twice
+/// (h-api-2, D-1512).
+///
+/// The body-side twin of [`request_bounds_refusal`]'s repeated-query rule.
+/// [`param`] answers with the FIRST value, so `from=2022-01-08&...&from=2099-01-01`
+/// was answered over the first window with the second never read: a request
+/// silently made into a different one. Keys are compared as sent, undecoded,
+/// exactly as [`param`] matches them, and [`REPEATABLE_FORM_FIELDS`] may
+/// repeat. One pass and one set insert per field, over a body the route's
+/// `DefaultBodyLimit` has already bounded.
+#[derive(Debug)]
+pub struct FormBody(pub String);
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for FormBody {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(
+        request: axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::response::IntoResponse as _;
+        let body = String::from_request(request, state)
+            .await
+            .map_err(axum::response::IntoResponse::into_response)?;
+        if let Some(key) = repeated_form_key(&body) {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                repeated_form_refusal(key),
+            )
+                .into_response());
+        }
+        Ok(Self(body))
+    }
+}
+
+/// The sentence a repeated single-value form field is refused with.
+fn repeated_form_refusal(key: &str) -> String {
+    format!(
+        "REFUSED — the form names {:?} more than once. Every field this server \
+         reads from a form is read once, so a second value would be silently \
+         ignored; send each field once. Only {} may repeat. Nothing was read or \
+         run.\n",
+        note_alphabet(key),
+        REPEATABLE_FORM_FIELDS.join(", ")
+    )
+}
+
+/// The first single-value form key that appears twice, or `None`.
+///
+/// [`repeated_query_key`] with [`REPEATABLE_FORM_FIELDS`] let through.
+pub(crate) fn repeated_form_key(body: &str) -> Option<&str> {
+    let mut seen = std::collections::HashSet::with_capacity(
+        body.bytes()
+            .filter(|b| *b == b'&')
+            .count()
+            .saturating_add(1),
+    );
+    body.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
+        .filter(|key| !REPEATABLE_FORM_FIELDS.contains(key))
+        .find(|key| !seen.insert(*key))
+}
+
 /// The first query key that appears twice, or `None`.
 ///
 /// One pass, one set insert per segment. The set is sized from the segment
@@ -16763,6 +16843,22 @@ fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str)
 /// write. It is a third of hyper's documented default for the same knob.
 pub const HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long one request's BODY has to arrive once its head has.
+///
+/// # Why the head deadline was not enough (probeapi-1 remainder, D-1510)
+///
+/// [`HEAD_READ_TIMEOUT`] stops at the head's blank line. A client that then
+/// promised a `Content-Length` and dripped the body held its connection for as
+/// long as it liked: the audit held one for about 25 s, and 256 of them fill
+/// [`MAX_CONNECTIONS`]. This is the same rule for the body: an absolute
+/// deadline from the moment the head is delivered, not an idle timer, answered
+/// `408 Request Timeout` with `Connection: close`.
+///
+/// It runs only while a body is still OWED and something is reading it, so a
+/// slow handler that has its whole body, or reads none, is never cut by it.
+/// The same ten seconds as the head, for the same reason.
+pub const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How many connections this server holds open at once.
 ///
 /// Above it, `accept` waits for a slot instead of taking another descriptor;
@@ -16776,6 +16872,8 @@ pub const MAX_CONNECTIONS: usize = 256;
 pub struct ConnectionLimits {
     /// See [`HEAD_READ_TIMEOUT`].
     pub head_read_timeout: std::time::Duration,
+    /// See [`BODY_READ_TIMEOUT`].
+    pub body_read_timeout: std::time::Duration,
     /// See [`MAX_CONNECTIONS`]. Zero is read as one: a server that can never
     /// accept is a hang, not a limit.
     pub max_connections: usize,
@@ -16785,8 +16883,128 @@ impl ConnectionLimits {
     /// What the operator's server runs with.
     pub const SERVED: Self = Self {
         head_read_timeout: HEAD_READ_TIMEOUT,
+        body_read_timeout: BODY_READ_TIMEOUT,
         max_connections: MAX_CONNECTIONS,
     };
+}
+
+/// What a client whose body did not arrive in time is told before its socket
+/// closes. Its head was parsed, so this is an ordinary response hyper writes.
+const BODY_TIMEOUT_REPLY: &str =
+    "REFUSED: the request body did not arrive in time; this connection is closed.";
+
+/// A request body that must finish arriving by a deadline (D-1510).
+///
+/// The clock is the one [`body_deadline`] started when the head was delivered.
+/// Each poll is O(1): one clock read, one poll of the inner body, and one of
+/// the alarm only when the inner body is pending.
+struct DeadlineBody {
+    inner: axum::body::Body,
+    deadline: tokio::time::Instant,
+    alarm: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// Set once, when the deadline passes with the body still owed; read by
+    /// [`body_deadline`] after the handler answers.
+    expired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl DeadlineBody {
+    fn expire(&self) -> axum::Error {
+        self.expired
+            .store(true, std::sync::atomic::Ordering::Release);
+        axum::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the request body did not arrive before the body-read deadline",
+        ))
+    }
+}
+
+impl http_body::Body for DeadlineBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use http_body::Body as _;
+        use std::task::Poll;
+        let this = &mut *self;
+        if this.inner.is_end_stream() {
+            return Poll::Ready(None);
+        }
+        // Absolute, like the head's: a body dripped one byte at a time is cut
+        // at the same moment as one that sent nothing.
+        if tokio::time::Instant::now() >= this.deadline {
+            return Poll::Ready(Some(Err(this.expire())));
+        }
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Pending => {
+                if this.alarm.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Some(Err(this.expire())));
+                }
+                Poll::Pending
+            }
+            ready => ready,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        use http_body::Body as _;
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        use http_body::Body as _;
+        self.inner.size_hint()
+    }
+}
+
+/// Gives a request's body [`ConnectionLimits::body_read_timeout`] from the
+/// moment its head is delivered, and answers `408` with `Connection: close`
+/// when a reader found it late (probeapi-1 remainder, D-1510).
+///
+/// A request with no body passes straight through. A handler that never reads
+/// its body is never cut: nothing polls it, and hyper closes the read side of
+/// a connection whose body was left unread once the response is written.
+async fn body_deadline(
+    axum::extract::State(timeout): axum::extract::State<std::time::Duration>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    use http_body::Body as _;
+    if request.body().is_end_stream() {
+        return next.run(request).await;
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    let expired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (parts, inner) = request.into_parts();
+    let body = DeadlineBody {
+        inner,
+        deadline,
+        alarm: Box::pin(tokio::time::sleep_until(deadline)),
+        expired: std::sync::Arc::clone(&expired),
+    };
+    let answered = next
+        .run(axum::extract::Request::from_parts(
+            parts,
+            axum::body::Body::new(body),
+        ))
+        .await;
+    if expired.load(std::sync::atomic::Ordering::Acquire) {
+        // Whatever the handler made of a body that failed to arrive is
+        // replaced: the request was never delivered, and the reason is time.
+        return (
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            [
+                (axum::http::header::CONNECTION, "close"),
+                (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            ],
+            BODY_TIMEOUT_REPLY,
+        )
+            .into_response();
+    }
+    answered
 }
 
 /// The live-connection count and the wake-up a closing connection sends.
@@ -16928,6 +17146,15 @@ impl HeadDeadline {
             return;
         };
         for &byte in fresh {
+            // LEADING BLANK LINES ARE NOT A HEAD (h-api-1, D-1511). httparse,
+            // and so hyper, skips CR and LF before the request line. Counted
+            // here, `\r\n\r\n` sent first read as a finished head, stopped the
+            // clock, and the partial head after it held its socket and slot
+            // for ever. Until a byte of the request line arrives, CR and LF
+            // neither start the head nor advance its end.
+            if !partial && matches!(byte, b'\r' | b'\n') {
+                continue;
+            }
             partial = true;
             // A head ends at an empty line: `\n` then `\n`, or `\n` `\r` `\n`.
             // httparse accepts the bare-LF form, so this must too, or a head
@@ -17118,6 +17345,10 @@ pub async fn serve_limited(
         }),
         head_read_timeout: limits.head_read_timeout,
     };
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        limits.body_read_timeout,
+        body_deadline,
+    ));
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             // The signal's own error is not actionable: a failed ctrl-c
@@ -17161,6 +17392,21 @@ mod head_deadline_tests {
                     "slow"
                 }),
             )
+            .route(
+                "/echo",
+                axum::routing::post(|body: axum::body::Bytes| async move { body }),
+            )
+            .route(
+                "/echo-slow",
+                axum::routing::post(move |body: axum::body::Bytes| async move {
+                    tokio::time::sleep(slow).await;
+                    body
+                }),
+            )
+            .route(
+                "/ignore",
+                axum::routing::post(|| async { "ignored" }),
+            )
     }
 
     /// A server on an ephemeral port, and the sender that stops it.
@@ -17183,6 +17429,7 @@ mod head_deadline_tests {
     fn limits(cap: usize) -> ConnectionLimits {
         ConnectionLimits {
             head_read_timeout: T,
+            body_read_timeout: T,
             max_connections: cap,
         }
     }
@@ -17293,6 +17540,49 @@ mod head_deadline_tests {
         assert!(cut || closed, "a dripping client outlived the deadline");
         assert!(said.starts_with("HTTP/1.1 408"), "{said:?}");
         assert!(began.elapsed() < T * 8, "cut late at {:?}", began.elapsed());
+        let _ = stop.send(());
+    }
+
+    /// h-api-1, D-1511: BLANK LINES BEFORE THE REQUEST LINE DO NOT END THE
+    /// HEAD. hyper skips them, so a client opening with `\r\n\r\n` (or bare
+    /// `\n\n`) and then a partial head is still owed its head, and is answered
+    /// `408` and closed at the deadline. Before D-1511 it was still open, with no
+    /// reply, after ten deadlines. A real request after leading blank lines is
+    /// still served.
+    #[tokio::test]
+    async fn leading_blank_lines_do_not_stop_the_head_clock() {
+        let (addr, stop) = start(limits(8)).await;
+        for lead in ["\r\n\r\n", "\n\n", "\r\n\r\n\r\n\n"] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let began = Instant::now();
+            client
+                .write_all(format!("{lead}GET /ok HTTP/1.1\r\nHost: x\r\n").as_bytes())
+                .await
+                .unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            let took = began.elapsed();
+            assert!(closed, "{lead:?}: still open after {took:?}");
+            assert!(said.starts_with("HTTP/1.1 408"), "{lead:?}: {said:?}");
+            assert!(took >= T_SLACK, "{lead:?}: cut early at {took:?}");
+            assert!(took < T * 4, "{lead:?}: cut late at {took:?}");
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(
+                    format!("{lead}GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{lead:?}: {said:?}");
+        }
+        // Only blank lines, then silence: no request was sent, so no reply.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"\r\n\r\n").await.unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed, "a socket that sent only blank lines was held");
+        assert_eq!(said, "");
         let _ = stop.send(());
     }
 
@@ -17430,6 +17720,171 @@ mod head_deadline_tests {
             assert!(closed && said.starts_with("HTTP/1.1 408"), "{said:?}");
         }
         let _ = stop.send(());
+    }
+
+    /// D-1510: A BODY DRIPPED AFTER A PROMPT HEAD IS CUT. The head arrives at
+    /// once, so the head deadline is satisfied; the body is promised as 64
+    /// bytes and dripped one byte per quarter-deadline. It is answered `408`
+    /// with `Connection: close` and closed, at the deadline measured from the
+    /// head, not before it and not long after. Before D-1510 it was held for as
+    /// long as the client kept dripping.
+    #[tokio::test]
+    async fn a_dripped_body_is_refused_with_408_at_the_deadline() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n")
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let mut cut = false;
+        for _ in 0..64 {
+            if client.write_all(b"a").await.is_err() {
+                cut = true;
+                break;
+            }
+            tokio::time::sleep(T / 4).await;
+            if began.elapsed() > T * 3 {
+                break;
+            }
+        }
+        let (said, closed) = drain(&mut client, T * 4).await;
+        assert!(cut || closed, "a dripping body outlived the deadline");
+        assert!(
+            said.starts_with("HTTP/1.1 408 Request Timeout"),
+            "{said:?}"
+        );
+        assert!(said.contains("connection: close"), "{said:?}");
+        assert!(
+            said.ends_with("REFUSED: the request body did not arrive in time; this connection is closed."),
+            "{said:?}"
+        );
+        let took = began.elapsed();
+        assert!(took >= T_SLACK, "cut early at {took:?}");
+        assert!(took < T * 8, "cut late at {took:?}");
+        let _ = stop.send(());
+    }
+
+    /// A body promised and never sent at all is cut the same way, and so is a
+    /// chunked body that sends one chunk and goes quiet.
+    #[tokio::test]
+    async fn a_silent_or_stalled_chunked_body_is_refused_with_408() {
+        let (addr, stop) = start(limits(8)).await;
+        for head in [
+            "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n",
+            "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n",
+        ] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(head.as_bytes()).await.unwrap();
+            let began = Instant::now();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            let took = began.elapsed();
+            assert!(closed, "{head:?}: still open after {took:?}");
+            assert!(said.starts_with("HTTP/1.1 408"), "{head:?}: {said:?}");
+            assert!(took >= T_SLACK, "{head:?}: cut early at {took:?}");
+            assert!(took < T * 4, "{head:?}: cut late at {took:?}");
+        }
+        let _ = stop.send(());
+    }
+
+    /// The boundary from the inside: a body finished half a deadline after its
+    /// head, plain and chunked, is served and echoed, and the kept-alive
+    /// connection answers a second request.
+    #[tokio::test]
+    async fn a_body_completed_before_the_deadline_is_served() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n\r\nabc")
+            .await
+            .unwrap();
+        tokio::time::sleep(T / 2).await;
+        client.write_all(b"def").await.unwrap();
+        let first = one_response(&mut client, "abcdef").await;
+        assert!(first.starts_with("HTTP/1.1 200 OK"), "{first:?}");
+        client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nxy\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(T / 2).await;
+        client.write_all(b"1\r\nz\r\n0\r\n\r\n").await.unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("xyz"), "{said:?}");
+        let _ = stop.send(());
+    }
+
+    /// The body deadline is for the BODY. A handler that has its whole body
+    /// and then takes three deadlines to answer is not cut, and neither is one
+    /// that never reads the body it was sent.
+    #[tokio::test]
+    async fn a_slow_handler_with_its_body_or_none_read_is_not_cut() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /echo-slow HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody")
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("body"), "{said:?}");
+        assert!(began.elapsed() >= T * 2 + T_SLACK);
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /ignore HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbo")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("ignored"), "{said:?}");
+        let _ = stop.send(());
+    }
+
+    /// THE AUDIT'S SHAPE: a crowd of body drippers filling the cap cannot
+    /// starve a real request. Each wave is cut at the body deadline and its
+    /// slot given back.
+    #[tokio::test]
+    async fn a_crowd_of_body_drippers_cannot_starve_a_real_request() {
+        let (addr, stop) = start(limits(4)).await;
+        let mut crowd = Vec::new();
+        for _ in 0..8 {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\na")
+                .await
+                .unwrap();
+            crowd.push(client);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let began = Instant::now();
+        let mut real = TcpStream::connect(addr).await.unwrap();
+        real.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut real, T * 20).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(began.elapsed() >= T, "the cap did not hold");
+        for mut client in crowd {
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(closed && said.starts_with("HTTP/1.1 408"), "{said:?}");
+        }
+        let _ = stop.send(());
+    }
+
+    /// The served limits carry the body deadline, and it equals the head's.
+    #[test]
+    fn the_served_body_deadline_matches_the_head_deadline() {
+        assert_eq!(
+            ConnectionLimits::SERVED.body_read_timeout,
+            super::BODY_READ_TIMEOUT
+        );
+        assert_eq!(super::BODY_READ_TIMEOUT, HEAD_READ_TIMEOUT);
     }
 
     /// A cap of zero is read as one, not as a server that never accepts.
@@ -32175,7 +32630,7 @@ fn resolved_master_rows(merged: &merge::Merged, vendor: Vendor) -> Vec<(String, 
 /// is not taken here.
 pub async fn universe_resolve(
     axum::extract::State(site): axum::extract::State<Loaded>,
-    body: String,
+    crate::server::FormBody(body): crate::server::FormBody,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
 

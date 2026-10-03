@@ -2153,7 +2153,7 @@ fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
 /// below. The route is a parser and a sentence.
 pub async fn queue(
     axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
-    body: String,
+    crate::server::FormBody(body): crate::server::FormBody,
 ) -> (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
@@ -4136,7 +4136,11 @@ mod route_tests {
         let root = site.store_root.clone();
         let before = std::fs::read_dir(&root).expect("the root exists").count();
         let (code, headers, body) =
-            queue(axum::extract::State(Loaded::clone(&site)), LEGAL.to_owned()).await;
+            queue(
+                axum::extract::State(Loaded::clone(&site)),
+                crate::server::FormBody(LEGAL.to_owned()),
+            )
+            .await;
         assert_eq!(code, axum::http::StatusCode::NOT_IMPLEMENTED, "{body}");
         assert_eq!(headers[0].1, "application/json; charset=utf-8");
         let after = std::fs::read_dir(&root).expect("the root exists").count();

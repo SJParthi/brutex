@@ -1017,6 +1017,19 @@ fn page_shell(asked: &Asked, body: &str) -> String {
 /// and the 64 MiB window is not spent on `GET /_app/immutable/...`. A
 /// 5xx is re-emitted at `Error` regardless of floor, because a request that
 /// failed is not detail.
+///
+/// # A 4xx is summarised, not written per request (h-api-3, D-1513)
+///
+/// A 4xx was a `Warn` line per request with no limit, above the served `Info`
+/// floor. Any page in the operator's browser can loop a request this server
+/// refuses (`<img src>` at a missing path is a 404; a cross-site POST is a
+/// 403), and a few hundred thousand lines roll the sink's whole 64 MiB window
+/// and erase the pull and sweep evidence: the shape D-0072 forbids, and the
+/// one `assets::Assets::note_missing` already refuses for its own 404 line. So
+/// the 4xx line is written on the 1st, 2nd, 4th, 8th, ... client error of the
+/// process, carrying `seen`, the running count, and the path and status of
+/// THAT request; the ones between are only the number. A 5xx is unchanged:
+/// one `Error` line each, because each is this server's own failure.
 pub async fn note_request(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -1028,21 +1041,47 @@ pub async fn note_request(
     let status = response.status();
     let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
 
-    let level = if status.is_server_error() {
-        telemetry::Level::Error
+    let (level, seen) = if status.is_server_error() {
+        (telemetry::Level::Error, None)
     } else if status.is_client_error() {
-        telemetry::Level::Warn
+        let Some(seen) = client_error_line_due(&CLIENT_ERRORS) else {
+            return response;
+        };
+        (telemetry::Level::Warn, Some(seen))
     } else {
-        telemetry::Level::Debug
+        (telemetry::Level::Debug, None)
     };
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::new(level, "api.request", "served")
-            .with("method", telemetry::Value::Str(&method))
-            .with("path", telemetry::Value::Str(&path))
-            .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
-            .with("micros", telemetry::Value::Uint(micros)),
-    );
+    let mut event = telemetry::Event::new(level, "api.request", "served")
+        .with("method", telemetry::Value::Str(&method))
+        .with("path", telemetry::Value::Str(&path))
+        .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
+        .with("micros", telemetry::Value::Uint(micros));
+    if let Some(seen) = seen {
+        event = event.with("seen", telemetry::Value::Uint(seen));
+    }
+    let _dropped_when_filtered = telemetry::emit(&event);
     response
+}
+
+/// Every 4xx this process has answered, for [`note_request`]'s summary.
+static CLIENT_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Counts one client error and answers its running count when a line is due:
+/// on the 1st, 2nd, 4th, 8th, ... (D-1513). One relaxed saturating update, O(1)
+/// apart from compare-and-swap retries under contention.
+/// Saturates at `u64::MAX`, which is not a power of two, so a saturated count
+/// writes nothing more rather than a line per request.
+fn client_error_line_due(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
+    // `fetch_add` wraps at the top; a saturating update cannot.
+    let before = counter
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| Some(n.saturating_add(1)),
+        )
+        .unwrap_or_else(|n| n);
+    let seen = before.saturating_add(1);
+    seen.is_power_of_two().then_some(seen)
 }
 
 #[cfg(test)]
@@ -1051,6 +1090,24 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+
+    /// D-1513: a flood of 4xx answers writes one line per power of two, each
+    /// carrying the running count, and never one per request.
+    #[test]
+    fn client_errors_are_summarised_on_powers_of_two() {
+        let counter = std::sync::atomic::AtomicU64::new(0);
+        let due: Vec<u64> = (0..1_000)
+            .filter_map(|_| client_error_line_due(&counter))
+            .collect();
+        assert_eq!(due, [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1_000);
+        // At the top of the range: the 2^63rd is due, a saturated count is not.
+        let counter = std::sync::atomic::AtomicU64::new((1 << 63) - 1);
+        assert_eq!(client_error_line_due(&counter), Some(1 << 63));
+        let counter = std::sync::atomic::AtomicU64::new(u64::MAX);
+        assert_eq!(client_error_line_due(&counter), None);
+        assert_eq!(client_error_line_due(&counter), None);
+    }
 
     /// A sink of our own, in a scratch directory — never the process global.
     ///

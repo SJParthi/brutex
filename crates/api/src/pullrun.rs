@@ -445,12 +445,20 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         {
             return Err(Refusal::Malformed(decoded));
         }
+        // A LEG'S PAYLOAD IS A FORM TOO, and it reaches `pull_spot` and
+        // `pull_fno` without passing their `FormBody` extractor, so a repeated
+        // single-value field inside it is refused here, before any leg runs
+        // (h-api-2, D-1512).
+        let body = percent_decode(payload);
+        if crate::server::repeated_form_key(&body).is_some() {
+            return Err(Refusal::Malformed(decoded));
+        }
         legs.push(Leg {
             route,
             vendor: vendor.to_owned(),
             dir: dir.to_owned(),
             label: label.to_owned(),
-            body: percent_decode(payload),
+            body,
         });
     }
     if legs.is_empty() {
@@ -684,12 +692,20 @@ async fn request_leg(site: Loaded, leg: Leg) -> (axum::http::StatusCode, String)
     match leg.route {
         Route::Spot => {
             let (status, _receipt, body) =
-                crate::server::pull_spot(axum::extract::State(site), leg.body).await;
+                crate::server::pull_spot(
+                    axum::extract::State(site),
+                    crate::server::FormBody(leg.body),
+                )
+                .await;
             (status, body.0)
         }
         Route::Fno => {
             let (status, body) =
-                crate::server::pull_fno(axum::extract::State(site), leg.body).await;
+                crate::server::pull_fno(
+                    axum::extract::State(site),
+                    crate::server::FormBody(leg.body),
+                )
+                .await;
             (status, body.0)
         }
     }

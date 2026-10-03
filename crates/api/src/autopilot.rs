@@ -3813,7 +3813,7 @@ pub async fn resume(
 /// reads the store.
 pub async fn control(
     axum::extract::State(site): axum::extract::State<Loaded>,
-    body: String,
+    crate::server::FormBody(body): crate::server::FormBody,
 ) -> (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
@@ -4723,7 +4723,7 @@ mod tests {
         for action in Action::ALL {
             let (code, headers, body) = control(
                 axum::extract::State(Loaded::clone(&site)),
-                format!("action={}", action.slug()),
+                crate::server::FormBody(format!("action={}", action.slug())),
             )
             .await;
             assert_eq!(code, axum::http::StatusCode::OK, "{body}");
@@ -4747,7 +4747,7 @@ mod tests {
         let before = site.autopilot.is_paused();
         for body in ["action=pause", "action=START", "action=", "", "actio=stop"] {
             let (code, _, answer) =
-                control(axum::extract::State(Loaded::clone(&site)), body.to_owned()).await;
+                control(axum::extract::State(Loaded::clone(&site)), crate::server::FormBody(body.to_owned())).await;
             assert_eq!(
                 code,
                 axum::http::StatusCode::BAD_REQUEST,
@@ -4794,7 +4794,7 @@ mod tests {
         });
         let (code, _, body) = control(
             axum::extract::State(Loaded::clone(&site)),
-            String::from("action=resume"),
+            crate::server::FormBody(String::from("action=resume")),
         )
         .await;
         assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
@@ -4838,7 +4838,7 @@ mod tests {
         });
         let (code, _, body) = control(
             axum::extract::State(Loaded::clone(&site)),
-            String::from("action=start"),
+            crate::server::FormBody(String::from("action=start")),
         )
         .await;
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
@@ -4935,7 +4935,7 @@ mod tests {
         let before = site.autopilot.is_paused();
         let (code, _, body) = control(
             axum::extract::State(Loaded::clone(&site)),
-            String::from("action=resume"),
+            crate::server::FormBody(String::from("action=resume")),
         )
         .await;
         assert_eq!(code, axum::http::StatusCode::CONFLICT, "{body}");
@@ -4951,7 +4951,7 @@ mod tests {
         // not be republished rather than pretending it was.
         let (code, _, body) = control(
             axum::extract::State(Loaded::clone(&site)),
-            String::from("action=stop"),
+            crate::server::FormBody(String::from("action=stop")),
         )
         .await;
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
