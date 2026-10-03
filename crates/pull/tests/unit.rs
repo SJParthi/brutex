@@ -866,16 +866,16 @@ fn every_config_error_prints_something_distinct() {
 // Reading the credential — part 2
 // ===========================================================================
 
-/// A secret source that records every read and **panics** on any write.
+/// A secret source that records every read.
 ///
-/// This is the whole of P-05's proof. The real SSM client offers
-/// `put_parameter`; this double offers one too, and it cannot be called without
-/// failing the test. So "no write happens" is not asserted from the absence of
-/// a line in the source — it is asserted from a process that would have died.
+/// It carried a `put_parameter` that panicked and a `writes` counter that
+/// `readonly_credentials` asserted was zero. That method was inherent on this
+/// double, not on [`ParameterStore`], so no production code could ever name it
+/// and the assertion was true by the type system (P1-14-05). P-05's proof is
+/// now the shape of the port itself, read by `readonly_credentials`.
 struct Double {
     answers: RefCell<VecDeque<Result<String, SecretError>>>,
     reads: Cell<usize>,
-    writes: Cell<usize>,
     decrypted: Cell<bool>,
     last_name: RefCell<String>,
 }
@@ -885,17 +885,27 @@ impl Double {
         Self {
             answers: RefCell::new(answers.into()),
             reads: Cell::new(0),
-            writes: Cell::new(0),
             decrypted: Cell::new(false),
             last_name: RefCell::new(String::new()),
         }
     }
+}
 
-    /// The write the real client offers and this repository never calls.
-    fn put_parameter(&self, _name: &str, _value: &str) -> ! {
-        self.writes.set(self.writes.get() + 1);
-        panic!("a write reached the parameter store; this repository never mints a token");
-    }
+/// The method signatures declared inside `pub trait {name} {` in `source`,
+/// with comments dropped, through the trait's closing brace.
+fn trait_methods(source: &str, name: &str) -> Vec<String> {
+    let (_, rest) = source
+        .split_once(&format!("\npub trait {name} {{\n"))
+        .unwrap_or_else(|| panic!("the trait {name} is declared at the top level"));
+    let (body, _) = rest
+        .split_once("\n}\n")
+        .unwrap_or_else(|| panic!("the trait {name} closes"));
+    body.lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//"))
+        .filter(|line| line.starts_with("fn ") || line.contains(" fn "))
+        .map(str::to_owned)
+        .collect()
 }
 
 impl ParameterStore for Double {
@@ -928,20 +938,29 @@ fn readonly_credentials() {
 
     let double = reader.source().client();
     assert_eq!(double.reads.get(), 1, "exactly one read");
-    assert_eq!(
-        double.writes.get(),
-        0,
-        "a whole credential read reached the store without one write"
-    );
 
-    // And the double is not a no-op: calling its write really does fail, so
-    // the assertion above is a statement about the code and not about a stub
-    // that would have passed either way.
-    let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        double.put_parameter("anything", "anything");
-    }));
-    assert!(attempted.is_err(), "the double must panic on a write");
-    assert_eq!(double.writes.get(), 1, "the write it panicked on was seen");
+    // THE PORT OFFERS NO WRITE, READ FROM ITS SOURCE (P1-14-05). This asserted
+    // `writes == 0` on a double whose write was an inherent method no
+    // production code could name, so it could not fail. What actually keeps a
+    // write out is that neither port declares one: `SsmSecretSource` is generic
+    // over `ParameterStore` and can call nothing else. So each trait must
+    // declare exactly its one read, and adding a second method fails here.
+    let secret_rs = include_str!("../src/secret.rs");
+    assert_eq!(
+        trait_methods(secret_rs, "ParameterStore"),
+        vec![
+            "fn get_parameter(&self, name: &str, with_decryption: bool) -> Result<String, SecretError>;"
+                .to_owned()
+        ],
+        "the Parameter Store port is one read and nothing else"
+    );
+    assert_eq!(
+        trait_methods(secret_rs, "SecretSource"),
+        vec![
+            "fn read(&self, path: &CredentialPath<'_>) -> Result<Secret, SecretError>;".to_owned()
+        ],
+        "the secret source is one read and nothing else"
+    );
 }
 
 /// P-06 — an auth failure halts the pull loudly rather than degrading.
@@ -997,7 +1016,6 @@ fn a_dead_token_is_re_read_once_and_then_halts() {
         })
     );
     assert_eq!(reader.source().client().reads.get(), 1);
-    assert_eq!(reader.source().client().writes.get(), 0);
 
     // The rotation did land: the fresh value is returned and nothing halts.
     let reader = CredentialReader::new(SsmSecretSource::new(

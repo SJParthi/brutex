@@ -2005,6 +2005,21 @@ mod tests {
             };
             assert_eq!(again, once, "a rerun disagreed with the first run");
         }
+        // THE EQUALITY ABOVE HOLDS FOR ANY DETERMINISTIC BODY (P1-13-01), a
+        // constant `ConditionMask::ZERO` included, and `filter_map(.ok())`
+        // made an evaluator that refused every bar compare `[] == []`. D-0373
+        // closed that shape elsewhere in this crate and its census missed this
+        // spelling. So every bar must have stepped, and the run must not be
+        // constant.
+        assert_eq!(once.len(), bars.len(), "every fixture bar must step");
+        assert!(
+            once.iter()
+                .skip(1)
+                .zip(once.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every bar produced an identical mask, so this test would pass on a \
+             body that ignores its input entirely"
+        );
     }
 
     /// With `Availability::Absent`, not one of the twenty VWAP positions is set.

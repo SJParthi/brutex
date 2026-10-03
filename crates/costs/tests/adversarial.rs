@@ -81,6 +81,7 @@ fn notionals() -> Vec<(&'static str, Paisa)> {
 #[test]
 fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants() {
     let mut cells = 0_u32;
+    let (mut checked, mut refused) = (0_u32, 0_u32);
     for (nname, notional) in notionals() {
         for (rname, rate) in rates() {
             let where_ = format!("[{nname}] x [{rname}]");
@@ -143,12 +144,71 @@ fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants(
                 levy_ceiling(notional, rate).map(Paisa::raw),
                 "{where_}: two identical calls disagreed"
             );
+
+            // 6, WITH TEETH (P1-14-06). Every check above sits under `if let
+            // Ok(..)`, so a function that refused every input passed them all,
+            // and `cells` counted loop turns, not checked cells. Each answer is
+            // now compared with the exact quotient computed here at i128 width:
+            // `Ok` exactly when that quotient fits `i64`, with that value, and
+            // `Err` exactly when it does not -- so neither a blanket refusal
+            // nor a wrap can pass.
+            let wide = i128::from(notional.raw()) * i128::from(rate.get());
+            let scale = i128::from(costs::rate::RATE_SCALE);
+            let exact_floor = wide.div_euclid(scale);
+            let exact_ceil = -(-wide).div_euclid(scale);
+            let fits = |value: i128| i64::try_from(value).ok();
+            assert_eq!(
+                levy_ceiling(notional, rate).ok().map(Paisa::raw),
+                fits(exact_ceil),
+                "{where_}: the levy ceiling is not the exact quotient's"
+            );
+            assert_eq!(
+                floor.ok().map(Paisa::raw),
+                fits(exact_floor),
+                "{where_}: the floor is not the exact quotient's"
+            );
+            let exact_statutory =
+                fits(exact_floor).and_then(|f| fits(-(-i128::from(f)).div_euclid(100) * 100));
+            assert_eq!(
+                statutory_levy(notional, rate).ok().map(Paisa::raw),
+                exact_statutory,
+                "{where_}: the statutory levy is not the exact rupee ceiling"
+            );
+            if let (Ok(_), Ok(_), Ok(_), Ok(_)) = (
+                ceil,
+                floor,
+                levy_ceiling(notional, rate),
+                statutory_levy(notional, rate),
+            ) {
+                checked += 1;
+            } else {
+                refused += 1;
+            }
+            if notional.raw() <= 1_000_000_000 {
+                assert!(
+                    ceil.is_ok()
+                        && floor.is_ok()
+                        && levy_ceiling(notional, rate).is_ok()
+                        && statutory_levy(notional, rate).is_ok(),
+                    "{where_}: a notional up to a crore must be priced, not refused"
+                );
+            }
         }
     }
     assert_eq!(
         cells, 63,
         "9 notionals x 7 rates = 63 cells; a generator that produced fewer \
          would pass every assertion above without testing anything"
+    );
+    assert!(
+        checked >= 49,
+        "the 7 notionals up to a crore x 7 rates must all reach the guarded \
+         invariants above; only {checked} did"
+    );
+    assert!(
+        refused >= 1,
+        "the top of the type must refuse somewhere, or invariant 6 was never \
+         exercised"
     );
 }
 
@@ -180,10 +240,12 @@ fn a_larger_notional_is_never_charged_less_than_a_smaller_one() {
 
     for (rname, rate) in rates() {
         let mut previous: Option<i64> = None;
+        let mut compared = 0_usize;
         for n in &ladder {
             match levy_ceiling(*n, rate) {
                 Ok(levy) => {
                     if let Some(prev) = previous {
+                        compared += 1;
                         assert!(
                             levy.raw() >= prev,
                             "[{rname}]: a notional of {} is charged {} against \
@@ -200,6 +262,14 @@ fn a_larger_notional_is_never_charged_less_than_a_smaller_one() {
                 Err(_) => break,
             }
         }
+        // P1-14-06: a refusal on the first rung broke out having compared
+        // nothing. Every rung of this ladder fits `i64` at every shipped rate,
+        // so every adjacent pair must actually be compared.
+        assert_eq!(
+            compared,
+            ladder.len() - 1,
+            "[{rname}]: the ladder stopped early, so monotonicity was not checked"
+        );
     }
 }
 

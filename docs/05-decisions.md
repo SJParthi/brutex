@@ -54836,3 +54836,67 @@ misdirected parameter as a different request and answered it under 200.
 
 The emitted-events accounting in `api::emitted` moves 61 to 63 sites and 31 to
 33 rows; both new Warns are driven and read back off the installed sink.
+
+### D-1920 — A test that cannot fail is given the failure it was written for — 2026-10-03
+
+Round 1's test audit (P1-10 to P1-14 and P1-17) found tests that passed whatever
+the code did, and invariant rows whose cited test did not check the claim.
+`CLAUDE.md` §4 bans a test that asserts nothing, and §9 a surviving mutant. Each
+fix below was checked by breaking the code it guards and watching the test fail.
+
+- **A child process must prove it ran.** `--exact` on a name that matches
+  nothing exits zero, so eight child-process tests in `cli` and `api` passed on
+  a child that ran no test (P1-10-02, P1-11-02, P1-12-03). Each now builds the
+  path from `module_path!()` and requires the child's `1 passed` line; the
+  strict sweep child goes through `api::isolated::rerun`.
+- **A source-shape test reads one bounded body of code.** The screen half of
+  the stored-sweep order test ran to the end of `lib.rs` (P1-10-03); the engine
+  `support` guard ran into the next function's doc comment and read comments as
+  code (P1-13-03); the server print ban stopped at the first `mod tests {` and
+  never read about 2,500 lines of handlers after it (P1-12-04); and a positive
+  needle in `server.rs` matched its own literal (P1-12-01, and the
+  `Kind::Equity` needle beside it). Each now ends at its function's closing
+  brace or drops every `#[cfg(test)]` item, ignores comments, and splits any
+  needle its own file would contain. `instrument_word` is also called directly.
+- **An assertion reads the result, not the furniture.** `auto 2` was checked
+  only for the provenance banner (P1-10-01); the refused-bind tests only for an
+  exit code several earlier arms also return (P1-12-02); the traversal test for
+  a leak of a file that did not exist (P1-12-05); a Base Evidence projection's
+  admission values were read and discarded (P1-10-04); the "partial" archive
+  case ran on an archive already corrupt (P1-11-03); and the refused-bar test
+  compared a count with the bad bar last (P1-13-02). Each now asserts the
+  search's own numbers, the logged event and its address, a sentinel at the
+  traversal target, the sealed values, an intact body with only the receipt
+  missing, and every mask of a column refused mid-stream.
+- **Idempotence must not hold for a constant.** Three §3 rule 5 tests in
+  `indicators` that D-0373's census missed now require every bar to step and
+  the run not to be constant (P1-13-01).
+- **`cli`'s command list is checked against the dispatch itself.** The set of
+  words the `match` in `dispatch` answers to is read from that function's code
+  and must equal `COMMANDS` (P1-11-01), which is what SC-08 already claimed.
+- **SigV4 is compared with the published vector.** The key derivation is
+  checked against AWS's documented `iam` signing key through a new
+  `signing_key_for`, against the same chain for `ssm`, and one full
+  `Authorization` header computed by an independent implementation of the
+  specification is pinned (P1-14-01). Gate 1d declares `iam`.
+- **The graph and findings tests cannot skip or narrow silently.** §1's row
+  names are read before the member filter and must be members, once each
+  (P1-14-02); a workspace member outside `crates/` or a glob is refused rather
+  than dropped, and comments are removed first (P1-14-03); `core/tests/findings.rs`
+  takes the history rule D-0693 item 8 gave `store`: skip only with no `git`
+  or no `.git` (P1-14-04).
+- **A tautology is replaced by the property that holds.** `readonly_credentials`
+  asserted a zero write count on a double's inherent method no production code
+  could name. It now requires `ParameterStore` and `SecretSource` to declare
+  exactly their one read each, and P-05 and `secret.rs` say so (P1-14-05).
+- **A guarded matrix counts what it checked.** Every cost cell is compared
+  with the exact i128 quotient, `Ok` exactly when it fits `i64`, every notional
+  up to a crore must price, and the monotonicity ladder must compare every pair
+  (P1-14-06). The lake page-boundary half must run all five cuts (P1-14-07).
+- **Invariant rows.** The broker-path paragraph cited a test that does not
+  exist and stated the reverse of the code; it now describes D-0136's set fetch
+  and cites the real test (P1-17-01). APIC-07's WARN and stderr line are now
+  driven through `note_unstamped_lock`, so the `api::emitted` accounting moves
+  one site from unreachable to driven (P1-17-02). C-V53-02's event is read back
+  from the binary's log (P1-17-03). FX3-01's one-call write and its rollback
+  wiring are read from `append_locked` and `append_raw` (P1-17-04).

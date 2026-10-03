@@ -1751,7 +1751,21 @@ pub(super) mod tests {
         let bars = warm_run();
         let mut a = evaluator(Availability::Absent);
         let mut b = evaluator(Availability::Absent);
-        assert_eq!(Column::build(&bars, &mut a), Column::build(&bars, &mut b));
+        let once = Column::build(&bars, &mut a);
+        assert_eq!(once, Column::build(&bars, &mut b));
+        // P1-13-01: the equality holds for any deterministic build, one that
+        // emits a constant row included. The fixture's bars vary, so the
+        // column must be swept and its rows must not be constant.
+        assert!(once.first_swept().is_some(), "the warm run sweeps");
+        let rows = once.bits();
+        assert!(
+            rows.iter()
+                .skip(1)
+                .zip(rows.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every swept row is identical, so this test would pass on a build \
+             that ignores its bars entirely"
+        );
     }
 
     /// `clear_before` ZEROES BELOW THE BOUNDARY AND KEEPS THE BOUNDARY ITSELF.

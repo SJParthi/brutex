@@ -17874,17 +17874,29 @@ fn stamp_serve_lock(
         path,
     )?;
     if let Some(warning) = stamped {
-        let _noted = telemetry::emit(
-            &telemetry::Event::new(
-                telemetry::Level::Warn,
-                "api.serve",
-                "the serve lock is held but could not be stamped",
-            )
-            .with("why", telemetry::Value::Str(&warning)),
-        );
-        warn_line!("{warning}");
+        note_unstamped_lock(&warning, |line| warn_line!("{line}"));
     }
     Ok(())
+}
+
+/// What a stamp failure that still serves leaves behind: one WARN event, and
+/// `warning` handed to `say` -- which in production is [`warn_line!`], a line
+/// on standard error.
+///
+/// Split out of [`stamp_serve_lock`] so the "never silently discarded" half of
+/// APIC-07 can be driven: the split between a failed stamp and a successful
+/// clear cannot be produced on one descriptor by any fixture, so the step that
+/// reports it is called directly instead (P1-17-02).
+fn note_unstamped_lock(warning: &str, say: impl FnOnce(&str)) {
+    let _noted = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "api.serve",
+            "the serve lock is held but could not be stamped",
+        )
+        .with("why", telemetry::Value::Str(warning)),
+    );
+    say(warning);
 }
 
 /// What a failed serve-lock stamp leaves, decided over two operations a test
@@ -20780,6 +20792,13 @@ mod tests {
             .expect("a port to sit on");
         let taken = squatter.local_addr().expect("the address it took");
 
+        // THE EVENT IS READ BACK, NOT INFERRED FROM THE EXIT CODE (P1-12-02).
+        // `FAILED` is also what several earlier arms of `run_in` return, so the
+        // code alone proved neither that the bind arm was reached nor that it
+        // logged anything; deleting the `telemetry::emit` left this green. The
+        // shared sink is installed first, so `run_in`'s own install is refused
+        // and its emit lands where `emitted::landed` reads.
+        let from = crate::emitted::mark();
         assert_eq!(
             run_in(
                 &agreeing("bindrefused"),
@@ -20789,6 +20808,21 @@ mod tests {
             .await,
             FAILED,
             "a port already held is a refused bind, and the exit code says so"
+        );
+        let address = taken.to_string();
+        let mine: Vec<telemetry::Record> =
+            crate::emitted::landed(from, "api.server", "cannot bind the listening address")
+                .into_iter()
+                .filter(|record| crate::emitted::says(record, "addr", &address))
+                .collect();
+        assert_eq!(mine.len(), 1, "one event for the refused bind: {mine:?}");
+        assert_eq!(mine[0].level, telemetry::Level::Error, "{mine:?}");
+        assert!(
+            mine[0]
+                .field("why")
+                .and_then(telemetry::OwnedValue::as_str)
+                .is_some_and(|why| !why.is_empty()),
+            "the host's reason travels: {mine:?}"
         );
         // The listener is dropped here, not before: releasing it early would
         // race the bind and this test would pass for the wrong reason.
@@ -21170,6 +21204,41 @@ mod tests {
         assert!(warned.contains("/store/serve.lock"), "{warned}");
         assert!(warned.contains("os error 28"), "the host's words: {warned}");
         assert!(warned.contains("emptied"), "{warned}");
+
+        // AND THE WARNING IS NOT DISCARDED (P1-17-02): the step
+        // `stamp_serve_lock` takes with it leaves one WARN event naming it and
+        // one line on the error writer. Deleting that step used to leave this
+        // test green.
+        let from = crate::emitted::mark();
+        let mut said = Vec::new();
+        note_unstamped_lock(&warned, |line| said.push(line.to_owned()));
+        assert_eq!(said, vec![warned.clone()], "the stderr line is the warning");
+        let noted: Vec<telemetry::Record> = crate::emitted::landed(
+            from,
+            "api.serve",
+            "the serve lock is held but could not be stamped",
+        )
+        .into_iter()
+        .filter(|record| crate::emitted::says(record, "why", "/store/serve.lock"))
+        .collect();
+        assert_eq!(noted.len(), 1, "one WARN event: {noted:?}");
+        assert_eq!(noted[0].level, telemetry::Level::Warn, "{noted:?}");
+        // And production takes that step: the body of `stamp_serve_lock`,
+        // bounded at its closing brace, hands the warning to it. The needles
+        // are split so this file cannot match them in this test.
+        let source = include_str!("server.rs");
+        let body = source
+            .split_once(concat!("\nfn stamp_serve_", "lock(\n"))
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map_or("", |(body, _)| body);
+        assert!(
+            body.contains(concat!("if let Some(warning) = ", "stamped {"))
+                && body.contains(concat!(
+                    "note_unstamped_",
+                    "lock(&warning, |line| warn_line!(\"{line}\"));"
+                )),
+            "`stamp_serve_lock` hands its warning to `note_unstamped_lock`: {body}"
+        );
 
         let refused = stamp_outcome(full, || Err(std::io::Error::from_raw_os_error(5)), path)
             .expect_err("neither stamped nor cleared");
@@ -22125,6 +22194,11 @@ mod tests {
             // route is the one way a static handler can silently take a route
             // over, and the only way to prove it cannot is to put one there.
             (build.join("store.json"), "\"DECOY\""),
+            // AND A SENTINEL WHERE A TRAVERSAL WOULD LAND (P1-12-05). The
+            // static root is `build/`, so `/../Cargo.toml` names this file.
+            // Without it nothing existed there, and "nothing leaked" held
+            // whether or not the handler refused the path.
+            (dir.join("Cargo.toml"), "[package] TRAVERSAL-LEAK-SENTINEL"),
         ] {
             let mut f = std::fs::File::create(&path).expect("create");
             f.write_all(body.as_bytes()).expect("write");
@@ -22380,9 +22454,21 @@ mod tests {
         assert!(db.contains("<title>shell</title>"), "{db}");
 
         // 8. AND A TRAVERSAL IS REFUSED OVER THE WIRE, not only in a unit test.
+        // The fixture holds a sentinel at the path the traversal names, so
+        // "nothing leaked" can fail, and the STATUS LINE must say 400 -- not
+        // merely some "400" anywhere in the headers or body.
         let escape = get(addr, "/%2e%2e/Cargo.toml").await;
-        assert!(escape.contains("400"), "{escape}");
-        assert!(!escape.contains("[package]"), "nothing leaked: {escape}");
+        assert!(
+            escape
+                .lines()
+                .next()
+                .is_some_and(|status| status.starts_with("HTTP/1.1 400")),
+            "{escape}"
+        );
+        assert!(
+            !escape.contains("TRAVERSAL-LEAK-SENTINEL"),
+            "nothing leaked: {escape}"
+        );
 
         let _ = tokio::net::TcpStream::connect(stop_addr).await;
         served
@@ -25072,10 +25158,24 @@ mod tests {
         // AND THE DRIVER SELECTS ON THE RESOLVED TYPE rather than naming the
         // index word. Read from the source because the choice sits inside an
         // `async fn` that opens sockets; the property is which field it reads.
+        //
+        // THE POSITIVE NEEDLE IS SPLIT TOO (P1-12-01). It was written whole,
+        // so it matched this assertion's own literal and passed after the
+        // selection moved into `instrument_word` and the old shape was gone.
+        // The selection itself is now called directly, both ways, and the
+        // driver's call site is pinned by a needle that cannot match itself.
+        assert_eq!(instrument_word(&rolling, true), rolling.index_word);
+        assert_eq!(instrument_word(&rolling, false), rolling.stock_word);
+        assert_ne!(
+            rolling.index_word, rolling.stock_word,
+            "the two words differ, so the two calls above can tell them apart"
+        );
         let src = include_str!("server.rs");
-        assert!(
-            src.contains("let word = if is_index {"),
-            "the strike width follows the underlying's own type"
+        let selection = concat!("let word = instrument_word(", "&rolling, is_index);");
+        assert_eq!(
+            src.matches(selection).count(),
+            1,
+            "the strike width follows the underlying's own type, at one call site"
         );
         // THE NEEDLE IS SPLIT SO IT CANNOT MATCH ITSELF. This file is its own
         // haystack, so a literal written whole here would be found in this very
@@ -25094,7 +25194,7 @@ mod tests {
         // `parse_fno` admits 213 names and 209 of them are keyed
         // `(Cash, Equity)`, which the single `(Index, Index)` probe missed.
         assert!(
-            src.contains("brutex_core::instrument::Kind::Equity,"),
+            src.contains(concat!("brutex_core::instrument::", "Kind::Equity,")),
             "rolling_security_id probes the equity shape as well as the index one"
         );
     }
@@ -25105,11 +25205,22 @@ mod tests {
             .await
             .expect("bind");
         let addr = taken.local_addr().expect("addr");
+        // "AND SAYS WHICH" IS READ BACK (P1-12-02): `FAILED` alone is returned
+        // by earlier arms too, so the refused bind's own event, naming this
+        // address, must be the one that landed.
+        let from = crate::emitted::mark();
         assert_eq!(
             run(&argv(&["serve", &addr.to_string()]), fired()).await,
             FAILED,
             "an address already in use is a refusal, not a silent retry"
         );
+        let address = addr.to_string();
+        let named = crate::emitted::landed(from, "api.server", "cannot bind the listening address")
+            .into_iter()
+            .filter(|record| crate::emitted::says(record, "addr", &address))
+            .count();
+        assert_eq!(named, 1, "the refusal names the address it could not bind");
+        drop(taken);
     }
 
     #[tokio::test]

@@ -290,6 +290,11 @@ fn a_non_utf8_argument_is_refused_by_name_not_a_panic() {
 fn a_closed_stdout_is_said_on_stderr_and_never_panics() {
     let (reader, writer) = std::io::pipe().expect("a pipe");
     drop(reader);
+    let logs = std::env::temp_dir().join(format!(
+        "brutex-cli-binary-log-closed-stdout-{}",
+        std::process::id()
+    ));
+    let _stale = std::fs::remove_dir_all(&logs);
     let out = command("closed-stdout")
         .args(["sweep", "6", "200"])
         .stdout(writer)
@@ -305,4 +310,45 @@ fn a_closed_stdout_is_said_on_stderr_and_never_panics() {
     assert!(!said.contains("panicked"), "{said}");
     assert!(said.contains("stdout is not writable"), "{said}");
     assert!(said.contains("closed the pipe"), "{said}");
+
+    // AND THE FAILURE IS LOGGED, ONCE (P1-17-03). C-V53-02 says each failure
+    // emits one `cli.output` event, and nothing read the log: deleting the
+    // `note(..)` in `cli::deliver` left this green. The run's own log
+    // directory is read back.
+    let events = output_events(&logs);
+    assert_eq!(
+        events.len(),
+        1,
+        "one `cli.output` event for the one failed write:\n{events:#?}\n{said}"
+    );
+    assert!(
+        events[0].contains("\"level\":\"warn\"") && events[0].contains("\"exit\":0"),
+        "a WARN that records the exit code the run kept: {}",
+        events[0]
+    );
+    let _cleaned = std::fs::remove_dir_all(&logs);
+}
+
+/// Every `cli.output` line written under `dir`, at any depth.
+fn output_events(dir: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(text) = std::fs::read_to_string(&path) {
+                found.extend(
+                    text.lines()
+                        .filter(|line| line.contains("\"target\":\"cli.output\""))
+                        .map(str::to_owned),
+                );
+            }
+        }
+    }
+    found
 }

@@ -375,19 +375,29 @@ fn the_ordinary_stored_sweep_withholds_in_the_screens_order() {
         "stored::load_exact_minute_context(",
     ];
     let lib = include_str!("lib.rs");
-    let body = |name: &str| {
+    // BOTH HALVES ARE BOUNDED, AND BOTH ARE CODE (P1-10-03). The screen half
+    // was everything after `fn screen_range_inner(` to the end of `lib.rs`, so
+    // a later function calling the same loaders in order satisfied it whatever
+    // the screen did. Each body now ends at its own closing brace, and comment
+    // lines are dropped so a step named only in a comment is not a step.
+    let body = |name: &str| -> String {
         let (_, rest) = lib
             .split_once(&format!("\nfn {name}("))
             .expect("the named function exists");
         rest.split_once("\n}\n")
             .expect("the function has a closing brace")
             .0
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     let sweep = body("stored_sweep_inputs");
-    let screen = lib
-        .split_once("\nfn screen_range_inner(")
-        .expect("the screen exists")
-        .1;
+    let screen = body("screen_range_inner");
+    assert!(
+        screen.len() < lib.len() / 4,
+        "the screen half must be one function, not the rest of the file"
+    );
     let (mut in_sweep, mut in_screen) = (0, 0);
     for step in SEQUENCE {
         let at_sweep = sweep[in_sweep..].find(step).map(|i| i + in_sweep);

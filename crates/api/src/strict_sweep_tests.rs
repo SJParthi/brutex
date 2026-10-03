@@ -507,15 +507,25 @@ fn strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_sta
 fn strict_invalid_server_environment_refuses_before_configuration_slot_or_start() {
     const CHILD: &str = "BRUTEX_STRICT_ENVIRONMENT_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .arg("--exact")
-            .arg("sweeprun::strict_tests::strict_invalid_server_environment_refuses_before_configuration_slot_or_start")
-            .arg("--test-threads=1")
-            .env(CHILD, "1")
-            .env("BRUTEX_MAX_STOP_POINTS", "not-an-integer")
-            .status()
-            .expect("isolated environment test child");
-        assert!(status.success());
+        // THROUGH `crate::isolated::rerun` (P1-12-03), which requires the
+        // child's own `1 passed` line: a status alone passed on a child whose
+        // `--exact` matched nothing. The path comes from `module_path!()`, so
+        // renaming the module cannot strand it.
+        let test = concat!(
+            module_path!(),
+            "::strict_invalid_server_environment_refuses_before_configuration_slot_or_start"
+        );
+        let test = test.split_once("::").map_or(test, |(_, path)| path);
+        let _child = crate::isolated::rerun(
+            test,
+            &[
+                (CHILD, std::ffi::OsStr::new("1")),
+                (
+                    "BRUTEX_MAX_STOP_POINTS",
+                    std::ffi::OsStr::new("not-an-integer"),
+                ),
+            ],
+        );
         return;
     }
     let site = site("invalid-server-setting");
