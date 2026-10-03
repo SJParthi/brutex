@@ -1,4 +1,4 @@
-# Per-finding status, all 91 (updated 2026-10-03 from scratchpad status.js and fix-board sweep.tsv)
+# Per-finding status, all 91 (final save 2026-10-03 20:12 UTC)
 
 Board states: found, fixing, branch, pushed, green. Mirrored at /mnt/project-files/fix-board/status/sweep.tsv.
 
@@ -26,8 +26,8 @@ Board states: found, fixing, branch, pushed, green. Mirrored at /mnt/project-fil
 | hunt-ci-2 | medium | main is never re-tested after a merge | fixed | pushed | a21d031 | Hourly check dispatches CI on main when its head has no run (D-1605). |
 | testgaps-1 | medium | Four ✓ invariants cite tests that don't exist | fixed | pushed | a21d031 | Gate 10 checks two-segment and bare names; four rows cite real tests (D-1606). |
 | testgaps-6 | medium | 11 invariants proven only by tests CI never runs | fixed | pushed | a21d031 | Gate 6d builds and runs the web/ Rust tests: 68 pass; 2 need operator data and are named. |
-| gaps-1 | medium | About 16 cli modules unreachable from any command | documented | fixing | f1f25c3 | No retirement decision exists, so nothing deleted; modules recorded as unwired (D-1568). |
-| gaps-3 | medium | Multiple-testing and walk-forward code is test-only | documented | fixing | f1f25c3 | Recorded as unwired with a test that pins the record (D-1547). |
+| gaps-1 | medium | About 16 cli modules unreachable from any command | blocked | found |  | No decision names a command for the superseded Step-3 V1-V4 modules; wiring needs the owner's decision (D-1568 stands). |
+| gaps-3 | medium | Multiple-testing and walk-forward code is test-only | blocked | found |  | No decision places Benjamini-Hochberg, the V1 walk-forward overfit rate, the V3 door or V2/V3 admission in the live chain (D-1544 stands). |
 | gaps-5 | medium | Cross-sectional winner table is in-sample only | open | found |  | Needs an out-of-sample split and correction across 210 instruments: a new feature, not a bug fix. |
 | gaps-7 | medium | Survivorship bias in the equity universe | open | found |  | Needs point-in-time F&O membership data, which the charter does not source. |
 | gaps-8 | medium | No equity charges and zero slippage | open | found |  | Needs a charter-sourced equity charge stack. |
@@ -59,14 +59,14 @@ Board states: found, fixing, branch, pushed, green. Mirrored at /mnt/project-fil
 | hunt-conc-3 | low | Refusal text depends on HashMap order | fixed | pushed | a21d031 | Reconcile walks identities in sorted order (D-1565). |
 | attackdata-2 | low | −0.0 Greek reported AlreadyPresent | fixed | pushed | a21d031 | Byte equality; greek domain enforced (D-1524). |
 | attackdata-3 | low | Repeated JSON keys keep the last value silently | fixed | pushed | a21d031 | Repeated JSON keys refused (D-1531). |
-| attackdata-4 | low | Over-precise price text can land one paisa off | documented | fixing | f1f25c3 | Needs serde_json arbitrary_precision; limit stated. |
+| attackdata-4 | low | Over-precise price text can land one paisa off | fixed | branch | c6d03c6 | JSON prices snapped from the vendor's own digits, no lossy f64 (D-1570). Final full test run not confirmed (stopped at 93% usage). |
 | attackdata-5 | low | Fold nets negative volumes | fixed | pushed | a21d031 | Negative volume and over-wide buckets refused (D-1532). |
 | attackdata-7 | low | Restated bar refused with the wrong reason | fixed | pushed | a21d031 | OverlapDisagrees names the conflict (D-1525). |
-| attackdata-8 | low | Checksum flag can be cleared to skip verification | documented | fixing | f1f25c3 | Needs a new on-disk format version (§3 rule 8); limit stated (D-1528). |
+| attackdata-8 | low | Checksum flag can be cleared to skip verification | fixed | branch | c6d03c6 | Store format version 3 with mandatory block checksums; older versions stay readable (D-1571). Final full test run not confirmed. |
 | o1store2-1 | low | Timestamp lookup can take more reads than documented | fixed | pushed | a21d031 | Doc bound corrected (D-1527). |
 | o1surface2-2 | low | Autopilot tick reads every vendor manifest twice | fixed | pushed | a21d031 | Tick reads only its own vendor once (D-1588). |
 | o1surface2-3 | low | Pull landing does disk I/O on HTTP worker threads | fixed | pushed | a21d031 | Landing runs off the HTTP workers (D-1589). |
-| o1eng2-1 | low | Sliding window rebuilds when exits move backward | documented | fixing | f1f25c3 | Θ(window) bound stated in limits; Newey-West effect UNVERIFIED. |
+| o1eng2-1 | low | Sliding window rebuilds when exits move backward | fixed | branch | c6d03c6 | O(1) window extremes and Newey-West retirement in any exit order (D-1572). Final full test run not confirmed. |
 | hunt-ci-3 | low | 'cargo deny \|\| true' passes the step-runs check | fixed | pushed | a21d031 | step-runs refuses swallowed or skipped commands (D-1600). |
 | hunt-ci-4 | low | Nothing guards ci-ok itself | fixed | pushed | a21d031 | Gate checks ci-ok's needs, always() and success-only (D-1601). |
 | hunt-ci-5 | low | 3,630 lines of gate tools skip lint, coverage and mutation | fixed | pushed | a21d031 | Gate tools clippy-clean; Gate 6c lints them. |

@@ -1,33 +1,47 @@
-# Workspace audit + fixes: CURRENT STATE (updated 2026-10-03 18:55 UTC)
+# Workspace audit + fixes: FINAL SAVE (2026-10-03 20:12 UTC, stopped at 93% weekly usage)
 
 **Start here.** Read in this order:
 1. PROMPTS-AND-BRIEFS.md: the user's words, the coordinator's rules and every agent brief.
-2. STATUS.md: all 91 findings, with status and commit.
-3. QUEUE.md: what to run next.
-4. FIXRULES2.md: worker rules.
+2. STATUS.md: all 91 findings.
+3. FIXRULES2.md: worker rules.
 
-Artifact (audit page, has the tail-latency tab): https://claude.ai/artifact/YYYZhcv7YjfW5txZL12Ki1. The source is brutex-workspace-audit.html.md here; rename it to .html before publishing. A new account can't update that URL, so it must publish a new one.
+Artifact source: brutex-workspace-audit.html.md. Rename it to .html and publish it as a new Artifact; the old URL https://claude.ai/artifact/YYYZhcv7YjfW5txZL12Ki1 belongs to the old account.
 
 ## Where things stand
 
 | Item | State |
 |---|---|
-| PR #74 (final/all-fixes) | 0cab319 (CI thread push), which carries this thread's a21d031 (67 fixes, D-1520..D-1592) and the mutant-kill tests |
-| Before a21d031 | full workspace tests: 6680 passed, 2 failed; both were clashes, fixed in a21d031 and passing alone |
-| Fixed | 75 of 91 |
-| Pushed | 67 + hunt-ci-12 (CI thread, D-1457) |
-| On a branch, not pushed | 3: hunt-api-2, hunt-api-3, errpaths-4 on origin audit-fix/w6 @ 700e644. Verified: fmt, clippy, tests green on indicators, runner, cli, api, core and store |
-| Done on branch, not pushed (2) | audit-fix/w7 @ 858c8bb: hunt-conc-1, hunt-conc-2, hunt-cli-a-5, o1surface2-1 (cli tests 1755 pass, clippy clean) |
-| In progress | audit-fix/w8 (WIP d2ed52d, being finished) |
-| Not started | audit-fix/w9 (gaps-5, gaps-10, gaps-11) |
-| Blocked, cannot be fixed by code | gaps-6 (split-refusal threshold), gaps-7 (point-in-time F&O membership), gaps-8 and hunt-costs-5 (charge rates): the charter has no source, and CLAUDE.md §3 rule 1 forbids invention. hunt-runner-5: no sourced HAC bandwidth. hunt-ci-1: needs the owner to turn on "Require review from Code Owners" in branch protection. testgaps-7: the ignored tests need operator market data. rustonly2-10: macOS-only dependency, not a defect |
+| PR #74 (final/all-fixes) | 0cab319: this thread's a21d031 (67 fixes) plus the CI thread's mutant kills and action pins (hunt-ci-12) |
+| Fixed | 78 of 91 |
+| Pushed | 68 |
+| Done on branches, NOT yet on PR #74 (10) | see the branch table below |
+| Not started (3) | gaps-5, gaps-10, gaps-11 on audit-fix/w9 (the brief is in PROMPTS-AND-BRIEFS.md) |
+| Blocked (10) | see the blocked table below |
 
-## Next steps (one agent at a time while usage is tight)
-1. Finish w8, then w9, each in its own worktree from its origin branch, following FIXRULES2.md.
-2. Merge w6, w7, w8 and w9 into a branch off origin/final/all-fixes. For doc-tail conflicts, keep both sides (keepboth.md).
-3. Run fmt, clippy -D warnings and `cargo test --workspace --locked`. Run root-only store tests as uid 65534.
-4. Tell the PR #74 CI thread the commit, then push HEAD:final/all-fixes. Never force-push and open no PR.
-5. Update STATUS.md and /mnt/project-files/fix-board/status/sweep.tsv, then republish the Artifact.
+Branches done but not on PR #74:
+
+| Branch | Findings | Checks |
+|---|---|---|
+| audit-fix/w6 @ 700e644 | hunt-api-2, hunt-api-3, errpaths-4 | fmt, clippy and tests green on indicators, runner, cli, api, core, store |
+| audit-fix/w7 @ 858c8bb | hunt-conc-1, hunt-conc-2, hunt-cli-a-5, o1surface2-1 | cli 1755 pass, clippy clean |
+| audit-fix/w8 @ c6d03c6 | attackdata-4 (D-1570), attackdata-8 (store format v3, D-1571), o1eng2-1 (D-1572) | The worker was stopped before its final report, so fmt, clippy and tests on store, pull, runner and their dependents must be run and confirmed first |
+
+Blocked findings:
+
+| Finding | What is missing |
+|---|---|
+| gaps-1, gaps-3 | An owner decision on wiring the superseded Step-3 V1-V4 and BH/walk-forward modules (D-1568, D-1544) |
+| gaps-6, gaps-7, gaps-8, hunt-costs-5, hunt-runner-5 | A charter source for the fact |
+| hunt-ci-1 | The owner turning on "Require review from Code Owners" |
+| testgaps-7 | Operator market data |
+| rustonly2-10 | Nothing: it is not a defect |
+
+## Next steps
+1. In a worktree off origin/final/all-fixes, merge audit-fix/w6, w7 and w8 with merge commits. For doc-tail conflicts, keep both sides (keepboth.md).
+2. Verify w8 first. Run fmt, clippy -D warnings and `cargo test --workspace --locked`, and run root-only store tests as uid 65534. Check Gate 15: no other language names in the diff.
+3. Coordinate with the PR #74 CI thread, or whoever now drives PR #74. Then push HEAD:final/all-fixes. Never force-push and open no PR.
+4. Run the w9 brief (features).
+5. Update STATUS.md and republish the Artifact.
 
 ---
 # History (earlier state, kept)

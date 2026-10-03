@@ -65,7 +65,7 @@ Commits so far: 5b6ce01 (D-1569) and 6516811 (D-1556, D-1557). D-1556..D-1559 an
 3. **hunt-cli-a-5:** not addressed yet. Read it in hunt-cli-a.md, verify it at HEAD, and fix it with a test that fails first.
 4. **o1surface2-1:** cli descend rebuilds a column per step. Remove the repeated rebuild correctly, for example with a cache keyed by the full identity. Test that a mismatch rebuilds and a match reuses, and update 06-limits. Return BLOCKED only with a precise reason.
 
-### w8 (data/engine), PAUSED, WIP on origin audit-fix/w8 @ d2ed52d (untested)
+### w8 (data/engine), DONE on origin audit-fix/w8 @ c6d03c6 (attackdata-4, attackdata-8, o1eng2-1 fixed; gaps-1, gaps-3 BLOCKED; final checks not confirmed)
 D-1570..D-1575; AFF-40..AFF-59. It was in the middle of attackdata-4, adding the serde_json feature and running the pull suite.
 1. **attackdata-4:** don't use a lossy f64 path. Use arbitrary_precision or raw number text, and test values an f64 would round. Check that cargo deny still passes.
 2. **attackdata-8:** add a new on-disk format version beside the old one, with old files still readable. Test round-trips and old reads, and document it in 02-store-format.
