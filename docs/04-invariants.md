@@ -6216,3 +6216,11 @@ old line regex the same input and watched it pass.
 | CUH-06 | One candidate-trade `Summary` hashes its catalog once across thirty page-level reads, a `read` summary adds none, and a replaced or removed catalog is still refused on every page surface (D-0991) | `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change` | ✓ |
 | CUH-07 | An empty candidate-trade catalog is verified once and its absent tier is refused (D-0991) | `cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses` | ✓ |
 | CUH-08 | A capture derives slice facts once for all of its candidate sides, records a side with no trading cell with no rows, and issues exactly four `fsync`s per candidate side (D-0991) | `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side` | ✓ |
+
+### Ledger append, page and lookup costs (lane 1-b group E) — D-1680 onward
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| LBE-01 | One Candidate Universe production append runs exactly one full ledger scan, onto an empty ledger, onto a non-empty one and as an exact reuse, and the appended completion is what a fresh reader finds (D-1680) | `cli::candidate_universe::tests::production_append_scans_the_ledger_once_and_rereads_only_its_block` | ✓ |
+| LBE-02 | The post-append re-read refuses a foreign write (generation), a corrupt committed row whose generation was made to match (seal), a physical row or completion count the append did not leave, a universe absent from the index and a written commit that is not the last stored completion, and accepts a reused older block (D-1680) | `cli::candidate_universe::tests::reverify_committed_refuses_every_disagreement_with_the_disk`, `cli::candidate_universe::tests::reverify_committed_refuses_counts_absences_and_order_it_did_not_write` | ✓ |
+| LBE-03 | §150 and the Candidate module header price a production append at one O(R+C) open plus O(new rows), name 16 appends per run, call the generation metadata only, and keep neither the "also hashes the data files" nor the "proportional to the new block" sentence, while the door opens once and the generation hashes nothing (D-1680) | `cli::ledger_append_lookup_costs::section_150_states_one_open_per_production_append_and_no_data_hash` | ✓ |

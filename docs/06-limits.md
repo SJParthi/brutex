@@ -7783,13 +7783,27 @@ completion before it builds its bounded index, so R rows and C completions cost
 O(R+C) time and O(C) indexed state. A validated sequence seek is fixed offset
 and worst-case O(1) in record count; a hash lookup is average O(1), not a
 worst-case collision guarantee, and a page costs O(P) for P returned rows.
-Append, hashing, canonical-order validation and durability are proportional to
-the new block plus filesystem costs. Universe construction would additionally
-walk the naturally extinct frontier and both dynamic grids. It is not O(1).
+On an already-open handle, append, hashing, canonical-order validation and
+durability are proportional to the new block plus filesystem costs. The one
+production door, `append_produced_candidate_universe_v1`, opens the ledger on
+every call, so one production append is O(R+C) for that open plus O(new rows)
+to write the block and re-read it through the same handle. Before D-1680 it
+then dropped the handle and ran a second full `open_read`, so it cost two
+O(R+C) passes. `ledger-v6` makes one such append per rung per family, 16 per
+run against one root, so a run's Candidate appends cost O(16 x (R+C)) plus the
+rows written: they grow with the ledger's history, not only the new block.
+Universe construction would additionally walk the naturally extinct frontier
+and both dynamic grids. It is not O(1).
 
 On Unix, cached-generation refusal binds the held lock, row and receipt paths by
-device/inode, length and nanosecond modification/change times and also hashes
-the data files. On non-Unix targets the portable generation token currently has
+device/inode, length and nanosecond modification/change times. It is metadata
+only and hashes no data file (D-1680 corrected an older sentence here that said
+it did). A same-length rewrite that left all of those fields equal would pass
+it; the change time cannot be set through the timestamp API, so that needs a
+clock change or a raw device write, and is UNVERIFIED as a reachable case. The
+production append still re-reads and re-seals its own new block after the
+check, so a corrupt new block is refused there; older blocks are re-validated
+only by the next full open. On non-Unix targets the portable generation token currently has
 only length and the platform modification time, so a same-length ABA path
 replacement with an indistinguishable timestamp is not proved detectable.
 Production deployment here is macOS/Unix, but portability remains an honest

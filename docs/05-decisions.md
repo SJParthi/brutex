@@ -53403,3 +53403,42 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1680 — A Candidate Universe production append opens the ledger once and re-reads only its block; §150 stops saying the generation hashes data — 2026-10-03
+
+**What was wrong.** W2-cli3-4: `append_produced_candidate_universe_v1`, the one
+production append door, opened the ledger (a full O(R + C) scan that re-seals
+every row and completion), appended, dropped the handle and ran a second full
+`open_read` to look the new completion up. Every production append was two
+O(R + C) passes plus the new rows, and `ledger-v6` makes sixteen per run. The
+module header said "the sealed internal append is O(new rows)" and
+`docs/06-limits.md` §150 said append is "proportional to the new block".
+W2-cli3-8: §150 also said the cached-generation check "also hashes the data
+files". `FileGenerationV1` is length, device/inode and nanosecond
+modification/change times, and `require_unchanged` hashes nothing.
+
+**The decision.** The door keeps its writer handle and calls
+`reverify_committed`, which under the shared lock rechecks the three
+generations, requires the physical row and completion counts to be the ones
+the append left, re-reads and re-seals only the committed block
+(`validate_file_block`) and, for a written block, requires the last stored
+completion to be its receipt. One production append is now one full open plus
+O(new rows). §150 and the module header state that, and §150 states that the
+generation is metadata only, what that misses (a same-length rewrite leaving
+every metadata field equal, UNVERIFIED as reachable) and that the new block is
+re-sealed anyway. `append_and_reopen`'s rustdoc and the commit type's doc no
+longer say a fresh read-only reopen follows.
+
+**Rejected.** Adding a content hash to the generation to make the old §150
+sentence true: it would make every cached lookup and page O(file bytes),
+which is the defect D-1681 removes elsewhere. Passing one opened ledger
+through all sixteen appends of a run: it would remove the remaining per-append
+open too, but it changes three callers' ownership (`ledger_v6`,
+`all_rung_population_v5`) and is left for a later unit; §150 states the
+remaining O(16 x (R + C)) per run.
+
+Tests: `cli::candidate_universe::tests::production_append_scans_the_ledger_once_and_rereads_only_its_block`
+(failed first on the two-open door: scans 2, expected 1),
+`cli::candidate_universe::tests::reverify_committed_refuses_every_disagreement_with_the_disk`,
+`cli::candidate_universe::tests::reverify_committed_refuses_counts_absences_and_order_it_did_not_write`,
+`cli::ledger_append_lookup_costs::section_150_states_one_open_per_production_append_and_no_data_hash`.
