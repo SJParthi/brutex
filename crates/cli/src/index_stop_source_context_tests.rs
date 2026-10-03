@@ -628,7 +628,13 @@ fn original_context_partial_torn_and_changed_archives_never_supply_candles() -> 
     let why = open(&fixture, &saved, 0, bounds())
         .err()
         .ok_or("an archive with no completion receipt must not open")?;
-    assert!(why.contains("complete"), "{why}");
+    // The refusal does not name the file; it carries the host's "not found".
+    // The open just above, on the same archive with the receipt present, is
+    // what pins the receipt as the cause.
+    assert!(
+        why.starts_with("original_context_refused") && why.contains("os error 2"),
+        "{why}"
+    );
     Ok(())
 }
 

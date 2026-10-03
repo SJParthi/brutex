@@ -145,8 +145,14 @@ fn a_sweep_runs_end_to_end_and_says_its_bars_were_generated() {
 
 #[test]
 fn the_threshold_search_runs_end_to_end() {
+    // SIX SESSIONS, AND THE SEARCH'S OWN NUMBERS ARE READ (P1-10-01). This ran
+    // `auto 2` and checked only the provenance banner, which `auto` prints
+    // whatever it found. MEASURED: two sessions are 750 bars against a 1,876
+    // bar warm-up, so `auto 2` swept 0 bars, walked 0 ladders, chose threshold
+    // `NONE`, said `NOTHING MEASURED` -- and the test passed. Six sessions is
+    // the first count that clears the warm-up, as for the sweep test above.
     let out = command("auto")
-        .args(["auto", "2"])
+        .args(["auto", "6"])
         .output()
         .expect("the binary runs");
     assert!(out.status.success(), "a valid auto exits zero");
@@ -154,6 +160,24 @@ fn the_threshold_search_runs_end_to_end() {
     assert!(
         text.contains("THESE BARS ARE GENERATED"),
         "provenance travels"
+    );
+    let swept = row_number(&text, "swept").expect("the BARS block reports swept");
+    assert!(swept > 0, "the search read no bars:\n{text}");
+    let threshold = row_number(&text, "threshold chosen")
+        .expect("the SEARCH block names a numeric threshold, not NONE");
+    assert!(threshold > 0, "no threshold was found:\n{text}");
+    let ladders = row_number(&text, "ladders walked").expect("the SEARCH block counts ladders");
+    assert!(ladders > 0, "no ladder was walked:\n{text}");
+    let combinations =
+        row_number(&text, "combinations found").expect("the LADDER block must report a count");
+    assert!(combinations > 0, "the chosen ladder found nothing:\n{text}");
+    assert!(
+        text.contains("the frontier went extinct, which is the answer"),
+        "the chosen rung must reach extinction:\n{text}"
+    );
+    assert!(
+        !text.contains("NOTHING MEASURED") && !text.contains("REFUSED"),
+        "the search declared it measured nothing or refused:\n{text}"
     );
 }
 
