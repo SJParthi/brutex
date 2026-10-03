@@ -7,8 +7,10 @@
 //! 3. the resolved rungs are replayed unchanged on later bars.
 //!
 //! No equity, future, option, reference index, BSE index, or unknown index can
-//! reach resolution. Those instruments may be stored, but `AGENTS.md` section
-//! 1 permits the sweep only for `NSE-NIFTY` and `NSE-BANKNIFTY`.
+//! reach resolution: this V1 policy resolves only `NSE-NIFTY` and
+//! `NSE-BANKNIFTY`. That is narrower than the sweep surface, which
+//! `CLAUDE.md` §1 widened to the F&O cash equities (D-0506); an equity is not
+//! resolved here.
 //!
 //! The resolver creates no tick and no execution price. Long stops sample
 //! `open - low` while long targets sample `high - open`; short swaps those two

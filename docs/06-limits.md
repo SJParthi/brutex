@@ -14030,3 +14030,31 @@ batches and retries. The reader doc says only "recheck every retained journal
 record" (W2-cli2-5). Not reduced here: the recheck is what lets a page refuse
 a journal that changed under it, and a cheaper generation check would be a
 change to that reader's authority.
+
+## Selection V5 and V6 reads and commits replay their sources — D-1642, 3 October 2026
+
+Let C be the rung's candidates (Population rows / Execution dispositions)
+and H the committed blocks in `global-selection-v6.bin` (at most
+`CEILING_BYTES / 16 KiB` = 4,194,304).
+
+- **Selection V5 `top_twenty_five` / `top_ten` (W2-cli14-1).** Each read
+  calls `PreparedSelectionV5::from_committed_execution` before and after the
+  read, and each of those re-opens the Population execution source twice and
+  every authenticated disposition once: two full two-family Candidate
+  Execution V3 grid replays per call, O(C × replay) per read of at most 25
+  rows. `successor_winners` does more. §163 says Top-10 is a prefix only
+  after the authoritative Top-25 has been reproduced; this is that
+  reproduction's price, per read.
+- **Selection V6 reads (W2-cli14-2).** `top_twenty_five` and `top_ten` call
+  `Prepared::from_execution` twice (each two Population V6 replays) with
+  `require_committed`, an O(H) scan hashing every 16 KiB block twice, in
+  between. `snapshot` is three `from_execution` and two scans;
+  `stored_oos_witnesses` takes two snapshots.
+- **Selection V6 commit (W2-cli14-3).** `persist` scans the whole file before
+  appending one block, and `commit_stored_selection_v6` scans it again in
+  `require_committed` and runs a second `from_execution`: two O(H) scans per
+  commit, once per rung per `ledger-v6` run. An identical rerun appends
+  nothing but pays the same scans.
+
+None of these is O(1), and none grows with the request alone. They are not
+reduced here (D-1642).

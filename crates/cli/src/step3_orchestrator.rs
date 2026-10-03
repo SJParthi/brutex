@@ -137,7 +137,8 @@ pub struct StoredCandidatePreAdmissionBoundsV1 {
 ///
 /// The request contains no raw market bytes, digest, calendar receipt, source
 /// commit, depth, fallback or pre-resolved result. `underlying` is validated by
-/// the canonical stored loader against the two-instrument sweep surface, and
+/// the canonical stored loader against the NSE sweep surface `CLAUDE.md` §1
+/// names (the two spot indices and the F&O cash equities), and
 /// `rung_name` is resolved by the existing stored timeframe authority.
 #[derive(Clone, Copy)]
 pub struct StoredCandidatePreAdmissionRequestV1<'a> {

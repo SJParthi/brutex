@@ -53850,3 +53850,29 @@ bounds to commit.
 
 `W2-cli2-5` (Boolean search detail pages recheck every retained journal
 record twice per page) is stated in `docs/06-limits.md` under this number.
+
+### D-1642 — Correct stale scope and caller claims in the V6 chain, and state Selection V5/V6 read and commit costs — 2026-10-03
+
+**What was wrong (GAP15-20).** Five source comments described a world that
+no longer exists: `step3_orchestrator`'s request doc validated `underlying`
+"against the two-instrument sweep surface"; `cli::ledger_all_arm`'s doc said
+"`CLAUDE.md` §1 names two instruments"; `population_v6`, `execution_v4` and
+`stored_post_training_oos` justified `dead_code` by a production caller
+"pending" or "awaited", though `ledger_v6` now calls all three; and
+`runner::exit_grid_policy` cited `AGENTS.md` §1 as permitting only the two
+indices. `CLAUDE.md` §1 sweeps the two indices and the F&O cash equities
+(D-0506, D-0682).
+
+**The change.** Each comment now says what is true: the stored loader
+validates against §1's NSE surface; the ledger chain is built for the two
+indices and does not sweep equities; the V6-chain modules have their
+production caller and keep a lint allowance only for items still reached
+from tests; the exit-grid V1 policy resolves only the two indices, which is
+narrower than the sweep surface. No code changed.
+
+**Costs stated (W2-cli14-1, W2-cli14-2, W2-cli14-3).** Reading a committed
+Selection V5 Top-25/Top-10 rebuilds the prepared selection twice, Selection V6
+reads rebuild `Prepared::from_execution` twice around an O(H) scan, and a
+Selection V6 commit scans the history twice. These are stated in
+`docs/06-limits.md`; they are the modules' re-authentication of their
+upstream sources, and reducing them is a change to what a read proves.
