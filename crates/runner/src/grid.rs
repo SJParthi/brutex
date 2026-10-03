@@ -6232,6 +6232,59 @@ mod exit_family_tests {
         }
     }
 
+    /// Gate 18: `the_hoisted_replay_doors_equal_the_per_call_doors` compares
+    /// `per_trade` with `per_trade_over`, and `per_trade` calls `per_trade_over`
+    /// -- so a mutant that answers `None` from `per_trade_over` changes both
+    /// sides at once and the comparison still holds. This checks each door
+    /// against an independent oracle instead: the grid cell it was chosen from,
+    /// and [`super::materialize_cell`]'s rows, which reach the fold through
+    /// [`super::CellReplay`] rather than through either door.
+    #[test]
+    fn per_trade_reproduces_the_chosen_cell_and_its_rows() {
+        let bars = crate::synthetic::sessions(8);
+        let column = column(&bars);
+        let facts = SliceFacts::of(&bars, &column);
+        let horizon = Horizon::bars(15).expect("nonzero horizon");
+        let mut traded = 0_usize;
+        for side in [Side::Long, Side::Short] {
+            let mask = ConditionMask::default();
+            let grid = super::evaluate_over(
+                &bars,
+                &column,
+                &mask,
+                horizon,
+                side,
+                Levels::derived(3),
+                &facts,
+            );
+            let ladders = crate::excursion::Ladders {
+                stops: &grid.stops,
+                targets: &grid.targets,
+                trails: &grid.trails,
+            };
+            for cell in grid.cells.iter().filter(|cell| cell.trades > 0).take(8) {
+                let rows =
+                    super::materialize_cell(&bars, &column, &mask, horizon, side, &grid, cell)
+                        .expect("an in-sample cell replays");
+                assert_eq!(usize::try_from(cell.trades).ok(), Some(rows.len()));
+                let expected = Some((*cell, rows));
+                let chosen = super::Chosen::from_cell(cell);
+                assert_eq!(
+                    super::per_trade(&bars, &column, &mask, horizon, side, ladders, chosen),
+                    expected
+                );
+                assert_eq!(
+                    super::per_trade_over(
+                        &bars, &column, &mask, horizon, side, ladders, chosen, &facts
+                    ),
+                    expected
+                );
+                traded = traded.saturating_add(1);
+            }
+        }
+        assert!(traded > 0, "the fixture must reach a cell that traded");
+    }
+
     #[test]
     fn exit_family_empty_input_does_not_substitute_a_baseline() {
         let bars = [];

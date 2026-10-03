@@ -27,19 +27,50 @@ const MIDDLE_SLOTS: usize = 64;
 /// joins to come back to one value, so `2h - 1 <= MAX_INSTRUCTIONS`.
 const DEEP_SLOTS: usize = MAX_INSTRUCTIONS.div_ceil(2);
 
-/// The scratch stack [`Expression::evaluate`] uses for a program of `len`
-/// instructions: the smallest tier no reachable stack height exceeds.
+/// The three scratch-stack widths [`Expression::evaluate`] dispatches on.
 ///
-/// A program of `len` instructions can stack at most `(len + 1) / 2` values,
-/// by the same leaves-and-joins count as [`DEEP_SLOTS`]. Each tier starts past
-/// the previous one's reach, so the width is at most `4.5 * len + 8`.
-pub(crate) const fn scratch_slots(len: usize) -> usize {
-    if len < 2 * SHALLOW_SLOTS {
-        SHALLOW_SLOTS
-    } else if len < 2 * MIDDLE_SLOTS {
-        MIDDLE_SLOTS
-    } else {
-        DEEP_SLOTS
+/// AN ENUM, NOT A MATCH ON THE WIDTH (D-1455). `evaluate` matched a `usize`
+/// width, computed from the length, against `SHALLOW_SLOTS`, `MIDDLE_SLOTS`
+/// and a `_` arm. Deleting either named arm sent that program to the deep stack, which
+/// answers identically and only clears more slots, so Gate 18 reported two
+/// survivors no output could kill. An exhaustive match on this enum has no
+/// wildcard to fall into, and each arm takes its width from [`Tier::slots`],
+/// so an arm and the width it runs are one fact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tier {
+    /// [`SHALLOW_SLOTS`].
+    Shallow,
+    /// [`MIDDLE_SLOTS`].
+    Middle,
+    /// [`DEEP_SLOTS`].
+    Deep,
+}
+
+impl Tier {
+    /// The smallest tier no reachable stack height of a `len`-instruction
+    /// program exceeds.
+    ///
+    /// A program of `len` instructions can stack at most `(len + 1) / 2`
+    /// values, by the same leaves-and-joins count as [`DEEP_SLOTS`]. Each tier
+    /// starts past the previous one's reach, so the width is at most
+    /// `4.5 * len + 8`.
+    const fn of(len: usize) -> Self {
+        if len < 2 * SHALLOW_SLOTS {
+            Self::Shallow
+        } else if len < 2 * MIDDLE_SLOTS {
+            Self::Middle
+        } else {
+            Self::Deep
+        }
+    }
+
+    /// The scratch slots this tier clears before a walk.
+    const fn slots(self) -> usize {
+        match self {
+            Self::Shallow => SHALLOW_SLOTS,
+            Self::Middle => MIDDLE_SLOTS,
+            Self::Deep => DEEP_SLOTS,
+        }
     }
 }
 
@@ -234,17 +265,17 @@ impl Expression {
     ///
     /// Θ(`len`): one step per instruction, at most [`MAX_INSTRUCTIONS`]. This is
     /// not O(1) in the program, and cannot be: every instruction can change the
-    /// answer. The scratch stack is [`scratch_slots`] wide for this program, 8,
-    /// 64 or 576 slots, so the slots cleared before the walk are at most
+    /// answer. The scratch stack is [`Tier::of`] the length, at
+    /// [`Tier::slots`] wide: 8, 64 or 576 slots, so the slots cleared before the walk are at most
     /// `4.5 * len + 8` and never the full wire capacity for a short rule.
     /// Proved by
     /// `vocab::expression::the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
     #[must_use]
     pub fn evaluate(&self, truth: ConditionMask, known: ConditionMask) -> Truth {
-        match scratch_slots(self.len) {
-            SHALLOW_SLOTS => self.run::<SHALLOW_SLOTS>(truth, known),
-            MIDDLE_SLOTS => self.run::<MIDDLE_SLOTS>(truth, known),
-            _ => self.run::<DEEP_SLOTS>(truth, known),
+        match Tier::of(self.len) {
+            Tier::Shallow => self.run::<{ Tier::Shallow.slots() }>(truth, known),
+            Tier::Middle => self.run::<{ Tier::Middle.slots() }>(truth, known),
+            Tier::Deep => self.run::<{ Tier::Deep.slots() }>(truth, known),
         }
     }
 
@@ -655,15 +686,15 @@ mod invariant_tests {
     /// `Not`), a false leaf gives the opposite, and an unknown one `Unknown`.
     #[test]
     fn the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates() {
-        assert_eq!(scratch_slots(0), 8);
-        assert_eq!(scratch_slots(1), 8);
-        assert_eq!(scratch_slots(15), 8);
-        assert_eq!(scratch_slots(16), 64);
-        assert_eq!(scratch_slots(127), 64);
-        assert_eq!(scratch_slots(128), 576);
-        assert_eq!(scratch_slots(MAX_INSTRUCTIONS), 576);
+        assert_eq!(Tier::of(0).slots(), 8);
+        assert_eq!(Tier::of(1).slots(), 8);
+        assert_eq!(Tier::of(15).slots(), 8);
+        assert_eq!(Tier::of(16).slots(), 64);
+        assert_eq!(Tier::of(127).slots(), 64);
+        assert_eq!(Tier::of(128).slots(), 576);
+        assert_eq!(Tier::of(MAX_INSTRUCTIONS).slots(), 576);
         for len in 1..=MAX_INSTRUCTIONS {
-            let slots = scratch_slots(len);
+            let slots = Tier::of(len).slots();
             assert!(slots >= len.div_ceil(2), "len {len} can stack past {slots}");
             assert!(2 * slots <= 9 * len + 16, "len {len} clears {slots} slots");
         }
