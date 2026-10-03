@@ -409,3 +409,31 @@ fn an_exact_half_rank_in_the_bottom_half_counts_as_overfit() {
     );
     assert_eq!(measured.median_placement, 500_000);
 }
+
+/// ET-strategies-trades-ranking-costs-2. The SAMPLE line names the fold count
+/// the walk-forward actually ran, not the five the constant states.
+#[test]
+fn the_sample_line_states_the_folds_the_walk_forward_ran() {
+    let fixture = Ranked::of(8);
+    let bars = &fixture.bars;
+    let splits = walk_forward_splits(bars.len());
+    assert_ne!(
+        splits, 5,
+        "fixture: a span where the run's folds differ from five"
+    );
+    let sessions = session_index(bars).len();
+    assert!(
+        sessions < MIN_AUDIT_SESSIONS,
+        "fixture: a thin sample prints SAMPLE"
+    );
+    let first = fixture.run.ranked.top.first().expect("a ranked candidate");
+    let text = traded_preamble(first, Direction::Long, &fixture.run.outcome, sessions, bars);
+    assert!(
+        text.contains(&format!("walk-forward folds {splits} ")),
+        "the SAMPLE line must state the run's own folds: {text}"
+    );
+    assert!(
+        text.contains(&format!("roughly {} day(s)", sessions / splits)),
+        "and divide by them: {text}"
+    );
+}

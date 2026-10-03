@@ -53535,3 +53535,25 @@ because the diagnostic is still not CSCV. The cost is the same.
 compatibility adapter, and other callers rely on its frozen integer field.
 Rewriting the renderer to take the exact type. Same answer, a wider diff in a
 second crate.
+
+### D-1725 — The audit's SAMPLE line states the fold count the walk-forward ran — 2026-10-03
+
+**Finding.** ET-strategies-trades-ranking-costs-2 (low bug).
+
+**What was wrong.** `sample_warning` printed `walk-forward folds 5` from the
+constant `WALK_FORWARD_SPLITS`, and divided sessions by it for "each fold tests
+on roughly N day(s)". `both_shapes` runs `walk_forward_splits(bars.len())`
+folds, which is 2 to 20 from the span's own length. So the SAMPLE block
+contradicted the WALK-FORWARD section of the same report. On
+`runner::synthetic::sessions(8)` the run uses 2 folds and the line said 5.
+
+**The decision.** `sample_warning(sessions, splits)` takes the count.
+`traded_preamble` passes `walk_forward_splits(bars.len())` over the same bars
+`both_shapes` receives. The divisor keeps `.max(1)`, so zero folds cannot
+divide by zero, and a test pins that. `WALK_FORWARD_SPLITS` had no other
+reader, so it was deleted. Its comment references, and its row in
+`docs/04-invariants.md`'s list of static constants, now name
+`walk_forward_splits`.
+
+**Rejected.** Keeping the constant in sync with the function. The function is
+derived from the span, so no constant can match it.

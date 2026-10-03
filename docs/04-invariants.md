@@ -3006,7 +3006,7 @@ retired cadence floor demanded.
 **Still static and named rather than left to be found:** `NIFTY_REFERENCE`
 (25,000, wrong for BANKNIFTY — mitigated on the browser routes by the
 `*_in_points` entry points, live on the argv `elite` arm), the exit grid's
-point ladder, `WALK_FORWARD_SPLITS`, `BOOTSTRAP_DRAWS`, `BOOTSTRAP_ALPHA_PPM`,
+point ladder, `BOOTSTRAP_DRAWS`, `BOOTSTRAP_ALPHA_PPM`,
 `MIN_AUDIT_SESSIONS`, and `engine::DEFAULT_CEILING` / `DEFAULT_PAIR_BUDGET`,
 which halt a ladder and so bound what a run explores.
 
@@ -6226,3 +6226,4 @@ old line regex the same input and watched it pass.
 | SCB-03 | argv `SUPPORT_PPM` and `BRUTEX_SUPPORT_PPM` accept exactly the same values: `1..=999_999`. Zero and 1,000,000 or more are refused by both (D-1722) | `cli::screen_policy_tests::argv_and_the_knob_share_one_support_domain` | ✓ |
 | SCB-04 | `cli top` reduces its stored thousandths by rounding half away from zero. That is symmetric in sign and free of overflow at `i64::MIN` and `i64::MAX` (D-1723) | `cli::screen_policy_tests::the_top_report_rounds_its_thousandths_half_away_from_zero`, `cli::screen_policy_tests::half_away_from_zero_is_symmetric_and_never_overflows` | ✓ |
 | SCB-05 | The audit's OVERFITTING counts a fold on the exact doubled midrank: a half-rank strictly past the midpoint is counted as overfit, and the exact midpoint is not (D-1724) | `cli::screen_policy_tests::an_exact_half_rank_in_the_bottom_half_counts_as_overfit` | ✓ |
+| SCB-06 | The SAMPLE line states and divides by `walk_forward_splits(bars.len())`, the fold count the walk-forward ran (D-1725) | `cli::screen_policy_tests::the_sample_line_states_the_folds_the_walk_forward_ran` | ✓ |
