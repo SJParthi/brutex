@@ -6216,7 +6216,6 @@ old line regex the same input and watched it pass.
 | CUH-06 | One candidate-trade `Summary` hashes its catalog once across thirty page-level reads, a `read` summary adds none, and a replaced or removed catalog is still refused on every page surface (D-0991) | `cli::candidate_trades::tests::a_summary_hashes_its_catalog_once_across_pages_and_still_refuses_a_change` | ✓ |
 | CUH-07 | An empty candidate-trade catalog is verified once and its absent tier is refused (D-0991) | `cli::candidate_trades::tests::an_empty_catalog_is_verified_once_and_its_absent_tier_refuses` | ✓ |
 | CUH-08 | A capture derives slice facts once for all of its candidate sides, records a side with no trading cell with no rows, and issues exactly four `fsync`s per candidate side (D-0991) | `cli::candidate_trades::tests::a_capture_derives_slice_facts_once_and_counts_four_syncs_per_candidate_side` | ✓ |
-<<<<<<< HEAD
 
 ### Ledger append, page and lookup costs (lane 1-b group E) — D-1680 onward
 
@@ -6235,7 +6234,11 @@ old line regex the same input and watched it pass.
 | LBE-11 | `run_route` consumes the sized context through the sized door only, and the replay's full-route cost is in its rustdoc and the limits (D-1683) | `cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated` | ✓ |
 | LBE-12 | One stored OOS fold builds its replay source once for three witnesses, the observer sees one fold stage and three replay stages, every witness equals the cohort's one-off mint, and a source changed after the fold still refuses a witness (D-1684) | `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_oos_fold_serves_every_witness_of_its_cohort` | ✓ |
 | LBE-13 | Population V6 folds each family once and §169 prices the per-witness term that remains (D-1684) | `cli::ledger_append_lookup_costs::section_169_prices_the_oos_fold_once_per_cohort` | ✓ |
-=======
+
+### Durability and crash safety (lane 1-b group C) — D-1740 onward
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
 | DUR-C-01 | An empty `complete` marker, the state a kill left in the old protocol, is an interrupted reservation: the previous checkpoint is `latest` and a republish succeeds as the next sequence (D-1740) | `cli::search_checkpoint::tests::an_empty_marker_left_by_a_kill_is_an_interrupted_reservation` | ✓ |
 | DUR-C-02 | A marker staged as `complete.tmp` and not renamed is never an acknowledgment; a failure at the rename removes it, refuses and poisons the writer (D-1740) | `cli::search_checkpoint::tests::a_staged_marker_is_never_an_acknowledgment` | ✓ |
 | DUR-C-03 | A short non-empty marker still refuses as a width mismatch (D-1740) | `cli::search_checkpoint::tests::a_short_nonempty_marker_still_refuses` | ✓ |
@@ -6248,4 +6251,3 @@ old line regex the same input and watched it pass.
 | DUR-C-10 | An unadmitted result-set commit writes no child while another writer holds the result-set lock, and commits once it is released (D-1745) | `cli::sweep_wiring_tests::an_unadmitted_commit_waits_for_the_result_set_writer_lock` | ✓ |
 | DUR-C-11 | `record_unadmitted` names `LEDGER.lock()`, `ResultSetLock::acquire`, the frontier, the receipt, `confirm_result_directory`, the ledger row and the release in that order (D-1745) | `cli::sweep_wiring_tests::the_unadmitted_commit_takes_both_locks_and_the_directory_barrier_in_order` | ✓ |
 | DUR-C-12 | A store's first journal write rolled back to an empty file reads as no rows, never as torn, and the next attempt starts the file afresh with token 1 (D-1741) | `cli::sweep_evidence::tests::a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows` | ✓ |
->>>>>>> lane1b/c
