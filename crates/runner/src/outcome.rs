@@ -652,14 +652,21 @@ impl WindowExtremes {
         if bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty) {
             return None;
         }
-        // BACKWARDS, OR A JUMP PAST EVERYTHING HELD: start again at `lo`. A
-        // right end before the last pushed bar cannot be served by popping, and
-        // a left end past `next` makes every held index stale.
-        if hi.saturating_add(1) < self.next || lo > self.next {
+        // BACKWARDS: start again at `lo`. A right end before the last pushed
+        // bar cannot be served by popping.
+        if hi.saturating_add(1) < self.next {
             self.highs.clear();
             self.lows.clear();
             self.next = lo;
         }
+        // A JUMP PAST EVERYTHING HELD: skip the bars before `lo` (D-1455).
+        // Every held index is below `next`, so below `lo`, and the front pops
+        // after the push loop discard each of them once. This was a second
+        // reset clause, `|| lo > self.next`, and Gate 18 showed its `>` could
+        // become `==` or `>=` unobserved: without the reset the skipped bars
+        // were pushed and popped again, the same answer at more cost. `max` is
+        // the skip with no operator to mutate. O(1).
+        self.next = self.next.max(lo);
         while self.next <= hi {
             let bar = bars.get(self.next)?;
             while self.highs.back().is_some_and(|&(_, h)| h <= bar.high) {
@@ -4177,12 +4184,26 @@ mod window_tests {
                 "the deque outgrew [{lo}, {hi}]"
             );
         }
-        // Backwards, then a repeat, then a jump past everything held.
+        // Backwards, then a repeat, then a jump past everything held. A jump
+        // skips to `lo` rather than resetting (D-1455), so the indices held
+        // before it must still be gone: the deques fit the window afterwards.
         for (lo, hi) in [(10, 20), (5, 9), (5, 9), (300, 310), (0, 0), (399, 399)] {
             assert_eq!(
                 window.over(&bars, lo, hi),
                 scan(&bars, lo, hi),
                 "[{lo}, {hi}]"
+            );
+            assert!(
+                window.highs.len() <= hi - lo + 1 && window.lows.len() <= hi - lo + 1,
+                "a stale index survived into [{lo}, {hi}]"
+            );
+            assert!(
+                window
+                    .highs
+                    .iter()
+                    .chain(&window.lows)
+                    .all(|&(at, _)| (lo..=hi).contains(&at)),
+                "a held index lies outside [{lo}, {hi}]"
             );
         }
         // Empty and out of range are absent, never a stale maximum.

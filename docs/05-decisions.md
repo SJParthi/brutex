@@ -54677,3 +54677,52 @@ planner's own tests pin 31, 78 jobs for 2,405 cases and the new ceiling. Both
 figures remain estimates: a job with several slow or hanging cases can still
 reach 240 minutes, and if the account runs fewer than 20 jobs at once the rest
 queue rather than fail.
+
+### D-1455 — Kill five more Gate 18 survivors: one missing test, four equivalent mutants removed by restructuring — 2026-10-03
+
+**Finding.** Gate 18 (cargo-mutants 26.2.0) reported five survivors in
+`runner` and `vocab` after D-1452.
+
+**Two were a missing test.** `grid::per_trade` -> `Some((Default::default(), vec![]))`
+and `grid::per_trade_over` -> `None`. The only test that called either,
+`the_hoisted_replay_doors_equal_the_per_call_doors`, compared the two doors
+with each other, and `per_trade` calls `per_trade_over`, so a `None` mutant
+changed both sides at once; its fixture (three and five sessions under the
+default mask) also reached no cell that traded, so every answer was `None`
+anyway. `per_trade_reproduces_the_chosen_cell_and_its_rows` checks each door
+against an independent oracle on eight sessions: the grid cell it was chosen
+from and `materialize_cell`'s rows, which are folded through `CellReplay` and
+reach neither door. It requires at least one traded cell, so it cannot pass
+vacuously. Each mutant was applied by hand and the test failed; on the real
+code it passes.
+
+**Four were equivalent, and no test can kill those (D-0192).**
+
+- `outcome::WindowExtremes::over`'s second reset clause, `|| lo > self.next`,
+  survived as `==` and as `>=`. Each was applied by hand and the 162
+  `outcome::`, `grid::` and `excursion::` tests all passed. The reset was only
+  an economy: without it the bars between `next` and `lo` were pushed, and the
+  front pops then discarded them, the same extremes at more cost. The clause is
+  gone and the skip is `self.next = self.next.max(lo)`, which has no operator
+  to mutate. Every index held before a jump is below `next`, so below `lo`, and
+  the existing front pops discard each once: still O(1) amortised per query.
+  The window test now asserts after every out-of-order query, the jump among
+  them, that the deques hold only indices inside the window.
+- `vocab::expression::Expression::evaluate` matched the `usize` from
+  `scratch_slots` against `SHALLOW_SLOTS`, `MIDDLE_SLOTS` and `_`. Deleting
+  either named arm ran that program on the 576-slot deep stack, which answers
+  identically and only clears more slots, so no output could tell. The
+  dispatch is now an exhaustive match on a private `Tier` enum with no
+  wildcard arm, so no arm can be deleted; each arm's const width is
+  `Tier::slots()` of that same variant, so an arm and the width it runs are
+  one fact; and `scratch_slots`, now unused outside its test, is removed in
+  favour of `Tier::of(len).slots()`, which the same boundaries pin in
+  `the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
+  `cargo mutants -p vocab` over `Tier`, `scratch_slots` and `evaluate`: 16
+  mutants, 14 caught, 2 unviable.
+
+**Rejected.** A test that observes which stack width ran. The width is a cost
+contract (`4.5 * len + 8` slots cleared), but observing it would need a
+test-only side channel in the evaluation path; removing the wildcard removes
+the mutant without one. Excluding the mutants in configuration was rejected
+for D-1452's reason.

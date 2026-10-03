@@ -11358,7 +11358,7 @@ the counts the tests assert: no bench times the fold.
   at most 1,151, on every bar it is asked about.** It is not O(1) in the
   program and cannot be, because every instruction can change the answer;
   it is O(1) in the bar count and allocates nothing. Its scratch stack is
-  sized to the program by `scratch_slots`: 8 slots up to 15 instructions, 64
+  sized to the program by `Tier::of(len).slots()`: 8 slots up to 15 instructions, 64
   up to 127, and 576 (the deepest stack 1,151 instructions can reach) past
   that, so the slots initialised per bar are at most `4.5 * len + 8`. Until
   this audit every bar cleared all 1,151 slots, even for a one-condition rule.
