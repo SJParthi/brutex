@@ -53403,3 +53403,218 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1560 — The run ledger and the receipt manifest recheck their indexed prefix when they grow, and a cold open refuses a duplicate run — 2026-10-03
+
+**What happened.** audit-20261003 hunt-cli-a-1, hunt-cli-a-2 and hunt-cli-a-3.
+D-0936 made Selection V1-V3 re-read their indexed records when the file grew,
+because constant-size generation evidence cannot tell "another handle
+appended" from "another handle rewrote an indexed record and appended". The
+same gap stayed open in `results/runs.bin` (`Results::absorb_new_records`)
+and `results/detail-sets.bin` (`Receipts::absorb_new`). A held writer whose
+row of run 1 was rewritten as run 9 while a peer appended run 2 accepted a
+second run 9 and refused run 1 as already recorded. In the receipt manifest
+the duplicate then made every cold `Receipts::open_read` refuse, so every
+committed result set's public read failed. A cold open of `runs.bin` also
+indexed two sealed rows of one identity silently (`seen` kept the later one
+and `len()` counted both), where the manifest beside it refuses.
+
+**The change.** `cli::result_set::PrefixDigest` keeps a running `blake3` over
+the bytes a handle has validated, `[0, scanned)`. It is built during the open
+scan, extended by the handle's own appends and by absorbed tails, and on the
+growth branch the prefix is re-hashed from the file and compared before any
+new record is decoded. A difference refuses with "rewrote already-indexed
+bytes ... nothing was appended". `brutex_core::blake3::Hasher` is neither
+`Clone` nor `std::io::Write`, so the digest is a running hasher (finalize
+does not consume it) and the file is read in 64 KiB chunks. `Results::open`
+and `Results::absorb_new_records` now refuse two sealed rows of one identity
+and name it and both byte offsets. Damaged (unsealed) rows are still skipped,
+as before.
+
+**Cost.** Opening hashes the file once more, O(bytes), beside the existing
+O(runs) index build. The growth branch re-reads O(indexed bytes); the
+same-length branch and a handle's own appends do not. This is D-0936's
+accepted cost, here also paid by `refresh` on the read side when the file
+grew; it is stated in `docs/06-limits.md`. It compares bytes only and does
+not defend against an actor who restores identical bytes.
+
+**Rejected.** Re-reading identities only: a rewrite of a non-identity field
+would pass. Keeping a copy of every indexed row: memory proportional to the
+ledger for a check a digest makes. Repairing the ledger: §4.
+
+Invariants AFC-01 to AFC-05.
+
+### D-1561 — Absence is `NotFound` and nothing else on the receipt and Step-3 read paths — 2026-10-03
+
+**What happened.** audit-20261003 errpaths-2 (and errpaths-6).
+`committed_receipt_with_limit` (`crates/cli/src/result_set.rs`) and six
+stages of `crates/cli/src/step3_comparison.rs` decided absence with
+`Path::exists`, which maps every stat error (a symlink loop, `EACCES`, `EIO`,
+`ENOTDIR`) to `false`. A ledger that could not be inspected was answered as
+"no committed run", or as an unmeasured stage, while the same file opened
+directly refuses.
+
+**The change.** Both use `std::fs::symlink_metadata`: `NotFound` is absence,
+any other error is a refusal naming the path and the error ("could not be
+inspected"). A dangling symlink is no longer absent; it reaches the opener,
+which refuses it. Step 3's six sites share `absent_or_uninspectable`.
+
+Invariants AFC-06 and AFC-07.
+
+### D-1562 — An exhausted expression search publishes nothing on a rerun — 2026-10-03
+
+**What happened.** audit-20261003 hunt-cli-b-1. `expression_search::execute`
+published a final checkpoint unconditionally. Rerunning a search whose latest
+checkpoint was already exhausted took no step and still appended a journal
+entry, consuming a reservation and a history link `verify_history` walks
+twice per run, so reruns changed bytes on disk (§3 rule 5). The grammar and
+Boolean campaigns already returned early.
+
+**The change.** `execute` returns the resumed state unchanged when it is
+already exhausted and a checkpoint exists. A run that takes any step still
+publishes as before, including the final state after a candidate
+checkpoint, whose encoding differs (no pending candidate).
+
+Invariant AFC-08.
+
+### D-1563 — Checkpoint completion markers appear whole, and no reservation passes the discovery limit — 2026-10-03
+
+**What happened.** KNOWN GAP11-0 and W2-cli13-5, re-reported by
+audit-20261003 hunt-cli-b. `search_checkpoint::Journal::publish_inner` wrote
+the completion marker as `File::create_new("complete")` then `write_all`. A
+kill between the two left a 0-byte marker that discovery counted as
+acknowledged and every later read refused as "marker width mismatch", for
+every consumer. Separately, `publish_inner` never compared its sequence with
+`DIRECTORY_LIMIT`, so the expression and AND searches could write a
+reservation that cold discovery then refuses to reopen.
+
+**The change.** The seal is written and synced under `complete.staged` and
+renamed to `complete`; the directory sync that followed already makes the
+rename durable. A kill before the rename leaves a reservation without
+`complete`, which discovery already counts as interrupted; the stray staging
+file is ignored. `publish_inner` refuses a sequence at or above
+`DIRECTORY_LIMIT` before it creates the reservation, which keeps the
+namespace (reservations plus `owner.lock`) within what discovery admits.
+
+Invariants AFC-09 and AFC-10.
+
+### D-1564 — `sweep-all` allocates attempts and files ledger rows in walk order; `range-all`, `pool` and the Boolean family pools state that theirs follow completion order — 2026-10-03
+
+**What happened.** audit-20261003 hunt-conc-1 (KNOWN GAP13-13) and
+hunt-conc-2. `batch::sweep_under` ran `one` per month inside `par_iter`, and
+`one` allocated the evidence attempt (`sweep_evidence::begin`) and appended the
+`runs.bin` row (`record_swept_run`) from the worker, so the token each month
+received and the order of ledger rows followed thread timing. The comment
+above the loop said "Nothing is shared and nothing is written". The test
+`a_whole_store_sweep_files_its_rows_in_walk_order_not_thread_order` failed on
+1087e54 with the ledger in a different order from the report.
+
+**The change for `sweep-all`.** The walk runs in windows of
+`WINDOW_PER_WORKER` (4) months per worker, each in four phases: `prepare`
+(load and identity, parallel, reads only), `begin` (every attempt, serial, in
+walk order, still before any sweep, so "a durable start precedes engine
+work" holds), `sweep` (parallel; each month writes only its own attempt's
+depth rows) and `file` (event, ledger row and terminal record, serial, in walk
+order). The window bounds the months held in memory between phases; the cost
+is one barrier per window. Report bytes are unchanged.
+
+**Not changed, and stated instead.** `range-all` (`sweep_rungs`), plain
+`pool` pass 1 and the Boolean family pools (`boolean_catalog_prepared`,
+`boolean_oos_command`) run whole commands per worker: `one_rung` calls the
+full audit (`audit_range_for_attempt`), which begins attempts, records the run
+and writes its detail sets, and the Boolean pools call
+`candidate::produce`. Splitting those into ordered phases means re-plumbing
+the audit and candidate transactions, which this change does not attempt.
+Their rendered output is gathered in input order and every ledger lookup is
+by identity, so reports are deterministic; the attempt tokens and the order of
+`runs.bin` rows they write follow completion order. `docs/06-limits.md`
+states it.
+
+Invariant AFC-12.
+
+### D-1565 — Reconciliation refusals name the lowest bad identity, not the first in hash order — 2026-10-03
+
+**What happened.** audit-20261003 hunt-conc-3. `admission_store::reconcile_all`
+and `population::reconcile_receipts`, `_v3` and `_v4` walked a
+`std::collections::HashMap`, whose iteration order is seeded per process. With
+more than one bad population the refusal named a different identity from one
+process to the next over the same bytes.
+
+**The change.** Each walk sorts the entries by identity first
+(`population::in_identity_order`, and the same sort inline in
+`reconcile_all`). The cold open was O(n); the sort makes it O(n log n), once
+per open, never per bar or per candidate.
+
+Invariants AFC-13 and AFC-14.
+
+### D-1566 — Small corrections: a false core-count claim, an unnamed validate value, the AND v2 observer and a stale stride comment — 2026-10-03
+
+audit-20261003 hunt-conc-4, hunt-cli-b-4, hunt-cli-b-2 and hunt-cli-a-6.
+
+- `rungs_within_cell_budget`'s doc said a larger machine earns a larger grid
+  budget. The arithmetic cancels the core count, so every machine gets the
+  same budget; the doc now says so and why that is the reproducible outcome.
+- `BRUTEX_VALIDATE` read `false`, `off` or `no` as ON in silence. It still
+  leaves validation ON for anything but `0`, and now records any value other
+  than `0` or `1` through `knobs::refuse_value`, so the `!! KNOB REFUSED` block
+  names it. Invariant AFC-15.
+- `search_checkpoint::Snapshot` refused `and-checkpoint-v2`, the only AND
+  format written since D-0712, while `Journal::open` admitted it. Both lists
+  now agree. Invariant AFC-11.
+- `trades.rs` said `PAYLOAD_BYTES` is checked to be 96; the assertion makes it
+  128.
+
+### D-1567 — Plain `descend` and `latest_for` keep their costs, now stated — 2026-10-03
+
+**What happened.** audit-20261003 o1surface2-1 and o1surface2-4
+(KNOWN W2-cli8-4). Every step after the first in plain `cli descend` calls
+`one_rung` from scratch, which reloads the signal span, the 1-min execution
+span and both contexts and rebuilds the anchored column. D-0997's
+`ScreenCache` serves `cli elite` only. `latest_for`'s doc said it was `O(1)`
+in the ordinary case; it opens `Results` (an O(runs) index build) on every
+call.
+
+**Why not fixed.** `descend` runs the full audit
+(`audit_range_for_attempt` → `audit_range_kernel`), not the screen kernel
+`ScreenCache` feeds. The audit prepares its column through
+`column_withholding_at_build`, whose preparation digest is checked against
+the identity transaction ("stored preparation inputs changed before audit
+identity publication"), and withholds unsourceable minute days on its own
+path. Holding that column across steps safely needs those checks re-derived
+for a held input set; that is a separate change, not a cache bolted on.
+`latest_for` matches on feed, instrument, rung, span and `min_hits`, not on an
+identity, so `of_identity` cannot serve it, and an in-memory index of those
+fields would still be built O(runs) per process. No format change was made.
+
+**The decision.** Both bounds are stated in `docs/06-limits.md`, and
+`latest_for`'s doc now states the O(runs) open.
+
+### D-1568 — The Step-3 V1-V4 authority modules are built, tested and not wired to any command; they stay — 2026-10-03
+
+**What happened.** audit-20261003 gaps-1. Roughly sixteen `pub mod`s in
+`crates/cli/src/lib.rs` (`admission_store`, `selection`, `selection_v3`,
+`selection_v4`, `selection_v4_authority`, `global_replay`, `global_replay_v2`,
+`population`, `execution_capability`, `execution_disposition_v2`,
+`institutional_evidence`, `institutional_statistics`,
+`stored_data_completeness`, `population_admission_writer`, `admission_join`,
+`step3_comparison`) form the earlier Step-3 authority chain. No `cli` verb
+and no `api` route reaches most of their items, and because they are `pub`,
+the `dead_code` lint cannot say so.
+
+**What was checked.** A grep over `crates/cli/src` and `crates/api/src`
+(excluding each module's own file and `*_tests.rs`) finds no reference to
+`step3_comparison::` anywhere. The others are referenced, but partly from
+live successors: `population` from `selection_v6_source`, `execution_v3`,
+`execution_v4` and `population_v6`; `institutional_evidence` from
+`boolean_admission_v1`, `selection_v5` and `selection_v6_source`;
+`stored_data_completeness` from `candidate_universe` and
+`stored_post_training_oos`. So the chain is not one dead block: some items are
+live through V5/V6 and the rest are reachable only from tests.
+
+**The decision.** Nothing is deleted. No entry in this ledger retires these
+modules, `docs/07-plan.md` §11 records them as superseded checkpoints, and
+their on-disk formats are history §3 rule 8 protects; a reader for them is how
+an existing store is still read. They are recorded here as unwired from any
+command: `step3_comparison` entirely, the rest in the items no live successor
+calls. Retiring any of them needs its own entry naming what reads its files
+afterwards.
