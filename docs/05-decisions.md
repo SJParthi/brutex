@@ -53590,3 +53590,36 @@ lint name in any `cli` source.
 **Rejected.** Rewording the reasons and keeping the suppressions: a
 suppression with no reason left to hold is noise a later reader must
 re-derive.
+
+### D-1707 — Pool pass 2 withholds an exact-minute-unsourceable day as pass 1 does — 2026-10-03
+
+**Finding.** The difference D-1702 left stated (GAP13-15 follow-up): pass 1
+builds its column through `column_withholding_at_build`, which withholds a day
+whose closing minute the one-minute store cannot source and rebuilds; pool
+pass 2's `price_all` built the column once and refused the whole instrument on
+the same day. An instrument pass 1 screened and recorded therefore priced as a
+refusal in pass 2, and the pool's two passes disagreed on which days exist.
+
+**The decision.** `price_all` calls pass 1's own build, read-only.
+`StoredPreparationBuild::commit` becomes `Option<&str>`: `Some` is the
+existing recorded build (both existing callers pass it unchanged), `None` runs
+the same withholding loop, digest and column and writes no preparation
+attempt, because pass 2 prepares nothing pass 1 did not already prepare and
+record. One withholding rule, one place.
+
+**Proof.** `cli::pool::tests::pass_two_withholds_an_unsourceable_close_day_as_pass_one_does`
+builds a generated store whose one-minute series stops five minutes early on
+2025-05-06 (premises: no interior gap; the whole-span column build refuses on
+that day's closing minute) and holds `price_all`'s cells, both sides, to the
+audit path's cells over the span with that day withheld. Failing first, before
+the change: `pass 2 withholds the day and prices the rest: "the exact stored
+1min ORB/GapFib overlay was refused: MissingClosingMinute { source: 224,
+expected_ts_micros: 1746525540000000 }..."`.
+
+**Cost.** The column build is O(B_sig + B_min) per attempt and runs W + 1
+times for W withheld days (at most 64), as in pass 1. `docs/06-limits.md`
+states it in the pool's cost.
+
+**Rejected.** A second withholding loop in `pool.rs`: two copies of one rule
+drift. Writing a preparation attempt from pass 2: it would record a
+preparation under no run this pass commits.

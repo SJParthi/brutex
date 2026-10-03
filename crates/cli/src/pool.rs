@@ -892,12 +892,12 @@ fn union_of(
 /// from the projected bars, and the rules are `Rules::derived` over the series
 /// the floors are measured on (`floors_measured_on`): the execution one.
 ///
-/// One difference from pass 1 remains and is stated: pass 1 withholds a day
-/// whose exact closing minute cannot be sourced and rebuilds its column
-/// (`column_withholding_at_build`, which also writes a preparation attempt);
-/// this read-only pass does not, so such an instrument is refused here BY
-/// NAME, with the column build's own reason, and never priced on a different
-/// span. `the_pool_prices_a_span_exactly_where_the_audit_path_does` pins the
+/// The column is pass 1's own build, `column_withholding_at_build`, run
+/// read-only: a day whose exact closing minute cannot be sourced is withheld
+/// and the column rebuilt, as pass 1 does, and no preparation attempt is
+/// written. Until D-1707 this pass refused such an instrument instead.
+/// `the_pool_prices_a_span_exactly_where_the_audit_path_does` and
+/// `pass_two_withholds_an_unsourceable_close_day_as_pass_one_does` pin the
 /// behaviour.
 ///
 /// # Cost
@@ -944,16 +944,18 @@ fn price_all(
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
-    let exact_minute =
-        stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
-    let availability = stored::vwap_availability(&span.key);
-    let column = crate::stored_anchored_column(
-        &span.bars,
-        &daily,
-        &exact_minute,
+    // PASS 1'S OWN BUILD, READ-ONLY: a day whose exact closing minute cannot
+    // be sourced is withheld and the column rebuilt from what survives, exactly
+    // as `one_rung` and `audit_range_kernel` do; `commit: None` records no
+    // preparation attempt, because this pass prepares nothing new. D-1707.
+    let (column, _digest) = crate::column_withholding_at_build(
+        root,
+        vendor,
+        underlying,
+        (from, to),
+        &mut span.bars,
         signal_length,
-        availability,
+        crate::StoredPreparationBuild { rung, commit: None },
     )?;
     let execution = execution_bars.as_ref().map(|exec| crate::Execution {
         bars: &exec.bars,
@@ -2713,16 +2715,14 @@ mod tests {
     /// projected column.
     #[test]
     fn the_pool_prepares_projects_and_prices_in_order_inside_price_all() {
-        const SEQUENCE: [&str; 14] = [
+        const SEQUENCE: [&str; 12] = [
             "stored::load_span(",
             "stored::rung_length_micros(",
             "validate_one_minute_execution(",
             "minute_gaps::days_with_interior_gaps(",
             "minute_gaps::withhold(",
-            "stored::load_daily_context(",
-            "stored::load_exact_minute_context(",
-            "stored::vwap_availability(",
-            "stored_anchored_column(",
+            "crate::column_withholding_at_build(",
+            "crate::StoredPreparationBuild { rung, commit: None }",
             "horizon_for(",
             "floors_measured_on(",
             "project_onto_execution(",
@@ -3123,6 +3123,7 @@ mod tests {
         rung: &'static str,
         words: [u64; 6],
         side: runner::excursion::Side,
+        withheld: &[i64],
     ) -> Option<grid::Cell> {
         let span = |r: &str| {
             crate::stored::load_span(
@@ -3135,7 +3136,9 @@ mod tests {
             )
             .expect("generated span")
         };
-        let signal = span(rung);
+        let mut signal = span(rung);
+        // The days pass 1 withholds, named by the caller; none on a whole store.
+        signal.bars = crate::minute_gaps::withhold(&signal.bars, withheld).0;
         let native = rung == crate::EXECUTION_RUNG;
         let exec = (!native).then(|| span(crate::EXECUTION_RUNG));
         let length = crate::stored::rung_length_micros(rung).expect("rung length");
@@ -3221,13 +3224,90 @@ mod tests {
                         Direction::Long => runner::excursion::Side::Long,
                         Direction::Short => runner::excursion::Side::Short,
                     };
-                    let reference = audit_path_cell(root, rung, candidate.words, side);
+                    let reference = audit_path_cell(root, rung, candidate.words, side, &[]);
                     assert!(
                         reference.is_some_and(|c| c.trades > 0),
                         "premise: the audit path fires at {rung}"
                     );
                     assert_eq!(*cell, reference, "{rung} {side:?}");
                 }
+            }
+        });
+    }
+
+    /// **Pass 2 withholds the day pass 1 withholds when that day's closing
+    /// minute cannot be sourced, and prices the rest exactly where the audit
+    /// path does.** D-1707, closing the difference D-1702 stated.
+    ///
+    /// The store's one-minute series stops five minutes early on one day: no
+    /// interior minute is missing, so the interior-gap withholding names
+    /// nothing, and the plain column build refuses on that day's closing
+    /// minute (both are premises). Pass 1 withholds the day and rebuilds;
+    /// before D-1707 pass 2 refused the whole instrument instead.
+    #[test]
+    fn pass_two_withholds_an_unsourceable_close_day_as_pass_one_does() {
+        let _knobs = crate::knobs::serially();
+        crate::knobs::clear_all();
+        crate::audited_stored::with_unsourceable_close(5, |root, day| {
+            let vendor = brutex_core::vendor::Vendor::Zerodha;
+            let range = ((2025, 5), (2025, 5));
+            let load = |rung: &str| {
+                crate::stored::load_span(root, vendor, "NIFTY", rung, range.0, range.1)
+                    .expect("generated span")
+            };
+            let (signal, minutes) = (load("5min"), load(crate::EXECUTION_RUNG));
+            assert!(
+                crate::minute_gaps::days_with_interior_gaps(&minutes.bars).is_empty(),
+                "premise: the cut is at the session's end, not interior"
+            );
+            let refused =
+                crate::stored::load_daily_context(root, vendor, "NIFTY", range, &signal.bars)
+                    .and_then(|daily| {
+                        let exact = crate::stored::load_exact_minute_context(
+                            root,
+                            vendor,
+                            "NIFTY",
+                            range,
+                            &signal.bars,
+                        )?;
+                        crate::stored_anchored_column(
+                            &signal.bars,
+                            &daily,
+                            &exact,
+                            crate::stored::rung_length_micros("5min")?,
+                            crate::stored::vwap_availability(&signal.key),
+                        )
+                    })
+                    .expect_err("premise: the whole span's column build refuses");
+            assert_eq!(
+                crate::unsourceable_minute(&refused).map(indicators::ist_day),
+                Some(day),
+                "premise: it refuses on the short day's closing minute: {refused}"
+            );
+            let union = [
+                Candidate {
+                    words: [0; 6],
+                    direction: Direction::Long,
+                },
+                Candidate {
+                    words: [0; 6],
+                    direction: Direction::Short,
+                },
+            ];
+            let priced = super::price_all(root, vendor, "NIFTY", "5min", range.0, range.1, &union)
+                .expect("pass 2 withholds the day and prices the rest");
+            assert_eq!(priced.len(), union.len());
+            for (candidate, cell) in union.iter().zip(&priced) {
+                let side = match candidate.direction {
+                    Direction::Long => runner::excursion::Side::Long,
+                    Direction::Short => runner::excursion::Side::Short,
+                };
+                let reference = audit_path_cell(root, "5min", candidate.words, side, &[day]);
+                assert!(
+                    reference.is_some_and(|c| c.trades > 0),
+                    "premise: the audit path fires on the withheld span"
+                );
+                assert_eq!(*cell, reference, "{side:?}");
             }
         });
     }

@@ -978,14 +978,21 @@ fn column_withholding_unsourceable_days(
         span,
         bars,
         signal_length,
-        StoredPreparationBuild { rung, commit },
+        StoredPreparationBuild {
+            rung,
+            commit: Some(commit),
+        },
     )
 }
 
 #[derive(Clone, Copy)]
 struct StoredPreparationBuild<'a> {
     rung: &'a str,
-    commit: &'a str,
+    /// The admitted build a preparation attempt is recorded under. `None` is
+    /// a READ-ONLY build: the same withholding loop, the same column, and no
+    /// attempt written -- the `pool`'s pass 2, which prices instruments pass 1
+    /// already prepared and recorded (D-1707).
+    commit: Option<&'a str>,
 }
 
 fn column_withholding_at_build(
@@ -1009,14 +1016,19 @@ fn column_withholding_at_build(
         let daily = stored::load_daily_context(root, vendor, underlying, (from, to), bars)?;
         let exact = stored::load_exact_minute_context(root, vendor, underlying, (from, to), bars)?;
         let digest = stored_anchored_digest(bars, &exact, &daily)?;
-        let attempt =
-            preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)?;
+        let attempt = commit
+            .map(|commit| {
+                preparation_attempt_with_commit(root, vendor, underlying, rung, digest, commit)
+            })
+            .transpose()?;
         let folded = stored_anchored_column(bars, &daily, &exact, signal_length, availability);
-        attempt.finish(if folded.is_ok() {
-            sweep_evidence::Completion::Completed
-        } else {
-            sweep_evidence::Completion::Refused
-        })?;
+        if let Some(attempt) = attempt {
+            attempt.finish(if folded.is_ok() {
+                sweep_evidence::Completion::Completed
+            } else {
+                sweep_evidence::Completion::Refused
+            })?;
+        }
         match folded {
             Ok(column) => {
                 if !dropped.is_empty() {
@@ -6801,7 +6813,10 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
         (from, to),
         &mut span.bars,
         signal_length,
-        StoredPreparationBuild { rung, commit },
+        StoredPreparationBuild {
+            rung,
+            commit: Some(commit),
+        },
     )?;
     // REBUILT FROM THE SURVIVING BARS. The helper above may have withheld days,
     // and both of these are keyed to the bars -- reading them from before it ran

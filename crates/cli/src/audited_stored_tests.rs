@@ -44,6 +44,42 @@ pub(crate) fn with_warmed_store_of<R>(
     run(&fixture.root)
 }
 
+/// A warmed NIFTY store whose one-minute series stops `cut` minutes early on
+/// 2025-05-06, every other file as [`with_warmed_store`] writes it. The cut is
+/// at the session's end, so no interior minute is missing and
+/// `minute_gaps::days_with_interior_gaps` names no day; the 5min bars still
+/// close on minutes the one-minute series no longer holds, which is the
+/// exact-minute-unsourceable day pass 1 withholds. `run` is given the store and
+/// that day's IST day number. D-1707.
+pub(crate) fn with_unsourceable_close<R>(
+    cut: usize,
+    run: impl FnOnce(&std::path::Path, i64) -> R,
+) -> R {
+    const SHORT_DAY: u8 = 6;
+    let fixture = Fixture::for_symbol("NIFTY");
+    let mut short_day = None;
+    for day in 5..=13 {
+        let rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        let minutes = if day == SHORT_DAY {
+            short_day = rows.first().map(|bar| indicators::ist_day(bar.ts_micros));
+            &rows[..rows.len().saturating_sub(cut)]
+        } else {
+            &rows[..]
+        };
+        fixture.write(5, Timeframe::MINUTE_1, minutes);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    run(&fixture.root, short_day.expect("2025-05-06 is a session"))
+}
+
 struct Fixture {
     root: PathBuf,
     /// The swept instrument every file and request names. NIFTY unless a

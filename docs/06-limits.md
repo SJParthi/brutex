@@ -8494,7 +8494,10 @@ frontier block per screened instrument, O(its rows), and makes one
 expected-O(1) `HashSet` insert per frontier row, not worst-case O(1)
 (D-1703; it was O(I × (L + R)) until then). Pass 2 prices on the one-minute
 execution series (D-1702): per instrument the loads, column, projection and
-one `SliceFacts`, O(B_sig + B_exec), and per union candidate one
+one `SliceFacts`, O(B_sig + B_exec) -- times W + 1 for the column, where W is
+the number of exact-minute-unsourceable days withheld, because pass 1's own
+build reloads both contexts and rebuilds after each one (D-1707, at most 64) --
+and per union candidate one
 `grid::evaluate_over`, which walks every row of the projected column before it
 prices, Θ(B_exec + cells × T). So pass 2 is
 Θ(I × (B_sig + B_exec) + I × U × (B_exec + cells × T)). U is the union of
