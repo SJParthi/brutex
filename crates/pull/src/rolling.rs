@@ -730,9 +730,26 @@ fn paisa(
         // as text has an exact decimal the vendor wrote, and routing it through
         // an f64 to shift two places introduces a representation error into a
         // value that had none. The reader below walks the text digit by digit.
-        PriceScale::Rupees => brutex_core::price::Paisa::from_rupee_text_half_up(&cell.to_string())
-            .map(brutex_core::price::Paisa::raw)
-            .map_err(|_| RollingError::Unrepresentable { field }),
+        PriceScale::Rupees => {
+            let text = cell.to_string();
+            let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
+                .map(brutex_core::price::Paisa::raw)
+                .map_err(|_| RollingError::Unrepresentable { field })?;
+            // THE TWO GUARDS `http::one_price` HAS, AND THIS DECODER DID NOT
+            // (hunt-pull-2, D-1530). A value with a non-zero digit that snaps
+            // to zero is not zero: zero is a real price, so a fabricated one
+            // cannot be told apart downstream. And a price below zero is not a
+            // price; `-0.004` snapped to `0` and so walked past every
+            // below-zero check after this one. Both are refused by name. The
+            // test is on the TEXT, so `0`, `0.00` and `-0.0` still read as the
+            // real zero they are.
+            let fabricated_zero =
+                snapped == 0 && text.bytes().any(|b| b.is_ascii_digit() && b != b'0');
+            if fabricated_zero || snapped < 0 {
+                return Err(RollingError::Unrepresentable { field });
+            }
+            Ok(snapped)
+        }
     }
 }
 
@@ -866,6 +883,36 @@ mod tests {
         let call =
             read(body, &spec(), "CALL", PriceScale::Rupees).expect("the answered side reads");
         assert_eq!(call.len(), 1);
+    }
+
+    /// audit-20261003 hunt-pull-2 (D-1530). A rupee price that is not zero
+    /// and is smaller than half a paisa, or that is below zero, is refused
+    /// rather than snapped to a clean zero. `http::one_price` refuses exactly
+    /// this; the rolling decoder stored `0.004` and `-0.004` as a price of 0,
+    /// and the negative one thereby slipped past every below-zero check.
+    #[test]
+    fn a_sub_half_paisa_or_negative_rupee_price_is_refused_not_snapped_to_zero() {
+        for cell in ["0.004", "-0.004", "-0.01", "-354"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            assert_eq!(
+                read(&body, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+                Err(RollingError::Unrepresentable { field: "open" }),
+                "{cell} is not a price this decoder may store"
+            );
+        }
+        // A real zero, however it is written, is still a price.
+        for cell in ["0", "0.0", "0.00", "-0.0"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
+                .unwrap_or_else(|why| panic!("{cell} is a real zero: {why}"));
+            assert_eq!(rows.len(), 1, "{cell}");
+        }
     }
 
     /// An absent side keeps its refusal.
