@@ -53528,3 +53528,38 @@ overlay's question. That is stated in `docs/06-limits.md`.
 `pull::calendar::kind_of`'s window: the calendar is venue-blind, so every
 NSE cash equity day after 2026-08-03 (continuous trading ends 15:14 for a
 CAS-eligible share) would have been withheld on its correct close.
+
+### D-1663 — Refuse a CAS-eligible cash prior session by name instead of calling it truncated — 2026-10-03
+
+**Finding.** GAP12-6 (low, bug). `exact_minute_context_from_span` judges the
+prior session that seeds `GapFib` against `prior_accepted_session`, which reads
+the venue-blind `pull::calendar::kind_of`. From 2026-08-03 an NSE cash share's
+continuous session ends at 15:15 when the share is eligible for the closing
+auction (every F&O share is, per NSE/CMTR/74466 §A) and at 15:30 when it is not
+(`pull::vendor::NSE_CASH_SESSIONS`, `cash_auction_eligibility_required`). A
+correct 15:14 close on an equity was refused as "Early or truncated bars
+cannot seed GapFib".
+
+**Decision.** For an equity key whose prior session day requires dated CAS
+eligibility, the stored read refuses before the geometry check with "cash
+session close UNVERIFIED: dated CAS eligibility required", naming the day, and
+never says truncated. The dated per-share schedule the fold uses
+(`pull::fold::minute_session` with a `cash_auction::Schedule`) is crate-private
+to `pull` and is not held on this read path, so no close is derived; inventing
+one from today's F&O list would be the undated eligibility `CLAUDE.md` §3
+rule 1 forbids. A 15:29 close on such a day is refused the same way, because
+it too cannot be confirmed without the schedule. Index keys and cash days
+before 2026-08-03 are unchanged. Test:
+`a_cas_equity_prior_session_ending_1514_seeds_gapfib` takes the plan's
+"with no schedule, an Err naming CAS" branch; its name is the plan's, and on
+an equity it asserts the refusal, not a seed. No failing-first run of this
+test against the old code was taken.
+
+**Not closed here.** The same venue-blindness reaches the exact-minute
+overlay's session close (`stored::nse_session_close_minute`), so a coarse
+equity rung's last bucket on a CAS day demands 15:29 and is withheld as a
+minute gap by D-1662's census rather than priced. Passing a dated schedule
+into the cli's stored path is the fix for both, and is left open.
+
+**Rejected.** Treating every swept equity as CAS-eligible: membership is
+dated and the list in hand is not.

@@ -3168,6 +3168,27 @@ pub fn load_daily_context_bounded(
     daily_context_from_span(daily, signal)
 }
 
+/// A CAS-ELIGIBLE CASH DAY HAS NO CLOSE THIS CALENDAR CAN STATE (GAP12-6,
+/// D-1663). `kind_of` is the index's venue-blind calendar. From 2026-08-03 an
+/// NSE cash share's continuous session ends at 15:15 when the share is eligible
+/// for the closing auction and at 15:30 when it is not, and which applies is a
+/// DATED per-share fact (`pull::vendor::cash_auction_eligibility_required`)
+/// this read path does not hold. Judging such a day against 15:29 called a
+/// correct 15:14 close "Early or truncated"; it is refused as what it is.
+fn refuse_unverified_cash_close(kind: Kind, prior_session_day: i64) -> Result<(), Refusal> {
+    if kind == Kind::Equity
+        && u32::try_from(prior_session_day)
+            .ok()
+            .and_then(|days| pull::session::Day::from_days(days).ok())
+            .is_some_and(pull::vendor::cash_auction_eligibility_required)
+    {
+        return Err(format!(
+            "cash session close UNVERIFIED: dated CAS eligibility required. The prior session for GapFib is IST day {prior_session_day}, an NSE cash equity day on which the continuous session ends at 15:15 or 15:30 depending on the share's dated closing-auction eligibility, which this stored read does not hold. Its terminal minutes were not judged against the index calendar and nothing was swept"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a complete stored one-minute span as `GapFib` context.
 pub(crate) fn exact_minute_context_from_span(
     minute: Span,
@@ -3228,6 +3249,7 @@ pub(crate) fn exact_minute_context_from_span(
             "the latest accepted exact 1min session before signal day {first_signal_day} is IST day {prior_session_day}, but it holds only {prior_session_bars} bar(s); GapFib requires its final three and no coarse or daily substitute was used"
         ));
     }
+    refuse_unverified_cash_close(minute.key.kind, prior_session_day)?;
     let final_window = prior_session
         .windows
         .iter()
@@ -4849,6 +4871,52 @@ mod tests {
             .expect_err("three opening bars are not the prior session's terminal three");
         assert!(why.contains("terminal-minute geometry"), "{why}");
         assert!(why.contains("Early or truncated bars"), "{why}");
+    }
+
+    /// GAP12-6, D-1663: an NSE cash equity whose prior session is a
+    /// CAS-eligible day (2026-08-03 on) ends its continuous session at 15:14.
+    /// That close was refused as "Early or truncated" against the venue-blind
+    /// 15:29; with no dated eligibility in hand it is now refused naming CAS, and
+    /// so is a 15:29 close on the same day, which this read cannot confirm
+    /// either. The index key and a pre-CAS cash day are unchanged.
+    #[test]
+    fn a_cas_equity_prior_session_ending_1514_seeds_gapfib() {
+        let cash = |bars| Span {
+            key: InstrumentKey::cash(Exchange::Nse, "RELIANCE").expect("a cash key"),
+            ..minute_span(bars)
+        };
+        let signal = [minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000)];
+        for last in [914_i64, 929] {
+            let span = cash(vec![
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last - 2, 2_500_000),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last - 1, 2_500_100),
+                minute_on_ist_day(OPEN_MONDAY_2026_08_03, last, 2_500_200),
+                minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+            ]);
+            let why = exact_minute_context_from_span(span, &signal)
+                .expect_err("no dated CAS eligibility is held here");
+            assert!(why.contains("dated CAS eligibility required"), "{why}");
+            assert!(!why.contains("truncated"), "{why}");
+        }
+        // The index on the same day is judged as before: 15:29 seeds.
+        let index = minute_span(vec![
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 927, 2_500_000),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 928, 2_500_100),
+            minute_on_ist_day(OPEN_MONDAY_2026_08_03, 929, 2_500_200),
+            minute_on_ist_day(OPEN_TUESDAY_2026_08_04, 555, 2_600_000),
+        ]);
+        assert!(exact_minute_context_from_span(index, &signal).is_ok());
+        // A cash day before 2026-08-03 is judged against the charter close.
+        let before = accepted_open_before(OPEN_MONDAY_2026_08_03);
+        let after = accepted_open_after(before);
+        let early_signal = [minute_on_ist_day(after, 555, 2_600_000)];
+        let pre_cas = cash(vec![
+            minute_on_ist_day(before, 927, 2_500_000),
+            minute_on_ist_day(before, 928, 2_500_100),
+            minute_on_ist_day(before, 929, 2_500_200),
+            minute_on_ist_day(after, 555, 2_600_000),
+        ]);
+        assert!(exact_minute_context_from_span(pre_cas, &early_signal).is_ok());
     }
 
     #[test]
