@@ -22,6 +22,8 @@
     reason = "the exception every test module in this workspace takes"
 )]
 
+mod support;
+
 use brutex_core::vendor::Vendor;
 use std::path::{Path, PathBuf};
 use store::catalog::{self, Census};
@@ -480,6 +482,14 @@ fn a_bars_link_to_a_real_directory_is_walked() {
 /// census while a month sat on disk (found by a review of D-0765).
 #[test]
 fn a_store_root_that_cannot_be_searched_is_refused() {
+    support::where_permission_binds(
+        "a_store_root_that_cannot_be_searched_is_refused",
+        a_store_root_that_cannot_be_searched_is_refused_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995, D-1526).
+fn a_store_root_that_cannot_be_searched_is_refused_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("root000");
     put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
@@ -541,6 +551,14 @@ fn the_walk_descends_rather_than_guessing_the_depth() {
 /// (its contents are unknown), but the census now names it.
 #[test]
 fn a_directory_the_walk_cannot_list_is_counted_not_dropped() {
+    support::where_permission_binds(
+        "a_directory_the_walk_cannot_list_is_counted_not_dropped",
+        a_directory_the_walk_cannot_list_is_counted_not_dropped_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995, D-1526).
+fn a_directory_the_walk_cannot_list_is_counted_not_dropped_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("unreadable");
     put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");

@@ -53403,3 +53403,177 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1520 — The bar writer refuses to re-initialise a month whose checksum sidecar proves records were committed — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-1. `BarFile::open_or_create`
+treated any bar file of at most 32,768 bytes that was all zeros as an
+interrupted `initialise` and rebuilt an empty month. A month that HAD committed
+bars and was later truncated to zero bytes, or zeroed back to its header
+region, therefore reopened empty; the next append started again at index 0 and
+the lost bars were never named. The `.crc` sidecar beside it (4 bytes, sealed
+over the old records) was not consulted, and the read door refused the same
+file as `NoValidHeader`, so the two doors disagreed.
+
+**The decision.** Before the repair, the writer measures the checksum sidecar.
+It gains an entry only from an append, after the records and before the header
+slot, so a sidecar with any bytes proves records were committed. Such a month
+is refused as the new `StoreError::CommittedRecordsLost`, naming the bar file,
+the sidecar and its length, and both files are left as found. An absent or
+empty sidecar still permits the repair.
+
+**Rejected.** A Warn line and repair anyway: the month would still reopen empty
+and accept a new index 0. Deleting the stale sidecar: §3 rule 8.
+
+Proven by `store::write::a_truncated_month_whose_sidecar_proves_records_is_refused_not_reinitialised` (AFA-01).
+
+### D-1521 — A torn genesis slot with nothing committed is repaired like an all-zero region — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-store-2. `initialise` writes the
+zero fill and then the 64-byte genesis slot. A crash that let part of the slot
+land left a file of at most 32,768 bytes, not all zeros, with no slot that
+decodes. It can hold no record, yet it was refused on every open for ever, and
+misdiagnosed as `UnknownVersion(0)`.
+
+**The decision.** The repair condition is now: length at most the region,
+every byte past the first 64-byte slot zero, and the first slot does not decode
+(magic, known version, stride and its own CRC). All zeros is the case with
+nothing in the slot. D-1520's sidecar check runs first, so a torn slot beside a
+sidecar with entries is still refused. A slot that DECODES was committed and is
+never re-initialised, and any byte past the first slot is not a shape a torn
+genesis can leave, so it is still refused.
+
+Proven by `store::write::a_torn_genesis_slot_with_nothing_committed_is_repaired`
+and `store::write::a_region_with_bytes_a_torn_genesis_cannot_leave_is_still_refused` (AFA-02).
+
+### D-1522 — The bar writer never creates a missing store root, and flushes every directory it creates — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-store-3 and hunt-store-4.
+`open_or_create` ran `create_dir_all` on the month's directory, which created
+every missing ancestor including the store root: a store on an unmounted volume
+got a fresh root on the parent filesystem and bars landed there, splitting
+append-only history across two devices (the class D-0954 fixed for api's
+journal). And of up to six directories it could create, only the month's own
+was fsynced, so their entries in their parents were not durable.
+
+**The decision.** The root is measured first: missing is `StoreError::Missing`
+and not a directory is `StoreError::NotADirectory`, both naming the root, and
+nothing is created. The directories below the root that do not exist are found
+before `create_dir_all` (with `try_exists`, so an unexaminable component is not
+counted as created and `create_dir_all` refuses it by name), and each created
+directory's parent is fsynced after it. A refused flush is returned naming that
+parent. Test fixtures that relied on the writer creating their scratch root now
+create it, which is what a production caller must do.
+
+**Not measured.** That the flushes reach stable storage is not observable in a
+test; that they are ISSUED is, through the host's refusal of the open.
+
+Proven by `store::write::a_missing_store_root_is_refused_not_recreated` and
+`store::durability::every_directory_the_writer_creates_has_its_entry_flushed` (AFA-03).
+
+### D-1523 — A `.bin` path resolves against the bar geometry only — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-store-1. `table_of(FileKind::Bars)`
+returned `Layout::KNOWN`, which also holds the overlay (version 9, 24-byte
+records) and the greeks sidecar (version 8, 80-byte records). An overlay or
+greeks file copied to a `.bin` name opened through the ordinary bar door and
+`read_record` served 56-byte bars read at the wrong offsets, low above high and
+an open interest equal to a timestamp, every block CRC passing. The append path
+and the audited door already refused it; the ordinary read door did not.
+
+**The decision.** A bar path resolves against a one-row `BAR_TABLE` holding
+`Layout::V2`, so such a file is refused as `FormatError::UnknownVersion(9)` or
+`(8)` by both doors. `Layout::KNOWN` keeps both sidecars, because
+`Header::decode_parts` must decode them.
+
+Proven by `store::write::the_bar_door_refuses_an_overlay_or_greeks_file_at_a_bar_name` (AFA-04).
+
+### D-1524 — The writer's duplicate check compares bytes, and a greeks row must be inside the pricer's domain — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-2. `already_stored` and
+`suffix_that_follows` compared rows with `PartialEq`. A `Greek` is `f64`
+fields, so a re-run whose delta was `-0.0` where the held row's was `0.0` was
+answered `AlreadyPresent` although the bytes differ, against the module's own
+"byte for byte" promise. And the greeks write gate checked only finiteness, so a
+spot of -5 paisa and a volatility of 1e300 or 0 committed.
+
+**The decision.** `Row` gains a required `same_bytes`, implemented for all
+three record kinds as image equality, and both duplicate checks use it.
+`Greek::is_sane` also requires `spot > 0` and `volatility > 0`, the two inputs
+`greeks` itself refuses as `NotPositive`. No range is invented for the
+derivatives: none is sourced, and a finite derivative of any size is what the
+pricer can return.
+
+Proven by `store::write::a_greek_rerun_with_a_negative_zero_is_not_already_present`
+and `store::geometry::a_greek_outside_the_pricers_domain_is_refused_at_the_write_boundary` (AFA-05).
+
+### D-1525 — An overlap that disagrees with the month is refused with the real diagnosis — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-7. A re-pull that restated a
+held bar was refused, correctly, but labelled `TimestampsOutOfOrder`, which is
+what `Header::advance` says about every batch that does not follow the tail. A
+batch reaching that refusal is already ordered, so the label sent an operator to
+look at ordering instead of at a restatement.
+
+**The decision.** The refusal is now `StoreError::OverlapDisagrees`, naming the
+batch index, a stamp and a `Conflict`: `Restated` (the month holds that stamp
+with different bytes), `NotHeld` (a stamp inside the held range the month never
+held) or `Skipped` (the batch runs past a held stamp, which is named). It is
+found by walking the overlap against the held records from the bisection point,
+one read per overlapping record, only on the refusal path. If the walk finds no
+disagreement, which the two checks before it make unreachable, `advance`'s own
+refusal is kept rather than inventing one. D-0692's tests now assert
+`Restated`.
+
+Proven by `store::write::an_overlap_that_disagrees_is_refused_with_the_real_diagnosis` (AFA-06).
+
+### D-1526 — The four root-only catalog tests run where the permission bits bind — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-store-7. D-0995 moved the chmod
+tests to `support::where_permission_binds` but missed four catalog tests, two
+in `crates/store/src/catalog_tests.rs` and two in `crates/store/tests/catalog.rs`.
+They asserted "a process that ignores permissions cannot run this test" and
+failed on every root container.
+
+**The decision.** The two integration tests use `tests/support`. The two unit
+tests use a private copy of the same helper inside `catalog_tests.rs`, a
+`#![cfg(test)]` file, because a unit test cannot reach `tests/support` without
+a `#[path]` mount from outside `src/`, which several gates then have to follow.
+Proven by the four tests themselves, now green as root (AFA-07).
+
+### D-1527 — Store documentation corrected against the code — 2026-10-03
+
+audit-20261003 o1store2-1, o1store2-2, o1store2-3 and hunt-store-6.
+
+* `docs/06-limits.md` D-1434 section: the bisection ceiling "31 × 375 =
+  11,625 records, fourteen reads" counted session minutes only. The store admits
+  any on-grid stamp inside the month (D-0915), so a one-minute month can hold
+  44,640 records (sixteen reads) and a one-second month 2,678,400 (twenty-two).
+  The section now says both, and `/bars.json`'s "up to 28 reads" says which
+  month it is for.
+* The same register said the cold verify uses "a heap buffer of the same
+  size" and "two heap buffers". Since D-1433 and D-0914 it uses the handle's
+  fixed buffer and a stack array; both passages are corrected.
+* D-1433 says the fixed buffer is `[u8; MAX_BLOCK_LEN]` "(4,096". The constant
+  is 4,088 (`crates/store/src/file.rs`, pinned by a const assertion). D-1433 is
+  not edited, because the ledger is append-only; this entry is the correction.
+* `docs/02-store-format.md` §7 and invariant S-07 said a ragged tail "is
+  truncated to the last whole record". D-0189 decided against the truncation;
+  both now state what the code does, and S-07 names the test that proves the
+  log line.
+
+Proven by `store::bisect_cost::the_bisection_ceiling_counts_every_minute_the_store_admits`
+and `store::bisect_cost::no_register_passage_still_puts_a_heap_buffer_on_the_cold_verify` (AFA-08).
+
+### D-1528 — A month whose header checksum flag was deliberately cleared is not detected, and is left as a stated limit — 2026-10-03
+
+audit-20261003 attackdata-8. Block verification is decided by the header's
+`FLAG_CHECKSUMS`. Someone who clears the flag in both slots and recomputes the
+slot CRCs turns verification off for a sealed month, and the `.crc` beside it is
+ignored. Random rot cannot do this: the slot CRC covers the flag. **Not
+changed.** Refusing an unflagged header that has a non-empty sidecar would
+change what the read door accepts for files written before `initialise` set the
+flag, and whether any such file carries a sidecar is UNVERIFIED; recording
+"sealed" outside the header would be an on-disk format change, which §3 rule 8
+forbids doing in place. The CRC is integrity, not authentication; that is
+recorded in `docs/06-limits.md`.

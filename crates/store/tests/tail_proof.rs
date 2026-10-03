@@ -180,6 +180,8 @@ fn every_touch_of_the_tail_after_another_block_runs_its_proof_again() {
     let root = scratch("root");
     let _ignored = fs::remove_dir_all(&dir);
     let _ignored = fs::remove_dir_all(&root);
+    // The store root exists: the writer no longer creates one (D-1522).
+    fs::create_dir_all(&root).expect("a scratch store root");
     let sink = telemetry::install(&telemetry::Config::new(&dir))
         .expect("nothing else in this test binary installs a sink");
     let keep = sink.keep_files();

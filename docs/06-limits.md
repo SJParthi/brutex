@@ -9116,7 +9116,9 @@ it was written.
   per handle (D-1448 corrects "first").** It is how the reader learns whether
   the file holds whole records past the commit. A handle remembers ONE verified
   block, so each touch of the tail after a touch of another block verifies it
-  again: one `fstat`, two heap buffers, a `pread` of the covered bytes (at most
+  again: one `fstat`, no heap allocation (the covered bytes go into the
+  handle's fixed 4,088-byte buffer and any records past the commit into a stack
+  array, D-1433 and D-0914; corrected by D-1527), a `pread` of the covered bytes (at most
   4,088), a 4-byte `pread` of the sidecar entry, a `pread` of up to 72 records
   past the commit, the CRC and, for an
   interrupted append, one `store.block` WARN. `store::tail_proof::every_touch_of_the_tail_after_another_block_runs_its_proof_again`
@@ -12034,8 +12036,14 @@ entry for either until now.
 * **`first_at_or_after`** (`crates/store/src/file.rs`, behind
   `BarFile::first_at_or_after` and `RevisionReader::first_at_or_after`) is a
   bisection over the committed records. It makes at most
-  `ceil(log2(n_valid + 1))` record reads. A one-minute month holds at most
-  31 × 375 = 11,625 records, so the bound is fourteen reads.
+  `ceil(log2(n_valid + 1))` record reads. A one-minute month of session
+  minutes holds 31 × 375 = 11,625 records, so its bound is fourteen reads.
+  **That is not the store's ceiling (D-1527).** The writer admits any stamp on
+  the timeframe's grid inside the month, session or not (D-0915), so a
+  one-minute month can hold 31 × 1,440 = 44,640 records, a bound of sixteen
+  reads, and a one-second month up to 2,678,400, a bound of twenty-two reads.
+  The audit-20261003 o1store2 probe committed 37,960 consecutive one-minute
+  bars to one month (its measurement, not this entry's).
   `store::file::first_at_or_after_never_probes_more_than_the_bisection_height`
   proves the count with a counting reader. For every month of 0 to 150 records
   it checks every insertion point, so it crosses the block edges at 73 and
@@ -12049,8 +12057,8 @@ entry for either until now.
 **What one read can cost.** A record read is one 56-byte positional read. A
 handle caches one verified checksum block. When a read lands in a different
 block it also pays a cold block verify first: a read of that block's covered
-bytes (up to 4,088), a 4-byte read of the `.crc` sidecar, a heap buffer of the
-same size, and a CRC-32C over it. If the block is the tail block, the verify
+bytes (up to 4,088) into the handle's own fixed buffer (no heap allocation
+since D-1433), a 4-byte read of the `.crc` sidecar, and a CRC-32C over it. If the block is the tail block, the verify
 also queries the file length and reads any records past the commit. Since
 there is one cache slot, a bisection can alternate between two adjacent
 blocks near its end. In a simulation of the lookup with one cached block
@@ -12063,7 +12071,9 @@ not the average.
 
 * `api` `/bars.json` calls `BarFile::first_at_or_after` **twice per request**,
   once for each end of the day window (`crates/api/src/server.rs`). That is
-  up to 28 record reads and 28 cold verifies for a ceiling month, and it
+  up to 28 record reads and 28 cold verifies for a session-only one-minute
+  month, 32 for a full one-minute month and 44 for a full one-second month
+  (D-1527), and it
   replaced a full-month read of about 8,250 records.
 * `BarFile::append` calls `already_stored` only on its duplicate path: after
   `Header::advance` refuses a batch with `TimestampsOutOfOrder`, it checks

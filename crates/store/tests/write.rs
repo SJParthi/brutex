@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use brutex_core::vendor::Vendor;
 
 use store::crc::crc32c;
-use store::file::{Action, Appended, BarFile, StoreError};
+use store::file::{Action, Appended, BarFile, Conflict, StoreError};
 use store::format::{Bar, FormatError, HEADER_LEN, OI_NULL, RECORD_LEN, RECORD_STRIDE};
 use store::header::Header;
 use store::layout::Layout;
@@ -466,12 +466,11 @@ fn an_overlapping_batch_with_different_bars_is_refused() {
     altered[0].close += 1;
     assert_eq!(
         file.append(&altered),
-        Err(StoreError::Format {
+        Err(StoreError::OverlapDisagrees {
             path: file.path().to_path_buf(),
-            source: FormatError::TimestampsOutOfOrder {
-                previous: T0 + 9 * MINUTE,
-                next: T0 + 5 * MINUTE,
-            },
+            at: 0,
+            ts_micros: T0 + 5 * MINUTE,
+            conflict: Conflict::Restated,
         }),
         "a re-pull landing on top of committed bars with different values"
     );
@@ -660,6 +659,20 @@ fn a_file_where_a_directory_belongs_is_named() {
     let scratch = Scratch::new("notdir");
     let root = scratch.root().join("plain");
     fs::write(&root, b"not a directory").unwrap();
+    // A ROOT that is a file is refused naming the root, before anything below
+    // it is attempted (D-1522).
+    assert_eq!(
+        outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL)),
+        Err(StoreError::NotADirectory {
+            path: root.clone(),
+            action: Action::Open,
+        })
+    );
+    // A file where a directory BELOW the root belongs is refused naming the
+    // directory that could not be created.
+    let root = scratch.root().join("mounted");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("bars"), b"not a directory").unwrap();
     let refusal = outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL));
     assert_eq!(
         refusal,
@@ -1491,4 +1504,328 @@ fn an_overlay_is_written_and_read_back_through_the_bar_writer() {
         3,
         "the same three rows, not six — a rerun stores nothing new"
     );
+}
+
+// ===========================================================================
+// audit-20261003: the writer's repair and creation doors
+// ===========================================================================
+
+/// attackdata-1 (D-1520). A month that HAD committed bars and was truncated
+/// to nothing, or zeroed back to its header region, is refused by the writer
+/// door, not silently rebuilt as an empty month.
+///
+/// The `.crc` sidecar beside it is the proof: it is written only by an append,
+/// after the records and before the header slot, so a non-empty sidecar beside
+/// a header region of zeros means records were committed and are gone. The
+/// read door already refused the same file; the two doors now agree.
+#[test]
+fn a_truncated_month_whose_sidecar_proves_records_is_refused_not_reinitialised() {
+    for truncated_to in [0_usize, 32_768] {
+        let scratch = Scratch::new(&format!("truncated{truncated_to}"));
+        let mut file = open(scratch.root()).expect("create");
+        file.append(&batch(0, 3)).expect("three bars commit");
+        drop(file);
+
+        let on_disk = bars_path().to_path_buf(scratch.root());
+        let sidecar = bars_path()
+            .with_file(FileKind::Checksums)
+            .to_path_buf(scratch.root());
+        let sealed = fs::read(&sidecar).expect("the sidecar the append sealed");
+        assert!(!sealed.is_empty(), "the premise: the append sealed a block");
+        fs::write(&on_disk, vec![0u8; truncated_to]).expect("the truncation");
+
+        let refused = outcome(open(scratch.root()));
+        assert_eq!(
+            refused,
+            Err(StoreError::CommittedRecordsLost {
+                path: on_disk.clone(),
+                sidecar: sidecar.clone(),
+                sidecar_len: u64::try_from(sealed.len()).expect("fits"),
+            }),
+            "{truncated_to}: a month whose sidecar proves committed records \
+             must be refused by name, not reopened empty"
+        );
+        let text = refused.expect_err("refused").to_string();
+        assert!(
+            text.contains(&on_disk.display().to_string()) && text.contains("committed"),
+            "the refusal names the file and why: {text}"
+        );
+        assert_eq!(
+            fs::read(&on_disk).expect("the bar file").len(),
+            truncated_to,
+            "{truncated_to}: the refusal leaves the bar file as it was found"
+        );
+        assert_eq!(
+            fs::read(&sidecar).expect("the sidecar"),
+            sealed,
+            "{truncated_to}: and the sidecar that proves the loss untouched"
+        );
+    }
+}
+
+/// hunt-store-2 (D-1521). A genesis slot write that tore — the zero fill
+/// landed and only part of the 64-byte slot did — leaves a file that cannot
+/// hold a record and has no committed header. With no sidecar entry beside it
+/// nothing was ever appended, so the writer repairs it exactly as it repairs
+/// an all-zero region, instead of refusing it on every open forever.
+#[test]
+fn a_torn_genesis_slot_with_nothing_committed_is_repaired() {
+    for torn_at in [1_usize, 8, 32, 63] {
+        let scratch = Scratch::new(&format!("tornslot{torn_at}"));
+        let on_disk = bars_path().to_path_buf(scratch.root());
+        let dir = on_disk.parent().expect("a parent").to_path_buf();
+        fs::create_dir_all(&dir).expect("the month directory");
+
+        // The genesis image a real initialise writes, torn after `torn_at`
+        // bytes of its first slot.
+        let donor = Scratch::new(&format!("tornslotdonor{torn_at}"));
+        drop(open(donor.root()).expect("a healthy empty month"));
+        let healthy = image(donor.root());
+        let mut torn = vec![0u8; 32_768];
+        torn[..torn_at].copy_from_slice(&healthy[..torn_at]);
+        fs::write(&on_disk, &torn).expect("the torn file");
+
+        let opened = open(scratch.root()).unwrap_or_else(|why| {
+            panic!("{torn_at}: a torn genesis slot holds nothing and must be repaired: {why}")
+        });
+        assert_eq!(opened.records(), 0, "{torn_at}: repaired to an empty month");
+        drop(opened);
+        assert_eq!(
+            image(scratch.root()),
+            healthy,
+            "{torn_at}: the repair writes the genesis region a fresh month has"
+        );
+    }
+}
+
+/// hunt-store-2's restraint: a slot that DECODES is a commit, not a tear, and
+/// a file whose region holds anything outside the first slot is not the shape
+/// a torn genesis can leave. Neither is re-initialised.
+#[test]
+fn a_region_with_bytes_a_torn_genesis_cannot_leave_is_still_refused() {
+    let scratch = Scratch::new("tornslotfar");
+    let on_disk = bars_path().to_path_buf(scratch.root());
+    fs::create_dir_all(on_disk.parent().expect("a parent")).expect("the month directory");
+    let mut damaged = vec![0u8; 32_768];
+    damaged[0] = b'B';
+    damaged[16_384 + 3] = 0x01;
+    fs::write(&on_disk, &damaged).expect("the damaged file");
+    assert!(
+        open(scratch.root()).is_err(),
+        "a byte in the second slot is not a torn genesis and must be refused"
+    );
+    assert_eq!(fs::read(&on_disk).expect("the file"), damaged, "untouched");
+}
+
+/// hunt-store-3 (D-1522). The writer does not recreate a missing store root.
+///
+/// A store on an unmounted volume would otherwise get a fresh root on the
+/// parent filesystem and bars would land there, splitting append-only history
+/// across two devices. The month's own directories below an existing root are
+/// still created.
+#[test]
+fn a_missing_store_root_is_refused_not_recreated() {
+    let scratch = Scratch::new("noroot");
+    let root = scratch.root().join("unmounted");
+    assert!(!root.exists(), "the premise: the root is absent");
+
+    let refused = outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL));
+    assert_eq!(
+        refused,
+        Err(StoreError::Missing {
+            path: root.clone(),
+            action: Action::Open,
+        }),
+        "a missing store root is refused by name"
+    );
+    assert!(!root.exists(), "and it was not created");
+
+    // Below an existing root, the month's directories are still made.
+    fs::create_dir_all(&root).expect("the root, mounted");
+    assert_eq!(
+        outcome(BarFile::open_or_create(&root, bars_path(), SYMBOL)),
+        Ok(0)
+    );
+}
+
+/// hunt-store-1 (D-1523). The ordinary bar door refuses an overlay file put at
+/// a `.bin` name instead of serving its 24-byte records as 56-byte bars.
+#[test]
+fn the_bar_door_refuses_an_overlay_or_greeks_file_at_a_bar_name() {
+    use store::format::{Greek, Overlay};
+
+    for kind in [FileKind::Overlay, FileKind::Greeks] {
+        let scratch = Scratch::new(&format!("wronggeometry{kind:?}"));
+        let path = StorePath::new(parts(kind)).expect("a legal path");
+        let mut file = BarFile::open_or_create(scratch.root(), path, SYMBOL).expect("opens");
+        let version = if kind == FileKind::Overlay {
+            let rows: Vec<Overlay> = (0..5)
+                .map(|index| Overlay {
+                    ts_micros: T0 + index * MINUTE,
+                    spot: 2_310_955,
+                    iv_micros: 125_000,
+                })
+                .collect();
+            file.append(&rows).expect("overlay rows");
+            Layout::OVERLAY.version()
+        } else {
+            let rows: Vec<Greek> = (0..5)
+                .map(|index| Greek {
+                    ts_micros: T0 + index * MINUTE,
+                    spot: 2_400_000,
+                    volatility: 0.25,
+                    delta: 0.5,
+                    gamma: 0.125,
+                    vega: 1.0,
+                    theta: -1.0,
+                    rho: 2.0,
+                    rate: 0.0,
+                    provenance: 0,
+                })
+                .collect();
+            file.append(&rows).expect("greeks rows");
+            Layout::GREEKS.version()
+        };
+        drop(file);
+
+        let sidecar_kind = kind.checksums().expect("a record kind has a sidecar");
+        fs::copy(
+            path.to_path_buf(scratch.root()),
+            bars_path().to_path_buf(scratch.root()),
+        )
+        .expect("the file at a bar name");
+        fs::copy(
+            path.with_file(sidecar_kind).to_path_buf(scratch.root()),
+            bars_path()
+                .with_file(FileKind::Checksums)
+                .to_path_buf(scratch.root()),
+        )
+        .expect("its sidecar at the bar sidecar's name");
+
+        for refused in [
+            outcome(BarFile::open_existing(scratch.root(), bars_path(), SYMBOL)),
+            outcome(BarFile::open_or_create(scratch.root(), bars_path(), SYMBOL)),
+        ] {
+            assert_eq!(
+                refused,
+                Err(StoreError::Format {
+                    path: bars_path().to_path_buf(scratch.root()),
+                    source: FormatError::UnknownVersion(version),
+                }),
+                "{kind:?}: a bar path is offered only the bar geometries"
+            );
+        }
+    }
+}
+
+/// attackdata-2 (D-1524). A greeks re-run is compared byte for byte, not by
+/// `f64` equality: a row whose delta is `-0.0` where the held row's is `0.0`
+/// has different bytes, so it is not "already present" — it is a restatement,
+/// refused by name.
+#[test]
+fn a_greek_rerun_with_a_negative_zero_is_not_already_present() {
+    use store::format::Greek;
+
+    let scratch = Scratch::new("greekzero");
+    let path = StorePath::new(parts(FileKind::Greeks)).expect("a legal path");
+    let mut file = BarFile::open_or_create(scratch.root(), path, SYMBOL).expect("opens");
+    let held = Greek {
+        ts_micros: T0,
+        spot: 2_400_000,
+        volatility: 0.25,
+        delta: 0.0,
+        gamma: 0.125,
+        vega: 1.0,
+        theta: -1.0,
+        rho: 2.0,
+        rate: 0.0,
+        provenance: 0,
+    };
+    file.append(&[held]).expect("the held row");
+    let rerun = Greek {
+        delta: -0.0,
+        ..held
+    };
+    assert_ne!(held.image(), rerun.image(), "the premise: the bytes differ");
+    assert_eq!(
+        file.append(&[rerun]),
+        Err(StoreError::OverlapDisagrees {
+            path: path.to_path_buf(scratch.root()),
+            at: 0,
+            ts_micros: T0,
+            conflict: Conflict::Restated,
+        }),
+        "different bytes are not the bytes already stored"
+    );
+    assert_eq!(
+        file.append(&[held]),
+        Ok(Appended::AlreadyPresent {
+            first_index: 0,
+            n_valid: 1
+        }),
+        "and the identical bytes still are"
+    );
+}
+
+/// attackdata-7 (D-1525). A batch whose overlap disagrees with what the month
+/// holds is refused with the real diagnosis, not as "timestamps out of order":
+/// a held bar restated with different values, a bar at a stamp inside the held
+/// range that the month never held, and a batch that skips a held bar.
+#[test]
+fn an_overlap_that_disagrees_is_refused_with_the_real_diagnosis() {
+    let scratch = Scratch::new("diagnosis");
+    let mut file = open(scratch.root()).expect("create");
+    // Held: minutes 0, 2, 4, 6, 8 — a month with holes, so a stamp inside the
+    // held range can be absent.
+    let held: Vec<Bar> = [0, 2, 4, 6, 8].into_iter().map(bar).collect();
+    file.append(&held).expect("held");
+    let on_disk = bars_path().to_path_buf(scratch.root());
+    let before = image(scratch.root());
+
+    // A restatement: minute 4 offered with a different close.
+    let mut restated = vec![bar(4), bar(6), bar(8), bar(9)];
+    restated[0].close += 1;
+    assert_eq!(
+        file.append(&restated),
+        Err(StoreError::OverlapDisagrees {
+            path: on_disk.clone(),
+            at: 0,
+            ts_micros: T0 + 4 * MINUTE,
+            conflict: Conflict::Restated,
+        })
+    );
+
+    // A stamp the month never held: minute 5 sits between held 4 and 6.
+    assert_eq!(
+        file.append(&[bar(4), bar(5), bar(6), bar(8), bar(9)]),
+        Err(StoreError::OverlapDisagrees {
+            path: on_disk.clone(),
+            at: 1,
+            ts_micros: T0 + 5 * MINUTE,
+            conflict: Conflict::NotHeld,
+        })
+    );
+
+    // A batch that skips held minute 6, naming the held stamp it skipped.
+    assert_eq!(
+        file.append(&[bar(4), bar(8), bar(9)]),
+        Err(StoreError::OverlapDisagrees {
+            path: on_disk.clone(),
+            at: 1,
+            ts_micros: T0 + 6 * MINUTE,
+            conflict: Conflict::Skipped,
+        })
+    );
+    let text = StoreError::OverlapDisagrees {
+        path: on_disk,
+        at: 0,
+        ts_micros: T0,
+        conflict: Conflict::Restated,
+    }
+    .to_string();
+    assert!(
+        text.contains("restate"),
+        "the message names the restatement: {text}"
+    );
+    assert_eq!(image(scratch.root()), before, "and nothing was written");
 }
