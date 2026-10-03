@@ -13931,3 +13931,21 @@ their module docs:
 
 These are not fixed because no run reaches them. A change that gives either
 module a caller must port D-1620 and restate this section.
+
+## A single-stop search re-verifies its whole acknowledged history on every launch — D-1633, 3 October 2026
+
+`index_stop_search_checkpoint::recover`, called by `open_checkpoint` on every
+launch and resume of a single-stop search, walks the whole acknowledged
+checkpoint chain and, for every completed historical frame and every selected
+rung (at most eight), calls `qualification::verify_search_slot_bounded`. That
+reopens the child's bounded reader (both candidate catalogs and the daily
+reader) and replays it. Per launch the cost is
+O(B × R × (C·P·D + C·S + C·days)): B completed batches, R selected rungs, C
+candidates, P later periods, D bootstrap draws (three procedures), S CSCV
+splits. It grows linearly with search history and is paid again on each
+resume. The general sentence about cold readers above does not state this
+per-launch multiplier, so it is stated here (W2-cli6-0).
+
+It is not removed: the replay is how a resume proves an acknowledged child
+still says what its pin says. A trusted cache of verified frames would be a
+new durable authority, and none exists.

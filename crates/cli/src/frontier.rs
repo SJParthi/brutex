@@ -435,8 +435,9 @@ impl Row {
         // THE FILL-HEADROOM RULE, in the four bytes reserved for exactly this:
         // a later rule needing to say what judged the row. i32, not i64, because
         // that is the space the reserve left and a headroom in hundredths never
-        // approaches two billion. Saturating, so an impossible value clamps to a
-        // refusal rather than wrapping into a pass.
+        // approaches two billion. `append` refuses a row whose value does not
+        // fit before encoding it (D-1623), so the saturation below is never
+        // reached on a written row; it remains only so `to_bytes` stays total.
         //
         // NOT round-tripping it was the alternative, and it was wrong: the row
         // stores its rule set so a reader knows what judged it, and a field that
@@ -1073,6 +1074,21 @@ impl Frontier {
             .map_err(|why| format!("the frontier file could not be seeked: {why}"))?;
         let first = end.saturating_sub(HEADER) / STRIDE;
 
+        // THE STORED RULE MUST BE THE APPLIED RULE. Bytes 196..200 hold the
+        // fill-headroom rule as an i32, and the knob parses an i64. A run judged
+        // at 3,000,000,000 bp used to store 2,147,483,647, so the row named a
+        // rule that did not judge it and a re-judge could flip its verdict.
+        // Refused before any byte is written (D-1623).
+        for row in rows {
+            if i32::try_from(row.rules.min_fill_headroom_bp).map_or(true, |bp| bp < 0) {
+                return Err(format!(
+                    "run {} was judged at min_fill_headroom_bp {}, which the frontier row's four-byte field cannot store exactly (0..={}); refusing rather than recording a rule that did not judge it",
+                    hex(&row.identity),
+                    row.rules.min_fill_headroom_bp,
+                    i32::MAX
+                ));
+            }
+        }
         let mut buffer: Vec<u8> = Vec::with_capacity(rows.len() * STRIDE_BYTES);
         for row in rows {
             buffer.extend_from_slice(&row.to_bytes());
@@ -2062,6 +2078,32 @@ mod tests {
         let raw = want.to_bytes();
         assert!(Row::seal_matches(&raw), "a fresh row matches its own seal");
         assert_eq!(Row::from_bytes(&raw).expect("valid schema"), want);
+    }
+
+    /// c4b-2, D-1623: a headroom the four-byte field cannot hold is refused
+    /// before a byte is written, never clamped into a different stored rule.
+    #[test]
+    fn an_unstorable_fill_headroom_is_refused_not_clamped() {
+        let dir = root("headroom-bound");
+        let mut store = Frontier::open(&dir).expect("a fresh file opens");
+        let path = dir.join("results").join("frontier.bin");
+        let before = std::fs::read(&path).expect("header bytes");
+        for bad in [i64::from(i32::MAX) + 1, 3_000_000_000, i64::MAX, -1, i64::MIN] {
+            let mut over = row(0x41, 1);
+            over.rules.min_fill_headroom_bp = bad;
+            let refusal = store.append_all(&[over]).expect_err("must refuse");
+            assert!(refusal.contains("min_fill_headroom_bp"), "{refusal}");
+            assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+        }
+        let mut edge = row(0x42, 1);
+        edge.rules.min_fill_headroom_bp = i64::from(i32::MAX);
+        assert_eq!(store.append_all(&[edge.clone()]).expect("i32::MAX fits"), 1);
+        drop(store);
+        let mut reopened = Frontier::open_read(&dir).expect("reopen");
+        let stored = reopened.read(0).expect("the row reads back");
+        assert_eq!(stored.identity, edge.identity);
+        assert_eq!(stored.rules.min_fill_headroom_bp, i64::from(i32::MAX));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn reseal(raw: &mut [u8; STRIDE_BYTES]) {

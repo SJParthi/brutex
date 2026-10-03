@@ -3026,10 +3026,32 @@ fn sync_directory(file: &File, root: &Path) -> Result<(), SelectionV5Refusal> {
 }
 
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), SelectionV5Refusal> {
-    file.seek(SeekFrom::End(0))
+    append_with_rollback(file, raw, |file, raw| file.write_all(raw))
+}
+
+/// Appends one record, and on a write error (ENOSPC, EIO, a short write)
+/// truncates the file back to its length before it, as Admission V3/V4 do
+/// (D-0916). Whole-record prefixes are already recovered as an exact-retry
+/// orphan; a partial record was not, and wedged the ledger for good (D-1622).
+fn append_with_rollback(
+    file: &mut File,
+    raw: &[u8],
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), SelectionV5Refusal> {
+    let end = file
+        .seek(SeekFrom::End(0))
         .map_err(|why| format!("cannot seek Selection V5 append: {why}"))?;
-    file.write_all(raw)
-        .map_err(|why| format!("cannot append Selection V5 record: {why}"))
+    let Err(why) = write(file, raw) else {
+        return Ok(());
+    };
+    match file.set_len(end) {
+        Ok(()) => Err(format!(
+            "cannot append Selection V5 record: {why}; truncated back to {end} bytes"
+        )),
+        Err(rollback) => Err(format!(
+            "cannot append Selection V5 record: {why}; truncation back to {end} bytes also failed: {rollback}"
+        )),
+    }
 }
 
 fn read_fixed_at<const N: usize>(
@@ -4161,6 +4183,38 @@ mod tests {
                 .expect("reused Top-25 reads"),
             top_twenty_five
         );
+        assert_eq!(directory_bytes(root.path()), before);
+    }
+
+    /// c4b-5, D-1622: a short write truncates back, so later opens and the
+    /// exact rerun still succeed byte-identically.
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TestRoot::new("append-rollback");
+        let fixture = prepared(30);
+        commit_prepared_for_test(root.path(), bounds(), &fixture).expect("first commit");
+        let before = directory_bytes(root.path());
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.path().join(name))
+                .expect("open committed Selection V5 file");
+            let refusal = append_with_rollback(&mut file, &[0x5a; 1_000], |file, raw| {
+                file.write_all(raw.get(..377).expect("partial"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a failed write must refuse");
+            assert!(
+                refusal.contains("injected short write") && refusal.contains("truncated back"),
+                "refusal `{refusal}` must name the write error and the rollback"
+            );
+            drop(file);
+            assert_eq!(directory_bytes(root.path()), before);
+        }
+        let reused =
+            commit_prepared_for_test(root.path(), bounds(), &fixture).expect("exact rerun reuses");
+        assert!(!reused.was_written());
         assert_eq!(directory_bytes(root.path()), before);
     }
 

@@ -53505,3 +53505,88 @@ coverage surface for no operator effect. `docs/06-limits.md` now states the
 cost and the dead status, so the module docs are not the only record. If
 either module gains a caller, D-1620's rollback and orphan rule must be
 ported in the same change.
+
+### D-1621 — The institutional statistics staleness check names the file, not only its bytes — 2026-10-03
+
+**What was wrong (W2-cli7-5).** `FileSnapshotV1` was `{ length, digest }` of
+content. `require_files_unchanged` compared the held handles' snapshots and
+then reopened each path and compared again. A byte-identical copy renamed over
+the path passed both, and `append_sync` wrote and fsynced the held, now
+unlinked, inode and returned `Appended`: the commit was reported and was not
+in the file any reader opens.
+
+**The change.** `FileSnapshotV1` gains `identity`, which on Unix is
+`(device, inode)` from the handle's metadata. The reopen comparison now
+refuses a different file with the same bytes ("no longer names the file
+held"). On a non-Unix target `std` has no stable file identity, and the check
+stays content-only there, as it was. The snapshot is in memory only; nothing
+stored changes.
+
+**What it proves.**
+`cli::institutional_statistics::tests::a_byte_identical_replacement_renamed_over_the_path_refuses`
+renames an identical copy over each file under a held handle and requires the
+append to refuse with the replacement untouched, and a fresh open to append.
+
+### D-1622 — Selection V5 and institutional statistics roll a failed append back — 2026-10-03
+
+**What was wrong (c4b-5).** `selection_v5::append_raw` and
+`institutional_statistics::append_sync` were `seek(End) + write_all` with no
+rollback. A short write (ENOSPC, EIO) left a ragged or torn tail that every
+later open refused ("file is ragged", "torn ... body"), so the ledger was
+wedged for good. Whole-record orphan prefixes were already recovered; partial
+records were not. Same class as D-0916 and D-1620.
+
+**The change.** Both go through an append-with-rollback that records the end
+offset and truncates back to it on a write error, naming both errors if the
+truncation fails. In institutional statistics a failed `sync_all` after a
+whole write is not truncated: the whole record stays and the next open treats
+it as the orphan an exact retry continues, which is the existing rule. Stored
+bytes of a successful append are unchanged.
+
+**What it proves.**
+`cli::selection_v5::tests::a_failed_append_truncates_back_and_the_ledger_stays_open`
+and
+`cli::institutional_statistics::tests::a_failed_append_truncates_back_and_the_ledger_stays_open`
+inject a short write into each file and require the directory byte-identical,
+the ledger readable, and the exact rerun to reuse.
+
+### D-1623 — The frontier refuses a fill-headroom rule its four-byte field cannot store — 2026-10-03
+
+**What was wrong (c4b-2).** `Rules::min_fill_headroom_bp` is an `i64` and
+`BRUTEX_MIN_FILL_HEADROOM_BP` accepts any non-negative value. The frontier row
+stores it in bytes 196..200 as `i32::try_from(..).unwrap_or(i32::MAX)`. A run
+judged at 3,000,000,000 bp recorded 2,147,483,647, so the row named a rule
+that did not judge it, and a re-judge from the stored rule could flip a
+verdict. A stored rule that differs from the applied one is a silent fallback
+(§4).
+
+**The change.** `Frontier::append_with` refuses, before any byte is written,
+a row whose `min_fill_headroom_bp` is outside `0..=i32::MAX`, naming the run
+and the value. The format is unchanged (still version 6, still an `i32`).
+Every value that was stored exactly before is stored exactly now; only values
+that used to be clamped are refused. The `to_bytes` saturation stays so the
+encoder is total, and its comment now says it is unreachable on a written row.
+
+**What it proves.**
+`cli::frontier::tests::an_unstorable_fill_headroom_is_refused_not_clamped`
+refuses `i32::MAX + 1`, 3,000,000,000, `i64::MAX`, −1 and `i64::MIN` with the
+file unchanged, and stores and reads back `i32::MAX` exactly.
+
+### D-1632 — `/frontier.json`'s verdict still omits the average-payoff and fill-headroom rules; not fixed here — 2026-10-03
+
+**What was found (W2-cli5-4).** `Row::verdict` sets `admitted` from five rules.
+`Rules::admits` also requires `fills_hold(min_fill_headroom_bp)` and
+`avg_payoff_holds(min_avg_rr_bp)`. Average payoff is computable from the row
+(`cell_wins`, `trades`, `gross_win`, `gross_loss`); fill headroom is not, since
+`Row` carries no optimistic total. Neither is flagged unchecked, so the page
+can show PASS for a row `Rules::admits` refuses.
+
+**Why it is not fixed in this change.** The fix crosses three layers at once:
+`cli::frontier::Verdict` gains fields, `api`'s `/frontier.json` must emit them
+and echo `min_avg_rr_bp`, and `web/src/lib/frontier-analytics.js` recomputes
+`meets.all` from exactly five rules and refuses any row whose `all` differs.
+Changing `admitted` in `cli` alone would make the page refuse valid
+responses. It needs one change across `cli`, `api` and `web`, with the web
+verifier's tests, and is left open as stated here. Until then a PASS on
+`/frontier.json` means "the five named rules hold", as `Verdict::admitted`'s
+rustdoc already says, and does not cover average payoff or fill headroom.
