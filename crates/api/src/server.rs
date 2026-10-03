@@ -20569,9 +20569,10 @@ mod tests {
             ("exchange=BSE&segment=FNO&symbol=SENSEX", 375),
             ("exchange=NSE&segment=SPOT&symbol=NIFTY", 375),
         ] {
-            let asked =
-                Addressed::parse(&format!("feed=zerodha&{query}&timeframe=1min&month=2026-08"))
-                    .unwrap();
+            let asked = Addressed::parse(&format!(
+                "feed=zerodha&{query}&timeframe=1min&month=2026-08"
+            ))
+            .unwrap();
             let audit = audit_one(&site, &asked, asked.month, Some(&calendar), None);
             assert!(audit.absent_file.is_some(), "{query}");
             assert_eq!(audit.expected, owed, "{query}");
