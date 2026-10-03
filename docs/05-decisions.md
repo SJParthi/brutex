@@ -54609,3 +54609,29 @@ reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
 **Not changed.** The wall-clock cost of these reads is not measured. Holding
 one calendar slot for a whole range audit means a long range can make the
 calendar route answer 429 sooner; that is a bound, stated, not a queue.
+
+### D-1830 — Delete Search Lineage V2 and V3, which no run ever called — 2026-10-03
+
+**What was found.** D-1631 stated that `anchored_search_lineage_v2` and
+`anchored_search_lineage_v3` rescan their whole files on every append,
+rehash every file on each lookup and do not roll a failed write back, and
+left all three because nothing calls them. The zero-gap rule asks for the
+cost to be removed where it can be, not stated.
+
+**What was checked before deleting.** A module that reads stored data may not
+be deleted while that data can exist. `git log -S "anchored_search_lineage_v2::"`
+and `-S "anchored_search_lineage_v3::"` over `crates/` find no commit, ever,
+in which code outside the two files named either module; both were compiled
+outside tests only under `allow(dead_code)` / `expect(dead_code)`. No run
+could therefore have written a V2 or V3 lineage file, so no stored file
+loses its only reader. No test outside the two files, no invariant row and
+no document but the D-1631 limits section and the Gate 11 rule-3 reasons
+named them.
+
+**The decision.** Both files are deleted with their `mod` lines and their two
+Gate 11 rule-3 allowlist entries. `runner::validate`'s V2 and V3 projections
+stay: they are public items of another crate. The D-1631 limits section now
+records the removal. V4, the live lineage, is unchanged.
+
+**What it changes.** About 5,100 lines of dead code and sixteen tests of it
+are gone. No output, digest, format or run identity moves.
