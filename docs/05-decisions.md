@@ -55983,3 +55983,78 @@ extractor still enforces the shared bound. O(1) per request for the choice.
 
 **Proof.** `server::tests::every_ticked_member_fits_and_one_too_many_is_named_not_a_413`
 and `server::tests::form_read_bound_is_wide_only_on_the_member_routes`.
+
+### D-1551 — A stopping server cancels running engine work at its structural boundaries — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-2. D-1582 bounded the shutdown
+wait at `SHUTDOWN_GRACE` and named what it abandoned, and said plainly what it
+did not do: the running sweep had no cancellation point, so a stop during a
+sweep abandoned it mid-run rather than stopping it.
+
+**The decision.** `cli::cancel` holds one process-wide stop flag, set by
+`cli::cancel::request` and never cleared (the only caller is a process that is
+ending). `api::server::end_runtime` sets it before it waits. Engine work checks
+it with `cli::cancel::check` at structural boundaries only: every stored
+instrument-month the loaders open (`stored`'s classified loader,
+`fold_audit::read_month`), each candidate of the exit-grid screen (the screen
+then refuses as a whole), before a range table is rendered, and at each
+single-stop timeframe boundary. Never inside the per-bar folds of `vocab`,
+`engine`, `indicators` or `runner`, which gate 17 keeps call-free. A check is
+one atomic load. A cancelled answer begins with `cli::cancel::CANCELLED` and
+names where it stopped. In `api`, `TaskFinisher::conduct` replaces any answer
+finished after the stop with that sentence, so a partial or late result is
+never presented as complete; `completion_audit` names the outcome `cancelled`
+at `Error`, and the invocation audit's terminal phase is `Cancelled`.
+`server::wait_then_end` is the wait without the stop, so a unit test can prove
+the bound without cancelling the other tests' work.
+
+**Rejected.** A per-run token threaded through `cli`: the rungs run on a
+parallel pool, so a thread-local cannot reach them, and threading a token
+through every command's signature changes hundreds of call sites for a flag
+whose only meaning is "this process is ending". Keying the stop by store root:
+two spellings of one root would silently miss.
+
+**Tests.** `cli::operator_boundary_tests::a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation`
+and `api::sweeprun::tests::shutdown_during_a_sweep_cancels_it_promptly_and_names_the_cancellation`,
+each run in a child process because the stop is process-wide. Before the
+change the first refused nothing after the stop and the second waited the full
+10 s grace and abandoned the task.
+
+### D-1552 — Same-origin failed-request lines are rationed and counted too — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-3, left partial by D-1583: only
+requests whose `Sec-Fetch-Site` names another site were rationed, so a
+same-origin page in a retry loop or a local tool still wrote one line per
+failed request and could roll the 64 MiB retained log away.
+
+**The decision.** `logs::Rations` keeps two fixed-window counts:
+cross-site at `FAILED_LINES_PER_WINDOW` (50) and same-origin or header-less at
+`LOCAL_FAILED_LINES_PER_WINDOW` (200) per 60 s window. Each counts what it holds
+back and the first failed request of its class in a later window writes one
+Warn line, `same-origin failed-request lines suppressed in the previous window`
+or its cross-site twin, carrying `suppressed` = N and `origin`. Separate counts,
+so neither class can spend or silence the other. Nothing is dropped without a
+count; the honest limit D-1583 stated (a flood followed by silence leaves its
+last count unsaid) applies to both classes.
+
+**Test.** `api::logs::tests::a_same_origin_flood_is_bounded_and_counted_separately_from_cross_site`;
+it did not compile against the previous tree, which had no same-origin ration.
+
+### D-1553 — `Widths` fields are private; a swapped pair cannot be built outside its module — 2026-10-03
+
+**What was observed.** audit-20261003 errpaths-4, left partial by D-1546:
+`Widths::new` refused a swapped or baseless pair but the public fields let any
+caller build one directly.
+
+**The decision.** The fields are private. `Widths::new` (checked) and
+`Widths::pinned` are the only public doors; `fib()` and `pivot()` read them.
+The degraded path (a mismatched width is withheld as unknown, never answered)
+is still proved, inside the crate, through a `#[cfg(test)]` constructor
+`Widths::unchecked` that no linked build can call. The six readiness suites
+that built a mismatched width now assert that `Widths::new` refuses it by name.
+
+**Tests.** Two `compile_fail` doctests on `indicators::evaluator::Widths` (a
+struct literal and a field write from another crate; both compiled on the
+previous tree and the doctests failed),
+`indicators::evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`
+and `indicators::evaluator::tests::swapped_or_baseless_widths_are_refused_by_name`.

@@ -14062,15 +14062,28 @@ bounds are all nonzero.
   primary circular recorded here, and none has been invented.
 ## crates/api audit fixes — D-1580..D-1591, 3 October 2026
 
+- **A stop is honoured at structural boundaries only (D-1551).** Engine work
+  checks `cli::cancel` once per stored instrument-month, once per screened
+  candidate, before a range table and at each single-stop timeframe: one
+  atomic load each, O(1). Between two boundaries it does not stop: one
+  rung's level-wise engine sweep over bars already loaded, or one
+  candidate's exit grid, runs to its end, because gate 17 keeps the inner
+  loops of `vocab`, `engine`, `indicators` and `runner` call-free. If that
+  stretch outlasts `SHUTDOWN_GRACE` (10 s) the task is abandoned and named,
+  as D-1582 states. How long such a stretch takes on real data is
+  unmeasured.
 - **Cross-site failed-request log lines are rationed (D-1583).** For requests
   whose `Sec-Fetch-Site` names another site, at most
   `logs::FAILED_LINES_PER_WINDOW` (50) `api.request` lines at `Warn`/`Error`
   per `FAILED_LINE_WINDOW_MS` (60 s), plus one summary line counting what was
   held back, said by the first failed request of a later window. A flood that
   is followed by silence until shutdown leaves its last count unsaid.
-  Same-origin and header-less clients are not rationed, so a local tool can
-  still fill the log. The ration is one process-wide mutex take per
-  cross-site failed request: O(1).
+  Same-origin and header-less clients draw on their own ration since D-1552:
+  at most `logs::LOCAL_FAILED_LINES_PER_WINDOW` (200) lines per window plus
+  one counted summary, about 7.4 MB an hour at the worst, 9.3 MB with the
+  cross-site ration, so a sustained flood of both still rolls the 64 MiB
+  retained log in about seven hours; it can no longer do so in seconds. The
+  ration is one process-wide mutex take per failed request: O(1).
 - **Every non-GET request body is read once before its handler (D-1587)** to
   refuse a form field named twice: O(body), bounded by `MAX_FORM_BYTES`
   (8 KiB), the same bound `DefaultBodyLimit` already put on every handler. A
