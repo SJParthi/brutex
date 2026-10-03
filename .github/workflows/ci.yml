@@ -1644,6 +1644,13 @@ jobs:
           # flags `crates/pull/tests/support/mod.rs` hands the re-executed test
           # binary it runs as an unprivileged user (root-permission tests).
           fold_literal='-0 -5 -0945 -1400 -token --exact --nocapture'
+          # Met when the audit fixes landed (83cb7a5). `-354` is a
+          # negative rupee price `rolling.rs` must refuse rather than snap to
+          # zero. `-7` is the tail the decoded scan reads from invented
+          # contract fixtures (`...-7000-CE`, `...-700000-CE`) in chain.rs and
+          # fno.rs. `repeats` is a refusal word asserted in http.rs and prose
+          # in a session.rs reason string. None is a path segment.
+          audit_literal='-354 -7 repeats'
 
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
@@ -1656,7 +1663,7 @@ jobs:
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
-          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal}"
+          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build: `grep -q` exits
