@@ -13967,3 +13967,12 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   at worst `O(K log K)` comparisons of precomputed keys, over `O(log(K / top))`
   doubling rounds. Before D-1728 it was `O(K log K)` key EVALUATIONS, each a
   map probe plus a Wilson bound.
+
+- **`cli results` and `cli top`, per request: `O(ledger rows)` reads, `O(1)`
+  retained** (W2-cli8-5, D-1729). `results_at` makes one newest-first pass
+  over every recorded run and keeps at most `LIST_ROWS` (40) records plus a
+  running best. `newest_complete` makes one pass and keeps one record. Neither
+  can stop early: the best complete run can be anywhere in the ledger. A
+  per-request bound below the ledger would need a secondary index, which this
+  append-only, path-is-the-index file does not keep. UNVERIFIED as a
+  measurement: no bench times either read.

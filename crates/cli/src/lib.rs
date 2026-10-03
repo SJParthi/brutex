@@ -7213,6 +7213,10 @@ fn append_condition_names(out: &mut String, record: &crate::results::Record) {
 /// number is a reader who will miss it — and because `done: NO` rows must not
 /// win. A halted ladder's total is not comparable with a complete one's: it
 /// covers less of the search while its combination count looks larger.
+// TEST-ONLY SINCE D-1729: the listing folds the same choice in
+// `listing_window`, and this stays as the reference its equivalence test and
+// the tie tests below check that fold against.
+#[cfg(test)]
 fn best_complete_newest_first(rows: &[crate::results::Record]) -> Option<&crate::results::Record> {
     // AND `trades == 0` MUST NOT WIN EITHER, for the same reason `halted` must
     // not: it is not a worse total, it is NO total.
@@ -7805,7 +7809,7 @@ const LIST_ROWS: usize = 40;
 /// answer could be printed once, on the run that produced it, and never again.
 ///
 /// Which run: the **best complete** one matching the filter, chosen exactly as
-/// [`best_complete_newest_first`] chooses it — highest `pessimistic` among rows
+/// `listing_window` chooses it — highest `pessimistic` among rows
 /// that completed and traded. A halted run's totals are not comparable with a complete one's, so
 /// ranking them together would be the defect `range-all`'s `complete` column
 /// exists to prevent.
@@ -8112,10 +8116,13 @@ fn newest_complete(
 ///
 /// # Cost
 ///
-/// `O(rows)` — the size of the answer, and every individual read is `O(1)` at
-/// `HEADER + i·STRIDE`. There is no scan of anything larger than the ledger and
-/// no index to maintain, which is `CLAUDE.md` §4's *"the path is the index"*
-/// applied to a file that is one array.
+/// `O(ledger rows)` reads -- every recorded run, matching or not -- each `O(1)`
+/// at `HEADER + i·STRIDE`, and `O(1)` retained: at most [`LIST_ROWS`] records
+/// plus one running best (W2-cli8-5, D-1729). This said "`O(rows)` — the size
+/// of the answer", but the printed answer is at most `LIST_ROWS + 1` rows while
+/// the scan is the whole ledger, and it held every matching record in memory to
+/// print forty. A per-request bound below the ledger would need a secondary
+/// index this append-only file does not keep; `docs/06-limits.md` states it.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -8225,44 +8232,33 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         return out;
     }
 
-    // NEWEST FIRST, read backwards. The ledger is append-only, so the last row
-    // is the most recent and no sort is needed to say so.
-    let mut rows: Vec<crate::results::Record> = Vec::new();
-    for back in 1..=count {
-        match store.read(count.saturating_sub(back)) {
-            Err(why) => return format!("refused: {why}\n"),
-            Ok(record) => {
-                let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
-                    && underlying
-                        .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
-                if keep {
-                    rows.push(record);
-                }
-            }
-        }
-    }
+    let window = match listing_window(&mut store, count, feed, underlying) {
+        Ok(window) => window,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let rows = &window.shown;
     if let (Some(f), Some(u)) = (feed, underlying) {
         let _ = writeln!(out, "  filtered to                             {f} {u}");
     }
     let _ = writeln!(
         out,
         "  matching                                {}",
-        rows.len()
+        window.matching
     );
     let _ = writeln!(out);
 
     // THE BEST ROW, BY THE FIGURE SELECTION USES. Chosen before the table,
     // because what it is decides what the page states above the table.
-    let best = best_complete_newest_first(&rows);
-    out.push_str(&listing_equity_note(&rows, best));
+    let best = window.best.as_ref();
+    out.push_str(&listing_equity_note(rows, best));
 
-    results_table(&mut out, &rows);
-    if rows.len() > LIST_ROWS {
+    results_table(&mut out, rows);
+    if window.matching > LIST_ROWS {
         let _ = writeln!(
             out,
             "  ... {} further row(s) NOT SHOWN. The ledger is complete; this \
              table is not.",
-            rows.len().saturating_sub(LIST_ROWS)
+            window.matching.saturating_sub(LIST_ROWS)
         );
     }
 
@@ -8276,6 +8272,59 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
         out.push_str(&quality_block(best));
     }
     out
+}
+
+/// What [`results_at`] keeps of one pass over the ledger: the newest
+/// [`LIST_ROWS`] matching records, the best complete one, and how many matched.
+struct ListingWindow {
+    /// The newest matching records, newest first, never more than `LIST_ROWS`.
+    shown: Vec<crate::results::Record>,
+    /// `best_complete_newest_first` over EVERY matching record, folded.
+    best: Option<crate::results::Record>,
+    /// Every matching record, shown or not.
+    matching: usize,
+}
+
+/// One newest-first pass over `count` ledger rows, retaining `O(1)` records
+/// (D-1729): the first [`LIST_ROWS`] matches and a running best.
+///
+/// The best is the one `best_complete_newest_first` picks over all matches:
+/// the largest `pessimistic` among complete rows, and the NEWEST of a tie.
+/// Visited newest first, a later record replaces it only when strictly larger.
+fn listing_window(
+    store: &mut crate::results::Results,
+    count: u64,
+    feed: Option<&str>,
+    underlying: Option<&str>,
+) -> Result<ListingWindow, crate::results::Refusal> {
+    let mut window = ListingWindow {
+        shown: Vec::with_capacity(LIST_ROWS),
+        best: None,
+        matching: 0,
+    };
+    // NEWEST FIRST, read backwards. The ledger is append-only, so the last row
+    // is the most recent and no sort is needed to say so.
+    for back in 1..=count {
+        let record = store.read(count.saturating_sub(back))?;
+        let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
+            && underlying.is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+        if !keep {
+            continue;
+        }
+        window.matching = window.matching.saturating_add(1);
+        if record.has_complete_trade_total()
+            && window
+                .best
+                .as_ref()
+                .is_none_or(|best| record.pessimistic > best.pessimistic)
+        {
+            window.best = Some(record);
+        }
+        if window.shown.len() < LIST_ROWS {
+            window.shown.push(record);
+        }
+    }
+    Ok(window)
 }
 
 /// What [`results_at`] states above its table: a stock's figures say what they

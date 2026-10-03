@@ -53647,3 +53647,30 @@ goes from 7 to 8. The reason is recorded in `docs/06-limits.md`.
 orders all K rows. Passing in `Results::holds` to choose between "recorded
 run" and "interrupted attempt". That is one more ledger open per commit to
 choose a word, and the neutral sentence is true in both cases.
+
+### D-1729 — `cli results` retains at most forty records and states its real cost — 2026-10-03
+
+**Finding.** W2-cli8-5 (low cost).
+
+**What was wrong.** `results_at` pushed every matching ledger record into a
+`Vec`, printed at most `LIST_ROWS` (40) of them, and chose the best over all
+of them. Its rustdoc said the cost was "`O(rows)` — the size of the answer".
+The answer is at most 41 rows, and the read is the whole ledger.
+`newest_complete`, behind `cli top`, also reads every row. It already
+retained one record.
+
+**The decision.** `listing_window` makes the same one newest-first pass and
+keeps the first 40 matches, a match count and a running best. Visited newest
+first, a later record replaces the best only when strictly larger, which is
+`best_complete_newest_first`'s choice, ties to the newest. That function is
+now test-only and stays as the reference: a 500-row ledger with heavy ties is
+listed both ways under four filters, and the window must equal the full
+retention. The rustdoc and `docs/06-limits.md` say `O(ledger rows)` reads and
+`O(1)` retained.
+
+**Rejected.** The plan's "scan `newest_complete` backward and stop at the
+first complete match". `newest_complete` picks the BEST complete run, not the
+newest, so stopping early would change which run `cli top` reports. It is left
+as one O(1)-memory pass, and the limit says so. A secondary index, for per-request
+O(1). The ledger is one append-only array whose path is its index, and an
+index file is a second store to keep in step.
