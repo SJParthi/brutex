@@ -7941,8 +7941,7 @@ mod tests {
         for (slot, ended) in shapes.into_iter().enumerate() {
             let mut cell = Cell::default();
             count_exit(&mut cell, ended);
-            let mut want = [0; 5];
-            want[slot] = 1;
+            let want: [u64; 5] = std::array::from_fn(|i| u64::from(i == slot));
             assert_eq!(
                 counters(&cell),
                 want,
