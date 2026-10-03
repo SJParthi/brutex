@@ -53472,7 +53472,10 @@ loudly or refuse, never silently.
 drives the three arms with the host's own errors (ENOSPC, EIO), then drives
 the refusal end to end through a `serve.lock` symlinked to `/dev/full`, where
 every write fails and no length can be set, and checks that the same store is
-taken at once with a regular lock file in its place. APIC-07.
+taken at once with a regular lock file in its place. APIC-07. The WARN arm's
+`emit` is the one site the suite cannot reach (a write that fails while
+emptying the same descriptor succeeds); `api::emitted`'s accounting names it
+in its unreachable list, 60 -> 61 lib sites.
 
 **Rejected.** Refusing on any stamp failure: the lock is correctly held and
 an emptied file is truthful, so refusing would turn an attribution problem
