@@ -18987,19 +18987,50 @@ struct Unadmitted<'a> {
 }
 
 /// Child preparation must succeed before a no-selection parent can be public.
+///
+/// The same commit protocol as `record_all_attempt` (D-1745): the process-wide
+/// `LEDGER` mutex and the cross-process result-set lock are held from the
+/// first child to the ledger row, and the directory barrier makes the
+/// children's names durable before the row can advertise them.
 fn record_unadmitted(
     into: Recording<'_>,
     id: &runner::identity::RunId,
     what: &Unadmitted<'_>,
 ) -> Result<String, String> {
-    let (frontier, rows) =
-        record_frontier(into.root, id, what.by_evidence, what.rules, what.priced)?;
-    let receipt = ensure_detail_receipt(into.root, id.bytes(), rows, 0, Direction::Long)?;
-    let (summary, _) = record_swept_run(into, id, what.sweep, what.bars, what.min_hits)?;
-    Ok(format!(
-        "\nNo final screened candidate was admitted, so no trade was selected. \
-        The {rows} retained frontier row(s), explicit zero-trade receipt and sweep summary are recorded.\n{frontier}{receipt}{summary}"
-    ))
+    let Ok(_guard) = LEDGER.lock() else {
+        return Err(
+            "the process-wide result-set lock was poisoned. No new ledger commit was attempted."
+                .to_owned(),
+        );
+    };
+    let cross_process = ResultSetLock::acquire(into.root)
+        .map_err(|why| format!("{why}. No detail block or ledger row was attempted."))?;
+    let committed = (|| {
+        let (frontier, rows) =
+            record_frontier(into.root, id, what.by_evidence, what.rules, what.priced)?;
+        let receipt = ensure_detail_receipt(into.root, id.bytes(), rows, 0, Direction::Long)?;
+        confirm_result_directory(into.root).map_err(|why| {
+            format!("the prepared detail names were not durably confirmed: {why}. No ledger commit was attempted.")
+        })?;
+        let (summary, _) = record_swept_run(into, id, what.sweep, what.bars, what.min_hits)?;
+        Ok::<_, String>(format!(
+            "\nNo final screened candidate was admitted, so no trade was selected. \
+            The {rows} retained frontier row(s), explicit zero-trade receipt and sweep summary are recorded.\n{frontier}{receipt}{summary}"
+        ))
+    })();
+    match (committed, cross_process.0.release()) {
+        (committed, Ok(())) => committed,
+        (Ok(mut report), Err(store::flock::Unreleased { why, .. })) => {
+            let _ = writeln!(
+                report,
+                "  WARNING: the result-set writer lock could not be released: {why}. Closing the handle also releases it, but that release was not confirmed by the explicit call."
+            );
+            Ok(report)
+        }
+        (Err(cause), Err(store::flock::Unreleased { why, .. })) => Err(format!(
+            "{cause}; the result-set writer lock could not be released either: {why}"
+        )),
+    }
 }
 
 fn audit_bars(

@@ -53557,3 +53557,27 @@ leaving the file untouched. Exactly the ceiling is admitted. The cost is one
 writes bytes the operator's bound forbade and then has to undo them.
 
 Invariant DUR-C-09.
+
+### D-1745 — `record_unadmitted` commits under both result-set locks and the directory barrier — 2026-10-03
+
+**Finding.** GAP11-3, `crates/cli/src/lib.rs` `record_unadmitted`.
+
+**What was wrong.** Every other result-set commit
+(`record_all_attempt`) holds the process-wide `LEDGER` mutex and the
+cross-process `ResultSetLock` from its first child to its ledger row, and
+calls `confirm_result_directory` before the row. `record_unadmitted`
+called `record_frontier`, `ensure_detail_receipt` and `record_swept_run`
+with none of the three, so a concurrent writer could interleave its own
+children and row with these, and a power loss could keep the ledger row
+while losing a child's directory entry.
+
+**The decision.** `record_unadmitted` takes `LEDGER.lock()` (a poisoned
+mutex is a named refusal), then `ResultSetLock::acquire`, then prepares the
+frontier and the receipt, calls `confirm_result_directory`, and only then
+appends the ledger row. The lock is released by name; a failed release adds
+a warning to a committed report and is appended to a refusal.
+
+**Rejected.** Calling `record_all_attempt` with an empty trade set: it
+writes a trades block and a selected direction this path has none of.
+
+Invariants DUR-C-10 and DUR-C-11.

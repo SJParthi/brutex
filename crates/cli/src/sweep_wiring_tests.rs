@@ -985,3 +985,90 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
     assert!(names_a_rate("Selection V7"));
     assert!(!names_a_rate("(D-0509, D-0525, D-0681) Selection V6"));
 }
+
+/// GAP11-3: `record_unadmitted` published its frontier, receipt and ledger
+/// row with neither the process-wide `LEDGER` mutex nor the cross-process
+/// result-set lock, and with no directory barrier before the ledger row. Every
+/// other result-set commit holds both locks and confirms the directory first.
+/// A writer holding the result-set lock must keep this commit from writing a
+/// single child until it releases. D-1745.
+#[test]
+fn an_unadmitted_commit_waits_for_the_result_set_writer_lock() {
+    let id = id();
+    let scored = runner::rank::Scored {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the public scored type supplies the mask type"
+        )]
+        mask: Default::default(),
+        hits: 1,
+        edge: runner::outcome::Edge::default(),
+    };
+    let sweep = engine::keep::Streamed::default();
+    let priced = std::collections::HashMap::new();
+    let retained = [&scored];
+    let what = super::Unadmitted {
+        sweep: &sweep,
+        bars: 1,
+        min_hits: 1,
+        by_evidence: &retained,
+        rules: Rules::BASELINE,
+        priced: &priced,
+    };
+    let root = root();
+    let held = super::ResultSetLock::acquire(&root).expect("the competing writer locks");
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let into = options(&root).recording.expect("fixture recording target");
+            done_tx
+                .send(super::record_unadmitted(into, &id, &what))
+                .expect("the waiting test receives the outcome");
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the unadmitted commit finished while another writer held the result set"
+        );
+        assert!(
+            !super::frontier::Frontier::path(&root).exists(),
+            "no child was prepared under another writer's lock"
+        );
+        assert!(!super::results::Results::path(&root).exists());
+        held.0.release().expect("the competing writer unlocks");
+        let report = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the commit proceeds once the lock is free")
+            .expect("the unadmitted commit records");
+        assert!(report.contains("No final screened candidate was admitted"));
+    });
+    assert!(super::results::Results::path(&root).is_file());
+    assert!(super::frontier::Frontier::path(&root).is_file());
+}
+
+/// The unadmitted commit names both locks before its first child and the
+/// directory barrier between its receipt and its ledger row, in that order.
+#[test]
+fn the_unadmitted_commit_takes_both_locks_and_the_directory_barrier_in_order() {
+    let source = include_str!("lib.rs");
+    let body = source
+        .split_once("\nfn record_unadmitted(")
+        .and_then(|(_, after)| after.split_once("\n}\n"))
+        .map(|(body, _)| body)
+        .expect("record_unadmitted remains one function");
+    let at = |needle: &str| {
+        body.find(needle)
+            .expect("record_unadmitted names every step")
+    };
+    let order = [
+        at("LEDGER.lock()"),
+        at("ResultSetLock::acquire(into.root)"),
+        at("record_frontier("),
+        at("ensure_detail_receipt("),
+        at("confirm_result_directory(into.root)"),
+        at("record_swept_run("),
+        at(".release()"),
+    ];
+    assert!(order.is_sorted(), "persistence order {order:?}");
+}
