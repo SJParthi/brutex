@@ -653,8 +653,13 @@ impl WindowExtremes {
             return None;
         }
         // BACKWARDS: start again at `lo`. A right end before the last pushed
-        // bar cannot be served by popping.
-        if hi.saturating_add(1) < self.next {
+        // bar, `next - 1`, cannot be served by popping. The test is
+        // `next >= hi + 2` as a `checked_sub` (D-1455): spelled
+        // `hi + 1 < next`, its `<` could become `<=` unobserved, because at
+        // `hi == next - 1` a rebuild from `lo` and no rebuild give the same
+        // extremes, at different cost. `hi + 2` cannot saturate: a `hi` past
+        // the slice was refused above.
+        if self.next.checked_sub(hi.saturating_add(2)).is_some() {
             self.highs.clear();
             self.lows.clear();
             self.next = lo;

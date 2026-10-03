@@ -54678,9 +54678,9 @@ figures remain estimates: a job with several slow or hanging cases can still
 reach 240 minutes, and if the account runs fewer than 20 jobs at once the rest
 queue rather than fail.
 
-### D-1455 — Kill five more Gate 18 survivors: one missing test, four equivalent mutants removed by restructuring — 2026-10-03
+### D-1455 — Kill seven Gate 18 mutants: two by a missing test, five equivalent ones removed by restructuring — 2026-10-03
 
-**Finding.** Gate 18 (cargo-mutants 26.2.0) reported five survivors in
+**Finding.** Gate 18 (cargo-mutants 26.2.0) reported six surviving mutants in
 `runner` and `vocab` after D-1452.
 
 **Two were a missing test.** `grid::per_trade` -> `Some((Default::default(), vec![]))`
@@ -54696,7 +54696,8 @@ reach neither door. It requires at least one traded cell, so it cannot pass
 vacuously. Each mutant was applied by hand and the test failed; on the real
 code it passes.
 
-**Four were equivalent, and no test can kill those (D-0192).**
+**Five were equivalent, and no test can kill those (D-0192).** Four were
+reported; the fifth sat on a line this change touches.
 
 - `outcome::WindowExtremes::over`'s second reset clause, `|| lo > self.next`,
   survived as `==` and as `>=`. Each was applied by hand and the 162
@@ -54708,6 +54709,14 @@ code it passes.
   the existing front pops discard each once: still O(1) amortised per query.
   The window test now asserts after every out-of-order query, the jump among
   them, that the deques hold only indices inside the window.
+- **Found while verifying, not reported by Gate 18:** the remaining reset
+  clause, `hi + 1 < self.next`, survives as `<=` the whole `runner` suite
+  (697 lib tests and every integration test, applied by hand). At
+  `hi == next - 1` a rebuild from `lo` and no rebuild give the same extremes.
+  This commit touches the line, so the in-diff gate would plan it. It is now
+  `self.next.checked_sub(hi.saturating_add(2)).is_some()`, the same
+  `next >= hi + 2` with no operator; `hi + 2` cannot saturate because a `hi`
+  past the slice is refused first.
 - `vocab::expression::Expression::evaluate` matched the `usize` from
   `scratch_slots` against `SHALLOW_SLOTS`, `MIDDLE_SLOTS` and `_`. Deleting
   either named arm ran that program on the 576-slot deep stack, which answers
@@ -54718,8 +54727,9 @@ code it passes.
   one fact; and `scratch_slots`, now unused outside its test, is removed in
   favour of `Tier::of(len).slots()`, which the same boundaries pin in
   `the_scratch_stack_is_sized_to_the_program_and_the_deepest_still_evaluates`.
-  `cargo mutants -p vocab` over `Tier`, `scratch_slots` and `evaluate`: 16
-  mutants, 14 caught, 2 unviable.
+  `cargo mutants -p vocab` over `Tier` and `evaluate` on the final tree: 14
+  mutants, 12 caught, 2 unviable (`Default::default()` for `Tier::of` and
+  `evaluate`; neither type implements `Default`).
 
 **Rejected.** A test that observes which stack width ran. The width is a cost
 contract (`4.5 * len + 8` slots cleared), but observing it would need a
