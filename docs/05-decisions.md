@@ -53466,3 +53466,23 @@ field (OHLC, spot, strike), through `RollingError::NotAPrice`. `0`, `0.00` and
 
 **What it changes.** Only cells that are negative or sub-half-paisa non-zero,
 which now refuse instead of landing. No run identity term moves.
+
+### D-1493 — The request-minute coverage audit floors each stamp to its minute, and states its uncapped output — 2026-10-03
+
+**What was observed (c4a-4, W1-pull3-4).** `request_minutes::audit` compared
+raw stamps against a minute cursor and counted a gap as `(to - from) / 60`.
+A stamp such as 09:15:59 opened a gap of 0 minutes and moved the cursor to
+09:16:59, so a real missing 09:16 before a 09:17:00 row was reported as
+"0 missing scheduled minutes". Its only caller, `ingest::from_window`,
+refuses an off-grid stamp first, so shipped input is aligned and no shipped
+report was wrong; the function was correct only because of that call order.
+Separately, its cost header said O(rows + days + gaps) with no limits entry,
+and each gap is one `String`, one `Failure` and one telemetry event, uncapped.
+
+**The decision.** Each stamp is floored to its minute (`div_euclid(60) * 60`)
+before any comparison, so a stamp counts as the minute it falls in. The
+uncapped output is stated in `docs/06-limits.md` rather than capped: a cap
+would hide which minutes are missing, and the bound is already set by the
+session length.
+
+**What it changes.** Nothing for aligned input. No run identity term moves.

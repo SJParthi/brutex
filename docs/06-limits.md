@@ -13911,3 +13911,14 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Audit fixer 2 follow-ups — D-1490 onward, 3 October 2026
+
+- **The request-minute coverage audit's output is not capped (W1-pull3-4,
+  D-1493).** `pull::ingest::request_minutes::audit` walks the rows once and
+  each civil day once: O(rows + days + gaps). Each gap is one `String`, one
+  `Failure` and one `pull.request_minutes` telemetry event. Gaps alternate
+  with held minutes, so a day yields at most about half its scheduled
+  minutes (188 for a 375-minute session), and a window of D sessions at most
+  about 188·D. A cap was rejected because it would hide which minutes are
+  missing. Not timed: no bench covers it.
