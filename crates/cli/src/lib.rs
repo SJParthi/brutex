@@ -17197,7 +17197,7 @@ fn record_trades(
             format!("  {written} trade(s) prepared and synced for this run\n")
         }
         Ok(Prepared::Reused(written)) => format!(
-            "  {written} trade(s) from an interrupted attempt were byte-verified and reused\n"
+            "  {written} trade(s) already present for this exact run identity were byte-verified and reused\n"
         ),
         Ok(Prepared::Empty) => String::new(),
         Err(why) => return Err(why),
@@ -17255,8 +17255,16 @@ fn record_frontier(
     // is measured in `measure_top` over the report's own rows and is not in
     // hand at this call site; using the money keys alone is the closest
     // faithful ordering rather than a second invented one.
-    let mut ordered: Vec<&&runner::rank::Scored> = by_evidence.iter().collect();
-    ordered.sort_by_key(|scored| {
+    //
+    // # Each key once, and only the written rows ordered (W2-cli8-3, D-1728)
+    //
+    // This was `ordered.sort_by_key(..)` over every retained row and then
+    // `take(top)`: O(K log K) KEY EVALUATIONS, each a map probe plus
+    // `rules.admits` (a Wilson square root) plus two ratios, to write `top`
+    // rows. `first_accepted_in_order` evaluates each key once and orders only
+    // the prefix it writes; the rows and their order are unchanged, because the
+    // evidence position is the final key and the old sort was stable.
+    let money_key = |scored: &&runner::rank::Scored| {
         // PASS LEADS HERE TOO, matching the report's own order. A row the report
         // ranks first because it cleared the policy must not appear ninth on the
         // page; that divergence is the defect this whole function was rewritten
@@ -17281,7 +17289,7 @@ fn record_frontier(
                 )
             },
         )
-    });
+    };
     // ONE ROW PER RESULT, and this is what a "top ten" was actually returning.
     //
     // MEASURED, on the first 60-minute run that published a frontier at all:
@@ -17301,8 +17309,8 @@ fn record_frontier(
     // sweep ranked highest. UNPRICED rows are never folded together -- they have
     // no result yet, so identical zeros mean "not measured", not "the same".
     let mut seen: std::collections::HashSet<(u64, u64, i64, i64, i64, i64)> =
-        std::collections::HashSet::with_capacity(ordered.len());
-    ordered.retain(|scored| {
+        std::collections::HashSet::with_capacity(by_evidence.len());
+    let distinct = |scored: &&runner::rank::Scored| {
         priced.get(&scored.mask.words()).is_none_or(|(cell, _)| {
             seen.insert((
                 cell.trades,
@@ -17313,10 +17321,10 @@ fn record_frontier(
                 cell.gross_loss,
             ))
         })
-    });
+    };
+    let ordered = first_accepted_in_order(by_evidence, top, money_key, distinct);
     let rows: Vec<frontier::Row> = ordered
         .iter()
-        .take(top)
         .enumerate()
         .filter_map(|(at, scored)| {
             // A rank past `u16` is a `top` nobody typed -- the argument is
@@ -17342,7 +17350,7 @@ fn record_frontier(
             format!("\n  frontier: {written} of {kept} ranked combination(s) prepared and synced\n")
         }
         Ok(Prepared::Reused(reused)) => format!(
-            "\n  frontier: {reused} of {kept} ranked combination(s) from an interrupted attempt were byte-verified and reused\n"
+            "\n  frontier: {reused} of {kept} ranked combination(s) already present for this exact run identity were byte-verified and reused\n"
         ),
         Ok(Prepared::Empty) => {
             format!("\n  frontier: 0 of {kept} ranked combination(s); no block was required\n")
@@ -17350,6 +17358,63 @@ fn record_frontier(
         Err(why) => return Err(why),
     };
     Ok((report, u64::try_from(rows.len()).unwrap_or(u64::MAX)))
+}
+
+/// The first `top` items of `items` that `accept` admits, visited in ascending
+/// `key` order with ties in input order, each key evaluated exactly ONCE.
+///
+/// Equal, row for row, to a stable sort of every item by `key`, a `retain` of
+/// `accept` in that order, and `take(top)` -- which is what `record_frontier`
+/// did -- without ordering the rows it never writes (W2-cli8-3, D-1728).
+/// `accept` is called in that same order and stops once `top` are admitted, so
+/// a stateful `accept` such as a dedup set sees exactly the prefix it saw
+/// before.
+///
+/// # Cost
+///
+/// `K` key evaluations and `O(K)` memory for the `(key, position)` pairs.
+/// Each round selects the next `window` smallest in `O(remaining)` and sorts
+/// only them; the window starts at `top` and doubles, so with few rejections it
+/// is `O(K + top log top)`. When `accept` rejects most of what it is shown the
+/// rounds number `O(log(K / top))`, bounding the whole at `O(K log K)`
+/// comparisons of precomputed keys -- the old cost, without its key work.
+fn first_accepted_in_order<'t, T, K: Ord>(
+    items: &'t [T],
+    top: usize,
+    mut key: impl FnMut(&T) -> K,
+    mut accept: impl FnMut(&T) -> bool,
+) -> Vec<&'t T> {
+    let mut keyed: Vec<(K, usize)> = items
+        .iter()
+        .enumerate()
+        .map(|(at, item)| (key(item), at))
+        .collect();
+    let mut out: Vec<&'t T> = Vec::with_capacity(top.min(items.len()));
+    let mut rest: &mut [(K, usize)] = &mut keyed;
+    let mut window = top;
+    while out.len() < top && !rest.is_empty() {
+        let cut = window.min(rest.len());
+        if let Some(last) = cut.checked_sub(1)
+            && cut < rest.len()
+        {
+            rest.select_nth_unstable(last);
+        }
+        let (head, tail) = core::mem::take(&mut rest).split_at_mut(cut);
+        head.sort_unstable();
+        for (_, at) in head.iter() {
+            if out.len() == top {
+                break;
+            }
+            if let Some(item) = items.get(*at)
+                && accept(item)
+            {
+                out.push(item);
+            }
+        }
+        rest = tail;
+        window = window.saturating_mul(2);
+    }
+    out
 }
 
 /// Writes or byte-verifies the fixed-stride receipt that names both detail
@@ -17376,7 +17441,7 @@ fn ensure_detail_receipt(
             result_set::TradePolicy::ChosenGridV1.as_str()
         ),
         result_set::Prepared::Reused => format!(
-            "  interrupted detail receipt byte-verified and reused: frontier={frontier_rows}, chosen trades={trade_rows}, direction={direction}, policy={}\n",
+            "  detail receipt already present for this exact run identity, byte-verified and reused: frontier={frontier_rows}, chosen trades={trade_rows}, direction={direction}, policy={}\n",
             result_set::TradePolicy::ChosenGridV1.as_str()
         ),
     })

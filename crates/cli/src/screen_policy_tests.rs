@@ -613,3 +613,103 @@ fn the_parallel_band_matches_a_sequential_measurement() {
         }
     }
 }
+/// GAP13-14. An exact rerun reuses its detail receipt and must not call that
+/// receipt the leftover of an interrupted attempt.
+#[test]
+fn an_exact_rerun_does_not_claim_an_interrupted_attempt() {
+    let root = verification_scratch().expect("a private scratch root");
+    let identity = [0x5a; 32];
+    let first = ensure_detail_receipt(&root, identity, 1, 1, Direction::Short)
+        .expect("the first receipt is written");
+    assert!(first.contains("prepared and synced"), "{first}");
+    let again = ensure_detail_receipt(&root, identity, 1, 1, Direction::Short)
+        .expect("the exact rerun reuses it");
+    assert!(again.contains("byte-verified and reused"), "{again}");
+    assert!(!again.contains("interrupted"), "{again}");
+    for head in [
+        "\nfn record_trades(",
+        "\nfn record_frontier(",
+        "\nfn ensure_detail_receipt(",
+    ] {
+        assert!(!code_of(head).contains("interrupted"), "{head}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// W2-cli8-3. The frontier commit evaluates each row's key once and orders
+/// only what it writes.
+#[test]
+fn the_frontier_commit_does_not_sort_every_retained_row() {
+    let frontier = code_of("\nfn record_frontier(");
+    assert!(!frontier.contains("sort_by_key("), "{frontier}");
+}
+
+/// What `record_frontier` did: a stable sort of everything by key, a `retain`
+/// of `accept` in that order, then `take(top)`.
+fn sort_everything(items: &[(u8, u8)], top: usize, seen_limit: u8) -> Vec<&(u8, u8)> {
+    let mut ordered: Vec<&(u8, u8)> = items.iter().collect();
+    ordered.sort_by_key(|item| item.0);
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    ordered.retain(|item| item.1 >= seen_limit || seen.insert(item.1));
+    ordered.into_iter().take(top).collect()
+}
+
+/// W2-cli8-3. Selecting the written prefix gives the old full sort's rows, in
+/// its order, over keys full of ties and an `accept` full of rejections --
+/// with every key evaluated exactly once.
+#[test]
+fn the_frontier_prefix_equals_the_full_sort_with_each_key_once() {
+    // A fixed linear congruential stream: reproducible without a dependency.
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u8::try_from((state >> 33) % bound).unwrap_or(0)
+    };
+    for case in 0..400_u64 {
+        let len = usize::from(next(60));
+        // Few distinct keys, so ties are everywhere; `.1` below `seen_limit` is
+        // a "priced result" folded by the dedup set, at or above it "unpriced".
+        let items: Vec<(u8, u8)> = (0..len).map(|_| (next(6), next(12))).collect();
+        let top = usize::from(next(20));
+        let seen_limit = next(13);
+        let want = sort_everything(&items, top, seen_limit);
+        let mut keys = 0_usize;
+        let mut seen = std::collections::HashSet::with_capacity(items.len());
+        let got = first_accepted_in_order(
+            &items,
+            top,
+            |item| {
+                keys += 1;
+                item.0
+            },
+            |item| item.1 >= seen_limit || seen.insert(item.1),
+        );
+        assert_eq!(keys, items.len(), "case {case}: each key once");
+        assert_eq!(
+            got.iter()
+                .map(|item| std::ptr::from_ref(*item))
+                .collect::<Vec<_>>(),
+            want.iter()
+                .map(|item| std::ptr::from_ref(*item))
+                .collect::<Vec<_>>(),
+            "case {case}: the same rows in the same order, ties by position"
+        );
+    }
+    // The edges by name: nothing to order, nothing asked, more asked than held,
+    // every key equal, and every row rejected.
+    let none: [(u8, u8); 0] = [];
+    assert!(first_accepted_in_order(&none, 5, |item| item.0, |_| true).is_empty());
+    let items = [(3_u8, 0_u8), (1, 1), (2, 2), (1, 3)];
+    assert!(first_accepted_in_order(&items, 0, |item| item.0, |_| true).is_empty());
+    let all = first_accepted_in_order(&items, 9, |item| item.0, |_| true);
+    assert_eq!(all, [&items[1], &items[3], &items[2], &items[0]]);
+    let equal = first_accepted_in_order(&items, 3, |_| 0_u8, |_| true);
+    assert_eq!(
+        equal,
+        [&items[0], &items[1], &items[2]],
+        "ties keep input order"
+    );
+    assert!(first_accepted_in_order(&items, 2, |item| item.0, |_| false).is_empty());
+}

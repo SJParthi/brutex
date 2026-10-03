@@ -53614,3 +53614,36 @@ fallback that hides the request, which §4 bans. Carrying each row's grid from
 the priced pass instead of rebuilding it. That keeps every priced row's grid
 resident, which is the memory the bounded heap exists to avoid. The rebuild
 per row is inherent to that trade.
+
+### D-1728 — The frontier commit evaluates each key once and orders only the rows it writes; a rerun no longer says "interrupted" — 2026-10-03
+
+**Findings.** W2-cli8-3 (low cost) and GAP13-14 (low doc-false).
+
+**What was wrong.** `record_frontier` ran `sort_by_key` over every retained
+row (`K <= audit_keep()`, up to 10,000,000) and then `take(top)`. The key is
+recomputed on every comparison: a map probe, `rules.admits` (a Wilson square
+root) and two ratios. That is O(K log K) key evaluations to write `top` rows.
+Gate 11's reason said these rows were "capped before it is ordered". They were
+capped after. Separately, all three `Reused` branches, for trades, frontier
+and detail receipt, said the rows came "from an interrupted attempt". An exact
+rerun of a completed audit reuses them too, so a routine idempotent rerun
+reported an interruption that never happened.
+
+**The decision.** `first_accepted_in_order` builds `(key, position)` once per
+row: K evaluations. It then repeats one step: `select_nth_unstable` the next
+`window` smallest, sort only that window, and feed it in order to the dedup
+`accept` until `top` are admitted. The window starts at `top` and doubles. The
+position is the last key, so ties keep evidence order, exactly as the old
+stable sort did, and the written rows are the same rows in the same order.
+That is checked against the old sort-retain-take over 400 generated cases full
+of ties and rejections, with each key counted once. The cost is
+`O(K + top log top)` when few rows are rejected, and at worst `O(K log K)`
+comparisons of precomputed keys. The three reuse messages now say "already
+present for this exact run identity", which is true after an interruption
+and after a completed run alike. Gate 11's sort count for `cli/src/lib.rs`
+goes from 7 to 8. The reason is recorded in `docs/06-limits.md`.
+
+**Rejected.** `sort_by_cached_key`. It removes the repeated key work but still
+orders all K rows. Passing in `Results::holds` to choose between "recorded
+run" and "interrupted attempt". That is one more ledger open per commit to
+choose a word, and the neutral sentence is true in both cases.

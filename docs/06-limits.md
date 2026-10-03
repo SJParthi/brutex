@@ -13355,6 +13355,14 @@ SEVEN MORE ROWS, EACH TRACED RATHER THAN INFERRED:
     `#[cfg(test)] fn` kept as the oracle the prefix cadence must end
     on. This scanner drops `#[cfg(test)] mod` blocks, not a
     `#[cfg(test)]` fn, so it still counts a line no build runs.
+  cli/lib.rs 7 -> 8 -- D-1728, W2-cli8-3. `record_frontier`'s
+    `sort_by_key` over every retained row went, and
+    `first_accepted_in_order` brought two: `select_nth_unstable` cuts the
+    next window of `(key, position)` pairs, and `sort_unstable` orders
+    only that window. The window starts at the page size `top` and
+    doubles only while the dedup rejects rows, so what is ordered is the
+    written page plus what was rejected to fill it, never the
+    unselected rest of the K retained rows.
 ~~~~
 
 ### Gate 11 — rule 5. CLAUDE.md section 4: refuse, never die.
@@ -13951,3 +13959,11 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   byte-identical to the sequential loop. The rebuild per row is inherent:
   carrying each priced row's grid would keep up to `screen_cap()` grids
   resident.
+
+- **`record_frontier`, per result commit** (W2-cli8-3, D-1728). There are `K`
+  key evaluations (`K <= audit_keep()`) and `O(K)` memory for the
+  `(key, position)` pairs. `first_accepted_in_order` selects and orders only
+  the rows it writes: `O(K + top log top)` when the dedup rejects few rows, and
+  at worst `O(K log K)` comparisons of precomputed keys, over `O(log(K / top))`
+  doubling rounds. Before D-1728 it was `O(K log K)` key EVALUATIONS, each a
+  map probe plus a Wilson bound.
