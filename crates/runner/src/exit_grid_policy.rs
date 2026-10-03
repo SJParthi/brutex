@@ -2773,11 +2773,23 @@ impl ResolvedExitGridV1 {
         }
         let series = oos.series();
         self.require_matching_series(series)?;
-        oos_run.require_matches(series, selected.side)?;
+        // ONE BLAKE3 PASS OVER THE OOS BARS, NOT TWO (c4a-5, D-1495). This
+        // called `require_matches`, which digests the bars, and then digested
+        // the same bars again for `oos_data_digest` below. The digest is the
+        // same value either way and the checks run in the same order, so the
+        // refusal reported for a faulty input does not change.
+        let bars = series.bars();
+        let oos_data_digest = crate::identity::data_digest(bars);
+        oos_run.require_matches_terms(
+            series.instrument(),
+            hash(series.feed().as_bytes()),
+            hash(series.commit().as_bytes()),
+            oos_data_digest,
+            selected.side,
+        )?;
         if oos_run.mask != selected.mask {
             return Err(ExitGridErrorV1::RunIdentityMismatch("mask"));
         }
-        let bars = series.bars();
         validate_execution_bars(bars)?;
         let first_oos = oos.first_oos();
         let first_test_stamp = bars.get(first_oos).map(|bar| bar.ts_micros).ok_or(
@@ -2835,7 +2847,6 @@ impl ResolvedExitGridV1 {
             facts,
         )?;
         let cell = replay.cell;
-        let oos_data_digest = crate::identity::data_digest(bars);
         let column_digest = digest_column(column);
         let digest = digest_replay_universe(
             oos_run.run_id,
@@ -7115,9 +7126,21 @@ mod tests {
             &execution,
         )
         .expect("the canonical OOS run");
+        crate::identity::DATA_DIGESTS.with(|count| count.set(0));
         let universe = resolved
             .replay_selected_universe(oos, &execution_column, &selected, run)
             .expect("pricing refusals remain conservative occupancy evidence");
+        assert_eq!(
+            crate::identity::DATA_DIGESTS.with(std::cell::Cell::get),
+            1,
+            "one replay hashes its OOS bars once, not once for the run check and \
+             again for the replay digest (c4a-5, D-1495)"
+        );
+        assert_eq!(
+            universe.oos_data_digest,
+            crate::identity::data_digest(&execution),
+            "and the digest it carries is still the digest of those bars"
+        );
 
         assert!(universe.digest_is_valid());
         assert_eq!(universe.require_integrity(), Ok(()));

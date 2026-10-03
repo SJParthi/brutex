@@ -53517,3 +53517,21 @@ change stored bytes for a pathological input, so it is left to a decision
 that owns those crates.
 
 **What it changes.** Comments, one test and a limits entry. No code path.
+
+### D-1495 — An OOS universe replay hashes its execution bars once — 2026-10-03
+
+**What was observed (c4a-5).** `ResolvedExitGridPolicyV1::replay_selected_universe_with`
+called `ExecutionRunV1::require_matches`, which runs `identity::data_digest`
+over the OOS bars, and then ran `data_digest` over the same bars again for the
+replay's `oos_data_digest`. The global-replay callers run it once per selected
+candidate, so every candidate paid two BLAKE3 passes over its OOS series
+where one gives both answers. The D-1184 and D-1190 limits entries named the
+per-call slice facts and attestation, not this repeat.
+
+**The decision.** The digest is computed once, before the run checks, and
+handed to `require_matches_terms`, the door that already exists for callers
+holding a digest. The checks run in the same order on the same values.
+
+**What it changes.** One pass per call instead of two. The digest, the run
+checks, the refusal reported for a faulty input and every output byte are
+unchanged.
