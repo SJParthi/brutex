@@ -54609,3 +54609,58 @@ reads the three handlers and refuses any `audit_one`, `audit_cash_schedule`,
 **Not changed.** The wall-clock cost of these reads is not measured. Holding
 one calendar slot for a whole range audit means a long range can make the
 calendar route answer 429 sooner; that is a bound, stated, not a queue.
+
+### D-1643 — Global Replay V4 enforces each stream's frozen exit-quality ceilings, as V1 did — 2026-10-03
+
+**What was wrong (GAP15-19).** Global Replay V1 summed the ambiguous bars and
+gap fills of every trade the global scheduler admitted for a stream and
+refused the replay when either sum passed the frozen exit policy's
+`max_ambiguous_bars` / `max_gap_fills`. V4 checked each row only
+(`ambiguous_bars() > 1 || gap_fills() > 1`) and kept no sum, so a replay could
+publish a stream with more ambiguous or gap-filled trades than the policy it
+was selected under allows. D-1638 stated the gap and left it open for this
+decision.
+
+**The rule chosen.** V1's: the replay refuses, naming the stream, its sums and
+its ceilings. Rejecting only later trades of the stream was the alternative
+D-1638 named; it was not chosen because the shared scheduler has already
+given the trade global occupancy when its quality is known, so dropping it
+afterwards would leave occupancy and money disagreeing — the same reason V1
+refused.
+
+**The change.**
+
+- `runner::exit_grid_policy::GlobalReplayWitnessUniverseV1` carries the two
+  ceilings, taken from the same resolved grid's policy that replays the
+  universe, with accessors, and seals them: the witness seal domain is now
+  `global-replay-witness-universe.v2`. That seal is in memory only, never
+  persisted, so no stored byte changes with it.
+- `cli::global_replay_v4` keeps one `StreamQuality` per stream, indexed by
+  the stream number every `Attempt` already carries. `account_decision`
+  adds each admitted priceable trade in O(1) with checked arithmetic and
+  refuses past either ceiling. Blocked trades and admitted price-refused
+  holds add nothing, as in V1.
+- The plan identity domain is `brutex-global-replay-v4-plan-v2`. The plan
+  identity names the durable `sweep_evidence` attempt, so an attempt run
+  under the old rule and one run under this rule never share an identity
+  while possibly ending differently.
+
+**Which results change.** A replay in which some stream's admitted trades sum
+past either frozen ceiling, which published before, now refuses with no
+publication. Every replay that does not reach a ceiling publishes the same
+bytes as before: the header, roster, witness, candidate, decision, VIX and
+completion records, the economic `replay_id` and the `publication_id` are all
+unchanged, because the ceilings gate the replay and are not written into it.
+A V4 publication already on disk is never read without recomputation (the
+store only verifies a fresh commit's own bytes), so a file published under
+the old rule is not reinterpreted; rerunning it either reproduces it or
+refuses. Global Replay V3 still checks per row only; it has no caller
+(`expect(dead_code)`) and is not a production path.
+
+**What it proves.** AGA-01, AGA-02 in `docs/04-invariants.md`:
+`cli::global_replay_v4::tests::admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings`,
+`cli::global_replay_v4::tests::admitted_quality_counts_refuse_on_overflow_instead_of_wrapping`
+and the extended
+`runner::exit_grid_policy::tests::global_replay_witness_mints_every_identity_at_the_authenticated_replay_door`.
+The stored-origin test now schedules under the real ceilings its witness was
+sealed with.

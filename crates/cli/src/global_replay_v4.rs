@@ -2,6 +2,9 @@
 //! Actual zero-through-25 prefixes replace V3's mandatory 200-winner topology.
 //! V1/V2/V3 files are never opened. No loose caller-authored replay row is an
 //! authority. The shared Runner scheduler owns inclusive global occupancy.
+//! Each stream's globally admitted ambiguous bars and gap fills are summed
+//! against its frozen exit-policy ceilings, and the replay refuses past
+//! either, as V1 did (D-1643).
 //! Whole replay, sorting, authentication and persistence are input-dependent.
 use std::collections::HashMap;
 use std::path::Path;
@@ -285,6 +288,7 @@ fn prepare(
         );
     }
     let mut attempts = Vec::new();
+    let mut quality = Vec::new();
     let mut witnesses = witnesses.into_iter();
     let mut stream = 0_u64;
     for snapshot in snapshots {
@@ -295,6 +299,11 @@ fn prepare(
             let (cohort, stored_witness, replay) = held.into_parts();
             replay.require_integrity().map_err(|why| why.to_string())?;
             let constituent = exact_constituent(snapshot, winner, &replay)?;
+            quality.try_reserve(1).map_err(|why| why.to_string())?;
+            quality.push(StreamQuality::frozen(
+                replay.max_ambiguous_bars(),
+                replay.max_gap_fills(),
+            ));
             push(
                 &mut records,
                 &codec::witness(stream, snapshot, winner, cohort, stored_witness, &replay)?,
@@ -322,7 +331,7 @@ fn prepare(
         root: store_root,
         months: HashMap::new(),
     };
-    let mut audit = schedule(&attempts, &mut records, bounds, &mut vix)?;
+    let mut audit = schedule(&attempts, &mut quality, &mut records, bounds, &mut vix)?;
     audit.witnesses = stream;
     audit.candidates = codec::count(attempts.len())?;
     // Reference-only VIX rows do not enter economic identity.
@@ -490,8 +499,61 @@ impl VixLookup for VixCatalog<'_> {
     }
 }
 
+/// One stream's globally admitted exit quality against its frozen ceilings.
+///
+/// Global Replay V1 summed the ambiguous bars and gap fills of every trade the
+/// global scheduler admitted for a stream and refused the replay when either
+/// passed the frozen exit policy's `max_ambiguous_bars` / `max_gap_fills`.
+/// V3 and V4 checked only each row (`<= 1`), so a stream could publish with
+/// more ambiguous or gap-filled trades than the policy it was selected under
+/// allows (GAP15-19). This restores V1's rule: the ceilings come sealed in
+/// the Runner witness, are indexed by stream, and each admitted priceable
+/// trade adds in O(1). D-1643.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamQuality {
+    max_ambiguous_bars: u64,
+    max_gap_fills: u64,
+    admitted_ambiguous_bars: u64,
+    admitted_gap_fills: u64,
+}
+impl StreamQuality {
+    const fn frozen(max_ambiguous_bars: u64, max_gap_fills: u64) -> Self {
+        Self {
+            max_ambiguous_bars,
+            max_gap_fills,
+            admitted_ambiguous_bars: 0,
+            admitted_gap_fills: 0,
+        }
+    }
+
+    /// Adds one globally admitted priceable trade; refuses past a ceiling.
+    fn absorb(&mut self, stream: u64, price: PriceProjection) -> Result<(), String> {
+        self.admitted_ambiguous_bars = self
+            .admitted_ambiguous_bars
+            .checked_add(price.ambiguous_bars())
+            .ok_or("Global Replay V4 admitted ambiguous-bar count overflow")?;
+        self.admitted_gap_fills = self
+            .admitted_gap_fills
+            .checked_add(price.gap_fills())
+            .ok_or("Global Replay V4 admitted gap-fill count overflow")?;
+        if self.admitted_ambiguous_bars > self.max_ambiguous_bars
+            || self.admitted_gap_fills > self.max_gap_fills
+        {
+            return Err(format!(
+                "Global Replay V4 stream {stream} globally admitted quality {}/{} exceeds its frozen ceilings {}/{} (ambiguous bars/gap fills)",
+                self.admitted_ambiguous_bars,
+                self.admitted_gap_fills,
+                self.max_ambiguous_bars,
+                self.max_gap_fills
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn schedule(
     attempts: &[Attempt],
+    quality: &mut [StreamQuality],
     records: &mut Vec<Record>,
     bounds: GlobalReplayV4Bounds,
     vix: &mut impl VixLookup,
@@ -543,6 +605,7 @@ fn schedule(
             account_decision(
                 attempt,
                 decision.disposition,
+                quality,
                 &mut audit,
                 records,
                 bounds,
@@ -589,6 +652,7 @@ fn schedule_group(
 fn account_decision(
     attempt: &Attempt,
     disposition: Disposition,
+    quality: &mut [StreamQuality],
     audit: &mut GlobalReplayV4Audit,
     records: &mut Vec<Record>,
     bounds: GlobalReplayV4Bounds,
@@ -603,6 +667,11 @@ fn account_decision(
     audit.pricing_refused += u64::from(attempt.candidate.pricing_refused());
     if matches!(disposition, Disposition::Admitted { .. }) {
         if let PathProjection::Priceable(price) = attempt.candidate.path() {
+            usize::try_from(attempt.stream)
+                .ok()
+                .and_then(|stream| quality.get_mut(stream))
+                .ok_or("Global Replay V4 admitted a trade of a stream with no frozen ceilings")?
+                .absorb(attempt.stream, price)?;
             let row = price.row();
             let entry = vix.stamp(attempt.feed, row.entry_micros)?;
             let exit = vix.stamp(attempt.feed, row.exit_micros)?;
