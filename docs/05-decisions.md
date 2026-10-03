@@ -54986,3 +54986,17 @@ publication, although nothing had made it durable. The closure now returns
 wrote nothing (`boolean_candidate_persistence::lost_owner_race`, matched on the
 new `OWNER_REFUSED` prefix). Every other failure of this call propagates. The
 race answer itself is unchanged.
+
+### D-1909 — A checkpoint marker is renamed into place, and a short one is an interrupted reservation — 2026-10-03
+
+CE-3: `search_checkpoint::publish_inner` created `<seq>/complete` under its
+final name and then wrote the 32-byte seal. A kill or ENOSPC between the two
+left a 0-31 byte marker. `discover_through` counted any regular `complete` as
+acknowledged and made it `latest`, and `read_saved` then refused "marker
+width mismatch" on every resume, forever. The marker is now written as
+`complete.writing`, synced, and renamed to `complete` before the directory
+barrier, so a crash leaves only a scratch name nothing reads. Discovery counts
+a regular `complete` shorter than 32 bytes, left by an older build, as
+interrupted, so `latest` is the newest whole checkpoint and the resume takes
+the next sequence. A whole-width marker that disagrees with its payload is
+still refused, not skipped.

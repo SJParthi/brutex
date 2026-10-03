@@ -260,11 +260,19 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
-        let mut marker = File::create_new(directory.join("complete")).map_err(error)?;
+        // WRITTEN UNDER A SCRATCH NAME AND RENAMED (CE-3, D-1909). Created
+        // under its final name, a kill or ENOSPC between create and write left
+        // a 0-31 byte `complete` that discovery made `latest`, and every later
+        // resume refused "marker width mismatch" forever. A crash now leaves
+        // only `complete.writing`, which nothing reads: the reservation is
+        // interrupted and the next publication takes a new sequence.
+        let writing = directory.join("complete.writing");
+        let mut marker = File::create_new(&writing).map_err(error)?;
         marker
             .write_all(&seal)
             .and_then(|()| marker.sync_all())
             .map_err(error)?;
+        fs::rename(&writing, directory.join("complete")).map_err(error)?;
         File::open(&directory)
             .map_err(error)?
             .sync_all()
@@ -455,6 +463,16 @@ fn discover_through(
             continue;
         }
         match fs::symlink_metadata(entry.path().join("complete")) {
+            // A SHORT MARKER IS A TORN CREATE, not an acknowledgment (CE-3,
+            // D-1909): a build that created it under its final name and was
+            // killed before 32 bytes landed. Counted as interrupted, so
+            // `latest` is the newest WHOLE checkpoint. A whole-width marker
+            // that disagrees with its payload is still refused by `read`.
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() < 32 => {
+                interrupted = interrupted
+                    .checked_add(1)
+                    .ok_or("checkpoint interruption counter exhausted")?;
+            }
             Ok(metadata) if metadata.file_type().is_file() => {
                 acknowledged = acknowledged
                     .checked_add(1)

@@ -235,3 +235,35 @@ fn a_dropped_search_journal_is_released_despite_a_duplicated_descriptor() -> Res
     drop(child);
     Ok(())
 }
+
+/// CE-3, D-1909: a completion marker cut short by a crash is an interrupted
+/// reservation. The newest whole checkpoint is `latest`, and the resume
+/// publishes the next sequence. A publication leaves no scratch marker.
+#[test]
+fn a_torn_completion_marker_is_an_interrupted_reservation() -> Result<(), String> {
+    for kept in [0_u64, 31] {
+        let scratch = Scratch::new().map_err(error)?;
+        let mut journal = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        journal.publish(b"valid old", 1024)?;
+        journal.publish(b"torn", 1024)?;
+        let newest = journal.directory.join("0000000000000002");
+        assert!(!newest.join("complete.writing").exists());
+        OpenOptions::new()
+            .write(true)
+            .open(newest.join("complete"))
+            .and_then(|marker| marker.set_len(kept))
+            .map_err(error)?;
+        drop(journal);
+        let mut reopened = Journal::open(&scratch.0, "expression-search-v1", [12; 32])?;
+        let latest = reopened
+            .latest(1024)?
+            .ok_or("the whole checkpoint is latest")?;
+        assert_eq!(latest.sequence, 1);
+        assert_eq!(latest.payload, b"valid old");
+        let (sequence, _) = reopened.publish(b"resumed", 1024)?;
+        assert_eq!(sequence, 3);
+        let resumed = reopened.latest(1024)?.ok_or("the resume is latest")?;
+        assert_eq!(resumed.payload, b"resumed");
+    }
+    Ok(())
+}
