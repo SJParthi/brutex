@@ -3027,12 +3027,24 @@ pub(crate) fn commit_stored_candidate_pre_admission_authority_v1(
 }
 
 /// Strict institutional door; ordinary callers retain the historical contract.
-pub(crate) fn commit_strict_candidate_pre_admission_authority_v1(
+///
+/// It consumes the strict context the rung's sizing census already loaded
+/// when one is offered (D-1683), and loads one when given `None`. Before
+/// D-1683 this door was `commit_strict_candidate_pre_admission_authority_v1`
+/// and always loaded.
+///
+/// # Errors
+///
+/// Every load, admission and commit refusal, plus a sized context that names another
+/// root, vendor, family, rung, span, bound or configuration, or whose sources
+/// changed since sizing.
+pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     config: &crate::audited_range_command::StrictConfig,
+    sized: Option<strict::SizedNifty>,
 ) -> Result<family_v6::StoredFamilyV6, String> {
     let commit = VerifiedBuildCommitV1::current()?;
-    commit_family_with_inputs_v6(request, commit, &|_, _, _| {}, Some(config), true)
+    commit_family_from_v6(request, commit, &|_, _, _| {}, Some(config), true, sized)
 }
 
 fn commit_stored_with_verified_build_v1(
@@ -3063,8 +3075,29 @@ fn commit_family_with_inputs_v6(
     config: Option<&crate::audited_range_command::StrictConfig>,
     allow_extinct: bool,
 ) -> Result<family_v6::StoredFamilyV6, String> {
+    commit_family_from_v6(
+        request,
+        verified_commit,
+        on_level,
+        config,
+        allow_extinct,
+        None,
+    )
+}
+
+fn commit_family_from_v6(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    config: Option<&crate::audited_range_command::StrictConfig>,
+    allow_extinct: bool,
+    sized: Option<strict::SizedNifty>,
+) -> Result<family_v6::StoredFamilyV6, String> {
     let mut root = AdmittedRootV1::admit(request.root)?;
-    let context = load_bounded_stored_context_v1(&request, &root, config)?;
+    let context = match sized {
+        Some(sized) => sized.into_context_for(&request, &root, config)?,
+        None => load_bounded_stored_context_v1(&request, &root, config)?,
+    };
     root.strict.clone_from(&context.strict);
     let attempt = strict::begin(&context, &request, verified_commit.0)?;
     let result = commit_loaded_stored_v1(

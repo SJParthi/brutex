@@ -49,8 +49,94 @@ impl Inputs {
     }
 }
 
+/// The family whose signal bar count sizes every rung's support threshold.
+pub(crate) const SIZING_UNDERLYING: &str = "NIFTY";
+
+/// The strict NIFTY context the sizing census loaded, held for the NIFTY
+/// family commit of the same rung so that span is loaded once, not twice
+/// (W2-cli7-3, D-1683). It can be consumed only by a request whose root,
+/// vendor, family, rung, span, load bounds and strict configuration are the
+/// ones it was loaded under; anything else refuses by name.
+pub(crate) struct SizedNifty {
+    root: std::path::PathBuf,
+    vendor: brutex_core::vendor::Vendor,
+    rung: String,
+    from: (u16, u8),
+    to: (u16, u8),
+    bounds: [crate::stored::StoredSpanLoadBoundV1; 3],
+    config: StrictConfig,
+    context: BoundedStoredContextV1,
+}
+
+impl SizedNifty {
+    /// The held context, when `request` and `config` name exactly what it
+    /// was loaded under and its sources are still current.
+    ///
+    /// # Errors
+    ///
+    /// Names the first differing term, or the source change.
+    pub(super) fn into_context_for(
+        self,
+        request: &super::StoredCandidatePreAdmissionRequestV1<'_>,
+        root: &AdmittedRootV1,
+        config: Option<&StrictConfig>,
+    ) -> Result<BoundedStoredContextV1, String> {
+        if let Some(term) = self.differing_term(request, root.path(), config) {
+            return Err(format!(
+                "the sized {SIZING_UNDERLYING} context cannot serve a request with another {term}"
+            ));
+        }
+        self.context.require_current()?;
+        root.require_same("before reusing the sized strict context")?;
+        Ok(self.context)
+    }
+
+    /// The first request term that differs from what this context was loaded
+    /// under, or `None` when every one matches.
+    pub(super) fn differing_term(
+        &self,
+        request: &super::StoredCandidatePreAdmissionRequestV1<'_>,
+        root: &std::path::Path,
+        config: Option<&StrictConfig>,
+    ) -> Option<&'static str> {
+        if root != self.root.as_path() {
+            Some("root")
+        } else if request.vendor != self.vendor {
+            Some("vendor")
+        } else if request.underlying != SIZING_UNDERLYING {
+            Some("family")
+        } else if request.rung_name != self.rung {
+            Some("rung")
+        } else if (request.from, request.to) != (self.from, self.to) {
+            Some("span")
+        } else if [
+            request.bounds.signal_records,
+            request.bounds.minute_records,
+            request.bounds.daily_records,
+        ] != self.bounds
+        {
+            Some("load bounds")
+        } else if config != Some(&self.config) {
+            Some("strict configuration")
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only count of strict stored-context loads on this thread.
+    pub(crate) static STRICT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The support census uses the same admitted input policy as the real kernel.
 /// Its guards remain held by the rung caller until selection is published.
+///
+/// The loaded NIFTY context is returned as well, for the same rung's NIFTY
+/// family commit to consume through
+/// `commit_strict_candidate_pre_admission_authority_sized_v1`: before D-1683
+/// it was dropped here and that commit loaded the same span again.
 pub(crate) fn size_sweeper(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -58,12 +144,12 @@ pub(crate) fn size_sweeper(
     rung: &str,
     bounds: super::StoredCandidatePreAdmissionBoundsV1,
     config: &StrictConfig,
-) -> Result<(runner::Sweeper, Arc<Inputs>), String> {
+) -> Result<(runner::Sweeper, Arc<Inputs>, SizedNifty), String> {
     let root = AdmittedRootV1::admit(root)?;
     let context = load(
         StoredContextLoadSpecV1 {
             vendor,
-            underlying: "NIFTY",
+            underlying: SIZING_UNDERLYING,
             rung_name: rung,
             from: request.from,
             to: request.to,
@@ -75,9 +161,12 @@ pub(crate) fn size_sweeper(
         config,
     )?;
     let count = context.signal.bars.len();
-    let inputs = context
-        .strict
-        .ok_or("strict institutional sizing lost its input authority")?;
+    let inputs = Arc::clone(
+        context
+            .strict
+            .as_ref()
+            .ok_or("strict institutional sizing lost its input authority")?,
+    );
     inputs.require_current()?;
     let min_hits = crate::min_hits_for(count, request.support_ppm);
     let sweeper = runner::Sweeper::new(crate::ladder_for(min_hits)?);
@@ -88,7 +177,21 @@ pub(crate) fn size_sweeper(
         min_hits,
         request.support_ppm,
     ));
-    Ok((sweeper, inputs))
+    let sized = SizedNifty {
+        root: root.path().to_path_buf(),
+        vendor,
+        rung: rung.to_owned(),
+        from: request.from,
+        to: request.to,
+        bounds: [
+            bounds.signal_records,
+            bounds.minute_records,
+            bounds.daily_records,
+        ],
+        config: config.clone(),
+        context,
+    };
+    Ok((sweeper, inputs, sized))
 }
 
 pub(super) fn load(
@@ -96,6 +199,8 @@ pub(super) fn load(
     root: &AdmittedRootV1,
     config: &StrictConfig,
 ) -> Result<BoundedStoredContextV1, String> {
+    #[cfg(test)]
+    STRICT_LOADS.with(|count| count.set(count.get().saturating_add(1)));
     root.require_same("before strict institutional source admission")?;
     let limits = [
         spec.signal_bound.max_records(),

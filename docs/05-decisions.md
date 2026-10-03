@@ -53403,3 +53403,208 @@ like a red build with no failing step.
 `include_str!` this one file. Deleting the reasons: they are the record
 gate 11's counts rest on. Shortening the shell: the bytes are 70%
 comments, and the code is what the gates run.
+
+### D-1680 — A Candidate Universe production append opens the ledger once and re-reads only its block; §150 stops saying the generation hashes data — 2026-10-03
+
+**What was wrong.** W2-cli3-4: `append_produced_candidate_universe_v1`, the one
+production append door, opened the ledger (a full O(R + C) scan that re-seals
+every row and completion), appended, dropped the handle and ran a second full
+`open_read` to look the new completion up. Every production append was two
+O(R + C) passes plus the new rows, and `ledger-v6` makes sixteen per run. The
+module header said "the sealed internal append is O(new rows)" and
+`docs/06-limits.md` §150 said append is "proportional to the new block".
+W2-cli3-8: §150 also said the cached-generation check "also hashes the data
+files". `FileGenerationV1` is length, device/inode and nanosecond
+modification/change times, and `require_unchanged` hashes nothing.
+
+**The decision.** The door keeps its writer handle and calls
+`reverify_committed`, which under the shared lock rechecks the three
+generations, requires the physical row and completion counts to be the ones
+the append left, re-reads and re-seals only the committed block
+(`validate_file_block`) and, for a written block, requires the last stored
+completion to be its receipt. One production append is now one full open plus
+O(new rows). §150 and the module header state that, and §150 states that the
+generation is metadata only, what that misses (a same-length rewrite leaving
+every metadata field equal, UNVERIFIED as reachable) and that the new block is
+re-sealed anyway. `append_and_reopen`'s rustdoc and the commit type's doc no
+longer say a fresh read-only reopen follows.
+
+**Rejected.** Adding a content hash to the generation to make the old §150
+sentence true: it would make every cached lookup and page O(file bytes),
+which is the defect D-1681 removes elsewhere. Passing one opened ledger
+through all sixteen appends of a run: it would remove the remaining per-append
+open too, but it changes three callers' ownership (`ledger_v6`,
+`all_rung_population_v5`) and is left for a later unit; §150 states the
+remaining O(16 x (R + C)) per run.
+
+Tests: `cli::candidate_universe::tests::production_append_scans_the_ledger_once_and_rereads_only_its_block`
+(failed first on the two-open door: scans 2, expected 1),
+`cli::candidate_universe::tests::reverify_committed_refuses_every_disagreement_with_the_disk`,
+`cli::candidate_universe::tests::reverify_committed_refuses_counts_absences_and_order_it_did_not_write`,
+`cli::ledger_append_lookup_costs::section_150_states_one_open_per_production_append_and_no_data_hash`.
+
+### D-1681 — A Pre-Admission page checks generations by metadata; the hashing lookups keep their hash and the limits price them by file bytes — 2026-10-03
+
+**What was wrong.** One defect class in three ledgers: a page or a cached
+lookup re-hashed a whole file through its generation check while the
+documents said O(P) or average O(1).
+W2-cli13-0: `PreAdmissionDataLedgerV1::page` content-hashed the lock file
+once and the data file twice per page (`require_unchanged`, then
+`require_generation` on a second descriptor), so paging all R rows at 256 per
+page hashed O(R^2 / 256) bytes, while §153 said "A page costs O(P)" and the
+module doc said a page is proportional to the returned records.
+W2-cli11-3: Observation V1 and V2 `reopen_audit` read the whole bounded
+authority file and blake3 it per lookup; §157 and §161 called the lookup
+average O(1).
+W2-cli11-2: Finalization V2 `reopen_structural_receipt` re-hashes the data
+file per lookup; its rustdoc said so and `docs/06-limits.md` said nothing.
+
+**The decision.** (b) for the page, (a) for the lookups.
+The page now compares the cached lock and data generations by metadata only
+(`require_metadata_generation`: length, device/inode, nanosecond
+modification/change times; the path must still name the held inode) and
+re-seals every record it returns, which it already did. It is O(P) plus a
+constant number of `stat` calls. What it does not see is stated in §153 and
+in the new limits chapter: a same-length rewrite of a record outside the page
+that leaves every metadata field equal. A rewrite of a returned record is
+refused by that record's seal. `reopen_audit` on the same ledger keeps its
+content hash, O(file bytes).
+The Observation and Finalization V2 lookups keep their content hash, because
+they are audit-only, seldom-called lookups and the hash is what refuses a
+same-length edit. Their rustdoc and §157, §161 and the new chapter now price
+each lookup at O(file bytes) before an average-O(1) probe.
+
+**An existing assertion changed, and why.**
+`stale_same_length_mutation_and_nonzero_bounds_fail_closed` asserted that a
+page after an external same-length write refuses with `changed`. The page no
+longer hashes, and Linux file timestamps advance in coarse ticks, so a write
+inside one tick of the append can leave the metadata equal; the page then
+refuses through the returned record's seal ("seal does not match"). The
+assertion now accepts either named refusal. It still requires a refusal. The
+new test pins each path deterministically: a pinned modification time for the
+metadata refusal, and a re-measured cached generation for the seal refusal.
+
+**Rejected.** Metadata checks for the Observation and Finalization lookups:
+they are not paged in loops, and giving up their same-length detection buys
+nothing measurable. Keeping the page's hash and only correcting the document:
+it leaves paging quadratic in the ledger.
+
+Tests: `cli::pre_admission_data::tests::pages_hash_no_file_and_reseal_only_the_records_they_return`
+(failed first: 33 whole-file hashes over eleven pages, expected 0),
+`cli::pre_admission_data::tests::replaced_lock_and_data_paths_refuse_cached_audits`,
+`cli::ledger_append_lookup_costs::a_pre_admission_page_checks_metadata_and_its_lookups_are_priced_by_file_bytes`,
+`cli::ledger_append_lookup_costs::observation_lookups_still_hash_the_whole_file_and_say_so`.
+
+### D-1682 — Statistics V2 reads each candidate's rows by index, reserves its index for stored records, and states its two-open append — 2026-10-03
+
+**What was wrong.** W2-cli12-0: `build_raw_candidates` filtered the whole
+period vector (C·P rows) and the whole split vector (C·S rows) once per
+candidate, so preparing one block was O(C²·(P+S)). W2-cli12-2: `open_inner`
+reserved `bounds.audits` map slots on every open before anything was counted;
+production passes `CEILING_RECORDS = 1 << 24`, so every open of every
+Statistics root, empty or not, allocated and initialised that many slots, and a
+`u64::MAX` ceiling could not open at all. W2-cli12-1:
+`append_population_statistics_v2` runs two full opens (the writer's and a
+fresh read-only reopen), each re-validating every stored block and rerunning
+every stored bootstrap, so A appends to one root cost O(A²) block validations;
+nothing said so.
+
+**The decision.** `candidate_column` reads candidate c's rows at
+`c, c + C, c + 2C, ...`, which is exactly the layout `build_raw_periods` and
+`build_raw_splits` write (period-major and split-major), so it returns the same
+rows in the same order as the filter at O(P + S) per candidate. It refuses a
+zero width, a sequence outside the width, a length that is not a multiple of
+the width, and any row whose candidate sequence is not the one its position
+names, so a layout change cannot select other rows silently. No digest,
+identity or byte changes: the equivalence test compares every column with the
+old filter over 50 candidates. `open_inner` reserves
+`min(bounds.audits, records the file holds)`, every audit occupying at least
+one record. The two-open append is kept and §154 states its cost.
+
+**Rejected.** Replacing the fresh reopen with a re-read through the writer's
+handle, as D-1680 does for Candidate Universe: here the fresh reopen is the
+named source of every projection type (`PopulationStatisticsV2ProjectionSource`,
+the Observation-to-Statistics link, "freshly reopened" in about twenty
+rustdoc items and the step-3 orchestrator), so removing it is a change of that
+authority's contract, not of a cost, and belongs in its own decision.
+Growing the index on demand with no reservation: it trades one bounded
+reservation for repeated rehashing during the scan.
+
+Tests: `cli::population_statistics_v2::tests::candidate_columns_equal_the_whole_vector_filter_and_visit_only_their_rows`,
+`cli::population_statistics_v2::tests::a_candidate_column_refuses_a_layout_it_cannot_index`,
+`cli::population_statistics_v2::tests::preparation_visits_each_candidate_row_once`
+(failed first with the filter restored and counted: 20 row visits for two
+candidates, expected 10),
+`cli::population_statistics_v2::tests::an_open_reserves_for_stored_records_not_the_audit_ceiling`
+(failed first with the ceiling reserve restored: "cannot reserve
+population-statistics index: memory allocation failed because the computed
+capacity exceeded the collection's maximum"),
+`cli::population_statistics_v2::tests::one_append_runs_two_full_scans_as_section_154_states`,
+`cli::ledger_append_lookup_costs::section_154_states_index_reads_the_bounded_reserve_and_the_two_open_append`.
+
+### D-1683 — The rung's sizing load of NIFTY is the NIFTY commit's load; replay's full-route cost is stated — 2026-10-03
+
+**What was wrong.** W2-cli7-3: `strict_v6_inputs::size_sweeper` ran a full
+checksum-audited strict load of NIFTY's span for each of the eight rungs only
+to count its signal bars, dropped it, and the NIFTY family commit of the same
+rung loaded the same span again: 24 strict loads per `run_route` where 16 do
+the work. W2-cli7-2: `ledger-v6-replay` runs the whole route (all eight rungs,
+both families, Search V4 and every commit) before anything can decide that the
+authorities are already committed; `docs/06-limits.md` did not say so.
+
+**The decision.** `size_sweeper` returns the loaded context as a
+`SizedNifty`, and `commit_strict_candidate_pre_admission_authority_sized_v1`
+(which replaces the unsized `..._v1` door, its only caller being `run_route`)
+consumes it for the NIFTY family. It is consumed only when root, vendor,
+family, rung, span, the three load bounds and the strict configuration all
+equal what it was loaded under, and after `require_current` and the root's
+`require_same`; anything else refuses by naming the differing term. Nothing a
+digest or identity reads changes: the commit receives the same context bytes
+it would have loaded. The replay cost is stated in `replay_route`'s rustdoc
+and the limits chapter: reuse is keyed by data digest, the digest needs the
+load, so a rerun over committed authorities is the full route.
+
+**Rejected.** A request-keyed index of committed routes so a replay can skip
+loading: it is a new durable authority and format, out of scope for a cost
+correction. Sizing from a header count instead of a load: the support
+threshold must count the bars the sweep will see after admission, and only the
+strict load admits them.
+
+Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_the_nifty_commit_consumes_the_sizing_load_once`
+(failed first: 2 strict loads after the NIFTY commit, expected 1),
+`cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_sized_context_refuses_every_other_request`,
+`cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_a_sized_context_whose_source_changed_refuses`,
+`cli::ledger_append_lookup_costs::the_ledger_v6_route_and_replay_costs_are_stated`.
+
+### D-1684 — One stored OOS fold per family cohort serves every witness — 2026-10-03
+
+**What was wrong.** W2-cli3-3: Population V6 caches one
+`StoredPostTrainingOosCohortV1` per family, but `mint_witness_inner` built a
+new `CandidateGlobalReplayOosSourceV1` for every witness: the anchored signal
+column, its exact-minute overlay, the checked execution column, alignment,
+calendars and stream digests, Θ(S + Q + D + E), up to 25 times per rung, from
+inputs that are all cohort fields. §169 said minting is proportional to the
+replay.
+
+**The decision.** `StoredPostTrainingOosCohortV1::fold_recorded` builds the
+source once as a `StoredOosFoldV1` that borrows the cohort, and
+`StoredOosFoldV1::mint_witness_recorded` mints each witness over it.
+`selected_stored_oos_witnesses` first resolves and validates every requested
+strategy (building cohorts as before), then mints in the same order, building
+each family's fold at its first witness. Witness bytes are unchanged (the test
+compares them with the cohort's own one-off mint). Each witness still re-proves
+the cohort current, twice, and that re-derives the cohort identity over every
+stream, so a witness remains Θ(S + Q + D + E) in hashing; §169 says so. The
+lifecycle observer now sees one fold stage per family instead of one per
+witness, so a Global Replay V4 run records fewer `Preparation` attempts in
+sweep evidence; no identity or format byte changes.
+
+**Rejected.** Caching the source inside the cohort: it borrows the cohort's
+own bytes, which a field cannot hold without a self-referential type. Caching
+a sealed integrity verdict to drop the per-witness re-hash: the per-witness
+check is what refuses a source that changed after the fold.
+
+Tests: `cli::step3_orchestrator::tests::strict_v6_fixture_tests::strict_v6_one_oos_fold_serves_every_witness_of_its_cohort`
+(failed first with each fold mint delegated back to the cohort's own
+per-witness mint: 4 source builds, the fold's and one per witness, expected 1),
+`cli::ledger_append_lookup_costs::section_169_prices_the_oos_fold_once_per_cohort`.

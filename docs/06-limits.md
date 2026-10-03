@@ -7783,13 +7783,27 @@ completion before it builds its bounded index, so R rows and C completions cost
 O(R+C) time and O(C) indexed state. A validated sequence seek is fixed offset
 and worst-case O(1) in record count; a hash lookup is average O(1), not a
 worst-case collision guarantee, and a page costs O(P) for P returned rows.
-Append, hashing, canonical-order validation and durability are proportional to
-the new block plus filesystem costs. Universe construction would additionally
-walk the naturally extinct frontier and both dynamic grids. It is not O(1).
+On an already-open handle, append, hashing, canonical-order validation and
+durability are proportional to the new block plus filesystem costs. The one
+production door, `append_produced_candidate_universe_v1`, opens the ledger on
+every call, so one production append is O(R+C) for that open plus O(new rows)
+to write the block and re-read it through the same handle. Before D-1680 it
+then dropped the handle and ran a second full `open_read`, so it cost two
+O(R+C) passes. `ledger-v6` makes one such append per rung per family, 16 per
+run against one root, so a run's Candidate appends cost O(16 x (R+C)) plus the
+rows written: they grow with the ledger's history, not only the new block.
+Universe construction would additionally walk the naturally extinct frontier
+and both dynamic grids. It is not O(1).
 
 On Unix, cached-generation refusal binds the held lock, row and receipt paths by
-device/inode, length and nanosecond modification/change times and also hashes
-the data files. On non-Unix targets the portable generation token currently has
+device/inode, length and nanosecond modification/change times. It is metadata
+only and hashes no data file (D-1680 corrected an older sentence here that said
+it did). A same-length rewrite that left all of those fields equal would pass
+it; the change time cannot be set through the timestamp API, so that needs a
+clock change or a raw device write, and is UNVERIFIED as a reachable case. The
+production append still re-reads and re-seals its own new block after the
+check, so a corrupt new block is refused there; older blocks are re-validated
+only by the next full open. On non-Unix targets the portable generation token currently has
 only length and the platform modification time, so a same-length ABA path
 replacement with an indistinguishable timestamp is not proved detectable.
 Production deployment here is macOS/Unix, but portability remains an honest
@@ -7852,7 +7866,15 @@ are linear in admitted bars and calendar days.
 Opening a file with R physical records validates R seals and semantic pairs and
 hashes the complete file while holding the shared path lock, so it is O(file
 bytes) time with a bounded O(completions) index. A page costs O(P) for P returned
-rows. Hash-map lookup is average O(1), not a worst-case collision guarantee.
+rows: since D-1681 it checks the lock and data generations by metadata only and
+re-seals each returned record, where before it content-hashed the lock file once
+and the data file twice per page, so paging all R rows cost O(R^2 / 256). A
+cached `reopen_audit` lookup still content-hashes both files, O(file bytes),
+before an average-O(1) hash-map probe, not a worst-case collision guarantee.
+The metadata check is length, device/inode and nanosecond modification/change
+times: a same-length rewrite of a record outside the page that left all of
+those equal is not seen by that page, and a rewrite of a returned record is
+refused by its seal.
 Lock acquisition, filesystem cache, `sync_data`, allocation and storage latency
 remain system-dependent.
 
@@ -7888,6 +7910,24 @@ whole-file validation, hashing, allocation, locks, `sync_all`, CSCV family work
 and bootstrap resampling are not constant-time or constant-space operations.
 Explicit audit/candidate/period/split/file ceilings are refusal bounds; they do
 not sample rows, cap Apriori depth or turn an admitted input into a smaller one.
+
+Preparing one block reads each candidate's P periods and S splits by index
+arithmetic (`outer x C + candidate`) out of the period-major and split-major
+vectors, so the per-candidate summaries cost O(C·(P+S)) in total. Before D-1682
+each candidate filtered both whole vectors, O(C²·(P+S)). An open reserves its
+audit index for at most the records the file holds, never the configured
+`max_audits` ceiling: before D-1682 every open, empty or not, reserved
+`max_audits` slots (production passes 1<<24) before anything was counted.
+
+One append through `append_population_statistics_v2` runs two full opens: the
+writer's, then a fresh read-only reopen after the writer is dropped. Each full
+open validates every stored block and reruns every stored block's bootstrap
+procedures, so one append costs two passes of O(sum over the A stored audits of
+(C·(P+S) + bootstrap)) plus the new block, and A appends to one root cost
+O(A²) block validations in total. The step-3 orchestrator then opens the root
+once more for its Admission V3 projection. D-1682 keeps the fresh reopen,
+because the Observation link and every projection type name a freshly
+reopened audit as their source; the cost is stated here instead.
 
 The eight focused tests use controlled, test-private source rows. The public
 API can durably append and freshly reopen only an opaque prepared capability;
@@ -8027,8 +8067,11 @@ The companion authority contains only fixed-size identities, counts and
 digests. It does not durably retain the O(C·P + C·K) raw evidence. Crash recovery
 therefore requires the upstream exact Candidate replay to derive the same
 observations again before an orphan Data may receive Completion. Opening the
-ledger scans and hashes its bounded bytes; hash-index lookup is average O(1),
-and one fixed-stride record position is worst-case O(1) in record count after
+ledger scans and hashes its bounded bytes. A cached `reopen_audit` lookup
+reads and hashes the whole bounded file again before its hash-index probe, so
+one lookup is O(file bytes); only the probe itself is average O(1) (D-1681
+corrected an older sentence here that called the lookup average O(1)). One
+fixed-stride record position is worst-case O(1) in record count after
 admission. Allocation, hashing, locking, sync and device latency are not
 constant-time.
 
@@ -8145,8 +8188,9 @@ For A admitted Observation authorities and B file bytes, open/fresh reopen scan
 and validate O(B) bytes and retain O(A) identity/data indexes. Append validates
 the embedded Pre-Admission record, hashes fixed records, synchronizes Data then
 Completion, hashes the bounded file and freshly reopens it. One fixed-stride
-record address is worst-case O(1) in record count after admission and one
-identity-map lookup is average O(1); allocation, locking, synchronization,
+record address is worst-case O(1) in record count after admission. One cached
+`reopen_audit` lookup reads and hashes the whole bounded file, O(B), before an
+identity-map probe that is average O(1) (D-1681); allocation, locking, synchronization,
 filesystem traversal, page faults, controller behavior, removable-drive loss
 and latency have no constant bound. The explicit byte/authority ceilings refuse
 excess; they do not truncate history or hide a failure.
@@ -8396,9 +8440,17 @@ those witnesses. Header admission is O(1) per stored month, but constructing
 one `StoredPostTrainingOosCohortV1` is O(M + S + D + Q): it loads complete
 bounded streams, validates calendar continuity, derives previous-day and
 exact-minute causal columns and hashes the retained snapshot. Space is
-O(S + D + Q) for the owned snapshot and derived column. Minting every witness
-is proportional to the authenticated Runner replay over its OOS bars and exit
-paths, and full future V4 preflight/scheduling is at least O(P + C) before
+O(S + D + Q) for the owned snapshot and derived column. The OOS replay
+source a witness replays over (the anchored signal column, its exact-minute
+overlay, the checked execution column, alignment, calendars and stream
+digests) costs Θ(S + Q + D + E) to build. Since D-1684 Population V6 builds it
+once per family cohort and every witness of that cohort replays over it;
+before D-1684 it was rebuilt for every witness. Each witness still pays two
+cohort integrity checks, and each re-derives the cohort identity by hashing
+the signal, minute-context, daily and execution streams and re-checks the
+strict source guards, so a witness remains Θ(S + Q + D + E) in hashing; what
+D-1684 removes per witness is the column evaluation and alignment, not that
+term. Then the authenticated Runner replay over its OOS bars and exit paths. Full future V4 preflight/scheduling is at least O(P + C) before
 persistence. Explicit record ceilings refuse excess before allocation where
 the store header permits; they do not convert any whole operation into O(1).
 
@@ -13911,3 +13963,62 @@ bounds are all nonzero.
     membership -- so the file no longer matches this rule and its
     row would only make the allowlist read looser than the tree.
 ~~~~
+
+## Ledger append, page and lookup costs found by lane 1-b — D-1680 onward
+
+Group E of the lane 1-b redo. Each subsection names its findings and decision.
+Bounds are read from the source and the counting tests named in
+`docs/04-invariants.md`; no wall-clock time is measured here, and none is
+claimed (`CLAUDE.md` §3 rule 6).
+
+### Cached lookups and pages that hash a whole ledger file — D-1681
+
+W2-cli13-0, W2-cli11-2 and W2-cli11-3 found three generation checks that read
+and hash a complete file per page or per lookup while the documents said O(P)
+or average O(1).
+
+- **Pre-Admission Data V1 `page`** (§153) is now O(P) for P returned rows plus
+  a constant number of `stat` calls. It compares the cached lock and data
+  generations by metadata only and re-seals every record it returns. Before
+  D-1681 it content-hashed the lock file once and the data file twice per page,
+  so paging all R rows at 256 per page was O(R^2 / 256) bytes hashed. What a
+  page does not see: a same-length rewrite of a record outside its own range
+  that leaves length, device/inode and nanosecond modification/change times
+  equal. A rewrite of a record it returns is refused by that record's seal.
+- **Pre-Admission Data V1 `reopen_audit`** still content-hashes the lock and
+  data files, O(file bytes) per lookup, then probes its map in average O(1).
+- **Observation V1 and V2 `reopen_audit`** (§157, §161) read the whole bounded
+  authority file into memory and hash it, O(B) time and O(B) transient memory
+  per lookup, before an average-O(1) map probe. Kept deliberately: they are
+  audit-only lookups, and the content hash is what refuses a same-length edit.
+- **Finalization V2 `reopen_structural_receipt`** re-hashes the bounded data
+  file through `require_unchanged`, O(file bytes) per lookup, before an
+  average-O(1) probe; its rustdoc already said so and this section is its
+  first statement here. Its append is dormant outside tests
+  (`expect(dead_code)`) and calls `require_unchanged`, a whole-file hash, at
+  several steps, so one append is a constant multiple of O(file bytes). The
+  finding counted at least eight passes; that count is not re-measured here
+  and is UNVERIFIED.
+
+### Ledger V6 route: one load per family per rung, and replay recomputes the route — D-1683
+
+W2-cli7-3: `strict_v6_inputs::size_sweeper` ran a complete checksum-audited
+strict load of NIFTY's span for every rung only to count its signal bars, and
+dropped it; the NIFTY family commit of the same rung then loaded the same span
+again. Since D-1683 the sizing load is handed to that commit as a
+`SizedNifty`, which it consumes only when root, vendor, family, rung, span,
+load bounds and strict configuration all match and the sources are still
+current. One `run_route` now makes 16 strict loads (8 rungs x 2 families),
+each O(M + B + source bytes) for M months and B bars, where before it made 24.
+Holding the context until the NIFTY commit does not raise the peak: the old
+route held one context at a time and so does this one.
+
+W2-cli7-2: `ledger-v6-replay` (and every `ledger-v6` rerun) runs the complete
+route before anything decides reuse. Reuse is keyed by data digest, the data
+digest needs the strict load, and the load is the dominant term, so a rerun
+over fully committed authorities still costs the full Step-4 route: 16 strict
+loads, eight Search V4 sweeps per family and every commit's reopen. That is
+not O(1) and not proportional to new work. Making it so would need a durable
+request-keyed index of committed routes that a replay could consult before
+loading, which is a new authority and a new format; D-1683 does not add one and
+states the cost here instead.
