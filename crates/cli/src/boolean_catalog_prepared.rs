@@ -46,7 +46,7 @@ pub(crate) struct Prepared {
 /// is [`crate::research_equity_note`], which `api` serves beside the same
 /// research as JSON (AF-19).
 pub(crate) fn research_heading(scope: &ResearchScopeV1) -> String {
-    let mut out = String::from(crate::STORED_PROVENANCE);
+    let mut out = String::from(crate::STORED_POOLED_PROVENANCE);
     out.push_str(&crate::research_equity_note(
         scope.families().iter().copied(),
     ));

@@ -766,6 +766,28 @@ fn enforce_read_limit(path: &Path, len: u64, max_bytes: Option<u64>) -> Result<(
     Ok(())
 }
 
+thread_local! {
+    /// Ledger index builds ([`Results::open_with`]) begun on this thread. Each
+    /// is an O(runs) walk, so a caller that promises one per operation is held
+    /// to it by counting. D-1703.
+    ///
+    /// Compiled into every build rather than gated on test: one thread-local
+    /// add beside an O(runs) walk costs nothing measurable, and a gate here
+    /// would put a test attribute above `mod tests`, where
+    /// `the_ledger_is_fsynced_and_never_merely_flushed` takes the first one to
+    /// mark the end of the shipping code.
+    static OPENS_ON_THIS_THREAD: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// How many ledger index builds this thread has begun. Only tests read it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read only by the pool's one-open test, D-1703")
+)]
+pub(crate) fn opens_on_this_thread() -> u64 {
+    OPENS_ON_THIS_THREAD.with(core::cell::Cell::get)
+}
+
 /// One bounded process cache: retain only the most recently used root. Its
 /// index grows with that ledger; changing roots releases it. A failed refresh
 /// or operation invalidates the handle and is returned without a hidden retry.
@@ -853,6 +875,7 @@ impl Results {
                   refusal paths in one function and the release in another"
     )]
     fn open_with(root: &Path, writable: bool, max_bytes: Option<u64>) -> Result<Self, Refusal> {
+        OPENS_ON_THIS_THREAD.with(|opens| opens.set(opens.get().saturating_add(1)));
         let dir = root.join("results");
         if writable {
             std::fs::create_dir_all(&dir)

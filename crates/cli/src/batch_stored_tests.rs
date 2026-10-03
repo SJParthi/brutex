@@ -168,3 +168,97 @@ fn batch_publication_failure_is_durable_refusal_and_a_repaired_retry_can_complet
     });
     crate::knobs::clear_all();
 }
+
+/// **A chunk files its months in INPUT order, whatever order they finish
+/// in.** GAP13-13, D-1701.
+///
+/// Three instrument-months sweep in one chunk while the FIRST is held back,
+/// so it finishes last. Its ledger row is still row 0, the attempt tokens rise
+/// in input order, and the journal's last terminal is the last month's.
+/// Before D-1701 each worker appended its own row and began its own attempt,
+/// so the held-back month was filed last.
+#[test]
+fn a_chunk_files_its_months_in_input_order_whatever_order_they_finish() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::audited_stored::with_warmed_store_of(&["NIFTY", "BANKNIFTY", "RELIANCE"], |root| {
+        let wanted: Vec<Held> = catalog::walk(root)
+            .expect("fixture census")
+            .held
+            .into_iter()
+            .filter(|held| {
+                held.timeframe.as_str() == "1min"
+                    && held.month.year() == 2025
+                    && held.month.month() == 5
+            })
+            .collect();
+        assert_eq!(wanted.len(), 3, "premise: three May months");
+        let chunk: Vec<&Held> = wanted.iter().collect();
+        slow_symbol(Some(chunk.first().expect("a first month").symbol.as_str()));
+        let rows = sweep_chunk(root, &chunk, u64::MAX, COMMIT);
+        slow_symbol(None);
+        assert_eq!(rows.len(), 3);
+        for row in &rows {
+            require_completed(row);
+        }
+        let mut ledger = Results::open_read(root).expect("ledger");
+        assert_eq!(ledger.len().expect("rows"), 3);
+        let mut previous = 0;
+        for (index, row) in (0_u64..).zip(&rows) {
+            let identity = row.identity.as_ref().expect("identity");
+            assert_eq!(
+                &ledger.read(index).expect("row").identity_hex(),
+                identity,
+                "ledger row {index} is input month {index}"
+            );
+            let bytes: Vec<u8> = (0..32)
+                .map(|i| u8::from_str_radix(&identity[i * 2..i * 2 + 2], 16).expect("hex"))
+                .collect();
+            let evidence =
+                sweep_evidence::read(root, bytes.try_into().expect("32 bytes"), 1_048_576)
+                    .expect("evidence")
+                    .expect("its attempt");
+            assert_eq!(evidence.completion, Completion::Completed);
+            assert!(
+                evidence.attempt > previous,
+                "attempt tokens rise in input order"
+            );
+            previous = evidence.attempt;
+        }
+        let last = sweep_evidence::latest(root, 1_048_576)
+            .expect("journal")
+            .expect("a terminal");
+        assert_eq!(
+            Some(crate::identity_hex(&last.identity)),
+            rows.last().and_then(|row| row.identity.clone()),
+            "the last terminal journaled is the last input month's"
+        );
+    });
+    crate::knobs::clear_all();
+}
+
+/// A chunk whose every month refuses before identification begins nothing and
+/// files nothing; the refusals keep input order. D-1701.
+#[test]
+fn a_chunk_of_unidentified_months_begins_no_attempt() {
+    crate::audited_stored::with_warmed_store(|root| {
+        let april: Vec<Held> = catalog::walk(root)
+            .expect("fixture census")
+            .held
+            .into_iter()
+            .filter(|held| held.timeframe.as_str() == "1min" && held.month.month() == 4)
+            .collect();
+        assert!(!april.is_empty(), "premise: an April month");
+        let chunk: Vec<&Held> = april.iter().collect();
+        let rows = sweep_chunk(root, &chunk, u64::MAX, COMMIT);
+        assert_eq!(rows.len(), chunk.len());
+        for row in &rows {
+            assert!(row.refused.is_some() && row.identity.is_none() && !row.ran);
+        }
+        assert!(!Results::path(root).exists());
+        assert_eq!(
+            sweep_evidence::latest(root, 1_048_576).expect("no evidence"),
+            None
+        );
+    });
+}

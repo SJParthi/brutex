@@ -439,7 +439,7 @@ mod tests {
                 heading,
                 format!(
                     "{}{}{BEFORE}",
-                    crate::STORED_PROVENANCE,
+                    crate::STORED_POOLED_PROVENANCE,
                     runner::audit::CostScope::CashEquity.report_note()
                 ),
                 "{symbols}"
@@ -449,7 +449,7 @@ mod tests {
         for symbols in ["NIFTY,BANKNIFTY", "NIFTY"] {
             assert_eq!(
                 prepared::research_heading(&scope(symbols).unwrap()),
-                format!("{}{BEFORE}", crate::STORED_PROVENANCE),
+                format!("{}{BEFORE}", crate::STORED_POOLED_PROVENANCE),
                 "an index scope is unchanged: {symbols}"
             );
         }
@@ -485,7 +485,7 @@ mod tests {
             );
             assert_eq!(
                 prepared::research_heading(&scope),
-                format!("{}{note}{BEFORE}", crate::STORED_PROVENANCE),
+                format!("{}{note}{BEFORE}", crate::STORED_POOLED_PROVENANCE),
                 "{symbols}"
             );
         }

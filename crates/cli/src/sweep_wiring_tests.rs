@@ -18,11 +18,7 @@ fn root() -> PathBuf {
 fn id() -> RunId {
     let key = stored::swept_index("NIFTY").expect("known fixture key");
     identity(&Run {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the identity API supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         direction: Direction::Undirected,
         instrument: &key,
         timeframe: "1min",
@@ -170,11 +166,7 @@ fn only_actual_computation_verbs_can_establish_sweep_status() {
 fn refused_unadmitted_children_never_publish_a_parent_summary() {
     let id = id();
     let scored = runner::rank::Scored {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the public scored type supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 1,
         edge: runner::outcome::Edge::default(),
     };
@@ -297,11 +289,7 @@ fn empty_cold_refused_and_inconsistent_samples_cannot_be_completed_or_resource_h
 fn a_real_candidate_budget_halt_and_certified_completion_keep_opposite_terminal_states() {
     use super::sweep_evidence::Completion;
     let empty = runner::rank::Scored {
-        #[expect(
-            clippy::default_trait_access,
-            reason = "the scored type supplies the mask type"
-        )]
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 0,
         edge: runner::outcome::Edge::default(),
     }
