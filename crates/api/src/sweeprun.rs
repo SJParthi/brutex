@@ -2368,9 +2368,10 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // Durable run/probe evidence uses this same target. Its completion cannot
     // replace a whole-command marker, nor can its uncorrelated token refresh
     // that command's activity. Search a bounded retained window explicitly.
-    let lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
-    let marker = lifecycle.records.iter().find(|record| {
-        matches!(
+    let mut lifecycle = status_tail(dir, "cli.lifecycle", None, 256);
+    let mut found = None;
+    for (index, record) in lifecycle.records.iter().enumerate() {
+        let is_marker = matches!(
             record.message.as_str(),
             "command started" | "command finished"
         ) && match record.field("command") {
@@ -2379,8 +2380,30 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             // Retain it so status becomes unknown instead of borrowing an
             // older sweep's successful completion.
             _ => true,
+        };
+        if is_marker {
+            found = Some(index);
+            break;
         }
-    });
+    }
+    // ONLY DAMAGE NEWER THAN THE MARKER CAN HIDE A NEWER MARKER (CE-11,
+    // D-1914). File order is sequence order, so a line torn by a killed CLI
+    // command and stepped over BEHIND the newest marker cannot outrank it, yet
+    // it blocked every browser launch until ~128 further commands pushed it out
+    // of the window. The window is re-walked to stop exactly at the marker, so
+    // only what lies between it and the newest end is judged. A walk that no
+    // longer ends on the same record (a newer one landed in between) keeps the
+    // whole window's verdict.
+    if let Some(index) = found
+        && tail_fault_unless_answered(&lifecycle, true).is_some()
+    {
+        let through = status_tail(dir, "cli.lifecycle", None, index.saturating_add(1));
+        let same = |tail: &telemetry::Tail| tail.records.get(index).map(|record| record.seq);
+        if same(&through).is_some() && same(&through) == same(&lifecycle) {
+            lifecycle = through;
+        }
+    }
+    let marker = found.and_then(|index| lifecycle.records.get(index));
     // A marker found inside the scanned window is the newest one, so the scan
     // cap cannot hide a newer one. With no marker found the cap is still the
     // answer: the latest sweep's marker may lie in the bytes it left unread.
@@ -6221,6 +6244,54 @@ mod tests {
             damaged.body
         );
         assert!(!damaged.launch_clear, "{}", damaged.body);
+        drop(sink);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// CE-11, D-1914: a line torn by a killed CLI command, OLDER than the
+    /// newest sweep marker, no longer blocks launch; the same damage NEWER
+    /// than the marker still does.
+    #[test]
+    fn damage_older_than_the_newest_marker_does_not_block_launch() {
+        let dir = crate::scratch::path("sweep-external-old-tear");
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
+        let marker = |message, phase| {
+            let event = telemetry::Event::info("cli.lifecycle", message)
+                .with("phase", phase)
+                .with("command", "sweep-stored");
+            assert_eq!(sink.emit_for_run(62, &event), telemetry::Emitted::Written);
+        };
+        let tear = || {
+            std::io::Write::write_all(
+                &mut std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(telemetry::current_path(&dir))
+                    .expect("the current log"),
+                b"{\"torn\n",
+            )
+            .expect("one malformed line");
+        };
+        marker("command started", "running");
+        tear();
+        marker("command started", "running");
+        marker("command finished", "completed");
+        let premise = super::status_tail(&dir, "cli.lifecycle", None, 256);
+        assert_eq!(
+            premise.malformed, 1,
+            "premise: the torn line is in the window"
+        );
+        let clear = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(
+            clear.body.contains(r#""status":"completed""#),
+            "{}",
+            clear.body
+        );
+        assert!(clear.launch_clear && !clear.uncertain, "{}", clear.body);
+        tear();
+        let newer = super::observe_elsewhere(&dir, i64::MAX);
+        assert!(newer.body.contains("1 malformed records"), "{}", newer.body);
+        assert!(!newer.launch_clear, "{}", newer.body);
         drop(sink);
         let _ = std::fs::remove_dir_all(dir);
     }

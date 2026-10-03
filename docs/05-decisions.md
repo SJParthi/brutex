@@ -55059,3 +55059,16 @@ and the directory barrier, before the marker exists. The second verification
 runs on the same, now unlocked, descriptor. The namespace's `owner.lock`
 still excludes any second writer, and a reader's own seal check still covers
 the marker.
+
+### D-1914 — Only log damage newer than the newest sweep marker makes external status unknown — 2026-10-03
+
+CE-11: `observe_elsewhere` judged faults across the whole 256-record
+lifecycle window. A line torn by a killed CLI command (`terminate_torn_tail`
+makes it one malformed line) therefore blocked every browser launch and showed
+`unknown` while it stayed in the window, even when it was OLDER than the newest
+sweep marker. File order is sequence order, so such a line cannot hide a newer
+marker. When the window shows a fault and holds a marker at index `i`, the
+lifecycle is walked again with limit `i + 1`. The walk stops on the marker, so
+only damage between it and the newest end is judged. If that walk does not end
+on the same record (a newer one landed between the walks), the whole window's
+verdict stands. Damage newer than the marker still blocks launch.
