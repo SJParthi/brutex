@@ -58910,3 +58910,24 @@ now carries the swept count. SWS-05; it failed against the old sizing
 
 **Rejected.** Sizing on retained bars less a fixed warm-up. Only the column's
 fold knows which rows it swept.
+
+### D-2104 — Merging the attack-audit batch keeps the base's thin-sample divisor and lane 1's zero ceiling — 2026-10-04
+
+**Finding.** The merge of `final/all-fixes` 8c9313c met lane 1's fixes in
+`cli/src/lib.rs` from both sides.
+
+- **The thin-sample note.** Lane 1's D-1725 and the base's D-1646 fixed it
+  twice. D-1725 divided the sessions by the fold count. D-1646 divides by the
+  fold count plus one.
+- **The descent.** The base moved the descent to a `limits` pair and a lens,
+  but kept refusing a zero stop ceiling, which lane 1's D-1721 had made mean
+  "no ceiling".
+
+**Decision.**
+
+- The base's divisor stands. An anchored walk-forward of N folds cuts the span
+  into N + 1 windows. SCB-06's test now divides by `splits + 1`.
+- D-1721 is carried onto the new signature. Zero means no ceiling, a negative
+  ceiling is refused by name, and the zero path passes the caller's lens.
+- The base's lens-identity test uses the 21-term policy array, the width lane 1
+  gave it when it bound the per-fold exit-ladder rung count.
