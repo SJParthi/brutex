@@ -116,11 +116,11 @@ Total new across rounds 1-11: 164. Round 11 = 3 medium, 12 low. Newly fixed: xcu
 | Crash/edge | 17 | repair and recovery tools on damaged input | CE-88..90 low | crash-edge-pass17.md |
 | Concurrency | 15 | autopilot as a state machine | conc15-1 med (day rung idle marks feed complete and naps minute rung), conc15-2..6 low | conc-pass15.md |
 | Greeks | 15 | option pricing and greeks | p15num-1 med (zero dividend yield hard-coded though charter says UNVERIFIED; IVs biased, ran), p15num-2 low | numeric-pass15.md |
-| CI gates | 15 | do gates fail on violations | PENDING: agent was running at pause; report will land at /mnt/project-files/zero-rounds/tests-docs-security-pass15.md (IDs P15-01+) | — |
-Total new across rounds 1-12 so far: 175 (round 12 so far = 2 medium, 9 low). All handed to zero-findings session.
+| CI gates | 15 | do gates fail on violations | P15-01 med (unsafe_code forbid bypass passes gates 5 and 16, ran), P15-02..17 low | tests-docs-security-pass15.md |
+Total new across rounds 1-12: 192 (round 12 = 3 medium, 25 low). All handed to zero-findings session.
 
 ### Resume here
-1. Read tests-docs-security-pass15.md if present; hand its findings to the zero-findings session, copy it here, add its rows.
+1. Round 12 is complete and handed over. Add round 12 rows (CE-88..90, conc15-1..6, p15num-1/2, P15-01..17) to the artifact.
 2. Check `git rev-parse --short origin/final/all-fixes-zero`; if it moved from 1f4de71, re-verify every open row on the new head first.
 3. Otherwise start round 13 on new themes (see the themes already covered in the report titles under /mnt/project-files/zero-rounds/). Stop an angle when a pass finds nothing new.
 Artifact: https://claude.ai/artifact/VPrgywStff6zaUpdpFMXQL (version 13 = through round 11; round 12 rows still to add).
