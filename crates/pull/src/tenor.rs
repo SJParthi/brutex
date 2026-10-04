@@ -262,6 +262,56 @@ impl Tenor {
         Ok(Self { seconds })
     }
 
+    /// The tenor at the moment a bar's CLOSE printed.
+    ///
+    /// Bars are stamped at the OPEN of their bucket, and the premium priced is
+    /// the bar's close, which printed one bucket later. [`Self::between`] at
+    /// the open stamp gives every row one bucket too much life — 60 s on the
+    /// minute rung — and prices the expiry day's last bar, whose close printed
+    /// at the expiry instant, with time still left (grk-2, apis-1, D-2604).
+    /// This measures from `open + width`, capped at the bar day's derivatives
+    /// close: a daily bar or a session's short last bucket closes there, not a
+    /// full width later.
+    ///
+    /// # Errors
+    ///
+    /// Every arm of [`TenorError`]; the bar day's own hours are read too, and
+    /// an unverified day is refused rather than guessed.
+    ///
+    /// # Cost
+    ///
+    /// O(1): two dated-table lookups and closed-form arithmetic.
+    pub fn at_close_of(
+        open_micros: i64,
+        width_seconds: u32,
+        expiry: Expiry,
+    ) -> Result<Self, TenorError> {
+        let at = IstMoment::from_epoch_secs(open_micros.div_euclid(1_000_000)).map_err(|_| {
+            TenorError::StampOffCalendar {
+                ts_micros: open_micros,
+            }
+        })?;
+        let day_close = i64::from(
+            Venue::NseDerivatives
+                .hours_on(at.day())
+                .map_err(TenorError::HoursUnverified)?
+                .close_minute(),
+        ) * SECONDS_PER_MINUTE;
+        let opened =
+            i64::from(at.minute_of_day()) * SECONDS_PER_MINUTE + i64::from(at.second_of_minute());
+        // A bar that opened at or after its day's close has no later print to
+        // measure to; it is measured at its own stamp, which is what the
+        // session filter that dropped such bars would have seen.
+        let lived = i64::from(width_seconds).min(day_close - opened).max(0);
+        let closed =
+            open_micros
+                .checked_add(lived * 1_000_000)
+                .ok_or(TenorError::StampOffCalendar {
+                    ts_micros: open_micros,
+                })?;
+        Self::between(closed, expiry)
+    }
+
     /// Seconds left, exactly.
     #[must_use]
     pub const fn seconds(self) -> i64 {
@@ -462,6 +512,43 @@ mod tests {
         assert_eq!(alive.seconds(), 60);
         assert_eq!(alive.minutes(), 1);
         assert_eq!(alive.calendar_days(), 0);
+    }
+
+    /// grk-2, apis-1, D-2604: a bar's tenor is measured where its close
+    /// printed. The expiry day's last minute bar (15:39, close at the 15:40
+    /// expiry) is expired, the 15:38 bar has 60 s, a 3-minute bar adds three
+    /// minutes, and a daily bar or a bar wider than the time left is capped at
+    /// its day's close rather than measured a full width later.
+    #[test]
+    fn a_bars_tenor_is_measured_at_the_moment_its_close_printed() {
+        let dies = expiry(2026, 8, 27);
+        assert_eq!(
+            Tenor::at_close_of(ist(2026, 8, 27, 15, 39), 60, dies),
+            Err(TenorError::AlreadyExpired { seconds_past: 0 })
+        );
+        assert_eq!(
+            Tenor::at_close_of(ist(2026, 8, 27, 15, 38), 60, dies).map(Tenor::seconds),
+            Ok(60)
+        );
+        assert_eq!(
+            Tenor::at_close_of(ist(2026, 8, 27, 15, 0), 180, dies).map(Tenor::seconds),
+            Ok(37 * 60)
+        );
+        // A daily bar stamped at its open prints its close at the day's close.
+        assert_eq!(
+            Tenor::at_close_of(ist(2026, 8, 26, 9, 15), 86_400, dies).map(Tenor::seconds),
+            Ok(86_400)
+        );
+        assert_eq!(
+            Tenor::at_close_of(ist(2026, 8, 27, 9, 15), 86_400, dies),
+            Err(TenorError::AlreadyExpired { seconds_past: 0 })
+        );
+        assert_eq!(
+            Tenor::at_close_of(i64::MIN, 60, dies),
+            Err(TenorError::StampOffCalendar {
+                ts_micros: i64::MIN
+            })
+        );
     }
 
     /// Minutes truncate, and the one place it shows is the honest one.

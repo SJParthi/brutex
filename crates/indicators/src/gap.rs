@@ -1528,9 +1528,12 @@ mod tests {
         // all 384 positions, so it moved. The gap family's own count, 4,092,
         // did not, and `complete_sessions_emit_exactly_what_the_three_bar_fold_emitted`
         // above still pins the gap family alone. Was 8_217_985_476_958_011_973.
+        // RE-TAKEN again for D-2613 (ind1-2): the trend EMA steps truncate and
+        // the EMA and gap-mid bits are decided exactly, on every bar; the gap
+        // family count, 4,092, is unchanged. Was 9_976_369_688_448_099_888.
         assert_eq!(
             (digest, gap_known),
-            (9_976_369_688_448_099_888, 4_092),
+            (3_321_827_449_681_235_504, 4_092),
             "complete sessions no longer emit what the three-bar fold emitted"
         );
     }

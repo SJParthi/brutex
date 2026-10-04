@@ -302,6 +302,15 @@ pub enum RollingError {
         /// The cell exactly as the vendor wrote it.
         text: String,
     },
+    /// A volatility cell below zero. No implied volatility is negative, so a
+    /// sign names a wrong field or a wrong scale; it was stored as read
+    /// (STO-2, D-2607).
+    NegativeVolatility {
+        /// Which field.
+        field: &'static str,
+        /// The cell exactly as the vendor wrote it.
+        text: String,
+    },
     /// A price cell that is negative, or is not zero and snaps to zero.
     /// GAP16-23, D-1492.
     NotAPrice {
@@ -362,6 +371,11 @@ impl core::fmt::Display for RollingError {
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
             }
+            Self::NegativeVolatility { field, text } => write!(
+                f,
+                "a `{field}` cell holds {text}, and no implied volatility is \
+                 below zero. Refused rather than stored"
+            ),
             Self::Undecimal { field, text } => write!(
                 f,
                 "a `{field}` cell holds {text}, which is not a decimal this build \
@@ -900,7 +914,19 @@ fn micros_of(cell: &serde_json::Value, field: &'static str) -> Result<i64, Rolli
         serde_json::Value::Number(n) => n.to_string(),
         _ => return Err(refuse()),
     };
-    shift_six(text.trim()).ok_or_else(refuse)
+    let micros = shift_six(text.trim()).ok_or_else(refuse)?;
+    // A NEGATIVE VOLATILITY IS NOT A VOLATILITY (STO-2, D-2607). Checked on
+    // the text as well as the value, so `-0.0000004`, which rounds to zero,
+    // is refused for the sign the vendor wrote rather than filed as zero.
+    let signed =
+        text.trim().starts_with('-') && text.bytes().any(|b| b.is_ascii_digit() && b != b'0');
+    if micros < 0 || signed {
+        return Err(RollingError::NegativeVolatility {
+            field,
+            text: cell.to_string(),
+        });
+    }
+    Ok(micros)
 }
 
 /// A decimal string as millionths, half-up, or `None` when it will not read.
@@ -1225,6 +1251,32 @@ mod tests {
         assert_eq!(rows[0].overlay.iv_micros, OI_NULL);
         let rows = read(&with("0.125"), &spec(), "CALL", PriceScale::Rupees).expect("reads");
         assert_eq!(rows[0].overlay.iv_micros, 125_000);
+    }
+
+    /// STO-2, D-2607: a negative volatility cell is refused by name, including
+    /// one that rounds to zero at six places; a signed zero is still zero.
+    #[test]
+    fn a_negative_volatility_cell_is_refused_by_name() {
+        let with = |iv: &str| {
+            format!(
+                r#"{{"data":{{"ce":{{
+                "timestamp":[1700000000],
+                "open":[100.0],"high":[100.0],"low":[100.0],"close":[100.0],
+                "volume":[1],"iv":[{iv}]
+            }}}}}}"#
+            )
+        };
+        for bad in ["-0.25", r#""-0.0000005""#, r#""-0.0000004""#] {
+            let got = read(&with(bad), &spec(), "CALL", PriceScale::Rupees);
+            assert!(
+                matches!(got, Err(RollingError::NegativeVolatility { .. })),
+                "{bad}: {got:?}"
+            );
+        }
+        for zero in ["0", r#""-0.0""#] {
+            let rows = read(&with(zero), &spec(), "CALL", PriceScale::Rupees).expect("zero reads");
+            assert_eq!(rows[0].overlay.iv_micros, 0, "{zero}");
+        }
     }
 
     /// **IV AND SPOT LAND IN THE OVERLAY, KEYED BY THE BAR'S OWN STAMP.**
