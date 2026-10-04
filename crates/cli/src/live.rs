@@ -206,6 +206,13 @@ const ROWS_AT: usize = HEADER_BYTES + SUMMARY_BYTES;
 /// than measured. `CLAUDE.md` §3 rule 6.
 pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 
+/// The fewest observations a live row may be judged against the bar with.
+///
+/// The end-of-run report's own floor, carried so `/live.json` cannot call a row
+/// clear that the report refuses to judge (xcut-1, D-1991). `api` does not
+/// name `runner`, so the figure reaches it through this crate.
+pub const MIN_JUDGEABLE_OBSERVATIONS: u64 = runner::report::MIN_OBSERVATIONS;
+
 /// What a run has found so far, and what it must clear.
 ///
 /// # Why the bar travels with the rows

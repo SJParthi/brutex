@@ -17930,6 +17930,9 @@ fn publish_ranked(
     rules: crate::Rules,
 ) -> (Option<crate::live::Live>, String) {
     let identity = id.bytes();
+    if let Some(why) = mispaired_live_row(by_evidence) {
+        return (None, why);
+    }
     let rows: Vec<crate::frontier::Row> = by_evidence
         .iter()
         .take(STORED_KEEP)
@@ -18000,6 +18003,30 @@ fn publish_ranked(
         },
         Err(why) => (None, format!("the live view could not be started: {why}\n")),
     }
+}
+
+/// Why the live view must not be written, when one of its rows is MISPAIRED.
+///
+/// A row whose forward outcomes belong to other bars has a mean and a t that
+/// mean nothing, and the end-of-run report prints it as MISPAIRED rather than
+/// judging it. `frontier::Row` has no slot for that count, so `/live.json`
+/// judged such a row's |t| against the bar like any other (xcut-1, D-1991). The
+/// live view is refused, by name, rather than served with one row a reader would
+/// count as proved.
+fn mispaired_live_row(by_evidence: &[&runner::rank::Scored]) -> Option<String> {
+    by_evidence
+        .iter()
+        .take(STORED_KEEP)
+        .zip(1_usize..)
+        .find_map(|(scored, rank)| {
+            (scored.edge.mismatched > 0).then(|| {
+                format!(
+                    "the live view was not written: row {rank} is MISPAIRED ({} forward outcomes \
+                     belong to other bars), so its mean and t mean nothing\n",
+                    scored.edge.mismatched
+                )
+            })
+        })
 }
 
 /// One event per ladder level, and this is where it is affordable.
@@ -23361,6 +23388,31 @@ mod tests {
     /// Through `money_key`, the production key, on `Screened` rows rather than
     /// a hand-built tuple: the defect was the mapping from a cell to its terms,
     /// so a test that built the tuple itself would restate it.
+    /// xcut-1, D-1991: a MISPAIRED row stops the live view by name; a clean
+    /// ranking writes it.
+    #[test]
+    fn a_mispaired_row_refuses_the_live_view_by_name() {
+        use runner::rank::Scored;
+
+        let row = |mismatched: u64| Scored {
+            #[expect(
+                clippy::default_trait_access,
+                reason = "the named mask type belongs to runner's private dependency graph"
+            )]
+            mask: Default::default(),
+            hits: 40,
+            edge: runner::outcome::Edge {
+                n: 40,
+                mismatched,
+                ..runner::outcome::Edge::default()
+            },
+        };
+        let (clean, bad) = (row(0), row(3));
+        assert_eq!(super::mispaired_live_row(&[&clean, &clean]), None);
+        let why = super::mispaired_live_row(&[&clean, &bad]).expect("refused");
+        assert!(why.contains("row 2 is MISPAIRED (3 forward"), "{why}");
+    }
+
     #[test]
     fn an_untested_cell_that_never_lost_ranks_behind_a_tested_one() {
         use runner::rank::Scored;

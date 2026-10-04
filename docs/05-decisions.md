@@ -57268,3 +57268,16 @@ and Finalization V4 already cut a failed barrier (D-1900).
 - `/masters` page: #74's escaped page (D-1585) is kept over staging's `createElement` page (CE-25/CE-26, D-1768); both stop vendor markup and both report a refused re-parse. `web/tests/masters-text.test.js` is removed and ZR-30/ZR-31 now cite `masters-load.test.js`. The `/masters` footer and its test keep staging's wording (D-1762/D-1769).
 - `api::emitted`: the lib emit-site count is 65 (D-1765's two driven sites plus D-1582/D-1583's two unreachable ones) and `UNREACHABLE` is 10 (P1-17-02 moved one out, D-1582/D-1583 added two).
 
+### D-1990 — A field a maximum gates is rounded up, and a series shorter than its bootstrap block is refused — 2026-10-04
+
+- run3-1: the runner's `losing_trade_rate_ppm` gate now reads the rate rounded UP from the exact counts the evidence carries (`losing_rate_ceil`). The stored rate stays the canonical floor `validate_count_rate` reconciles, so evidence bytes do not move; a true 1/3 on a 333,333 cap now fails.
+- p2bool-1, p2inst-1, p2idx-1: `ambiguous_fill_rate_ppm`, `gap_affected_rate_ppm`, `session_concentration_ppm` and `largest_trade_profit_share_ppm` are each gated by a maximum and were floored, so a true 200,000.5 ppm share passed a 200,000 cap. Population Base Evidence V2, institutional evidence (direct cell and trade-row reconciliation), Boolean admission and single-stop qualification now store them rounded up (`measured_ceiling_rate`, `ceiling_rate_ppm`). The minimum-gated win rate keeps its floor, which is its safe side.
+- D-0743's open cli builders: `boolean_admission_v1`, `boolean_admission_reader` and the single-stop PBO now store White, SPA, FWER, Romano-Wolf and PBO with the new `AdmissionExactProbabilityV2::ceiling_ppm`. The exact decisions (`hypothesis_decision`) were already exact and are unchanged.
+- D-0742's open half: every bootstrap entry point (`reality_check`, `spa`, the White/SPA receipts, `romano_wolf`, its receipt, the adjusted p-values and `family_tests_v1`) now refuses a block longer than the period count. Before, over 400 periods of pure noise a block of 40,000 put 36 of 40 families under p = 0.05; a block of 10 put 2. Refused rather than clamped, because a different block answers a different question.
+- These change stored evidence bytes for any record whose max-gated rate was inexact in ppm. No golden digest test moved.
+
+### D-1991 — /live.json judges only the rows the end-of-run report judges — 2026-10-04
+
+- xcut-1: `clears_bar` now also requires `n >= runner::report::MIN_OBSERVATIONS` (30), carried to `api` as `cli::live::MIN_JUDGEABLE_OBSERVATIONS`; a five-observation row with t = 9 was served as clearing the bar while the report called it TOO FEW.
+- A MISPAIRED row (`Edge::mismatched > 0`) has no slot in `frontier::Row`, so `publish_ranked` now refuses to write the live view and names the row, rather than serving a t the report says means nothing. Adding the count to the row would change the 280-byte frontier stride; that is not done here.
+- run1-3 was already closed by CE-7 (D-1769): the bar is carried as its ceiling and the page compares strictly above it.

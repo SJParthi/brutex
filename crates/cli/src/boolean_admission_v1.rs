@@ -22,7 +22,7 @@ pub(crate) mod qualification;
 #[path = "boolean_admission_reader.rs"]
 pub(crate) mod reader;
 use crate::candidate_universe::population_base_evidence_v2::{
-    measured_rate, ratio_observed, return_drawdown,
+    measured_ceiling_rate, measured_rate, ratio_observed, return_drawdown,
 };
 use crate::sweep_evidence::{Completion, Operation};
 
@@ -192,6 +192,8 @@ pub(super) fn base_values(row: &BooleanCoordinateV1) -> Result<AdmissionEvidence
     let cell = row.cell();
     let details = crate::institutional_evidence::reconcile_trade_rows(cell, row.trades())?;
     let rate = |part, total, name| measured_rate(part, total, name).map_err(display);
+    // A rate a MAXIMUM gates rounds UP (p2bool-1, D-1990).
+    let ceiling = |part, total, name| measured_ceiling_rate(part, total, name).map_err(display);
     let ratio = |part, total, name| ratio_observed(part, total, name).map_err(display);
     let measured = |value| {
         if cell.trades > 0 {
@@ -226,8 +228,8 @@ pub(super) fn base_values(row: &BooleanCoordinateV1) -> Result<AdmissionEvidence
         fwer_p_value_ppm: ObservedU64V1::Unmeasured,
         spa_p_value_ppm: ObservedU64V1::Unmeasured,
         decided_folds: ObservedU64V1::Unmeasured,
-        ambiguous_fill_rate_ppm: rate(cell.ambiguous_bars, cell.trades, "ambiguous rate")?,
-        gap_affected_rate_ppm: rate(cell.gapped, cell.trades, "gap rate")?,
+        ambiguous_fill_rate_ppm: ceiling(cell.ambiguous_bars, cell.trades, "ambiguous rate")?,
+        gap_affected_rate_ppm: ceiling(cell.gapped, cell.trades, "gap rate")?,
         session_concentration_ppm: details.session_concentration_ppm,
         largest_trade_profit_share_ppm: details.largest_trade_profit_share_ppm,
         execution_complete: if row.execution_refusal_bits().bits() == 0 {
@@ -292,10 +294,10 @@ fn apply_statistics(
     let white = measured.white.exact_p_value();
     let white = probability(white.numerator() as u64, white.denominator() as u64)?;
     let spa = measured.spa.exact_p_value();
-    values.white_reality_p_value_ppm = ObservedU64V1::Measured(white.ppm());
+    values.white_reality_p_value_ppm = ObservedU64V1::Measured(white.ceiling_ppm());
     values.white_reality_decision = hypothesis_decision(white);
     values.spa_p_value_ppm = ObservedU64V1::Measured(
-        probability(spa.numerator() as u64, spa.denominator() as u64)?.ppm(),
+        probability(spa.numerator() as u64, spa.denominator() as u64)?.ceiling_ppm(),
     );
     values.bootstrap_draws = ObservedU64V1::Measured(measured.white.draws() as u64);
     values.bootstrap_strategies = ObservedU64V1::Measured(measured.white.strategies() as u64);
@@ -308,7 +310,7 @@ fn apply_statistics(
     );
     if measured.contributing_splits > 0 {
         values.pbo_ppm = ObservedU64V1::Measured(
-            probability(measured.bottom_half_splits, measured.contributing_splits)?.ppm(),
+            probability(measured.bottom_half_splits, measured.contributing_splits)?.ceiling_ppm(),
         );
     }
     if let Some(romano) = &measured.romano {
@@ -321,9 +323,9 @@ fn apply_statistics(
             .adjusted_p_value();
         let adjusted = probability(adjusted.numerator() as u64, adjusted.denominator() as u64)?;
         values.fwer_p_value_ppm = ObservedU64V1::Measured(
-            probability(family.numerator() as u64, family.denominator() as u64)?.ppm(),
+            probability(family.numerator() as u64, family.denominator() as u64)?.ceiling_ppm(),
         );
-        values.romano_wolf_p_value_ppm = ObservedU64V1::Measured(adjusted.ppm());
+        values.romano_wolf_p_value_ppm = ObservedU64V1::Measured(adjusted.ceiling_ppm());
         values.romano_wolf_decision = hypothesis_decision(adjusted);
         values.full_precision_statistics_complete = CompletenessV1::Complete;
     }

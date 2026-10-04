@@ -568,14 +568,18 @@ impl BaseEvidenceRecordV2 {
             fwer_p_value_ppm: ObservedU64V1::Unmeasured,
             spa_p_value_ppm: ObservedU64V1::Unmeasured,
             decided_folds: ObservedU64V1::Unmeasured,
-            ambiguous_fill_rate_ppm: measured_rate(
+            // The next four are gated by a MAXIMUM, so they round UP: a floor put a
+            // true 200,000.5 ppm share on a 200,000 cap and passed it (p2bool-1,
+            // D-1990). `losing_trade_rate_ppm` stays the canonical floor the
+            // runner reconciles; the runner's gate reads its exact counts (run3-1).
+            ambiguous_fill_rate_ppm: measured_ceiling_rate(
                 a.ambiguous_bars,
                 a.trades,
                 "ambiguous fill rate",
             )?,
-            gap_affected_rate_ppm: measured_rate(a.gapped, a.trades, "gap affected rate")?,
+            gap_affected_rate_ppm: measured_ceiling_rate(a.gapped, a.trades, "gap affected rate")?,
             session_concentration_ppm: if row_values_measured {
-                ObservedU64V1::Measured(rate_ppm(
+                ObservedU64V1::Measured(ceiling_rate_ppm(
                     a.max_session_trades,
                     a.trades,
                     "session concentration",
@@ -584,7 +588,7 @@ impl BaseEvidenceRecordV2 {
                 ObservedU64V1::Unmeasured
             },
             largest_trade_profit_share_ppm: if a.gross_win > 0 {
-                ObservedU64V1::Measured(rate_ppm(
+                ObservedU64V1::Measured(ceiling_rate_ppm(
                     best_trade,
                     gross_win,
                     "largest trade profit share",
@@ -1581,6 +1585,34 @@ pub(crate) fn measured_rate(
     }
 }
 
+/// `measured_rate` rounded UP, for a rate a MAXIMUM gates (p2bool-1, D-1990).
+/// A minimum-gated rate keeps `measured_rate`'s floor, which is its safe side.
+pub(crate) fn measured_ceiling_rate(
+    part: u64,
+    total: u64,
+    name: &'static str,
+) -> Result<ObservedU64V1, BaseEvidenceRefusalV2> {
+    if total == 0 {
+        Ok(ObservedU64V1::Unmeasured)
+    } else {
+        Ok(ObservedU64V1::Measured(ceiling_rate_ppm(
+            part, total, name,
+        )?))
+    }
+}
+
+fn ceiling_rate_ppm(
+    part: u64,
+    total: u64,
+    name: &'static str,
+) -> Result<u64, BaseEvidenceRefusalV2> {
+    let scaled = u128::from(part) * u128::from(PPM);
+    let quotient = (total != 0)
+        .then(|| scaled.div_ceil(u128::from(total)))
+        .ok_or(BaseEvidenceRefusalV2::Arithmetic(name))?;
+    u64::try_from(quotient).map_err(|_| BaseEvidenceRefusalV2::Arithmetic(name))
+}
+
 fn rate_ppm(part: u64, total: u64, name: &'static str) -> Result<u64, BaseEvidenceRefusalV2> {
     let denominator = u128::from(total);
     let scaled = u128::from(part)
@@ -1832,6 +1864,57 @@ mod tests {
             CompletenessV1::Unmeasured
         );
         AdmissionEvidenceV1::new(values).expect("canonical base projection");
+    }
+
+    #[test]
+    fn max_gated_rates_round_up_and_min_gated_rates_keep_their_floor() {
+        // p2bool-1, D-1990: 400,001 of 2,000,000 is a 200,000.5 ppm share, and
+        // 1 of 3 is 333,333.33 ppm. A floor put each on a round cap and passed.
+        let mut r = record();
+        let a = &mut r.draft.aggregates;
+        a.trades = 3;
+        a.wins = 2;
+        a.losses = 1;
+        a.ambiguous_bars = 1;
+        a.gapped = 1;
+        a.max_session_trades = 1;
+        a.best_trade = 400_001;
+        a.gross_win = 2_000_000;
+        let values = r.admission_values().expect("finite projection");
+        assert_eq!(
+            values.largest_trade_profit_share_ppm,
+            ObservedU64V1::Measured(200_001)
+        );
+        assert_eq!(
+            values.ambiguous_fill_rate_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        assert_eq!(
+            values.gap_affected_rate_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        assert_eq!(
+            values.session_concentration_ppm,
+            ObservedU64V1::Measured(333_334)
+        );
+        // Minimum-gated, and the losing rate the runner reconciles as a floor.
+        assert_eq!(values.win_rate_ppm, ObservedU64V1::Measured(666_666));
+        assert_eq!(
+            values.losing_trade_rate_ppm,
+            ObservedU64V1::Measured(333_333)
+        );
+        assert_eq!(
+            measured_ceiling_rate(1, 0, "none"),
+            Ok(ObservedU64V1::Unmeasured)
+        );
+        assert!(matches!(
+            ceiling_rate_ppm(1, 0, "zero"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("zero"))
+        ));
+        assert!(matches!(
+            ceiling_rate_ppm(u64::MAX, 1, "too wide"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("too wide"))
+        ));
     }
 
     #[test]

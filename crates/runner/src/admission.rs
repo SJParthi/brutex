@@ -1022,7 +1022,7 @@ impl AdmissionPolicyV1 {
             &mut refused,
         );
         check_max_u64(
-            e.losing_trade_rate_ppm,
+            losing_rate_ceil(&e),
             p.max_losing_trade_rate_ppm,
             AdmissionReasonV1::LosingTradeRate,
             &mut failed,
@@ -2880,6 +2880,28 @@ fn check_min_u64(
     record_observation(observation, reason, violates, failed, unmeasured, refused);
 }
 
+/// The losing-trade rate as its maximum gate must read it: rounded UP from the
+/// exact counts the evidence already carries. The stored rate is the canonical
+/// floor, so a true 1/3 (333,333.33 ppm) stored as 333,333 passed a 333,333 cap
+/// (run3-1, D-1990). Evidence validation has already proved the stored rate is
+/// that floor, so the ceiling is the floor plus one exactly when the division
+/// left a remainder. A rate whose counts are not measured is read as stored.
+fn losing_rate_ceil(e: &AdmissionEvidenceValuesV1) -> ObservedU64V1 {
+    match (e.losing_trade_rate_ppm, e.losing_trades, e.trades) {
+        (
+            ObservedU64V1::Measured(rate),
+            ObservedU64V1::Measured(losses),
+            ObservedU64V1::Measured(trades),
+        ) => {
+            let inexact = (u128::from(losses) * u128::from(PPM))
+                .checked_rem(u128::from(trades))
+                .is_some_and(|remainder| remainder != 0);
+            ObservedU64V1::Measured(rate.saturating_add(u64::from(inexact)))
+        }
+        (stored, _, _) => stored,
+    }
+}
+
 fn check_max_u64(
     observation: ObservedU64V1,
     ceiling: u64,
@@ -3006,6 +3028,19 @@ impl AdmissionExactProbabilityV2 {
     #[must_use]
     pub fn ppm(self) -> u64 {
         let projected = u128::from(self.numerator) * u128::from(PPM) / u128::from(self.denominator);
+        u64::try_from(projected).unwrap_or(PPM)
+    }
+
+    /// Projection rounded UP onto one million comparison points.
+    ///
+    /// The form a field gated by a MAXIMUM must store: a floor put a true
+    /// probability just above the cap onto the cap, and the cap passed it
+    /// (D-0743's open cli builders, D-1990). Never above `PPM`, because the
+    /// numerator never exceeds the denominator.
+    #[must_use]
+    pub fn ceiling_ppm(self) -> u64 {
+        let projected =
+            (u128::from(self.numerator) * u128::from(PPM)).div_ceil(u128::from(self.denominator));
         u64::try_from(projected).unwrap_or(PPM)
     }
 
@@ -7585,6 +7620,52 @@ mod tests {
             assert!(!verdict.is_admitted());
             assert!(verdict.reconciles());
         }
+    }
+
+    #[test]
+    fn the_ceiling_projection_rounds_up_only_a_remainder() {
+        let third = AdmissionExactProbabilityV2::new(1, 3).expect("finite");
+        assert_eq!((third.ppm(), third.ceiling_ppm()), (333_333, 333_334));
+        let half = AdmissionExactProbabilityV2::new(1, 2).expect("finite");
+        assert_eq!((half.ppm(), half.ceiling_ppm()), (500_000, 500_000));
+        let zero = AdmissionExactProbabilityV2::new(0, 7).expect("finite");
+        assert_eq!(zero.ceiling_ppm(), 0);
+        let one = AdmissionExactProbabilityV2::new(u64::MAX, u64::MAX).expect("finite");
+        assert_eq!(one.ceiling_ppm(), PPM);
+    }
+
+    #[test]
+    fn a_losing_rate_whose_floor_sits_on_the_cap_fails_when_the_exact_rate_is_above() {
+        // run3-1, D-1990: 1,000,001 / 2,500,001 losses is 400,000.16 ppm; its
+        // canonical floor is the 400,000 cap itself, so the floor alone passed.
+        let mut above = constructible_values();
+        above.trades = ObservedU64V1::Measured(2_500_001);
+        above.winning_trades = ObservedU64V1::Measured(1_500_000);
+        above.losing_trades = ObservedU64V1::Measured(1_000_001);
+        above.win_rate_ppm = ObservedU64V1::Measured(599_999);
+        above.losing_trade_rate_ppm = ObservedU64V1::Measured(400_000);
+        let above = AdmissionEvidenceV1::new(above).expect("the floor is the canonical rate");
+        let verdict = policy().evaluate(&above);
+        assert!(
+            verdict
+                .failed()
+                .contains(AdmissionReasonV1::LosingTradeRate)
+        );
+
+        // An exact 400,000 ppm (2 of 5) sits on the cap and is not above it.
+        let mut on = constructible_values();
+        on.trades = ObservedU64V1::Measured(50);
+        on.winning_trades = ObservedU64V1::Measured(30);
+        on.losing_trades = ObservedU64V1::Measured(20);
+        on.win_rate_ppm = ObservedU64V1::Measured(600_000);
+        on.losing_trade_rate_ppm = ObservedU64V1::Measured(400_000);
+        let on = AdmissionEvidenceV1::new(on).expect("exact rate");
+        let verdict = policy().evaluate(&on);
+        assert!(
+            !verdict
+                .failed()
+                .contains(AdmissionReasonV1::LosingTradeRate)
+        );
     }
 
     #[test]

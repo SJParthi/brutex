@@ -10965,11 +10965,14 @@ The continuation draw is `1_000_000_u64.saturating_sub(1_000_000 / block as u64)
 ppm, so a block above `bootstrap::MAX_BLOCK` (1,000,000) would never restart
 and is now refused by every entry point
 (`a_block_the_ppm_draw_cannot_restart_is_refused_by_every_entry_point`). A
-block at or below the ceiling is still accepted however it compares with the
-series length — the same test answers at a block of 1,000,000 over 200
-periods — and the integer division quantizes the restart probability, so a
-large accepted block is resampled at `1_000_000 / (1_000_000 / block)` rather
-than at `block`. Neither is refused or measured here.
+block longer than the series is refused too (D-1990,
+`a_block_longer_than_the_series_is_refused_by_every_entry_point`): before
+that, a block of 40,000 over 400 periods of pure noise put 36 of 40 families
+under p = 0.05. The integer division still quantizes the restart probability,
+so an accepted block is resampled at `1_000_000 / (1_000_000 / block)` rather
+than at `block`; with the block now at most the period count, the restart
+probability's relative error is below `block / 1_000_000` (arithmetic, not
+measured).
 
 ## Admission V2/V3 refuses, rather than decides, a floor-hidden probability — D-0743, 30 September 2026
 
@@ -10977,8 +10980,10 @@ A max-gated probability whose floor ppm is within its ceiling while its exact
 fraction is above it is refused by the three projection doors
 (`a_floor_ppm_on_the_ceiling_never_passes_an_exact_probability_above_it`);
 a V2/V3 verdict, re-derived from the floor ppm slots, cannot carry the
-correct failure. The cli V1 builders
-that fill the same fields with `.ppm()` are not changed by D-0743.
+correct failure. The cli V1 builders that filled the same fields with the
+floor `.ppm()` (`boolean_admission_v1`, `boolean_admission_reader`, and the
+single-stop PBO in `index_stop_qualification_numeric`) now store
+`AdmissionExactProbabilityV2::ceiling_ppm`, rounded up (D-1990).
 ## Grammar search: what a node budget bounds, and what display cannot re-run — D-0751 to D-0753, 29 September 2026
 
 * **A node budget bounds choices, not progress (D-0752).** `Cursor::advance`
