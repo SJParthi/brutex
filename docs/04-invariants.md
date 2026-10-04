@@ -6414,6 +6414,7 @@ old line regex the same input and watched it pass.
 | AFG-06 | A signal-candle-stop evaluation over any day window seals the same digest as the full row walk did, and keeps only periods inside the window (D-2307) | `runner::signal_candle_stop::tests::a_bisected_day_window_seals_exactly_what_the_full_row_walk_did` | ✓ |
 | AFG-09 | `api::detail::Cached` holds its slot lock only for an O(1) look, install or clear: a cold `open`, a `refresh` (D-1560's growth re-hash included) and `f` each run with it free, and another root can be served from inside a cold open (D-2309) | `api::detail::tests::the_slot_lock_is_free_while_a_handle_opens_or_refreshes` | ✓ |
 | AFG-10 | `cli top` and `cli results` open the results ledger once and read each row once, from the open's own pass (no second walk through `Results::read`), name the same damaged row as before (the first for `top`, the newest for `results`) (D-2310) | `cli::results_report_tests::top_and_results_read_each_row_once_in_one_open` | ✓ |
+| AFG-16 | Every bootstrap resampled mean equals `mean_at`'s f64 fold bit for bit: read from integer prefix sums over the draw's contiguous runs, O(runs) per strategy per draw, only where the fold is provably exact (`|v| ≤ 2^53` and `periods × max|v| ≤ 2^53`), and through the same fold otherwise; the rng stream and every receipt are unchanged (D-2316) | `runner::bootstrap::tests::the_run_prefix_mean_is_the_fold_bit_for_bit`, `runner::bootstrap::tests::the_prefix_path_reads_one_term_per_run_not_per_period` | ✓ |
 
 ### Rust and O(1) sweep, data side (D-2370 onward)
 
