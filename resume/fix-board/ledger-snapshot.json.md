@@ -1,6 +1,6 @@
 {
-  "as_of": "2026-10-04 22:20 UTC",
-  "prev_as_of": "2026-10-04 22:00 UTC",
+  "as_of": "2026-10-04 23:20 UTC",
+  "prev_as_of": "2026-10-04 22:20 UTC",
   "states": {
     "Lane 1|W3-store1-3": "pushed",
     "Lane 1|W3-store1-0": "fixing",
@@ -1193,6 +1193,7 @@
     "Zero-rounds: tests, docs, security|P19-06": "found",
     "Zero-rounds: tests, docs, security|P19-07": "found",
     "Named only in a status file|store-tix": "pushed",
-    "Named only in a status file|log-p99": "pushed"
+    "Named only in a status file|log-p99": "pushed",
+    "Named only in a status file|L1B-mutant-cas-guard": "branch"
   }
 }
