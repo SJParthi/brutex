@@ -475,6 +475,8 @@ fn a_real_file_write_failure_names_its_true_end_and_leaves_the_bytes() {
     let mut writable = OpenOptions::new().append(true).open(&path).unwrap();
     write_synced(&mut writable, &[1; BYTES]).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 10 + BYTES as u64);
+}
+
 /// W2-cli9-5: a crash after `create_new` of the per-invocation journal and
 /// before its first synced record leaves a 0-byte journal. That is the same
 /// fact as a missing journal -- an indexed start nobody confirmed -- and must
