@@ -47,6 +47,15 @@ jobs:
           # D-2343: the auto-merge and main re-check JSON rules, tested here.
           rustc --edition=2024 --test -D warnings .github/gh_json.rs -o "${tool}-gh-json-tests"
           "${tool}-gh-json-tests"
+          # D-2311: the listings and verdicts of this step and of gates 1 to 7
+          # below are .github/gates_tree.rs, proved by its own tests here and
+          # run from this one path by each later step. It may start only git
+          # (D-2344), so a step runs the scanner itself and hands the tool the
+          # output file and the exit status; any non-zero status is refused.
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          rustc --edition=2024 --test -D warnings .github/gates_tree.rs -o "${gt}-tests"
+          "${gt}-tests"
+          rustc --edition=2024 -D warnings .github/gates_tree.rs -o "$gt"
           if [ -n "${GITHUB_ENV:-}" ]; then
             printf 'SOURCE_SCAN=%s\n' "$tool" >> "$GITHUB_ENV"
           fi
@@ -62,33 +71,26 @@ jobs:
           #     section 2); such a program lives under web/ and is run by path.
           #     D-2342 widens the forms; awk is a pinned ratchet (06-limits).
           # Every tracked .yml under .github/, not only workflows/ (D-2341).
-          wfs=$(git ls-files '.github/*.yml')
-          [ -n "$wfs" ] || { echo "GATE 0 READ NO WORKFLOW."; exit 1; }
-          # shellcheck disable=SC2086
-          if ! "$tool" workflow $wfs; then
-            echo
-            echo "GATE 0 FAILED: the workflow lines above are refused. See D-1100."
-            exit 1
-          fi
+          # An empty listing is refused.
+          work=$(mktemp -d)
+          "$gt" gate-0 prepare "$work"
+          st_w=0; xargs -0 -r "$tool" workflow < "$work/workflows.z" > "$work/workflow" || st_w=$?
           # D-1601: ci-ok needs every job, runs `if: always()`, accepts only
           # success. D-1603: no crate code spawns a shell or an interpreter by
           # a literal name or path, which gate 1e's PATH stubs cannot see.
-          if ! "$tool" aggregator .github/workflows/ci.yml; then
-            echo "GATE 0 FAILED: ci-ok no longer guards every gate. See D-1601."
-            exit 1
-          fi
+          st_a=0; "$tool" aggregator .github/workflows/ci.yml > "$work/aggregator" || st_a=$?
           # D-2344: every spawn names current_exe, a CARGO_BIN_EXE_ path or a
           # listed program; .github/*.rs tools are read too.
-          # shellcheck disable=SC2046
-          if ! "$tool" spawns $(git ls-files 'crates/*.rs' '.github/*.rs'); then
-            echo "GATE 0 FAILED: crate code above starts a shell or interpreter. D-1603."
-            exit 1
-          fi
-          echo "OK — the scanner passed its own tests and the workflow is clean."
+          st_s=0; xargs -0 -r "$tool" spawns < "$work/spawns.z" > "$work/spawns" || st_s=$?
+          "$gt" gate-0 verdict "$work" "$st_w" "$st_a" "$st_s"
 
       - name: Gate 1 — extension allowlist
         run: |
           set -euo pipefail
+          # D-2311: the lists and the walk below are `ALLOWED`, `extension_ok`
+          # and `gate_1_record` in .github/gates_tree.rs; these comments are
+          # their justification.
+          #
           # THE ONLY EXTENSIONS THIS REPOSITORY MAY CONTAIN OUTSIDE web/, and this
           # line is now CLAUDE.md section 2 quoted rather than section 2 widened:
           # "Allowed tracked extensions: `.rs` `.toml` `.md` `.lock` `.html`
@@ -102,13 +104,13 @@ jobs:
           # 1's list is the sentence a reader takes as the statement of section 2,
           # and a wider sentence is a wrong one. So the split is by PATH here too,
           # exactly as the `web/` exception already is.
-          allowed='rs|toml|md|lock|html|css'
+          #
           # `.yml` ONLY UNDER `.github/`. The parenthesis in section 2 is part of
           # the rule, and nothing enforced it here. Both tracked `.yml` files --
           # this workflow and `auto-merge.yml` -- already live there, so this
           # narrowing costs nothing today and is the point at which a `.yml`
           # dropped at the root becomes a red build rather than a gate-1b one.
-          github_allowed="${allowed}|yml"
+          #
           # `.json` is in section 2's list ONLY under `.claude/`, and exactly one
           # tracked file carries it: `.claude/launch.json`, which holds the two
           # run configurations docs/07-plan.md section 0 names. It is read by the
@@ -130,12 +132,12 @@ jobs:
           # -- a gate that widens the law to match the tree is the shape this whole
           # file exists to refuse." Section 2 now carries the `.claude/` clause and
           # D-0210 is the entry. The gate did not move; the law did.
-          claude_allowed="${allowed}|json"
+          #
           # Under web/ ONLY, the browser languages are allowed -- D-0052. This
           # is narrowed by PATH, not relaxed by extension: putting `ts` on the
           # line above would permit a build script anywhere in the tree, which
           # is the thing CLAUDE.md section 2 exists to forbid.
-          web_allowed='.*'
+          #
           # Files with no extension that are still legitimate -- AND WHERE.
           # The names used to pass at any depth, so `crates/x/LICENSE` could
           # hold anything (UC-8). A licence and a code-owners file mean
@@ -143,80 +145,27 @@ jobs:
           # where GitHub reads it). D-1104. The two git files now pass only at
           # the root and under web/ (rustonly2-5, D-2348): a nested one could
           # hold anything, and none is tracked anywhere else.
-          root_names='LICENSE|CODEOWNERS'
-          any_depth_names='\.gitignore|\.gitattributes'
-          bad=0
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          work=$(mktemp -d)
+          #
+          # A MODE IS CONTENT TOO (D-1104). Outside web/, every tracked file
+          # is an ordinary non-executable file: a symlink can point the
+          # allowlist's `.rs` at anything, an executable bit turns a `.rs`
+          # holding a shell script into a program cargo can be told to run,
+          # and a gitlink is a whole foreign tree. None is tracked today.
+          #
+          # WHICH LIST APPLIES IS DECIDED BY THE PATH, not by the file.
+          # Under web/ the browser languages are legal; everywhere else the
+          # hard rule is untouched, so a .ts under crates/ fails here exactly
+          # as it always did.
+          #
           # THE LISTING IS A FILE, NOT A PROCESS SUBSTITUTION (AC-gates-law-10).
           # `done < <(git ls-files)` swallowed a git that failed -- a moved
           # worktree, a refused directory owner -- the loop read nothing and
-          # this gate printed OK. Written here, a failure stops the step under
-          # `set -e`, and an empty listing is refused below. NUL-separated with
-          # `-s`, so a name git would quote (a non-ASCII `.rs`, whose extension
-          # read as `rs"`: ET-rust-only-purity-10) is read as itself, and so
-          # the MODE is read alongside it.
-          git ls-files -s -z > "$work/staged"
-          git ls-files -z > "$work/tracked"
-          n=0
-          while IFS= read -r -d '' rec; do
-            n=$((n + 1))
-            mode="${rec%% *}"
-            f="${rec#*$'\t'}"
-            base="${f##*/}"
-            # A MODE IS CONTENT TOO (D-1104). Outside web/, every tracked file
-            # is an ordinary non-executable file: a symlink can point the
-            # allowlist's `.rs` at anything, an executable bit turns a `.rs`
-            # holding a shell script into a program cargo can be told to run,
-            # and a gitlink is a whole foreign tree. None is tracked today.
-            case "$f" in
-              web/*) ;;
-              *) if [ "$mode" != 100644 ]; then
-                   printf 'FORBIDDEN MODE  %s  (%s; only 100644 outside web/)\n' "$f" "$mode"
-                   bad=1
-                 fi ;;
-            esac
-            if grep -Eq "^(${any_depth_names})$" <<< "$base"; then
-              case "$f" in
-                .gitignore|.gitattributes|web/*) continue ;;
-                *) printf 'FORBIDDEN FILE  %s  (%s is allowed only at the root)\n' "$f" "$base"
-                   bad=1; continue ;;
-              esac
-            fi
-            if grep -Eq "^(${root_names})$" <<< "$base"; then
-              case "$f" in
-                LICENSE|CODEOWNERS|.github/CODEOWNERS|docs/CODEOWNERS) continue ;;
-                web/*) continue ;;
-                *) printf 'FORBIDDEN FILE  %s  (%s is allowed only where it means something)\n' "$f" "$base"
-                   bad=1; continue ;;
-              esac
-            fi
-            case "$base" in
-              *.*) ext="${base##*.}" ;;
-              *)   ext="" ;;
-            esac
-            # WHICH LIST APPLIES IS DECIDED BY THE PATH, not by the file.
-            # Under web/ the browser languages are legal; everywhere else the
-            # hard rule is untouched, so a .ts under crates/ fails here exactly
-            # as it always did.
-            case "$f" in
-              web/*)     list="$web_allowed"    ; where='web/' ;;
-              .github/*) list="$github_allowed" ; where='.github/' ;;
-              .claude/*) list="$claude_allowed" ; where='.claude/' ;;
-              *)         list="$allowed"        ; where='outside web/' ;;
-            esac
-            if ! grep -Eq "^(${list})$" <<< "$ext"; then
-              printf 'FORBIDDEN FILE  %s  (extension %s, %s)\n' \
-                "$f" "${ext:-<none>}" "$where"
-              bad=1
-            fi
-          done < "$work/staged"
-          if [ "$n" -eq 0 ]; then
-            echo "GATE 1 READ NO TRACKED FILE. A gate that reads nothing is not a gate."
-            exit 1
-          fi
-          echo "read ${n} tracked file(s)"
-
+          # this gate printed OK. A git that fails now stops the step, and an
+          # empty listing is refused. NUL-separated with `-s`, so a name git
+          # would quote (a non-ASCII `.rs`, whose extension read as `rs"`:
+          # ET-rust-only-purity-10) is read as itself, and so the MODE is read
+          # alongside it.
+          #
           # AN EXTENSION IS A NAME, AND THE NAME IS NOT THE CONTENT (D-1104).
           # Everything above decides from the path. ET-rust-only-purity-3 and
           # UC-8 put non-Rust content under `.rs`, an executable script named
@@ -234,28 +183,13 @@ jobs:
           #      `.rs` nothing compiles is not Rust to anything that reads this
           #      repository, whatever is in it, and a `.rs` that IS compiled has
           #      to be Rust or the build fails.
-          if ! "$scan" content "$work/tracked"; then
-            echo "FORBIDDEN CONTENT above. See CLAUDE.md section 2 and D-1104."
-            bad=1
-          fi
-          if ! "$scan" orphans "$work/tracked"; then
-            echo "A TRACKED .rs ABOVE IS COMPILED BY NOTHING, or a module could not"
-            echo "be resolved. Give it a crate root, or remove it. D-1104."
-            bad=1
-          fi
-          if [ "$bad" -ne 0 ]; then
-            echo
-            echo "This repository is Rust only outside web/. See CLAUDE.md section 2"
-            echo "and docs/05-decisions.md D-0052."
-            echo "Outside web/:  ${allowed//|/ }"
-            echo "Under .github/: ${github_allowed//|/ }"
-            echo "Under .claude/: ${claude_allowed//|/ }"
-            echo "Under  web/:    ${web_allowed//|/ }"
-            exit 1
-          fi
-          echo "OK — every tracked file is in the allowlist for where it lives, has"
-          echo "     an ordinary mode, carries no content its name hides, and every"
-          echo "     .rs outside web/ is compiled."
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-1 prepare "$work"
+          st_c=0; "$scan" content "$work/tracked" > "$work/content" || st_c=$?
+          st_o=0; "$scan" orphans "$work/tracked" > "$work/orphans" || st_o=$?
+          "$gt" gate-1 verdict "$work" "$st_c" "$st_o"
 
       - name: Gate 1e — the engine builds with no front-end toolchain
         run: |
@@ -292,12 +226,13 @@ jobs:
           #
           # A crate that shells out to a bundler trips clause 2 AND, because the
           # stub exits 127, clause 1 as well.
-          tree="${RUNNER_TEMP:-/tmp}/gate-1e-no-web"
-          git worktree add --detach "$tree" HEAD
-          rm -rf "$tree/web"
-          [ ! -e "$tree/web" ] || { echo "GATE 1E: web/ was not removed"; exit 1; }
-          cd "$tree"
-          stub="$(mktemp -d)"
+          #
+          # D-2311: the worktree, the stubs and every verdict below are
+          # `gate-1e` in .github/gates_tree.rs. Each stub is a copy of that
+          # binary, which logs its own name and exits 127 when it runs under a
+          # stub's name, so no shell program is written to make one. The two
+          # cargo captures stay here, exactly as D-0911 pins them.
+          #
           # Each stub APPENDS TO A FILE as well as writing to stderr, and the file is
           # what the check reads. Cargo suppresses a build script's stderr unless the
           # script itself fails, so a `build.rs` doing
@@ -305,7 +240,7 @@ jobs:
           # trace in the captured output at all -- the first version of this clause
           # missed exactly that, verified by injecting it. A file on disk is outside
           # cargo's output capture.
-          invoked="$stub/.invoked"
+          #
           # D-1101: the interpreters other than Node are shadowed too. An audit
           # ran a non-JS interpreter from `crates/cli/build.rs` with every gate
           # green, and the stub list named only Node's toolchain. Gate 2 now
@@ -313,44 +248,24 @@ jobs:
           # A program reached by ABSOLUTE path is still not shadowed here, which
           # is why gate 2's token check is the one that carries the rule. The
           # py-family names are assembled because gate 15 bans the word itself.
-          snake="$(printf 'py')thon"
           # sh and bash too (D-2344): no crate code starts a shell.
-          for tool in node npm npx yarn pnpm bun deno vite webpack esbuild rollup tsc \
-                      "$snake" "${snake}3" perl ruby php lua luajit sh bash; do
-            printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "%s"\necho "GATE-1E-INVOKED: %s" >&2\nexit 127\n' \
-              "$tool" "$invoked" "$tool" > "$stub/$tool"
-            chmod +x "$stub/$tool"
-          done
-          echo "shadowed: $(ls "$stub" | tr '\n' ' ')"
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          tree="${RUNNER_TEMP:-/tmp}/gate-1e-no-web"
+          stub="$(mktemp -d)"
+          "$gt" gate-1e prepare "$tree" "$stub"
+          cd "$tree"
 
           set +e
           out="$(PATH="$stub:$PATH" cargo build --workspace --locked --all-targets 2>&1)"
           status=$?
           set -e
+          # The check the old gate discarded: a failing build with no toolchain
+          # on PATH is exactly what §2 forbids, whatever the reason. And the
+          # package-metadata words, kept as a second signal: a crate could reach
+          # a toolchain by an absolute path the stub directory does not shadow.
+          "$gt" gate-1e verdict build "$stub" "$status" <<< "$out"
 
-          if [ -s "$invoked" ]; then
-            echo "FORBIDDEN: a crate invoked a front-end toolchain during the build:"
-            sort -u "$invoked" | sed 's/^/  /'
-            exit 1
-          fi
-          # The check the old gate discarded. A failing build with no toolchain on
-          # PATH is exactly what §2 forbids, whatever the reason.
-          if [ "$status" -ne 0 ]; then
-            echo "GATE 1E FAILED: cargo build exited $status with the front-end"
-            echo "toolchain shadowed. §2 requires it to pass on a machine with no"
-            echo "Node and no package manager. The tail of the build:"
-            printf '%s\n' "$out" | tail -40
-            exit 1
-          fi
-          # And the words, kept as a second signal: a crate could reach a toolchain
-          # by an absolute path the stub directory does not shadow.
-          if grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json' <<< "$out"; then
-            echo "FORBIDDEN: the build read front-end package metadata."
-            printf '%s\n' "$out" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
-            exit 1
-          fi
-
-          # §2's SENTENCE NAMES THREE COMMANDS AND THIS STEP SHADOWED ONE. The
+          # §2'S SENTENCE NAMES THREE COMMANDS AND THIS STEP SHADOWED ONE. The
           # quote at the top of this gate is "`cargo build`, `cargo test` and
           # `cargo clippy` must pass on a machine with no Node" -- and everything
           # above it tested `cargo build`. That is not a pedantic gap. `cargo
@@ -376,31 +291,10 @@ jobs:
           tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"
           tstatus=$?
           set -e
-
-          # `$invoked` accumulates across both runs and the build clause already
-          # exited on a non-empty file, so anything in it now was written while
-          # the tests ran.
-          if [ -s "$invoked" ]; then
-            echo "FORBIDDEN: a crate invoked a front-end toolchain while its tests ran:"
-            sort -u "$invoked" | sed 's/^/  /'
-            echo "The build was clean and the test run was not, which means the"
-            echo "call is in test code rather than in a build script."
-            exit 1
-          fi
-          if [ "$tstatus" -ne 0 ]; then
-            echo "GATE 1E FAILED: cargo test exited $tstatus with the front-end"
-            echo "toolchain shadowed. §2 requires it to pass on a machine with no"
-            echo "Node and no package manager. The tail of the run:"
-            printf '%s\n' "$tout" | tail -40
-            exit 1
-          fi
-          if grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json' <<< "$tout"; then
-            echo "FORBIDDEN: the test run read front-end package metadata."
-            printf '%s\n' "$tout" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
-            exit 1
-          fi
-          echo "OK — the workspace builds AND tests with web/ deleted, every"
-          echo "     front-end tool, interpreter and shell shadowed, and no stub invoked."
+          # The stub log accumulates across both runs and the build verdict
+          # already refused a non-empty one, so anything in it now was written
+          # while the tests ran.
+          "$gt" gate-1e verdict test "$stub" "$tstatus" <<< "$tout"
       - name: Gate 1b — .json and .yml are confined
         run: |
           set -euo pipefail
@@ -423,14 +317,9 @@ jobs:
           # read. It is operator tooling, not source, and it is not shipped.
           # The listing first: `git ls-files ... | grep || true` swallowed a git
           # that failed and printed OK over nothing (AC-gates-law-10, D-1104).
-          listing=$(git ls-files)
-          [ -n "$listing" ] || { echo "GATE 1B READ NO TRACKED FILE."; exit 1; }
-          bad=$(grep -E '\.(json|yml)$' <<< "$listing" \
-                | grep -Ev '^(\.github/|\.claude/|web/)' || true)
-          if [ -n "$bad" ]; then
-            printf 'CONFIG OUTSIDE ITS HOME:\n%s\n' "$bad"; exit 1
-          fi
-          echo "OK."
+          # A git that fails stops the step, and an empty listing is refused.
+          # D-2311: the rule is `gate_1b` in .github/gates_tree.rs.
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1b
 
       - name: Gate 1g — no tracked configuration runs a program
         run: |
@@ -457,65 +346,30 @@ jobs:
           # are all one key. A new key is a reviewed edit to this list. The
           # workflows themselves may not set the environment-variable or
           # `--config` forms of the same settings.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          bad=0
-          listing=$(git ls-files)
-          [ -n "$listing" ] || { echo "GATE 1G READ NO TRACKED FILE."; exit 1; }
-          hits=$(grep -E '(^|/)\.cargo(/|$)' <<< "$listing" || true)
-          if [ -n "$hits" ]; then
-            printf 'REFUSED  a tracked cargo configuration:\n%s\n' "$hits"
-            bad=1
-          fi
+          #
           # Only one file may live under .config/, and only one of each tool
           # file may exist, at the root, because each tool also reads a copy
           # in any ancestor of the directory it runs in.
-          hits=$(grep -E '^\.config/' <<< "$listing" | grep -vx '\.config/nextest\.toml' || true)
-          hits="$hits$(grep -E '(^|/)(rust-toolchain(\.toml)?|nextest\.toml)$' <<< "$listing" \
-                       | grep -vxE 'rust-toolchain\.toml|\.config/nextest\.toml' || true)"
-          if [ -n "$hits" ]; then
-            printf 'REFUSED  a tool configuration outside its one place:\n%s\n' "$hits"
-            bad=1
-          fi
-          check_keys() {
-            file="$1"; allow="$2"
-            [ -f "$file" ] || return 0
-            keys=$("$scan" toml "$file") || { echo "REFUSED  $file is not TOML this gate can read"; bad=1; return 0; }
-            extra=$(sed -E 's/^[^:]*:[0-9]+:([^ ]*) = .*$/\1/' <<< "$keys" | grep -vxE "$allow" || true)
-            if [ -n "$extra" ]; then
-              printf 'REFUSED  %s sets a key outside its allowlist:\n' "$file"
-              sed 's/^/           /' <<< "$extra"
-              bad=1
-            else
-              printf 'ok       %s — %s key(s), all allowed\n' "$file" "$(grep -c . <<< "$keys")"
-            fi
-          }
-          check_keys rust-toolchain.toml \
-            'toolchain|toolchain\.(channel|components|targets|profile)'
-          check_keys .config/nextest.toml \
-            'profile\.[A-Za-z0-9_-]+\.overrides\[\](\.(filter|priority))?'
-          wf=$(git ls-files '.github/*.yml')
-          # shellcheck disable=SC2086
-          envs=$(grep -nE '(^|[^A-Za-z0-9_])(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTC|RUSTDOC|RUSTC_LINKER|RUSTUP_TOOLCHAIN|RUSTUP_HOME|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]|cargo[^#|;]*[[:space:]]--config[[:space:]=]' $wf || true)
+          #
           # D-1612 (rustonly2-7): the same doors by other names -- a linker in
           # RUSTFLAGS, a CARGO_HOME whose config.toml is any tracked file, and
           # a nextest configuration under another name. Comment lines skipped.
-          # shellcheck disable=SC2086
           # D-2346 (RO-7): RUSTDOCFLAGS and the encoded and per-target flag
           # forms, a doc runtool, and an environment NAME built from a shell
           # variable or written to GITHUB_ENV/GITHUB_PATH beyond the two
           # literal names this workflow sets. See docs/06-limits.md.
-          envs2=$( { grep -nHE '(^|[^A-Za-z0-9_])CARGO_HOME[[:space:]]*[:=]|(RUSTFLAGS|RUSTDOCFLAGS)[^#]*(linker|link-arg|fuse-ld|runtool|link-self-contained)|--(test-)?runtool|nextest[^#|;]*--(tool-)?config-file|(^|[[:space:];&|(])(export|declare|typeset|readonly|local|env)([[:space:]]+-[A-Za-z]+)*[[:space:]]+[^=[:space:]]*\$[^=[:space:]]*=|printf[[:space:]]+-v|GITHUB_PAT[H]' $wf || true; } \
-                   | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)
-          envs3=$( { grep -nHE 'GITHUB_EN[V]' $wf || true; } | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(#|if \[ -n "\$\{GITHUB_EN[V]:-\}" \]; then$|printf .(SOURCE_SCAN|CARGO_TARGET_DIR)=%s\\n. "\$[a-z_]+" >> "\$GITHUB_EN[V]"$)' || true)
-          envs2="${envs2}${envs3:+${envs2:+$'\n'}$envs3}"
-          envs="${envs}${envs2:+${envs:+$'\n'}$envs2}"
-          if [ -n "$envs" ]; then
-            printf 'REFUSED  a workflow sets a compiler wrapper, runner or linker:\n%s\n' "$envs"
-            bad=1
-          fi
-          [ "$bad" -eq 0 ] || { echo; echo "GATE 1G FAILED. See D-1105."; exit 1; }
-          echo "OK — no tracked configuration names a program for cargo, rustup or"
-          echo "     nextest to run."
+          #
+          # D-2311: the listing rules, the two key allowlists and the three
+          # workflow patterns are `gate_1g_verdict` in .github/gates_tree.rs,
+          # each matcher beside the expression it replaced. The scanner reads
+          # each tool file that exists; `prepare` lists which ones do.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-1g prepare "$work"
+          st_t=0; xargs -0 -r "$scan" toml < "$work/toolchain.z" > "$work/toolchain" || st_t=$?
+          st_n=0; xargs -0 -r "$scan" toml < "$work/nextest.z" > "$work/nextest" || st_n=$?
+          "$gt" gate-1g verdict "$work" "$st_t" "$st_n"
 
       - name: Gate 1f — no browser code inside a Rust string literal
         run: |
@@ -564,29 +418,16 @@ jobs:
           #
           # WHAT IT CANNOT SEE: markup assembled at run time from pieces that
           # are not one literal or one `concat!` -- `format!("<scr{}", "ipt>")`.
+          #
+          # D-2311: the listing (NUL-separated, so a name with a space stays one
+          # name; an empty one is refused) and the verdict are `gate-1f` in
+          # .github/gates_tree.rs.
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          files=$(git ls-files 'crates/*.rs')
-          [ -n "$files" ] || { echo "GATE 1F READ NO FILE."; exit 1; }
-          bad=0
-          # One argument per line, so a name with a space stays one name.
-          mapfile -t list <<< "$files"
-          if ! out=$("$scan" browser "${list[@]}"); then
-            printf 'BROWSER CODE IN A RUST FILE:\n%s\n' "$out"
-            bad=1
-          fi
-          echo "scanned $(grep -c . <<< "$files") tracked .rs file(s) under crates/"
-          if [ "$bad" = 1 ]; then
-            echo ""
-            echo "Browser code belongs under web/, which CLAUDE.md section 2"
-            echo "makes unrestricted. Serve it the way /typeahead.js and"
-            echo "/masters.js are served: a file on disk, read at REQUEST time by"
-            echo "assets::Assets, referenced as <script src=\"...\" defer>. Never"
-            echo "include_str! and never inline, so no crate depends on the front"
-            echo "end to BUILD -- which is the other half of the same section."
-            exit 1
-          fi
-          echo "OK — no <script> body, no browser API and no inline handler"
-          echo "     appears in any .rs production region under crates/."
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-1f prepare "$work"
+          st=0; xargs -0 -r "$scan" browser < "$work/rs.z" > "$work/browser" || st=$?
+          "$gt" gate-1f verdict "$work" "$st"
       - name: Gate 1c — no literal credential path
         run: |
           set -euo pipefail
@@ -607,1099 +448,37 @@ jobs:
           #
           # No untrusted input reaches this step: the inputs are `git ls-files`
           # and a static pattern. Nothing from the event payload is expanded.
-          envs='prod|production|dev|development|stage|staging|uat|qa|sandbox|live'
-          # The listing first, to a file: piped straight into `xargs ... ||
-          # true`, a git that failed left nothing to scan and the step printed
-          # OK (AC-gates-law-10, D-1104).
-          c_work=$(mktemp -d)
-          git ls-files -z > "$c_work/tracked"
-          [ -s "$c_work/tracked" ] || { echo "GATE 1C READ NO TRACKED FILE."; exit 1; }
+          #
+          # The ten words are `ENV_WORDS` in .github/gates_tree.rs (D-2311).
+          # The listing first: piped straight into `xargs ... || true`, a git
+          # that failed left nothing to scan and the step printed OK
+          # (AC-gates-law-10, D-1104). A git that fails stops the step, an
+          # empty listing is refused, and a tracked file that cannot be read is
+          # refused rather than skipped.
+          #
           # The org segment may begin with `_` or `-`, because
           # `pull::config::check_segment` accepts either there, and the
           # environment word is matched case-blind, because a segment may hold
           # upper case. The pattern required `[A-Za-z0-9]` first and a
           # lower-case environment, so an org written `_acmeorg` before a real
           # environment word, or an environment word in capitals, passed
-          # (AC-gates-law-8, D-1109).
-          hits=$(xargs -0 -r grep -niE "/[A-Za-z0-9_-][A-Za-z0-9_.-]*/(${envs})/" < "$c_work/tracked" \
-                 || true)
-          if [ -n "$hits" ]; then
-            printf 'LITERAL CREDENTIAL PATH IN A TRACKED FILE:\n%s\n' "$hits"
-            echo
-            echo "Use the shape /<org>/<env>/<vendor>/<field>. The real"
-            echo "segments are resolved at runtime. See D-0013."
-            exit 1
-          fi
-          # The runtime configuration itself is never tracked.
-          tracked=$(tr '\0' '\n' < "$c_work/tracked" | grep -E '(^|/)credentials\.toml$' || true)
-          if [ -n "$tracked" ]; then
-            printf 'CREDENTIAL CONFIG IS TRACKED:\n%s\n' "$tracked"; exit 1
-          fi
-          echo "OK — no literal credential path, no tracked credential config."
+          # (AC-gates-law-8, D-1109). The runtime configuration itself,
+          # `credentials.toml`, is never tracked.
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-1c
 
       - name: Gate 1d — every segment-shaped literal in crates/pull is declared
         run: |
           set -euo pipefail
-          seg_shape='org env region vendor fields ap-south-1'
-
-          # ---- group 2: vendor wire names. THE ONES THIS GATE EXISTS FOR.
-          # Each is a data vendor's own public product name, written down here
-          # as the name its bars are filed under — `Descriptor::wire` in
-          # crates/pull/src/vendor.rs. `groww` and `dhan` carry the reasoning
-          # above. `truedata` and `gdfl` are the same case and were checked the
-          # same way before being added: both are already tracked and public in
-          # docs/08-vendor-samples.md and docs/05-decisions.md, so removing
-          # them from crates/pull would leak nothing back. Whether either is
-          # ALSO an operator's real `<vendor>` segment is operator-side and
-          # unknowable from inside this repository — docs/06-limits.md §18.
-          # Note for the reader: CLAUDE.md §8 says crates/pull "holds no org,
-          # env, or vendor literal". Four vendor literals are on this line. The
-          # sentence and the tree disagree and the tree is not being hidden.
-          # charts, v1 and v2 joined as URL PATH COMPONENTS of a vendor's candle
-          # endpoint: PathSegment::Literal("charts") at vendor.rs:3640 and the
-          # two API version segments beside it at 3639 and 3837. They name a
-          # route on a broker's public API — not an account, not an environment,
-          # not a field — and gate 1c passes on the same tree. Read before
-          # adding: the question this list answers is whether the word is a
-          # VENDOR'S, and these three are its URL and nothing else.
-          # `instruments` joins for the same reason `charts` did: it is a
-          # `PathSegment::Literal` in a vendor's URL (vendor.rs:4330), a route on a
-          # public API rather than anything about an account.
-          vendor_wire='groww dhan truedata gdfl charts v1 v2 instruments'
-
-          # ---- group 2b: the CLAIM STANDINGS, which are wire words about WHO
-          # made a claim and are not vendor, org, env or field names at all.
+          # Every double-quoted literal under crates/pull that could BE a
+          # parameter-path segment must be declared, so "every segment here is
+          # invented" is a check and adding one is a deliberate act.
+          # docs/06-limits.md §18 records what it cannot do.
+          #
+          # THE DECLARED WORDS AND THE REASON FOR EACH GROUP ARE IN
+          # .github/gates_tree.rs (D-2311). They were shell variables here,
+          # each beside the comment that argued it; they moved with those
+          # comments, unchanged, and a new word is declared there.
           #
-          # `pull::vendor::ClaimStanding::word` emits `vendor_doc` and
-          # `operator` on `/feeds.json` so a page can say which of two
-          # disagreeing history floors binds without matching prose against the
-          # string "the operator" — D-0131. `vendor_doc` trips this gate for
-          # the same reason `groww` does: it is lower-case, underscored and
-          # segment-shaped. It names a KIND OF SOURCE, never a path segment,
-          # and no Parameter Store path this repository reads has a `vendor_doc`
-          # or an `operator` component.
-          #
-          # Declared rather than excluded by pattern: an allowlist that grows by
-          # rule stops being an allowlist, which is the failure mode group 1's
-          # own comment names.
-          claim_standing='vendor_doc operator'
-
-          # ---- group 3: invented configuration fixtures. Nonsense by
-          #   1 2 3 9 -- FOUR BARE DIGITS, and each was read before it was added.
-          #   "1", "2" and "9" are invented vendor_id values in resolve.rs and
-          #   universe.rs test rows beside invented ISINs (INE000A01001). "3" is
-          #   the VALUE of the X-Kite-Version header in vendor.rs -- a public API
-          #   version number, not a credential. Group 10's note explains why an
-          #   all-digit literal is scanned rather than waved through: a twelve-
-          #   digit account number is a perfectly ordinary <org> segment. These
-          #   four are one digit each and name no account.
-          # construction — no operator's path reads `orgone/testenv/vendorone`.
-          # 5633 and 999 sit beside 1 2 3 9: invented instrument_id and vendor_id
-          # values in http.rs and universe.rs fixtures, next to invented ISINs.
-          config_fixture='
-          orgone testenv vendorone vendortwo fieldone fieldtwo fieldthree
-          field-one_2 a-value
-          1 2 3 9 5633 999
-          '
-
-          # ---- group 4: deliberately secret-SHAPED fixtures, which exist to
-          # prove the secret backstop rejects them. Keyboard walks and the
-          # oldest joke password in the trade; none is a credential.
-          secret_fixture='
-          k7f2p9q1w8e3-5t6y0u4i2o9 k7f2p9q1w8e3r5t6y0u4i2o
-          k7f2p9q1w8e3r5t6y0u4i2o9 kfpqwerstyuioasdfghjklzx
-          hunter2 hunter2-and-then-some stale fresh 9876
-          shhh the-token default-secret other-token
-          '
-
-          # ---- group 5: test scaffolding — expect() messages, assert labels,
-          # fixture names and words quoted inside prose. The gate scans comments
-          # on purpose, so a word quoted in a doc comment lands here too.
-          # `brutex-no-such-dir-ever` is a path chosen to NOT exist.
-          #
-          # The last two lines are the socket and decoder tests in
-          # crates/pull/src/http.rs, and every one of them is a word this
-          # repository chose rather than one a vendor did:
-          #   x            — a JSON string standing where a number belongs
-          #   nz snapshots — fold.rs refusal text asserted back
-          #   decodes unchanged records — expect() messages
-          #   cached       — the SECOND object in the two-object splice fixture
-          #                  (D-0049). Deliberately not `live`, which group 7
-          #                  already carries for a different reason.
-          #   stolen       — the path a test redirect points at, named to read
-          #                  as what following it would have meant (D-0050)
-          #   redirect window_async — substrings a refusal must contain
-          # before broker censused declares indistinguishable mixed nested options
-          # too-deep u unused -- scratch directories and assertion substrings,
-          # every one inside a test. folder.rs builds directories with those
-          # names; nse.rs and resolve.rs assert that refusal messages CONTAIN
-          # before, declares and indistinguishable; http.rs passes u and unused as
-          # throwaway URL arguments it never reads.
-          scaffold='
-          a v one two no ok big good invalid genesis manifest write read-only deny
-          anything mkdir notutf8 atthebound brutex-pull june july nifty
-          core store pull ratio
-          real next small bounded three summed everything february
-          non-zero non-decreasing held centuries negative per-day per-second
-          brutex-no-such-dir-ever
-          x nz snapshots decodes unchanged records
-          cached stolen redirect window_async
-          b h 2026 half nope other reads signs forwards readable
-          bars empty idempotent lands paise shared lock-held
-          brutex-ssm-no-such-file-ever
-          before broker censused declares indistinguishable mixed nested options
-          too-deep u unused
-          ab archive-extra-second broker-clean broker-conflict broker-duplicate
-          broker-extra-second broker-shifted cash-cas cash-ordinary
-          cash-unknown-a cash-unknown-b cash-unmeasured-calendar ceiling client
-          coarse-unverified conflicting correction daily-midnight daily-open date
-          elsewhere five-minute flag fold-absent-bucket fold-absent-tail gap-receipt
-          gapfill headers historical-candidate-hole historical-incomplete
-          historical-partial historical-tail historical-unverified-schedule
-          incomplete local-ist loopback millisecond must-not-be-created not-a-date
-          not-a-price okay receipt record request request-cash-eligibility
-          request-derivative-exempt request-empty request-exception request-holiday
-          request-intervals request-span request-unmeasured request-unordered
-          response resume runtime runtime-truncated runtime-unverified shared-archive
-          short test trailing true unavailable unreadable-rows versioned whole width
-          '
-          # D-0610: reviewed fixture symbols and version-refusal inputs.
-          scaffold="$scaffold abb forcemot irfc
-          brutex-nse-cash-session-v1 brutex-nse-cash-session-v2"
-
-          # ---- group 6: granularity and session tokens. `Granularity::dir`
-          # and `SessionKind::label` in crates/pull/src/vendor.rs. These name a
-          # bar interval and are the STABLE ON-DISK DIRECTORY NAMES, which
-          # CLAUDE.md §3 rule 8 forbids renaming.
-          #
-          # `1d` and `day` are NOT directory names and never reach the disk.
-          # They appear in a doc comment on `Granularity::wire` that explains
-          # why the wire word is DECLARED per vendor rather than derived from
-          # the directory name: `1day`, `1d` and `day` are all real spellings
-          # used by real brokers for the same rung, so there is no rule that
-          # turns one into the others and inventing one would be CLAUDE.md
-          # section 3 rule 1. The gate scans comments on purpose, so prose
-          # about a spelling lands here exactly as a constant would -- which is
-          # the correct behaviour, because a real segment pasted into a doc
-          # comment publishes it just as effectively.
-          #
-          # `60min` REPLACED `1hr` ON 14 AUG 2026, AND THE PARAGRAPH ABOVE IS
-          # WHY THAT NEEDED AN ARGUMENT RATHER THAN AN EDIT.
-          #
-          # It says these are the stable on-disk directory names and that §3
-          # rule 8 forbids renaming one. `1hr` was NOT one. It was
-          # `Granularity::dir`'s word for the hour rung, and the directory is
-          # created from `store::path::Timeframe`, whose word for that rung has
-          # been `60min` since the store was widened. The two disagreed, and
-          # nothing noticed because `Granularity::store_timeframe` answered
-          # `None` for the rung -- so no bar could ever be written under either
-          # spelling and `1hr` never named a directory on any disk.
-          #
-          # Rule 8 protects HISTORY. There is none here to protect: the rename
-          # orphans nothing, because nothing was ever filed. What it removes is
-          # a second name for one rung, which `web/src/routes/db/+page.svelte`
-          # had been absorbing by hand in an alias table. `1hr` stays on this
-          # list -- the doc comment recording the rename quotes it, and a word
-          # this gate has already seen must not start failing because the code
-          # explaining it was written. D-0132.
-          timeframe='
-          tick 1s 5s 1min 2min 3min 5min 10min 15min 30min 60min 1hr 1day 1week continuous
-          1d day intraday
-          '
-
-          # ---- group 7: rate-governor display strings, crates/pull/src/rate.rs.
-          # `WindowSpan::{Second,Minute,Day}` and `RequestKind::{Live,
-          # Historical}` rendering themselves for a log line or a refusal.
-          # `live` IS one of the ten environment words gate 1c matches on, and
-          # that is why it was looked at rather than waved through: here it is
-          # the live-quote endpoint group as opposed to the historical one, in
-          # a two-variant enum, and it is joined to no path.
-          governor='second minute day live historical'
-
-          # ---- group 8: the vendors' own record field names. CLAUDE.md §8
-          # says in as many words that crates/pull "holds the shape and the
-          # field names". `FieldNames`/`ResponseShape` in vendor.rs, the
-          # column labels fetch.rs quotes back in a refusal, and the file
-          # extension archive.rs checks. None is a credential field.
-          #
-          # `data` is an ENVELOPE key — the object a vendor hangs its bars
-          # under, exactly as `payload` above already is, and since D-0049 the
-          # decoder reads only the one the descriptor names. `from` and `to`
-          # are the two query parameters a GET vendor takes its window in
-          # (`Method::Get` in http.rs). All three are wire vocabulary, which is
-          # the category this group exists for.
-          # symbol interval p success -- each read against its own call site.
-          # symbol is an NSE record field (nse.rs:632); interval a vendor query
-          # placeholder (vendor.rs:4337); p the page parameter NSE endpoints take
-          # (nse.rs:1057); success a status VALUE in a canned response body
-          # (http.rs:1744). All four are vendor vocabulary on the wire. None names
-          # an account, an environment or a credential field.
-          record_field='
-          open high low close volume timestamp open_interest payload csv
-          data from to candles
-          status error code message
-          symbol interval p success
-          duplicates
-          '
-
-          # ---- group 9: an HTTP HEADER NAME, not a value. One broker sends
-          # its token in a header called `access-token`; the token itself is
-          # read from Parameter Store and never appears in this repository.
-          # Read this line twice before adding anything to it.
-          #
-          # `x-token` was read twice. It is the header name on the INVENTED
-          # descriptor the http.rs tests are built from — `x-` is the
-          # conventional prefix for a name no registry owns, and no vendor in
-          # crates/pull/src/vendor.rs uses it. The other broker's header is
-          # `Authorization`, which this gate never sees because its capital
-          # letter puts it outside the lower-case pattern being scanned; that
-          # is the scan's shape, not an exemption, and the descriptor spells it
-          # that way because that is the name on the wire.
-          header_name='access-token x-token'
-
-          # ---- group 10: bare integers a refusal message must contain, so the
-          # test asserts the refused value is IN the message. These are domain
-          # bounds — u32::MAX, the year-9999 epoch-millisecond ceiling, the two
-          # lengths of February. All-digit literals are NOT excluded from the
-          # scan by shape, deliberately: a twelve-digit account number is a
-          # perfectly ordinary `<org>` segment, and `253402281000` is twelve
-          # digits. It is on this list because it was read, not because a
-          # pattern let it past.
-          bound_number='10000 1970 9999 28 29 4294967295 253402281000 48 750
-          0 1e300'
-          # D-0610: fixture IDs, malformed dates/flags, timestamps and bounds.
-          bound_number="$bound_number 00000000 01 12345 1250640000 1296345600
-          1296345600000 1296345601 1333 1577923200 18446744073709551616
-          20210129 2029 2147483648 502070400 86400"
-
-          # ---- group 11: FIELD LABELS IN A `Debug` RENDERING, not values.
-          # `HttpSource`'s Debug impl is hand-written precisely so the token is
-          # never printed, and these two strings are the captions it prints
-          # instead: `base_url` beside the descriptor's URL, and `token` beside
-          # the fixed string `<redacted>`. `token` is on an allowlist in a
-          # credential gate and that is worth stopping on — it is the word
-          # "token", four characters, standing where a value would be if this
-          # impl were derived. That it appears here is the evidence the redact
-          # is in place, not evidence of a leak.
-          #
-          # `key` is the third caption, and the paragraph above argues it
-          # unchanged: it is the word standing where a value would be if this
-          # impl were derived, and the value beside it is the fixed string
-          # `<redacted>` — crates/pull/src/http.rs:87 reads
-          # `.field("key", &self.key.as_ref().map(|_| "<redacted>"))`. Its
-          # presence on this list is the evidence the redact exists, not
-          # evidence of a leak, which is exactly what the note about `token`
-          # says and is the reason both are read rather than waved through.
-          debug_label='base_url token key'
-
-          # ---- group 12: DATES ON THE WIRE, in the two compact formats.
-          # `DateFormat::{CompactYmd,CompactDmy}` render 2025-07-01 as
-          # `20250701` and `01072025`, and the test that pins all four formats
-          # asserts both. Group 10's note explains why all-digit literals are
-          # scanned rather than waved through, and the `YYYY-MM-DD` exclusion
-          # above is anchored to that one spelling on purpose — so these two
-          # are declared here by hand. Both are the same calendar date this
-          # repository already writes in the clear a dozen times over; neither
-          # names an account, an environment, a vendor or a field.
-          wire_date='20250701 01072025'
-
-          # ---- group 13: AWS SigV4's own wire vocabulary, crates/pull/src/ssm.rs.
-          # Every word here is published by AWS and fixed by the signing
-          # algorithm. None is an operator's choice, so none can be one of their
-          # path segments. `ssm` is the service code that appears in the
-          # credential scope; `aws4_request` is the terminator the algorithm
-          # mandates; the rest are HTTP header names AWS defines.
-          #
-          # `us-east-1`, `20150830` and `20150831` are lifted VERBATIM from
-          # AWS's own published SigV4 test vectors, which is what ssm.rs checks
-          # the implementation against — they are the only external proof this
-          # repository has that the signature is computed correctly, and
-          # changing them to something invented would delete that proof.
-          # CLAUDE.md §8 names ap-south-1 as the region this repository reads
-          # from; us-east-1 appears nowhere but inside those vectors.
-          aws_sigv4='
-          ssm aws4_request authorization content-type host
-          x-amz-date x-amz-target x-amz-security-token
-          us-east-1 20150830 20150831
-          '
-
-          # ---- group 14: the AWS shared-credentials file format. These are the
-          # INI keys and the default profile name AWS itself defines for
-          # ~/.aws/credentials, read by `AwsIdentity::from_credentials_file`.
-          # Only the names of the keys are here; gate 1c already refuses the
-          # file itself from ever being tracked.
-          aws_shared='
-          credentials profiles default
-          aws_access_key_id aws_secret_access_key aws_session_token
-          '
-
-          # ---- group 15: the redacting `Debug`'s own field labels.
-          # `AwsIdentity` hand-writes `Debug` so the secret and the session
-          # token render as `<redacted>`; these are the labels printed beside
-          # them. That `secret` and `session_token` appear as literals AT ALL is
-          # that redaction working, not a value escaping.
-          redact_label='key_id secret session_token'
-
-          # ---- group 16: published hash test vectors. `abc` is the NIST
-          # SHA-256 input whose digest ssm.rs pins, and `000fff` is the
-          # three-byte lower-case hex-padding check beside it.
-          hash_vector='abc 000fff'
-
-          # ---- group 17: the vendors' REQUEST field names, and one published
-          # example value. Group 8 above carries the names each vendor uses in
-          # its RESPONSE; these are the names it requires in the REQUEST, and
-          # they arrived with the parameter map that stops Dhan answering
-          # DH-905. Every one is read first-hand from the vendor's own
-          # documentation page:
-          #   securityId exchangeSegment instrument   dhanhq.co/docs/v2/historical-data
-          #   exchange segment trading_symbol start_time end_time
-          #                                             groww.in/trade-api/docs
-          # `exchange`, `segment` and `instrument` are ordinary English words a
-          # vendor chose for a field; they name no account and no environment.
-          # `13` is the securityId of NIFTY in Dhan's OWN worked example, used
-          # in a test so the request can be asserted against a value the vendor
-          # published rather than one invented here.
-          #
-          # The twelve month TOKENS are the calendar, lower-cased. Groww writes a
-          # contract expiry as `04Jan24` and `pull::fno::read_contract` reads it
-          # into this store's `2024-01-04`, so the table it compares against is
-          # the twelve English month abbreviations and nothing else. `19200` is
-          # the strike in the vendor's OWN worked example, used in the tests so
-          # the paisa conversion is asserted against a number the vendor
-          # published rather than one invented here -- the same reason Dhan's
-          # `13` is on this list. `2020` is the year Groww states its F&O history
-          # begins and `2019` is the year one before it, asserted in the refusal
-          # so the message names BOTH ends of the gap an operator just typed --
-          # a refusal that says only "before the floor" sends them to the
-          # vendor's dashboard instead of to the field. Two calendar years. A month name is not a secret in any sense
-          # section 8 is about.
-          #
-          # `expiries`, `contracts`, `underlying_symbol`, `expiry_date`, `year`
-          # and `month` are Groww's expired-F&O contract lookup -- two path
-          # segments and four query fields, read from
-          # groww.in/trade-api/docs/curl/backtesting. An expired option is in no
-          # instrument master, so its name has to be discovered before its bars
-          # can be asked for; `pull::vendor::FnoDiscovery` is the shape that
-          # records how. Six ordinary English words a vendor chose. They name no
-          # org, no env and no account, which is what section 8 is about.
-          #
-          # `underlying` joined them as the field key on the `pull.fno discovery
-          # refused` event -- the one that carries a failed walk's WHOLE reason,
-          # because the journal's note is stride-bound to 68 bytes and a
-          # discovery failure's reason begins with the URL, so the vendor's
-          # status was exactly the part that fell off. It holds an instrument
-          # name, which is public market vocabulary.
-          request_field='
-          securityId exchangeSegment instrument
-          exchange segment trading_symbol start_time end_time
-          13
-          groww_symbol candle_interval 1minute
-          expiries contracts underlying_symbol expiry_date year month underlying
-          jan feb mar apr may jun jul aug sep oct nov dec
-          19200 2019 2020
-          '
-
-          # ---- group 18: RFC 6238 APPENDIX B, and the words beside it.
-          # crates/pull/src/totp.rs is an RFC 6238 code generator that nothing
-          # outside its own tests calls: no path in this build trades a code
-          # for a token, and nothing uses it to recognise a stale one either
-          # (a stale token is re-read from Parameter Store, CLAUDE.md section
-          # 8). It never mints -- section 8 forbids it, because a local mint
-          # would invalidate the token another system shares; the test
-          # pull::totp::no_path_outside_this_module_computes_a_code pins
-          # that, D-1447. This gate seeing these six numbers is the evidence
-          # that the implementation is pinned to the published vectors rather
-          # than to whatever it happens to produce.
-          #
-          # Every value below is printed in RFC 6238, a public standards
-          # document, and reproduces from the RFC's own key at the RFC's own
-          # timestamps. They name no account, no environment, no vendor and no
-          # field. `gezdgnbvgy3tqojqgezdgnbvgy3tqojq` is the base32 spelling of
-          # the RFC's 32-byte SHA-256 test key -- the string "12345678901234567890"
-          # repeated, which is the least secret secret in cryptography.
-          #
-          # A real TOTP secret can never appear here: section 8 puts it in
-          # Parameter Store, never in a tracked file, so a six-digit literal in
-          # this crate is either a published vector or a defect. That is exactly
-          # the distinction this gate exists to force someone to make by hand.
-          #
-          # `legal`, `malformed` and `provably` are that module's own test
-          # names and refusal words -- base32 alphabets that are legal, inputs
-          # that are malformed, and a bound that is provably reached.
-          totp_vector='
-          755224 287082 359152 969429 338314 254676 287922
-          162583 399871 520489 005924 050471 081804 279037 353130
-          gezdgnbvgy3tqojqgezdgnbvgy3tqojq
-          legal malformed provably
-          '
-
-          # ---- group 19: two more test scaffolding words that arrived with the
-          # census and the null-price decoder. `census-incremental` is a
-          # temporary directory name chosen for the test that proves the census
-          # APPENDS rather than rewrites -- the one that asserts on the file's
-          # INODE, because asserting on its size passed under both strategies
-          # and let a mutant survive. `fits` and `skipped` are assertion labels:
-          # a window that fits inside both the vendor cap and one month, and a
-          # bar the Groww decoder skipped because a price cell held null.
-          # `daily` and `unstorable` are `Scratch::new(...)` temp-directory
-          # names in crates/pull/tests/broker.rs -- one for the test that a
-          # daily pull lands under `1day/` and folds a session into one bar,
-          # one for the test that a rung the store cannot carry is refused BY
-          # NAME rather than filed under the nearest directory that exists.
-          # Both name a scratch path this repository chose, not a segment any
-          # vendor or account uses.
-          late_scaffold='census-incremental fits skipped daily unstorable all counts'
-          # `crates/pull/src/folder.rs` and its tests, added by another line of work. Read in
-          # context before declaring, one at a time, because declaring a literal is a claim
-          # that it is not a parameter-path segment:
-          #
-          #   vendor-data     `pub const ROOT_DIR` -- a LOCAL filesystem directory the folder
-          #                   scanner walks. Not a Parameter Store segment; nothing joins it
-          #                   into a `/<org>/<env>/<vendor>/<field>` path.
-          #   bent            scratch directory names in `tests/folder.rs`, each naming the
-          #   bought-nothing  case it sets up -- a folder whose files are bent, one that
-          #   wrong-kind      bought nothing, one holding the wrong kind, one never created,
-          #   never-created   one already sealed.
-          #   sealed
-          #   earliest        ordinary field and label words in the same module.
-          #   latest
-          #   files
-          #   pulled
-          #   read
-          #   verb
-          #
-          # Declared rather than left refusing. The distinction this used to draw against
-          # gate 11's `crates/pull/src/totp.rs` entry no longer has a second half: that one
-          # WAS a real §4 violation left visible for its owner, and it has since been fixed
-          # and its allowance deleted. The principle it illustrated stands -- blessing a
-          # defect hides it, so an allowlist entry must be a report with an owner. These are not
-          # defects -- a scratch directory called `sealed` is not a credential path, and saying
-          # so is what this gate asks for. Their owner should still confirm the list.
-          folder_scaffold='vendor-data bent bought-nothing wrong-kind never-created sealed earliest latest files pulled read verb'
-
-          # ---- group 20: THE MANIFEST FORMAT'S OWN FIELD NAMES, and nothing
-          # else. `pull::manifest::Layout::declare` refuses a degenerate format
-          # geometry and NAMES THE FIELD it refused —
-          # `ManifestError::DegenerateLayout { field }` — exactly as
-          # `store::layout::Layout::declare` does one crate away, and for the
-          # reason stated there: a `const` panic cannot format a field name, so
-          # the fallible door is where an operator finds out which of the four
-          # numbers was wrong.
-          #
-          # All four are field names on a struct in THIS repository, spelled the
-          # way the struct spells them. None is an account, an environment, a
-          # vendor or a field of a vendor's record: `magic` is the eight bytes a
-          # manifest begins with, `version` is its format number, and the two
-          # strides are the byte width of one entry in the two widths this
-          # workspace computes offsets in. D-0067.
-          layout_field='magic version entry_stride entry_stride_len'
-
-          # ---- group 22: TELEMETRY FIELD KEYS AND OUTCOME WORDS. D-0075.
-          # `crates/pull` gained a telemetry dependency and 15 emit sites, and
-          # every `.with("key", ...)` puts a bare lower-case word in the source
-          # — which is exactly the shape this gate scans for. None of these is
-          # a path segment: they are the LEFT side of a log field, and the
-          # right side is the value. They are declared one by one rather than
-          # waved through with a pattern, because "it looks like a log field"
-          # is precisely the excuse a real credential segment would wear.
-          #
-          # WHAT IS DELIBERATELY NOT HERE. No org, no environment, no vendor
-          # and no field name from the Parameter Store shape. `value_len` is
-          # the closest this list comes to a credential and it is a LENGTH:
-          # `crates/pull/src/ssm.rs` logs how long the token is and never the
-          # token, and never the parameter name. Gate 1c still refuses the
-          # path itself in any tracked file, and this group does not touch it.
-          telemetry_field='
-          bars bars_out before_open before_window after_window at_or_after_close
-          bucket_secs bytes cap_days chunk chunks dropped entries epoch
-          first_chunk_to folded from_version generation ghosts header
-          instrument_id keys landed members outcome per_day per_minute
-          per_second reason refused region_bytes repairing representable
-          rows rows_in snapshots url value_len why absent degraded dir
-          field file kept loaded max rotated vendors
-          asked blank byte_len chars duplicate fault
-          about census rows_read slices
-          not-base32 too-long hmac-refused
-          at
-          unreadable_volume unreadable_oi
-          timeframe
-          '
-
-          # THE SECOND BATCH, and why each is not a path segment. The emit
-          # sites in `secret.rs`, `totp.rs`, `work.rs` and `config.rs` landed
-          # after this group was first written, so the gate correctly went red
-          # on all fifteen. Every one is the LEFT side of a `.with(...)`:
-          #
-          #   asked blank duplicate kept  — `work.rs` counts, one plan's
-          #     four outcomes. Integers on the right, never a name.
-          #   byte_len chars max          — LENGTHS. `secret.rs` logs how many
-          #     bytes the credential is and never the credential; `totp.rs`
-          #     logs how many characters were offered against `MAX_SECRET_LEN`.
-          #   fault not-base32 too-long   — `totp.rs` outcome words: a
-          #   hmac-refused                  `TotpError` rendered to a stable
-          #     token so a page can group by it. They name a FAILURE, not a
-          #     location. `hmac-refused` joined them when the `unreachable!`
-          #     that gate 11 names in this file became a refusal: it says the
-          #     BUILD is wrong, not the operator's secret, which is why it is a
-          #     separate word rather than folded into one of the other three.
-          #   file loaded vendors         — `config.rs`, reporting that the
-          #     untracked local configuration was read and how many vendors it
-          #     named. The count, never the contents.
-          #   rotated                     — `secret.rs`, a bool: whether a
-          #     re-read returned a different value. CLAUDE.md §8's "a stale
-          #     token is re-read; if the re-read returns the same dead value,
-          #     the pull halts loudly".
-          #
-          # `field` IS THE ONE WORTH ARGUING ABOUT, so it is argued here. §8's
-          # shape is `/<org>/<env>/<vendor>/<field>`, and `secret.rs` logs
-          # `.with("field", <the field's name>)` — the fourth segment's VALUE,
-          # not just the key. That is deliberate and it is inside §8's own
-          # carve-out: "`crates/pull` holds the shape and the field names; it
-          # holds no `org`, `env`, or `vendor` literal." The field names are
-          # already tracked source. The two segments §8 keeps out of this
-          # repository — `org` and `env` — are read at run time from the
-          # untracked configuration and appear in NO event on any of these
-          # paths. A log handed to somebody still cannot be turned into a
-          # parameter path.
-
-          # THE THIRD BATCH — the four run-scoped failure events, D-0087.
-          # `refused_whole` and the two census arms returned `Err` and logged
-          # NOTHING, so a backfill that landed zero bars left a quiet log. All
-          # four are the LEFT side of a `.with(...)`:
-          #
-          #   about      — the folder or path a refused RUN was about. A local
-          #     archive directory the operator typed, or a store path this
-          #     repository rendered. Never a Parameter Store segment.
-          #   census     — the census file's own path on disk, same shape.
-          #   rows_read  — a COUNT. The rows a refused run did read, so the
-          #     receipt cannot blame a vendor that answered perfectly.
-          #   slices     — a COUNT of appended slices whose census went
-          #     unpublished.
-          #
-          # Two counts and two filesystem paths. No org, no env, no vendor, no
-          # field of a vendor's record.
-
-          # THE FOURTH BATCH — one word, `at`, from `resolve.rs`.
-          #
-          # `pull::resolve::note_refused` emits the six refusals `crawl` can
-          # record, and it names the document that refused with
-          # `.with("at", &at)` — the same word as `IndexFailure::at`, which is
-          # the field this event exists to make visible. Gate 19 refused all
-          # six sites for logging nothing at all; fixing that necessarily put a
-          # new bare lower-case word in the source, which is the shape gate 1d
-          # scans for. The two gates pulling in opposite directions is the
-          # system working: one demands the event, the other demands the event
-          # be accounted for.
-          #
-          # It is not a path segment. The RIGHT side is a URL the crawl built
-          # from `INDEX_HOST` plus a category path — an exchange address on
-          # the public internet, and the same value `url` already carries in
-          # this group. The LEFT side is a two-letter English preposition, and
-          # §8's shape has no `at` in it: the four segments are `org`, `env`,
-          # `vendor` and `field`, none of which this event carries. Nothing on
-          # this path reads Parameter Store, and `resolve.rs` holds no
-          # credential of any kind — it crawls a public index site.
-          #
-          # THE SIXTH BATCH -- `timeframe`, from `ingest.rs`. The rung a spot pull
-          # ran at, on the once-per-target event. It is the LEFT side of a
-          # `.with(...)` whose right side is `rung.as_str()`, one of the words in
-          # the `timeframe` group above, and section 8`s shape has no `timeframe` in
-          # it: the four segments are org, env, vendor and field.
-          #
-          # `2min` and `10min` joined the timeframe group in the same commit. They
-          # are exchange rungs the other session added to `Timeframe::KNOWN`, and
-          # they are periods of time -- not an org, an env, a vendor or a field.
-          #
-          # THE FIFTH BATCH — `unreadable_volume` and `unreadable_oi`, from
-          # `csv.rs`. Two counts on the once-per-file decode event, and both name
-          # a SUBSTITUTION this build made: a volume field that would not parse
-          # is stored as `0` and an open interest as absent. CLAUDE.md §4 permits
-          # the degrade and forbids it being silent, and these are what stop it
-          # being silent — `rows` including rows whose volume was invented is not
-          # the same fact as `rows` where every field was read.
-          #
-          # Not path segments. Both are the LEFT side of a `.with(...)` and the
-          # right side is an integer COUNT, never a name; `unreadable_oi` is
-          # abbreviated the way the struct field is not, because the wire key is
-          # read in a column and the struct field is read in prose. §8's shape is
-          # `/<org>/<env>/<vendor>/<field>` and neither word can be any of those
-          # four: `csv.rs` decodes a body that is already in memory, reads no
-          # Parameter Store, and holds no credential.
-
-          # ---- group 24: AN INVENTED AWS ERROR BODY, WHOSE WHOLE PURPOSE IS TO
-          # PROVE A PATH IS NOT LEAKED. crates/pull/src/ssm.rs test module.
-          #
-          # READ THIS ONE TWICE, because it is the only group whose entries are
-          # shaped exactly like the four segments CLAUDE.md §8 keeps out of this
-          # repository. That is not a coincidence and it is not a slip: the
-          # fixture is a fabricated `AccessDeniedException` body carrying a full
-          # parameter ARN, and the test asserts that the renderer emits NONE of
-          # it. `ssm.rs:893` reads
-          #
-          #     for leak in ["SomeFutureException", "parameter/", "anorg", "arn:aws"]
-          #
-          # and fails if any appears in the message an operator sees. So `anorg`
-          # is tracked precisely so that a build which starts leaking an org
-          # segment goes red.
-          #
-          # Each is transparently invented -- `anorg`, `anenv`, `avendor` and
-          # `afield` are "an org", "an env", "a vendor", "a field" spelled as
-          # identifiers, and no vendor in crates/pull/src/vendor.rs is named
-          # `avendor`. `000000000000` is a zeroed AWS account id, the value AWS
-          # documentation itself uses as a placeholder, and twelve digits is
-          # the account-id width. `assumed-role` is a fixed ARN component of an
-          # STS role session, not a segment anyone chose.
-          #
-          # Gate 1c still refuses the real path in any tracked file and this
-          # group does not touch it: none of these six is a real org, env,
-          # vendor or field, and the file that holds them is the one proving
-          # the real ones never reach a log.
-          ssm_leak_fixture='anorg anenv avendor afield 000000000000 assumed-role'
-
-          # ---- group 23: A YEAR-MONTH IN AN ASSERTION. D-0070.
-          # `pull::unit::a_daily_bucket_is_an_ist_day_...` asserts the month a
-          # folded bar derives to, and that assertion is the whole proof of the
-          # fold fix: before it, a bar stamped 00:00 IST on 2026-01-01 derived
-          # to 2025-12. The literal is a `store::path::YearMonth` rendering,
-          # not a path segment — the store's own month component is written
-          # from a `YearMonth` and never from a caller's string.
-          year_month='2026-01'
-
-          # ---- group 20: THE EXCHANGE'S OWN PUBLISHED FILENAMES, and three
-          # test words that arrived with them. crates/pull/src/nse.rs.
-          #
-          # `ind_niftybanklist` and `ind_niftytotalmarket_list` are the names
-          # NSE Indices Limited gives two of its constituent files, published at
-          # niftyindices.com and read 14 Aug 2026 (docs/00-charter.md §4d).
-          # They are here for a reason worth reading twice: they are quoted in a
-          # REFUSAL MESSAGE, because the argument for refusing is that the two
-          # disagree with each other -- one is word-joined and the other is
-          # underscore-separated, so no rule turns an index's name into its
-          # filename and any rule guessed from one is already wrong about the
-          # other. A message that made that argument without showing both
-          # spellings would be asking the reader to take it on trust.
-          #
-          # Neither is a credential path segment and neither could become one:
-          # they name a public file on a public exchange host, they contain no
-          # org, env, vendor or field, and nse.rs COMPOSES NO FILENAME AT ALL --
-          # `constituent_link` reads the URL the exchange published and refuses
-          # a page that carries none. That is the whole point of the module and
-          # these two literals are the evidence for it, not an exception to it.
-          #
-          # `nifty-bank` is the page name in that refusal's own test. `doctype`
-          # and `transport` are assertion substrings: the first proves an
-          # interstitial is refused AS HTML rather than read as an index with no
-          # members, and the second proves an empty document and a failed fetch
-          # print as different facts.
-          nse_published='
-          ind_niftybanklist ind_niftytotalmarket_list
-          nifty-bank doctype transport
-          '
-
-          # ---- group 21: THE JOIN'S OWN VOCABULARY. crates/pull/src/universe.rs.
-          #
-          # `isin`, `symbol` (already on group 17), `matched`, `lacks`,
-          # `no-isin` and `ambiguous` are the words a resolution emits for WHAT
-          # BECAME OF A NAME. They name a verdict, never a path component, and
-          # no Parameter Store path this repository reads has an `ambiguous` or
-          # a `no-isin` segment. They are on the wire because a page has to
-          # render the bucket, and D-0105's rule -- the slugs are the wire's own
-          # words -- makes emitting them the correct choice rather than
-          # inventing a second vocabulary for the browser.
-          #
-          # `isin` is worth its own sentence. It is the International Securities
-          # Identification Number, an ISO 6166 identifier the EXCHANGE issues
-          # and publishes in every constituent file. It identifies an
-          # instrument, not an account: it is printed on public filings, it is
-          # the join key D-0125 already chose, and it carries none of the four
-          # things this gate protects.
-          #
-          # `kite` is the wire name of a vendor whose descriptor this build does
-          # not yet carry, used in a TEST as the feed a symbol-keyed join is
-          # attributed to. It is on the same footing as `groww` and `dhan` in
-          # group 2, and for the same reason: it is that vendor's own public
-          # product name, already tracked in docs/00-charter.md section 4z.
-          #
-          # `350` and `400` are the two counts in the collapse test -- a
-          # universe that shrank from 750 to 350, losing 400 -- asserted to
-          # appear IN the refusal so the message cannot stop naming them.
-          join_verdict='
-          isin no-isin matched lacks ambiguous
-          kite 350 400
-          '
-
-          # ---- group 22: TWO WORDS FROM THE EXCHANGE'S OWN NAVIGATION.
-          # crates/pull/src/resolve.rs tests.
-          #
-          # `sectoral-indices` and `strategy` are asserted substrings: a test
-          # that breaks one category's listing checks the failure it collects
-          # NAMES that category, so a refusal cannot stop saying which family
-          # went missing. They are components of a public exchange URL --
-          # niftyindices.com/indices/equity/sectoral-indices -- and the four
-          # such paths live in `nse::Category::path`, where they are slash-
-          # joined and therefore never reach this scan; these two are the bare
-          # words a test quotes.
-          #
-          # Neither names an org, an env, a vendor or a field, and no Parameter
-          # Store path this repository reads has a `strategy` component. They
-          # describe a family of stock-market indices.
-          nav_word='sectoral-indices strategy'
-
-          # ---- group 23: TWO HTTP STATUS CODES, asserted to appear IN a
-          # refusal. crates/pull/src/resolve.rs tests.
-          #
-          # `302` and `403` are read back out of the message the document
-          # transport produces, so a refusal cannot stop naming the status it
-          # refused on -- the same device group 10's bounds use. A three-digit
-          # HTTP status names no account, no environment, no vendor and no
-          # field; it is defined by RFC 9110 and is the same number for every
-          # host on the internet.
-          http_status='302 403'
-
-          # ---- group 24: THE WITHDRAWN-INDEX REGRESSION. nse.rs tests.
-          #
-          # `nifty-ipo` is a real index the exchange has COMMENTED OUT of its
-          # own thematic listing, copied into a test fixture from the live page
-          # on 14 Aug 2026 along with the markup around it. It is the regression
-          # that caught `without_comments`: a byte scanner reads inside an HTML
-          # comment where a browser does not, and the crawl found 62 index links
-          # on a page that lists 44. A withdrawn page answering 404 makes every
-          # pass incomplete, which makes a snapshot permanently unpublishable.
-          #
-          # It is the public name of a stock-market index on a public exchange
-          # site, it names no org, env, vendor or field, and it is on this list
-          # because the fixture must keep quoting it -- a regression test that
-          # stops naming the case it guards stops guarding it.
-          #
-          # `an-index` is the placeholder page name in the sibling test.
-          withdrawn_index='nifty-ipo an-index'
-
-          # ---- group 25: THE THIRD BROKER'S ROW. crates/pull/src/vendor.rs.
-          #
-          # `zerodha` is that vendor's own public product name, written down as
-          # the name its bars are filed under -- `Descriptor::wire`, and the
-          # store prefix `core::vendor::Vendor::as_str`. Same footing as `groww`
-          # and `dhan` in group 2 and checked the same way: it is already
-          # tracked and public in docs/00-charter.md section 4z. Whether it is
-          # ALSO an operator's real <vendor> segment is operator-side and
-          # unknowable from inside this repository -- docs/06-limits.md
-          # section 18, exactly as for the other four.
-          #
-          # `instrument_token` is the vendor's own name for the numeric id it
-          # issues, used as the PLACEHOLDER in the bars path
-          # (/instruments/historical/:instrument_token/:interval) and as a
-          # column header in its instrument dump. It names an instrument, not
-          # an account.
-          #
-          # `api-key` IS A CREDENTIAL FIELD AND IS THE LINE TO READ TWICE.
-          #
-          # It is the <field> of /<org>/<env>/<vendor>/<field> -- the LAST
-          # component of the shape, and the only one of the four that is not
-          # operator-specific. CLAUDE.md section 8 says in as many words that
-          # crates/pull "holds the shape and the field names"; this is a field
-          # name, and it is here because `Auth::key_field` now carries it so the
-          # descriptor decides how many secrets a scheme needs rather than a
-          # match on the feed in crates/api.
-          #
-          # It names no org, no env and no vendor, and it is ALREADY PUBLIC in
-          # this repository: docs/00-charter.md section 4 lists Groww's fields as
-          # api-key, totp-secret and access-token, and `access-token` has been on
-          # group 9 since the first broker row. The VALUE is read from Parameter
-          # Store at runtime and appears in no tracked file, no environment
-          # variable and no log -- section 8, and `pull::http::Credential`
-          # redacts it in Debug.
-          zerodha_row='zerodha instrument_token api-key'
-
-          # ---- group 24: DHAN'S ROLLING-OPTION VOCABULARY, and it is wire
-          # vocabulary in the same sense every row above is.
-          #
-          # `rollingoption` is the path segment of Dhan's expired-options
-          # endpoint (`docs/14-expired-options-data.md`). `ce` and `pe` are the
-          # two objects one answer carries -- the vendor's spelling of CALL and
-          # PUT, which the REQUEST spells the other way, and `rolling::side_key`
-          # is the one place those two spellings meet. `iv`, `oi`, `spot` and
-          # `strike` are four of the nine words its `requiredData` array admits,
-          # named in the request because the vendor DEFAULTS that array to a
-          # subset and a default is a decision taken elsewhere that changes what
-          # lands on disk.
-          #
-          # None names an org, an env, an account or a field of a credential.
-          # They are seven words a broker chose for its own JSON, and this
-          # repository can no more rename them than it can rename `open`.
-          # `1` `2` `3` are Dhan's expiry ORDINALS -- near, next, far -- and `4`
-          # is the one past the end, present only in the test that proves an
-          # ordinal the vendor does not serve is REFUSED rather than guessed at.
-          # Four single digits. None can be an org, an env or a vendor.
-          rolling_word='rollingoption ce pe iv oi spot strike 1 2 3 4'
-
-          # ---- group 25: TEST SCAFFOLD NAMES AND ONE BOUND.
-          #
-          # `contractpath` is a scratch directory in `tests/broker.rs`; `bin` is
-          # the extension that test counts to prove two contracts do not share a
-          # file. `call` and `put` are the two labels its loop prints so a
-          # failure names which side it was on -- English words in an assertion
-          # message, never a path.
-          #
-          # `9223372036854775807` is `i64::MAX` written out, and it is there to
-          # prove `shift_six` REFUSES it rather than wrapping: a volatility that
-          # overflows is not a volatility. A number with no decimal point cannot
-          # be a parameter path segment in any case; it is listed because the
-          # scanner is shape-based and shape alone cannot tell a bound from a
-          # name, which is the same reason `19200` and `2019` are already here.
-          rolling_scaffold='contractpath bin call put 9223372036854775807'
-
-          # ---- group 26: TEST FIXTURE NAMES AND PLACEHOLDER TOKENS.
-          #
-          # Every one is a value a TEST constructs, and each is named for the
-          # fault it arranges rather than for anything a vendor or an account is
-          # called:
-          #
-          #   dir-is-a-file lock-is-a-dir  scratch roots in `ingest.rs`, each
-          #     named for the filesystem shape it puts in the writer's way -- a
-          #     directory where a file belongs and the reverse.
-          #   census-lock-dup              a scratch root in `ingest.rs`, named
-          #     for the duplicated census-lock descriptor it arranges: a second
-          #     reference to the lock's open file description, the model of a
-          #     spawned child's copy (D-0693).
-          #   interleaved                  a word asserted to appear IN a refusal
-          #     sentence, so the message keeps naming the condition it refused.
-          #   feed                         a scratch subdirectory in
-          #     `archive.rs`. The English noun, not a vendor.
-          #   t                            a placeholder CREDENTIAL VALUE in
-          #     `http.rs` tests -- one character, chosen so it can never be
-          #     mistaken for a real token, and `Credential` redacts it in Debug
-          #     regardless. Section 8 is about real secrets reaching tracked
-          #     files; a single letter is the opposite of that.
-          #   z zzz                        the filler `http.rs` repeats to build
-          #     an over-long body and prove the refusal is CUT rather than
-          #     echoed whole.
-          #
-          # None is an org, an env, a vendor or a field of a credential. They are
-          # listed because the scanner is shape-based, and a short lowercase word
-          # has the same shape as a path segment whatever it means.
-          pull_fixture='dir-is-a-file lock-is-a-dir census-lock-dup interleaved
-          feed t z zzz'
-
-          # SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS
-          # GATE COULD NOT RUN. It sits behind gate 1e in the same job, so every
-          # literal added since the workspace stopped compiling arrived
-          # undeclared. Not one is an org, an env, a vendor or a credential
-          # field; they are listed because the scanner is SHAPE-based and a short
-          # lowercase word has a path segment's shape whatever it means.
-          #
-          #   `vendor_error` — the broker's OWN error vocabulary, quoted so a
-          #     refusal can be classified by what the vendor actually said.
-          #     `ga001` is Groww's failure code, `dh-901` and the 800-815 block
-          #     are Dhan's, `tokenexception` and `not_entitled` are Kite's
-          #     exception NAMES, and `pykiteconnect` is the SDK those names are
-          #     documented in rather than on the wire. Charter §3 territory:
-          #     these are verified external facts, and dropping them to satisfy
-          #     a scanner would delete the provenance that says why two
-          #     different failures are one event.
-          vendor_error='ga001 dh-901 tokenexception not_entitled session_dead
-          throttled retry_bounded request_wrong error_name error_type
-          reason_given pykiteconnect metadata methods null source 0x'
-          #
-          #   `event_field` — telemetry KEY names and the values they carry.
-          #     `stage` is the newest: `pull::ingest::note_not_filed` takes it so
-          #     one helper can say WHERE a filing gave up — address, bars or
-          #     overlay — rather than three helpers whose event shapes drift.
-          #     The rest are counters and units on lines `/logs` already draws.
-          event_field='address captures closed committed failures ingested
-          outside-session outside-window outside_session overlay ovl paisa
-          premium rupees runlog sent stage unmeasured vendor-hole name
-          envelope outside'
-          #
-          #   `pull_scratch` — scratch ROOTS a test builds, each named for the
-          #     fault it arranges: a store that cannot be written, a solver
-          #     given an unsolvable quote, bytes kept verbatim. Same class as
-          #     `dir-is-a-file` above and named the same way.
-          pull_scratch='fromrows plausible solvable unwritable verbatim'
-          #
-          #   `bare_number` — digits the scanner cannot tell from a segment.
-          #     Dhan's 8xx status block, Kite's 7030, a `nifty-50` index name,
-          #     and round bounds in test fixtures. A number is not a path.
-          bare_number='001 100 200 250 50 6 7030 8 800 803 804 805 806 807 808
-          809 810 811 812 813 814 815 901 nifty-50'
-
-          # ---- group 27: FOUR TELEMETRY FIELD KEYS AND ONE FAILURE-KIND VALUE,
-          # and these are the only entries below that are in PRODUCTION code.
-          # Every one was read at its call site before it was written down.
-          #
-          #   kind             `crates/pull/src/capture.rs:162`, the LEFT side of
-          #     `.with("kind", ...)` on the `pull.capture` refusal event, and the
-          #     name of the `&str` parameter `note_refused` takes. That event
-          #     deliberately carries no URL, no body and no header — the URL and
-          #     body ARE the evidence that failed to land, and a header can carry
-          #     the credential — so feed, kind and the local I/O reason are all
-          #     that is left of it. Four letters naming a field on a log line.
-          #     §8's shape is `/<org>/<env>/<vendor>/<field>` and has no `kind`.
-          #   rung             `ingest.rs:529`, the LEFT side of
-          #     `.with("rung", ...)` on the once-per-target `pull.run` event. Its
-          #     right side is `Timeframe::as_str`, one of the words already in
-          #     the `timeframe` group. Same case as `timeframe` itself, which the
-          #     sixth batch above argues at length.
-          #   corrected        `http.rs:964` and `csv.rs:464`, both LEFT sides
-          #   negative_volume  and both COUNTS on the right — how many bars
-          #     carried a negative volume and were recorded as zero, and how many
-          #     rows were skipped outright. CLAUDE.md §4 permits the degrade and
-          #     forbids it being silent; these two are what stop it being silent,
-          #     exactly as `unreadable_volume` and `unreadable_oi` already do.
-          #
-          # `unreadable` is the one VALUE here rather than a key:
-          # `capture.rs:444` and `http.rs:2744` pass it as the `kind` argument
-          # above, so it names a CLASS OF FAILURE — the captured body could not
-          # be written — and `capture.rs:550` reuses the word for that test's
-          # scratch directory. It names no account, no environment, no vendor and
-          # no field, and the crate joins it into no path.
-          capture_field='kind rung corrected negative_volume unreadable'
-
-          # ---- group 28: SCRATCH ROOTS AND ONE TEMPORARY FILE STEM. Every word
-          # is the argument to `scratch(...)`, `Scratch::new(...)` or `tmp(...)`
-          # in a test, and every one is named for the case it arranges rather
-          # than for anything a vendor or an account is called. Same class as
-          # `dir-is-a-file` and `pull_scratch` above and read the same way:
-          #
-          #   restart-collision concurrent-names all-names-held   capture.rs
-          #     — a writer restarted onto an occupied name, several writers
-          #     racing for names at once, and every bounded name already taken.
-          #   short-body not-csv json-body index-lands no-partial              masters.rs
-          #   same-source-lock lock-names json-will-not-convert no-comma
-          #   wrong-shape
-          #     — a truncated answer, a body that is not CSV, one that is JSON,
-          #     a landing that reaches the index, a landing that leaves no
-          #     `.partial`, two landings contending for one source's lock, the
-          #     names a lock takes, JSON that will not convert, a row with no
-          #     comma, and a document of the wrong shape.
-          #   partialcount     ingest.rs, the partial-batch counter's own test.
-          #   spanning-months  tests/broker.rs, a batch that crosses a month end.
-          #   identity         tests/unit.rs:121-122, the STEM handed to `tmp`
-          #     twice by the test that proves two calls never collide. It is a
-          #     temporary file name in the OS temp directory, carrying the pid
-          #     and a serial; nothing joins it into a Parameter Store path.
-          #
-          # None is an org, an env, a vendor or a field. They are listed because
-          # the scanner is SHAPE-based and a short lower-case word has a path
-          # segment's shape whatever it means.
-          pull_scratch_2='
-          restart-collision concurrent-names all-names-held
-          short-body not-csv json-body index-lands no-partial
-          same-source-lock lock-names json-will-not-convert no-comma
-          wrong-shape partialcount spanning-months identity
-          '
-
-          # ---- group 29: ASSERTION LABELS, A FILENAME PREFIX AND TWO
-          # DELIBERATELY MALFORMED FIXTURES.
-          #
-          #   zerodha-unreadable-0  `capture.rs:727`, the PREFIX a test builds
-          #     capture filenames from while it occupies every bounded name. It
-          #     is `<feed wire name>-<failure kind>-<index>` — `zerodha` is
-          #     already declared in group 25 and `unreadable` in group 27 — and
-          #     it names a file on the operator's own disk, never a segment of a
-          #     parameter path.
-          #   partial      `masters.rs:1770`, matched as a FILENAME SUBSTRING:
-          #     the test reads the directory and asserts no `.partial` survived
-          #     a landing. The English adjective, not a path component.
-          #   splittable   `session.rs`, an `expect()` message on three calls.
-          #   untouched    `http.rs:4176`, an `assert_eq!` label.
-          #   emit-sites   `emit_sites.rs:1412`, the `origin` argument of
-          #     `ingest::from_rows` — a label folded into a refusal message as
-          #     "(from {origin})", and here it is that test module's own name.
-          #   novalue      `masters.rs:2474` and `:2489`, two of the four
-          #   not-a-pair     deliberately malformed `Set-Cookie` values the
-          #     cookie jar must skip. They are invented nonsense whose whole
-          #     purpose is to not parse.
-          pull_assert='zerodha-unreadable-0 partial splittable untouched
-          emit-sites novalue not-a-pair'
-
-          # ---- group 30: TWO YEAR-MONTHS AND TWO BARE NUMBERS, all four
-          # asserted rather than emitted.
-          #
-          # `2025-07` and `2025-08` are `store::path::YearMonth` renderings read
-          # back off disk by `tests/broker.rs:1270,1274` — the test that proves a
-          # batch spanning a month end lands one bar in each file. Same case as
-          # `year_month` above, and they are scanned rather than excluded because
-          # the `YYYY-MM-DD` exclusion is anchored to that one spelling on
-          # purpose: a `YYYY-MM` is two characters short of it.
-          #
-          # `401` is an HTTP status asserted to appear IN a refusal, the same
-          # device `302` and `403` already are: a credentialed source offered a
-          # transport that sends no token must name the cause rather than let the
-          # vendor answer it. `42` is asserted NOT to appear — it is the value of
-          # a JSON key that is not a list, and the test proves a number does not
-          # become an index name. A three-digit RFC 9110 status and a two-digit
-          # counter-example name no account, no environment, no vendor and no
-          # field.
-          pull_asserted_number='2025-07 2025-08 401 42'
-
-          # ---- group 31: ONE WRONG REGION AND THREE CASE LABELS, all four
-          # offered by `ssm.rs` tests rather than emitted. D-1371, D-1372.
-          #
-          # `ap-south-2` is a real AWS region that is NOT the one CLAUDE.md §8
-          # names. `ssm.rs:1212` offers it beside `us-east-1` and two malformed
-          # spellings of `ap-south-1` to prove the client refuses to sign for
-          # any region but `ap-south-1`: the near miss is the point of the test,
-          # and it names no account, environment, vendor or field.
-          #
-          # `empty-id`, `empty-secret` and `empty-token` are the `assert!`
-          # labels of the three cases proving an empty AWS access key id,
-          # secret key or session token is refused before a request is signed.
-          # Hyphenated test-case names, never a segment of a parameter path.
-          # Declared on the owner's decision (PR #35), not widened by a gate.
-          ssm_region_fixture='ap-south-2 empty-id empty-secret empty-token'
-          # D-1109 surfaced these when the gate began reading DECODED literals.
-          # `orgtwo`, `vendorx` and `fieldx` are config-fixture segments written
-          # inside a larger fixture literal as `\"orgtwo\"`, which the line regex
-          # could not see (a backslash sat before each quote); `note`, `exact` and
-          # `__type` are JSON and CSV keys inside fixture bodies, `__type` being
-          # the AWS JSON error field. None names a real account, environment or
-          # vendor.
-          inner_literal='orgtwo vendorx fieldx note exact __type'
-          # Negative numbers, now that a segment may begin with `-` (D-1109):
-          # parse and overflow fixtures, `i64::MIN` among them. No digit string
-          # is a path segment this repository configures.
-          signed_number='-1 -125 -2450 -19801 -1e300 -9223372036854775808'
-          # Met only in the combined fold (D-1450): branches written before
-          # D-1109 let a segment begin with `-` carried these, and none is a
-          # path segment. `-0`, `-5`, `-0945` and `-1400` are numeric
-          # fixtures: a calendar date's month and day pieces, a malformed CSV
-          # minute and a negative open interest, and the UTC offsets
-          # `kind_of`'s offset parser is driven with (D-0957). `-token` is the
-          # tail the decoded scan reads from the invented `access-token` and
-          # `x-token` header names `header_name` already declares whole.
-          # `--exact`, `--nocapture` and `--test-threads=1` are the libtest
-          # flags `crates/pull/tests/support/mod.rs` hands the re-executed test
-          # binary it runs as an unprivileged user (root-permission tests).
-          fold_literal='-0 -5 -0945 -1400 -token --exact --nocapture'
-          # Met when the audit fixes landed (83cb7a5). `-354` is a
-          # negative rupee price `rolling.rs` must refuse rather than snap to
-          # zero. `-7` is the tail the decoded scan reads from invented
-          # contract fixtures (`...-7000-CE`, `...-700000-CE`) in chain.rs and
-          # fno.rs. `repeats` is a refusal word asserted in http.rs and prose
-          # in a session.rs reason string. None is a path segment.
-          audit_literal='-354 -7 repeats'
-
-          allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
-          ${secret_fixture} ${scaffold} ${timeframe} ${governor}
-          ${record_field} ${header_name} ${bound_number}
-          ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
-          ${redact_label} ${hash_vector} ${request_field}
-          ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}
-          ${rolling_word} ${rolling_scaffold} ${pull_fixture}
-          ${ssm_leak_fixture}
-          ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
-          ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
-          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}"
-          # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
-          # grep -qxF` was the shape here, and under `set -euo pipefail` it is
-          # unsound in the direction that fails a green build: `grep -q` exits
-          # the instant it MATCHES, `printf` takes EPIPE, `pipefail` promotes
-          # it, `!` inverts it, and a declared word is reported as undeclared.
-          # Writing the list to a file removes the pipe.
-          work=$(mktemp -d)
-          printf '%s\n' $allowed > "$work/allowed"
-
           # THE EXTRACTION READS TOKENS, NOT LINES (D-1109). It used to drop
           # every line whose first non-blank character was `//` or `*`, on the
           # claim that "a Rust STRING LITERAL cannot sit on a line that begins
@@ -1727,51 +506,20 @@ jobs:
           # segment-shaped values are in this crate today; declaring them is a
           # separate piece of work. Gate 1c's path-shape scan, which is
           # case-blind on the segments, is what covers a mixed-case path.
+          #
+          # The listing, the extraction, the date exclusion and the verdict are
+          # `gate-1d` in .github/gates_tree.rs. A scanner that fails is refused
+          # by name; under the pipe this replaced, it stopped the step with no
+          # message of the gate's own.
           scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          git ls-files -z -- crates/pull > "$work/list.z"
-          tr '\0' '\n' < "$work/list.z" > "$work/list"
-          grep -c . "$work/list" > /dev/null \
-            || { echo "GATE 1D READ NO FILE under crates/pull."; exit 1; }
-          : > "$work/words"
-          : > "$work/rs.z"
-          while IFS= read -r -d '' f; do
-            case "$f" in
-              *.rs) printf '%s\0' "$f" >> "$work/rs.z" ;;
-              *) { grep -ohE '"[a-z0-9_-][a-z0-9_-]{0,31}"' -- "$f" || true; } \
-                   | tr -d '"' >> "$work/words" ;;
-            esac
-          done < "$work/list.z"
-          xargs -0 -r "$scan" strings < "$work/rs.z" | cut -d: -f3- > "$work/values"
-          [ -s "$work/values" ] \
-            || { echo "GATE 1D READ NO STRING LITERAL under crates/pull."; exit 1; }
-          { grep -E '^[a-z0-9_-][a-z0-9_-]{0,31}$' "$work/values" || true; } >> "$work/words"
-          { grep -ohE '\\"[a-z0-9_-][a-z0-9_-]{0,31}\\"' "$work/values" || true; } \
-            | sed 's/\\"//g' >> "$work/words"
-          { grep -Ev '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$work/words" || true; } \
-            | sort -u > "$work/found"
-          bad=0
-          while IFS= read -r word; do
-            if [ -z "$word" ]; then continue; fi
-            if ! grep -qxF -- "$word" "$work/allowed"; then
-              printf 'UNDECLARED SEGMENT-SHAPED LITERAL IN crates/pull: %s\n' "$word"
-              { xargs -0 -r "$scan" strings < "$work/rs.z" \
-                  | grep -F -- "$word" || true; } | head -3
-              bad=1
-            fi
-          done < "$work/found"
-          echo "read $(grep -c . "$work/list") tracked file(s), $(grep -c . "$work/found") distinct segment-shaped literal(s)"
-          if [ "$bad" -ne 0 ]; then
-            echo
-            echo "Either the literal is invented — add it above — or it is a real"
-            echo "path segment and must not be tracked. See CLAUDE.md section 8."
-            exit 1
-          fi
-          echo "OK — every segment-shaped literal under crates/pull is declared."
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-1d prepare "$work"
+          st=0; xargs -0 -r "$scan" strings < "$work/rs.z" > "$work/strings" || st=$?
+          "$gt" gate-1d verdict "$work" "$st"
       - name: Gate 2 — no build script shells out
         run: |
           set -euo pipefail
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          bad=0
           # THE FILE SET IS THE COMPILER'S, READ BY THE SCANNER (D-1101). It was
           # a shell walk of `mod NAME;` lines, which `#[path = "x.rs"] mod m;`,
           # `pub(crate) mod m;` and `include!("x.rs")` all walked past -- so a
@@ -1785,43 +533,19 @@ jobs:
           #
           # A `build = "gen.rs"` key would rename the ROOT out of the seed list;
           # the manifest scan below refuses the key outright.
-          work=$(mktemp -d)
-          git ls-files -z > "$work/tracked"
-          [ -s "$work/tracked" ] || { echo "GATE 2 READ NO TRACKED FILE."; exit 1; }
-          roots=$(git ls-files '*build.rs')
-          echo "every file compiled into a build script:"
-          if [ -z "$roots" ]; then
-            echo "  none — no tracked build.rs"
-          else
-            # shellcheck disable=SC2086
-            if ! "$scan" closure "$work/tracked" $roots > "$work/closure"; then
-              echo "  A BUILD SCRIPT PULLS IN CODE THIS GATE CANNOT RESOLVE:"
-              grep '^UNRESOLVED ' "$work/closure" | sed 's/^/    /'
-              bad=1
-            fi
-            grep -v '^UNRESOLVED ' "$work/closure" | sed 's/^/  /'
-
-            # THE SPAWN CHECK READS TOKENS (D-1101). Whitespace, comments,
-            # strings and raw identifiers no longer decide it: `p::r#Command::
-            # r#new(..).r#status()` after `use std::process as p;` was invisible
-            # to all five regexes this replaced. Refused in any build-script
-            # file: the identifiers `Command` and `CommandExt`; `process` unless
-            # it is `process::{id, exit, abort, ExitCode, ExitStatus,
-            # Termination}` -- the members that start nothing, which is what
-            # `build_provenance.rs`'s test pid needs; `.spawn(`, `.output(`,
-            # `.status(`, `.exec(`; and `macro_rules`, `unsafe`, `extern`,
-            # `asm!` and `libc`, because each is a way to call something whose
-            # tokens this scan cannot read.
-            # shellcheck disable=SC2046
-            if ! "$scan" build $(grep -v '^UNRESOLVED ' "$work/closure") > "$work/found"; then
-              echo 'BUILD SCRIPT INVOKES, OR CAN REACH, AN EXTERNAL PROCESS:'
-              sed 's/^/  /' "$work/found"
-              echo "A build script is Rust, so gate 1 passes it — and then it runs"
-              echo "something else. That is the side door. See CLAUDE.md section 2."
-              bad=1
-            fi
-          fi
-
+          #
+          # THE SPAWN CHECK READS TOKENS (D-1101). Whitespace, comments,
+          # strings and raw identifiers no longer decide it: `p::r#Command::
+          # r#new(..).r#status()` after `use std::process as p;` was invisible
+          # to all five regexes this replaced. Refused in any build-script
+          # file: the identifiers `Command` and `CommandExt`; `process` unless
+          # it is `process::{id, exit, abort, ExitCode, ExitStatus,
+          # Termination}` -- the members that start nothing, which is what
+          # `build_provenance.rs`'s test pid needs; `.spawn(`, `.output(`,
+          # `.status(`, `.exec(`; and `macro_rules`, `unsafe`, `extern`,
+          # `asm!` and `libc`, because each is a way to call something whose
+          # tokens this scan cannot read.
+          #
           # THE GLOB ABOVE KEYS ON A FILENAME, AND THE FILENAME IS ONLY A
           # DEFAULT. `build.rs` is what cargo looks for when a manifest says
           # nothing; a manifest that says `build = "gen.rs"` gets a build script
@@ -1850,35 +574,21 @@ jobs:
           # WHAT THIS DOES NOT COVER. A build script cargo picks up from the
           # DEFAULT path with no manifest key is caught by the glob above and by
           # gate 13 layer 3, not by this clause; the two halves are complementary
-          # and neither is sufficient alone.
+          # and neither is sufficient alone. The glob `*Cargo.toml` also matches
+          # `NotCargo.toml`; the basename is pinned exactly.
           #
-          # The path list is narrowed with grep and not with a `case`, because a
-          # `case` pattern's `)` inside a `$( ... )` is a bash 3.2 parse error --
-          # `syntax error near unexpected token ;;`. The runner has bash 5, so
-          # this would have been green in CI and red on the operator's own Mac,
-          # which is the worst way for a gate to disagree with itself. The glob
-          # `*Cargo.toml` also matches `NotCargo.toml`; the grep pins the
-          # basename exactly.
-          keys=$( { git ls-files '*Cargo.toml' \
-                    | { grep -E '(^|/)Cargo\.toml$' || true; } \
-                    | while IFS= read -r m; do
-                        awk -v F="$m" '{ l = $0; sub(/#.*$/, "", l); print F ":" NR ":" l }' "$m"
-                      done \
-                    | grep -E ':[[:space:]]*(build|links)[[:space:]]*=' || true; } )
-          if [ -n "$keys" ]; then
-            printf 'A MANIFEST NAMES A BUILD SCRIPT OR A NATIVE LIBRARY:\n%s\n' "$keys"
-            echo 'A `build =` key renames the script out of every filename check'
-            echo 'in this file, and a `links =` key requires one to exist at all.'
-            echo 'Nothing here needs either: there is no C to compile, no protocol'
-            echo 'to generate from, and no version to stamp that'
-            echo 'env!("CARGO_PKG_VERSION") does not already carry.'
-            echo "See CLAUDE.md section 2 and gate 13 layer 3."
-            bad=1
-          fi
-
-          [ "$bad" -eq 0 ] || exit 1
-          echo "OK — no build script invokes an external process, and no manifest"
-          echo "     names one under another filename."
+          # D-2311: the listings (`*build.rs` roots, every tracked file, every
+          # `Cargo.toml`), the closure's file list, the manifest-key scan and
+          # the verdict are `gate-2` in .github/gates_tree.rs. The scanner runs
+          # here, twice, its output and status handed back each time.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          gt="${RUNNER_TEMP:-/tmp}/gates-tree"
+          work=$(mktemp -d)
+          "$gt" gate-2 prepare "$work"
+          st_c=0; xargs -0 -r "$scan" closure "$work/tracked" < "$work/roots.z" > "$work/closure" || st_c=$?
+          "$gt" gate-2 files "$work"
+          st_b=0; xargs -0 -r "$scan" build < "$work/files.z" > "$work/found" || st_b=$?
+          "$gt" gate-2 verdict "$work" "$st_c" "$st_b"
 
       - name: Gate 9 — core depends on nothing
         run: |
@@ -1917,33 +627,22 @@ jobs:
           # `[patch]`, `[replace]`) and prints one line per declaration. Core
           # may have none, so ANY line is the violation -- and a manifest the
           # scanner cannot read is a refusal, never a pass.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          f=crates/core/Cargo.toml
+          #
           # ABSENT IS A REFUSAL. This step said "skip — crate not created yet"
           # and passed when the manifest was missing, so deleting the manifest
           # turned the architecture's most load-bearing arrow off in silence.
-          if [ -z "$(git ls-files -- "$f")" ]; then
-            echo "REFUSED  $f is not a tracked file. The crate this gate guards is gone."
-            exit 1
-          fi
-          if ! deps=$("$scan" deps "$f"); then
-            echo "REFUSED  $f could not be read as TOML, so nothing it declares can be vouched for."
-            exit 1
-          fi
-          if [ -n "$deps" ]; then
-            printf 'crates/core MUST DEPEND ON NOTHING. Found:\n%s\n' "$deps"
-            echo "core is compiled to wasm32 through crates/web. See D-0009."
-            echo "A DEV-DEPENDENCY IS NOT A TECHNICALITY: it is compiled into every"
-            echo "test and every bench, so a crate that declares one CAN REACH IT"
-            echo "whatever the shipping graph says."
-            exit 1
-          fi
+          # D-2311: the verdict is `gate-9` in .github/gates_tree.rs, which
+          # checks the manifest is tracked and refuses a scanner that failed.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          f=crates/core/Cargo.toml
+          work=$(mktemp -d)
+          st=0; "$scan" deps "$f" > "$work/deps" || st=$?
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9 "$f" "$work/deps" "$st"
           # WHAT THIS STILL CANNOT SEE, because a gate that oversells itself is
           # worse than no gate: a `[patch]` or `[replace]` in the WORKSPACE root
           # that redirects a crate core does not name is not core's declaration
           # and is not read here. Gate 13 layers 1 and 2 walk the root manifest
           # and the lock; this step reads one file, completely.
-          echo "OK — core declares no dependency of any kind, in any spelling."
       - name: Gate 9b — greeks depends on nothing
         run: |
           set -euo pipefail
@@ -2001,36 +700,22 @@ jobs:
           # `[replace]`) and prints one line per declaration; greeks may have
           # none, so ANY line is the violation. A manifest it cannot read is a
           # refusal, never a pass.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          f=crates/greeks/Cargo.toml
           # ABSENT IS A REFUSAL. This step said "skip — crate not created yet"
           # and passed when the manifest was missing, so deleting the crate's
           # manifest turned the guarantee off in silence.
-          if [ -z "$(git ls-files -- "$f")" ]; then
-            echo "REFUSED  $f is not a tracked file. The crate this gate guards is gone."
-            exit 1
-          fi
-          if ! deps=$("$scan" deps "$f"); then
-            echo "REFUSED  $f could not be read as TOML, so nothing it declares can be vouched for."
-            exit 1
-          fi
-          if [ -n "$deps" ]; then
-            printf 'crates/greeks MUST DEPEND ON NOTHING. Found:\n%s\n' "$deps"
-            echo "It is shared with another repository by git URL. See D-0046."
-            exit 1
-          fi
+          #
           # The public surface names no type from this workspace. Every other
           # crate here is reachable only by its package name, so naming one at
           # all is the leak -- including through a re-export, which is the case
           # standalone.rs cannot see.
-          leaks=$(git ls-files 'crates/greeks/**/*.rs' \
-                  | xargs -r grep -nE '\b(brutex_core|core::(price|instrument|universe|vendor))\b' \
-                  || true)
-          if [ -n "$leaks" ]; then
-            printf 'A WORKSPACE TYPE APPEARS IN crates/greeks:\n%s\n' "$leaks"
-            exit 1
-          fi
-          echo "OK — greeks depends on nothing and names no workspace type."
+          #
+          # D-2311: the tracked check, the verdict and the source scan for a
+          # workspace type are `gate-9b` in .github/gates_tree.rs.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          f=crates/greeks/Cargo.toml
+          work=$(mktemp -d)
+          st=0; "$scan" deps "$f" > "$work/deps" || st=$?
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-9b "$f" "$work/deps" "$st"
 
       - name: Gate 10b — no invariant identifier means two things
         run: |
@@ -2043,17 +728,11 @@ jobs:
           #
           # Gate 10 could not see it: it walks rows -> tests and never asks
           # whether a row is uniquely named. See D-0329.
-          f=docs/04-invariants.md
-          dups=$(grep -oE '^\| [A-Z]+-[0-9]+[a-z]? ' "$f" \
-                 | tr -d '| ' | sort | uniq -d || true)
-          if [ -n "$dups" ]; then
-            printf 'INVARIANT IDENTIFIER DEFINED MORE THAN ONCE:\n%s\n' "$dups"
-            echo
-            echo "Give the LATER row an unused number. Never renumber the"
-            echo "earlier one -- that rewrites history. See D-0329."
-            exit 1
-          fi
-          echo "OK — every invariant identifier is unique."
+          #
+          # D-2311: `gate_10b` in .github/gates_tree.rs reads the table rows of
+          # docs/04-invariants.md, and refuses a file it cannot read or one in
+          # which it finds no identifier at all.
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-10b
 
       - name: Gate 7 — the browser crate depends on core alone
         run: |
@@ -2065,17 +744,11 @@ jobs:
           # code reaches only for `core` -- outlives the layout, and a crate of
           # this name reappearing must be held to it again. The skip below is
           # therefore the correct outcome today, not a gap.
-          f=crates/web/Cargo.toml
-          [ -f "$f" ] || { echo "skip — crates/web does not exist (D-0052 moved it to web/)"; exit 0; }
-          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}' "$f" \
-                 | grep -v '^$' || true)
-          extra=$(printf '%s\n' "$deps" | grep -v '^core$' || true)
-          if [ -n "$extra" ]; then
-            printf 'crates/web MAY ONLY DEPEND ON core. Found:\n%s\n' "$extra"
-            echo "It compiles to wasm32 where the filesystem does not exist."
-            exit 1
-          fi
-          echo "OK."
+          #
+          # D-2311: `gate_7` in .github/gates_tree.rs skips when
+          # crates/web/Cargo.toml is not a file and otherwise reads its flat
+          # `[dependencies]` table exactly as the old one-line program did.
+          "${RUNNER_TEMP:-/tmp}/gates-tree" gate-7
 
       - name: Gate 13 — no foreign runtime, not even through a dependency
         run: |
