@@ -56866,6 +56866,7 @@ commit door refuses them across the whole file before it appends.
 now pages a three-block file (one block from 1, an empty page past the end, a
 duplicate inside a page refused) where it used to assert the whole-file
 refusal. `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict`.
+
 ### D-2370 — A day the venue cannot attest is withheld once, and its session is looked up once per day — 2026-10-04
 
 **Finding (OD-1, data-side Rust and O(1) sweep).** In
