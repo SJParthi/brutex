@@ -64,3 +64,12 @@ Total new across rounds 1-5: 72. Each round still finds 1-3 mediums, so rounds c
 | Law vs code | 9 | CLAUDE.md claims, charter sources | P9-01..04 low (21/23 claims hold) | tests-docs-security-pass9.md |
 Total new across rounds 1-6: 85. Owner items added: P9-02 (no source for lot sizes/strike steps/expiry weekdays), P9-03 (Groww cap).
 Zero thread at 09:30 had local fix branches (zero/edges-3, ci-web, calendar, data-edges, conc-api, conc-data) not yet on staging; re-verify when it pushes.
+
+## Round 7 (same head 1f4de71) — done 2026-10-04 ~12:40 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 12 | web front end's own logic | CE-70 med (holding chart wrong interval, daily key has no year), CE-71..73 low | crash-edge-pass12.md |
+| Concurrency | 10 | multi-stage ledger chain | conc10-1 med (store-root ledgers have one lifetime 2^24-row cap, ran), conc10-2 low | conc-pass10.md |
+| Data shaping | 10 | folding, paisa, OI | p10num-1 med (GDFL LTQ=0 quote rows folded into bar prices), p10num-2 low | numeric-pass10.md |
+| Test strength | 10 | 50 hand/CM mutations | P10-01 med (GST-rate mutant survives, ran), P10-02 med (lane-order mutant), P10-03..07 low | tests-docs-security-pass10.md |
+Total new across rounds 1-7: 100. Round 7 = 5 medium, 10 low. Re-checked still open: ledgerall-1, pop2-7, ledgerv6-1.
