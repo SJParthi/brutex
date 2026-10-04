@@ -29067,32 +29067,6 @@ mod tests {
         }
     }
 
-    /// **A DAILY WINDOW IS SPLIT BY THE MONTH AND NOT BY THE ONE-MINUTE CAP.**
-    ///
-    /// The two bounds are different rules from different owners. The **cap** is
-    /// the vendor's, and `docs/00-charter.md` §4 records it *per rung*: Groww
-    /// "30 days per request **at 1-minute granularity**", Dhan 90 against its
-    /// intraday-charts endpoint. Neither records a day-level figure, so neither
-    /// descriptor carries one — UNVERIFIED, absent rather than guessed. The
-    /// **month** is the store's, and it binds at every rung, because a bar file
-    /// addresses one month whatever the bar length is.
-    ///
-    /// So the daily split must be the month alone. Groww at one minute needs
-    /// **126** requests per instrument for 2020-01-01..2026-08-07 — 80 months,
-    /// plus one extra cut inside each of the 46 months longer than its 30-day
-    /// cap. At the day rung it needs **80**, one per month and no more.
-    ///
-    /// # The honest size of that, because a test should not flatter it
-    ///
-    /// 80 is a FLOOR, not a target, and it is the store's floor rather than any
-    /// vendor's: `docs/05-decisions.md` D-0054 says "14 at day level", which
-    /// implies a ~172-day cap that appears in no source and is unreachable
-    /// regardless. For Dhan the daily count and the one-minute count are both
-    /// 80 — its 90-day cap is already wider than any month, so the month was
-    /// the only bound at either rung and this change buys it nothing. Asserted
-    /// for both feeds, including the one where the answer is "no difference",
-    /// because a test that only looked at Groww would let a Dhan regression
-    /// through.
     /// **Each rung is split by the cap its own vendor published, and by nothing
     /// else.**
     ///
@@ -29106,6 +29080,14 @@ mod tests {
     /// rung. What survives is the case it still serves: a rung the vendor
     /// published NO cap for has no number to chunk by, and the month is the
     /// only bound left.
+    ///
+    /// Groww therefore needs 81 one-minute requests (its 30-day cap) and 14
+    /// daily ones (its 180-day cap) for this 80-month window, and Dhan, which
+    /// publishes no day cap, still needs 80 daily ones. A first doc block on
+    /// this test said the daily split was "the month alone" and counted 126
+    /// and 80 for Groww — D-0055's rule, which D-0320 and D-1370 removed —
+    /// while the body asserted 81 and 14. Deleted by tests-docs-security-pass18
+    /// P18-03, D-1962.
     #[test]
     fn each_rung_is_split_by_the_cap_its_own_vendor_published() {
         /// The window touches this many months; a capped rung must beat it.

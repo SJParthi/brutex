@@ -76,8 +76,10 @@ pub const MAX_LEG_FIELD_BYTES: usize =
 /// ticked members on one leg and about 55 across six; the page then reported
 /// a `SyntaxError` instead of a reason (P3-01-01, D-1769). Sized so every run
 /// [`legs_from`] would accept is read, and one leg too many reaches
-/// [`Refusal::TooManyLegs`]. About 26.5 MB at most, held in memory once; see
-/// `docs/06-limits.md`.
+/// [`Refusal::TooManyLegs`]. 27,347,836 bytes at most — about 27.3 MB, or
+/// 26.1 MiB — held in memory once; see `docs/06-limits.md`. (This said "about
+/// 26.5 MB", which is neither unit; tests-docs-security-pass17 P17-19,
+/// D-1967, and `the_run_form_bound_is_the_figure_the_limits_document_states`.)
 pub const MAX_RUN_FORM_BYTES: usize =
     crate::server::MAX_FORM_BYTES + (MAX_RUN_LEGS + 1) * MAX_LEG_FIELD_BYTES;
 
@@ -1535,6 +1537,21 @@ mod tests {
             leg.len()
         );
         const { assert!(MAX_RUN_FORM_BYTES > MAX_RUN_LEGS * MAX_LEG_FIELD_BYTES) };
+    }
+
+    /// The figures `docs/06-limits.md` states for the form bounds, from the
+    /// constants: 168,192 for a member form, 881,924 for one leg field and
+    /// 27,347,836 for a run form (8,192 + 31 × 881,924). The prose said "about
+    /// 26.5 MB", which is neither 27.35 MB nor 26.08 MiB. P17-19, D-1967.
+    #[test]
+    fn the_run_form_bound_is_the_figure_the_limits_document_states() {
+        assert_eq!(crate::ingest::MAX_MEMBER_FORM_BYTES, 168_192);
+        assert_eq!(MAX_LEG_FIELD_BYTES, 881_924);
+        assert_eq!(MAX_RUN_LEGS, 30);
+        assert_eq!(MAX_RUN_FORM_BYTES, 27_347_836);
+        let limits = include_str!("../../../docs/06-limits.md");
+        assert!(limits.contains("read up to 27,347,836 bytes of form"));
+        assert!(!limits.contains("about 26.5 MB"));
     }
 
     #[test]

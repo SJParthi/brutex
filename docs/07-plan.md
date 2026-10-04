@@ -53,8 +53,8 @@ by building the workspace with `web/` moved aside.
   used to read "The run configuration itself is not in the clone" and say that
   closing it "needs a decision entry and a gate 1 amendment — **OPEN**". Both
   halves are now done and the row was the last thing that did not know it.
-  `.claude/launch.json` is **tracked** — `.gitignore:30` ignores `.claude/`
-  *except that one file*, and says so — and it carries exactly the two
+  `.claude/launch.json` is **tracked** — `.gitignore` ignores `/.claude/*`
+  *except that one file* (`!/.claude/launch.json`), and says so — and it carries exactly the two
   configurations the table below names, in the preview tools' format. Gate 1 and
   gate 1b were amended to admit `.json` under `.claude/`, and `CLAUDE.md` §2 and
   D-0210 closed the law half.
@@ -91,8 +91,8 @@ Restated here so the plan can be checked against it rather than against memory.
 | # | Requirement | Where it is enforced |
 |---|---|---|
 | R-1 | Spot, **every instrument**, bounded at ~800 — 750 NIFTY Total Market + ~35 NSE indices | `catalog::tracked`, and `/instruments.json` shares that exact predicate |
-| R-2 | **2020-01-01 → yesterday**, never today | `finished_day_only` in `broker_window`, HTTP path only |
-| R-3 | Day-level first, then one-minute | Selectable and landing under `1day/` — D-0055. Open only for Groww, whose daily interval word is unrecorded; see §4 item 4a |
+| R-2 | **2020-01-01 → the last day whose session has closed**: no day whose session has not closed, so today is askable once its close has passed (the close read from the session table, which moves with CAS) | `finished_day_only` in `broker_window`, HTTP path only. This row said "never today" until P17-06 (D-1967); the guard has tested whether the session has ended, not whether the calendar day has, since the 21:11 IST refusal it records. The autopilot still clamps itself to yesterday (`api::autopilot` module doc) |
+| R-3 | Day-level first, then one-minute | Selectable and landing under `1day/` — D-0055. Groww's daily interval word is `1day`, recorded in its descriptor from the vendor's annexure (D-0076); see §4 item 4a. (This row said it was unrecorded until P17-04, D-1967) |
 | R-4 | F&O: **NIFTY only** as the first step | Pull exists: `POST /pull/fno` is routed (`crates/api/src/server.rs`, `pull_fno`). Contracts are stored, never swept (CLAUDE.md §1). Re-stated 2026-10-03, D-1614 |
 | R-5 | TrueData / GDFL are **F&O CSVs from a folder**: no market hours, no rate limit, no token | `Transport::LocalArchive`, and every vendor rule keys off the transport |
 | R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
@@ -166,10 +166,10 @@ P1-18-04, D-1944.
 | # | Item | Why this position |
 |---|---|---|
 | 1 | **Drive one Groww pull end to end from the Ingest page** | Nobody has closed the loop once. An 11,200-request backfill on an undriven loop is how a half-written history happens |
-| 2 | **Make the readiness gate a rule, not a courtesy** | `/feeds.json` reports `ready` and the picker disables — but `parse_feed` accepts any feed, so a `curl` bypasses it. The first attempt used the census as the signal, which is **circular**: a feed just bought holds nothing and could never be pulled. Needs an entitlement signal that is not the census |
+| 2 | **Enforce the existing readiness predicate on the POST routes** | `/feeds.json` reports `ready` and the picker disables — but `parse_feed` accepts any feed, so a `curl` bypasses it. The signal now exists and is not the census: readiness is `SourceKind::needs_credential` for a broker and `archive_ready` for an archive, and neither reads the census. What is missing is enforcement: `archive_ready`'s one caller is the `/feeds.json` path, and no POST route consults the predicate, so R-10's "advisory only" still holds. (This row said "Needs an entitlement signal that is not the census" until P17-21, D-1967) |
 | 3 | ~~**Serve `web/build` from the Rust binary**~~ — **done: D-0064 serves it from a directory read at run time, D-0068 commits the output.** See §0 | This row used to say "assets embed the way `STYLE` already does". **That was wrong and it is worth recording why:** an embed resolves at compile time against a path under `web/`, and CI gate 1e builds with `web/` *moved aside* — so embedding makes the crate fail to compile under the gate's own premise. The assets are read from disk instead |
 | 4 | ~~**Day-level mode before one-minute** (R-3)~~ — **selectable and landing under `1day/` as of D-0055.** What is left is one vendor fact, below | The operator's stated first step. The saving is smaller than this row used to claim; see the corrected arithmetic |
-| 4a | **Read Groww's daily `candle_interval` word off a live call and write it into one descriptor row** | Its request names the bar length in a parameter and the daily spelling is recorded nowhere — `1day`, `1d` and `day` are all plausible and only one is a request. A daily pull against that feed refuses by name until it is recorded. Dhan needs nothing: its request carries no interval field at all |
+| 4a | ~~**Read Groww's daily `candle_interval` word and write it into one descriptor row**~~ — **done: D-0076.** `pull::vendor`'s Groww descriptor carries `(Granularity::Day1, "1day")`, read from the vendor's own annexure (`GrowwAPI.CANDLE_INTERVAL_DAY`) in the same table that gave `1minute` | This row said the spelling was recorded nowhere and a daily pull refused by name until it was; that stopped being true at D-0076 (P17-04, D-1967). Dhan needs nothing: its request carries no interval field at all |
 | 5 | **The 2020 → yesterday backfill** | The goal |
 | 6 | **GDFL one-second fills (D-0802), the parts that need no permission:** read and record in `docs/00-charter.md` §4g whatever further GDFL facts the files in hand support (one day, 26 May 2026, is recorded); first build, with its own entry, D-0802 consequence 12: a reader for the measured `GFDLCM_INDICES_TICK_` and `GFDLCM_STOCK_TICK_` folder layout and its `<NAME>.NSE_IDX.csv` and `<NAME>.NSE.csv` files, a resolver from GDFL names to `InstrumentKey` that refuses what it cannot resolve, and the job that writes the one-second records (running that job over the GDFL files waits on the §3 row, building and testing it does not); then design, each with its own entry, D-0802 consequences 1 to 9, 11, 13 and 14: the run identity with a fill feed (`CLAUDE.md` §3 rule 3), no look-ahead with a bounded staleness for every fill (entry, horizon exit, forced exit, and a stop, target or trail crossed inside a gap) and whether the entry second can itself trigger an exit, the higher-rung entry rule, the O(1) bounds or their limits in `docs/06-limits.md`, the one-second store format (starting from D-0123's existing `1s` fold, format not fixed, weighed against D-0015's ~1.26 MB per instrument per day for a dense grid) with its `docs/02-store-format.md` page and rules for the backward-stamped and out-of-session rows the measured index files carry, the volume-less index fill and whether an equity fill may read volume, what is left of the optimistic/pessimistic bracket and the pessimistic-profit criterion when every fill is the second's worst case, idempotence and row order, the India VIX stamp at a fill instant, and how the existing charge stack attaches to a one-second fill (the stack itself is unchanged), and where exit levels are placed: the price a stop, target or trail is measured from now that the one-minute Open is no longer a fill, and whether the derived step, the quantile ladders, EG-01's training distribution and the stop floor come from GDFL seconds or from the signal's Zerodha minutes (no GDFL-priced exit grid is built or ranked before that is locked), and non-regular sessions: which calendar classifies a GDFL day and second (`CLAUDE.md` §5 names `pull::calendar::kind_of`), what a day it answers `Closed`, `Unmeasured` or `OpenLengthUnmeasured` does, and what the store, the out-of-session rule and the forced square-off do on a session that is not 09:15 to 15:30 (its compiled range is 2 Dec 2019 to 4 Sep 2026, the GDFL folder names run from 3 Sep 2018). The fill-engine entry supersedes D-0436's same-feed and pricing halves, rewrites UE-01, UE-02, UE-03's execution half (its signal-index selection is unchanged), UE-04, UE-05 and UE-06, and audits every other invariant that pins one-minute or bracketed execution (D-0802 names XP-02, the row its ranking contradicts most directly, CO-01, XM-01, XM-05, DR-02, SB-01, SB-02, EB-05, EB-07, EG-01, EG-02, the D-0581/D-0582 stop rows, OOS-01, SO-01 and GR3-02, and says that list is not exhaustive) | Nothing is built. Every fill takes the second's worst-case high or low (D-0802 B3), never the level. Format and density are measured for one day only, and the existing fold would refuse both measured index files on their backward steps; code that relies on an unrecorded vendor fact breaks `CLAUDE.md` §3 rule 1. The ranking reads GDFL fills, so it needs GDFL seconds across the whole tested history, which the operator states are in hand. The search stays on Zerodha minutes and their rungs and is not blocked by this |
 
@@ -180,21 +180,28 @@ that was missing — **80 calendar months**.
 
 | Rung | Cap | Windows / instrument | × 800 instruments |
 |---|---|---|---|
-| Day-level, Groww | none published | **80** | ~64,000 requests |
+| Day-level, Groww | 180 d | **14** | ~11,200 requests |
 | Day-level, Dhan | none published | **80** | ~64,000 requests |
-| One-minute, Groww | 30 d | **126** | ~100,800 requests |
-| One-minute, Dhan | 90 d | **80** | ~64,000 requests |
+| One-minute, Groww | 30 d | **81** | ~64,800 requests |
+| One-minute, Dhan | 90 d | **27** | ~21,600 requests |
 
-**This table replaces one that claimed a 180-day daily cap and 14 windows.**
-That cap appears in no source: `docs/00-charter.md` §4 records a day-level
-figure for neither vendor, and D-0054 cited §4 for "14 at day level" while §4
-said nothing of the kind. Both are corrected here and in D-0055.
+**These are the counts `split_window` produces and a test asserts**
+(`api::server::tests::each_rung_is_split_by_the_cap_its_own_vendor_published`).
+A capped rung is split by its cap alone, and a chunk may span months:
+`ingest::months_in` writes one file per month out of it (D-0320, D-1370). Only a
+rung with no published cap is asked a month at a time, so Dhan's daily pass is
+the one that stays at 80.
 
-**14 was unreachable regardless, and by a bound this repository owns.** The
-store addresses one month per file and `pull::ingest` refuses a batch spanning
-two, so the floor is one request per month — 80 — whatever a vendor allows. The
-real saving of the daily rung is **126 → 80 on Groww and nothing at all on
-Dhan**, whose 90-day cap was already wider than any month.
+**Groww's 180-day daily cap is sourced.** The vendor's own backtesting limits
+table gives it, and `pull::vendor`'s Groww descriptor carries
+`(Granularity::Day1, 180)`; `docs/00-charter.md` §4 records the citation and a
+second vendor table that disagrees. **This section used to say the opposite
+twice**: that a 180-day daily cap "appears in no source", and that 14 daily
+windows were unreachable because the store's month bound forced 80, with
+one-minute counts of 126 and 80. The cap had a source and the month bound was
+removed for capped rungs; corrected by tests-docs-security-pass17 P17-05,
+D-1967. The real saving of the daily rung on Groww is **81 → 14**; on Dhan it
+is **27 → 80**, an increase, because its daily rung has no published cap.
 
 The daily rung is still the right first pass, for the reason that survives the
 arithmetic: **one bar per day instead of 375**, so a wrong symbol, a dead
@@ -296,7 +303,7 @@ here; read them in `docs/04-invariants.md` beside the row named:
 |---|---|---|
 | Condition lookup | `C-V-04` | `popcount`, `union` and `intersect` against the bits set, up to every live bit (328 today) |
 | Mask evaluation | `C-V-01`, `C-V-02`, `C-V-03`, and the live path `C-E-02` | hit against miss; a miss in each of the six words; a 1-bit candidate against every live bit; the live `Column::support` from k=1 to k=8 |
-| Duplicate rejection | `C-E-04` | a **whole ladder walk** per bar, 10,000 → 100,000 bars — generate, subset-prune, reject repeated k=1 positions and count support together, not the rejection alone |
+| Duplicate rejection | `C-E-10` | `engine::primitives::offer`, the k=1 `HashSet<u32>` insert `first_level` makes, at 1,000 / 10,000 / 100,000 positions already offered. k≥2 has no rejection to time: the prefix join is injective. (This row named `C-E-04`, which times a whole ladder walk, not the rejection; tests-docs-security-pass17 P17-08, D-1967) |
 | Result append | `C-E-11` | `engine::primitives::append`, the call `drain` makes per survivor |
 | Bar lookup | `C-01` | measured in `store` |
 
@@ -364,9 +371,9 @@ live: the price scale and encoding the descriptors declare are not the ones
 
 | Item | Evidence |
 |---|---|
-| GDFL futures are **unaddressable except by hand** | Measured on `GFDLNFO_TICK_01072025`: **642** futures CSVs, at `Futures/{-I,-II,-III}/{SYMBOL}-{series}.NFO.csv` — `Futures/-III/FINNIFTY-III.NFO.csv`. Options sit flat under `Options/` and resolve; futures nest a **continuation-series folder**, so the member path has **four** components where `MemberPattern::StemGroupSymbol` documents three — `{archive stem}/{group folder}/{symbol}{suffix}`, `vendor.rs:1700`. "Unreadable" was too strong: an operator who types the deepest folder into the Ingest page **does** get them, which is exactly how the 194 misfiled instrument-months in §3 happened — `ABB-III`, from `ABB-III.NFO.csv` |
-| **596** decimal-strike contracts per day are refused — **loudly** | Reproduced on 2025-07-01: **11,490** option members in `Options.zip`, of which **exactly 596** carry a decimal strike (`BANKBARODA31JUL25276.65CE.NFO.csv`). `.` is not in the store's legal identifier byte set — `core/src/symbol.rs:73–77` admits `A–Z 0–9 - _ &` and nothing else — so each is an `InstrumentError::Malformed`. **The coverage loss is real. The silence is not**; see below |
-| TrueData 2025 indices store nothing, and the **reason is thin** | 88,885 rows read, **0 stored** — `NIFTY 50` and `INDIA VIX` contain a space, refused by the same byte set. **That count is carried from the original row and was NOT re-measured in this pass**: no `NSE_IDX_TICK_*` archive is on this machine, and `CLAUDE.md` §3 rule 6 forbids restating it as though it were. What WAS re-measured is the refusal path, and it is loud by the same five mechanisms below. The genuine defect is the **wording** — `core/src/error.rs:91` renders every one of them as "malformed instrument identifier", naming neither the offending byte nor its offset. An operator reading "NIFTY 50 — malformed instrument identifier" is not told it was the space |
+| GDFL futures are **unaddressable except by hand** | Measured on `GFDLNFO_TICK_01072025`: **642** futures CSVs, at `Futures/{-I,-II,-III}/{SYMBOL}-{series}.NFO.csv` — `Futures/-III/FINNIFTY-III.NFO.csv`. Options sit flat under `Options/` and resolve; futures nest a **continuation-series folder**, so the member path has **four** components where `MemberPattern::StemGroupSymbol` documents three — `{archive stem}/{group folder}/{symbol}{suffix}`, `pull::vendor::MemberPattern::StemGroupSymbol`. "Unreadable" was too strong: an operator who types the deepest folder into the Ingest page **does** get them, which is exactly how the 194 misfiled instrument-months in §3 happened — `ABB-III`, from `ABB-III.NFO.csv` |
+| **596** decimal-strike contracts per day are refused — **loudly** | Reproduced on 2025-07-01: **11,490** option members in `Options.zip`, of which **exactly 596** carry a decimal strike (`BANKBARODA31JUL25276.65CE.NFO.csv`). `.` is not in the store's legal identifier byte set — `core::symbol`'s byte set admits `A–Z 0–9 - _ &` and nothing else — so each is an `InstrumentError::Malformed`. **The coverage loss is real. The silence is not**; see below |
+| TrueData 2025 indices store nothing, and the **reason is thin** | 88,885 rows read, **0 stored** — `NIFTY 50` and `INDIA VIX` contain a space, refused by the same byte set. **That count is carried from the original row and was NOT re-measured in this pass**: no `NSE_IDX_TICK_*` archive is on this machine, and `CLAUDE.md` §3 rule 6 forbids restating it as though it were. What WAS re-measured is the refusal path, and it is loud by the same five mechanisms below. The genuine defect is the **wording** — `core::error`'s `Malformed` arm renders every one of them as "malformed instrument identifier", naming neither the offending byte nor its offset. An operator reading "NIFTY 50 — malformed instrument identifier" is not told it was the space |
 | The only true 1-minute archive product is unreadable | 8 fields, and the time is `09:15` — the parser needs seconds |
 | No zip reader anywhere in the workspace | Every archive must be hand-extracted. Visible in the operator's own tree, where `GFDLNFO_TICK_01072025.zip` sits beside an already-extracted `GFDLNFO_TICK_01072025/` |
 
@@ -374,14 +381,21 @@ live: the price scale and encoding the descriptors declare are not the ones
 member raises **five** things, and every one of them was reproduced:
 
 1. a telemetry event at **`Error`** on `pull.member` — "did not land" — naming
-   the instrument and the reason (`pull/src/ingest.rs:442`, called at 576);
-2. an entry in `Ingested::failures`, named (`ingest.rs:577`);
-3. `Ingested::balances()` **false**, because it begins `self.failures.is_empty()`
-   (`ingest.rs:244–246`);
-4. a receipt line reading **"Members failed: 596"**, and the balance line
-   spelled `NO — …` (`api/src/server.rs:3717`, 3733);
+   the instrument and the reason (`pull::ingest`, the "One member that did not
+   land" event);
+2. an entry in `Ingested::failures`, named;
+3. `Ingested::balances()` **false**, because it begins `self.failures.is_empty()`;
+4. a receipt fact **"Failure diagnostics"** carrying the count of
+   `done.failures`, at most five `Failed` facts naming members, and the balance
+   line spelled `NO — … failure diagnostics` (`api::server`'s ingest receipt).
+   This item quoted a "Members failed: 596" line that the receipt no longer
+   prints;
 5. `audit::Outcome::Failed` on the journalled record, forced by
-   `!done.failures.is_empty()` (`api/src/audit.rs:588`).
+   `!done.failures.is_empty()` (`api::audit`).
+
+Line numbers were replaced by item names here by tests-docs-security-pass17
+P17-20 (D-1967), for the reason §7.1 gives: a line number in a plan is stale by
+the next commit.
 
 That is "degrade loudly and name the reason". It is **not** "a fallback that
 hides a failure", which is what the old wording — *decode then vanish*, *store
@@ -440,7 +454,7 @@ already in place.
 | A vendor restating history | Overlap verified byte for byte; a differing bar **refuses** | `store::file::suffix_that_follows` |
 | Two runs racing | `CensusLock` taken before the read, so read-modify-write is atomic | `pull::ingest` |
 | A full disk | Returned, never signalled — no writable mapping, by rule | `CLAUDE.md` §4 |
-| A half-written day | Never requested: yesterday is the newest day asked for | `finished_day_only` |
+| A half-written day | Never requested: no day whose session has not closed is asked for — today is askable once its close (from the session table) has passed (P17-06, D-1967) | `finished_day_only` |
 
 **This half is done.** Kill the process at any instant; the store recovers, the
 census recovers, and the rerun resumes rather than refusing.
@@ -472,28 +486,30 @@ good, because it cannot be.
 
 ### 9.3 What EXPECTED means, and why it is the hard part
 
-Step 1 is where honesty is required, and it is the part with no code yet.
+Step 1 is where honesty is required. Its parts now have code: `pull::calendar`
+answers which days were sessions, and `pull::gaps::classify*` is the DIFFER
+step. What is still missing is per-instrument history floors (row 4) and a
+loop that runs the five steps to a fixpoint. This section said Step 1 had no
+code and that no trading calendar existed until tests-docs-security-pass17
+P17-07 (D-1967).
 
 | Question | Answer | Status |
 |---|---|---|
 | Which instruments? | The tracked universe, ~800 | ✅ `catalog::tracked` |
-| Which days? | Trading days between the instrument's floor and yesterday | ⚠️ `pull::calendar::kind_of` and `expected_bars` exist and are the canonical IST session authority (CLAUDE.md §5); the paragraph below predates them (D-1614) |
-| How many bars in a day? | 375 at one-minute, 09:15–15:29 inclusive (CAS, from 2026-08-03) | ⚠️ constant exists; holidays do not |
+| Which days? | Trading days between the instrument's floor and the last closed session | ✅ `pull::calendar::kind_of`, `expected_bars` and `sessions_between`, the canonical IST session authority (CLAUDE.md §5). Derived from the store's own record, not typed from a webpage; holidays, Saturday budget sessions and four irregular sessions included. It knows 2019-12-02 to 2026-09-04 (`calendar::FIRST_DAY`, `LAST_DAY`); a day outside that range is not answered |
+| How many bars in a day? | Per day from `calendar::expected_bars`, with each segment's close from `pull::session`: 375 one-minute bars, 09:15–15:29, for a regular session before NSE's CAS change; from 2026-08-03 the swept index stops at 15:15 while cash keeps 15:30 (`pull::session`, NSE/CMTR/74466) | ✅ per day from the calendar. This row read "375 … (CAS, from 2026-08-03)" and "holidays do not [exist]": 375 is the pre-CAS and cash figure, not the index figure after that date |
 | When does an instrument's history start? | Per feed, per RUNG, and per instrument. Groww's day rung from 2020 and its one-minute rung a rolling 3 months; Dhan a **rolling** ~5 years that moves daily | ⚠️ per-feed and per-rung floors are recorded and emitted — `pull::vendor::Descriptor::history`, `/feeds.json`, D-0113. **Per INSTRUMENT is still nowhere**: a scrip listed in 2024 has no bars in 2021 and nothing here knows that |
 
-**Without a trading calendar, "expected" cannot be computed exactly.** A weekend
-and an exchange holiday are indistinguishable from a missing pull, and treating
-either as a gap makes the loop never terminate.
-
-`docs/06-limits.md` already records the absence honestly: the coverage swatches
-on `/store` are quartiles of *the fullest month on the page*, "not of an ideal
-month, because no trading calendar exists in this build to say what a full month
-is."
-
-So the completeness guarantee has a prerequisite, and it is **a trading calendar
-derived from data rather than invented** — the set of days on which some
-instrument reported bars is the exchange's own answer to which days were trading
-days, and it needs no vendor to publish one.
+**The trading calendar this section named as the prerequisite now exists, and
+it is derived from data rather than invented.** `pull::calendar` takes the set
+of days on which stored series reported bars as the exchange's own answer to
+which days were trading days (with SEBI's record for 2021-02-24's interrupted
+session), so a weekend or a holiday is no longer indistinguishable from a
+missing pull inside its range. Its limit is the range: past `LAST_DAY` it
+answers nothing, so "expected" for a later day still cannot be computed until
+the calendar is extended. (A quotation from `docs/06-limits.md` that "no
+trading calendar exists in this build" stood here; that sentence is no longer
+in that document.)
 
 ### 9.4 The honest statement of the guarantee
 
@@ -528,10 +544,10 @@ Enumerated because a 22,400-request run (daily) and a 129,600-request run
 | 9 | Vendor restates history | Refused, not swallowed | ✅ |
 | 10 | Disk full | Returned, never signalled | ✅ |
 | 11 | **Token expires mid-run** | The pull re-reads the credential through `credential_law::Watch::reread` on the production path (`crates/api/src/server.rs`), and a re-read that returns the same dead value halts loudly (CLAUDE.md §8, D-0948) | ✅ re-read; this row said "no re-read" until D-1614 |
-| 12 | Network timeout or reset | Chunk errors, whole member fails, remaining chunks abandoned | ❌ retry with backoff |
-| 13 | Vendor 5xx | Same | ❌ same path |
-| 14 | One instrument fails | No loop yet; when there is one it must not abort the other 799 | ❌ per-instrument isolation |
-| 15 | Restart loses progress | Rerun is safe but redoes everything | ❌ census as the progress ledger |
+| 12 | Network timeout or reset | `api::server::with_retry` re-asks a request that got no status at all on the quadratic transport backoff, up to `THROTTLE_ATTEMPTS`; `the_retry_policy_ladders_back_off_and_then_stop` | ✅ retry with backoff; this row said "❌" until P17-03 (D-1967) |
+| 13 | Vendor 5xx | The same `with_retry`, on the quadratic backoff with the governor untouched, capped at `SERVER_ERROR_ATTEMPTS` (5) | ✅ same path |
+| 14 | One instrument fails | The broker run loops over its targets and records a failure against that instrument's own name and continues ("PER-INSTRUMENT ISOLATION" in `api::server`) | ✅ per-instrument isolation |
+| 15 | Restart loses progress | The autopilot's resume point comes from the store: `next_window` probes the census and asks from the day after the last one a key holds (`api::autopilot` module doc) | ✅ census as the progress ledger, on the autopilot path |
 | 16 | Instrument younger than the window | Every request before its listing is wasted budget | ❌ per-instrument floor |
 | 17 | Symbol renamed between deliveries | Measured: `NIFTY` (2022) vs `NIFTY 50` (2025) — two directories, one index | ❌ canonical alias, descriptor-driven |
 | 18 | Instrument delisted mid-run | 404 read as a failure rather than "history ends here" | ❌ distinguish gone-from-master from transport error |
@@ -539,7 +555,10 @@ Enumerated because a 22,400-request run (daily) and a 129,600-request run
 | 20 | Clock skew across DST | **Not a risk.** India observes no DST | — |
 
 **#11 is the only one certain to fire**, because no run of this size fits inside
-one 24-hour token. It is a hard stop today.
+one 24-hour token. It is not a hard stop: `credential_halts` re-reads the
+credential, a rotated value lets the run continue, and only a re-read that
+returns the same dead value halts (row 11). This said "It is a hard stop
+today" until tests-docs-security-pass17 P17-03 (D-1967).
 
 ---
 
@@ -1036,12 +1055,20 @@ failed their tests as intended; fresh campaign coverage remains395/412 lines and
 ## Grammar search limits recorded but not changed — OPEN (D-0751 to D-0754)
 
 Three grammar-search defects were resolved by stating them, not by changing
-the code. Each stays open here so a recorded limit is not read as a closed one.
+the code. Two stay open here so a recorded limit is not read as a closed one;
+the first was closed in code afterwards.
 
-* **One node is not O(1) (D-0753).** Each grammar choice revalidates its whole
-  prefix, so per-node cost grows with the prefix up to the 1,151-instruction
-  capacity. The time per node is UNMEASURED. Closing it needs an incremental
-  validator whose per-position state `decode` can rebuild, and a bench.
+* **CLOSED: one node is not O(1) (D-0753).** Each grammar choice used to
+  revalidate its whole prefix. Since o1engine-23 (recorded beside D-0983) the
+  step is incremental: `Cursor::place` checks only the new instruction against
+  the subtree start and stack depth already recorded for the prefix, and the
+  whole-prefix `valid_prefix` is test-only, kept as the reference the
+  incremental check is compared against. What remains: at an `And` or `Or` the
+  two sibling operands are still compared as slices, a comparison bounded by
+  the program length rather than by a constant, and no bench times a node
+  (`docs/06-limits.md`, "One expression-grammar node checks only its new
+  instruction"). This bullet listed the defect as open until
+  tests-docs-security-pass17 P17-02, D-1967.
 * **A node budget does not bound progress (D-0752).** Nodes between two
   candidates grow with the alphabet and can exceed one checkpoint replay.
   Pruning refused leaves moves the node counts and pause points a saved search

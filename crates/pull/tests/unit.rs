@@ -7583,6 +7583,40 @@ fn rebuilding_a_census_from_the_same_rows_is_byte_identical() {
     );
 }
 
+/// M-29, DB-03 — the vendor field is all eight bytes of 48..56, for every
+/// vendor, and the reserved runs beside it stay zero.
+#[test]
+fn every_vendor_owns_all_eight_bytes_of_the_manifest_vendor_field() {
+    // THE VENDOR FIELD IS ALL EIGHT BYTES, not five. `groww` alone cannot tell
+    // a 48..54 vendor from a 48..56 one; `truedata` fills the field and
+    // `zerodha` reaches byte 54, so every vendor is imaged and read back here.
+    // tests-docs-security-pass14 P14-01, D-1959.
+    for vendor in Vendor::ALL {
+        let slot = ManifestHeader::genesis(vendor).image();
+        let mut field = [0u8; 8];
+        let name = vendor.as_str().as_bytes();
+        field[..name.len()].copy_from_slice(name);
+        assert_eq!(&slot[48..56], &field, "{vendor:?} owns all of 48..56");
+        assert!(
+            slot[12..16].iter().chain(&slot[56..60]).all(|b| *b == 0),
+            "{vendor:?} wrote into a reserved run"
+        );
+        assert_eq!(
+            ManifestHeader::decode(&slot).map(|h| h.vendor),
+            Ok(vendor),
+            "{vendor:?} reads back as itself"
+        );
+    }
+    assert_eq!(
+        &ManifestHeader::genesis(Vendor::TrueData).image()[48..56],
+        b"truedata"
+    );
+    assert_eq!(
+        &ManifestHeader::genesis(Vendor::Zerodha).image()[48..56],
+        b"zerodha\0"
+    );
+}
+
 /// M-29 — the stride and the header are the geometry the format document
 /// states.
 ///
@@ -7665,12 +7699,15 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
     assert_eq!(&slot[24..32], &7u64.to_le_bytes());
     assert_eq!(&slot[32..40], &5u64.to_le_bytes());
     assert_eq!(&slot[40..48], &51_184u64.to_le_bytes());
-    assert_eq!(&slot[48..54], b"groww\0");
+    assert_eq!(&slot[48..56], b"groww\0\0\0");
     assert_eq!(&slot[60..64], &crc32c(&slot[..60]).to_le_bytes());
     assert!(
-        slot[54..60].iter().all(|b| *b == 0),
+        slot[12..16].iter().chain(&slot[56..60]).all(|b| *b == 0),
         "reserved bytes are zero and stay zero"
     );
+    assert!(census.contains("| 12 | 4 | reserved | written zero |"));
+    assert!(census.contains("| 48 | 8 | `vendor` |"));
+    assert!(census.contains("| 56 | 4 | reserved | written zero |"));
 
     // The entry's two halves, and the reserved run in the second one.
     let held = Held::new(

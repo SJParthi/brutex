@@ -58282,3 +58282,104 @@ The check cannot tell a test function from a production one, and it cannot judge
 - `command_report` takes `Result<String, Refused>`, where `Refused::Arguments` exits `MISUSED` and prints the usage and `Refused::Work` exits `FAILED`. `From<String>` and `From<&str>` produce `Work`, so `?` on a work step needs no mapping and only an argument check says `misused(..)`. `checksum_receipts::command`, `sweep_audited_stored` and `audited_range_command::command` parse every argument, including MAX_BYTES and MAX_RECORDS, before the build stamp or the store root.
 - Tests that pinned the old codes now pin the documented ones: a month the store does not hold, a well-formed range on an unstamped build and a pool whose every instrument refused exit `FAILED`; `the_raw_quote_limit_counts_and_names_every_call_of_swept_rung` and `docs/06-limits.md` name `stored_words` in place of `sweep_audited_stored` as the `swept_rung` caller. That test's call scanner also stopped counting a unit test's `super::swept_rung(..)` assertion as a call site: the two in D-2724's `operator_text_names_only_rungs_and_commands_this_binary_accepts` made it find thirteen calls where the bullet's eleven production callers stand.
 - Proved by `cli::tests::a_malformed_argument_exits_misused_and_a_refused_job_exits_failed`, which drives one argument refusal and one work refusal through `dispatch` for the stored, strict-audit, expression, research and Boolean commands (FB-27).
+
+### D-1955 — The store refuses a stride its header cannot hold; two edge claims corrected — 2026-10-04
+
+- Crash-edge pass 20, also-noted items and row 200. `header.rs` wrote `record_stride` into its two-byte header field with a bare `as u16`, and `Layout::declare` admitted any `u32` stride, so a stride above `u16::MAX` would have been written truncated and read back as a different geometry.
+- `Layout::declare` (`degenerate_field`) now refuses a `record_stride` above `0xFFFF` by naming `record_stride`. The cast in `genesis_at` keeps `as u16`, because it is a `const fn` where `u16::try_from` is not available, and its `allow` now states the reason: every layout that reaches it was refused above `u16::MAX` at declaration. Proved by `store::unit::a_degenerate_layout_is_refused_at_declaration` (DB-01): `u16::MAX` is admitted and `u16::MAX + 1` is refused.
+- `api::backtest::Run::from_bytes` claimed its field list was const-asserted. Only `FIELD_SUM`, a hand-kept restatement of the widths, is const-asserted equal to `PAYLOAD_BYTES`; nothing ties the `take` sequence to it. The reason now says so and names the two tests that hold the bound.
+- `core::universe`'s `mask` doc said `n = 0` "wraps". It underflows: with overflow checks (on in this workspace's dev and release profiles) that is a panic, or a compile error in a const context. It is unreachable because `MemberIndex::build` asserts `is_power_of_two`. The doc now says that.
+
+### D-1956 — The cli's module-wide dead-code expectations are narrowed to the items — 2026-10-04
+
+- CE-95 (crash-edge pass 20). `execution_v3`, `population_v5`, `population_finalization_v3` and `population_finalization_v4` each carried a module-wide `expect(dead_code)`. A new dead item in those modules was silent, which is the failure the lint exists to report.
+- The module-wide expectations are removed. Each item that is still dead carries its own expectation: `expect(dead_code)` when nothing reaches it, and `cfg_attr(not(test), expect(dead_code))` when only tests reach it, so the test build does not report an unfulfilled expectation. `clippy --all-targets -- -D warnings` passes on `cli`.
+- `global_replay_v3` keeps its module-wide expectation, and the finding was wrong about it: no production command reaches the module and nothing outside the file names it. The Step-3 orchestrator writes Global Replay V4. The reason now says that.
+
+### D-1957 — Docs/02 §33 says a Global Replay V3 VIX stamp is part of the money identity — 2026-10-04
+
+- p19num-1 (numeric pass 19). §33 said the VIX stamp "never changes selection, execution, money". The stamp is hashed into each money id, so the same trade stamped Absent and Exact has two money ids. The sentence now says so, and adds that no production command writes Global Replay V3.
+- The document test now pins the new sentence and refuses the old one; it did not pin the sentence before. `cli::global_replay_v3::tests::a_vix_stamp_is_part_of_the_money_identity` proves the claim (DB-04).
+
+### D-1958 — Two float-boundary claims corrected; the rate band is stated as constants — 2026-10-04
+
+- CE-96 (crash-edge pass 20). `runner::outcome`'s module comment and float `allow` said outcome arithmetic was integer paisa. Since D-1173 `Edge`'s money fields are `f64` paisa sums. The comment and the reason now say that; `runner::grid`'s comment is corrected the same way. No arithmetic changed.
+- CE-97. `pull::pricing` built its plausible-rate band with float arithmetic (`-MAX_PLAUSIBLE_RATE`) under an `expect(float_arithmetic)`. `MIN_PLAUSIBLE_RATE = -1.0` is now a named constant, const-asserted to be the sign flip of `MAX_PLAUSIBLE_RATE` by its bits, so the band holds no arithmetic and the expectation is removed. `pull::pricing::a_rate_without_a_citation_is_refused` now checks both edges: ±1.0 is admitted and ±1.0000001 is `RateImplausible` (DB-07).
+- The named constant is one more `f64` token in `crates/pull/src/pricing.rs`, so gate 11's float allowance for that file rises from 22 to 23. It is a rate, not a price; `docs/06-limits.md` records why beside the other allowances.
+
+### D-1959 — The store format document states byte order, sidecar layout and sibling records — 2026-10-04
+
+- Tests-docs-security pass 14, P14-01 to P14-06, and the `graph.rs` note.
+- P14-01: §11.3's census slot table put "reserved" over the last two bytes of `vendor` and left out bytes 12..16. The table now gives `vendor` all of 48..56 and 12..16 and 56..60 as reserved. `pull::unit::every_vendor_owns_all_eight_bytes_of_the_manifest_vendor_field` images every vendor, `truedata` among them, which fills all eight bytes, and reads each back (DB-03).
+- P14-02, P14-03: §2 and §3 state the little-endian byte order, §6 gives the `.crc` sidecar layout (the entry for block `b` is a 4-byte little-endian CRC-32C at offset `4·b`), and §8 gives the overlay and greeks record layouts. Pinned by `store::docs::the_sidecar_byte_order_and_sibling_record_layouts_are_stated` against the constants and the encoders' bytes (DB-02).
+- P14-04: §9's single-writer row says the store takes the lock, as §5 and the code do.
+- P14-05: `crates/store/REPAIR.md` says a revision is born at `Layout::CURRENT`, version 3 since D-1571, not "remains V2".
+- P14-06: `docs/01-architecture.md` §3's Step-3 diagram draws the ledger-v6 chain the production command reaches; §23 names the production writer of Candidate Universe.
+- The graph note: `docs/01-architecture.md` now says what `core/tests/graph.rs` compares and what it does not read.
+
+### D-1960 — AS-11 and AS-14 state D-0602's rule — 2026-10-04
+
+- P18-01 (tests-docs-security pass 18). AS-11 and AS-14 still stated D-0595's bracket rule as current, beside AS-12, which says D-0602 reversed it. Both rows are rewritten to the current rule; AS-11's history column names the reversing decisions (D-0602, and D-0605 for the day), and AS-14's proof column cites AS-12's fold and its test. Both remain NO-TEST rows, as before.
+
+### D-1961 — The autopilot's grace floor argues from D-0128's paused default — 2026-10-04
+
+- P18-02. The `GRACE_SECS` floor doc and AU-01b argued from D-0108's "boot flies" default, which D-0128 reversed. Both now say the autopilot boots paused and only the exact `run` opt-in makes the countdown the only gate.
+
+### D-1962 — A capped rung is split by its own cap, as the code does — 2026-10-04
+
+- P18-03. A test doc in `api::server` and a comment in `pull::vendor` still stated D-0055's "the month binds every rung", which D-0320 and D-1370 removed; the test asserts the opposite. The stale doc block is deleted and the test's doc now gives the counts it asserts: Groww 81 one-minute and 14 daily requests, Dhan 27 and 80. The vendor comment says Groww's 180-day cap cuts its daily pass to 14 requests.
+
+### D-1963 — Groww's 180-day daily cap is sourced; the charter and the vendor comment say so — 2026-10-04
+
+- P17-05 (tests-docs-security pass 17). `docs/07-plan.md` §4 said Groww has no published daily cap, while the code carries 180 days from the vendor's limits table. The charter's Groww row and §4's arithmetic now give 180 days and 14 requests. The stale "day row is absent" lines in `pull::vendor` are deleted.
+
+### D-1964 — BT-26 states D-0414's model and names tests that exist — 2026-10-04
+
+- P18-04. BT-26 stated D-0410's "excursions unrecorded, commission 0.00%" model, which D-0414 superseded, and cited two tests that do not exist. The row now states the current model and names the current tests.
+
+### D-1965 — The form notes say which members of a set are swept — 2026-10-04
+
+- P18-05. The stored tier and Total Market targets were served as "stored, never swept", and docs/04's ST heading said none of them is swept (D-0105). Since D-0506 their F&O-share members are swept. The text now matches the code; `is_sweepable` is unchanged.
+- `SpotTarget`'s doc says nine fixed sets, not seven. Each tier and Total Market note says "stored; members that are F&O shares are swept (D-0506)". The F&O note counts 208 shares and two indices (D-0682). `Everything` says pulling it widens nothing. `Indices` keeps "never swept".
+- Proved by `api::ingest::tests::a_spot_request_names_its_target_or_is_refused`, which pins every note, and `api::ingest::tests::only_the_reference_set_says_never_swept` (DB-08).
+- Not changed, and flagged: the `Indices` set may hold NIFTY and BANKNIFTY, which are on the sweep surface, and its note still says "never swept". Three operator strings in `api::server` still say single stocks are never swept. Both are outside P18-05.
+
+### D-1966 — The indicators column comments cite D-0401's exact aligner — 2026-10-04
+
+- Tests-docs-security pass 18, also seen. Four comments in `indicators::column` cited D-0293's alignment rule, which D-0401 made exact. They now describe the exact aligner. The collision branch cannot be reached from `onto_execution`. It is kept for the public `reproject`. No code changed.
+
+### D-1967 — The plan and limits documents match the tree — 2026-10-04
+
+- Tests-docs-security pass 17, P17-02 to P17-21 except P17-05 (D-1963). P17-01 is not in this batch.
+- `docs/07-plan.md`:
+  - D-0753 is marked closed (P17-02).
+  - §10's handled interruptions and closing line are corrected (P17-03).
+  - R-3 and NEXT 4a say Groww's daily word `1day` is recorded (P17-04).
+  - R-2, §9.1 and §10 say a day is askable once its session has closed (P17-06).
+  - §9.3 is rewritten: `pull::calendar` and `pull::gaps` exist, and the dead docs/06 quote is dropped (P17-07).
+  - The duplicate-rejection row names `C-E-10` (P17-08).
+  - §0 and §7.2 cite item names instead of stale lines and a receipt string (P17-20).
+  - NEXT #2 names the predicate that remains to enforce (P17-21).
+- `docs/06-limits.md`:
+  - §3 and §30 carry superseded notes (P17-09).
+  - §4's three timings are labelled as having no recorded origin (P17-10).
+  - §14 states the bar reader and the x86_64 figure (P17-11).
+  - §28 is dated, and notes that both of its source defects are fixed (P17-12, P17-13).
+  - §43's surviving lake mutant count is corrected (P17-14).
+  - §85's floor of five is marked stale (P17-15).
+  - §32 and the gate-11 rule-4 reason say `census::held_series` also runs per request on `/store?show=gaps` (P17-16).
+  - §66 says `run_local` reads each feed's layout (P17-17).
+  - §49 names the two halt kinds that revive themselves (P17-18).
+  - §53's rerun is closed (P17-08).
+- P17-13's two source defects are fixed: `store::format`'s comment counts 56 (field, byte) positions, and `api::catalog` cites C-14.
+- P17-19: `MAX_RUN_FORM_BYTES` is 8,192 + 31 × 881,924 = 27,347,836 bytes, about 27.3 MB or 26.1 MiB. Its doc, docs/06 and the D-1202 section say so. Proved by `api::pullrun::tests::the_run_form_bound_is_the_figure_the_limits_document_states` (DB-06).
+
+### D-1968 — The VIX companion states that its candle fields are points, not money — 2026-10-04
+
+- p19num-2 (numeric pass 19). `/indexstopvix.json` serves India VIX candles in fields named `*_paisa`, and nothing said that they hold index points × 100. The JSON field names are not changed, because the browser checks the exact key set.
+- `cli::index_stop_vix::POLICY` is hashed into the persisted policy digest, so it is unchanged. The served `policy` field appends `api::indexstopvixjson::CANDLE_UNIT`, and `docs/02-store-format.md` states the unit. Proved by `api::indexstopvixjson::tests::the_served_policy_states_that_vix_candles_are_points_not_money` (DB-05).
+
+### D-1969 — No feed's adjustment for corporate actions is verified; the unchecked note names every kind — 2026-10-04
+
+- p16num-2 (numeric pass 16). The charter recorded no feed's adjustment policy. `docs/00-charter.md` §4 now carries an adjustment row for Groww, Dhan, Zerodha and GDFL, each `UNVERIFIED`, and an intro note that TrueData is no different. `docs/02-store-format.md` §3 says the store keeps the vendor's prices as served and adjusts nothing.
+- p16num-3. `runner::audit::CORPORATE_ACTIONS_UNCHECKED` named only split, bonus and demerger detection. It now names split, bonus, rights issue, face-value change, demerger and dividend. It cites D-0694, and says no detector threshold is sourced, so none was applied. Every test that pins the sentence is updated, and docs/06's D-0694 section has a matching paragraph.

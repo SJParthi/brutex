@@ -862,8 +862,9 @@ impl Bar {
     ///   pins all 56 bytes of one record as a literal array. A body that
     ///   returns zeros — or any other bytes — fails it.
     /// - `store::unit::the_image_is_little_endian_and_each_field_owns_its_own_offset`
-    ///   holds up the byte order this comment claims, and walks all 448
-    ///   (field, byte) positions so no two fields can swap.
+    ///   holds up the byte order this comment claims, and walks all 56
+    ///   (field, byte) positions — seven fields of eight bytes
+    ///   each — so no two fields can swap.
     /// - `store::unit::decoding_the_image_returns_the_record_byte_for_byte`
     ///   round-trips every boundary a record has, [`OI_NULL`] included.
     ///

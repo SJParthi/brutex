@@ -489,8 +489,10 @@ impl AnchoredColumn {
 /// [`Column::build`] fills `source` with the bar whose CLOSE carried the mask, so
 /// a position opens on the bar AFTER it. [`Column::reproject`] overwrites the
 /// same field with the execution bar a position can actually be OPENED on —
-/// `align::onto_execution` returns the first execution bar stamped at or after
-/// the signal's close, which is already the fill bar.
+/// `align::onto_execution` returns the execution bar stamped EXACTLY at the
+/// signal's close, or `None` when that bar is absent (D-0401, which superseded
+/// D-0293's "first bar at or after" rule), and that bar is already the fill
+/// bar.
 ///
 /// Nothing recorded which convention a given `Column` was under, and
 /// `runner::trade::walk` read every column under the first: it added `+1` to a
@@ -888,21 +890,25 @@ impl Column {
                 // ONE FILL BAR, ONE ROW. A SECOND SIGNAL ON IT IS NOT A SECOND
                 // OBSERVATION.
                 //
-                // `align::onto_execution` is forward-only and returns the FIRST
-                // execution bar stamped at or after each signal's close, so when
-                // the execution series has a hole two consecutive signals resolve
-                // to the same bar -- `align`'s own test asserts `[Some(10),
-                // Some(10)]` as the correct output. Both rows were then pushed
-                // with the same `source`, and `outcome::edge` zips `bits` with
-                // `sources` and accumulates one observation per ROW: the same
-                // forward return entered the mean twice. `n` inflates, the
-                // standard error understates, `|t|` inflates -- and `|t|` is what
-                // picks the combination that gets traded.
+                // Under D-0293's rule `align::onto_execution` returned the FIRST
+                // execution bar stamped at or after each signal's close, so a hole
+                // in the execution series resolved two consecutive signals to the
+                // same bar, and `align`'s test then asserted `[Some(10),
+                // Some(10)]`. Both rows were pushed with the same `source`, and
+                // `outcome::edge` zips `bits` with `sources` and accumulates one
+                // observation per ROW: the same forward return entered the mean
+                // twice. `n` inflates, the standard error understates, `|t|`
+                // inflates -- and `|t|` is what picks the combination that gets
+                // traded.
                 //
-                // MEASURED, not hypothetical: the 81 months of one-minute zerodha
-                // NIFTY this store holds are 618,296 bars against roughly 626,625
-                // for 1,671 sessions of 375 -- about 8,329 missing, 1.32%. A hole
-                // of one bar is enough to collide two 2-minute signals.
+                // D-0401 made the aligner EXACT: a signal maps only to the bar
+                // stamped at its close, or to `None`, so two distinct signal
+                // closes can no longer share a target and this branch is
+                // unreachable from `onto_execution`. It stays because `reproject`
+                // is a public door that accepts any non-decreasing targets, and a
+                // caller with a coarser map can still collide two rows. (This
+                // comment described the at-or-after rule as current until
+                // tests-docs-security-pass18, D-1966.)
                 //
                 // The FIRST signal keeps the bar, and that is the physical answer
                 // rather than a tiebreak: it is the earliest signal that could
@@ -954,9 +960,8 @@ impl Column {
                 known,
                 source,
                 // `onto` HOLDS FILL BARS, not signal bars: `align::onto_execution`
-                // returns the first execution bar stamped at or after the
-                // signal's close, which is the earliest bar a position can be
-                // opened on. Recording that is what stops `trade::walk` adding
+                // returns the execution bar stamped exactly at the signal's close
+                // (D-0401), which is the bar a position is opened on. Recording that is what stops `trade::walk` adding
                 // a second `+1` to a bar that already is the fill.
                 sourced: Sourced::Fill,
                 census,
@@ -2370,11 +2375,13 @@ mod reproject_tests {
     ///
     /// # The number this changes
     ///
-    /// `align::onto_execution` is forward-only and returns the first execution
-    /// bar stamped at or after each signal's close, so a hole in the execution
-    /// series resolves two consecutive signals to the same bar; `align`'s own
-    /// test asserts `[Some(10), Some(10)]` as the correct output. Both rows used
-    /// to be pushed with that same source, and `outcome::edge` accumulates one
+    /// Under D-0293's at-or-after rule, `align::onto_execution` resolved two
+    /// consecutive signals to the same bar across a hole in the execution
+    /// series (`align`'s test then asserted `[Some(10), Some(10)]`). D-0401 made
+    /// the aligner exact, so it no longer produces a collision, and this test
+    /// drives `reproject` with colliding targets directly, as any other caller
+    /// of that public door could. Both rows used to be pushed with that same
+    /// source, and `outcome::edge` accumulates one
     /// observation per ROW -- so one forward return entered the mean twice.
     ///
     /// That inflates `n`, understates the standard error and inflates `|t|`, and

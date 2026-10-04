@@ -85,11 +85,16 @@ use crate::{audit, census, ingest, render};
 /// intended case, one in the exception.
 pub const GRACE_SECS: u64 = 20;
 
-/// The whole weight of "nothing is contacted before somebody could say no" now
-/// rests on that window, because D-0108 made the boot default FLY. A window of
-/// zero, or of one second, would remove the consent gate without removing the
+/// The boot default is PAUSED (D-0128 reversed D-0108's "boot flies"): only the
+/// exact `BRUTEX_AUTOPILOT=run` opt-in lets the autopilot fly
+/// ([`stays_paused_from`]). When the operator opts in with `run`, the countdown
+/// is the only gate between boot and the first socket, so "nothing is
+/// contacted before somebody could say no" rests on that window. A window of
+/// zero, or of one second, would remove that gate without removing the
 /// sentence that promises it — so the floor is a **compile-time** check rather
 /// than a test, and shrinking it fails the build with this line as the reason.
+/// (This said the window carried the whole weight "because D-0108 made the
+/// boot default FLY"; tests-docs-security-pass18 P18-02, D-1961.)
 const _: () = assert!(GRACE_SECS >= 5);
 
 /// How many times one month is attempted before it is stalled and passed.
