@@ -1,4 +1,35 @@
-# Zero-findings audit loop — resume state, 2026-10-03 ~20:20 UTC (FINAL SAVE at 93%)
+# Zero-findings audit loop — resume state
+
+## UPDATE 2026-10-04 05:35 UTC — read this first (supersedes the 20:20 UTC block below)
+- Resumed 03:40 UTC on the user's "Go". Staging `final/all-fixes-zero` is now
+  **ad1bead4** (pushed). It contains:
+  - D-1769 batch (9c6284c2);
+  - zero/test-teeth (0ea46614) and zero/ledger-tails (281cbb46) merged;
+  - origin/final/all-fixes (#74 head b23976fc) merged in, 18 conflicts resolved
+    (D-1770 records each duplicate fix and which side was kept);
+  - merge fallout fixed: two production fns split <100 lines, agent-branch
+    clippy fixes, grid fingerprint re-taken (10_616_736_728_369_623_410),
+    `form_read_bound` gives /pull/run and /pull/recovery the run bound.
+- Verification at save: `cargo clippy --workspace --all-targets -D warnings`
+  clean on bde50c0c. Full `cargo test --workspace --no-fail-fast` on bde50c0c:
+  api lib 1423 pass / 1 fail (the /pull/run 413, fixed in ad1bead4); the run
+  was still going through cli when saved. Re-run the full suite on ad1bead4.
+- The disk filled once (old agent worktree targets); deleting
+  `.claude/worktrees/*/target` of finished agents freed 18 GB.
+- Agents running at save (worktrees off bde50c0c, local branches, not pushed):
+  - zero/api-routes: P3-01-02, P3-01-03, P3-01-04, P3-02-01, P3-02-06,
+    P3-02-07. D-1970..1979, prefix ZW-. Prompt: AGENT-PROMPTS.md "api-routes".
+  - zero/numeric: floor-then-max class p2bool-1 p2inst-1 p2idx-1 run3-1
+    D-0743 pbo_ppm; D-0742 block>periods; pst-1 grk-1 run1-1 xcut-1; then
+    run1-2 run1-3 run2-1 run2-2 pst-2 pst-4 grk-2. Operator questions to NAME:
+    pst-3 clib-1 clib-2 gaps-7. D-1990..1999, prefix ZN-.
+  If the session died, their branches are lost unless pushed; redo from the
+  prompts.
+- Next free main-thread numbers: D-1771..1799, invariant ZR-57.
+- Tracker (zero-findings.tsv.md here): 177 still `found`.
+- Still not done: cargo-mutants, non-root tests, message PR 74 CI thread
+  (cse_01TPJRnnkg5yuNeRBHDyzaaP) and merge staging into #74.
+
 
 Saved because weekly usage reached 93% at 20:09 UTC. Work stopped after this save.
 
