@@ -65,10 +65,15 @@
 //! nothing (`Orb::bits` in `crates/indicators/src/orb.rs` skips a window whose
 //! `extremes` is `None`) while the shorter one already answers, so between
 //! minute 5 and minute 15 the implication is simply false. Nor are the
-//! Fibonacci ladders, whose rungs are mutually exclusive rather than implied,
-//! nor `near_pivot_*`, whose bands can both fire at a boundary where `r2 − r1`
-//! equals `2·half`. An approximate implication pruned as exact would discard a
-//! real distinction, which is worse than the redundancy it removes.
+//! Fibonacci ladders, whose rungs are neither implied nor, on whole-paisa
+//! levels, always exclusive: below a range of
+//! [`crate::tolerance::RUNG_EXCLUSIVE_MIN_RANGE`] paisa two rungs of one ladder
+//! can fire on the same bar, and across the two previous-day ladders up to
+//! about 1,000 paisa (D-1861). No Fibonacci pair is screened here, so every
+//! pair that fires is enumerated. Nor `near_pivot_*`, whose bands can both
+//! fire at a boundary where `r2 − r1` equals `2·half`. An approximate
+//! implication pruned as exact would discard a real distinction, which is
+//! worse than the redundancy it removes.
 //!
 //! # Cost
 //!
@@ -299,6 +304,36 @@ mod tests {
                 }
                 assert!(!implies(a, b), "{a} must not imply {b}");
                 assert!(compatible(a, b), "{a} and {b} must stay compatible");
+            }
+        }
+    }
+
+    /// AHB-02 (D-1861). No Fibonacci pair is screened. Two rungs can fire on one
+    /// bar once levels are whole paisa (`tolerance::RUNG_EXCLUSIVE_MIN_RANGE`),
+    /// so a screen that treated them as exclusive would drop combinations that
+    /// do fire. Every live `near_*` row on the session range, with every other
+    /// such row, is a pair the join enumerates.
+    #[test]
+    fn no_session_range_band_pair_is_screened() {
+        let rows: Vec<u16> = crate::table::TABLE
+            .iter()
+            .filter(|row| {
+                row.band == Some(crate::tolerance::Base::SessionRange)
+                    && crate::table::LIVE.get(u32::from(row.index))
+            })
+            .map(|row| row.index)
+            .collect();
+        assert!(
+            rows.len() >= 27,
+            "the fib ladders alone hold 27: {}",
+            rows.len()
+        );
+        for &a in &rows {
+            for &b in &rows {
+                assert!(
+                    pair_is_informative(a, b),
+                    "{a} and {b} must both be enumerated"
+                );
             }
         }
     }

@@ -991,3 +991,34 @@ fn a_rolled_back_first_write_leaves_an_empty_file_that_reads_as_no_rows() -> Res
     );
     Ok(())
 }
+
+/// AHA-06 (h-cli-4, D-1854): a reservation whose write tears is rolled back
+/// and its file removed, because the file was created by this call and "no
+/// file" is the state before it; the same token then reserves whole.
+#[test]
+fn a_failed_reservation_leaves_no_file() -> Result<(), String> {
+    let fixture = Fixture::new()?;
+    let _quiet = BarrierWatch::modelled(|_| Ok(()));
+    let attempt = begin(&fixture.0, [0x54; 32], Operation::Sweep)?;
+    let evidence = Evidence {
+        attempt: 9_999,
+        ..attempt.evidence
+    };
+    let fault = fail_write(1, 40);
+    let refusal = reserve_start(&fixture.0, evidence)
+        .err()
+        .ok_or("the torn reservation refuses")?;
+    drop(fault);
+    assert!(
+        refusal.contains("rolled back to byte 0")
+            && refusal.contains("the reservation file was removed"),
+        "{refusal}"
+    );
+    assert!(!start_path(&fixture.0, 9_999).exists());
+    reserve_start(&fixture.0, evidence)?;
+    assert_eq!(
+        last_event(&start_path(&fixture.0, 9_999), LIMIT)?.map(|saved| saved.attempt),
+        Some(9_999)
+    );
+    Ok(())
+}

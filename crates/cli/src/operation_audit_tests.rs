@@ -312,6 +312,7 @@ struct FailingWriter {
     fail_after: usize,
     sync_fails: bool,
     synced: bool,
+    truncate_fails: bool,
 }
 impl io::Write for FailingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -339,26 +340,66 @@ impl DurableWrite for FailingWriter {
             Ok(())
         }
     }
+    fn end(&mut self) -> io::Result<u64> {
+        Ok(self.bytes.len() as u64)
+    }
+    fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+        if self.truncate_fails {
+            return Err(io::Error::other("private truncation failure"));
+        }
+        self.bytes
+            .truncate(usize::try_from(len).expect("fixture length"));
+        Ok(())
+    }
 }
 
+/// AHA-08 (h-cli-4, D-1854). A failed or short write is never acknowledged
+/// and is truncated back to the record boundary before it, so the file is
+/// never left torn; a failed truncation names both errors; a failed sync after
+/// a whole write is refused and leaves the whole record.
 #[test]
 fn disk_full_partial_write_and_sync_failure_are_never_acknowledged() {
-    for fail_after in [0, 7, 255] {
+    for (prior, fail_after) in [
+        (0, 0),
+        (0, 7),
+        (0, 255),
+        (BYTES, BYTES + 1),
+        (BYTES, 2 * BYTES - 1),
+    ] {
         let mut writer = FailingWriter {
-            bytes: Vec::new(),
+            bytes: vec![9; prior],
             fail_after,
             sync_fails: false,
             synced: false,
+            truncate_fails: false,
         };
-        assert!(write_synced(&mut writer, &[0; BYTES]).is_err());
-        assert_eq!(writer.bytes.len(), fail_after);
+        let refusal = write_synced(&mut writer, &[0; BYTES]).expect_err("refused");
+        assert_eq!(
+            refusal,
+            format!(
+                "invocation audit: private full-disk injection; truncated back to {prior} bytes"
+            )
+        );
+        assert_eq!(writer.bytes, vec![9; prior], "rolled back to the boundary");
         assert!(!writer.synced);
     }
+    let mut writer = FailingWriter {
+        bytes: Vec::new(),
+        fail_after: 7,
+        sync_fails: false,
+        synced: false,
+        truncate_fails: true,
+    };
+    assert_eq!(
+        write_synced(&mut writer, &[0; BYTES]).expect_err("refused"),
+        "invocation audit: private full-disk injection; truncation back to 0 bytes also failed: private truncation failure"
+    );
     let mut writer = FailingWriter {
         bytes: Vec::new(),
         fail_after: BYTES,
         sync_fails: true,
         synced: false,
+        truncate_fails: false,
     };
     assert!(write_synced(&mut writer, &[0; BYTES]).is_err());
     assert!(writer.synced);
@@ -413,6 +454,27 @@ fn durable_id_boundaries_are_exact_before_and_after_index_creation() {
     let mut maximum = first;
     maximum.id = u64::MAX;
     assert_eq!(Record::decode(&maximum.encode().unwrap()).unwrap(), maximum);
+}
+
+/// AHA-08 (D-1854). The real file's rollback measures the true end and its
+/// truncation runs: on a handle that cannot write, the refusal names the
+/// file's real length and the failed truncation, and no byte changes.
+#[test]
+fn a_real_file_write_failure_names_its_true_end_and_leaves_the_bytes() {
+    let root = Scratch::new();
+    let path = root.0.join("index.bin");
+    std::fs::write(&path, [7_u8; 10]).unwrap();
+    let mut file = File::open(&path).unwrap();
+    let refusal = write_synced(&mut file, &[0; BYTES]).expect_err("a read-only handle refuses");
+    assert!(
+        refusal.starts_with("invocation audit: ")
+            && refusal.contains("; truncation back to 10 bytes also failed: "),
+        "{refusal}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), [7_u8; 10]);
+    let mut writable = OpenOptions::new().append(true).open(&path).unwrap();
+    write_synced(&mut writable, &[1; BYTES]).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 10 + BYTES as u64);
 }
 
 /// W2-cli9-5: a crash after `create_new` of the per-invocation journal and

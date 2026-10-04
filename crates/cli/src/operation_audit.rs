@@ -336,16 +336,39 @@ fn append(file: &mut File, expected: u64, record: &Record) -> Result<(), String>
 
 trait DurableWrite: io::Write {
     fn sync(&mut self) -> io::Result<()>;
+    /// The current end of the file: where the next append lands.
+    fn end(&mut self) -> io::Result<u64>;
+    /// Cut the file back to `len` bytes.
+    fn truncate_to(&mut self, len: u64) -> io::Result<()>;
 }
 impl DurableWrite for File {
     fn sync(&mut self) -> io::Result<()> {
         self.sync_all()
     }
+    fn end(&mut self) -> io::Result<u64> {
+        self.seek(SeekFrom::End(0))
+    }
+    fn truncate_to(&mut self, len: u64) -> io::Result<()> {
+        self.set_len(len)
+    }
 }
+/// Appends one fixed-stride record and syncs it. A failed or short write is
+/// truncated back to the length before it, so neither the index nor an
+/// invocation file is left torn for every later reader to refuse (the
+/// D-1850 shape, D-1854); when the truncation also fails both errors are
+/// named. A failed sync after a whole write is not rolled back and is
+/// never acknowledged.
 fn write_synced(file: &mut impl DurableWrite, image: &[u8; BYTES]) -> Result<(), String> {
-    file.write_all(image)
-        .and_then(|()| file.sync())
-        .map_err(error)
+    let end = file.end().map_err(error)?;
+    if let Err(why) = file.write_all(image) {
+        return Err(match file.truncate_to(end) {
+            Ok(()) => error(format!("{why}; truncated back to {end} bytes")),
+            Err(and) => error(format!(
+                "{why}; truncation back to {end} bytes also failed: {and}"
+            )),
+        });
+    }
+    file.sync().map_err(error)
 }
 
 struct State {
