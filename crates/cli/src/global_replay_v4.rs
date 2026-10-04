@@ -508,7 +508,9 @@ impl VixLookup for VixCatalog<'_> {
 /// more ambiguous or gap-filled trades than the policy it was selected under
 /// allows (GAP15-19). This restores V1's rule: the ceilings come sealed in
 /// the Runner witness, are indexed by stream, and each admitted priceable
-/// trade adds in O(1). D-1643.
+/// trade adds in O(1), proven by
+/// `cli::tests::admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings`
+/// (in `global_replay_v4::tests`; AGA-01). D-1643.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StreamQuality {
     max_ambiguous_bars: u64,

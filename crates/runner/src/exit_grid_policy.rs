@@ -7261,6 +7261,32 @@ mod tests {
         );
     }
 
+    /// D-1643: the frozen quality ceilings travel with the witness, from the
+    /// same resolved policy (3 and 2 in this fixture), and are sealed.
+    fn witness_seals_its_frozen_quality_ceilings(
+        torn: &mut GlobalReplayWitnessUniverseV1,
+        policy: [u64; 2],
+    ) {
+        assert_eq!(torn.max_ambiguous_bars(), 3);
+        assert_eq!(torn.max_gap_fills(), 2);
+        assert_eq!([torn.max_ambiguous_bars(), torn.max_gap_fills()], policy);
+        for widen in [0, 1] {
+            if widen == 0 {
+                torn.max_ambiguous_bars = u64::MAX;
+            } else {
+                torn.max_gap_fills = u64::MAX;
+            }
+            assert_eq!(
+                torn.require_integrity(),
+                Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch),
+                "a widened quality ceiling breaks the opaque successor seal"
+            );
+            torn.max_ambiguous_bars = 3;
+            torn.max_gap_fills = 2;
+            assert_eq!(torn.require_integrity(), Ok(()));
+        }
+    }
+
     #[test]
     fn global_replay_witness_mints_every_identity_at_the_authenticated_replay_door() {
         let training = crate::synthetic::sessions(6);
@@ -7319,34 +7345,14 @@ mod tests {
         assert_eq!(witness.selected_exit_digest(), selected.selection_digest);
         assert!(!witness.candidates().is_empty());
         assert_ne!(witness.universe_digest(), [0; 32]);
-        // D-1643: the frozen quality ceilings travel with the witness, from the
-        // same resolved policy (3 and 2 in this fixture), and are sealed.
-        assert_eq!(witness.max_ambiguous_bars(), 3);
-        assert_eq!(witness.max_gap_fills(), 2);
-        assert_eq!(
-            [witness.max_ambiguous_bars(), witness.max_gap_fills()],
+        let mut torn = witness;
+        witness_seals_its_frozen_quality_ceilings(
+            &mut torn,
             [
                 resolved.policy().max_ambiguous_bars(),
-                resolved.policy().max_gap_fills()
-            ]
+                resolved.policy().max_gap_fills(),
+            ],
         );
-
-        let mut torn = witness;
-        for widen in [0, 1] {
-            if widen == 0 {
-                torn.max_ambiguous_bars = u64::MAX;
-            } else {
-                torn.max_gap_fills = u64::MAX;
-            }
-            assert_eq!(
-                torn.require_integrity(),
-                Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch),
-                "a widened quality ceiling breaks the opaque successor seal"
-            );
-            torn.max_ambiguous_bars = 3;
-            torn.max_gap_fills = 2;
-            assert_eq!(torn.require_integrity(), Ok(()));
-        }
         torn.first_oos = 1;
         assert_eq!(
             torn.require_integrity(),
