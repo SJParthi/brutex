@@ -1914,10 +1914,12 @@ fn tree_lines(repo: &dyn Repo, dir: &str) -> Result<Option<Vec<TreeLine>>, Strin
     Ok(Some(out))
 }
 
-/// `include_str!\([^")]`: an include whose argument is not a literal.
+/// `include_str!\([^")]`: an include whose argument is not a literal, or
+/// whose argument is not on its line at all (D-2318): clause D reads one line
+/// at a time, so a path on the next line was never read and escaped it.
 fn computed_include(line: &[u8]) -> bool {
     find_all(line, b"include_str!(")
-        .any(|p| line.get(p + 13).is_some_and(|&b| b != b'"' && b != b')'))
+        .any(|p| line.get(p + 13).is_none_or(|&b| b != b'"' && b != b')'))
 }
 
 /// `grep -o 'include_str!\("[^"]+"\)'` with the sed that strips the macro:
@@ -3547,7 +3549,10 @@ mod tests {
         assert!(computed_include(b"include_str!(x)"));
         assert!(!computed_include(b"include_str!(\"a\")"));
         assert!(!computed_include(b"include_str!()"));
-        assert!(!computed_include(b"include_str!("));
+        assert!(
+            computed_include(b"include_str!("),
+            "a path on the next line is not read, so it is refused (D-2318)"
+        );
         assert_eq!(
             included_paths(b"include_str!(\"a.md\") + include_str!(\"b.rs\")"),
             vec!["a.md", "b.rs"]

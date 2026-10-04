@@ -58305,3 +58305,18 @@ to the old `sed` edit (`cmp`, measured locally). The tool's tests
 `gate_8_plants_once_after_the_signature_and_refuses_without_it` and
 `gate_8_counts_a_catch_only_for_a_nonzero_exit_naming_c09` cover every refusal
 branch; the full bench probe is CI's to run.
+
+### D-2318 — Gate 22 clause D refuses an include whose path is not on its line — 2026-10-04
+
+**Finding.** Porting gate 22 (D-2312) showed, in the old shell and the new
+tool alike, that clause D reads one line at a time: `include_str!(` at the end
+of a line with its path on the next escaped both the computed-argument check
+and the literal-path check, so a sweep crate could include any file that way.
+
+**Decision.** `gates_runtime::computed_include` now also refuses an
+`include_str!(` with nothing after it on its line. A legitimate include keeps
+its literal path on the macro's own line; no tracked file under gate 22's scope
+splits one (gate 22 passes on the tree).
+
+**Proof.** The tool's test asserts `computed_include(b"include_str!(")` is now a
+refusal; gate 22 run locally on the merged tree exits 0.
