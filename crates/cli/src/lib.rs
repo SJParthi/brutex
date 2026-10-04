@@ -5646,8 +5646,9 @@ fn grid_exposure(outcome: &runner::RankedOutcome, bars: &[indicators::Candle]) -
 /// It is not invented, and it is not a preference. It is the arithmetic the
 /// three consumers of the series force:
 ///
-/// * the walk-forward splits into [`WALK_FORWARD_SPLITS`] anchored folds, so a
-///   fold's TEST window is roughly `sessions / splits`;
+/// * the walk-forward splits into [`walk_forward_splits`] anchored folds,
+///   DERIVED from the bar count (two to twenty), so a fold's TEST window is
+///   roughly `sessions / (folds + 1)`;
 /// * the bootstrap resamples in stationary blocks of
 ///   [`runner::bootstrap::DEFAULT_BLOCK`], so a draw is roughly
 ///   `sessions / block` blocks;
@@ -5680,7 +5681,11 @@ const MIN_AUDIT_SESSIONS: usize = 50;
 /// computed over ~20 sessions rendered in **exactly the same format** as one
 /// computed over 3,650, with nothing on the page to tell them apart. The number
 /// was not wrong; the impression it gave was.
-fn sample_warning(sessions: usize) -> String {
+///
+/// `folds` is the count the walk-forward actually uses on these bars,
+/// [`walk_forward_splits`] of the bar count. This printed a fixed five that no
+/// fold had used since the count was derived (D-1646).
+fn sample_warning(sessions: usize, folds: usize) -> String {
     if sessions >= MIN_AUDIT_SESSIONS {
         return String::new();
     }
@@ -5688,7 +5693,7 @@ fn sample_warning(sessions: usize) -> String {
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
-        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {WALK_FORWARD_SPLITS} · \
+        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {folds} · \
          bootstrap block {block}\n  \
          THIN. Below {MIN_AUDIT_SESSIONS} sessions each fold tests on roughly \
          {} day(s) and each bootstrap draw is roughly {} block(s), so the \
@@ -5696,7 +5701,7 @@ fn sample_warning(sessions: usize) -> String {
          sample does not have. They render in the same format they would over \
          ten years; they do not mean the same thing. The trades, the exit grid \
          and the excursions are unaffected — those measure what happened.",
-        sessions / WALK_FORWARD_SPLITS.max(1),
+        sessions / folds.saturating_add(1),
         sessions / block.max(1),
     );
     out
@@ -5952,26 +5957,6 @@ fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
     }
     days
 }
-
-/// How many anchored folds the walk-forward uses.
-///
-/// # A stated assumption, in the form this crate already uses for one
-///
-/// `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` are both constants
-/// their own documentation calls "a stated assumption and not a derivation", and
-/// this is the third. `CLAUDE.md` §3 rule 1 forbids PRETENDING a number is
-/// derived; it does not forbid choosing one and saying so.
-///
-/// Five is the anchored-walk-forward count in common use, and the trade it makes
-/// is legible: each additional fold buys another independent out-of-sample
-/// verdict and costs one more full sweep, while shortening every training window.
-/// On a 91,874-bar column that is roughly 18,000 test bars per fold — enough that
-/// a fold's verdict is not one afternoon.
-///
-/// Nothing in the data says where that trade sits, and no charter source names a
-/// fold count, so this is the assumption and the report prints it beside the
-/// result rather than burying it.
-const WALK_FORWARD_SPLITS: usize = 5;
 
 /// How many anchored folds to split a column into, DERIVED from its length.
 ///
@@ -8650,7 +8635,7 @@ fn traded_preamble(
 ) -> String {
     let mut out = traded_line(first, direction);
     out.push_str(&grid_exposure(outcome, bars));
-    out.push_str(&sample_warning(sessions));
+    out.push_str(&sample_warning(sessions, walk_forward_splits(bars.len())));
     out
 }
 
@@ -11149,9 +11134,10 @@ fn descent_banner(
 /// # Why only the survivor pays for this
 ///
 /// Every step of a descent runs with `validate: false`, which is what makes the
-/// walk finishable: the stack costs `WALK_FORWARD_SPLITS` sweeps twice over plus
-/// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade
-/// re-walks — none of it sized by the data. MEASURED: a 60-minute audit over six
+/// walk finishable: the stack costs [`walk_forward_splits`] sweeps (two to
+/// twenty, derived from the bar count) twice over plus `BOOTSTRAP_DRAWS` x
+/// `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade re-walks, a figure no
+/// trade count moves. MEASURED: a 60-minute audit over six
 /// months did not finish in sixty seconds at a candidate ceiling of one
 /// thousand; the same sweep without the stack takes 0.005s.
 ///
@@ -16304,9 +16290,10 @@ struct AuditOptions<'a> {
     ///
     /// # Why a search must be able to say no
     ///
-    /// These three cost `WALK_FORWARD_SPLITS` sweeps twice over plus
-    /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade
-    /// re-walks, and none of that is sized by the data. MEASURED: a 60-minute
+    /// These three cost `walk_forward_splits` sweeps (two to twenty, derived
+    /// from the bar count) twice over plus `BOOTSTRAP_DRAWS` x
+    /// `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade re-walks, a figure no
+    /// trade count moves. MEASURED: a 60-minute
     /// audit over six months did not finish in sixty seconds at a candidate
     /// ceiling of ONE THOUSAND, while the same sweep without them takes 0.005s.
     ///
@@ -19632,10 +19619,11 @@ fn audit_bars_work(
     // `validate::walk_forward` was built, tested and never called: this report
     // printed "NOT SUPPLIED to this render" for it on every run since the
     // function existed. What it needed was a fold count, and
-    // `WALK_FORWARD_SPLITS` supplies one as a STATED ASSUMPTION -- the form
-    // `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` already use.
+    // `walk_forward_splits` DERIVES one from the bar count (two to twenty); the
+    // fixed five it replaced was printed in the thin-sample note long after no
+    // fold used it (D-1646).
     //
-    // It re-sweeps once per fold, so it costs about `WALK_FORWARD_SPLITS` times
+    // It re-sweeps once per fold, so it costs about `walk_forward_splits` times
     // the sweep above. That is what an out-of-sample verdict costs, and it is
     // paid here rather than skipped.
     // A FRESH EVALUATOR PER FOLD, AND IT IS A COPY RATHER THAN A REBUILD.
@@ -19689,9 +19677,9 @@ fn audit_bars_work(
     // THE WHOLE VALIDATION STACK IS SKIPPABLE, AND SKIPPING IT IS WHAT MAKES A
     // SEARCH POSSIBLE AT ALL.
     //
-    // Below this line are three stages whose cost is fixed by constants rather
-    // than by the data: `both_shapes` runs `WALK_FORWARD_SPLITS` sweeps twice
-    // over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
+    // Below this line are three stages whose cost no trade count moves:
+    // `both_shapes` runs `walk_forward_splits` sweeps (two to twenty, derived
+    // from the bar count) twice over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
     // `BOOTSTRAP_DRAWS` (1,000) resamples for each of `BOOTSTRAP_CANDIDATES`
     // (16) — sixteen thousand full trade re-walks, whether the run has forty
     // trades or forty thousand.
@@ -21102,6 +21090,11 @@ mod tests {
         // streamed frontier correctly refuses before every stage below.
         let text = audit_run_within(12, 1_400, 50_000);
         assert!(text.starts_with(PROVENANCE), "provenance leads it too");
+        // THE THIN-SAMPLE NOTE NAMES THE FOLDS THE WALK-FORWARD USED: a 12-session
+        // column is far under 6,000 bars, so `walk_forward_splits` clamps to two.
+        // It printed a fixed five here until D-1646.
+        assert!(text.contains("walk-forward folds 2 ·"), "{text}");
+        assert!(!text.contains("walk-forward folds 5"), "{text}");
         // GENERATED BARS NAME NO INSTRUMENT, so `audit_with` keeps the index
         // header under the PROVENANCE banner, and no share's label. D-0681.
         assert!(
@@ -21914,14 +21907,14 @@ mod tests {
     fn a_thin_sample_is_named_and_a_sufficient_one_says_nothing() {
         // SUFFICIENT: silent, exactly at the boundary and above it.
         assert!(
-            sample_warning(MIN_AUDIT_SESSIONS).is_empty(),
+            sample_warning(MIN_AUDIT_SESSIONS, 5).is_empty(),
             "the boundary itself is sufficient; a warning here would fire on \
              every adequate run and teach the reader to ignore it"
         );
-        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000).is_empty());
+        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000, 20).is_empty());
 
         // THIN: named, with the two numbers that decide it.
-        let thin = sample_warning(20);
+        let thin = sample_warning(20, 3);
         assert!(thin.contains("THIN"), "the verdict is stated: {thin}");
         assert!(
             thin.contains("sessions 20"),
@@ -21941,7 +21934,16 @@ mod tests {
         // ZERO SESSIONS MUST NOT PANIC. The divisors are constants here, but a
         // future change to either could make one zero, and this is the arm that
         // would catch a division by it.
-        assert!(sample_warning(0).contains("THIN"));
+        assert!(sample_warning(0, 0).contains("THIN"));
+        assert!(sample_warning(0, usize::MAX).contains("roughly 0 day(s)"));
+
+        // THE FOLD COUNT PRINTED IS THE ONE PASSED, never a constant (D-1646):
+        // twenty sessions over three folds test on 20 / (3 + 1) = 5 days each.
+        assert!(thin.contains("walk-forward folds 3 ·"), "{thin}");
+        assert!(thin.contains("roughly 5 day(s)"), "{thin}");
+        let seven = sample_warning(20, 7);
+        assert!(seven.contains("walk-forward folds 7 ·"), "{seven}");
+        assert!(seven.contains("roughly 2 day(s)"), "{seven}");
     }
 
     /// THE LOG DIRECTORY IS DECIDED WITHOUT TOUCHING THE ENVIRONMENT.
