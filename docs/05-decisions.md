@@ -60245,6 +60245,13 @@ sides had fixed, and in one place where it undid lane 1's change.
   a program; the step runs the scanner and the resolver (D-2344). Locally gate
   10 checked 2,457 tokens with none missing, and gate 12 found 2 unproven
   claims, both on its allowlist.
+- Gate 11's rule 4 count for `crates/cli/src/lib.rs` moved from the shell
+  allowlist to `ALLOW_SORT` in `gates_ledger.rs` at the base's 7. Lane 1's
+  shell copy said 8 for D-1728's windowed sort in `first_accepted_in_order`,
+  which sorts each selected window of `top` keys and never the whole input.
+  The entry is 8 again, with that reason beside it. Gate 12's step counts the
+  resolved table with `wc -l`, because gate 0 pins inline `awk` programs at
+  zero (D-2342).
 
 **Rejected.** Keeping both counters, or both listing folds. Two
 implementations of one fact drift. Reverting `prepare_span` to `price_all`'s

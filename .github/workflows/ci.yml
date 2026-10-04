@@ -3230,7 +3230,7 @@ jobs:
           "$tool" gate12-tokens \
             | "$work/invariant-paths" --resolve "$work/path-fns" "$work/modules" "$work/inline" \
             > "$work/resolved"
-          echo "  $(awk 'END{print NR}' "$work/resolved") (token, crate fn) resolution(s)"
+          echo "  $(wc -l < "$work/resolved") (token, crate fn) resolution(s)"
           "$tool" gate12 "$allow_claim" "$work/resolved"
 
       - name: Gate 14 — every crate that claims a bound re-measures it

@@ -1442,7 +1442,10 @@ const ALLOW_SORT: Allow = &[
     ("crates/api/src/indexmap.rs", 1),
     ("crates/api/src/pullrun.rs", 1),
     ("crates/api/src/server.rs", 12),
-    ("crates/cli/src/lib.rs", 7),
+    // 8 since D-1728: `first_accepted_in_order` sorts only each selected
+    // window of `top` keys, never the whole input (D-2105 carried the count
+    // over from the shell allowlist the sweep replaced).
+    ("crates/cli/src/lib.rs", 8),
     ("crates/engine/src/lib.rs", 2),
     ("crates/pull/src/nseindex.rs", 1),
     ("crates/runner/src/grid.rs", 3),
