@@ -85,11 +85,6 @@ fn each_quoted_line_is_in_the_source_it_names() {
         (
             "search",
             SEARCH,
-            "let prior = Reader::open(request.input.output, identity, observe, records)?;",
-        ),
-        (
-            "search",
-            SEARCH,
             "let reader = Reader::open(request.input.output, identity, observe, records)?;",
         ),
         (
@@ -98,7 +93,7 @@ fn each_quoted_line_is_in_the_source_it_names() {
             "for batch in 0..reader.completed_batches() {",
         ),
         ("search", SEARCH, "reader.verify_batch(batch as u64)?;"),
-        ("search", SEARCH, "prior.verify_batch(batch as u64)?;"),
+        ("search", SEARCH, "saved.verify_batch(newest as u64)?;"),
         ("search", SEARCH, "saved.verify_batch(batch as u64)?;"),
         ("reader", READER, "for old in &self.history {"),
         ("reader", READER, "QualifiedCampaign::open("),
@@ -136,19 +131,15 @@ fn each_quoted_line_is_in_the_source_it_names() {
 
 #[test]
 fn the_verify_loops_the_section_describes_are_the_ones_in_the_source() {
-    // The search command verifies every completed batch before and after it
-    // publishes, and every `verify_batch` ends by rereading the history.
+    // The search command verifies every completed batch at resume and once
+    // more before it reports its outcome (D-2668), and every `verify_batch`
+    // ends by rereading the history.
     // Each named loop is the one that makes the call the section says it does.
     for (source, opener, call) in [
         (
             SEARCH,
             "for batch in 0..reader.completed_batches() {",
             "reader.verify_batch(batch as u64)?;",
-        ),
-        (
-            SEARCH,
-            "for batch in 0..prior.completed_batches() {",
-            "prior.verify_batch(batch as u64)?;",
         ),
         (
             SEARCH,

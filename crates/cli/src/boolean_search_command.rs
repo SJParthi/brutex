@@ -410,18 +410,21 @@ fn execute_observed(
                     )?);
                 }
             }
-            // Before a new completion, reconcile previously finished children again.
-            let prior = Reader::open(request.input.output, identity, observe, records)?;
-            for batch in 0..prior.completed_batches() {
-                prior.verify_batch(batch as u64)?;
-            }
+            // ONLY THE NEW COMPLETION IS VERIFIED HERE (CE-66, D-2668). Every
+            // earlier batch was verified at resume or when it completed, and
+            // the invocation's closing pass below reverifies all of them before
+            // any outcome is reported. Re-verifying every earlier batch before
+            // AND after each completion made an invocation's work grow with
+            // the square of its batch count.
             training.require_current()?;
             later.require_current()?;
             journal.publish(&record.encode()?, bytes)?;
             let saved = Reader::open(request.input.output, identity, observe, records)?;
-            for batch in 0..saved.completed_batches() {
-                saved.verify_batch(batch as u64)?;
-            }
+            let newest = saved
+                .completed_batches()
+                .checked_sub(1)
+                .ok_or("search completion missing after publish")?;
+            saved.verify_batch(newest as u64)?;
             training.require_current()?;
             later.require_current()?;
             Ok::<(), String>(())
@@ -439,6 +442,12 @@ fn execute_observed(
         latest = Some(record);
     }
     let saved = Reader::open(request.input.output, identity, observe, records)?;
+    // THE CLOSING PASS: every completed batch, once, before the outcome is
+    // reported, so a child changed while this invocation ran is refused here
+    // rather than at the next completion (CE-66, D-2668).
+    for batch in 0..saved.completed_batches() {
+        saved.verify_batch(batch as u64)?;
+    }
     training.require_current()?;
     later.require_current()?;
     // Outcome is read from the acknowledged journal, never inferred from return prose.
