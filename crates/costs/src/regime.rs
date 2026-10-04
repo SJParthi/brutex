@@ -178,9 +178,19 @@ impl RegimeTable {
                 selected = row;
                 // A later row has displaced the one whose successor this was.
                 verified_from = None;
-            } else if verified_from.is_none() {
-                // Rows ascend, so the first row that has not started yet is
-                // the successor of whichever row is in force.
+            } else if verified_from.is_none() && matches!(row.rate, Rate::Verified(_)) {
+                // Rows ascend, so this is the first row that has not started
+                // yet AND carries a rate.
+                //
+                // The `Verified` half is the fix `dated.rs` already carries
+                // (`DatedTable::value_on`). `Refusal::verified_from` is "the
+                // first day a verified rate exists again", and this loop used
+                // to name the next row's start whatever that row held. The two
+                // agree for every shipped table and differ the moment two
+                // unverified rows abut — a shape `is_shipping_shape` permits —
+                // where the old answer pointed at a day that refuses again.
+                // p6num-2, D-2711;
+                // `the_day_a_regime_refusal_names_is_a_day_that_answers`.
                 verified_from = Some(row.start);
             }
         }
@@ -208,15 +218,21 @@ impl RegimeTable {
     /// verified rate. Derived rather than written down a second time, so no
     /// report, log line or footer can hold a boundary date that has drifted
     /// from the table it claims to describe.
+    ///
+    /// A window's `verified_from` is the start of the first LATER row that
+    /// carries a verified rate, not merely the next row: two abutting
+    /// unverified rows are one refusal span as far as a caller asking "when
+    /// can I price again" is concerned, and [`Self::rate_on`] answers the same
+    /// day. p6num-2, D-2711.
     fn refusal_windows(&self) -> [Option<RefusalWindow>; MAX_REGIME_ROWS] {
         let mut windows = [None; MAX_REGIME_ROWS];
-        let successors = self
-            .rows()
-            .skip(1)
-            .map(|row| Some(row.start))
-            .chain(std::iter::once(None));
-        for (slot, (row, verified_from)) in windows.iter_mut().zip(self.rows().zip(successors)) {
+        for (index, (slot, row)) in windows.iter_mut().zip(self.rows()).enumerate() {
             if row.rate == Rate::Unverified {
+                let verified_from = self
+                    .rows()
+                    .skip(index + 1)
+                    .find(|later| matches!(later.rate, Rate::Verified(_)))
+                    .map(|later| later.start);
                 *slot = Some(RefusalWindow {
                     start: row.start,
                     verified_from,
@@ -472,9 +488,14 @@ const _: () = assert!(BSE_EXCHANGE_CHARGE.get() == 3_250);
 
 /// The STT rate on options sell-side premium in force on `day`.
 ///
-/// The regime is selected by the trade's **entry** date, per the source's
-/// `DEC-COST-002`. A boundary date is inclusive: 2024-10-01 is the first day
-/// of the 0.10% regime, not the last day of the 0.0625% one.
+/// The rate in force on `day`, and nothing else selects it: this function
+/// knows no trade and no leg. [`crate::trip::price`] passes the **sell**
+/// leg's own day, because the tax is levied on the sell (D-1535, K-44); a
+/// caller that keys it to the entry day instead reproduces the under-charge
+/// hunt-costs-1 found on a trip that straddles a boundary. This said "the
+/// regime is selected by the trade's entry date" after D-1535 removed that
+/// rule (p6num-1, D-2710). A boundary date is inclusive: 2024-10-01 is the
+/// first day of the 0.10% regime, not the last day of the 0.0625% one.
 ///
 /// # Errors
 ///
@@ -874,6 +895,87 @@ mod tests {
                     verified_from: None
                 }),
                 None
+            ]
+        );
+    }
+
+    #[test]
+    fn the_stt_lookup_doc_names_the_sell_legs_day_not_the_entry_day() {
+        // p6num-1, D-2710: the public doc of `stt_options_rate` told a caller
+        // the regime was keyed to the trade's entry date, the rule D-1535
+        // removed because it under-charged a trip straddling a boundary. Read
+        // the doc block itself, so a revert of the prose fails here.
+        let source = include_str!("regime.rs");
+        let head = source
+            .split("pub fn stt_options_rate(")
+            .next()
+            .expect("the function exists");
+        let doc: Vec<&str> = head
+            .lines()
+            .rev()
+            .take_while(|line| line.starts_with("///"))
+            .collect();
+        let doc = doc.join("\n");
+        assert!(doc.len() > 200, "the doc block was found: {doc}");
+        assert!(
+            !doc.contains(concat!("by the trade's **", "entry** date")),
+            "the doc still keys STT to the entry day: {doc}"
+        );
+        assert!(
+            doc.contains("**sell**"),
+            "the doc names the sell leg: {doc}"
+        );
+        assert!(doc.contains("D-1535"), "the doc cites D-1535: {doc}");
+    }
+
+    #[test]
+    fn the_day_a_regime_refusal_names_is_a_day_that_answers() {
+        // Two unverified rows in a row — permitted by `is_shipping_shape` and
+        // the shape the next likely edit (the FA73061 re-split, a pre-2023 STT
+        // row) would produce. Port of `dated.rs`'s test of the same name.
+        let table = RegimeTable {
+            charge: "test charge",
+            exchange: Some(Exchange::Nse),
+            anchor: RegimeRow::unverified(TradeDay::MIN, "the first gap"),
+            later: [
+                Some(RegimeRow::unverified(OCT_2024, "a later gap")),
+                Some(RegimeRow::verified(APR_2026, 30, "cited")),
+            ],
+        };
+        assert!(table.is_shipping_shape());
+        for (asked, window_start, source) in [
+            (TradeDay::MIN, TradeDay::MIN, "the first gap"),
+            (day(2024, 9, 30), TradeDay::MIN, "the first gap"),
+            (OCT_2024, OCT_2024, "a later gap"),
+            (day(2026, 3, 31), OCT_2024, "a later gap"),
+        ] {
+            let refusal = table.rate_on(asked).expect_err("both rows refuse");
+            // The next row's start would answer OCT_2024 for the first two
+            // days here, and OCT_2024 refuses.
+            assert_eq!(refusal.verified_from(), Some(APR_2026), "asked {asked}");
+            assert_eq!(refusal.window_start(), window_start, "asked {asked}");
+            assert_eq!(refusal.source(), source, "asked {asked}");
+        }
+        // The property a caller reads the field for, over the whole domain.
+        for today in every_representable_day() {
+            if let Err(refusal) = table.rate_on(today) {
+                let resumes = refusal.verified_from().expect("a verified row follows");
+                assert_eq!(rate_of(table.rate_on(resumes)), 30, "asked {today}");
+            }
+        }
+        // The derived windows say the same day.
+        assert_eq!(
+            table.refusal_windows(),
+            [
+                Some(RefusalWindow {
+                    start: TradeDay::MIN,
+                    verified_from: Some(APR_2026),
+                }),
+                Some(RefusalWindow {
+                    start: OCT_2024,
+                    verified_from: Some(APR_2026),
+                }),
+                None,
             ]
         );
     }

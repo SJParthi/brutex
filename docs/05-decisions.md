@@ -57605,3 +57605,44 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2710 — `stt_options_rate` documents the day it is given, not the entry day — 2026-10-04
+
+**What was observed.** p6num-1 (numeric pass 6): the public doc of
+`costs::regime::stt_options_rate` said "the regime is selected by the trade's
+**entry** date, per the source's `DEC-COST-002`". D-1535 (K-44) replaced that
+rule: `trip::price` resolves each leg at its own day and charges STT at the
+sell leg's day. A caller following the doc would reproduce hunt-costs-1's
+under-charge on a trip that straddles a boundary. K-43 also still said a trip
+refuses when its "entry day" lands in an unverified window, while
+`trip::price` resolves both legs and refuses on either.
+
+**The decision.** The doc now says the function returns the rate in force on
+the `day` it is passed and that `trip::price` passes the sell leg's own day
+(D-1535). K-43 now says "either of whose legs' days". No code path changes.
+With the shipped tables an exit day in an unverified window implies an entry
+day in one too, so K-43's existing tests still prove the row.
+
+**Proof.** `costs::regime::tests::the_stt_lookup_doc_names_the_sell_legs_day_not_the_entry_day`
+reads the doc block and fails on the old sentence. FB-11.
+
+### D-2711 — A regime refusal names the first day a verified rate exists, not the next row — 2026-10-04
+
+**What was observed.** p6num-2 (numeric pass 6): `RegimeTable::rate_on` set
+`Refusal::verified_from` to the next row's start whatever that row held, and
+`refusal_windows` did the same for `RefusalWindow::verified_from`. Both fields
+are documented as "the first day a verified rate exists again". `DatedTable::value_on`
+was already corrected for this. `is_shipping_shape` permits two abutting
+unverified rows, and in that shape the refusal pointed at a day that refuses
+again. No shipped table has that shape today, so no wrong output existed.
+
+**The decision.** `rate_on` takes the first later row that is
+`Rate::Verified`, the `dated.rs` condition. `refusal_windows` gives each
+unverified row the start of the first later verified row. Two abutting
+unverified rows therefore report overlapping windows with one shared end; each
+keeps its own start and citation. Lookup cost is unchanged: at most
+`MAX_REGIME_ROWS` rows, a compile-time constant.
+
+**Proof.** `costs::regime::tests::the_day_a_regime_refusal_names_is_a_day_that_answers`
+checks every representable day: a refusal's `verified_from` is a day that
+prices. It fails if either half of the fix is reverted. FB-12.
