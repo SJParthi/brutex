@@ -1861,7 +1861,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // expectation cannot go stale against it. It already knows the one case
     // where zero is correct: an option contract folds into no rung.
     let derived_expected =
-        derived_count_in(plan.contract, timeframe).saturating_mul(months_written);
+        derived_count_for(plan.vendor, plan.contract, timeframe).saturating_mul(months_written);
     Ok(Landed {
         failures,
         bars: landed.bars.len(),
@@ -2216,6 +2216,12 @@ fn derive_all(
     // legs are `Segment::Fno` and the segment therefore cannot tell them apart
     // — the same reason `api::ladder::Leg` exists. The suffix is the test:
     // `-FUT` for a future, a strike and a side for an option.
+    // GDFL IS ONE SECOND AND NOTHING COARSER (operator, 4 Oct 2026, D-2807).
+    // Minutes and every higher rung come from the Zerodha one-minute pulls,
+    // so no rung is ever folded from a `gdfl` bar. See `derives_for`.
+    if !derives_for(into.vendor) {
+        return failures;
+    }
     if into.contract.is_some_and(|c| c.is_option()) {
         return failures;
     }
@@ -2447,6 +2453,32 @@ pub fn derived_count_in(
         0
     } else {
         derived_count(source)
+    }
+}
+
+/// Whether any coarser rung is ever derived from a bar of `vendor`.
+///
+/// False for `gdfl` ALONE, by the operator's rule of 4 Oct 2026 (D-2807): GDFL
+/// supplies the one-second rung only, and minutes and every higher timeframe
+/// come from the Zerodha one-minute pulls, derived by the app from those. A
+/// named rule, not a missing arm: a GDFL bar filed through any ingest door
+/// is filed at its own rung and folded into nothing.
+#[must_use]
+pub const fn derives_for(vendor: Vendor) -> bool {
+    !matches!(vendor, Vendor::Gdfl)
+}
+
+/// [`derived_count_in`] for a bar of `vendor`: zero for `gdfl` ([`derives_for`]).
+#[must_use]
+pub fn derived_count_for(
+    vendor: Vendor,
+    contract: Option<brutex_core::instrument::Contract>,
+    source: Timeframe,
+) -> usize {
+    if derives_for(vendor) {
+        derived_count_in(contract, source)
+    } else {
+        0
     }
 }
 

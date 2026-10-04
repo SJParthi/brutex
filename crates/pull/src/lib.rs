@@ -150,6 +150,13 @@ pub mod gdfl_archive;
 /// a `CmSource` and checked before the one-second fold sees them. D-0808,
 /// D-2800.
 pub mod gdfl_cm;
+/// The common GDFL import runtime: indices, stocks and option contracts
+/// folded to one-second and one-minute bars through the one ingest door,
+/// incremental by day. D-2802.
+pub mod gdfl_import;
+/// GDFL NSE options tick files and the contract each ticker names, read from
+/// the yearly zips or the tick store. D-2806.
+pub mod gdfl_nfo;
 /// The verified tick store (`BRTXTS01` day files), the second `CmSource`.
 /// D-2801.
 pub mod gdfl_tickstore;
@@ -222,6 +229,10 @@ pub mod work;
 /// back. See its own header for what it drives and for the one site it cannot.
 #[cfg(test)]
 mod emit_sites;
+
+/// Test-only builders of invented GDFL zips, tick-store day files and rows.
+#[cfg(test)]
+mod gdfl_fixtures;
 
 /// Test-only: re-runs a test where the permission bits bind, even as root. The
 /// same file serves this crate's integration tests. D-0995.

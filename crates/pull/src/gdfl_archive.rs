@@ -296,7 +296,7 @@ fn central_directory<B: ReadAt>(span: &Span<'_, B>) -> Result<Vec<Entry>, CmRefu
 }
 
 /// The three-letter month the vendor's folders use: `APR_2024`.
-const MONTHS: [&str; 12] = [
+pub(crate) const MONTHS: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 
@@ -552,45 +552,146 @@ impl<B: ReadAt> CmSource for Archive<B> {
         _listing: &DayListing<ZipLocator>,
         file: &ListedFile<ZipLocator>,
     ) -> Result<Vec<u8>, CmRefusal> {
-        let at = file.locator;
-        let span = Span {
-            src: &self.source,
-            base: at.base,
-            len: at.span,
-        };
-        let local = span.read(at.header, 30)?;
-        if !signed(&local, 0, LOCAL_SIGNATURE) {
-            return Err(CmRefusal::ArchiveMalformed {
-                what: NO_MEMBER_SIGNATURE,
-            });
-        }
-        let data = at.header + 30 + le(&local, 26, 2, CUT_SHORT)? + le(&local, 28, 2, CUT_SHORT)?;
-        if span.holds(data, at.packed).is_err() {
-            return Err(CmRefusal::ArchiveMalformed {
-                what: MEMBER_PAST_DAY_ZIP,
-            });
-        }
-        let packed = span.read(data, at.packed)?;
-        let limit = file.len.saturating_add(1);
-        match at.method {
-            0 => Ok(packed.into_iter().take(index(limit)).collect()),
-            8 => {
-                let mut out = Vec::new();
-                std::io::Read::read_to_end(
-                    &mut std::io::Read::take(flate2::read::DeflateDecoder::new(&*packed), limit),
-                    &mut out,
-                )
-                .map_err(|_| CmRefusal::ArchiveMemberCorrupt {
-                    member: file.entry.to_string(),
-                })?;
-                Ok(out)
-            }
-            _ => Err(CmRefusal::ArchiveMethodUnknown {
-                member: file.entry.to_string(),
-                method: at.method,
-            }),
-        }
+        member_bytes(&self.source, file.locator, &file.entry, file.len)
     }
+}
+
+/// A member's bytes, read through `at` from `source`: stored ones as they
+/// are, deflated ones inflated, at most one byte past `len`, the length the
+/// central directory states, so a member that inflates longer is refused by
+/// [`crate::gdfl_cm::verify`] without being inflated whole. The one member
+/// read every zip source shares: the capital-market day zips here and the
+/// options day zips of [`crate::gdfl_nfo`] (D-2806).
+///
+/// # Errors
+///
+/// [`CmRefusal::ArchiveMalformed`] when the member's local header is not
+/// where its record says or its data runs past its zip,
+/// [`CmRefusal::ArchiveMethodUnknown`] for a method other than stored or
+/// deflated, [`CmRefusal::ArchiveMemberCorrupt`] for a deflate stream that
+/// does not inflate, and [`CmRefusal::ArchiveUnavailable`] on a failed read.
+pub fn member_bytes<B: ReadAt>(
+    source: &B,
+    at: ZipLocator,
+    entry: &str,
+    len: u64,
+) -> Result<Vec<u8>, CmRefusal> {
+    let span = Span {
+        src: source,
+        base: at.base,
+        len: at.span,
+    };
+    let local = span.read(at.header, 30)?;
+    if !signed(&local, 0, LOCAL_SIGNATURE) {
+        return Err(CmRefusal::ArchiveMalformed {
+            what: NO_MEMBER_SIGNATURE,
+        });
+    }
+    let data = at.header + 30 + le(&local, 26, 2, CUT_SHORT)? + le(&local, 28, 2, CUT_SHORT)?;
+    if span.holds(data, at.packed).is_err() {
+        return Err(CmRefusal::ArchiveMalformed {
+            what: MEMBER_PAST_DAY_ZIP,
+        });
+    }
+    let packed = span.read(data, at.packed)?;
+    let limit = len.saturating_add(1);
+    match at.method {
+        0 => Ok(packed.into_iter().take(index(limit)).collect()),
+        8 => {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(flate2::read::DeflateDecoder::new(&*packed), limit),
+                &mut out,
+            )
+            .map_err(|_| CmRefusal::ArchiveMemberCorrupt {
+                member: entry.to_owned(),
+            })?;
+            Ok(out)
+        }
+        _ => Err(CmRefusal::ArchiveMethodUnknown {
+            member: entry.to_owned(),
+            method: at.method,
+        }),
+    }
+}
+
+/// One central-directory record of a zip, its ZIP64 values applied, for a
+/// reader whose zips are not the capital-market day table (D-2806).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipEntry {
+    /// The entry's name, byte for byte as the record states it (lossy UTF-8).
+    pub name: String,
+    /// The entry's uncompressed length.
+    pub len: u64,
+    /// The entry's CRC-32.
+    pub crc32: u32,
+    /// Where [`member_bytes`] reads it.
+    pub locator: ZipLocator,
+}
+
+/// Every central record of the zip that occupies `len` bytes at `base` of
+/// `source`, in its order: O(entries), the same walk the capital-market day
+/// table is built from, with every refusal it names.
+///
+/// # Errors
+///
+/// [`CmRefusal::ArchiveMalformed`] when the bytes are not a zip, and
+/// [`CmRefusal::ArchiveUnavailable`] on a failed read.
+pub fn zip_entries<B: ReadAt>(source: &B, base: u64, len: u64) -> Result<Vec<ZipEntry>, CmRefusal> {
+    let span = Span {
+        src: source,
+        base,
+        len,
+    };
+    Ok(central_directory(&span)?
+        .into_iter()
+        .map(|entry| ZipEntry {
+            name: String::from_utf8_lossy(&entry.name).into_owned(),
+            len: entry.len,
+            crc32: entry.crc32,
+            locator: ZipLocator {
+                base,
+                span: len,
+                header: entry.offset,
+                method: u16::try_from(entry.method).unwrap_or(u16::MAX),
+                packed: entry.packed,
+            },
+        })
+        .collect())
+}
+
+/// Where a STORED member's bytes lie in `source`, as `(offset, length)`: its
+/// local header read and checked, so a zip filed inside another zip can be
+/// listed with [`zip_entries`] in place (D-2806). A compressed member has no
+/// such span and is refused by name.
+///
+/// # Errors
+///
+/// [`CmRefusal::ArchiveMemberCompressed`] for a member that is not stored,
+/// [`CmRefusal::ArchiveMalformed`] when its local header is not where its
+/// record says or its data runs past its zip, and
+/// [`CmRefusal::ArchiveUnavailable`] on a failed read.
+pub fn stored_span<B: ReadAt>(source: &B, entry: &ZipEntry) -> Result<(u64, u64), CmRefusal> {
+    let at = entry.locator;
+    if at.method != 0 {
+        return Err(CmRefusal::ArchiveMemberCompressed {
+            member: entry.name.clone(),
+        });
+    }
+    let span = Span {
+        src: source,
+        base: at.base,
+        len: at.span,
+    };
+    let local = span.read(at.header, 30)?;
+    if !signed(&local, 0, LOCAL_SIGNATURE) {
+        return Err(CmRefusal::ArchiveMalformed {
+            what: NO_LOCAL_SIGNATURE,
+        });
+    }
+    let data = at.header + 30 + le(&local, 26, 2, CUT_SHORT)? + le(&local, 28, 2, CUT_SHORT)?;
+    span.holds(data, at.packed)?;
+    Ok((at.base.saturating_add(data), at.packed))
 }
 
 #[cfg(test)]
