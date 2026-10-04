@@ -90,3 +90,4 @@ Artifacts.
 - Run 1271's shards: none finished in 70 min (timeout 240, max-parallel 20, 127 shards): Gate 18 takes many hours. Push only before shards start.
 - Policy agreed: lane1-b and sweep send batches to this thread, no direct pushes. zero-work: zero-findings thread will merge onto head and hand one validated commit (coordinator).
 - Watch CI via public API through proxy: curl https://api.github.com/repos/SJParthi/brutex/actions/runs?branch=final/all-fixes (15000/hr).
+- 19:20 UTC: head is 8f58d91 (8b1e5bd + Fix Board web18 605c529). CI run 37226157475 on it; Gate W green. New Gate 6d passed locally. Local runner mutants 22/78, 0 missed so far; api next. Paused for usage at 93%; resume 22:03.
