@@ -56677,3 +56677,28 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-1860 — The column docs state the exact-close alignment rule — 2026-10-04
+
+**What was wrong (h-eng-1).** Three doc blocks in `indicators::column` (the
+`Sourced` type doc, the duplicate guard and the fill-bar note in `reproject`,
+and the doc of `two_signals_resolving_to_one_fill_bar_produce_one_row`) still
+said `align::onto_execution` returns "the first execution bar stamped at or
+after" a signal's close. They said an execution hole therefore maps two
+signals to one bar, cited an `align` test asserting `[Some(10), Some(10)]`, and
+gave a measured 1.32% hole rate as the reason collisions happen. D-0401
+replaced that rule: a signal maps only to the bar stamped exactly at its close
+instant on the same IST day, and is `None` otherwise. No such `align` test
+exists.
+
+**The change.** The four comments now state the exact-close rule: a hole drops
+a signal, and a collision through `align` needs duplicate or overlapping
+signal stamps. The `collided` guard stays, as defence for any direct caller of
+the public `reproject` door. No code path, output or version changes.
+
+**What it proves.** `runner::align::tests::an_execution_hole_drops_a_signal_and_never_collides_two`
+shows a one-bar hole under 2-minute signals gives one `None` and strictly
+increasing fill bars, and that only a repeated signal stamp shares a bar.
+`vocab`'s `stale_claims` test `the_column_docs_state_the_exact_close_alignment_rule`
+fails if the retired sentences return or if `align` stops comparing for
+equality (AHB-01).
