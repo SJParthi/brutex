@@ -86,7 +86,7 @@ fn run(
         commit,
         feed: loaded.vendor.as_str(),
     };
-    let identity = runner::expression::identity(&run, &expression);
+    let identity = runner::expression::identity(&run, expression);
     // Both lifecycle and descriptor sync before the indicator fold or expression
     // evaluation. A failure here prevents the computation, not just its report.
     let attempt = crate::sweep_evidence::begin(
@@ -97,7 +97,7 @@ fn run(
     let directory =
         attempt_directory(&root, identity, attempt.token()).map_err(|e| e.to_string())?;
     let mut writer =
-        EvidenceWriter::begin(&directory, identity, &expression).map_err(|e| e.to_string())?;
+        EvidenceWriter::begin(&directory, identity, expression).map_err(|e| e.to_string())?;
     let column = crate::stored_anchored_column(
         &loaded.bars,
         &daily,
@@ -105,7 +105,7 @@ fn run(
         crate::stored::rung_length_micros(rung)?,
         crate::stored::vwap_availability(&loaded.key),
     )?;
-    let summary = runner::expression::evaluate(&column, &expression, |index, verdict| {
+    let summary = runner::expression::evaluate(&column, expression, |index, verdict| {
         let bar = loaded.bars.get(index).ok_or_else(|| {
             std::io::Error::other("expression source is outside its historical slice")
         })?;

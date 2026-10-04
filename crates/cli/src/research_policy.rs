@@ -215,7 +215,7 @@ pub(crate) fn command(path: &str, points: &str, out: &mut String) -> u8 {
     }
 }
 
-/// MAX_POINTS, and the paisa risk it states.
+/// `MAX_POINTS`, and the paisa risk it states.
 fn risk_of(points: &str) -> Result<(u64, u64), String> {
     let max_points = points
         .parse::<u64>()

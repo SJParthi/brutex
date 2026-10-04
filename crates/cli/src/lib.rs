@@ -21537,185 +21537,59 @@ mod tests {
     #[test]
     fn a_malformed_argument_exits_misused_and_a_refused_job_exits_failed() {
         let scratch = std::env::temp_dir().join(format!("brutex-p8-03-{}", std::process::id()));
-        let output = scratch.join("out");
+        let output = scratch.join("out").to_string_lossy().into_owned();
         let catalog = scratch.join("absent-catalog.txt");
-        let (output, catalog) = (
-            output.to_string_lossy().into_owned(),
-            catalog.to_string_lossy().into_owned(),
-        );
-        let misused: &[&[&str]] = &[
-            &[
-                "sweep-stored",
-                "nosuchfeed",
-                "NIFTY",
-                "1min",
-                "2026",
-                "1",
-                "10",
-            ],
-            &[
-                "audit-stored",
-                "zerodha",
-                "NOSUCH",
-                "1min",
-                "2026",
-                "1",
-                "10",
-            ],
-            &[
-                "sweep-stored",
-                "zerodha",
-                "NIFTY",
-                "1day",
-                "2026",
-                "1",
-                "10",
-            ],
-            &[
-                "audit-range",
-                "zerodha",
-                "NIFTY",
-                "60min",
-                "2026",
-                "8",
-                "2019",
-                "12",
-                "10",
-            ],
-            &[
-                "checksum-audit-stored",
-                "zerodha",
-                "NIFTY",
-                "1min",
-                "x",
-                "1",
-                "/r",
-                "10",
-            ],
-            &[
-                "sweep-audited-stored",
-                "zerodha",
-                "NIFTY",
-                "1min",
-                "2026",
-                "13",
-                "10",
-                "/r",
-                "1",
-                "1",
-            ],
-            &[
-                "expression-stored",
-                "nosuchfeed",
-                "NIFTY",
-                "1min",
-                "2026",
-                "1",
-                "0",
-            ],
-            &["research-plan", "nosuchfeed"],
-            &[
-                "boolean-catalog-stored",
-                "nosuchfeed",
-                "NIFTY",
-                "60min",
-                "2025",
-                "1",
-                "2025",
-                "2",
-                &catalog,
-                "60",
-                "100",
-                &output,
-            ],
+        let catalog = catalog.to_string_lossy().into_owned();
+        // One command per line; OUT and CATALOG stand for the two scratch
+        // paths, substituted after the split so a path is one word.
+        let words = |line: &str| -> Vec<String> {
+            line.split_whitespace()
+                .map(|word| match word {
+                    "OUT" => output.clone(),
+                    "CATALOG" => catalog.clone(),
+                    word => word.to_owned(),
+                })
+                .collect()
+        };
+        let misused = [
+            "sweep-stored nosuchfeed NIFTY 1min 2026 1 10",
+            "audit-stored zerodha NOSUCH 1min 2026 1 10",
+            "sweep-stored zerodha NIFTY 1day 2026 1 10",
+            "audit-range zerodha NIFTY 60min 2026 8 2019 12 10",
+            "checksum-audit-stored zerodha NIFTY 1min x 1 /r 10",
+            "sweep-audited-stored zerodha NIFTY 1min 2026 13 10 /r 1 1",
+            "expression-stored nosuchfeed NIFTY 1min 2026 1 0",
+            "research-plan nosuchfeed",
+            "boolean-catalog-stored nosuchfeed NIFTY 60min 2025 1 2025 2 CATALOG 60 100 OUT",
         ];
-        for words in misused {
+        for line in misused {
             let mut out = String::new();
-            let code = super::dispatch(&argv(words), &mut out);
-            assert_eq!(code, MISUSED, "{words:?}:\n{out}");
+            let code = super::dispatch(&words(line), &mut out);
+            assert_eq!(code, MISUSED, "{line}:\n{out}");
             assert!(
                 out.contains(USAGE),
-                "a malformed argument gets the usage: {words:?}"
+                "a malformed argument gets the usage: {line}"
             );
         }
-        let failed: &[&[&str]] = &[
-            &[
-                "sweep-stored",
-                "zerodha",
-                "NIFTY",
-                "1min",
-                "1999",
-                "1",
-                "10",
-            ],
-            &[
-                "audit-range",
-                "zerodha",
-                "NIFTY",
-                "60min",
-                "1999",
-                "1",
-                "1999",
-                "2",
-                "10",
-            ],
-            &[
-                "checksum-audit-stored",
-                "zerodha",
-                "NIFTY",
-                "1min",
-                "1999",
-                "1",
-                &output,
-                "10",
-            ],
-            &[
-                "expression-stored",
-                "zerodha",
-                "NIFTY",
-                "1min",
-                "1999",
-                "1",
-                "0",
-            ],
-            &[
-                "expression-search-stored",
-                "zerodha",
-                "NIFTY",
-                "1min",
-                "1999",
-                "1",
-                "all",
-                "1",
-                "1",
-                "1",
-            ],
-            &[
-                "boolean-catalog-stored",
-                "zerodha",
-                "NIFTY",
-                "60min",
-                "1999",
-                "1",
-                "1999",
-                "2",
-                &catalog,
-                "60",
-                "100",
-                &output,
-            ],
+        let failed = [
+            "sweep-stored zerodha NIFTY 1min 1999 1 10",
+            "audit-range zerodha NIFTY 60min 1999 1 1999 2 10",
+            "checksum-audit-stored zerodha NIFTY 1min 1999 1 OUT 10",
+            "expression-stored zerodha NIFTY 1min 1999 1 0",
+            "expression-search-stored zerodha NIFTY 1min 1999 1 all 1 1 1",
+            "boolean-catalog-stored zerodha NIFTY 60min 1999 1 1999 2 CATALOG 60 100 OUT",
         ];
-        for words in failed {
+        for line in failed {
             let mut out = String::new();
-            let code = super::dispatch(&argv(words), &mut out);
-            assert_eq!(code, FAILED, "{words:?}:\n{out}");
+            let code = super::dispatch(&words(line), &mut out);
+            assert_eq!(code, FAILED, "{line}:\n{out}");
             assert!(
                 !out.contains(USAGE),
-                "a refused job is not a usage error: {words:?}\n{out}"
+                "a refused job is not a usage error: {line}\n{out}"
             );
             assert!(
                 out.contains("REFUSED") || carries_refusal(&out),
-                "{words:?}:\n{out}"
+                "{line}:\n{out}"
             );
         }
         let _ = std::fs::remove_dir_all(&scratch);
