@@ -41,10 +41,8 @@ fn span_of(bar: &Candle) -> i64 {
 
 fn evaluator(tolerance: Tolerance, calendar: Calendar) -> Evaluator {
     Evaluator::with_calendar(
-        Widths {
-            fib: tolerance,
-            pivot: vocab::tolerance::pinned_pivot().expect("pivot"),
-        },
+        Widths::new(tolerance, vocab::tolerance::pinned_pivot().expect("pivot"))
+            .expect("a Fibonacci width on the session range"),
         Availability::Absent,
         Thresholds::CLASSICAL,
         calendar,
@@ -303,14 +301,8 @@ fn absent_ambiguous_and_unrepresentable_gap_references_never_satisfy_not() {
     );
     assert!(counts.iter().any(|[_, _, unknown]| *unknown == huge.len()));
     assert!(counts.iter().any(|[f, t, _]| f + t > 0));
-    for wrong in [
-        Tolerance::from_milli(10).expect("baseless"),
-        vocab::tolerance::pinned_pivot().expect("wrong base"),
-    ] {
-        for [f, t, u] in verify(&huge, wrong, Calendar::all_regular()) {
-            assert_eq!((f, t, u), (0, 0, huge.len()));
-        }
-    }
+    // A baseless or wrong-base width cannot reach an evaluator at all (D-1553).
+    refused_widths();
     for milli in [0, i64::MAX] {
         verify(
             &huge,
@@ -384,7 +376,7 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
         }
         minutes.extend(today);
     }
-    let mut column = Column::build(&signal, &mut evaluator(widths.fib, calendar));
+    let mut column = Column::build(&signal, &mut evaluator(widths.fib(), calendar));
     assert!(!column.is_empty(), "fixture must warm the actual column");
     let before = column.clone();
     overlay_five_minute(&signal, &minutes, widths, calendar, &mut column)
@@ -405,7 +397,7 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
         let answers = expected(
             minutes.get(..minute_index).expect("prior exact context"),
             exact,
-            widths.fib,
+            widths.fib(),
             calendar,
         );
         known_false += answers
@@ -442,4 +434,33 @@ fn exact_minute_overlay_preserves_known_false_and_is_transactional_on_missing_ev
         column, intact,
         "no partial truth or availability overlay on failure"
     );
+}
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
+    }
 }

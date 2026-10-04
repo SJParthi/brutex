@@ -792,6 +792,9 @@ pub(crate) fn with_shared_writer<T>(
 ) -> Result<T, Refusal> {
     type CachedWriter = Option<(PathBuf, Results)>;
     static WRITER: std::sync::OnceLock<std::sync::Mutex<CachedWriter>> = std::sync::OnceLock::new();
+    // Taken before the writer lock, so a lane never waits holding what a lower
+    // lane needs. D-1556.
+    let _turn = crate::ordered::turn();
     let mut held = WRITER
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()

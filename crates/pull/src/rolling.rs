@@ -748,7 +748,8 @@ fn stamp(cell: Option<&serde_json::Value>, field: &'static str) -> Result<i64, R
         whole
     } else {
         let number = cell.as_number().ok_or_else(refuse)?;
-        let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
+        let hundredths = crate::csv::paisa(&crate::http::number_text(number).ok_or_else(refuse)?)
+            .ok_or_else(refuse)?;
         if hundredths % 100 != 0 {
             return Err(refuse());
         }
@@ -779,7 +780,8 @@ fn count(cell: &serde_json::Value, field: &'static str) -> Result<i64, RollingEr
         whole
     } else {
         let number = cell.as_number().ok_or_else(refuse)?;
-        let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
+        let hundredths = crate::csv::paisa(&crate::http::number_text(number).ok_or_else(refuse)?)
+            .ok_or_else(refuse)?;
         if hundredths % 100 != 0 {
             return Err(refuse());
         }
@@ -827,8 +829,13 @@ fn paisa(
         // as text has an exact decimal the vendor wrote, and routing it through
         // an f64 to shift two places introduces a representation error into a
         // value that had none. The reader below walks the text digit by digit.
+        // The text is the vendor's own digits, recovered by
+        // `http::number_text` (D-1570), not an f64's re-rendering.
         PriceScale::Rupees => {
-            let text = cell.to_string();
+            let text = cell
+                .as_number()
+                .and_then(crate::http::number_text)
+                .ok_or(RollingError::Unrepresentable { field })?;
             let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
                 .map(brutex_core::price::Paisa::raw)
                 .map_err(|_| RollingError::Unrepresentable { field })?;
@@ -1028,6 +1035,31 @@ mod tests {
             let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
                 .unwrap_or_else(|why| panic!("{cell} is a real zero: {why}"));
             assert_eq!(rows.len(), 1, "{cell}");
+        }
+    }
+
+    /// audit-20261003 attackdata-4 (D-1570). The rolling decoder snaps the
+    /// vendor's own digits, not an f64's rendering of them: each text here is
+    /// one an `f64` rounds across a half-paisa boundary first.
+    #[test]
+    fn a_rolling_price_is_snapped_from_the_vendors_own_text() {
+        for (cell, want) in [
+            ("354.12499999999999999", 35_412_i64), // f64: 354.125 -> 35413
+            ("0.0149999999999999999", 1),          // f64: 0.015 -> 2
+            ("3.5412499999999999999e2", 35_412),   // f64: 354.125 -> 35413
+        ] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[{cell}],
+                "low":[{cell}],"close":[{cell}],"volume":[1]}},"pe":null}}}}"#
+            );
+            let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
+                .unwrap_or_else(|why| panic!("{cell}: {why}"));
+            let bar = rows.first().expect("one row").bar;
+            assert_eq!(
+                (bar.open, bar.high, bar.low, bar.close),
+                (want, want, want, want),
+                "{cell} is {want} paisa by its own text"
+            );
         }
     }
 

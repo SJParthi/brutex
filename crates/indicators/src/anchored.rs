@@ -764,10 +764,10 @@ impl ExactMinuteFamilies {
         widths: Widths,
         calendar: &Calendar,
     ) -> Result<(ConditionMask, ConditionMask), Corrupt> {
-        let (mut truth, mut known) = gap.step_known(bar, widths.fib, calendar)?;
+        let (mut truth, mut known) = gap.step_known(bar, widths.fib(), calendar)?;
         if matches!(self, Self::OrbAndGapFib) {
-            truth = truth.union(&orb.step(bar, widths.fib)?);
-            known = known.union(&orb.known(widths.fib));
+            truth = truth.union(&orb.step(bar, widths.fib())?);
+            known = known.union(&orb.known(widths.fib()));
         }
         Ok((truth, known))
     }

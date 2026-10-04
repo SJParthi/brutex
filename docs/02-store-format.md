@@ -1,4 +1,4 @@
-# 02 — Store format, version 2
+# 02 — Store format, versions 2 and 3
 
 Bytes on disk. This document is the authority; the code follows it.
 
@@ -8,6 +8,10 @@ place — `CLAUDE.md` §3 rule 8.
 
 **Version 1 is retired.** §10 says what it was and why it is refused rather
 than decoded. Its number is never reused.
+
+**Version 3 is the version written since D-1571.** It is version 2's geometry
+byte for byte; what it adds is that block checksums are mandatory (§2.1).
+Version 2 files stay readable at their own row and are never rewritten as 3.
 
 ---
 
@@ -61,8 +65,8 @@ differently on each (§3 rule 5).
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|
-| 0 | 8 | `magic` | `b"BRUTEXB2"` |
-| 8 | 2 | `format_version` | `2` |
+| 0 | 8 | `magic` | `b"BRUTEXB3"` (version 3) or `b"BRUTEXB2"` (version 2) |
+| 8 | 2 | `format_version` | `3`, or `2` for a file written before D-1571 |
 | 10 | 2 | `record_stride` | `56`. Read it; never assume it. |
 | 12 | 4 | `flags` | bit 0: block checksums present. Every other bit is zero; a set one is refused on read and on commit (D-1354) |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
@@ -84,6 +88,35 @@ a **new version**, never by reinterpreting version 2.
 The 64-byte slot size and the 16384-byte slot spacing are **family** constants:
 every version uses them, which is what lets a reader locate the slots before it
 knows which version the file is.
+
+### 2.1 Version 3 — block checksums are mandatory (D-1571)
+
+At version 2, bit 0 of `flags` decides whether a month is verified. Clearing it
+in both slots and recomputing their CRCs turned verification off for a sealed
+month, and the `.crc` beside it was ignored (audit-20261003 attackdata-8);
+random rot cannot do it, because the slot CRC covers the flag, but a deliberate
+rewrite can.
+
+Version 3 closes that without touching version 2's bytes:
+
+- **Same geometry.** Header region, slot offsets, 56-byte stride, 73-record
+  blocks and the `.crc` sidecar are version 2's exactly. Only `magic`
+  (`BRUTEXB3`), `format_version` (`3`) and one rule differ.
+- **The rule.** A version-3 slot whose `flags` lacks bit 0 is refused on read
+  (`FormatError::ChecksumsRequired(3)`) and is never committed. A version-3
+  month is therefore always verified, and a sealed month whose `.crc` is
+  missing is refused as `ChecksumsMissing`, as at version 2.
+- **Written.** `store::layout::Layout::CURRENT` is version 3, so every month
+  created from D-1571 on is born at it.
+- **Version 2 stays readable.** A `.bin` resolves against both rows; a
+  version-2 month is opened, appended to and sealed at version 2 for its whole
+  life, flag optional as before. No file is upgraded in place (`CLAUDE.md`
+  §3 rule 8).
+- **What it does not close.** The CRC is integrity, not authentication. An
+  actor who rewrites `magic` and `format_version` back to version 2 in both
+  slots and recomputes their CRCs can still present an unsealed version-2
+  month; one who can do that can equally rewrite the `.crc`. Stated in
+  `docs/06-limits.md`.
 
 ---
 

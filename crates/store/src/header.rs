@@ -394,6 +394,11 @@ impl Header {
         if self.flags & !FLAG_CHECKSUMS != 0 {
             return Err(FormatError::UnknownFlags(self.flags));
         }
+        // A VERSION THAT REQUIRES CHECKSUMS IS NEVER COMMITTED WITHOUT THEM, so
+        // no slot this build writes can reach the read-side refusal. D-1571.
+        if layout.requires_checksums() && !self.checksums_present() {
+            return Err(FormatError::ChecksumsRequired(self.format_version));
+        }
         Ok(Commit {
             slot: self.generation % layout.slot_count(),
             offset: layout.slot_offset(self.generation),
@@ -507,6 +512,13 @@ impl Header {
         if flags & !FLAG_CHECKSUMS != 0 {
             return Err(FormatError::UnknownFlags(flags));
         }
+        // VERSION 3 IS SEALED BY DEFINITION. Clearing the flag in both slots
+        // and recomputing their CRCs used to turn block verification off for a
+        // sealed month, the `.crc` beside it ignored (audit-20261003
+        // attackdata-8). At version 3 that slot is refused by name. D-1571.
+        if layout.requires_checksums() && flags & FLAG_CHECKSUMS == 0 {
+            return Err(FormatError::ChecksumsRequired(format_version));
+        }
         Ok((
             Self {
                 format_version,
@@ -560,10 +572,10 @@ impl Header {
     /// # Examples
     ///
     /// ```
-    /// # use store::{format::FormatError, header::Header};
+    /// # use store::{format::{FLAG_CHECKSUMS, FormatError}, header::Header};
     /// // An empty file: a zeroed header region, then the genesis commit.
     /// let mut region = vec![0u8; 32_768];
-    /// let genesis = Header::genesis(1, 60, 0).commit()?;
+    /// let genesis = Header::genesis(1, 60, FLAG_CHECKSUMS).commit()?;
     /// assert_eq!(genesis.offset, 0);
     /// assert_eq!(genesis.durable_through, 32_768);
     /// region

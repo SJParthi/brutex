@@ -69,12 +69,28 @@ use crate::{Corrupt, CurDayFib};
 /// as thousandths of the **CPR width**. Those are different quantities and a single
 /// number cannot serve both — at the width correct for one, the other is off by a
 /// factor of fifty. Recorded as D-0079.
+///
+/// # A swapped pair cannot be built outside this module (errpaths-4, D-1553)
+///
+/// The fields are private. [`Widths::new`] checks each width's base and
+/// [`Widths::pinned`] is the shipped pair; there is no other door. Neither a
+/// struct literal nor a field write compiles from another crate:
+///
+/// ```compile_fail
+/// let pivot = vocab::tolerance::pinned_pivot().unwrap();
+/// let swapped = indicators::evaluator::Widths { fib: pivot, pivot };
+/// ```
+///
+/// ```compile_fail
+/// let mut widths = indicators::evaluator::Widths::pinned().unwrap();
+/// widths.fib = vocab::tolerance::pinned_pivot().unwrap();
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Widths {
     /// Band width for the Fibonacci ladders, in thousandths of the session range.
-    pub fib: Tolerance,
+    fib: Tolerance,
     /// Band width for the pivot and CPR families, in thousandths of the CPR width.
-    pub pivot: Tolerance,
+    pivot: Tolerance,
 }
 
 impl Widths {
@@ -104,9 +120,9 @@ impl Widths {
     /// `near_*` call then got `WrongBand` from `vocab::table::set_near`, the
     /// callers discard that error by design, and the run withheld every band
     /// position of the mismatched family while refusing nothing (errpaths-4,
-    /// D-1546). This is the checked door; the public fields remain for the
-    /// readiness suites that prove a mismatched width is withheld as unknown and
-    /// never answered false.
+    /// D-1546). This is the checked door, and since D-1553 the only public one: the
+    /// fields are private, so no caller outside this module can build a pair
+    /// this refuses.
     ///
     /// # Errors
     ///
@@ -129,6 +145,27 @@ impl Widths {
             }
         }
         Ok(Self { fib, pivot })
+    }
+
+    /// Band width for the Fibonacci ladders, in thousandths of the session range.
+    #[must_use]
+    pub const fn fib(&self) -> Tolerance {
+        self.fib
+    }
+
+    /// Band width for the pivot and CPR families, in thousandths of the CPR width.
+    #[must_use]
+    pub const fn pivot(&self) -> Tolerance {
+        self.pivot
+    }
+
+    /// A pair NOT checked against its bases, for this crate's own tests of
+    /// the degraded path only: a mismatched width must be withheld as
+    /// unknown and never answered false. Compiled only under `cfg(test)`, so
+    /// no build of this crate another crate links can call it (D-1553).
+    #[cfg(test)]
+    pub(crate) const fn unchecked(fib: Tolerance, pivot: Tolerance) -> Self {
+        Self { fib, pivot }
     }
 }
 
@@ -1546,6 +1583,61 @@ mod tests {
                 ),
                 "{fib_side:?} / {pivot_side:?}: {refused:?}"
             );
+        }
+    }
+
+    /// errpaths-4, D-1553: THE DEGRADED PATH, NOW REACHABLE ONLY FROM HERE.
+    ///
+    /// The fields are private, so the readiness suites can no longer hand an
+    /// evaluator a mismatched width; this proves what such a width would do if
+    /// one ever reached it. Over eight volume-bearing sessions every band row
+    /// of the mismatched family is never known and never true (withheld as
+    /// unknown, never answered false), while the pinned pair knows at least one
+    /// row of each family, so the check is not vacuous.
+    #[test]
+    fn a_mismatched_width_is_withheld_as_unknown_and_never_answered() {
+        let fib = vocab::tolerance::pinned_fib().expect("pinned fib");
+        let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot");
+        let baseless = Tolerance::from_milli(10).expect("a width with no base");
+        let rows_of = |base: Base| {
+            vocab::table::TABLE
+                .iter()
+                .filter(move |row| row.band == Some(base))
+                .map(|row| u32::from(row.index))
+        };
+        let fold = |widths: Widths| {
+            let mut evaluator =
+                Evaluator::new(widths, Availability::Present, Thresholds::CLASSICAL);
+            let (mut truth, mut known) = (ConditionMask::default(), ConditionMask::default());
+            for day in 30_000..30_008 {
+                for mut bar in session(day, 375) {
+                    bar.volume = 100;
+                    let (t, k) = evaluator.step_known(&bar).expect("a sane bar");
+                    truth = truth.union(&t);
+                    known = known.union(&k);
+                }
+            }
+            (truth, known)
+        };
+        let (_, pinned_known) = fold(widths());
+        for base in [Base::SessionRange, Base::CprWidth] {
+            assert!(
+                rows_of(base).any(|bit| pinned_known.get(bit)),
+                "the pinned pair never knew a {base:?} row"
+            );
+        }
+        for (widths, wrong) in [
+            (Widths::unchecked(pivot, pivot), Base::SessionRange),
+            (Widths::unchecked(baseless, pivot), Base::SessionRange),
+            (Widths::unchecked(fib, fib), Base::CprWidth),
+            (Widths::unchecked(fib, baseless), Base::CprWidth),
+        ] {
+            assert!(Widths::new(widths.fib(), widths.pivot()).is_err());
+            let (truth, known) = fold(widths);
+            for bit in rows_of(wrong) {
+                assert!(!known.get(bit), "{widths:?}: row {bit} was known");
+                assert!(!truth.get(bit), "{widths:?}: row {bit} was answered true");
+            }
         }
     }
 

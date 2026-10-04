@@ -63,8 +63,8 @@
 //! comparison as a test.
 
 use crate::format::{
-    BLOCK_LEN, FORMAT_VERSION, FormatError, HEADER_LEN, MAGIC, MAGIC_FAMILY, MAX_SLOT_COUNT,
-    RECORD_STRIDE, RECORDS_PER_BLOCK, RETIRED_VERSIONS, SLOT_COUNT, SLOT_STRIDE,
+    BLOCK_LEN, FORMAT_VERSION, FormatError, HEADER_LEN, MAGIC, MAGIC_FAMILY, MAGIC_V2,
+    MAX_SLOT_COUNT, RECORD_STRIDE, RECORDS_PER_BLOCK, RETIRED_VERSIONS, SLOT_COUNT, SLOT_STRIDE,
 };
 
 /// Whether `version` is one this build knows of and refuses to decode.
@@ -94,12 +94,25 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Version 2 — the format `docs/02-store-format.md` describes.
+    /// Version 2 — `docs/02-store-format.md`'s geometry, flag optional. Read,
+    /// appended to at its own version, never written new since D-1571.
     ///
     /// Built through [`Layout::declared`], not written as a literal, so it is
     /// checked by the same rule every other row is.
     pub const V2: Self = Self::declared(
         FORMAT_VERSION_2,
+        MAGIC_V2,
+        SLOT_COUNT,
+        RECORD_STRIDE,
+        RECORDS_PER_BLOCK,
+    );
+
+    /// Version 3 — version 2's geometry, byte for byte, with block checksums
+    /// MANDATORY ([`Layout::requires_checksums`]). Every new bar file is born
+    /// at it; a version-2 file is read at [`Self::V2`] and never rewritten.
+    /// audit-20261003 attackdata-8, D-1571.
+    pub const V3: Self = Self::declared(
+        FORMAT_VERSION_3,
         MAGIC,
         SLOT_COUNT,
         RECORD_STRIDE,
@@ -176,10 +189,22 @@ impl Layout {
     /// sidecar later. `Header::decode_parts` resolves a version while decoding.
     /// Whether a geometry may be handed to a BAR reader is decided by
     /// `crate::file::table_of`, from the file kind, and never by this list.
-    pub const KNOWN: &'static [Self] = &[Self::V2, Self::OVERLAY, Self::GREEKS];
+    pub const KNOWN: &'static [Self] = &[Self::V2, Self::V3, Self::OVERLAY, Self::GREEKS];
 
     /// The version this build writes. Older versions are read, never written.
-    pub const CURRENT: Self = Self::V2;
+    pub const CURRENT: Self = Self::V3;
+
+    /// Whether a slot of this version MUST declare
+    /// [`crate::format::FLAG_CHECKSUMS`].
+    ///
+    /// True for version 3 only. Version 2 made the flag optional, and its
+    /// files keep that meaning; the sidecars (overlay, greeks) keep theirs.
+    /// A slot that breaks it is refused as
+    /// [`FormatError::ChecksumsRequired`] on decode and on commit. D-1571.
+    #[must_use]
+    pub const fn requires_checksums(self) -> bool {
+        self.version == FORMAT_VERSION_3
+    }
 
     /// Declares a format version's geometry at compile time.
     ///
@@ -591,12 +616,18 @@ impl Layout {
 /// Version 2's number, named so [`Layout::V2`] does not import a constant that
 /// reads as "whatever version this build writes".
 ///
-/// If version 3 is ever minted, [`crate::format::FORMAT_VERSION`] becomes 3
-/// and `Layout::V2` must keep saying 2. A row that read the moving constant
+/// Version 3 was minted by D-1571 and [`crate::format::FORMAT_VERSION`] became
+/// 3; `Layout::V2` keeps saying 2. A row that read the moving constant
 /// would silently renumber an existing geometry — `CLAUDE.md` §3 rule 8.
 const FORMAT_VERSION_2: u16 = 2;
 
 const _: () = assert!(FORMAT_VERSION_2 == 2);
+
+/// Version 3's number, named for the same reason: [`Layout::V3`] must keep
+/// saying 3 when a later version is minted. D-1571.
+const FORMAT_VERSION_3: u16 = 3;
+
+const _: () = assert!(FORMAT_VERSION_3 == 3);
 const _: () = assert!(Layout::CURRENT.version() == FORMAT_VERSION);
 
 /// The first field of a declaration that is not a geometry a file can have.

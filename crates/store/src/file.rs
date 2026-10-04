@@ -1283,7 +1283,9 @@ const GREEKS_TABLE: &[Layout] = &[Layout::GREEKS];
 /// `Layout::KNOWN`'s own doc promised "a `.bar` path is offered only the bar
 /// geometries whatever its header claims"; this table is what makes it true.
 /// audit-20261003 hunt-store-1, D-1523.
-const BAR_TABLE: &[Layout] = &[Layout::V2];
+// Version 2 stays readable beside version 3, the version written since
+// D-1571: a format version is never mutated in place (§3 rule 8).
+const BAR_TABLE: &[Layout] = &[Layout::V2, Layout::V3];
 
 const _: () = assert!(Layout::V2.record_stride() == crate::format::RECORD_STRIDE);
 
@@ -4706,6 +4708,100 @@ mod tests {
         scrub_month(&path);
     }
 
+    /// **A NEW MONTH IS VERSION 3, AND ITS CHECKSUM FLAG CANNOT BE CLEARED
+    /// (audit-20261003 attackdata-8, D-1571).**
+    ///
+    /// The attack the audit measured: clear `FLAG_CHECKSUMS` in every slot and
+    /// recompute each slot's CRC. At version 2 the month then opened
+    /// unverified with its `.crc` beside it, ignored. A month born now is
+    /// version 3, whose checksums are mandatory, so the same rewrite is refused
+    /// by name while the honest month round-trips verified.
+    #[test]
+    fn a_new_month_is_version_three_and_a_cleared_checksum_flag_is_refused() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("v3flag");
+        assert_eq!(file.header().format_version, 3, "born at version 3");
+        let held: Vec<Bar> = (0..3).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        drop(file);
+        let honest = reopen_readonly(&path).expect("the honest month opens");
+        assert_eq!(honest.header().format_version, 3);
+        assert!(honest.header().checksums_present());
+        for (index, want) in (0u64..).zip(&held) {
+            assert_eq!(honest.read_record(index), Ok(*want), "verified round trip");
+        }
+        drop(honest);
+
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        let mut cleared = 0;
+        for base in [0usize, 16_384] {
+            let slot = &mut bytes[base..base + 64];
+            if &slot[..7] != b"BRUTEXB" {
+                continue;
+            }
+            slot[12..16].copy_from_slice(&0u32.to_le_bytes());
+            let crc = crate::crc::crc32c_split(&slot[..56], &slot[60..64]);
+            slot[56..60].copy_from_slice(&crc.to_le_bytes());
+            cleared += 1;
+        }
+        assert_eq!(cleared, 2, "the premise: both slots hold a commit");
+        std::fs::write(&path, &bytes).expect("the rewrite lands");
+        assert!(sidecar_of(&path).exists(), "the .crc is still there");
+
+        match reopen_readonly(&path) {
+            Err(StoreError::Format {
+                source: FormatError::ChecksumsRequired(3),
+                ..
+            }) => {}
+            other => panic!("a version-3 month without its flag must be refused, got {other:?}"),
+        }
+        scrub_month(&path);
+    }
+
+    /// **A VERSION-2 MONTH STILL READS AND STILL APPENDS AT VERSION 2 (D-1571).**
+    ///
+    /// Minting version 3 must not strand a month written before it, nor
+    /// rewrite one: §3 rule 8. A sealed version-2 month is written by hand,
+    /// appended to through the ordinary door, and read back verified, and its
+    /// header still says 2.
+    #[test]
+    fn a_version_two_month_still_reads_and_appends_at_version_two() {
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let path = scratch("v2still");
+        scrub_month(&path);
+        let bars = open_rw(&path).expect("a temp path opens");
+        initialise(&bars, &path, SYMBOL, 60, Layout::V2).expect("a version-2 header region");
+        drop(bars);
+
+        let mut file = reopen(&path).expect("a version-2 month opens");
+        assert_eq!(file.header().format_version, 2, "the premise");
+        assert!(file.header().checksums_present());
+        let held: Vec<Bar> = (0..4).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 4,
+            })
+        );
+        drop(file);
+        let reader = reopen_readonly(&path).expect("and reads back");
+        assert_eq!(reader.header().format_version, 2, "never rewritten as 3");
+        for (index, want) in (0u64..).zip(&held) {
+            assert_eq!(reader.read_record(index), Ok(*want));
+        }
+        drop(reader);
+        scrub_month(&path);
+    }
+
     /// A month born without the flag reads, and no sidecar is invented for it.
     ///
     /// `initialise` sets `FLAG_CHECKSUMS` unconditionally, so this month is
@@ -4720,7 +4816,9 @@ mod tests {
         let path = scratch("unsealed");
         scrub_month(&path);
         let bars = open_rw(&path).expect("a temp path opens");
-        let genesis = crate::header::Header::genesis_at(Layout::CURRENT, SYMBOL, 60, 0);
+        // VERSION 2: an unflagged month is a version-2 month. Version 3 refuses
+        // to commit a slot without the flag (D-1571).
+        let genesis = crate::header::Header::genesis_at(Layout::V2, SYMBOL, 60, 0);
         let commit = genesis.commit().expect("the genesis header commits");
         let region = vec![0u8; 32_768];
         write_fully(&bars, &path, 0, &region).expect("the header region");

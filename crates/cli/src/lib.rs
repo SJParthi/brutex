@@ -59,6 +59,8 @@ mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
 pub mod audited_range_command;
 mod audited_stored;
+/// The cooperative stop a stopping server asks engine work to honour (D-1551).
+pub mod cancel;
 /// Independent full-file checksum audit and retained historical admission receipts.
 pub mod checksum_receipts;
 mod columns;
@@ -240,6 +242,7 @@ pub mod live;
 pub mod minute_gaps;
 /// Durable outer invocation lifecycle, separate from computation evidence.
 pub mod operation_audit;
+mod ordered;
 pub mod pool;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
@@ -1739,7 +1742,7 @@ fn descend_arm(
 ///
 /// # Why this exists, and it is not a convenience
 ///
-/// `range-all` sweeps eight rungs under one `par_iter`, and `sweep_rungs` calls
+/// `range-all` sweeps eight rungs at once (one `ordered::map` lane each), and `sweep_rungs` calls
 /// `SharedBy::these(8)` before it. That divides the machine's candidate ceiling
 /// by eight — 134,217,720 becomes 16,777,215 — and `support_lanes_for` divides
 /// the core count the same way. The division is CORRECT: eight rungs each
@@ -6709,6 +6712,15 @@ struct StoredRangeAuditRequest<'a> {
     commit: &'static str,
 }
 
+/// Why a range audit refuses in a build with no verified commit stamp.
+fn unstamped_audit_refusal() -> stored::Refusal {
+    "this build carries no verified commit stamp, so §3 rule 3's run identity \
+     cannot be recorded and the audit will not run. Restore every Rust/Cargo \
+     input to HEAD (normally by committing the intended change), then rebuild. \
+     An explicit BRUTEX_COMMIT is accepted only when it exactly equals clean HEAD"
+        .to_owned()
+}
+
 fn audit_range_inner(
     vendor_word: &str,
     underlying: &str,
@@ -6721,13 +6733,7 @@ fn audit_range_inner(
     swept_rung(rung)?;
     // COMMIT FIRST, BEFORE A BAR IS READ, for the reason `audit_stored_inner`
     // gives: a build that cannot be identified must refuse BEFORE it computes.
-    let commit = commit_stamp().ok_or_else(|| {
-        "this build carries no verified commit stamp, so §3 rule 3's run identity \
-         cannot be recorded and the audit will not run. Restore every Rust/Cargo \
-         input to HEAD (normally by committing the intended change), then rebuild. \
-         An explicit BRUTEX_COMMIT is accepted only when it exactly equals clean HEAD"
-            .to_owned()
-    })?;
+    let commit = commit_stamp().ok_or_else(unstamped_audit_refusal)?;
 
     let vendor = parse_vendor(vendor_word)?;
     let root = store_root()?;
@@ -6744,52 +6750,122 @@ fn audit_range_inner(
     })
 }
 
-/// Keeps the admitted span's identity and all execution inputs in one transaction.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the exact one-minute loading/validation block keeps identity, floors, and execution on one borrowed series; splitting it would recreate independently wired paths"
-)]
-fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, stored::Refusal> {
-    let StoredRangeAuditRequest {
-        root,
-        vendor,
-        underlying,
-        rung,
-        from,
-        to,
-        min_hits,
-        attempt,
-        commit,
-    } = request;
-    // BEFORE THE SPAN IS READ, as every recorded kernel does, and here it is
-    // load-bearing: `column_withholding_at_build` below writes a preparation
-    // attempt long before `audit_bars` could refuse. D-0685.
-    recorded_budget_refusal()?;
-    let mut span = stored::load_span(&root, vendor, underlying, rung, from, to)?;
+/// Which stored range audit an [`AuditCache`] holds the inputs for: every term
+/// [`load_audit_inputs`] reads. D-1557.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuditKey {
+    root: std::path::PathBuf,
+    vendor: Vendor,
+    underlying: String,
+    rung: String,
+    span: ((u16, u8), (u16, u8)),
+    commit: String,
+}
 
-    note(
-        &telemetry::Event::info("cli.audit", "stored span loaded")
-            .with("feed", span.vendor.as_str())
-            .with("underlying", underlying)
-            .with("rung", span.timeframe)
-            .with("from", format!("{}-{:02}", from.0, from.1).as_str())
-            .with("to", format!("{}-{:02}", to.0, to.1).as_str())
-            .with("months_asked", u64::from(span.asked))
-            .with("months_found", u64::from(span.found))
-            .with(
-                "months_missing",
-                u64::try_from(span.missing.len()).unwrap_or(u64::MAX),
-            )
-            .with("bars", u64::try_from(span.bars.len()).unwrap_or(u64::MAX))
-            // THE TWELFTH AND ELEVENTH FIELDS, AND THE EVENT IS NOW FULL.
-            // `telemetry::event::MAX_FIELDS` is 12: a thirteenth is counted and
-            // DROPPED, so nothing further may be added here without removing
-            // something. The `/logs` page walks fields generically, so these
-            // two appear there with no change to `crates/api`.
-            .with("withheld_days", u64::from(span.excluded.days()))
-            .with("withheld_bars", span.excluded.bars())
-            .with("min_hits", min_hits),
-    );
+/// Everything a stored range audit loads and prepares that does not depend on
+/// the support. D-1557.
+///
+/// # Why a descent may hold it, and why that keeps the identity honest
+///
+/// `cli descend` audits one span at up to ten supports, and every step after
+/// the first reloaded both spans and both contexts, rebuilt the anchored column
+/// and wrote a fresh preparation attempt for it (audit-20261003 o1surface2-1).
+/// None of that reads `min_hits`. D-1567 declined to hold the column because
+/// the audit checks its preparation digest against the identity it publishes.
+/// That check is exactly what is held here: the column, the contexts and the
+/// executed-data digest are kept TOGETHER, produced by one load that already
+/// passed `stored preparation inputs changed before audit identity
+/// publication`, and every step's run identity takes its `data_digest` from the
+/// held digest of the held bytes. A reused step therefore sweeps exactly the
+/// bytes its identity names. A different key, any of feed, instrument, rung,
+/// span, root or build, loads afresh; nothing is answered from another span.
+struct AuditInputs {
+    span: stored::Span,
+    /// Signal bars as loaded, before any day was withheld: the event reports it.
+    loaded_bars: usize,
+    signal_length: i64,
+    execution_bars: Option<stored::Span>,
+    column: Column,
+    exact_minute: stored::ExactMinuteContext,
+    unsourceable: Vec<i64>,
+    daily: stored::DailyContext,
+    executed_digest: [u8; 32],
+}
+
+/// The inputs of the last stored range audit, or its refusal, and the raw
+/// signal span `one_rung` reads first. D-1557.
+///
+/// A refusal is held too, as [`ScreenCache`] holds one: every step over a span
+/// that cannot be prepared refuses with the same reason each step's own load
+/// gave before.
+#[derive(Default)]
+struct AuditCache {
+    held: Option<(AuditKey, Result<AuditInputs, stored::Refusal>)>,
+    raw: Option<(AuditKey, Result<stored::Span, stored::Refusal>)>,
+}
+
+impl AuditCache {
+    /// The held inputs for `key`, loading them first unless `key` is the one held.
+    fn inputs(
+        &mut self,
+        key: AuditKey,
+        load: impl FnOnce() -> Result<AuditInputs, stored::Refusal>,
+    ) -> Result<&AuditInputs, stored::Refusal> {
+        if self.held.as_ref().is_none_or(|(held, _)| *held != key) {
+            self.held = Some((key, load()));
+        }
+        match &self.held {
+            Some((_, Ok(inputs))) => Ok(inputs),
+            Some((_, Err(why))) => Err(why.clone()),
+            None => Err("the audit input cache holds nothing after a load".to_owned()),
+        }
+    }
+    /// The raw signal span for `key`, loading it first unless `key` is held.
+    fn raw(
+        &mut self,
+        key: AuditKey,
+        load: impl FnOnce() -> Result<stored::Span, stored::Refusal>,
+    ) -> Result<&stored::Span, stored::Refusal> {
+        if self.raw.as_ref().is_none_or(|(held, _)| *held != key) {
+            self.raw = Some((key, load()));
+        }
+        match &self.raw {
+            Some((_, Ok(span))) => Ok(span),
+            Some((_, Err(why))) => Err(why.clone()),
+            None => Err("the raw span cache holds nothing after a load".to_owned()),
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Test-only: how many times this thread prepared a range audit's inputs. D-1557.
+    static AUDIT_INPUT_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Test-only: how many times this thread loaded `one_rung`'s raw span. D-1557.
+    static RUNG_SPAN_LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`audit_range_kernel_cached`] with a fresh cache: one audit, one load.
+fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, stored::Refusal> {
+    audit_range_kernel_cached(request, &mut AuditCache::default())
+}
+
+/// The support-independent half of a stored range audit: both spans, the
+/// withholding, the anchored column under its preparation evidence, both
+/// contexts and the executed-data digest. Loaded once per [`AuditCache`] key.
+/// audit-20261003 o1surface2-1, D-1557.
+fn load_audit_inputs(
+    root: &std::path::Path,
+    vendor: Vendor,
+    underlying: &str,
+    rung: &str,
+    (from, to): ((u16, u8), (u16, u8)),
+    commit: &'static str,
+) -> Result<AuditInputs, stored::Refusal> {
+    #[cfg(test)]
+    AUDIT_INPUT_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
+    let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
+    let loaded_bars = span.bars.len();
 
     let signal_length = stored::rung_length_micros(rung)?;
 
@@ -6813,7 +6889,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     let execution_bars = if rung == EXECUTION_RUNG {
         None
     } else {
-        match stored::load_span(&root, vendor, underlying, EXECUTION_RUNG, from, to) {
+        match stored::load_span(root, vendor, underlying, EXECUTION_RUNG, from, to) {
             Ok(exec) => Some(exec),
             // A REFUSAL HERE STOPS THE RUN. It would be easy to fall back to
             // executing on the signal rung and print a note, and that is exactly
@@ -6887,7 +6963,7 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     // symptom exactly as it was, which is how a correct fix looked like no fix
     // at all.
     let (column, preparation_digest) = column_withholding_at_build(
-        &root,
+        root,
         vendor,
         underlying,
         (from, to),
@@ -6899,13 +6975,13 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     // and both of these are keyed to the bars -- reading them from before it ran
     // would describe a span the column no longer has.
     let (exact_minute, unsourceable) = exact_minute_withholding_unsourceable_days(
-        &root,
+        root,
         vendor,
         underlying,
         (from, to),
         &mut span.bars,
     )?;
-    let daily = stored::load_daily_context(&root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
 
     if stored_anchored_digest(&span.bars, &exact_minute, &daily)? != preparation_digest {
         return Err(
@@ -6913,6 +6989,95 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
                 .to_owned(),
         );
     }
+    let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
+    let executed_digest =
+        stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?;
+    Ok(AuditInputs {
+        span,
+        loaded_bars,
+        signal_length,
+        execution_bars,
+        column,
+        exact_minute,
+        unsourceable,
+        daily,
+        executed_digest,
+    })
+}
+
+/// Keeps the admitted span's identity and all execution inputs in one transaction.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the exact one-minute loading/validation block keeps identity, floors, and execution on one borrowed series; splitting it would recreate independently wired paths"
+)]
+fn audit_range_kernel_cached(
+    request: StoredRangeAuditRequest<'_>,
+    cache: &mut AuditCache,
+) -> Result<String, stored::Refusal> {
+    let StoredRangeAuditRequest {
+        root,
+        vendor,
+        underlying,
+        rung,
+        from,
+        to,
+        min_hits,
+        attempt,
+        commit,
+    } = request;
+    // BEFORE THE SPAN IS READ, as every recorded kernel does, and here it is
+    // load-bearing: `column_withholding_at_build` below writes a preparation
+    // attempt long before `audit_bars` could refuse. D-0685.
+    recorded_budget_refusal()?;
+    let AuditInputs {
+        span,
+        loaded_bars,
+        signal_length,
+        execution_bars,
+        column,
+        exact_minute,
+        unsourceable,
+        daily,
+        executed_digest,
+    } = cache.inputs(
+        AuditKey {
+            root: root.clone(),
+            vendor,
+            underlying: underlying.to_owned(),
+            rung: rung.to_owned(),
+            span: (from, to),
+            commit: commit.to_owned(),
+        },
+        || load_audit_inputs(&root, vendor, underlying, rung, (from, to), commit),
+    )?;
+    let signal_length = *signal_length;
+    note(
+        &telemetry::Event::info("cli.audit", "stored span loaded")
+            .with("feed", span.vendor.as_str())
+            .with("underlying", underlying)
+            .with("rung", span.timeframe)
+            .with("from", format!("{}-{:02}", from.0, from.1).as_str())
+            .with("to", format!("{}-{:02}", to.0, to.1).as_str())
+            .with("months_asked", u64::from(span.asked))
+            .with("months_found", u64::from(span.found))
+            .with(
+                "months_missing",
+                u64::try_from(span.missing.len()).unwrap_or(u64::MAX),
+            )
+            .with("bars", u64::try_from(*loaded_bars).unwrap_or(u64::MAX))
+            // THE TWELFTH AND ELEVENTH FIELDS, AND THE EVENT IS NOW FULL.
+            // `telemetry::event::MAX_FIELDS` is 12: a thirteenth is counted and
+            // DROPPED, so nothing further may be added here without removing
+            // something. The `/logs` page walks fields generically, so these
+            // two appear there with no change to `crates/api`.
+            .with("withheld_days", u64::from(span.excluded.days()))
+            .with("withheld_bars", span.excluded.bars())
+            .with("min_hits", min_hits),
+    );
+    let execution = execution_bars.as_ref().map(|exec| Execution {
+        bars: &exec.bars,
+        signal_length_micros: signal_length,
+    });
 
     // BOUND ONCE, USED TWICE: by the run identity below and by the
     // `AuditOptions` this function goes on to build.
@@ -6939,7 +7104,6 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     let lens = runner::rank::Lens::Payoff;
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
-    let execution_slice = execution.map_or(span.bars.as_slice(), |exec| exec.bars);
     let id = identity(&Run {
         #[expect(
             clippy::default_trait_access,
@@ -6982,12 +7146,14 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
         // while `span.bars` stays byte-identical. On native 1min `execution` is
         // absent and the one dataset is bound exactly once. This strengthens
         // `data_digest`; it does not add a tenth identity term.
-        data_digest: stored_executed_digest(&span.bars, &exact_minute, &daily, execution_slice)?,
+        // HELD WITH THE INPUTS IT DIGESTS, so a reused step names exactly the
+        // bytes it sweeps. D-1557.
+        data_digest: *executed_digest,
         commit,
         feed: span.vendor.as_str(),
     });
 
-    let mut header = span_banner(&span, underlying, from, to, commit);
+    let mut header = span_banner(span, underlying, from, to, commit);
     // WITHHELD DAYS ARE NAMED, NOT COUNTED AND DROPPED.
     //
     // A sweep whose sample is smaller than the operator asked for must say so
@@ -7018,20 +7184,20 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
                 .with("underlying", underlying),
         );
     }
-    header.push_str(&daily_reference_note(&daily, &exact_minute));
+    header.push_str(&daily_reference_note(daily, exact_minute));
     let availability = stored::vwap_availability(&span.key);
     let cost = stored::audit_cost_scope(&span.key)?;
     Ok(audit_bars(
         &evaluator_stored(availability),
-        span.bars,
+        span.bars.clone(),
         &header,
         min_hits,
         Some(&id),
         AuditOptions {
-            prepared_column: Some(column),
+            prepared_column: Some(column.clone()),
             replay: Some(StoredReplay {
-                daily: &daily,
-                exact_minute: &exact_minute,
+                daily,
+                exact_minute,
                 signal_length_micros: signal_length,
                 availability,
             }),
@@ -9299,7 +9465,7 @@ impl Rules {
     ///
     /// Measured on the one-minute rung: 618,296 bars across four parallel
     /// vectors is about 30 MB allocated, walked and freed, twice — and
-    /// `range_over` runs eight rungs under `par_iter`, so it is eight extra full
+    /// `range_over` runs eight rungs at once, so it is eight extra full
     /// passes concurrently. Reuse needs `RankedRun` to return the `Forward` it
     /// built, which is a signature change on a crate boundary, so it is recorded
     /// here rather than claimed away. §3 rule 6.
@@ -12122,6 +12288,12 @@ fn screen<'a>(
         .take(priced_cap)
         .enumerate()
         .filter_map(|(rank, scored)| {
+            // ONE CANDIDATE IS A BATCH BOUNDARY: a stopping server is honoured
+            // here, and the screen then refuses as a whole below rather than
+            // returning the candidates it reached (hunt-api-2, D-1551).
+            if crate::cancel::requested() {
+                return None;
+            }
             if pricing
                 .capture
                 .is_some_and(|capture| capture.check().is_err())
@@ -12262,6 +12434,7 @@ fn screen<'a>(
     if let Some(capture) = pricing.capture {
         capture.check()?;
     }
+    crate::cancel::check(|| format!("the exit-grid screen of {} candidates", by_evidence.len()))?;
 
     // PASSERS FIRST, then by net. `Reverse` and not a negation, for the reason
     // `audit::grid` gives: `pessimistic` saturates at `i64::MIN` and negating
@@ -13431,10 +13604,6 @@ fn affordable_min_hits(
     found.min_hits.ok_or_else(|| "no nonempty affordable support probe completed; the rung will not silently fall back to a deeper statistical threshold".to_owned())
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one all-rungs row owns its fail-closed signal/daily/minute preparation and support derivation"
-)]
 fn one_rung(
     vendor_word: &str,
     underlying: &str,
@@ -13444,6 +13613,69 @@ fn one_rung(
     support_ppm: Option<u64>,
     attempt: Option<u64>,
 ) -> RungRow {
+    one_rung_cached(
+        RungAsk {
+            vendor_word,
+            underlying,
+            rung,
+            from,
+            to,
+            support_ppm,
+            attempt,
+        },
+        RungStore {
+            root: store_root(),
+            commit: commit_stamp(),
+        },
+        &mut AuditCache::default(),
+    )
+}
+
+impl RungStore {
+    /// The same root and stamp for another step of the same command.
+    fn again(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            commit: self.commit,
+        }
+    }
+}
+
+/// One rung's question: what [`one_rung`] takes positionally.
+#[derive(Clone, Copy)]
+struct RungAsk<'a> {
+    vendor_word: &'a str,
+    underlying: &'a str,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+    support_ppm: Option<u64>,
+    attempt: Option<u64>,
+}
+
+/// Where a rung reads and under which build it records: the resolved store
+/// root, or why there is none, and the commit stamp, if the build has one.
+struct RungStore {
+    root: Result<std::path::PathBuf, stored::Refusal>,
+    commit: Option<&'static str>,
+}
+
+/// [`one_rung`], reusing `cache`'s raw span and audit inputs when it holds
+/// this question. A descent passes one cache down its whole ladder. D-1557.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one all-rungs row owns its fail-closed signal/daily/minute preparation and support derivation"
+)]
+fn one_rung_cached(ask: RungAsk<'_>, store: RungStore, cache: &mut AuditCache) -> RungRow {
+    let RungAsk {
+        vendor_word,
+        underlying,
+        rung,
+        from,
+        to,
+        support_ppm,
+        attempt,
+    } = ask;
     let first_line = |why: String| why.lines().next().unwrap_or(&why).to_owned();
     // BEFORE THE STORE IS RESOLVED: the support derivation below writes
     // preparation and probe evidence before `audit_range` is reached. D-0685.
@@ -13457,7 +13689,7 @@ fn one_rung(
             validation: None,
         };
     }
-    let root = match store_root() {
+    let root = match store.root {
         Ok(root) => root,
         Err(why) => {
             return RungRow {
@@ -13487,7 +13719,19 @@ fn one_rung(
             };
         }
     };
-    let mut span = match stored::load_span(&root, vendor, underlying, rung, from, to) {
+    let key = AuditKey {
+        root: root.clone(),
+        vendor,
+        underlying: underlying.to_owned(),
+        rung: rung.to_owned(),
+        span: (from, to),
+        commit: store.commit.unwrap_or_default().to_owned(),
+    };
+    let span = match cache.raw(key, || {
+        #[cfg(test)]
+        RUNG_SPAN_LOADS.with(|loads| loads.set(loads.get().saturating_add(1)));
+        stored::load_span(&root, vendor, underlying, rung, from, to)
+    }) {
         Ok(span) => span,
         Err(why) => {
             return RungRow {
@@ -13598,6 +13842,10 @@ fn one_rung(
     let min_hits = if named_ppm.is_some() {
         statistical
     } else {
+        // A NAMED SUPPORT READS ONLY THE THREE FACTS ABOVE, so a descent's held
+        // span is never copied; the derivation withholds days from its own
+        // copy, as it always withheld them from its own load. D-1557.
+        let mut span = span.clone();
         // THE DAILY CONTEXT AND THE OVERLAY ARE LOADED INSIDE
         // `column_withholding_unsourceable_days`, not here.
         //
@@ -13710,7 +13958,7 @@ fn one_rung(
     // The long report is DISCARDED on purpose: nine of them is six thousand
     // lines. The row is read back from the store, which is the point of having
     // one.
-    let text = audit_range_for_attempt(vendor_word, underlying, rung, from, to, min_hits, attempt);
+    let text = audit_range_cached(&root, vendor, store.commit, ask, min_hits, cache);
     // LIFTED BEFORE `text` GOES OUT OF SCOPE. The two scanners below already
     // read this string for a refusal and for a not-recorded sentence; this is
     // the third question it answers and the only one nothing was asking.
@@ -13759,7 +14007,7 @@ fn one_rung(
         // through; this closes the silent substitution now and does not block it.
         Err(first_line(format!("the result was not recorded: {why}")))
     } else {
-        latest_for(vendor_word, underlying, rung, from, to, min_hits)
+        latest_for(&root, vendor_word, underlying, rung, from, to, min_hits)
     };
 
     // A RUNG FINISHING IS AN EVENT, AND IT WAS NOT ONE.
@@ -14992,6 +15240,37 @@ pub fn descend(
     ceiling_ppm: u64,
     cadence: Cadence,
 ) -> String {
+    descend_in(
+        &RungStore {
+            root: store_root(),
+            commit: commit_stamp(),
+        },
+        vendor_word,
+        underlying,
+        rung,
+        (from, to),
+        ceiling_ppm,
+        cadence,
+    )
+}
+
+/// [`descend`] over a resolved store, every step through ONE [`AuditCache`].
+///
+/// Each step after the first used to call `one_rung` from scratch, reloading
+/// the signal span, the one-minute execution span and both contexts and
+/// rebuilding the anchored column, none of which depends on the support
+/// (audit-20261003 o1surface2-1). Every step now asks the same cache, so that
+/// work is done once per descent and a step pays only for what its support
+/// changes. D-1557.
+fn descend_in(
+    store: &RungStore,
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    (from, to): ((u16, u8), (u16, u8)),
+    ceiling_ppm: u64,
+    cadence: Cadence,
+) -> String {
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
         return format!(
             "refused: `{rung}` is not a rung this engine sweeps. The eight are: \
@@ -15008,15 +15287,17 @@ pub fn descend(
     // nobody knows until the span is opened. Guessing it from the rung's name
     // would be arithmetic on an assumption -- §3 rule 1's `UNVERIFIED` -- so the
     // ceiling runs first and its `bars` is what the floor is derived from.
-    let first = one_rung(
+    let mut cache = AuditCache::default();
+    let ask = |support| RungAsk {
         vendor_word,
         underlying,
-        known,
+        rung: known,
         from,
         to,
-        Some(ceiling_ppm),
-        None,
-    );
+        support_ppm: Some(support),
+        attempt: None,
+    };
+    let first = one_rung_cached(ask(ceiling_ppm), store.again(), &mut cache);
     let Ok(ref seed) = first.outcome else {
         let why = first
             .outcome
@@ -15065,16 +15346,7 @@ pub fn descend(
             // run that §3 rule 5 says produces identical bytes -- pure waste.
             first.outcome.clone()
         } else {
-            one_rung(
-                vendor_word,
-                underlying,
-                known,
-                from,
-                to,
-                Some(support),
-                None,
-            )
-            .outcome
+            one_rung_cached(ask(support), store.again(), &mut cache).outcome
         };
         let line = descent_line(support, row.clone());
         // EACH ROW IS ANNOUNCED THE MOMENT IT LANDS, ON STDERR.
@@ -15267,13 +15539,25 @@ pub fn range_over_for_attempt(
     )
 }
 
+/// The stop check before a range table is rendered (hunt-api-2, D-1551).
+fn rungs_not_cancelled(vendor_word: &str, underlying: &str, rungs: usize) -> Result<(), String> {
+    crate::cancel::check(|| {
+        format!(
+            "the {rungs} rung(s) of {underlying} on {vendor_word}, before their table was rendered"
+        )
+    })
+}
+
 /// Sweeps independent rungs in parallel while preserving their input order.
 ///
 /// [`SharedBy`] divides the machine candidate ceiling among exactly the rungs
-/// in flight. The guard spans the indexed parallel map, so panic unwinding
-/// cannot leave the divisor raised. Rayon preserves the order of this indexed
-/// input in the collected rows, keeping reruns byte-identical regardless of
-/// completion order.
+/// in flight. The guard spans the fan-out, so panic unwinding cannot leave the
+/// divisor raised. The rows come back in input order, and since D-1556 so do
+/// the rungs' shared durable writes: [`ordered::map`] runs each rung as a lane
+/// whose evidence-journal and ledger writes land in an order fixed by the
+/// inputs, so the attempt tokens and the `runs.bin` rows a rerun writes are the
+/// same whatever the thread count or which rung computes fastest. They used to
+/// follow completion order (audit-20261003 hunt-conc-1).
 fn sweep_rungs(
     vendor_word: &str,
     underlying: &str,
@@ -15284,20 +15568,30 @@ fn sweep_rungs(
 ) -> Vec<RungRow> {
     let (from, to) = span;
     let _sharing = SharedBy::these(rungs.len());
-    rungs
-        .par_iter()
-        .map(|&rung| {
-            one_rung(
-                vendor_word,
-                underlying,
+    ordered::map(rungs, |&rung| {
+        one_rung(
+            vendor_word,
+            underlying,
+            rung,
+            from,
+            to,
+            support_ppm,
+            attempt,
+        )
+    })
+    .unwrap_or_else(|why| {
+        rungs
+            .iter()
+            .map(|&rung| RungRow {
                 rung,
-                from,
-                to,
-                support_ppm,
-                attempt,
-            )
-        })
-        .collect()
+                outcome: Err(why.clone()),
+                missing: Vec::new(),
+                excluded: stored::CalendarExclusion::none(),
+                retention: None,
+                validation: None,
+            })
+            .collect()
+    })
 }
 
 /// The comparable-run provenance and support explanation above a range table.
@@ -15449,6 +15743,12 @@ fn range_over_inner(
         support_ppm,
         attempt,
     );
+    // A STOP ASKED FOR DURING THE RUNGS REFUSES THE WHOLE TABLE. Rungs that
+    // finished before it are real, but a table missing the rest would read as
+    // the complete comparison it is not (hunt-api-2, D-1551).
+    if let Err(why) = rungs_not_cancelled(vendor_word, underlying, rows.len()) {
+        return format!("refused: {why}\n");
+    }
     // EVERY RUNG REFUSED IS A REFUSAL, NOT A REPORT.
     //
     // MEASURED, by attacking this command: `range-all nosuchfeed NIFTY ...`,
@@ -15657,6 +15957,7 @@ const IN_SAMPLE_WARNING: &str = "\n  \
 /// audit's measurement, and `crates/cli/benches/ratio.rs` deliberately does not
 /// time `Results::open` (D-1459).
 fn latest_for(
+    root: &std::path::Path,
     vendor_word: &str,
     underlying: &str,
     rung: &str,
@@ -15664,8 +15965,7 @@ fn latest_for(
     to: (u16, u8),
     min_hits: u64,
 ) -> Result<crate::results::Record, String> {
-    let root = store_root()?;
-    let mut store = crate::results::Results::open(&root)?;
+    let mut store = crate::results::Results::open(root)?;
     let count = store.len()?;
     let (feed, name, tf) = (
         crate::results::field(vendor_word),
@@ -16174,17 +16474,40 @@ pub fn audit_range(
     }
 }
 
-/// [`audit_range`] under one exact browser attempt.
-fn audit_range_for_attempt(
-    vendor_word: &str,
-    underlying: &str,
-    rung: &str,
-    from: (u16, u8),
-    to: (u16, u8),
+/// [`audit_range`] for one rung of [`one_rung_cached`], under its browser
+/// attempt, over the root and vendor that rung already resolved, and through
+/// `cache`. The commit refusal is [`audit_range_inner`]'s. D-1557.
+fn audit_range_cached(
+    root: &std::path::Path,
+    vendor: Vendor,
+    commit: Option<&'static str>,
+    ask: RungAsk<'_>,
     min_hits: u64,
-    attempt: Option<u64>,
+    cache: &mut AuditCache,
 ) -> String {
-    match audit_range_inner(vendor_word, underlying, rung, from, to, min_hits, attempt) {
+    // NO RUNG CHECK HERE: every caller's rung is one of `EVERY_RUNG`
+    // (`range_over` and `pool::run` refuse any other, `descend` finds it in
+    // the list), which is exactly what `audit_range_inner`'s check admits, and
+    // `stored::load_span` above it refuses an unswept rung by name.
+    let audited = commit
+        .ok_or_else(unstamped_audit_refusal)
+        .and_then(|commit| {
+            audit_range_kernel_cached(
+                StoredRangeAuditRequest {
+                    root: root.to_path_buf(),
+                    vendor,
+                    underlying: ask.underlying,
+                    rung: ask.rung,
+                    from: ask.from,
+                    to: ask.to,
+                    min_hits,
+                    attempt: ask.attempt,
+                    commit,
+                },
+                cache,
+            )
+        });
+    match audited {
         Ok(text) => text,
         Err(why) => format!("refused: {why}\n"),
     }
@@ -16546,7 +16869,7 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// therefore a budget for the machine, not for a caller.
 ///
 /// [`range_over`] hands that whole-machine budget to **every rung at once**.
-/// Its `rungs.par_iter()` runs eight independent sweeps concurrently and
+/// Its rung fan-out runs eight independent sweeps concurrently and
 /// nothing divided the ceiling between them, so eight sweeps each believed they
 /// could claim 19.6 GB: **157 GB of a 48 GB machine**. The guard that exists to
 /// stop the machine swapping was itself oversubscribing it eightfold.
@@ -20365,6 +20688,9 @@ fn record_all_attempt(
     run_id: &runner::identity::RunId,
     what: &Recorded<'_>,
 ) -> ResultSetAttempt {
+    // ONE ORDERED EVENT for the whole result set, taken before `LEDGER` and
+    // the cross-process lock so a lane never waits holding either. D-1556.
+    let _turn = crate::ordered::turn();
     let Ok(_guard) = LEDGER.lock() else {
         let why =
             "the process-wide result-set lock was poisoned. No new ledger commit was attempted.";
@@ -27655,6 +27981,27 @@ mod derived_floor_tests {
                 shared += 1;
                 continue;
             }
+            if before_end.contains("data_digest: *executed_digest,") {
+                // D-1557: the range audit takes its data term from the digest
+                // `load_audit_inputs` held beside the bytes it digested, and
+                // that digest is the two-series composition.
+                let (_, owner) = source[..at]
+                    .rsplit_once("\nfn ")
+                    .expect("the held digest has an enclosing production function");
+                assert!(
+                    owner.starts_with(concat!("audit_range_kernel_", "cached(")),
+                    "only the range audit may take a held digest"
+                );
+                let loader = compact_source(stored_function(source, "load_audit_inputs"));
+                assert!(
+                    loader.contains(concat!(
+                        "letexecuted_digest=stored_executed_",
+                        "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+                    )),
+                    "the held digest is the two-series composition"
+                );
+                continue;
+            }
             assert!(
                 before_end.contains("data_digest: stored_executed_digest("),
                 "a stored run identity derives its data term from something \
@@ -28189,12 +28536,19 @@ mod derived_floor_tests {
             "data_digest:stored_executed_",
             "digest(&span.bars,exact_minute,daily,execution_slice)?"
         );
+        // D-1557: the range audit holds its digest beside its inputs, so its
+        // binding is the held one in `load_audit_inputs`.
+        let held_bound = concat!(
+            "letexecuted_digest=stored_executed_",
+            "digest(&span.bars,&exact_minute,&daily,execution_slice)?"
+        );
         assert_eq!(
             (
                 code.matches(span_bound).count(),
+                code.matches(held_bound).count(),
                 code.matches(screen_bound).count()
             ),
-            (1, 1),
+            (0, 1, 1),
             "audit-range and screen-range must bind signal, exact-minute context, daily references and the actual separately loaded execution slice"
         );
         assert_eq!(
