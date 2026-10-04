@@ -72,7 +72,7 @@ use runner::exit_grid_policy::{
     AttestedTrainingV1, ExecutionDigestsV1, ExecutionDispositionV1, ExecutionResolutionV1,
     ExecutionRunV1, ExecutionSeriesV1, ExitGridSelectorV1, ForcedStopV1,
     GlobalReplayWitnessUniverseV1, OosExecutionSeriesV1, RangeResolutionV1, RationalPercentileV1,
-    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v1, instrument_digest_v1,
+    ResolvedExitGridV1, ValidatedExitGridV1, column_digest_v2, instrument_digest_v1,
 };
 use runner::grid::{Cell, CellReplay, Chosen, Ttp};
 use runner::identity::{DailyReferenceBinding, Direction, Params, Run};
@@ -640,8 +640,8 @@ impl CandidateUniverseDescriptorV1 {
         require_column_sources("execution", execution_column, execution_series.bars().len())?;
         let signal_stream = CandidateSignalStreamV1::from_bars(signal_bars)?;
         let execution_stream = CandidateExecutionStreamV1::from_series(execution_series)?;
-        let signal_column_digest = column_digest_v1(signal_column);
-        let execution_column_digest = column_digest_v1(execution_column);
+        let signal_column_digest = column_digest_v2(signal_column);
+        let execution_column_digest = column_digest_v2(execution_column);
         require_nonzero_digest("candidate signal column", signal_column_digest)?;
         require_nonzero_digest("candidate execution column", execution_column_digest)?;
         let mut descriptor = Self {
@@ -921,8 +921,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         .map_err(|why| format!("candidate daily data identity refused: {why:?}"))?;
         let signal_stream = CandidateSignalStreamV1::from_bars(signal_bars)?;
         let execution_stream = CandidateExecutionStreamV1::from_series(execution_series)?;
-        let signal_column_digest = column_digest_v1(&signal_column);
-        let execution_column_digest = column_digest_v1(&execution_column);
+        let signal_column_digest = column_digest_v2(&signal_column);
+        let execution_column_digest = column_digest_v2(&execution_column);
         let mut source = Self {
             family,
             rung_seconds,
@@ -1045,8 +1045,8 @@ impl<'a> CandidateUniverseProductionSourceV1<'a> {
         {
             return Err("candidate production exact stream identity changed".to_owned());
         }
-        if self.signal_column_digest != column_digest_v1(&self.signal_column)
-            || self.execution_column_digest != column_digest_v1(&self.execution_column)
+        if self.signal_column_digest != column_digest_v2(&self.signal_column)
+            || self.execution_column_digest != column_digest_v2(&self.execution_column)
         {
             return Err("candidate production exact column identity changed".to_owned());
         }
@@ -1463,7 +1463,7 @@ fn derive_global_replay_oos_source_id(source: &CandidateGlobalReplayOosSourceV1<
     hasher.update(&source.signal_calendar.digest());
     hasher.update(&source.execution_calendar.digest());
     hasher.update(&source.data_digest);
-    hasher.update(&column_digest_v1(&source.execution_column));
+    hasher.update(&column_digest_v2(&source.execution_column));
     if let Some(spec) = source.execution_column.evaluation_spec_token() {
         hasher.update(spec.fingerprint_v1().as_bytes());
     }
@@ -8109,6 +8109,45 @@ mod tests {
             "the typed production fixture must derive at least one non-constant supported live condition"
         );
         (best_bit, best_support, ties)
+    }
+
+    #[test]
+    fn production_source_refuses_either_column_digest_that_is_not_the_v2_digest_of_its_column() {
+        let fixture = ProductionFixture::new();
+        let mut source = fixture.source();
+        source.validate().expect("the untampered fixture validates");
+
+        let signal_v2 = source.signal_column_digest;
+        let execution_v2 = source.execution_column_digest;
+        assert_eq!(signal_v2, column_digest_v2(&source.signal_column));
+        assert_eq!(execution_v2, column_digest_v2(&source.execution_column));
+
+        // The V1 digest of the very same column is a stale codec, not this
+        // column's production identity.
+        let signal_v1 = runner::exit_grid_policy::column_digest_v1(&source.signal_column);
+        let execution_v1 = runner::exit_grid_policy::column_digest_v1(&source.execution_column);
+        assert_ne!(signal_v1, signal_v2);
+        assert_ne!(execution_v1, execution_v2);
+
+        for (label, signal, execution) in [
+            ("signal only", signal_v1, execution_v2),
+            ("execution only", signal_v2, execution_v1),
+            ("signal foreign", digest(211), execution_v2),
+            ("execution foreign", signal_v2, digest(212)),
+        ] {
+            source.signal_column_digest = signal;
+            source.execution_column_digest = execution;
+            let refusal = source.validate().expect_err(label);
+            assert!(
+                refusal.contains("exact column identity changed"),
+                "{label}: {refusal}"
+            );
+        }
+        source.signal_column_digest = signal_v2;
+        source.execution_column_digest = execution_v2;
+        source
+            .validate()
+            .expect("restoring both digests validates again");
     }
 
     #[test]

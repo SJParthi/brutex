@@ -53,7 +53,7 @@ use vocab::ConditionMask;
 use crate::exit_grid_policy::{
     AttestedTrainingV1, ExecutionDigestsV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridErrorV1,
     OosExecutionSeriesV1, OosReplaySliceV1, ReplayedExitV1, ResolvedExitGridV1, SelectedExitV1,
-    column_digest_v1,
+    column_digest_v2,
 };
 use crate::identity::{Params, Run, data_digest};
 use crate::outcome::Horizon;
@@ -2291,7 +2291,7 @@ pub fn walk_forward_projected_prepared_anchored_search_v4(
         signal_digest: data_digest(signal),
         signal_first_ts_micros,
         signal_last_ts_micros,
-        signal_column_digest: column_digest_v1(full_signal_column),
+        signal_column_digest: column_digest_v2(full_signal_column),
         horizon_bars: horizon.as_bars(),
         splits: stable_u64_v4(splits)?,
         min_hits: base.min_hits(),
@@ -7393,7 +7393,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             source.signal_column_digest(),
-            crate::exit_grid_policy::column_digest_v1(&full_signal_column)
+            crate::exit_grid_policy::column_digest_v2(&full_signal_column)
         );
         assert_eq!(
             projection.long_grid_identity().policy_digest(),
