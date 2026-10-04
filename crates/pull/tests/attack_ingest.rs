@@ -128,8 +128,8 @@ fn ist_text(utc: i64, zone: &str) -> String {
 }
 
 /// One candle as Kite spells it: stamp text and five already-rendered cells.
-fn candle(stamp: &str, o: &str, h: &str, l: &str, c: &str, v: &str) -> String {
-    format!("[\"{stamp}\",{o},{h},{l},{c},{v}]")
+fn candle(stamp: &str, open: &str, high: &str, low: &str, close: &str, volume: &str) -> String {
+    format!("[\"{stamp}\",{open},{high},{low},{close},{volume}]")
 }
 
 fn body(candles: &[String]) -> String {
@@ -616,7 +616,7 @@ fn impossible_ohlc_never_reaches_the_disk() {
     }
 }
 
-/// Volume edges: zero is zero; i64::MAX is held; past i64 is refused; a
+/// Volume edges: zero is zero; `i64::MAX` is held; past `i64` is refused; a
 /// negative is not stored.
 #[test]
 fn volume_edges_are_held_exactly_or_refused() {
@@ -672,7 +672,7 @@ fn every_truncation_and_hostile_body_refuses_without_panicking() {
         "{\"status\":\"success\",\"data\":{\"candles\":[[1,2,3,4,5]]}}".to_owned(),
         "{\"status\":\"success\",\"data\":{\"candles\":[[\"x\",1,1,1,1,0,0,0]]}}".to_owned(),
         "{\"status\":\"error\",\"error_type\":\"TokenException\",\"message\":\"x\"}".to_owned(),
-        format!("{}\u{0}", full),
+        format!("{full}\u{0}"),
         full.replace("candles", "candl\u{e9}s"),
         format!("{}{}", "[".repeat(200_000), "]".repeat(200_000)),
     ];
@@ -748,7 +748,7 @@ fn the_day_pass_then_the_minute_pass_is_nine_files_and_rerunning_changes_no_byte
         "the minute pass never rewrites the vendor's day bar"
     );
     let mut rungs = 0;
-    for &tf in Timeframe::KNOWN.iter() {
+    for &tf in Timeframe::KNOWN {
         if tf.secs() < 60 {
             continue;
         }
@@ -1144,6 +1144,17 @@ fn the_decoded_door_names_its_session_drops_and_reruns_change_no_byte() {
     assert_eq!(image(&scratch.0), before);
 }
 
+/// One decoder-skip case: o, h, l, c, v, listing, and the reason that must count it.
+type SkipCase = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Listing,
+    fn(&pull::fetch::DecodeSkips) -> usize,
+);
+
 /// THE DECODER'S SKIPS AND THE RECEIPT. A Kite day window of three candles,
 /// one of which the decoder drops (impossible OHLC, a negative volume on a
 /// traded listing, a null price). The receipt must not claim every offered
@@ -1153,15 +1164,7 @@ fn a_candle_the_decoder_skips_is_still_on_the_receipt() {
     let trading = [day(2025, 7, 1), day(2025, 7, 2), day(2025, 7, 3)];
     let req = request(trading[0], trading[2], Granularity::Day1);
     // (o, h, l, c, v, listing, which reason must count it)
-    let cases: [(
-        &str,
-        &str,
-        &str,
-        &str,
-        &str,
-        Listing,
-        fn(&pull::fetch::DecodeSkips) -> usize,
-    ); 3] = [
+    let cases: [SkipCase; 3] = [
         ("10", "9", "11", "10", "0", Listing::Index, |s| {
             s.impossible_ohlc
         }),
