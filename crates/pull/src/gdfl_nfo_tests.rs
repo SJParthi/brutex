@@ -4,6 +4,7 @@
 #![allow(
     clippy::expect_used,
     clippy::panic,
+    clippy::too_many_lines,
     clippy::case_sensitive_file_extension_comparisons,
     clippy::unwrap_used,
     clippy::indexing_slicing,
