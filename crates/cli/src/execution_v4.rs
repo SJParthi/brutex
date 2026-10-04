@@ -5762,6 +5762,24 @@ mod tests {
         parameter
     }
 
+    /// X-22 (P12-08, D-1798): NO EQUITY RESULT CAN REACH SELECTION V6. Its
+    /// winners are Execution V4 dispositions, and an Execution V4 family is
+    /// one of exactly two index families: of all 256 family tags only 1
+    /// (NIFTY) and 2 (BANKNIFTY) decode. So a cash-equity family cannot be
+    /// constructed from a stored byte, which is what `CLAUDE.md` §1 requires
+    /// until an equity charge stack exists. The enum itself has no third
+    /// variant; this pins the decoder, the one door a stored byte comes in by.
+    #[test]
+    fn no_family_tag_names_an_equity_so_none_can_reach_selection_v6() {
+        let execution: Vec<ExecutionV4Family> = (0..=u8::MAX)
+            .filter_map(|tag| decode_family(tag).ok())
+            .collect();
+        assert_eq!(
+            execution,
+            [ExecutionV4Family::Nifty, ExecutionV4Family::BankNifty]
+        );
+    }
+
     /// W2-cli4-1, C4-CLI-03-01: the encoder writes tag 4 for `OperatorRule` (D-0594),
     /// and the validator used to admit only 1..=3, so every `OperatorRule`
     /// parameter was refused as "a zero required bound/policy". Every selector
@@ -5774,14 +5792,18 @@ mod tests {
             .first()
             .expect("fixture has a parameter")
             .clone();
-        for selector in [
-            ExitGridSelectorV1::PessimisticTotal,
-            ExitGridSelectorV1::EdgeThenPessimistic,
-            ExitGridSelectorV1::GuaranteedFloor,
-            ExitGridSelectorV1::OperatorRule,
+        // AS-09 (P12-04, D-1793): every tag pinned BY VALUE. Only
+        // `OperatorRule => 4` was, so a coordinated shift of the other three
+        // in the encoder and the validator passed this test.
+        for (selector, tag) in [
+            (ExitGridSelectorV1::PessimisticTotal, 1_u8),
+            (ExitGridSelectorV1::EdgeThenPessimistic, 2),
+            (ExitGridSelectorV1::GuaranteedFloor, 3),
+            (ExitGridSelectorV1::OperatorRule, 4),
         ] {
+            assert_eq!(selector_policy_tag(selector), tag, "{selector:?}");
             let mut parameter = base.clone();
-            parameter.selector_policy_tag = selector_policy_tag(selector);
+            parameter.selector_policy_tag = tag;
             let parameter = reidentify_parameter(parameter);
             let validated = parameter.validate();
             assert!(
@@ -5795,7 +5817,6 @@ mod tests {
                 "{selector:?} must survive a decode"
             );
         }
-        assert_eq!(selector_policy_tag(ExitGridSelectorV1::OperatorRule), 4);
         for outside in [0, 5] {
             let mut parameter = base.clone();
             parameter.selector_policy_tag = outside;

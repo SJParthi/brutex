@@ -2598,6 +2598,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RJ-02 (P12-02, D-1791): a version this build does not write is
+    /// REFUSED, never widened. The refusal names both versions and the exact
+    /// move-aside command, and the file is left byte for byte as it was.
+    #[test]
+    fn another_format_version_is_refused_and_left_untouched() {
+        let dir = root("header-version");
+        let path = Frontier::path(&dir);
+        drop(Frontier::open(&dir).expect("a fresh file opens"));
+        let mut bytes = std::fs::read(&path).expect("the header is readable");
+        let older = VERSION - 1;
+        bytes
+            .get_mut(8..12)
+            .expect("the version word")
+            .copy_from_slice(&older.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("the fixture is rewritten");
+
+        let why = Frontier::open(&dir).expect_err("another version must refuse");
+        assert!(
+            why.contains(&format!("frontier format version {older}")),
+            "{why}"
+        );
+        assert!(
+            why.contains(&format!("writes and reads version {VERSION}")),
+            "{why}"
+        );
+        assert!(why.contains(&format!("v{older}.bin")), "{why}");
+        assert!(why.contains("Nothing was written"), "{why}");
+        assert_eq!(std::fs::read(&path).expect("still readable"), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A flipped byte anywhere in the payload is caught.
     #[test]
     fn a_single_flipped_byte_fails_the_seal() {

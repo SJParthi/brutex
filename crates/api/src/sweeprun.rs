@@ -3685,6 +3685,49 @@ mod tests {
         conduct_command, descent_from, marker_refusal, now_micros, settle, stamp_refusal,
     };
 
+    /// SF-13 (P12-02, D-1791): a derived threshold reaches the wire as
+    /// `null`, never as a magic zero, and a fixed one as its number.
+    #[test]
+    fn a_derived_threshold_is_null_on_the_wire_and_never_a_zero() {
+        let at = |support| {
+            Progress::started("zerodha", "NIFTY", (2024, 1), (2024, 1), support, 0, 1).to_json()
+        };
+        let derived = at(None);
+        assert!(
+            derived.contains(r#","support_ppm":null,"started_micros""#),
+            "{derived}"
+        );
+        let fixed = at(Some(47_000));
+        assert!(
+            fixed.contains(r#","support_ppm":47000,"started_micros""#),
+            "{fixed}"
+        );
+    }
+
+    /// SW-14 (P12-02, D-1791): THE COMMIT GATE RUNS BEFORE THE SLOT IS
+    /// CLAIMED. Two unstamped presses are both refused 503 for the build, the
+    /// second is never answered 409 `Busy`, and the slot is still empty after
+    /// both. Claiming first would make the second press a conflict with a run
+    /// that was only ever going to fail.
+    #[test]
+    fn an_unstamped_press_is_refused_before_the_slot_and_never_reads_as_busy() {
+        let site = finisher_site("sw14-unstamped");
+        let run = format!(r#"{{"feed":"zerodha","underlying":"NIFTY",{SPAN}}}"#);
+        for press in ["first", "second"] {
+            let (status, _headers, body) = super::run_with(&site, &run, None);
+            assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "{press}: {body}"
+            );
+            assert!(body.contains("\"accepted\":false"), "{press}: {body}");
+        }
+        assert!(
+            site.sweep.lock().expect("private slot").is_none(),
+            "an unstamped build claimed the slot"
+        );
+    }
+
     /// audit-20261003 hunt-api-2, D-1582: CTRL-C ENDS THE PROCESS WHILE A
     /// SWEEP RUNS. A blocking task holding an engine-task count sleeps far past
     /// the grace; dropping a runtime would wait for all of it (tokio's

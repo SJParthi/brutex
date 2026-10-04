@@ -1745,6 +1745,82 @@ pub(super) mod tests {
         );
     }
 
+    /// **V-02 and V-03 on the production fold, at many cuts.** P12-01.
+    ///
+    /// `a_prefix_of_the_bars_gives_a_prefix_of_the_column` cuts once. This
+    /// cuts every 25th bar of the warm run (120 cuts, under both
+    /// availabilities so the VWAP family is folded too) and at each cut builds
+    /// two more columns through the real `Evaluator`: one over the prefix
+    /// alone (the future is ABSENT) and one over the run with every bar from
+    /// the cut onward replaced by a valid but extreme bar (the future is
+    /// MUTATED). Every row sourced before the cut must be identical, bits and
+    /// knowledge both, in all three columns.
+    ///
+    /// Not every single cut: that is 3,000 rebuilds of up to 3,000 bars per
+    /// availability, extrapolated (not measured) at minutes in a debug
+    /// build. The stride is the stated limit of this test.
+    #[test]
+    fn every_row_before_a_cut_ignores_an_absent_or_mutated_future() {
+        fn rows_before(column: &Column, cut: usize) -> usize {
+            column.sources().iter().take_while(|&&s| s < cut).count()
+        }
+        let bars = warm_run();
+        let mut suffix_moved_something = false;
+        for availability in [Availability::Absent, Availability::Present] {
+            let full = Column::build(&bars, &mut evaluator(availability));
+            assert!(full.first_swept().is_some(), "the warm run sweeps");
+            for cut in (1..bars.len()).step_by(25) {
+                let head = bars.get(..cut).expect("cut is inside the run");
+                let short = Column::build(head, &mut evaluator(availability));
+
+                let mut mutated = bars.clone();
+                for slot in mutated.iter_mut().skip(cut) {
+                    let close = slot.close.saturating_mul(4);
+                    *slot = Candle::new(
+                        slot.ts_micros,
+                        slot.open.saturating_mul(3),
+                        close.saturating_add(9_000),
+                        slot.low.saturating_div(2),
+                        close,
+                        slot.volume.saturating_mul(1_000),
+                        OI_NULL,
+                    );
+                }
+                let corrupted = Column::build(&mutated, &mut evaluator(availability));
+
+                let n = rows_before(&full, cut);
+                assert_eq!(
+                    rows_before(&short, cut),
+                    n,
+                    "absent future: rows before the cut"
+                );
+                assert_eq!(
+                    rows_before(&corrupted, cut),
+                    n,
+                    "mutated future: rows before the cut"
+                );
+                for other in [&short, &corrupted] {
+                    assert_eq!(
+                        other.bits().get(..n),
+                        full.bits().get(..n),
+                        "bits before the cut moved"
+                    );
+                    assert_eq!(
+                        other.known().get(..n),
+                        full.known().get(..n),
+                        "knowledge before the cut moved"
+                    );
+                }
+                suffix_moved_something |= corrupted.bits().get(n..) != full.bits().get(n..);
+            }
+        }
+        // Without this the test would pass on a fold that ignores its bars.
+        assert!(
+            suffix_moved_something,
+            "no mutated suffix changed any later row, so the mutation tested nothing"
+        );
+    }
+
     #[test]
     fn the_same_bars_give_the_same_column_twice() {
         // §3 rule 5, idempotence, byte for byte.

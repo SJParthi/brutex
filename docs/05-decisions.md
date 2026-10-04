@@ -58120,3 +58120,119 @@ Found by crash pass 15.
 Found by crash pass 15.
 
 - CE-83. `/store.json`, `/calendar.json`, `/logs.json` and `/indexmap.json` readers printed only the HTTP status. `web/src/lib/refusal.js` reads `error`, then `refused` (the unknown-feed answer `no_such_feed_json` gives six routes), then `refusal` (the masters routes), falls back to short plain text, and never throws; `refusalFrom` gives the route, the status and the reason, or says the route named none. The census loader also falls back to `x-brutex-census-note`, where an unreadable census puts its sentence beside an empty array. The `refused` key is left as it is on the api: renaming it would change six routes' contract to fix a reader, and the reader is now fixed.
+
+### D-1790 — The look-ahead and evaluator rows name tests that drive the production fold — 2026-10-04
+
+Found by the audit helpers' tests-docs-security pass 12 (`/mnt/project-files/zero-rounds/tests-docs-security-pass12.md`, P12-01).
+
+- V-02 to V-05 named module paths that do not exist, named tests that fold a test-local union of `CurDayFib`, `Patterns` and `SessionState` rather than the production `Evaluator`, and carried the "crate does not exist" status. They now name `indicators::...` tests under their real paths, and the status is ✓.
+- V-02 and V-03 (no look-ahead, suffix independence) rest on the new `indicators::column::tests::every_row_before_a_cut_ignores_an_absent_or_mutated_future`. It runs `Column::build` through the real `Evaluator` under both volume availabilities. At every 25th cut of the 3,000-bar warm run it builds the prefix alone and the run with every later bar replaced. Every row sourced before the cut must match the full column in bits and knowledge. It also checks that some later row did change, so the mutation is not a no-op.
+- V-04 (a daily series sets no time-of-day or VWAP bit) rests on the new `indicators::invariants::a_daily_bar_series_sets_no_time_of_day_or_vwap_bit`. It feeds 260 bars stamped 00:00 IST through the production fold under both availabilities. The truth bits for 44 to 47 and every VWAP position stay clear. The VWAP knowledge bits stay clear. The 44 to 47 knowledge bits are set, meaning "known false"; that was measured, and the row says so. An intraday control sets a time-of-day bit and 52/53, so the test cannot pass by setting nothing.
+- `daily_mask_clears` is now described as the Absent half only.
+- The older union-fold tests stay. Their limit, and the 25-bar stride with its EXTRAPOLATED every-cut cost, is recorded in `docs/06-limits.md`.
+
+### D-1791 — Every ✓ row names its proof; rows with none say so — 2026-10-04
+
+Found by pass 12, P12-02.
+
+About 30 ✓ rows named a code pointer, a count or a prose claim instead of a test. Each was handled one of three ways.
+
+**Rewritten to name an existing test** (still ✓). SW-29, SF-11, MR-31, MR-32, MR-34, RF-04, RJ-01, SG-02, OV-02, OV-03, GR-01 to GR-04 (GR-04 names `web/tests/live-progress.test.js`), GR-06, HZ-02, HZ-03, AS-02, AS-04, LV-02, LV-04, SW-22, RC-03, MR-37, and S-04, S-07, S-09 (moved from — to ✓).
+
+**Given a new test.** Each test below was written for its row:
+- BT-12: `api::operation_audit::tests::the_backtest_page_is_not_a_registered_route_and_its_json_is`.
+- SW-14: `api::sweeprun::tests::an_unstamped_press_is_refused_before_the_slot_and_never_reads_as_busy`.
+- LG-05: `api::logs::tests::completeness_flags_merge_in_the_direction_that_cannot_over_promise`. This needed `both_halves` to delegate the merge to a new pure `api::logs::merged`. Behaviour is unchanged.
+- SF-13:
+  - `api::sweeprun::tests::a_derived_threshold_is_null_on_the_wire_and_never_a_zero`.
+  - `cli::derived_floor_tests::a_derived_threshold_is_named_derived_and_a_fixed_one_is_named_fixed`.
+- SF-14: `cli::derived_floor_tests::the_stop_ceiling_and_the_listing_bound_cannot_move_the_floor`.
+- RF-02: `cli::derived_floor_tests::a_flat_forward_window_is_a_win_for_neither_side`.
+- RJ-02: `cli::frontier::tests::another_format_version_is_refused_and_left_untouched`.
+- GR-05: `cli::tests::an_unreadable_frontier_costs_only_its_own_half_of_the_report`.
+
+BT-12 is ◐: the test pins the production route table, but nothing tests that `web/svelte.config.js`'s `SERVER_RENDERED` set leaves `/backtest` out.
+
+**Marked ◐ or ✗.**
+- MR-27, WF-04 and CIG-21 are ◐: they are exercised by hand or only in part.
+- SD-04, WF-02, WF-03, OV-04, AS-07, AS-11, AS-14 and AS-18 are ✗ with "NO TEST (P12-02)". This pass did not write a test that would prove them, and a ✓ with nothing behind it is the defect being fixed.
+
+The legend now says ✗ also marks a row that names no test.
+
+### D-1792 — The masters-run credential and log-level rows get their own tests — 2026-10-04
+
+Found by pass 12, P12-02 (MR-15, MR-22).
+
+- MR-15 ("the credentialed leg reaches a source only through the public ladder") cited code. It now names `api::mastersrun::tests::the_credentialed_leg_reaches_a_source_only_through_the_public_ladder`, a source-shape test over the leg's body.
+- MR-22 ("every outcome is logged at the level its consequence earns") named nothing. It now names `api::mastersrun::tests::every_outcome_is_logged_at_the_level_its_consequence_earns`. That test drives `record` with each attempt, fetch and verdict outcome, plus each landed variant, and reads the emitted level back through the telemetry sink.
+
+### D-1793 — AS-09 names every selector-codec test, and the runner's identity byte is pinned by value — 2026-10-04
+
+Found by pass 12, P12-04.
+
+AS-09 said all six selector codecs pin their tags as literals. The named test pinned one tag, and the identity-bearing runner codec was pinned nowhere. Four tests now cover them:
+- `runner::exit_grid_policy::tests::the_identity_selector_byte_keeps_its_four_literal_tags` asserts the literals 1 to 4. It also asserts four pairwise-distinct `policy().digest()` values with only the selector varied, so a renumbering re-keys runs visibly.
+- `cli::candidate_universe::boolean_candidate_v1::grid_context::tests::every_selector_word_is_pinned_by_value_on_both_sides` pins 0 to 3 on encode at its byte offset, and on decode by writing each tag in.
+- `every_exit_grid_selector_tag_the_encoder_writes_is_admitted`, in both `cli::execution_v3` and `cli::execution_v4`, now walks literal (selector, tag) pairs 1 to 4 instead of a single OperatorRule check.
+
+The row's DECODE clause was corrected to what the decoders do, and it names all of these tests.
+
+### D-1794 — S-29 describes four known geometries, and only the bar pair shares a stride — 2026-10-04
+
+Found by pass 12, P12-05.
+
+S-29 still described three bar/sidecar geometries at bar version 2. `Layout::KNOWN` holds four, and two of them share a stride by exemption. The row now says four rows and three distinct geometries. It names the new `store::geometry::every_known_geometry_has_its_own_magic_and_version_and_only_the_bar_pair_shares_a_stride`, which asserts:
+- the length is 4;
+- magic and version are pairwise distinct;
+- the only pair of rows sharing a stride is `(2, 3)`.
+
+The comment in `crates/store/tests/unit.rs` that counted three was corrected.
+
+### D-1795 — BA-05 stops citing a missing dependency and names a test for per-month events — 2026-10-04
+
+Found by pass 12, P12-06.
+
+BA-05's ✓ proof cited "`cli` declares no `telemetry` dependency", which has been false since D-0226. The row now:
+- says `cli` does declare `telemetry`;
+- rests the loop-freedom half on gate 17's silenced list (`vocab engine indicators runner`);
+- names the new `cli::batch::stored_tests::a_whole_store_sweep_emits_one_progress_event_per_instrument_month_not_per_bar`.
+
+That test sweeps a three-instrument store (NIFTY, BANKNIFTY, RELIANCE at 5min) and checks:
+- there is one "stored month swept" event per printed identity;
+- each event's bar count is above 1;
+- total events are fewer than bars.
+
+### D-1796 — HZ-01 states the exact-deadline horizon `horizon_bar` now implements — 2026-10-04
+
+Found by pass 12, P12-03.
+
+HZ-01 described a removed behaviour, and it named no test, so gate 10 could not notice. It now states the exact-deadline rule and names two tests:
+- `runner::trade::tests::a_hold_does_not_run_across_an_intraday_halt`;
+- `runner::trade::clock_contract_tests::horizon_lookup_requires_positive_cadence_exact_actual_timestamp_and_present_index`.
+
+### D-1797 — A docs/04 proof that CI skips by name says so — 2026-10-04
+
+Found by pass 12, P12-07.
+
+The captured-vocabulary row in the front-end table named `vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses` in `web/saved-backtest/viewer.rs` as its proof, but that test returns `Err` unless `BRUTEX_VIEWER_TEST_VOCABULARY` names an operator-captured file, and gate 6d skips it by name (D-1607). The row now says so: no CI run executes it.
+
+### D-1798 — Four CLAUDE.md invariants get rows: X-19 to X-22 — 2026-10-04
+
+Found by pass 12, P12-08. These are invariants `CLAUDE.md` states that had no row in docs/04. The rows were added after X-18:
+- X-19: the swept crates are pinned by gate 24.
+- X-20: the generated and stored provenance banners make opposite claims. Proof: `cli::tests::the_generated_and_stored_banners_make_opposite_claims`.
+- X-21: `NSE-INDIAVIX` never enters the condition vocabulary. Proof: the new `vocab::table::no_condition_names_the_volatility_index`.
+- X-22: no equity result can reach Selection V6. Proof: the new `cli::execution_v4::tests::no_family_tag_names_an_equity_so_none_can_reach_selection_v6`. It asserts that every byte from 0 to 255 decodes to NIFTY, BANKNIFTY or nothing. The population-side half was not written, because `InstrumentFamilyV1::from_byte` is private to its module.
+
+### D-1799 — Gate 10 refuses a ✓ row that names no proof — 2026-10-04
+
+Found by pass 12, P12-02 (the gate half).
+
+`.github/invariant_paths.rs` now reads the status cell of every `docs/04-invariants.md` row. It refuses a ✓ row whose proof cell names none of these:
+- a CI gate by number;
+- a front-end `.test.js` file;
+- a backticked token whose last segment is a function some tracked source declares, with three or more segments, or two or more underscores.
+
+The `.github/workflows/ci.yml` gate 10 comment says so. Every current row passes; the unit test is `a_tick_row_must_name_a_test_a_gate_or_a_front_end_test_file`.
+
+The check cannot tell a test function from a production one, and it cannot judge whether a named proof proves the row. That limit is recorded in `docs/06-limits.md`.

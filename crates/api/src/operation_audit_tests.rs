@@ -790,3 +790,21 @@ fn the_journals_per_request_growth_is_stated_in_the_limits() {
         assert_eq!(route, route.to_lowercase(), "compared lower-cased");
     }
 }
+
+/// BT-12 (P12-02, D-1791): `/backtest` is NOT a registered route and
+/// `/backtest.json` is. A registered route beats the router's fallback
+/// unconditionally, so a Rust page at `/backtest` would make a click and a
+/// reload render two different applications. Read off the same production
+/// route table `every_registered_route_is_audited_or_exempt_by_name` reads.
+#[test]
+fn the_backtest_page_is_not_a_registered_route_and_its_json_is() {
+    let routes = registered_routes();
+    assert!(
+        routes.iter().any(|route| route == "/backtest.json"),
+        "the parser found the table: {routes:?}"
+    );
+    assert!(
+        !routes.iter().any(|route| route == "/backtest"),
+        "`/backtest` belongs to the front end's fallback: {routes:?}"
+    );
+}
