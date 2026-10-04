@@ -16336,21 +16336,71 @@ fn request_bounds_refusal(
 /// `member` is the ticked instruments of a pull; `leg` is one leg of a press.
 const MULTI_VALUED_FORM_FIELDS: [&str; 2] = ["member", "leg"];
 
-/// The first form-body key that appears twice and is not a list field, or
+/// The most distinct non-list keys one form body may name.
+///
+/// The `param`/`params` readers in this crate together name 42 distinct
+/// fields, so a form any handler reads in full stays under it. The bound is what keeps
+/// [`form_fault`]'s set a constant size: it was sized from the body's `&`
+/// count, so a 27.3 MB `/pull/run` body of `&` reserved about 570 MB before a
+/// key was read (P5-05, D-2703). Past this many the body is refused by name.
+const MAX_DISTINCT_FORM_KEYS: usize = 64;
+
+/// Why [`one_value_per_form_field`] refuses a form body.
+#[derive(Debug, PartialEq, Eq)]
+enum FormFault<'a> {
+    /// The first non-list key that appears twice.
+    Repeated(&'a str),
+    /// More than [`MAX_DISTINCT_FORM_KEYS`] distinct non-list keys.
+    TooManyFields,
+}
+
+/// The first reason a form body cannot be read one value per field, or
 /// `None`. The query rule ([`repeated_query_key`]) for the body.
-fn repeated_form_key(body: &str) -> Option<&str> {
-    let mut seen = std::collections::HashSet::with_capacity(
-        body.bytes()
-            .filter(|b| *b == b'&')
-            .count()
-            .saturating_add(1),
-    );
-    body.split('&')
+///
+/// The set is reserved at [`MAX_DISTINCT_FORM_KEYS`] and never grows: a key
+/// that would make it larger is refused instead of inserted, so the memory is
+/// constant whatever the body holds. O(body) time, once per request.
+fn form_fault(body: &str) -> Option<FormFault<'_>> {
+    form_fault_within(
+        body,
+        &mut std::collections::HashSet::with_capacity(MAX_DISTINCT_FORM_KEYS),
+    )
+}
+
+/// [`form_fault`] over a set the caller reserved, so a test can prove the set
+/// never grows past its reservation.
+fn form_fault_within<'a>(
+    body: &'a str,
+    seen: &mut std::collections::HashSet<&'a str>,
+) -> Option<FormFault<'a>> {
+    for key in body
+        .split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
         .filter(|key| !MULTI_VALUED_FORM_FIELDS.contains(key))
-        .find(|key| !seen.insert(*key))
+    {
+        if seen.contains(key) {
+            return Some(FormFault::Repeated(key));
+        }
+        if seen.len() == MAX_DISTINCT_FORM_KEYS {
+            return Some(FormFault::TooManyFields);
+        }
+        seen.insert(key);
+    }
+    None
 }
+
+/// The routes whose handler decodes its body as one JSON object
+/// (`crate::sweeprun::wire_body`) and reads no form field.
+///
+/// JSON-ness is decided by the ROUTE, not by the request (P5-06, D-2703). It
+/// was decided by a client-chosen `Content-Type` containing `json` or a body
+/// starting with `{` or `[`, while every form handler parses its `String`
+/// body as a form whatever it is labelled. `text/plain; x=json` or a `{=&`
+/// prefix therefore carried `action=stop&action=start` past the check to a
+/// first-match-wins reader. Proven by
+/// `api::server::a_form_labelled_or_shaped_as_json_is_still_checked`.
+const JSON_BODY_ROUTES: [&str; 3] = ["/backtest/run", "/backtest/descend", "/engine/command"];
 
 /// The body bound [`one_value_per_form_field`] reads within, by route.
 ///
@@ -16382,9 +16432,11 @@ fn form_read_bound(path: &str) -> usize {
 /// with no such check, so `vendor=dhan&vendor=groww` pulled Dhan,
 /// `action=stop&action=start` stopped, and the second value, even an invalid
 /// one, was never read, on the very routes that spend vendor quota. The body is
-/// read here once, within [`MAX_FORM_BYTES`] (the bound `DefaultBodyLimit`
-/// already gave every handler, answered with the same `413` past it), checked,
-/// and handed on unchanged. A JSON body is not a form and is passed through.
+/// read here once, within [`form_read_bound`] (the bound each route's
+/// `DefaultBodyLimit` already gave its handler, answered with the same `413`
+/// past it), checked, and handed on unchanged. A body on one of the
+/// [`JSON_BODY_ROUTES`] is not a form and is passed through; on every other
+/// route the body is checked however it is labelled (D-2703).
 ///
 /// O(body) once per request, bounded by [`form_read_bound`].
 async fn one_value_per_form_field(
@@ -16414,29 +16466,32 @@ async fn one_value_per_form_field(
         )
             .into_response();
     };
-    let json = parts
-        .headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
-        || matches!(bytes.trim_ascii_start().first(), Some(b'{' | b'['));
+    let json = JSON_BODY_ROUTES.contains(&parts.uri.path());
     if !json
         && let Ok(text) = std::str::from_utf8(&bytes)
-        && let Some(key) = repeated_form_key(text)
+        && let Some(fault) = form_fault(text)
     {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            format!(
+        let said = match fault {
+            FormFault::Repeated(key) => format!(
                 "REFUSED — the form names {:?} more than once. Every field this \
                  server reads from a form is read once, so a second value would \
                  be silently ignored; send each field once. Nothing was read or \
                  run.\n",
                 note_alphabet(key)
             ),
+            FormFault::TooManyFields => format!(
+                "REFUSED — the form names more than {MAX_DISTINCT_FORM_KEYS} \
+                 distinct fields, and no form this server reads has that many. \
+                 Nothing was read or run.\n"
+            ),
+        };
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            said,
         )
             .into_response();
     }
@@ -23990,15 +24045,122 @@ mod tests {
             assert!(!listed.contains("more than once"), "{listed}");
         })
         .await;
+        assert_eq!(form_fault("a=1&b=2&member=x&member=y&leg=1&leg=2"), None);
+        assert_eq!(form_fault("a=1&&b=2&a"), Some(FormFault::Repeated("a")));
         assert_eq!(
-            repeated_form_key("a=1&b=2&member=x&member=y&leg=1&leg=2"),
-            None
+            form_fault("action=stop&action=start"),
+            Some(FormFault::Repeated("action"))
         );
-        assert_eq!(repeated_form_key("a=1&&b=2&a"), Some("a"));
+    }
+
+    /// P5-05, D-2703: THE REPEATED-FIELD SET IS A CONSTANT SIZE. It was
+    /// reserved at one bucket per `&` byte, so a 27.3 MB `/pull/run` body of
+    /// `&` reserved about 570 MB before a key was read. It is now reserved at
+    /// `MAX_DISTINCT_FORM_KEYS`, never grows, and a body naming more distinct
+    /// non-list keys than that is refused by name.
+    #[test]
+    fn the_form_field_set_is_constant_and_too_many_fields_are_refused() {
+        let keys = |count: usize| {
+            (0..count)
+                .map(|i| format!("k{i}=1"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let at_bound = keys(MAX_DISTINCT_FORM_KEYS);
+        assert_eq!(form_fault(&at_bound), None);
+        let past = keys(MAX_DISTINCT_FORM_KEYS + 1);
+        assert_eq!(form_fault(&past), Some(FormFault::TooManyFields));
+        // A repeat inside the bound is still named as a repeat.
         assert_eq!(
-            repeated_form_key("action=stop&action=start"),
-            Some("action")
+            form_fault(&format!("{at_bound}&k0=2")),
+            Some(FormFault::Repeated("k0"))
         );
+        // List fields never count against the bound.
+        let listed = format!("{at_bound}&{}", "member=x&leg=y&".repeat(500));
+        assert_eq!(form_fault(&listed), None);
+        let flood = "&".repeat(crate::pullrun::MAX_RUN_FORM_BYTES);
+        let many = keys(10_000);
+        for body in [flood.as_str(), many.as_str(), listed.as_str()] {
+            let mut seen = std::collections::HashSet::with_capacity(MAX_DISTINCT_FORM_KEYS);
+            let reserved = seen.capacity();
+            let _ = form_fault_within(body, &mut seen);
+            assert_eq!(
+                seen.capacity(),
+                reserved,
+                "the set grew past its reservation"
+            );
+            assert!(seen.len() <= MAX_DISTINCT_FORM_KEYS, "{}", seen.len());
+        }
+    }
+
+    /// P5-06, D-2703: A FORM IS CHECKED HOWEVER IT IS LABELLED. JSON-ness was
+    /// read from the request -- a `Content-Type` containing `json`, or a body
+    /// starting with `{` -- while every form handler parses its body as a form
+    /// regardless, first match wins. Both shapes now reach the check; only the
+    /// three routes whose handler decodes JSON skip it.
+    #[tokio::test]
+    async fn a_form_labelled_or_shaped_as_json_is_still_checked() {
+        let fno = "underlying=NIFTY&underlying=BANKNIFTY&series=fut&expiry=2020-01-30\
+                   &from=2020-01-01&to=2020-01-30";
+        with_server("jsonlabel", |addr| async move {
+            let host = format!("localhost:{}", addr.port());
+            let same = "Sec-Fetch-Site: same-origin\r\n";
+            // The client's own label comes first, so it is the one read.
+            let labelled = post_as(
+                addr,
+                "/pull/fno",
+                fno,
+                &host,
+                &format!("Origin: http://{host}\r\n{same}Content-Type: text/plain; x=json\r\n"),
+            )
+            .await;
+            assert!(labelled.starts_with("HTTP/1.1 400"), "{labelled}");
+            assert!(
+                labelled.contains("the form names \"underlying\" more than once"),
+                "{labelled}"
+            );
+            let shaped = post(addr, "/pull/fno", &format!("{{=&{fno}")).await;
+            assert!(
+                shaped.contains("the form names \"underlying\" more than once"),
+                "{shaped}"
+            );
+            let crowded = post(
+                addr,
+                "/pull/fno",
+                &(0..=MAX_DISTINCT_FORM_KEYS)
+                    .map(|i| format!("k{i}=1"))
+                    .collect::<Vec<_>>()
+                    .join("&"),
+            )
+            .await;
+            assert!(crowded.starts_with("HTTP/1.1 400"), "{crowded}");
+            assert!(
+                crowded.contains(&format!(
+                    "more than {MAX_DISTINCT_FORM_KEYS} distinct fields"
+                )),
+                "{crowded}"
+            );
+            // A JSON route is never read as a form, whatever its body holds or
+            // however it is labelled: the decision is the route's.
+            for path in JSON_BODY_ROUTES {
+                let answer = post_as(
+                    addr,
+                    path,
+                    "a=1&a=2",
+                    &host,
+                    &format!("Origin: http://{host}\r\n{same}Content-Type: text/plain\r\n"),
+                )
+                .await;
+                assert!(!answer.contains("the form names"), "{path}: {answer}");
+                // And its handler is the JSON decoder: a form is not the one
+                // object it reads, and it says so.
+                assert!(
+                    answer.contains("must be one complete JSON object"),
+                    "{path}: {answer}"
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -28193,9 +28355,17 @@ mod tests {
     /// `autopilot`'s tests, which drive `take_seat` and `take_every_seat`
     /// against each other directly.
     /// audit-20261003 o1surface2-3, D-1589: A LANDING DOES NOT HOLD THE ONLY
-    /// WORKER. On a one-worker multi-thread runtime, a task doing 400 ms of
-    /// blocking store work through `off_the_workers` leaves another task free
-    /// to run; inline, that task would wait the full 400 ms.
+    /// WORKER. On a one-worker multi-thread runtime, a task blocked in store
+    /// work through `off_the_workers` leaves another task free to run.
+    ///
+    /// A HANDSHAKE, NOT A STOPWATCH (P5-07, D-2704). This asserted that the
+    /// other task answered within 300 ms of a 400 ms blocking sleep, so a
+    /// loaded host could fail it with the fix in place. Now the blocking work
+    /// waits for a signal that only the other task sends: run through
+    /// `block_in_place` the other task runs and the wait ends at once; run
+    /// inline it holds the only worker, the other task never runs, and the
+    /// wait times out. The 30 s timeout is the failure, never a threshold a
+    /// passing run races.
     #[test]
     fn blocking_landing_work_leaves_the_runtime_answering() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -28204,20 +28374,26 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let began = std::time::Instant::now();
-            let landing = tokio::spawn(async {
-                off_the_workers(|| std::thread::sleep(std::time::Duration::from_millis(400)));
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let landing = tokio::spawn(async move {
+                off_the_workers(move || {
+                    entered_tx.send(()).unwrap();
+                    go_rx.recv_timeout(std::time::Duration::from_secs(30))
+                })
             });
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let answered = tokio::spawn(async { std::time::Instant::now() })
-                .await
+            // The landing is blocked in its work before the other task exists,
+            // so the other task can only run beside it, never before it.
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(30))
                 .unwrap();
-            assert!(
-                answered.duration_since(began) < std::time::Duration::from_millis(300),
-                "another task waited {:?} behind a landing",
-                answered.duration_since(began)
+            let other = tokio::spawn(async move { go_tx.send(()) });
+            assert_eq!(
+                landing.await.unwrap(),
+                Ok(()),
+                "another task could not run while a landing blocked"
             );
-            landing.await.unwrap();
+            other.await.unwrap().unwrap();
         });
         // And both landing calls in `land_spot` go through it.
         let source = include_str!("server.rs");
@@ -28232,30 +28408,38 @@ mod tests {
     /// client disconnects); the work it started still runs to its end and
     /// still does what follows its last await — which for a real pull is the
     /// audit record, the run-id release and the "now fetching" reset.
+    ///
+    /// ORDERED BY SIGNALS, NOT BY SLEEPS (P5-07, D-2704). This raced a 20 ms
+    /// timeout against a 200 ms sleep, so a runtime starved for 180 ms failed
+    /// it with the fix in place. Now the work waits on a gate the test opens
+    /// only after the route is dropped: the route is polled once (which starts
+    /// the work), proven pending, dropped, and only then is the gate opened. A
+    /// route that ran the work inline drops it with the route and the flag is
+    /// never set; the 30 s timeout is the failure, never a threshold.
     #[tokio::test]
     async fn a_dropped_pull_route_does_not_cancel_the_pull() {
-        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = std::sync::Arc::clone(&finished);
-        let route = detached_pull("Spot pull", async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let finished = std::sync::Arc::new(tokio::sync::Notify::new());
+        let done = std::sync::Arc::clone(&finished);
+        let (gate, opened) = tokio::sync::oneshot::channel::<()>();
+        let mut route = Box::pin(detached_pull("Spot pull", async move {
+            let _ = opened.await;
+            done.notify_one();
             (axum::http::StatusCode::OK, String::from("done"))
-        });
-        // The client goes away 20 ms in: the route's future is dropped.
-        let cut = tokio::time::timeout(std::time::Duration::from_millis(20), route).await;
+        }));
+        // One poll starts the work; the gate is shut, so it cannot finish.
+        let polled =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(route.as_mut().poll(cx).is_pending()))
+                .await;
+        assert!(polled, "the route had not finished when it was dropped");
+        // The client goes away: the route's future is dropped.
+        drop(route);
         assert!(
-            cut.is_err(),
-            "the route had not finished when it was dropped"
+            gate.send(()).is_ok(),
+            "dropping the route cancelled the pull it started"
         );
-        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
-        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !finished.load(std::sync::atomic::Ordering::SeqCst) {
-            assert!(
-                tokio::time::Instant::now() < until,
-                "dropping the route cancelled the pull it started"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), finished.notified())
+            .await
+            .expect("the pull ran to its end after its route was dropped");
     }
 
     /// A pull task that panics is a 500 that says bars may have been written —

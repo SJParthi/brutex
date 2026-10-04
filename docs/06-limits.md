@@ -14145,10 +14145,19 @@ bounds are all nonzero.
   retained log in about seven hours; it can no longer do so in seconds. The
   ration is one process-wide mutex take per failed request: O(1).
 - **Every non-GET request body is read once before its handler (D-1587)** to
-  refuse a form field named twice: O(body), bounded by `MAX_FORM_BYTES`
-  (8 KiB), the same bound `DefaultBodyLimit` already put on every handler. A
-  JSON body (by `Content-Type` or a leading `{`/`[`) is passed through
-  unchecked. `member` and `leg` are list fields and may repeat.
+  refuse a form field named twice: O(body), bounded by `form_read_bound`, the
+  same bound each route's `DefaultBodyLimit` puts on its handler: `MAX_FORM_BYTES`
+  (8 KiB) on most routes, `ingest::MAX_MEMBER_FORM_BYTES` on `/ingest/queue`
+  and `/pull/spot`, and `pullrun::MAX_RUN_FORM_BYTES` (27,347,836 bytes) on
+  `/pull/run` and `/pull/recovery` (D-1592, D-1769). The key set is reserved
+  at `MAX_DISTINCT_FORM_KEYS` (64) and never grows; a body naming more distinct
+  non-list keys is refused. It was reserved at one bucket per `&` byte, about
+  570 MB for a 27.3 MB body of `&` (P5-05, D-2703). Only the three routes whose
+  handler decodes JSON (`/backtest/run`, `/backtest/descend`,
+  `/engine/command`) skip the check; a request's `Content-Type` or leading
+  `{`/`[` no longer does (P5-06, D-2703). `member` and `leg` are list fields
+  and may repeat. (This bullet said the read was bounded by `MAX_FORM_BYTES`
+  after D-1769 widened it.)
 - **Shutdown waits at most `server::SHUTDOWN_GRACE` (10 s) for engine tasks
   (D-1582).** A sweep, descent or command still running then is abandoned
   with the process — named on stderr and in the log — and its invocation
