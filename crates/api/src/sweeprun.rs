@@ -1339,7 +1339,10 @@ const ABNORMAL_END: &str = "the engine task stopped abnormally before it recorde
 /// Constructing this guard before the closure is handed to Tokio covers both
 /// failure windows: a panic while the closure runs, and a runtime shutdown that
 /// drops a queued closure before it starts. In either case the captured guard
-/// is dropped and an in-flight slot becomes a visible refusal.
+/// is dropped and an in-flight slot becomes a visible refusal. The panic window
+/// exists only where a panic unwinds (`dev`, `test`); `release` sets
+/// `panic = "abort"`, so there a panic ends the process instead (poison-1,
+/// D-1771).
 ///
 /// # Why normal completion disarms rather than relying on the slot
 ///
@@ -1692,8 +1695,10 @@ pub fn apply_knobs(asked: &Asked) -> Applied {
 /// screen cap, support floor and validation setting. A run steered by settings
 /// nobody chose, with an audit line naming a different request's.
 ///
-/// `Drop` runs during unwinding, so this holds on every exit: normal return,
-/// early return, and panic.
+/// `Drop` runs on normal and early return in every build, and during unwinding
+/// where a panic unwinds (`dev`, `test`). `release` sets `panic = "abort"`, so
+/// there a panic ends the process and no later request exists to inherit the
+/// knobs (poison-1, D-1771).
 #[must_use = "the guard must be held for the run, not dropped immediately"]
 pub struct Applied;
 
@@ -2561,7 +2566,24 @@ fn status_tail(
     } else {
         query
     };
-    telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query)
+    settled_tail(|| telemetry::tail(dir, telemetry::DEFAULT_KEEP_FILES, &query))
+}
+
+/// One read, and one more only when the first ended on a partial line.
+///
+/// A partial last line is what a reader sees while the CLI is inside the
+/// `write` of its newest record. Counted as damage on one read, it refused a
+/// browser launch and turned `/backtest/run.json` to `unknown` for no fault at
+/// all (conc9-2, D-1774). A torn line left by a writer that DIED is still
+/// there on the second read (only the next writer to open terminates it), so
+/// it still refuses: that fragment may be a newer marker, which is why
+/// `partial_tail` is a fault. The second read narrows the window to a write
+/// that spans both reads; it does not close it, and no lock is taken to close
+/// it, because probing `events.lock` would refuse a CLI that opens its sink at
+/// that instant. At most two bounded reads.
+fn settled_tail(read: impl Fn() -> telemetry::Tail) -> telemetry::Tail {
+    let first = read();
+    if first.partial_tail { read() } else { first }
 }
 
 fn tail_fault(tail: &telemetry::Tail) -> Option<String> {
@@ -6735,6 +6757,50 @@ mod tests {
         latest.dropped_fields = 1;
         assert!(super::tail_fault(&tail).is_some());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// conc9-2: a partial last line seen once is re-read, and only one still
+    /// there on the second read counts as damage.
+    #[test]
+    fn a_line_being_written_is_reread_and_a_torn_one_still_refuses() {
+        let partial = telemetry::Tail {
+            partial_tail: true,
+            ..telemetry::Tail::default()
+        };
+        let whole = telemetry::Tail::default();
+        let reads = std::cell::Cell::new(0_u8);
+        let settled = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                partial.clone()
+            } else {
+                whole.clone()
+            }
+        });
+        assert_eq!(reads.get(), 2, "a partial tail is read once more");
+        assert!(
+            super::tail_fault(&settled).is_none(),
+            "the finished write is no fault"
+        );
+
+        reads.set(0);
+        let torn = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            partial.clone()
+        });
+        assert_eq!(reads.get(), 2);
+        assert!(
+            super::tail_fault(&torn).is_some(),
+            "a torn tail still refuses"
+        );
+
+        reads.set(0);
+        let clean = super::settled_tail(|| {
+            reads.set(reads.get() + 1);
+            whole.clone()
+        });
+        assert_eq!(reads.get(), 1, "a whole tail is read once");
+        assert!(super::tail_fault(&clean).is_none());
     }
 
     /// **A sweep marker inside the scanned window is the answer, however large

@@ -546,6 +546,18 @@ fn json_of(
     out
 }
 
+/// Whether the banner and `/logs.json`'s `loud` must speak.
+///
+/// Wider than [`telemetry::Health::is_loud`], which stays "were events lost"
+/// because the dropped-events note keys on it. A held clock and a standing
+/// `last_error` lose no event, but each is something the operator must be told:
+/// `clock_held` was counted and rendered nowhere, so after a clock jump every
+/// event kept a frozen time while the page said "Sink healthy", and
+/// `last_error` was shown only beside a loss (conc9-3, D-1774).
+const fn banner_is_loud(h: &telemetry::Health) -> bool {
+    h.is_loud() || h.clock_held > 0 || h.last_error.is_some()
+}
+
 /// The WRITE side of the log, as JSON. `null` when this process has no sink.
 fn sink_json(health: Option<&telemetry::Health>) -> String {
     let Some(h) = health else {
@@ -554,14 +566,15 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"loud":{},"last_error":{}}}"#,
+        r#"{{"written":{},"dropped":{},"rotations":{},"rotation_failures":{},"current_bytes":{},"next_seq":{},"clock_held":{},"loud":{},"last_error":{}}}"#,
         h.written,
         h.dropped,
         h.rotations,
         h.rotation_failures,
         h.current_bytes,
         h.next_seq,
-        h.is_loud(),
+        h.clock_held,
+        banner_is_loud(h),
         h.last_error
             .as_deref()
             .map_or_else(|| "null".to_owned(), render::json_string),
@@ -871,14 +884,30 @@ fn health_banner(health: Option<&telemetry::Health>) -> String {
                 server names the reason on stdout at startup.</p>"
             .to_owned();
     };
-    if !h.is_loud() {
+    if !banner_is_loud(h) {
         return format!(
             "<p class=\"lead\">Sink healthy · {} written · 0 dropped · {} \
              rotation(s) · {} byte(s) in the current file.</p>",
             h.written, h.rotations, h.current_bytes,
         );
     }
-    let mut out = String::from("<p class=\"halt\"><b>The log is incomplete</b>");
+    let mut out = String::from(if h.is_loud() {
+        "<p class=\"halt\"><b>The log is incomplete</b>"
+    } else if h.clock_held > 0 {
+        "<p class=\"halt\"><b>The log's clock is held</b>"
+    } else {
+        "<p class=\"halt\"><b>The sink reported a failure</b>"
+    });
+    if h.clock_held > 0 {
+        let _ = write!(
+            out,
+            "{} event(s) read a clock BEHIND the last one written and were \
+             stamped at that later instant instead, so their times on this page \
+             are not when they happened, and a stale-run check reading them \
+             may see a dead run as live. ",
+            h.clock_held,
+        );
+    }
     if h.dropped > 0 {
         let _ = write!(
             out,
@@ -2050,6 +2079,34 @@ mod tests {
             "{page}"
         );
         assert!(page.contains("rename refused"), "{page}");
+    }
+
+    /// conc9-3: a held clock and a standing last error each make the banner
+    /// and `/logs.json` speak, though no event was lost.
+    #[test]
+    fn a_held_clock_and_a_standing_error_are_shown() {
+        let mut held = health(0, 0, None);
+        held.clock_held = 3;
+        let page = health_banner(Some(&held));
+        assert!(
+            page.contains("clock is held") && page.contains("3 event(s)"),
+            "{page}"
+        );
+        assert!(!page.contains("Sink healthy"), "{page}");
+        let json = sink_json(Some(&held));
+        assert!(
+            json.contains(r#""clock_held":3"#) && json.contains(r#""loud":true"#),
+            "{json}"
+        );
+
+        let erred = health(0, 0, Some("floor resumed ahead of the clock"));
+        let page = health_banner(Some(&erred));
+        assert!(page.contains("reported a failure"), "{page}");
+        assert!(page.contains("floor resumed ahead of the clock"), "{page}");
+
+        let quiet = health(0, 0, None);
+        assert!(health_banner(Some(&quiet)).contains("Sink healthy"));
+        assert!(sink_json(Some(&quiet)).contains(r#""loud":false"#));
     }
 
     fn health(dropped: u64, rotation_failures: u64, last_error: Option<&str>) -> telemetry::Health {

@@ -163,6 +163,23 @@ fn credential_config_absent_halts() {
     assert_eq!(empty, ConfigError::MissingKey { key: "org" });
 }
 
+/// CE-77, D-1780: a byte-order mark is refused by name, before line 1 is read.
+/// The same text without it parses, so the mark alone is the reason.
+#[test]
+fn a_byte_order_mark_is_refused_by_name() {
+    let marked = format!("\u{feff}{CONFIG}");
+    assert_eq!(
+        CredentialConfig::parse(&marked),
+        Err(ConfigError::ByteOrderMark)
+    );
+    assert!(CredentialConfig::parse(CONFIG).is_ok());
+    assert!(
+        ConfigError::ByteOrderMark
+            .to_string()
+            .contains("byte-order mark")
+    );
+}
+
 /// P-08 — the configuration supplies path segments only.
 #[test]
 fn credential_config_rejects_secret_value() {
@@ -823,6 +840,7 @@ fn every_config_error_prints_something_distinct() {
         },
         ConfigError::TooLarge { at_least: 1 },
         ConfigError::LineTooLong { line: 1, len: 2 },
+        ConfigError::ByteOrderMark,
         ConfigError::Unparseable { line: 1 },
         ConfigError::UnknownTable { line: 1 },
         ConfigError::UnknownVendor { line: 1 },

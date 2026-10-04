@@ -69,6 +69,9 @@
 //! Opening reads the whole file once, O(rows), to learn where each block starts.
 //! That is the same trade [`crate::results`] already makes for its duplicate
 //! check, and it happens once per process rather than once per question.
+//! For the writer that holds because `cli` keeps one handle per process and
+//! refreshes it by the delta (`with_cached_handle` in `lib.rs`); until p12num-1
+//! (D-1777) every recorded run reopened it, Θ(rows) per run.
 //! A read-only [`Frontier::of_run`] also opens/indexes `runs.bin` and
 //! `detail-sets.bin` to prove public commit and exact cardinality. On a fresh
 //! HTTP handle that proof is O(total ledger rows + total receipts), before the
@@ -238,11 +241,12 @@ const HEADER_RESERVED: core::ops::Range<usize> = 12..HEADER_BYTES;
 ///
 /// # Every field is either the key or something a comparison needs
 ///
-/// There is no P&L here and that is deliberate. A frontier row records what the
-/// SWEEP found — the combination, how often it fired, and the two statistics the
-/// cut can be made on. What a trade of it would have earned is the exit grid's
-/// answer and lives on [`crate::results::Record`], one per run, because the grid
-/// is only ever run on the chosen combination.
+/// A frontier row records what the SWEEP found — the combination, how often it
+/// fired, and the statistics the cut can be made on — AND the chosen exit-grid
+/// cell's raw money fields (`trades`, `cell_wins`, `pessimistic`, `worst_trade`,
+/// `max_drawdown`, `min_win`), which are zero when that cell traded nothing.
+/// This said "there is no P&L here"; the money fields were added and the
+/// sentence was not removed (Z1-slice18-F2, D-1771).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
     /// Which run this row belongs to — the nine-term identity §3 rule 3 names.
@@ -1727,7 +1731,8 @@ fn index_of(file: &mut File, len: u64) -> Result<Indexed, Refusal> {
     //
     // A `BufReader` does not change the O(rows) walk -- only a persisted or
     // cached index does that -- but it divides the syscall count by the rows
-    // that fit in a buffer: at 208 bytes and the default 8 KiB, 39 per read.
+    // that fit in a buffer: at `STRIDE_BYTES` (280) and the default 8 KiB, 29 per
+    // read.
     // The borrow is scoped so the `File`'s cursor is free afterwards, and every
     // later reader seeks explicitly before it reads.
     let mut buffered = std::io::BufReader::new(&mut *file);

@@ -376,9 +376,10 @@ pub struct Census {
 
 /// The census of an already-decoded walk.
 ///
-/// One pass for the reach, then one pass to collect the names, then a sort. The
-/// sort is `O(members log members)` and is the only super-linear step in the
-/// walk; it is taken once per folder read, never per file or per row, and
+/// One pass for the reach, then one pass to collect the names, then two sorts
+/// (the names, and their upper-cased ingest keys). Each sort is
+/// `O(members log members)` and they are the only super-linear steps in the
+/// walk; they are taken once per folder read, never per file or per row, and
 /// `docs/06-limits.md` records the walk's cost.
 ///
 /// # Errors
@@ -391,13 +392,24 @@ pub fn census_of(members: &[Member], rejected: Vec<Rejected>) -> Result<Census, 
         .iter()
         .map(|member| member.instrument.clone())
         .collect();
+    // A COLLISION IS WHAT INGEST WILL MERGE, so it is counted on ingest's key.
+    // Ingest keys a member by `Symbol::new`, which folds ASCII case, so
+    // `reliance` and `RELIANCE` land in one series. Counted on the raw stems,
+    // they were two instruments and `collisions: 0` on a case-sensitive
+    // filesystem (CE-67, D-1772). The names listed stay as the files spell them.
+    let mut keys: Vec<String> = instruments
+        .iter()
+        .map(|name| name.to_ascii_uppercase())
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let collisions = instruments.len() - keys.len();
     instruments.sort_unstable();
-    let before = instruments.len();
     instruments.dedup();
     Ok(Census {
-        collisions: before - instruments.len(),
         reach,
         instruments,
+        collisions,
         rejected,
     })
 }

@@ -59,16 +59,18 @@ pub type Refusal = String;
 /// `BRUTEXRS`, so a file that is not this one is refused before it is parsed.
 pub(crate) const MAGIC: [u8; 8] = *b"BRUTEXRS";
 
-/// Version TWO: version one had no seal. A new field is a new version at its own
-/// stride, never a
-/// widened record — `CLAUDE.md` §4 and §3 rule 8 together.
-/// The version before this one, which this build READS and never writes.
+/// The version before this one, which this build READS and never writes:
+/// version 2, the first sealed one (213 bytes; version 1 had no seal). A new
+/// field is a new version at its own stride, never a widened record —
+/// `CLAUDE.md` §4 and §3 rule 8 together.
 ///
 /// Named rather than written as `2` at its two use sites, so a future version
 /// 4 that also wants to read 3 changes one constant and not a scattering of
 /// literals whose meaning is only clear in context.
 const VERSION_V2: u32 = 2;
 
+/// The version this build WRITES: version 3, 261 bytes per record, sealed over
+/// its first 253 (Z1-slice26-F1, D-1771).
 const VERSION: u32 = 3;
 
 /// The stride a given format version addresses records at.
@@ -98,11 +100,13 @@ const _: () = assert!(HEADER_BYTES as u64 == HEADER);
 /// of unknown length, because a variable record has no stride and therefore no
 /// O(1) address.
 ///
-/// # 213, and the last eight are the seal
+/// # 261, and the last eight are the seal
 ///
-/// Version 1 was 205 and carried no integrity check, so a record damaged after
-/// it was written parsed cleanly and rendered as a run that never happened.
-/// The eight added bytes are `blake3` over the other 205 -- see [`SEAL_BYTES`].
+/// Version 3 is 261 bytes: 253 of fields and an eight-byte `blake3` seal over
+/// those 253 -- see [`SEAL_BYTES`]. Version 2 was 213 (205 sealed) and is still
+/// read through [`STRIDE_V2`]. Version 1 was 205 and carried no integrity check,
+/// so a record damaged after it was written parsed cleanly and rendered as a run
+/// that never happened; the seal is what version 2 added.
 ///
 /// # It was 176 for about ten minutes
 ///
@@ -136,8 +140,8 @@ const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 /// Bytes of a record the seal covers: everything before the seal itself.
 ///
 /// The seal cannot cover itself, so this is [`STRIDE_BYTES`] less [`SEAL_BYTES`]
-/// and it is also the stride version 1 used — the eight new bytes are the whole
-/// of the difference between the two versions.
+/// -- 253 in version 3. (It equalled version 1's whole stride only while version
+/// 2 was current: 205.)
 const PAYLOAD_BYTES: usize = STRIDE_BYTES - SEAL_BYTES;
 
 /// Bytes of `blake3` kept as the seal.
@@ -451,7 +455,8 @@ impl Record {
     ///
     /// # Cost
     ///
-    /// **O(1).** One hash of a FIXED 205 bytes, per record read or written.
+    /// **O(1).** One hash of a FIXED 253 bytes (205 for a version 2 record),
+    /// per record read or written.
     /// Not per bar and not per candidate, so it is not on the path §3 rule 4
     /// governs.
     ///

@@ -5439,7 +5439,8 @@ pub struct Site {
     ///
     /// `Some(progress)` with `progress.finished == None` is the ONE reading of
     /// "a run is in flight", and `pullrun::Finisher` guarantees it is cleared
-    /// on every exit including a panic. A finished run is deliberately LEFT
+    /// on every exit, including cancellation and, where a panic unwinds (`dev`,
+    /// `test`), a panic; `release` aborts on a panic, which ends the process. A finished run is deliberately LEFT
     /// here rather than taken out: the page reads its summary after it ends,
     /// and a slot emptied on completion would answer that read with nothing.
     pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
@@ -5450,8 +5451,10 @@ pub struct Site {
     /// each other, `Some` with no `finished_micros` as the one reading of "in
     /// flight", and a finished run LEFT in the slot so the page can read its
     /// report after it ends. `sweeprun::TaskFinisher` turns every abnormal task
-    /// exit into a finished refusal, including a panic and a queued blocking
-    /// task dropped during shutdown, so no dead task can leave this slot busy.
+    /// exit into a finished refusal, including a queued blocking task dropped
+    /// during shutdown and, where a panic unwinds (`dev`, `test`), a panic, so no
+    /// dead task can leave this slot busy; `release` aborts on a panic, which
+    /// ends the process and the slot with it (poison-1, D-1771).
     ///
     /// Separate from [`Self::run`] rather than sharing it, because a pull and
     /// a sweep are independent work: a sweep reads bars off disk and a pull

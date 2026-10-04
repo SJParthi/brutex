@@ -146,8 +146,9 @@ impl CostScope {
 /// V6 clause (AF-19). It names no rate, for the reason the audit header names
 /// none: `docs/00-charter.md` records no source for one.
 pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE: brokerage,\n  \
-     STT, stamp duty, exchange charges, the SEBI fee and GST apply to a\n  \
-     share trade and none is subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
+     STT, stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges\n  \
+     and GST (an UNVERIFIED list) apply to a share trade and none is\n  \
+     subtracted. COST-EXCLUDED RESEARCH, NOT A NET\n  \
      RESULT (D-0509, D-0525, D-0681). No equity result carries Selection V6\n  \
      or execution authority until a charter-sourced equity charge stack\n  \
      exists.";
@@ -321,8 +322,8 @@ fn equity_header(out: &mut String) {
         out,
         "  CASH EQUITY run. EVERY TOTAL BELOW IS GROSS OF EVERY CHARGE.\n  \
          A stock IS tradeable -- you buy real shares -- so brokerage, STT,\n  \
-         stamp duty, exchange charges, the SEBI fee and GST all apply to a\n  \
-         share trade. This engine has no equity charge path:\n  \
+         stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges\n  \
+         and GST (an UNVERIFIED list) all apply to a share trade. This engine has no equity charge path:\n  \
          `costs::scope::Segment` has no equity variant, so NONE of those\n  \
          charges is subtracted anywhere in this run, and the ranking that\n  \
          chose this combination is on GROSS returns.\n\n  \
@@ -381,7 +382,9 @@ fn equity_header(out: &mut String) {
 /// # What is NOT in these figures, for a cash-equity run
 ///
 /// **Every charge.** A stock is bought as real shares, so brokerage, STT,
-/// stamp duty, exchange charges, the SEBI fee and GST all apply, and no path
+/// stamp duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST
+/// all apply (an UNVERIFIED list: no charter source enumerates the equity
+/// charge stack, D-1779), and no path
 /// in this engine computes any of them. The `scope` argument is what tells the
 /// header which of the two statements is true; it was absent until D-0681, and
 /// the index statement was printed over stocks for as long as it was.
@@ -726,9 +729,9 @@ fn grid_columns(out: &mut String) {
     let _ = writeln!(
         out,
         "  stop+tsl+ttp+target+time = trades. total/fill cost/worst trip/drawdown \
-         are paisa; the MAE/MFE columns and ret/DD are ppm.\n  total is the WORST \
+         are paisa; winner MAE/MFE and all MAE are ppm; ret/DD and mfe/allMAE are\n  ratios in hundredths (250 = 2.50).\n  total is the WORST \
          reading of BOTH legs: in at the worst price the bar PRINTED, out \
-         at the worse of the two orderings. entry cost is what that entry gave \
+         at the worse of the two orderings. fill cost is what that entry gave \
          up against the open; unknown is what the ordering could still be worth."
     );
 }
@@ -1935,7 +1938,7 @@ mod tests {
                 );
             }
             for disclosure in [
-                "apply to a\n  share trade",
+                "and GST (an UNVERIFIED list) all apply to a share trade",
                 "This engine has no equity charge path",
                 "the ranking that\n  chose this combination is on GROSS returns",
                 "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
@@ -2141,13 +2144,16 @@ mod tests {
 
     /// Every charge the equity statement says a share trade pays, as it names
     /// them.
-    const SHARE_TRADE_CHARGES: [&str; 6] = [
+    const SHARE_TRADE_CHARGES: [&str; 9] = [
         "brokerage",
         "STT",
         "stamp duty",
         "exchange charges",
         "SEBI fee",
+        "IPFT",
+        "DP charges",
         "GST",
+        "UNVERIFIED list",
     ];
 
     /// The first rate unit or currency `text` names, or `None`.
@@ -2441,7 +2447,9 @@ mod tests {
             "stamp duty",
             "exchange charges",
             "SEBI fee",
-            "GST",
+            "IPFT",
+            "DP charges",
+            "GST (an UNVERIFIED list)",
             "COST-EXCLUDED RESEARCH, NOT A NET RESULT",
             "No equity result carries Selection V6",
             "D-0681",

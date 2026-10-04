@@ -589,8 +589,14 @@ pub fn body(spec: &RollingSpec, ask: &Ask) -> String {
     out
 }
 
-/// One `"key":"value"` pair, JSON-escaped.
+/// One `"key":"value"` pair, JSON-escaped as RFC 8259 requires.
+///
+/// Escaped only `"` and `\` until CE-68: a security id is vendor-file text
+/// and may hold a control character, which sent Dhan a body no parser accepts
+/// and an error that blamed the vendor. Below 0x20 is now `\u00XX`, the same
+/// rule as `api::pullrun::quote_for_json` (D-1772).
 fn push_pair(out: &mut String, key: &str, value: &str, first: bool) {
+    use core::fmt::Write as _;
     if !first {
         out.push(',');
     }
@@ -601,6 +607,13 @@ fn push_pair(out: &mut String, key: &str, value: &str, first: bool) {
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if u32::from(c) < 0x20 => {
+                // Writing into a `String` cannot fail.
+                let _cannot_fail = write!(out, "\\u{:04x}", u32::from(c));
+            }
             other => out.push(other),
         }
     }
@@ -1873,5 +1886,18 @@ mod tests {
             read(both, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
             Ok(1)
         );
+    }
+
+    /// CE-68: a control character in a value is escaped, so the body parses.
+    /// Before the fix `\u{1}` and a newline went out raw and no JSON parser
+    /// accepted the request.
+    #[test]
+    fn a_control_character_in_a_value_still_makes_valid_json() {
+        let mut out = String::from("{");
+        push_pair(&mut out, "securityId", "13\u{1}\n\t\r\"\\x", true);
+        out.push('}');
+        assert_eq!(out, r#"{"securityId":"13\u0001\n\t\r\"\\x"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(parsed["securityId"], "13\u{1}\n\t\r\"\\x");
     }
 }

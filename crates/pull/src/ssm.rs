@@ -241,6 +241,7 @@ impl AwsIdentity {
     /// [`SsmError`] naming the variable that was missing, so an operator is
     /// told which one to set rather than that "AWS failed".
     pub fn from_env() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
@@ -305,6 +306,7 @@ impl AwsIdentity {
     /// [`SsmError`] naming every place that was looked at, so "no credentials"
     /// is never the whole message.
     pub fn discover() -> Result<Self, SsmError> {
+        refuse_non_unicode(|name| std::env::var(name))?;
         Self::discover_from(|name| std::env::var(name).ok(), Self::from_shared_file)
     }
 
@@ -454,6 +456,35 @@ fn non_blank(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
 }
 
+/// The four AWS identity variables this module reads.
+const AWS_IDENTITY_VARS: [&str; 4] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+];
+
+/// Refuses, by name, an AWS identity variable that is set but not UTF-8.
+///
+/// `std::env::var(..).ok()` reads a non-UTF-8 value as UNSET, so a mangled
+/// `AWS_PROFILE` or key pair silently signed as `[default]`: an identity the
+/// operator did not choose, which D-1534 already refuses for the half-set
+/// case. Other environment readers in the workspace refuse non-UTF-8 by name,
+/// and this now does too (CE-69, D-1772). Four lookups, whatever the input.
+fn refuse_non_unicode(
+    read: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<(), SsmError> {
+    for name in AWS_IDENTITY_VARS {
+        if let Err(std::env::VarError::NotUnicode(_)) = read(name) {
+            return Err(SsmError::unreachable(format!(
+                "{name} is set but is not valid UTF-8. Refused rather than \
+                 read as unset, which would sign as a different AWS identity."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Lower-case hex, which is the only encoding `SigV4` accepts.
 ///
 /// Written out rather than pulled in: a `hex` dependency for sixteen characters
@@ -520,7 +551,7 @@ fn signing_key_for(secret: &str, date: &str, region: &str, service: &str) -> Vec
 /// `crate::ingest::parse_window` takes `today`: a function that reads the clock
 /// cannot be tested at its own boundary, and a signature is only checkable
 /// against a fixed instant.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Signable<'a> {
     /// The host header, `ssm.<region>.amazonaws.com`.
     pub host: &'a str,
@@ -532,6 +563,22 @@ pub struct Signable<'a> {
     pub body: &'a str,
     /// The session token, when the identity carries one.
     pub session_token: Option<&'a str>,
+}
+
+/// Redacted like [`AwsIdentity`]: the body names the real parameter path, which
+/// `CLAUDE.md` §8 keeps out of every tracked file, and the session token is a
+/// credential. A derived `Debug` printed both into any panic or log line that
+/// formatted a `Signable` (P11-02, D-1776).
+impl core::fmt::Debug for Signable<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Signable")
+            .field("host", &self.host)
+            .field("region", &self.region)
+            .field("stamp", &self.stamp)
+            .field("body", &"<redacted>")
+            .field("session_token", &self.session_token.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Signable<'_> {
@@ -1720,5 +1767,49 @@ mod tests {
         assert_eq!(kind, SecretError::Unreachable);
         assert!(detail.contains("ap-south-1"), "{detail}");
         assert!(detail.contains("§8"), "{detail}");
+    }
+
+    /// CE-69: a non-UTF-8 AWS variable is refused by name, not read as unset.
+    #[test]
+    fn a_non_unicode_aws_variable_is_refused_by_name() {
+        use std::env::VarError;
+        for bad in AWS_IDENTITY_VARS {
+            let read = |name: &str| {
+                if name == bad {
+                    Err(VarError::NotUnicode(std::ffi::OsString::from("x")))
+                } else {
+                    Err(VarError::NotPresent)
+                }
+            };
+            let Err(SsmError { detail, .. }) = refuse_non_unicode(read) else {
+                panic!("{bad} not UTF-8 must be refused")
+            };
+            assert!(detail.contains(bad), "the refusal names {bad}: {detail}");
+        }
+        let unset = refuse_non_unicode(|_: &str| Err(VarError::NotPresent));
+        assert!(unset.is_ok(), "unset variables are not refused here");
+        let set = refuse_non_unicode(|_: &str| Ok("AKIAEXAMPLE".to_owned()));
+        assert!(set.is_ok(), "UTF-8 values pass");
+    }
+
+    /// P11-02: a formatted `Signable` names neither the body nor the token.
+    #[test]
+    fn a_signable_prints_no_parameter_path_and_no_token() {
+        let signable = Signable {
+            host: "ssm.ap-south-1.amazonaws.com",
+            region: "ap-south-1",
+            stamp: "20261004T000000Z",
+            body: r#"{"Name":"PARAMETER-NAME"}"#,
+            session_token: Some("TOKEN-VALUE"),
+        };
+        let shown = format!("{signable:?}");
+        assert!(
+            !shown.contains("PARAMETER-NAME") && !shown.contains("TOKEN-VALUE"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("ap-south-1") && shown.contains("<redacted>"),
+            "{shown}"
+        );
     }
 }

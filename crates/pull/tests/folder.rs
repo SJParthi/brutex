@@ -699,6 +699,32 @@ fn two_members_naming_one_instrument_are_counted_rather_than_hidden() {
     assert_eq!(census.collisions, 1, "and the duplicate is REPORTED");
 }
 
+/// CE-67: stems that differ only in case are ONE series at ingest, which keys by
+/// `Symbol::new` and folds ASCII case, so the census counts them as a collision.
+/// Before, `reliance` and `RELIANCE` reported `collisions: 0`.
+#[test]
+fn stems_that_differ_only_in_case_are_counted_as_a_collision() {
+    let members = vec![
+        member("RELIANCE", 1_664_768_701),
+        member("reliance", 1_664_509_500),
+        member("TCS", 1_664_768_701),
+    ];
+    let census = folder::census_of(&members, Vec::new()).expect("all are moments");
+    assert_eq!(
+        census.instruments,
+        vec![
+            "RELIANCE".to_owned(),
+            "TCS".to_owned(),
+            "reliance".to_owned()
+        ],
+        "names are listed as the files spell them"
+    );
+    assert_eq!(
+        census.collisions, 1,
+        "ingest merges the two, so it is REPORTED"
+    );
+}
+
 /// AN EMPTY FOLDER CENSUSES TO AN EMPTY LIST, NOT TO A REFUSAL.
 ///
 /// The same distinction `Reach::Empty` exists for: a folder that is there and

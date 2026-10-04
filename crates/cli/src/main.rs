@@ -64,6 +64,7 @@ fn main() -> std::process::ExitCode {
     // whole answer for an audit trail. `CLAUDE.md` §4 bans a fallback that
     // HIDES a failure; this one names it, above the report, on the same screen.
     let where_events_went = cli::install_log();
+    cli::announce_unlogged(&where_events_went, &mut stderr);
 
     // `args_os`, never `args`: the latter panics on an argument that is not
     // valid UTF-8, exiting 101 before the line below can say where events

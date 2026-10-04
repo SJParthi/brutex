@@ -862,17 +862,21 @@ fn a_range_widened_by_an_empty_month_records_its_own_row() {
     let _knobs = crate::knobs::serially();
     crate::knobs::clear_all();
     let fixture = Fixture::warmed();
+    // The widened span ends in June, whose 1day and 1min months are present
+    // and hold no bar: the trailing month adds no bar, only span, so the two
+    // audits differ by identity alone. Widening at the START needs a daily
+    // record before the first signal day, which an empty leading month cannot
+    // give, so that shape refuses by design.
+    drop(fixture.open(6, Timeframe::DAY_1));
+    drop(fixture.open(6, Timeframe::MINUTE_1));
     let narrow = fixture
         .audit_span("1min", (2025, 5), (2025, 5))
         .expect("the stored month audits");
     assert!(narrow.contains("RESULT RECORDED"), "{narrow}");
     let wide = fixture
-        .audit_span("1min", (2025, 4), (2025, 5))
-        .expect("an empty leading month is named, not refused");
-    assert!(
-        wide.contains("MONTHS MISSING FROM THIS SPAN (1): 2025-04"),
-        "{wide}"
-    );
+        .audit_span("1min", (2025, 5), (2025, 6))
+        .expect("an empty trailing month is audited, not refused");
+    assert!(wide.contains("2025-05..2025-06 · 2 of 2 months"), "{wide}");
     assert!(wide.contains("RESULT RECORDED"), "{wide}");
     assert!(!wide.contains(crate::NOT_RECORDED), "{wide}");
     let mut ledger = crate::results::Results::open_read(&fixture.root).expect("ledger");
@@ -882,10 +886,10 @@ fn a_range_widened_by_an_empty_month_records_its_own_row() {
         ledger.read(1).expect("wide"),
     );
     assert_ne!(first.identity, second.identity);
-    assert_eq!((second.from_year, second.from_month), (2025, 4));
+    assert_eq!((second.to_year, second.to_month), (2025, 6));
     drop(ledger);
-    for (from, report) in [((2025, 5), "narrow"), ((2025, 4), "wide")] {
-        let retry = fixture.audit_span("1min", from, (2025, 5)).expect("rerun");
+    for (to, report) in [((2025, 5), "narrow"), ((2025, 6), "wide")] {
+        let retry = fixture.audit_span("1min", (2025, 5), to).expect("rerun");
         assert!(
             retry.contains("RESULT ALREADY RECORDED AND VERIFIED"),
             "{report}: {retry}"

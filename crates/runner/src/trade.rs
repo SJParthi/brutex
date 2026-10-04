@@ -23,7 +23,9 @@
 //!    accepted unique 15:09 row can price it. Nothing is ever held overnight.
 //! 2. **Fills happen on the NEXT bar.** A signal is a fact about a bar's close;
 //!    you cannot trade at a price that has already printed. A signal on bar `N`
-//!    fills on bar `N + 1`.
+//!    fills on bar `N + 1`. On a checked one-minute `Sourced::Fill` column the
+//!    signal has already been projected onto that next execution bar, so the
+//!    entry fills on the projected bar itself (Z1-slice03-F1).
 //! 3. **Two cases, both reported, neither chosen.** BEST is the next bar's open.
 //!    WORST is the PRINTED extreme of the next bar — the high if you are buying,
 //!    the low if you are selling. A single number would hide which of the two a
@@ -141,9 +143,12 @@ const EXECUTION_MINUTE_MICROS: i64 = 60_000_000;
 /// One completed round trip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Trade {
-    /// The bar whose close carried the signal. Nothing is traded on it.
+    /// The bar whose close carried the signal. On a `Sourced::Signal` column
+    /// nothing is traded on it; on a `Sourced::Fill` column the signal bar IS
+    /// the next execution bar and the entry fills on it (Z1-slice03-F1).
     pub signal_bar: usize,
-    /// The bar the entry filled in — always `signal_bar + 1`.
+    /// The bar the entry filled in: `signal_bar + 1` on a `Sourced::Signal`
+    /// column, `signal_bar` itself on a `Sourced::Fill` column.
     pub entry_bar: usize,
     /// The bar the exit filled in: the horizon, or that session's square-off,
     /// whichever came first.

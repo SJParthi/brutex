@@ -1186,8 +1186,13 @@ table.
 
 1. **Finance Act 2023 reportedly moved options STT from 0.05% to 0.0625%
    effective 2023-04-01.** If true, `costs`'s 1990-01-01 anchor row is two
-   windows and every trade before 2023-04-01 is currently priced 25% too high on
-   STT. The row's `source` string says so in full.
+   windows and `costs::regime::stt_options_rate` returns a rate 25% too high for
+   every day before 2023-04-01. **No trade is priced at it**: every trip before
+   2024-10-01 already refuses on the exchange transaction charge (the section
+   above), so the overstatement reaches only a caller that reads the STT rate on
+   its own. The row's `source` string says so in full. (This said every such
+   trade "is currently priced 25% too high", which the refusal above
+   contradicts. D-1779.)
 2. **NSE `FA73061` (dated 2026-02-27, effective 2026-03-01) reportedly re-splits
    the transaction charge and the IPFT as ₹3,552 + ₹1 per crore, leaving the
    total unchanged at 0.03553%.** If true, the 3,503 + 50 split is wrong from
@@ -8957,8 +8962,10 @@ none of them; each is what a gate would have measured had it been allowed to.
 
 - **Every figure in a cash-equity audit is gross of every charge.** That
   covers the trades, the exit grid and the ranking that chose the
-  combination. Brokerage, STT, stamp duty, exchange charges, the SEBI fee and
-  GST all apply to a share trade, and none is subtracted: no equity charge
+  combination. Brokerage, STT, stamp duty, exchange charges, the SEBI fee, the
+  IPFT, DP charges and GST all apply to a share trade — an UNVERIFIED list,
+  since no charter source enumerates the equity charge stack (D-1779) — and
+  none is subtracted: no equity charge
   path exists (`costs::scope::Segment` has no equity variant), and
   `docs/00-charter.md` records no rate to build one from. How much this
   leaves out is UNMEASURED. The audit now says so in its first lines. Until
@@ -14465,6 +14472,14 @@ new durable authority, and none exists.
   O(H + T) per recorded run for H rows already stored and T of this run,
   Θ(N·H) over N runs. The writer open has no byte ceiling. The module
   rustdoc said "once per process" until D-1634.
+- **Superseded by D-1777 (p12num-1).** `ensure_frontier_rows`,
+  `ensure_trade_rows` and `ensure_detail_receipt` now keep one writer handle
+  per process (`cli::with_cached_handle`) and bring it up to date with the
+  type's `refresh`, which reads only rows appended since: O(T + delta) per
+  recorded run instead of O(H + T). The full walk remains once per process,
+  and again whenever the root changes, the path names a different file (by
+  device and inode), a refresh is refused or an operation is refused; each of
+  those opens fresh. UNVERIFIED as a measurement: no bench times it.
 - **`strict::size_sweeper` per rung (W2-cli16-3).** `ledger_v6` calls it once
   for each of the eight rungs. Each call loads the whole NIFTY signal, daily
   and exact-minute span (with prior context) under the strict checksum
