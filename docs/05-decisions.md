@@ -57671,3 +57671,9 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - `expiry_of` now accepts only a day `pull::calendar::kind_of` records as `Open(Session::full())`. A Muhurat-only or other irregular day is refused by name exactly as a closed day is, and for the same reason: the rule that moves an expiry off such a day is not charter-sourced, so no date is stepped to. The closed-day refusal keeps its own wording. A day outside the calendar's measured range still passes through, as `docs/06-limits.md` states.
 - `listing_of` is unchanged: a refused contract is not a withdrawn cadence (CE-43, D-2650), so the api's `cadence_has_contracts_on` still asks WEEK on those weeks.
 - Proved by `pull::rolling::tests::a_computed_expiry_on_a_muhurat_only_day_is_refused_like_a_closed_one` and `api::server::tests::a_muhurat_week_contract_does_not_remove_its_cadence_from_the_walk` (ZX-21).
+
+### D-2672 — The two non-regular-day sets are pinned equal in cli — 2026-10-04
+
+- CE-55. `indicators::evaluator::CHARTER_NON_REGULAR_IST_DAYS` is a second copy of `pull::calendar`'s irregular and length-unmeasured sets. They agree today, nine days, and nothing pinned them; `cli::index_consistency` reads both (`eligibility_of`, `calendar_bytes`). `indicators` may not depend on `pull` (gate 22 clause A), so neither crate can hold the check.
+- `cli`, which depends on both, now derives the calendar's set by asking `kind_of` of every measured day (an `Open` session other than `Session::full()`, or `OpenLengthUnmeasured`) and asserts equality in both directions; the same test shows the checker reports a day missing from either side. No set changed.
+- Proved by `cli::index_consistency::tests::the_indicators_non_regular_days_equal_the_pull_calendars_in_both_directions` (ZX-22).
