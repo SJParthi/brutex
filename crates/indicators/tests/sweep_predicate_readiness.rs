@@ -84,7 +84,7 @@ fn every_small_integer_single_candle_matches_independent_shape_ratios() {
 }
 
 #[test]
-fn every_small_two_body_pair_matches_inclusive_engulfing_and_strict_colour() {
+fn every_small_two_body_pair_matches_strictly_larger_engulfing_and_strict_colour() {
     let mut cases = 0;
     let mut bullish = 0;
     let mut bearish = 0;
@@ -99,14 +99,19 @@ fn every_small_two_body_pair_matches_inclusive_engulfing_and_strict_colour() {
                     let mask = detector
                         .step(&bar(30_000, 1, open, 108, 98, close))
                         .expect("current bar");
+                    // Inclusive containment AND a strictly larger body: an
+                    // equal-body reversal is neither engulfing nor harami
+                    // (D-1543).
                     let up = old_open > old_close
                         && close > open
                         && open <= old_close
-                        && close >= old_open;
+                        && close >= old_open
+                        && close - open > old_open - old_close;
                     let down = old_close > old_open
                         && open > close
                         && open >= old_close
-                        && close <= old_open;
+                        && close <= old_open
+                        && open - close > old_close - old_open;
                     assert_eq!(
                         mask.get(157),
                         up,

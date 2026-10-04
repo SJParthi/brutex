@@ -1155,6 +1155,43 @@ impl LedgerV2 {
         }
     }
 
+    /// The exact retry of a universe already complete: the Base bytes must
+    /// match, and are re-synced unless this process saw their barrier fail.
+    fn reuse_complete(
+        &mut self,
+        existing: &BaseEvidenceReopenAuditV2,
+        receipt: &CandidateUniverseReceiptV1,
+        prepared: &PreparedBaseEvidenceV2,
+    ) -> Result<BaseEvidenceProductionCommitV2, BaseEvidenceLedgerRefusalV2> {
+        let expected =
+            CompletionV2::from_prepared(receipt, prepared, existing.completion.first_record)?;
+        if existing.completion != expected {
+            return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
+                "Candidate universe is complete with different Base bytes".to_owned(),
+            ));
+        }
+        compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
+        // A path whose barrier failed in this process is never confirmed
+        // by a second one (ledgers-2, D-1915).
+        crate::fixed_tail::refuse_after_failed_barrier(&self.record_path)
+            .and_then(|()| crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path))
+            .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
+        self.record_file
+            .sync_data()
+            .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
+        self.completion_file.sync_data().map_err(|why| {
+            io_error(
+                "re-sync reused Base completion",
+                &self.completion_path,
+                &why,
+            )
+        })?;
+        sync_directory(&self.root_file, &self.root)?;
+        self.record_generation = file_generation(&self.record_file, &self.record_path)?;
+        self.completion_generation = file_generation(&self.completion_file, &self.completion_path)?;
+        Ok(BaseEvidenceProductionCommitV2::Reused(*existing))
+    }
+
     fn append_locked(
         &mut self,
         candidate: &CandidateUniverseReopenAuditV1,
@@ -1169,36 +1206,7 @@ impl LedgerV2 {
             .map_err(|_| BaseEvidenceLedgerRefusalV2::Arithmetic("offered record count"))?;
         require_bound("append records", offered, self.bounds.records)?;
         if let Some(existing) = self.audits.get(&receipt.universe_id()).copied() {
-            let expected =
-                CompletionV2::from_prepared(&receipt, prepared, existing.completion.first_record)?;
-            if existing.completion != expected {
-                return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(
-                    "Candidate universe is complete with different Base bytes".to_owned(),
-                ));
-            }
-            compare_prepared(&mut self.record_file, expected.first_record, prepared)?;
-            // A path whose barrier failed in this process is never confirmed
-            // by a second one (ledgers-2, D-1915).
-            crate::fixed_tail::refuse_after_failed_barrier(&self.record_path)
-                .and_then(|()| {
-                    crate::fixed_tail::refuse_after_failed_barrier(&self.completion_path)
-                })
-                .map_err(BaseEvidenceLedgerRefusalV2::Io)?;
-            self.record_file
-                .sync_data()
-                .map_err(|why| io_error("re-sync reused Base records", &self.record_path, &why))?;
-            self.completion_file.sync_data().map_err(|why| {
-                io_error(
-                    "re-sync reused Base completion",
-                    &self.completion_path,
-                    &why,
-                )
-            })?;
-            sync_directory(&self.root_file, &self.root)?;
-            self.record_generation = file_generation(&self.record_file, &self.record_path)?;
-            self.completion_generation =
-                file_generation(&self.completion_file, &self.completion_path)?;
-            return Ok(BaseEvidenceProductionCommitV2::Reused(existing));
+            return self.reuse_complete(&existing, &receipt, prepared);
         }
         require_bound(
             "completion",

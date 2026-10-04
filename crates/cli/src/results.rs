@@ -252,6 +252,20 @@ fn read_at(file: &mut File, at: u64, version: u32) -> Result<([u8; STRIDE_BYTES]
     Ok((widen_v2(&raw), sealed))
 }
 
+/// The refusal for two sealed rows that carry one run identity.
+fn duplicate_identity(path: &Path, identity: &[u8; 32], first: u64, second: u64) -> Refusal {
+    let hex = identity.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    });
+    format!(
+        "{} holds duplicate run identity {hex}: sealed rows at bytes {first} and {second}. \
+         A run is recorded once (§3 rule 5), so the ledger is ambiguous and is \
+         not indexed. Nothing was written",
+        path.display()
+    )
+}
+
 /// Eight bytes of `blake3` over the record's payload.
 ///
 /// Reads `raw[..PAYLOAD_BYTES]` and ignores whatever occupies the seal slot, so
@@ -619,6 +633,9 @@ pub struct Results {
     /// process appended afterwards. `append` re-scans from here under the file
     /// lock before it decides a run is new -- see [`Results::append`].
     scanned: u64,
+    /// `blake3` over bytes `[0, scanned)`, so growth by another handle cannot
+    /// hide an in-place rewrite of a row this handle already indexed. D-1560.
+    prefix: crate::result_set::PrefixDigest,
 }
 
 /// Write the sixteen-byte header of a fresh ledger, and prove it was kept.
@@ -1012,11 +1029,21 @@ impl Results {
             // recorded. It still occupies its stride, so the records after it
             // stay addressable, and `read` refuses it BY NAME when asked for.
             let (raw, sealed) = read_at(&mut file, at, version)?;
+            // TWO SEALED ROWS OF ONE IDENTITY ARE REFUSED, NOT INDEXED. `seen`
+            // kept the later one and `len()` counted both, so a ledger holding
+            // a duplicate run rendered it twice without a word -- while the
+            // receipt manifest beside it refuses the same condition. A rerun
+            // is refused at append; a ledger that already holds one is named
+            // here. audit-20261003 hunt-cli-a-3, D-1560.
             if sealed {
-                seen.insert(Record::from_bytes(&raw).identity, at);
+                let identity = Record::from_bytes(&raw).identity;
+                if let Some(first) = seen.insert(identity, at) {
+                    return Err(duplicate_identity(&path, &identity, first, at));
+                }
             }
             at = at.saturating_add(stride);
         }
+        let prefix = crate::result_set::PrefixDigest::over(&mut file, &path, at)?;
         let generation = crate::result_set::file_generation(&file, &path)?;
         if generation.len != at {
             return Err(
@@ -1043,6 +1070,7 @@ impl Results {
             seen,
             scanned: at,
             version,
+            prefix,
         })
     }
 
@@ -1351,6 +1379,7 @@ impl Results {
         })?;
         self.seen.insert(record.identity, at);
         self.scanned = at.saturating_add(STRIDE);
+        self.prefix.extend_with(&record.to_bytes());
         self.generation = crate::result_set::file_generation(&self.file, &self.path)?;
         Ok(at.saturating_sub(HEADER) / STRIDE)
     }
@@ -1390,6 +1419,12 @@ impl Results {
             crate::result_set::require_generation_unchanged(self.generation, observed, &self.path)?;
             return Ok(());
         }
+        // GROWTH ALSO RE-READS WHAT WAS ALREADY INDEXED. The generation changes
+        // on an honest append and on "rewrote an indexed row, then appended"
+        // alike, so only the bytes can tell them apart. O(indexed bytes), on
+        // this branch only. D-0936's rule, extended here by D-1560
+        // (audit-20261003 hunt-cli-a-1).
+        self.prefix.require_unchanged(&mut self.file, &self.path)?;
         while self.scanned.saturating_add(stride) <= len {
             let at = self.scanned;
             let (raw, sealed) = read_at(&mut self.file, at, self.version)?;
@@ -1397,11 +1432,15 @@ impl Results {
             // the row's address, but never let corrupted bytes block an exact
             // rerun. `read` still names the bad seal when that row is requested.
             if sealed {
-                self.seen
-                    .insert(Record::from_bytes(&raw).identity, self.scanned);
+                let identity = Record::from_bytes(&raw).identity;
+                if let Some(first) = self.seen.insert(identity, at) {
+                    return Err(duplicate_identity(&self.path, &identity, first, at));
+                }
             }
             self.scanned = at.saturating_add(stride);
         }
+        self.prefix
+            .extend_from(&mut self.file, &self.path, self.scanned)?;
         self.generation = crate::result_set::file_generation(&self.file, &self.path)?;
         if self.generation.len != self.scanned {
             return Err("the results ledger changed length while refreshing its index".to_owned());
@@ -2738,5 +2777,105 @@ mod tests {
              so a device that cannot fsync still reaches the refusal that names \
              what is actually wrong with the operator's store"
         );
+    }
+
+    /// Writes `record`'s bytes over the row at `index`, in place, the way a
+    /// second handle (or an operator's editor) would rewrite history.
+    fn rewrite_row_in_place(root: &std::path::Path, index: u64, record: &Record) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(Results::path(root))
+            .expect("the ledger opens for an in-place rewrite");
+        file.seek(SeekFrom::Start(HEADER + index * STRIDE))
+            .expect("seek to the indexed row");
+        file.write_all(&record.to_bytes()).expect("rewrite the row");
+        file.sync_all().expect("sync the rewrite");
+    }
+
+    /// audit-20261003 hunt-cli-a-1: a held writer whose indexed row was
+    /// rewritten in place while another handle ALSO appended must refuse,
+    /// rather than absorb only the tail and accept a duplicate of the
+    /// rewritten identity. The sibling of D-0936 for Selection V1-V3.
+    #[test]
+    fn rewrite_plus_append_of_an_indexed_run_refuses_before_append() {
+        let r = root("rewrite-grow");
+        let mut held = Results::open(&r).expect("the held writer opens");
+        held.append(&record(1)).expect("run 1 is recorded");
+        rewrite_row_in_place(&r, 0, &record(9));
+        Results::open(&r)
+            .expect("a peer opens after the rewrite")
+            .append(&record(2))
+            .expect("the peer appends run 2");
+        let before = std::fs::read(Results::path(&r)).expect("bytes before");
+
+        let why = held
+            .append(&record(9))
+            .expect_err("a rewritten indexed row is refused, not absorbed");
+        assert!(why.contains("rewrote already-indexed"), "{why}");
+        let why = held
+            .append(&record(3))
+            .expect_err("the handle stays refused for any later append");
+        assert!(why.contains("rewrote already-indexed"), "{why}");
+        assert_eq!(
+            std::fs::read(Results::path(&r)).expect("bytes after"),
+            before,
+            "the refused appends wrote nothing"
+        );
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// An honest append by another handle is still absorbed in file order
+    /// after the prefix recheck added for hunt-cli-a-1.
+    #[test]
+    fn honest_growth_by_another_handle_is_still_absorbed_after_the_prefix_recheck() {
+        let r = root("honest-grow");
+        let mut held = Results::open(&r).expect("the held writer opens");
+        held.append(&record(1)).expect("run 1");
+        Results::open(&r)
+            .expect("peer")
+            .append(&record(2))
+            .expect("peer appends run 2");
+        let why = held
+            .append(&record(2))
+            .expect_err("the peer's run is known after the absorb");
+        assert!(why.contains("already recorded"), "{why}");
+        assert_eq!(held.append(&record(3)).expect("run 3 is new"), 2);
+        held.append(&record(4))
+            .expect("an own append after an own append");
+        let mut check = Results::open_read(&r).expect("reader");
+        let ids: Vec<u8> = (0..4)
+            .map(|i| check.read(i).expect("row").identity[0])
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+        let _ = std::fs::remove_dir_all(&r);
+    }
+
+    /// audit-20261003 hunt-cli-a-3: a cold open over two sealed rows of one
+    /// identity refuses, as the receipt manifest does, instead of indexing the
+    /// later row and counting both.
+    #[test]
+    fn a_cold_open_refuses_two_sealed_rows_of_one_identity() {
+        use std::io::Write;
+        let r = root("cold-duplicate");
+        Results::open(&r)
+            .expect("writer")
+            .append(&record(5))
+            .expect("run 5");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(Results::path(&r))
+            .expect("raw append");
+        file.write_all(&record(5).to_bytes())
+            .expect("a second sealed row of run 5");
+        drop(file);
+        for why in [
+            Results::open_read(&r).expect_err("the reader refuses"),
+            Results::open(&r).expect_err("the writer refuses"),
+        ] {
+            assert!(why.contains("duplicate run identity"), "{why}");
+            assert!(why.contains(&"05".repeat(32)), "{why}");
+        }
+        let _ = std::fs::remove_dir_all(&r);
     }
 }

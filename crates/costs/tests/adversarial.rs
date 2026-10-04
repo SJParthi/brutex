@@ -79,6 +79,10 @@ fn notionals() -> Vec<(&'static str, Paisa)> {
 
 /// THE MATRIX: every notional against every shipped rate.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix of every notional against every rate, read top to bottom"
+)]
 fn every_extreme_notional_against_every_shipped_rate_holds_the_money_invariants() {
     let mut cells = 0_u32;
     let (mut checked, mut refused) = (0_u32, 0_u32);

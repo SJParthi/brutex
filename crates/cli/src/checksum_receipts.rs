@@ -511,7 +511,7 @@ fn open_writable(path: &Path) -> Result<File, String> {
     options.read(true).write(true).create(true).truncate(false);
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(store::open_flags::O_NOFOLLOW | store::open_flags::O_NONBLOCK);
+        options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     }
     let file = options.open(path).map_err(error)?;
     regular_generation(&file, path)?;

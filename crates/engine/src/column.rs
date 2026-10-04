@@ -27,8 +27,7 @@ const BARS_PER_WORD: usize = 64;
 
 /// Every position set in `mask`, low to high.
 ///
-/// `ConditionMask` exposes no bit iterator -- `every_subset_is_frequent` says as much
-/// and pays 384 probes for the lack of one. This walks the words instead, clearing
+/// `ConditionMask` exposes no bit iterator, so this walks the words instead, clearing
 /// the lowest set bit each step, so it costs one iteration per SET bit rather than
 /// one per possible bit. It lives here rather than in `crates/vocab` because
 /// `words()` is already public and this needs no new API surface there.

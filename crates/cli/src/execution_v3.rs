@@ -62,6 +62,11 @@ use crate::population_v5::{
     PopulationV5ExecutionV3SourceV1,
 };
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Execution V3 fixed record";
+
 /// Bytes in one canonical Execution V3 parameter record.
 pub(crate) const EXECUTION_V3_PARAMETER_BYTES: usize = 1_024;
 /// Bytes in one canonical Execution V3 percentile atom.
@@ -5435,6 +5440,34 @@ mod tests {
                 prepared.population_id
             );
         }
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let prepared = prepared(80);
+        let root = TestRoot::new("append-rollback");
+        append_exact_prefix(&root.path, &prepared, 2, 0, 0);
+        for (name, width) in [
+            (PARAMETER_FILE, EXECUTION_V3_PARAMETER_BYTES),
+            (PERCENTILE_FILE, EXECUTION_V3_PERCENTILE_BYTES),
+            (DISPOSITION_FILE, EXECUTION_V3_DISPOSITION_BYTES),
+            (COMPLETION_FILE, EXECUTION_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path.join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let committed = commit_prepared_for_test(&root.path, bounds(), &prepared)
+            .expect("the next append continues the exact prefix after the rollback");
+        assert!(committed.was_written());
+        assert_eq!(
+            committed.authority().structural_receipt().population_id(),
+            prepared.population_id
+        );
+        drop(committed);
+        ExecutionV3Ledger::open_read(&root.path, bounds()).expect("the ledger stays readable");
     }
 
     #[test]

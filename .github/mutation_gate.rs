@@ -13,8 +13,16 @@ const JOB_MINUTES: usize = 240;
 // case. The old 40 minutes and 120 seconds packed 165 cases into each of three
 // jobs, and all three hit the 240-minute limit with 256 of 495 cases untested.
 // These are still estimates: the worst measured case cost plus a margin.
+//
+// Recalibrated from PR #74's run 37092404876 (D-1453). At 270s, 62 cases a
+// job: of the first 12 shards to stop, the 8 that finished spent about 205
+// to 290 worker-seconds a case after a 27 to 40 minute baseline, and 4 were
+// cancelled at the 240-minute limit with no outcome recorded, so their
+// survivors and timeouts went unnamed. 540s is twice the worst finished
+// cost, and leaves room in each job for one mutant that runs to cargo-mutants'
+// own test timeout, so that case is named as timed out instead of being lost.
 const RESERVE_MINUTES: usize = 100;
-const ESTIMATED_CASE_SECONDS: usize = 270;
+const ESTIMATED_CASE_SECONDS: usize = 540;
 const WORKERS: usize = 2;
 const MAX_JOBS: usize = 256;
 const CASES_PER_JOB: usize =
@@ -283,14 +291,15 @@ mod tests {
 
     #[test]
     fn capacity_and_empty_matrix_are_explicit() {
-        assert_eq!(CASES_PER_JOB, 62);
+        assert_eq!(CASES_PER_JOB, 31);
         assert_eq!(job_count(0), Ok(1));
-        assert_eq!(job_count(62), Ok(1));
-        assert_eq!(job_count(63), Ok(2));
-        assert_eq!(job_count(495), Ok(8));
-        assert_eq!(job_count(15_810), Ok(255));
-        assert_eq!(job_count(15_872), Ok(256));
-        assert!(job_count(15_873).is_err());
+        assert_eq!(job_count(31), Ok(1));
+        assert_eq!(job_count(32), Ok(2));
+        assert_eq!(job_count(495), Ok(16));
+        assert_eq!(job_count(2_405), Ok(78));
+        assert_eq!(job_count(7_905), Ok(255));
+        assert_eq!(job_count(7_936), Ok(256));
+        assert!(job_count(7_937).is_err());
         assert_eq!(
             matrix(0).unwrap(),
             "{\"include\":[{\"index\":0,\"shard\":\"0/1\",\"expected\":0}]}"
@@ -299,7 +308,7 @@ mod tests {
 
     #[test]
     fn large_plan_partitions_every_case_once_without_sampling() {
-        let all = generated(15_810);
+        let all = generated(7_905);
         let total = job_count(all.len()).unwrap();
         let mut seen = BTreeSet::new();
         for index in 0..total {

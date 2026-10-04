@@ -79,6 +79,8 @@ impl Fixture {
     fn write(&self, rung: Timeframe, bars: &[Bar]) {
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         let symbol = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        // The writer never creates a missing store root (D-1522).
+        fs::create_dir_all(&self.root).expect("the store root");
         BarFile::open_or_create(&self.root, self.path(rung), symbol)
             .expect("fixture file")
             .append(bars)
@@ -252,6 +254,14 @@ fn assert_fold_command_case(case: &str) {
         text.contains("Every stored coarse bar equals"),
         matches!(case, "clean" | "withheld"),
         "only a complete agreeing comparison may claim agreement: {text}"
+    );
+    // The span summary names withheld rung-months only when there are some:
+    // a clean or failing span must not print "0 rung-month(s) carry buckets
+    // derive WITHHELD", which reads as a finding where there is none.
+    assert_eq!(
+        text.contains("rung-month(s) carry buckets derive WITHHELD"),
+        case == "withheld",
+        "the withheld summary must appear exactly when derive withheld a bucket: {text}"
     );
     assert_eq!(
         text.contains("WITHHELD by derive policy"),

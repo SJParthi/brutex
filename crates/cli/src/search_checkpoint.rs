@@ -79,6 +79,7 @@ impl Snapshot {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"
@@ -222,6 +223,17 @@ impl Journal {
             return Err("checkpoint publication exceeds its byte admission".to_owned());
         }
         let sequence = self.next;
+        // NEVER RESERVE WHAT COLD DISCOVERY CANNOT REOPEN. `discover_through`
+        // refuses a namespace of `DIRECTORY_LIMIT` entries, the owner lock
+        // being one of them, so reservation `DIRECTORY_LIMIT` would be written
+        // and acknowledged and then every later open of the search would
+        // refuse. Refused here, before the directory exists. audit-20261003
+        // W2-cli13-5, D-1563.
+        if !usize::try_from(sequence).is_ok_and(|at| at < DIRECTORY_LIMIT) {
+            return Err(format!(
+                "checkpoint directory admission limit reached: reservation {sequence} would exceed the {DIRECTORY_LIMIT}-entry namespace cold discovery admits"
+            ));
+        }
         self.next = self
             .next
             .checked_add(1)
@@ -275,6 +287,8 @@ impl Journal {
         // interrupted and the next publication takes a new sequence.
         let writing = directory.join("complete.writing");
         let mut marker = File::create_new(&writing).map_err(error)?;
+        #[cfg(test)]
+        tests::marker_created(&self.directory);
         marker
             .write_all(&seal)
             .and_then(|()| marker.sync_all())

@@ -996,6 +996,41 @@ mod tests {
         assert_eq!(call.len(), 1);
     }
 
+    /// audit-20261003 hunt-pull-2 (D-1530). A rupee price that is not zero
+    /// and is smaller than half a paisa, or that is below zero, is refused
+    /// rather than snapped to a clean zero. `http::one_price` refuses exactly
+    /// this; the rolling decoder stored `0.004` and `-0.004` as a price of 0,
+    /// and the negative one thereby slipped past every below-zero check.
+    #[test]
+    fn a_sub_half_paisa_or_negative_rupee_price_is_refused_not_snapped_to_zero() {
+        for cell in ["0.004", "-0.004", "-0.01", "-354"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            // The refusal is D-1492's `NotAPrice`, which landed on the same
+            // guard from the other audit; this test pins that it names the cell.
+            assert_eq!(
+                read(&body, &spec(), "CALL", PriceScale::Rupees).map(|rows| rows.len()),
+                Err(RollingError::NotAPrice {
+                    field: "open",
+                    text: cell.to_owned(),
+                }),
+                "{cell} is not a price this decoder may store"
+            );
+        }
+        // A real zero, however it is written, is still a price.
+        for cell in ["0", "0.0", "0.00", "-0.0"] {
+            let body = format!(
+                r#"{{"data":{{"ce":{{"timestamp":[1756698300],"open":[{cell}],"high":[354],
+                "low":[0],"close":[354],"volume":[1]}},"pe":null}}}}"#
+            );
+            let rows = read(&body, &spec(), "CALL", PriceScale::Rupees)
+                .unwrap_or_else(|why| panic!("{cell} is a real zero: {why}"));
+            assert_eq!(rows.len(), 1, "{cell}");
+        }
+    }
+
     /// An absent side keeps its refusal.
     ///
     /// `null` is the vendor saying "nothing here"; a missing key is a body with

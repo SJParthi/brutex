@@ -3663,6 +3663,51 @@ impl CandidateUniverseLedgerV1 {
         }
     }
 
+    /// Where the block starts: the end of the ledger, or the first row of an
+    /// orphan of this exact retry, cut back so the block is written whole.
+    fn cut_orphan_for_rewrite(
+        &mut self,
+        receipt: &CandidateUniverseReceiptV1,
+        prepared: &PreparedCandidateUniverseV1,
+    ) -> Result<u64, CandidateUniverseRefusal> {
+        let Some(orphan) = self.orphan else {
+            return Ok(self.total_rows);
+        };
+        if orphan.universe_id != receipt.universe_id() {
+            return Err(format!(
+                "candidate row tail belongs to {}, not requested {}; no fallback may hide it",
+                hex32(orphan.universe_id),
+                hex32(receipt.universe_id())
+            ));
+        }
+        if orphan.row_count > receipt.row_count {
+            return Err(format!(
+                "candidate orphan has {} rows, longer than exact retry {}",
+                orphan.row_count, receipt.row_count
+            ));
+        }
+        let prefix = usize::try_from(orphan.row_count)
+            .map_err(|_| "candidate orphan prefix does not fit usize".to_owned())?;
+        compare_rows(
+            &mut self.row_file,
+            orphan.first_row,
+            prepared
+                .rows
+                .get(..prefix)
+                .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
+        )?;
+        // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915): the orphan
+        // may be the bytes of a run whose barrier failed, and a barrier
+        // on this descriptor cannot prove them durable. The block is
+        // cut back and written again whole; the bytes are identical.
+        let start = candidate_row_offset(orphan.first_row)?;
+        self.row_file
+            .set_len(start)
+            .and_then(|()| self.row_file.sync_all())
+            .map_err(|why| format!("cannot cut candidate orphan for rewrite: {why}"))?;
+        Ok(orphan.first_row)
+    }
+
     fn append_complete_locked(
         &mut self,
         prepared: &PreparedCandidateUniverseV1,
@@ -3702,44 +3747,9 @@ impl CandidateUniverseLedgerV1 {
                 self.bounds.max_universes
             ));
         }
-        let (first_row, prefix) = match self.orphan {
-            Some(orphan) => {
-                if orphan.universe_id != receipt.universe_id() {
-                    return Err(format!(
-                        "candidate row tail belongs to {}, not requested {}; no fallback may hide it",
-                        hex32(orphan.universe_id),
-                        hex32(receipt.universe_id())
-                    ));
-                }
-                if orphan.row_count > receipt.row_count {
-                    return Err(format!(
-                        "candidate orphan has {} rows, longer than exact retry {}",
-                        orphan.row_count, receipt.row_count
-                    ));
-                }
-                let prefix = usize::try_from(orphan.row_count)
-                    .map_err(|_| "candidate orphan prefix does not fit usize".to_owned())?;
-                compare_rows(
-                    &mut self.row_file,
-                    orphan.first_row,
-                    prepared
-                        .rows
-                        .get(..prefix)
-                        .ok_or_else(|| "candidate retry lost its orphan prefix".to_owned())?,
-                )?;
-                // REWRITTEN, NOT VOUCHED FOR (ledgers-2, D-1915): the orphan
-                // may be the bytes of a run whose barrier failed, and a barrier
-                // on this descriptor cannot prove them durable. The block is
-                // cut back and written again whole; the bytes are identical.
-                let start = candidate_row_offset(orphan.first_row)?;
-                self.row_file
-                    .set_len(start)
-                    .and_then(|()| self.row_file.sync_all())
-                    .map_err(|why| format!("cannot cut candidate orphan for rewrite: {why}"))?;
-                (orphan.first_row, 0)
-            }
-            None => (self.total_rows, 0),
-        };
+        // An orphan is cut back and rewritten whole, so nothing is prefixed.
+        let first_row = self.cut_orphan_for_rewrite(&receipt, prepared)?;
+        let prefix = 0_u64;
         let block_start = candidate_row_offset(first_row)?;
         let desired_total = first_row
             .checked_add(receipt.row_count)
@@ -8996,8 +9006,7 @@ mod tests {
         drop(ragged);
         assert!(
             CandidateUniverseLedgerV1::open_read(ragged_root.path(), bounds)
-                .err()
-                .expect("a reader refuses the ragged fixed-stride file")
+                .expect_err("a reader refuses the ragged fixed-stride file")
                 .contains("ragged")
         );
         // ledgers-3, D-1910: the next writer cuts the never-acknowledged tail.

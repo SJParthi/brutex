@@ -17,12 +17,16 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# D-1610 (hunt-ci-12): no job here writes through GITHUB_TOKEN; checkout reads.
+permissions:
+  contents: read
+
 jobs:
   language-purity:
     name: Gate 1+2 — one language
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
 
       - name: Gate 0 — the source scanner proves itself, then reads this workflow
@@ -59,6 +63,18 @@ jobs:
           if ! "$tool" workflow $wfs; then
             echo
             echo "GATE 0 FAILED: the workflow lines above are refused. See D-1100."
+            exit 1
+          fi
+          # D-1601: ci-ok needs every job, runs `if: always()`, accepts only
+          # success. D-1603: no crate code spawns a shell or an interpreter by
+          # a literal name or path, which gate 1e's PATH stubs cannot see.
+          if ! "$tool" aggregator .github/workflows/ci.yml; then
+            echo "GATE 0 FAILED: ci-ok no longer guards every gate. See D-1601."
+            exit 1
+          fi
+          # shellcheck disable=SC2046
+          if ! "$tool" spawns $(git ls-files 'crates/*.rs'); then
+            echo "GATE 0 FAILED: crate code above starts a shell or interpreter. D-1603."
             exit 1
           fi
           echo "OK — the scanner passed its own tests and the workflow is clean."
@@ -459,6 +475,13 @@ jobs:
           wf=$(git ls-files '.github/workflows/*.yml')
           # shellcheck disable=SC2086
           envs=$(grep -nE '(^|[^A-Za-z0-9_])(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|RUSTC|RUSTDOC|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]|cargo[^#|;]*[[:space:]]--config[[:space:]=]' $wf || true)
+          # D-1612 (rustonly2-7): the same doors by other names -- a linker in
+          # RUSTFLAGS, a CARGO_HOME whose config.toml is any tracked file, and
+          # a nextest configuration under another name. Comment lines skipped.
+          # shellcheck disable=SC2086
+          envs2=$( { grep -nHE '(^|[^A-Za-z0-9_])CARGO_HOME[[:space:]]*[:=]|RUSTFLAGS[^#]*(linker|link-arg|fuse-ld)|nextest[^#|;]*--(tool-)?config-file' $wf || true; } \
+                   | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)
+          envs="${envs}${envs2:+${envs:+$'\n'}$envs2}"
           if [ -n "$envs" ]; then
             printf 'REFUSED  a workflow sets a compiler wrapper, runner or linker:\n%s\n' "$envs"
             bad=1
@@ -1624,6 +1647,13 @@ jobs:
           # flags `crates/pull/tests/support/mod.rs` hands the re-executed test
           # binary it runs as an unprivileged user (root-permission tests).
           fold_literal='-0 -5 -0945 -1400 -token --exact --nocapture'
+          # Met when the audit fixes landed (83cb7a5). `-354` is a
+          # negative rupee price `rolling.rs` must refuse rather than snap to
+          # zero. `-7` is the tail the decoded scan reads from invented
+          # contract fixtures (`...-7000-CE`, `...-700000-CE`) in chain.rs and
+          # fno.rs. `repeats` is a refusal word asserted in http.rs and prose
+          # in a session.rs reason string. None is a path segment.
+          audit_literal='-354 -7 repeats'
 
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
@@ -1636,7 +1666,7 @@ jobs:
           ${ssm_leak_fixture}
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
-          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal}"
+          ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build: `grep -q` exits
@@ -3276,6 +3306,10 @@ jobs:
           # command. It is not left terminal-only: `note_exit` emits
           # `api.main` with the exit code `MISUSED` and the argument count on
           # every exit, this one included.
+          # The SECOND (D-1582, hunt-api-2) is a production diagnostic: the
+          # hand-built tokio runtime failed to start, so nothing ran. It is
+          # not terminal-only either: the same arm calls `note_exit` with
+          # `FAILED` before returning, so `api.main` records it. D-1458.
           #
           # `cli/src/main.rs:print!` is the PROGRAM'S OWN OUTPUT, not a
           # diagnostic. `cli::run` renders its whole report into a String and
@@ -3374,7 +3408,7 @@ jobs:
           #     Folded with D-1450.
           declared='api/src/calendar_of.rs:println!:2
           api/src/constituents.rs:println!:2
-          api/src/main.rs:eprintln!:1
+          api/src/main.rs:eprintln!:2
           core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
           pull/src/pricing.rs:println!:1
@@ -3857,7 +3891,15 @@ jobs:
           # not a path. `.metadata()` on an open handle was already excluded on
           # purpose (above); `Path::exists` is not used in this crate's
           # production code today.
-          declared='sink.rs:std::fs::OpenOptions::new:2
+          #
+          # `OpenOptions::new` went from two to three (D-1537, hunt-costs-3).
+          # The two old sites open the event file to append (`FileTarget::open`
+          # and `reopen` after a roll). The third, `hold_directory`, opens
+          # `<dir>/events.lock` -- create, no truncate, write -- only to take a
+          # non-blocking `flock` on it, so two sinks cannot write one event
+          # stream. It writes no byte, reads none, and names no path outside
+          # the sink's own directory. D-1458.
+          declared='sink.rs:std::fs::OpenOptions::new:3
           sink.rs:std::fs::create_dir_all:1
           sink.rs:std::fs::metadata:1
           sink.rs:std::fs::remove_file:1
@@ -4473,8 +4515,10 @@ jobs:
           # same invariant. That is a judgement, not a string comparison.
           #
           # NO UNTRUSTED INPUT: one tracked document and the pattern below.
+          # D-1608: a digit may follow the first letter (`FV4-01`); 179 rows
+          # were invisible to uniqueness until it could.
           f=docs/04-invariants.md
-          ids=$(grep -oE '^\| *`?[A-Z][A-Z-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
+          ids=$(grep -oE '^\| *`?[A-Z][A-Z0-9-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
                 | sed -E 's/^\| *`?//; s/`? *\|$//')
           n=$( { printf '%s\n' "$ids" | grep -c . || true; } )
           # A pattern that stops matching is the failure mode gate 8 shipped
@@ -4901,6 +4945,9 @@ jobs:
           #   * A row whose "Proven by" cell is prose, a const assertion or a
           #     CI gate rather than a qualified token or an explicit name in
           #     a source file. Those prose-only rows are not checked.
+          #   * D-1606: invariant_paths.rs now also resolves `a::b` tokens and
+          #     bare names (3+ underscores) in a status row's proof cell, but a
+          #     module-first `a::b` only to "declared somewhere".
           #
           # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files`, the document,
           # and the static patterns below. Gate 1c's discipline.
@@ -5193,6 +5240,7 @@ jobs:
           crates/cli/src/selection_v6.rs 1
           crates/cli/src/index_stop_store.rs 1
           crates/api/src/recovery_journal.rs 1
+          crates/pull/src/http.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -5254,6 +5302,8 @@ jobs:
           crates/cli/src/index_stop_vix_codec.rs 1
           crates/cli/src/boolean_qualified_journal.rs 1
           crates/cli/src/pool.rs 2
+          crates/cli/src/admission_store.rs 1
+          crates/cli/src/population.rs 1
           '
 
           # ---- rule 5. CLAUDE.md section 4: refuse, never die. --------------
@@ -6000,8 +6050,16 @@ jobs:
           # no proof; that block now says UNVERIFIED too. Entries are
           # `FILE ITEM`, the item being the name below the doc block, so the
           # one left can excuse `base_win_rate_bp` and nothing else.
+          #
+          # `charge_stack_legs` (D-1535, entry D-1459) is the same case as
+          # `base_win_rate_bp`: the trigger is `\bflat\b` and the word is the
+          # FINANCIAL one -- "Brokerage and GST are flat in this crate's
+          # tables", a charge that does not scale with quantity. The word is
+          # a predicate, so the noun list cannot reach it, and the block makes
+          # no claim about cost. UNVERIFIED there would be a false statement.
           allow_claim='
           crates/cli/src/lib.rs base_win_rate_bp
+          crates/costs/src/trip.rs charge_stack_legs
           '
 
           inv=docs/04-invariants.md
@@ -6891,7 +6949,11 @@ jobs:
             echo "           assertion no machine makes. Reasons above."
             bad=1
           fi
-          if "$scan" step-runs "$wf" 'echo "GATE 8 MEASURED NOTHING' | sed 's/^/  /'; then
+          # D-1460: the proof is the top-level `git ls-files --error-unmatch`
+          # line, not the `echo` inside gate 8's `if`, which D-1601's
+          # `step-runs` refuses as a line that may never run.
+          if "$scan" step-runs "$wf" "git ls-files --error-unmatch 'crates/*/benches/*.rs'" | sed 's/^/  /' \
+             && grep -qE "^[[:space:]]+git ls-files --error-unmatch 'crates/\\*/benches/\\*\\.rs' > /dev/null[[:space:]]*$" "$wf"; then
             echo "  present  gate 8 still refuses an empty bench set"
           else
             echo "  REFUSED  gate 8 no longer fails when no bench exists. A skip"
@@ -6920,13 +6982,13 @@ jobs:
     runs-on: ubuntu-24.04
     needs: language-purity
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Is there a crate to build yet?
         id: probe
@@ -7104,6 +7166,21 @@ jobs:
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Gate 6c — the .github/*.rs gate tools meet fmt and clippy
+        run: |
+          set -euo pipefail
+          # D-1600 (hunt-ci-5). They are built by bare rustc, so 6a and 6b
+          # never read them. Test and non-test builds both, as gate 0 does.
+          tools=$(git ls-files '.github/*.rs')
+          [ -n "$tools" ] || { echo "GATE 6c READ NO TOOL."; exit 1; }
+          out="${RUNNER_TEMP:-/tmp}/gate-6c"
+          for f in $tools; do
+            rustfmt --edition 2024 --check "$f"
+            clippy-driver --edition=2024 -D warnings "$f" -o "$out"
+            clippy-driver --edition=2024 --test -D warnings "$f" -o "$out-t"
+          done
+          echo "OK — $(wc -w <<< "$tools") tool(s) are formatted and clippy-clean."
+
       - name: Gate 5 — unsafe is denied, exceptions are counted
         run: |
           set -euo pipefail
@@ -7117,12 +7194,15 @@ jobs:
           # given a single file, so `awk -F:` read field 2 of a bare number
           # and counted zero — an exception in the only .rs file would have
           # been invisible. Counting occurrences directly fixes both.
-          n=$( { git ls-files '*.rs' | xargs -r grep -oh 'allow(unsafe_code)' || true; } \
+          # D-1610 (hunt-ci-13): `allow(unsafe_code, reason = ..)` and
+          # `expect(unsafe_code)` are exceptions too, not only the bare form.
+          pat='(allow|expect)\(unsafe_code[,)]'
+          n=$( { git ls-files '*.rs' | xargs -r grep -ohE "$pat" || true; } \
                | wc -l | tr -d ' ')
           echo "documented unsafe exceptions: $n"
           if [ "$n" -gt 3 ]; then
             echo "More than 3 unsafe exceptions. Each needs a decision entry."
-            git ls-files '*.rs' | xargs -r grep -n 'allow(unsafe_code)'
+            git ls-files '*.rs' | xargs -r grep -nE "$pat"
             exit 1
           fi
 
@@ -7140,9 +7220,10 @@ jobs:
           # This is a CI tool version, not a workspace dependency: it adds
           # nothing to the dependency graph and needs no ledger entry. The
           # constraint stays bounded rather than floating, so a future breaking
-          # 0.18.9 needs rustc 1.88 and rust-toolchain.toml pins 1.85.0, so the
-          # version is pinned EXACTLY at 0.18.3 -- the newest release cargo
-          # itself reports as supporting 1.85.0. A caret range would silently
+          # 0.18.9 needs rustc 1.88 and rust-toolchain.toml then pinned 1.85.0
+          # (it pins 1.97.1 now; D-1610), so the version was pinned EXACTLY at
+          # 0.18.3 -- the newest release cargo itself reported as supporting
+          # 1.85.0. A caret range would silently
           # re-break the moment a newer cargo-deny raises its MSRV again.
           #
           # THE VERSION IS PINNED, AND UNTIL D-0034 IT WAS NOT. The paragraph
@@ -7161,17 +7242,53 @@ jobs:
         if: steps.probe.outputs.has_crates == 'true'
         run: cargo test --workspace --locked
 
+      - name: Gate 6d — the native Rust tests under web/ run
+        if: steps.probe.outputs.has_crates == 'true'
+        run: |
+          set -euo pipefail
+          # D-1607 (testgaps-6). Eleven invariant rows are proven by native
+          # tests in web/*.rs, which belong to no crate, so cargo never ran
+          # them. They are built here by rustc against the libraries the
+          # Tests step already compiled, as their READMEs describe. Two viewer
+          # tests need an operator-captured store and vocabulary and are
+          # skipped BY NAME; docs/06-limits.md says so.
+          t="${RUNNER_TEMP:-/tmp}/web-native"; mkdir -p "$t"
+          cargo build -p api -p cli --lib --tests --locked --message-format=json > "$t/art.json"
+          ext=""
+          for n in serde serde_json axum tower tokio api cli brutex_core vocab; do
+            p=$( { grep '"reason":"compiler-artifact"' "$t/art.json" \
+                   | grep -o "\"crate_types\":\[\"lib\"\],\"name\":\"$n\".*" \
+                   | grep -o '"filenames":\["[^"]*\.rlib"' || true; } | sed 's/.*\["//; s/"$//' | sort -u)
+            [ "$(grep -c . <<< "$p")" -eq 1 ] || { echo "GATE 6d: no single rlib for $n: $p"; exit 1; }
+            ext="$ext --extern $n=$p"
+          done
+          api=$(sed -E 's/.* --extern api=([^ ]+).*/\1/' <<< "$ext")
+          sha() { sha256sum "$1" | cut -c1-64; }
+          export BRUTEX_INSPECTOR_API_SHA256="$(sha "$api")" BRUTEX_VIEWER_API_SHA256="$(sha "$api")"
+          export BRUTEX_INSPECTOR_SOURCE_SHA256="$(sha web/sweep-readiness/main-inspector.rs)"
+          export BRUTEX_VIEWER_SOURCE_SHA256="$(sha web/saved-backtest/viewer.rs)"
+          rustc --edition=2024 -D warnings web/sweep-readiness/verify.rs -o "$t/verify"
+          for f in web/sweep-readiness/frontend-publish.rs web/sweep-readiness/main-inspector.rs \
+                   web/sweep-readiness/deployment-preflight.rs web/saved-backtest/viewer.rs; do
+            b=$(basename "$f" .rs)
+            # shellcheck disable=SC2086
+            rustc --edition=2024 --test -D warnings "$f" -o "$t/$b" -L dependency=target/debug/deps $ext
+            ( cd "$t" && "./$b" --skip vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses \
+                                --skip exact_saved_search_rejects_foreign_pin_through_existing_handler )
+          done
+          echo "OK — every native test under web/ but the two named above ran."
+
       - name: The browser crate actually builds for the browser
         run: |
           [ -d crates/web ] || { echo "skip"; exit 0; }
           cargo build -p web --target wasm32-unknown-unknown --locked
 
   coverage:
-    name: Coverage 100%
+    name: Coverage — 90% lines, 89% regions (D-0677)
     runs-on: ubuntu-24.04
     needs: build
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
       - name: Use a fresh coverage target for this run and attempt
         run: |
@@ -7180,7 +7297,7 @@ jobs:
           test ! -e "$coverage_target"
           mkdir -p "$coverage_target"
           printf 'CARGO_TARGET_DIR=%s\n' "$coverage_target" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
         with: { components: llvm-tools-preview }
       - name: Measure
         run: |
@@ -7395,7 +7512,7 @@ jobs:
 
       - name: Retain the measured line report for diagnosis
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-lines
           path: /tmp/cov.txt
@@ -7410,10 +7527,10 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/bin/cargo-mutants
@@ -7518,7 +7635,7 @@ jobs:
           matrix=$(/tmp/mutation-gate plan /tmp/mutation-plan/all.txt)
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
           git rev-parse HEAD > /tmp/mutation-plan/commit.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-plan
           path: /tmp/mutation-plan/
@@ -7535,26 +7652,28 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      max-parallel: 8
+      # D-1453: 20, from 8. Half-size jobs double the matrix; at 8 at once a
+      # 2,405-case plan would take ten waves.
+      max-parallel: 20
       matrix: ${{ fromJSON(needs.mutant-plan.outputs.matrix) }}
     env:
       CARGO_BUILD_JOBS: 2
       RUST_TEST_THREADS: 2
       RAYON_NUM_THREADS: 2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { fetch-depth: 0 }
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: mutation-shards
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/bin/cargo-mutants
             ~/.cargo/bin/cargo-nextest
           key: mutation-tools-${{ runner.os }}-26.2.0-nextest-0.9.145-v1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: mutation-plan
           path: /tmp/mutation-plan
@@ -7613,7 +7732,7 @@ jobs:
           /tmp/mutation-gate verify /tmp/mutation-plan/assigned.txt mutants.out "$status"
       - name: Retain exact assignments and terminal outcomes
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-shard-${{ matrix.index }}
           path: |
@@ -7632,9 +7751,9 @@ jobs:
     needs: build
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch; toolchain input defaults to stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Per-operation cost at 1x / 10x / 100x
         run: |
           set -euo pipefail
@@ -7657,6 +7776,12 @@ jobs:
             echo "docs/05-decisions.md. This step does not skip."
             exit 1
           fi
+          # The `if` above names the cause; this line is the refusal gate 14
+          # proves. D-1601's `step-runs` (rightly) refuses a line inside an
+          # `if` as one that may never run, so the proof needs a TOP-LEVEL
+          # command that fails the step when no bench is tracked: git exits 1
+          # on a pathspec that matches nothing. D-1460.
+          git ls-files --error-unmatch 'crates/*/benches/*.rs' > /dev/null
           echo "$n bench source file(s) tracked."
           # Each harness is `harness = false`: it prints every number it took
           # and exits non-zero on a breach. See docs/04-invariants.md C-01,
@@ -7667,9 +7792,9 @@ jobs:
     name: Gate W — the browser tree
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
           cache: npm
@@ -7853,9 +7978,18 @@ jobs:
           echo "     nothing on load; only the socket-free status() runs."
       - name: Gate W4 — unused CSS does not grow
         run: |
+          set -euo pipefail
           CEILING=0
-          npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
-          FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
+          # D-1609 (hunt-ci-7): the build's own status fails the step (it was
+          # piped into tee with no pipefail), and a log without vite's
+          # "built in" line is refused rather than read as zero warnings.
+          npm --prefix web run build > /tmp/build.log 2>&1
+          if ! grep -qE 'built in [0-9]' /tmp/build.log; then
+            echo "GATE W4 READ NO BUILD OUTPUT. A silent zero is not a pass."
+            tail -20 /tmp/build.log
+            exit 1
+          fi
+          FOUND=$( { grep -F 'Unused CSS selector' /tmp/build.log || true; } \
                   | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')
           echo "distinct unused CSS selectors: $FOUND (ceiling $CEILING)"
           if [ "$FOUND" -gt "$CEILING" ]; then

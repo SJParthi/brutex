@@ -19,7 +19,7 @@
 //! hash probe. Neither bound is presented as measured.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -235,6 +235,8 @@ pub struct Receipts {
     scanned: u64,
     generation: FileGeneration,
     max_bytes: Option<u64>,
+    /// `blake3` over bytes `[0, scanned)`; growth rechecks it. D-1560.
+    prefix: PrefixDigest,
 }
 
 /// The open-time validation lock over `file`, exclusive for the writer's door
@@ -379,6 +381,7 @@ impl Receipts {
             }
             at = at.saturating_add(STRIDE);
         }
+        let prefix = PrefixDigest::over(&mut file, &path, at)?;
         let generation = file_generation(&file, &path)?;
         if generation.len != at {
             return Err(format!(
@@ -401,6 +404,7 @@ impl Receipts {
             scanned: at,
             generation,
             max_bytes,
+            prefix,
         })
     }
 
@@ -439,7 +443,9 @@ impl Receipts {
     /// Refuses lock, validation, duplicate mismatch, write, sync, or unlock
     /// failures. A same-length external mutation or replacement of the already
     /// validated prefix is refused from constant-size filesystem-generation
-    /// evidence; no O(history) prefix rescan is hidden here. On a target without
+    /// evidence. When the file GREW, the validated prefix is re-hashed and a
+    /// rewrite of it is refused (D-1560): that rescan is O(indexed bytes) and
+    /// runs only on the growth branch. On a target without
     /// a stable file identity, append fails closed. A partial write is rolled
     /// back only to this call's known start.
     pub fn append_exact(&mut self, receipt: Receipt) -> Result<Prepared, Refusal> {
@@ -503,6 +509,7 @@ impl Receipts {
         let generation = self.validated_generation(scanned)?;
         self.seen.insert(receipt.identity, receipt);
         self.scanned = scanned;
+        self.prefix.extend_with(&receipt.to_bytes());
         self.generation = generation;
         Ok(Prepared::Written)
     }
@@ -535,6 +542,13 @@ impl Receipts {
             self.generation = observed;
             return Ok(());
         }
+        // GROWTH RE-READS THE INDEXED PREFIX. A peer that rewrote an indexed
+        // receipt and also appended changed the generation exactly as an
+        // honest append does; without this the stale index let this handle
+        // append a duplicate identity, after which every cold open refused the
+        // whole manifest. O(indexed bytes), growth branch only. D-1560
+        // (audit-20261003 hunt-cli-a-2).
+        self.prefix.require_unchanged(&mut self.file, &self.path)?;
         while self.scanned.saturating_add(STRIDE) <= len {
             let receipt = read_at(&mut self.file, &self.path, self.scanned)?;
             if let Some(existing) = self.seen.insert(receipt.identity, receipt) {
@@ -554,6 +568,8 @@ impl Receipts {
             }
             self.scanned = self.scanned.saturating_add(STRIDE);
         }
+        self.prefix
+            .extend_from(&mut self.file, &self.path, self.scanned)?;
         self.refresh_generation(len)?;
         Ok(())
     }
@@ -573,6 +589,120 @@ impl Receipts {
             ));
         }
         Ok(generation)
+    }
+}
+
+/// `blake3` over the bytes `[0, covered)` of an append-only file this handle has
+/// already validated and indexed.
+///
+/// Constant-size [`FileGeneration`] evidence cannot tell "another handle
+/// appended" from "another handle rewrote an indexed record and appended",
+/// because an honest append changes the same metadata. So when a held writer
+/// sees the file grow, it re-hashes the prefix it had indexed and compares:
+/// the D-0936 rule for Selection V1-V3, extended to `runs.bin` and
+/// `detail-sets.bin` by D-1560 (audit-20261003 hunt-cli-a-1, hunt-cli-a-2).
+///
+/// The digest is kept as a running hasher, so the handle's own appends and the
+/// absorbed tail extend it in O(appended bytes); only the growth branch pays
+/// the O(indexed bytes) re-read.
+pub(crate) struct PrefixDigest {
+    hasher: brutex_core::blake3::Hasher,
+    covered: u64,
+}
+
+impl std::fmt::Debug for PrefixDigest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrefixDigest")
+            .field("covered", &self.covered)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PrefixDigest {
+    /// The digest of `[0, to)`, read from `file`.
+    pub(crate) fn over(file: &mut File, path: &Path, to: u64) -> Result<Self, Refusal> {
+        let mut digest = Self {
+            hasher: brutex_core::blake3::Hasher::new(),
+            covered: 0,
+        };
+        digest.extend_from(file, path, to)?;
+        Ok(digest)
+    }
+
+    /// Extends the digest with the file's bytes `[covered, to)`.
+    pub(crate) fn extend_from(
+        &mut self,
+        file: &mut File,
+        path: &Path,
+        to: u64,
+    ) -> Result<(), Refusal> {
+        let wanted = to.saturating_sub(self.covered);
+        let read = hash_range(file, path, self.covered, wanted, &mut self.hasher)?;
+        if read != wanted {
+            return Err(format!(
+                "{} ended at byte {} while its validated prefix up to byte {to} was being hashed",
+                path.display(),
+                self.covered.saturating_add(read)
+            ));
+        }
+        self.covered = to;
+        Ok(())
+    }
+
+    /// Extends the digest with bytes this handle itself just wrote at `covered`.
+    pub(crate) fn extend_with(&mut self, bytes: &[u8]) {
+        self.hasher.update(bytes);
+        self.covered = self
+            .covered
+            .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+    }
+
+    /// Refuses unless the file's bytes `[0, covered)` still hash to this digest.
+    pub(crate) fn require_unchanged(&self, file: &mut File, path: &Path) -> Result<(), Refusal> {
+        let mut fresh = brutex_core::blake3::Hasher::new();
+        let read = hash_range(file, path, 0, self.covered, &mut fresh)?;
+        if read != self.covered || fresh.finalize() != self.hasher.finalize() {
+            return Err(format!(
+                "{} rewrote already-indexed bytes before byte {} while also growing; append-only history was violated and nothing was appended",
+                path.display(),
+                self.covered
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Hashes up to `count` bytes of `file` from `from`, returning how many existed.
+fn hash_range(
+    file: &mut File,
+    path: &Path,
+    from: u64,
+    count: u64,
+    hasher: &mut brutex_core::blake3::Hasher,
+) -> Result<u64, Refusal> {
+    file.seek(SeekFrom::Start(from)).map_err(|why| {
+        format!(
+            "{} could not seek to byte {from} to hash its validated prefix: {why}",
+            path.display()
+        )
+    })?;
+    let mut limited = Read::by_ref(file).take(count);
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = match limited.read(&mut buffer) {
+            Ok(0) => return Ok(total),
+            Ok(read) => read,
+            Err(why) if why.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(why) => {
+                return Err(format!(
+                    "{} could not be read to hash its validated prefix: {why}",
+                    path.display()
+                ));
+            }
+        };
+        hasher.update(buffer.get(..read).unwrap_or(&[]));
+        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
     }
 }
 
@@ -866,8 +996,20 @@ fn committed_receipt_with_limit(
     identity: &[u8; 32],
     max_bytes: Option<u64>,
 ) -> Result<Option<Receipt>, Refusal> {
-    if !crate::results::Results::path(root).exists() {
-        return Ok(None);
+    // ABSENCE IS `NotFound` AND NOTHING ELSE. `Path::exists` maps every stat
+    // error (a symlink loop, EACCES, EIO, ENOTDIR) to `false`, which answered
+    // "no committed run" over a ledger that could not be inspected while the
+    // same ledger opened directly refuses. audit-20261003 errpaths-2, D-1561.
+    let ledger_path = crate::results::Results::path(root);
+    match std::fs::symlink_metadata(&ledger_path) {
+        Ok(_) => {}
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(why) => {
+            return Err(format!(
+                "{} could not be inspected: {why}. It is not treated as absent, so no run is reported as uncommitted",
+                ledger_path.display()
+            ));
+        }
     }
     let mut ledger = match max_bytes {
         Some(max_bytes) => crate::results::Results::open_read_bounded(root, max_bytes)?,
@@ -1454,5 +1596,118 @@ mod tests {
                 "docs/16 names `CommittedParents::{name}`, which is not a method of it"
             );
         }
+    }
+
+    fn receipt_of(n: u8) -> Receipt {
+        Receipt {
+            identity: [n; 32],
+            frontier_rows: u64::from(n),
+            trade_rows: u64::from(n) * 2,
+            direction: costs::fill::Direction::Long,
+            trade_policy: TradePolicy::ChosenGridV1,
+        }
+    }
+
+    /// audit-20261003 hunt-cli-a-2: an indexed receipt rewritten in place
+    /// while another handle also appended is refused by the held writer. Before
+    /// the prefix recheck it absorbed only the tail, appended a duplicate of the
+    /// rewritten identity, and every later cold read of the manifest refused.
+    #[test]
+    fn rewrite_plus_append_of_an_indexed_receipt_refuses_before_append() {
+        use std::io::{Seek as _, SeekFrom};
+        let root = root("rewrite-grow");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut held = Receipts::open(&root).expect("held writer");
+        held.append_exact(receipt_of(1)).expect("receipt 1");
+        let path = Receipts::path(&root);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("in-place writer");
+        file.seek(SeekFrom::Start(super::HEADER))
+            .expect("seek to indexed receipt");
+        file.write_all(&receipt_of(9).to_bytes())
+            .expect("rewrite receipt 1 as 9");
+        file.sync_all().expect("sync rewrite");
+        drop(file);
+        Receipts::open(&root)
+            .expect("peer")
+            .append_exact(receipt_of(2))
+            .expect("peer appends receipt 2");
+        let before = std::fs::read(&path).expect("bytes before");
+
+        let why = held
+            .append_exact(receipt_of(9))
+            .expect_err("the rewritten prefix is refused, not absorbed");
+        assert!(why.contains("rewrote already-indexed"), "{why}");
+        assert_eq!(std::fs::read(&path).expect("bytes after"), before);
+        let reader = Receipts::open_read(&root).expect("the manifest stays readable");
+        assert_eq!(reader.of_identity(&[9; 32]), Some(receipt_of(9)));
+        assert_eq!(reader.of_identity(&[2; 32]), Some(receipt_of(2)));
+        assert_eq!(reader.of_identity(&[1; 32]), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Honest growth by a peer is still absorbed after the prefix recheck.
+    #[test]
+    fn honest_receipt_growth_by_a_peer_is_still_absorbed() {
+        let root = root("honest-grow");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut held = Receipts::open(&root).expect("held writer");
+        held.append_exact(receipt_of(1)).expect("receipt 1");
+        Receipts::open(&root)
+            .expect("peer")
+            .append_exact(receipt_of(2))
+            .expect("peer receipt 2");
+        assert_eq!(
+            held.append_exact(receipt_of(2))
+                .expect("peer's receipt is known"),
+            Prepared::Reused
+        );
+        assert_eq!(
+            held.append_exact(receipt_of(3)).expect("receipt 3"),
+            Prepared::Written
+        );
+        assert_eq!(
+            held.append_exact(receipt_of(4)).expect("receipt 4"),
+            Prepared::Written
+        );
+        let reader = Receipts::open_read(&root).expect("reader");
+        for n in 1..=4 {
+            assert_eq!(reader.of_identity(&[n; 32]), Some(receipt_of(n)));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// audit-20261003 errpaths-2: a ledger path whose stat fails is refused by
+    /// `committed_receipt`, not answered as "no committed run". The same
+    /// ledger opened directly already refuses.
+    #[cfg(unix)]
+    #[test]
+    fn an_uninspectable_ledger_path_is_refused_not_reported_uncommitted() {
+        let root = root("uninspectable-ledger");
+        let _ = std::fs::remove_dir_all(&root);
+        let path = crate::results::Results::path(&root);
+        std::fs::create_dir_all(path.parent().expect("results dir")).expect("results dir");
+        std::os::unix::fs::symlink(&path, &path).expect("a self-referencing symlink");
+        for why in [
+            super::committed_receipt(&root, &[1; 32]).expect_err("unbounded refuses"),
+            super::committed_receipt_bounded(&root, &[1; 32], 1 << 20)
+                .expect_err("bounded refuses"),
+        ] {
+            assert!(why.contains("runs.bin"), "{why}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        // A `results` that is a regular file makes the stat itself fail.
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::write(root.join("results"), b"not a directory").expect("blocking file");
+        for why in [
+            super::committed_receipt(&root, &[1; 32]).expect_err("unbounded refuses"),
+            super::committed_receipt_bounded(&root, &[1; 32], 1 << 20)
+                .expect_err("bounded refuses"),
+        ] {
+            assert!(why.contains("could not be inspected"), "{why}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

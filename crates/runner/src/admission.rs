@@ -4751,6 +4751,8 @@ impl AdmissionPolicyV1 {
     /// # Errors
     ///
     /// Returns the first Statistics, walk-forward, or evidence-join refusal.
+    ///
+    /// **No production caller (D-1544).** Only this module's tests call it.
     pub fn evaluate_v2_projection(
         self,
         base: &AdmissionEvidenceValuesV1,
@@ -4811,6 +4813,8 @@ impl AdmissionPolicyV1 {
     /// # Errors
     ///
     /// Returns the first Statistics, walk-forward, or evidence-join refusal.
+    ///
+    /// **No production caller (D-1544).** Only this module's tests call it.
     pub fn evaluate_v3_projection(
         self,
         base: &AdmissionEvidenceValuesV1,

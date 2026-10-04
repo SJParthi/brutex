@@ -739,7 +739,8 @@ impl Sweep {
 ///
 /// # Where the number comes from
 ///
-/// Bytes, not taste. A level holds each distinct candidate twice: once in `seen`
+/// Bytes, not taste. When this was measured a level held each distinct
+/// candidate twice: once in the `seen` duplicate set, since deleted (see below),
 /// as a [`ConditionMask`] key (48 bytes) and once, if it survives, in `out` as an
 /// [`Itemset`] (56 bytes). `hashbrown` carries roughly one slot in eight spare
 /// plus a control byte, so 128 bytes per candidate across both is a safe
@@ -1689,9 +1690,9 @@ impl Ladder {
     /// # THE BOUND IS CUMULATIVE, AND A PER-LEVEL ONE HAS ALREADY FAILED
     ///
     /// `admitted` accumulates across every level of the walk, and it is tempting
-    /// to call that a mistake: `seen` is built fresh inside [`Self::next_level`]
-    /// and dropped when that level ends, so the bytes THIS SET holds are one
-    /// level's worth. An audit reached exactly that conclusion and changed the
+    /// to call that a mistake: the `seen` set, since deleted because the prefix
+    /// join is injective, was built fresh inside [`Self::next_level`] and dropped
+    /// when that level ended, so the bytes it held were one level's worth. An audit reached exactly that conclusion and changed the
     /// test to `seen.len() + grow_by > ceiling`.
     ///
     /// **It is wrong for the RETAINING entry point, and

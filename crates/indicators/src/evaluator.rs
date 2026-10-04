@@ -96,6 +96,40 @@ impl Widths {
         vocab::tolerance::pinned_fib()
             .and_then(|fib| vocab::tolerance::pinned_pivot().map(|pivot| Self { fib, pivot }))
     }
+
+    /// The two widths, refused unless each is measured on its own family's base.
+    ///
+    /// `fib` must be measured on [`Base::SessionRange`] and `pivot` on
+    /// [`Base::CprWidth`]. A swapped or baseless pair used to be accepted: every
+    /// `near_*` call then got `WrongBand` from `vocab::table::set_near`, the
+    /// callers discard that error by design, and the run withheld every band
+    /// position of the mismatched family while refusing nothing (errpaths-4,
+    /// D-1546). This is the checked door; the public fields remain for the
+    /// readiness suites that prove a mismatched width is withheld as unknown and
+    /// never answered false.
+    ///
+    /// # Errors
+    ///
+    /// [`vocab::VocabError::WrongBand`], naming the first table position of the
+    /// family whose width is wrong, the base it expects and the base offered.
+    pub fn new(fib: Tolerance, pivot: Tolerance) -> Result<Self, vocab::VocabError> {
+        for (offered, expected) in [(fib, Base::SessionRange), (pivot, Base::CprWidth)] {
+            if offered.base() != Some(expected) {
+                let index = vocab::table::TABLE
+                    .iter()
+                    .filter(|row| row.band == Some(expected))
+                    .map(|row| row.index)
+                    .next()
+                    .unwrap_or(0);
+                return Err(vocab::VocabError::WrongBand {
+                    index,
+                    expected,
+                    got: offered.base(),
+                });
+            }
+        }
+        Ok(Self { fib, pivot })
+    }
 }
 
 /// Set `above` or `below`, and neither when the two are equal.
@@ -550,7 +584,10 @@ enum Side {
 // move. D-1441 then took 64 bytes OUT: `GapFib`'s three-slot ring and bar count
 // became one running 3-minute candle, 160 bytes to 96, so the evaluator measures
 // 1728 and the ceiling came down from 1824 to keep the same 32 bytes of slack.
-const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1760);
+// D-1542 put 48 back: the two EMAs and the ATR each carry one `i128` running
+// sum for the simple-mean seed, so the evaluator measures 1776 and the ceiling
+// moved from 1760 to 1808, the same 32 bytes of slack.
+const _: () = assert!(core::mem::size_of::<Evaluator>() <= 1808);
 
 impl Evaluator {
     /// Snapshot the four caller choices, without any running indicator state.
@@ -725,7 +762,7 @@ impl Evaluator {
         // after them. The entry was right about the fix it described and wrong that the
         // fix was complete.
         //
-        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1760
+        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1808
         // bytes by the const assertion above -- a 1,728-byte memcpy per bar against a
         // fold that already costs ~320 ns.
         let (next, mask) = self.stepped(bar)?;
@@ -1478,6 +1515,36 @@ mod tests {
                 evaluator.spec().availability,
                 verdict,
                 "the getter and the reprojection spec read the same field"
+            );
+        }
+    }
+
+    /// SWAPPED OR BASELESS WIDTHS ARE REFUSED BY THE CHECKED CONSTRUCTOR.
+    /// errpaths-4, D-1546.
+    ///
+    /// Every `near_*` caller discards `set_near`'s `WrongBand`, so a pivot
+    /// width on the Fibonacci side, or the reverse, withheld every band
+    /// position in the run and refused nothing. `Widths::new` refuses the
+    /// pair before an evaluator can be built from it, naming the base.
+    #[test]
+    fn swapped_or_baseless_widths_are_refused_by_name() {
+        let fib = vocab::tolerance::pinned_fib().expect("pinned fib");
+        let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot");
+        assert_eq!(Widths::new(fib, pivot), Widths::pinned());
+        let baseless = Tolerance::from_milli(10).expect("a width with no base");
+        for (fib_side, pivot_side, expected) in [
+            (pivot, fib, Base::SessionRange),
+            (fib, fib, Base::CprWidth),
+            (baseless, pivot, Base::SessionRange),
+            (fib, baseless, Base::CprWidth),
+        ] {
+            let refused = Widths::new(fib_side, pivot_side);
+            assert!(
+                matches!(
+                    refused,
+                    Err(vocab::VocabError::WrongBand { expected: e, .. }) if e == expected
+                ),
+                "{fib_side:?} / {pivot_side:?}: {refused:?}"
             );
         }
     }

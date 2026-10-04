@@ -431,3 +431,54 @@ fn a_month_with_bytes_that_are_not_zero_is_refused_rather_than_reinitialised() {
         "and the refusal leaves the file exactly as it was found"
     );
 }
+
+/// hunt-store-4 (D-1522). Every directory the writer CREATES has its entry
+/// flushed in its parent, not only the month's own directory.
+///
+/// `create_dir_all` can make the vendor .. rung chain in one call, and only
+/// the leaf was synced, so after a crash a month whose first commit returned
+/// `Committed` could lose the directory that names it. The flush is observed
+/// the way the leaf's is above: the parent of the first created directory is
+/// write-and-execute but not read, so `mkdir` inside it succeeds and opening
+/// it for the flush is refused, and that refusal must reach the caller naming
+/// the parent. A flush that is never issued is never refused.
+#[cfg(unix)]
+#[test]
+fn every_directory_the_writer_creates_has_its_entry_flushed() {
+    support::where_permission_binds(
+        "every_directory_the_writer_creates_has_its_entry_flushed",
+        every_directory_the_writer_creates_has_its_entry_flushed_body,
+    );
+}
+
+/// The test above, run where the mode bits bind (D-0995).
+#[cfg(unix)]
+fn every_directory_the_writer_creates_has_its_entry_flushed_body() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("PARENTFLUSH");
+    let vendor = scratch.root.join("bars").join("groww");
+    fs::create_dir_all(&vendor).expect("the vendor directory exists; NSE below it does not");
+
+    fs::set_permissions(&vendor, fs::Permissions::from_mode(0o300)).expect("close the vendor");
+    let refused = BarFile::open_or_create(&scratch.root, bars_path(), 7).map(|file| file.records());
+    fs::set_permissions(&vendor, fs::Permissions::from_mode(0o755)).expect("reopen the vendor");
+
+    assert_eq!(
+        refused,
+        Err(StoreError::Denied {
+            path: vendor.clone(),
+            action: Action::Open,
+        }),
+        "the new `NSE` entry lives in the vendor directory, so its flush is \
+         issued there, and the host's refusal is returned naming it"
+    );
+    assert!(
+        vendor.join("NSE").is_dir(),
+        "the premise: the directory was created before its entry was flushed"
+    );
+
+    let opened = BarFile::open_or_create(&scratch.root, bars_path(), 7)
+        .expect("the same month with the vendor readable");
+    assert_eq!(opened.records(), 0);
+}

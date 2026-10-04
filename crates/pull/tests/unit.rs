@@ -8274,6 +8274,26 @@ fn the_governor_clock_is_monotonic() {
     }
 }
 
+/// **AND IT MOVES.** A clock that never steps back is satisfied by a constant;
+/// the governor needs one that advances by the time that actually passed, or
+/// every reservation is made at one frozen instant. Bracketed by an
+/// [`std::time::Instant`] measurement, the reading's advance is at least the
+/// measured interval, less one microsecond for each reading's truncation.
+#[test]
+fn the_governor_clock_advances_by_the_time_that_passed() {
+    let before = pull::rate::monotonic_micros();
+    let measured = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let elapsed = u64::try_from(measured.elapsed().as_micros()).expect("a few milliseconds");
+    let after = pull::rate::monotonic_micros();
+    assert!(elapsed >= 3_000, "slept {elapsed} us");
+    let advanced = after.checked_sub(before).expect("never steps back");
+    assert!(
+        advanced.saturating_add(1) >= elapsed,
+        "clock advanced {advanced} us across a measured {elapsed} us ({before} -> {after})"
+    );
+}
+
 /// **No manifest doc calls a hash probe a worst-case constant.** v4-1, D-1488.
 ///
 /// `Manifest::entry`, `Manifest::closes` and `Manifest::record` are each one

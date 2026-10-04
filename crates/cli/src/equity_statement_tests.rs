@@ -11,7 +11,7 @@ use super::{
     AuditOptions, Cadence, Rules, STORED_PROVENANCE, audit_bars, descend_banner, descent_banner,
     month_banner, range_opening, render_top_record, span_banner,
 };
-use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope};
+use runner::audit::{CORPORATE_ACTIONS_UNCHECKED, CostScope, NO_OVERNIGHT_MEASURED};
 
 /// A recorded row naming `underlying` and nothing else.
 fn record(underlying: &str) -> crate::results::Record {
@@ -183,6 +183,16 @@ fn a_stock_banner_is_its_index_banner_with_the_note_put_in_and_nothing_else() {
             let stock_rest = stock_text
                 .strip_prefix(&stock_head)
                 .expect("a stock's banner leads with the provenance and the note");
+            // The span banner is built with its bars in hand, so a stock's
+            // names its largest overnight move next (D-1540); these spans
+            // hold no bars, so it is exactly the "none measured" line.
+            let stock_rest = if surface == "audit-range" {
+                stock_rest
+                    .strip_prefix(NO_OVERNIGHT_MEASURED)
+                    .expect("a stock's span banner states its overnight move (D-1540)")
+            } else {
+                stock_rest
+            };
             let index_rest = index_text
                 .strip_prefix(STORED_PROVENANCE)
                 .expect("an index's banner leads with the provenance");

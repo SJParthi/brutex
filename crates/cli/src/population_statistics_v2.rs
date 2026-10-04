@@ -54,6 +54,11 @@ use crate::population_observations_v1::{
 };
 use crate::pre_admission_data::{PreAdmissionDataReopenAuditV1, PreAdmissionDataV1};
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "population-statistics record";
+
 /// Operator-facing refusal from the Population Statistics V2 audit boundary.
 pub type PopulationStatisticsV2Refusal = String;
 
@@ -6946,6 +6951,34 @@ mod tests {
             .expect("ensure_header exists");
         let body = body.split_once("\nfn ").map_or(body, |(head, _)| head);
         assert!(body.contains("return sync_parent(path);"), "{body}");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let root = TempRoot::new("append-rollback");
+        let prepared = fixture(4);
+        drop(
+            PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+                .expect("empty fixture ledger opens"),
+        );
+        let planned = prepared.records(0, 0).expect("planned bytes build");
+        let data_path = root.path().join(DATA_FILE);
+        for raw in planned.get(..1).expect("fixture prefix is inside plan") {
+            write_bytes(&data_path, raw);
+        }
+        crate::append_rollback::tests::inject_short_write(&data_path, APPEND_LABEL, RECORD_BYTES);
+        let mut ledger = PopulationStatisticsV2Ledger::open_writer(root.path(), bounds())
+            .expect("the rolled-back prefix is still recoverable");
+        let completed = ledger
+            .append(&prepared)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(
+            completed,
+            PopulationStatisticsV2Append::Written(_)
+        ));
+        drop(ledger);
+        PopulationStatisticsV2Ledger::open_read(root.path(), bounds())
+            .expect("the ledger stays readable");
     }
 
     #[test]

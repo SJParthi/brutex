@@ -52,6 +52,8 @@ compile_error!(
     "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
 );
 
+/// The one append-with-rollback every fixed-stride ledger appends through (D-1850).
+mod append_rollback;
 #[cfg(test)]
 mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
@@ -3666,6 +3668,7 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
+    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -4095,6 +4098,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
+    out.push_str(&stored::overnight_note(&span.key, &span.bars));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -5417,12 +5421,12 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
 /// was collapsing the stop ladder to one rung — but that clamp was also the
 /// only thing bounding `cap / step_points` above. And `screen` was
 /// parallelised, so `available_parallelism` of these grids are live at once.
-/// The candidate ceiling covers none of it: [`derived_ceiling`] counts APRIORI
+/// The candidate ceiling covers none of it: [`ceiling_from_env`] counts APRIORI
 /// candidates, and an exit grid is transient per-candidate work it never sees.
 ///
 /// # Derived, not typed
 ///
-/// [`derived_ceiling`] already answers *"how many 146-byte records fit in this
+/// [`ceiling_from_env`] already answers *"how many 146-byte records fit in this
 /// machine's share"* — scaled by core count and divided among concurrent rungs
 /// by `SharedBy`. A `Cell` is about the same width, and a grid is TRANSIENT
 /// where a candidate is RETAINED, so a grid gets a small fraction of that: one
@@ -5430,8 +5434,17 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
 ///
 /// On the reference machine that is roughly nine thousand cells per candidate,
 /// solving to seven or eight rungs — the range the old constant already sat in,
-/// now reached by arithmetic rather than by a number that happened to hold. A
-/// larger machine earns more; a smaller one is protected.
+/// now reached by arithmetic rather than by a number that happened to hold.
+///
+/// **The core count cancels, so every machine gets the same budget.** This
+/// sentence used to say "a larger machine earns more; a smaller one is
+/// protected", and the arithmetic does neither: [`whole_machine_ceiling`]
+/// multiplies by `available_parallelism` and the division by `threads` below
+/// divides by the same figure, so the budget is
+/// `DEFAULT_CEILING / REFERENCE_CORES / GRID_SHARE` (9,362 cells, seven rungs)
+/// on one core and on 128 alike, up to integer rounding. That is the
+/// reproducible outcome: the grid rung count, which selects the winning cell,
+/// does not depend on the machine. audit-20261003 hunt-conc-4, D-1566.
 ///
 /// Solved by walking upward rather than inverting a quintic: the answer is
 /// small, the walk is bounded, and `variants` is a `const fn` of a few
@@ -6251,6 +6264,9 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         loaded.bars.len(),
         commit,
     );
+    // D-1540: the month banner names the largest overnight move of a stock's
+    // bars, where `month_banner` itself sees only their count.
+    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -6468,6 +6484,7 @@ fn span_banner(
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
+    header.push_str(&stored::overnight_note(&span.key, &span.bars));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7374,9 +7391,13 @@ fn grouped(n: u64) -> String {
 /// The conversion happens HERE, at the render boundary, and nowhere else — the
 /// same rule the tick grid follows. Integer arithmetic throughout: the rupees
 /// and the paise are separated by division and remainder, never by a float.
-fn rupees(paisa: i64) -> String {
+///
+/// Takes any integer up to `i128`, because a pooled or per-period money total is
+/// summed exactly in `i128` rather than clamped in `i64` (D-1852).
+fn rupees(paisa: impl Into<i128>) -> String {
+    let paisa: i128 = paisa.into();
     let negative = paisa < 0;
-    // `unsigned_abs` and not `abs`: `i64::MIN` has no positive counterpart, and
+    // `unsigned_abs` and not `abs`: `i128::MIN` has no positive counterpart, and
     // it is exactly the value `saturating_add` produces for a variant that lost
     // without bound. A sort that panicked on the worst possible result would be
     // the report killing the process over the answer.
@@ -11835,7 +11856,9 @@ struct Consistency {
     /// every year can still have a day that took a quarter of the account, and
     /// the yearly view cannot show it. A day is the smallest unit an intraday
     /// operator carries risk across.
-    worst_day: i64,
+    ///
+    /// `i128`: a period's net is summed exactly, never clamped (D-1852).
+    worst_day: i128,
     /// Periods counted at the coarsest grain, so a share can be read against a
     /// denominator. `10_000` of one year is not the same evidence as `10_000` of
     /// seven, and a share alone cannot tell them apart.
@@ -11908,7 +11931,7 @@ fn consistency_of(
     }
     // Sized from the ladder, so a new grain cannot be silently discarded.
     let mut shares_bp = [0_i64; crate::stability::GRAINS.len()];
-    let mut worst_day = 0_i64;
+    let mut worst_day = 0_i128;
     let mut years = 0_usize;
     for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
         let measured = crate::stability::at(&rows, *grain);
@@ -12380,7 +12403,7 @@ fn screen<'a>(
         let (weakest, worst_period) = r.consistency.as_ref().map_or(
             // The unmeasured floor: worse than any real grain share and any
             // real period, so measured rows always sort ahead.
-            (i64::MIN, i64::MIN),
+            (i64::MIN, i128::MIN),
             calendar_terms,
         );
         core::cmp::Reverse((
@@ -12588,7 +12611,7 @@ const fn money_key(cell: &grid::Cell) -> core::cmp::Reverse<(i64, i64, i64)> {
 /// Both terms are carried RAW because the caller wraps the key in `Reverse`:
 /// the tuple sorts descending, so a larger term ranks higher, and for both a
 /// grain share and a period's net "larger" already means "better".
-fn calendar_terms(c: &Consistency) -> (i64, i64) {
+fn calendar_terms(c: &Consistency) -> (i64, i128) {
     (c.weakest_bp(), c.worst_day)
 }
 
@@ -15610,14 +15633,19 @@ const IN_SAMPLE_WARNING: &str = "\n  \
 /// The record just written for this exact run, read back from the store.
 ///
 /// Reads BACKWARDS from the newest row and stops at the first match, because the
-/// row this command just appended is the last one. That is `O(1)` in the ordinary
-/// case and `O(rows)` only if the run was somehow not recorded — which is
-/// reported as the refusal it is rather than absorbed.
+/// row this command just appended is usually the last one. The SCAN is short in
+/// the ordinary case; the CALL is not.
 ///
-/// **UNVERIFIED as a measurement.** The bound is argued from the
-/// shape of the code and no bench in this workspace times it.
-/// `CLAUDE.md` §3 rule 6: a structural argument is not a
-/// measurement, however sound it is.
+/// **O(runs) per call, measured.** `Results::open` builds the identity index
+/// and hashes the file before the first row is read, so every call costs the
+/// whole ledger: audit-20261003 o1surface2-4 measured a 14.13x open cost for
+/// 10x the rows, and about 10.9x even when the newest row matches. This doc
+/// said `O(1)` in the ordinary case until D-1567. The match is on feed,
+/// instrument, rung, span and `min_hits`, not on an identity, so
+/// `Results::of_identity` cannot serve it; `docs/06-limits.md` states the bound.
+/// That bound is UNVERIFIED by any tracked test or bench: the 14.13x is the
+/// audit's measurement, and `crates/cli/benches/ratio.rs` deliberately does not
+/// time `Results::open` (D-1459).
 fn latest_for(
     vendor_word: &str,
     underlying: &str,
@@ -16501,7 +16529,7 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// # The defect this closes, and it is why a run "ran out of budget"
 ///
-/// [`derived_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
+/// [`whole_machine_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
 /// memory"* — `engine::DEFAULT_CEILING` at roughly 146 bytes each is about
 /// **19.6 GB**, and its own doc says that is *"a fact about ONE machine"*. It is
 /// therefore a budget for the machine, not for a caller.
@@ -16673,7 +16701,7 @@ impl Drop for SharedBy {
 ///
 /// # It is at module scope because TWO functions need it
 ///
-/// It was declared inside [`derived_ceiling`], which is why [`shared_out`] could
+/// It was declared inside `derived_ceiling` (since removed), which is why [`shared_out`] could
 /// not apply the same floor and why the sharing division existed on one ceiling
 /// path and not the other. A constant only one function can see is a constant
 /// the other function will re-derive differently.
@@ -16706,7 +16734,7 @@ const REFERENCE_CORES: usize = 14;
 
 /// This machine's whole candidate budget, BEFORE any sharing.
 ///
-/// Split out from [`derived_ceiling`] so [`ceiling_asked`] can name the same
+/// Split out from `derived_ceiling` (since removed) so [`ceiling_asked`] can name the same
 /// figure without the process-global division -- the identity must describe the
 /// search and not the scheduling.
 ///
@@ -23251,6 +23279,33 @@ mod tests {
         );
     }
 
+    /// h-cli-3, D-1852: `rupees` renders every integer up to `i128` exactly,
+    /// zero without a sign, and the `i128` totals a pooled or per-period sum
+    /// can now reach, including `i128::MIN`, without a panic or a clamp.
+    #[test]
+    fn rupees_render_zero_unsigned_and_every_i128_exactly() {
+        assert_eq!(super::rupees(0_i64), "\u{20b9}0.00");
+        assert_eq!(super::rupees(-1_i64), "-\u{20b9}0.01");
+        assert_eq!(super::rupees(1_i64), "\u{20b9}0.01");
+        assert_eq!(super::rupees(12_345_678_i64), "\u{20b9}1,23,456.78");
+        assert_eq!(
+            super::rupees(i64::MIN),
+            "-\u{20b9}92,23,37,20,36,85,47,758.08"
+        );
+        assert_eq!(
+            super::rupees(3 * i128::from(i64::MIN)),
+            "-\u{20b9}2,76,70,11,61,10,56,43,274.24"
+        );
+        assert_eq!(
+            super::rupees(i128::MIN),
+            "-\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.28"
+        );
+        assert_eq!(
+            super::rupees(i128::MAX),
+            "\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.27"
+        );
+    }
+
     /// THE WORST DAY RANKS A SMALLER LOSS HIGHER, WHICH IS WHAT THE RULE SAYS.
     ///
     /// `calendar_terms` feeds a key the caller wraps in `Reverse`, so the tuple
@@ -23271,7 +23326,7 @@ mod tests {
     /// catch it.
     #[test]
     fn a_row_that_never_lost_a_day_outranks_one_that_lost_heavily() {
-        let row = |worst_day: i64| Consistency {
+        let row = |worst_day: i128| Consistency {
             shares_bp: [5_000; crate::stability::GRAINS.len()],
             worst_day,
             years: 6,
@@ -23452,6 +23507,26 @@ mod tests {
         ] {
             assert_eq!(validates(raw), want, "{why}");
         }
+    }
+
+    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value other than `0`
+    /// or `1` still leaves validation ON, and the run now SAYS so through the
+    /// `!! KNOB REFUSED` block, instead of reading `false` as `1` in silence.
+    #[test]
+    fn an_unexpected_validate_value_stays_on_and_is_named_as_refused() {
+        let _knobs = crate::knobs::serially();
+        for (raw, refused) in [("false", true), ("off", true), ("1", false), (" 0 ", false)] {
+            crate::knobs::clear_all();
+            crate::knobs::set("BRUTEX_VALIDATE", raw);
+            assert_eq!(super::validate_from_env(), raw.trim() != "0", "{raw:?}");
+            let block = crate::knobs::refused().unwrap_or_default();
+            assert_eq!(
+                block.contains("BRUTEX_VALIDATE"),
+                refused,
+                "{raw:?}: {block}"
+            );
+        }
+        crate::knobs::clear_all();
     }
 
     /// AND THE SEARCH ACTUALLY FINISHES, ON A COLUMN WITH BARS TO SWEEP.

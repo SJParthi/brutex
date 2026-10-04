@@ -1019,6 +1019,29 @@ fn scope_key(asked: &SpotRequest) -> Result<String, String> {
     ))
 }
 
+/// The plan scope a stored attempt belongs to, read from its body alone.
+///
+/// The same key [`scope_key`] gives for a body [`checked`] accepts, but without
+/// asking the current build whether it still would: a symbol a later universe
+/// retired still names its own scope, so it can be skipped by every plan it is
+/// not part of (hunt-api-4, D-1584).
+fn stored_scope_key(body: &str) -> Result<String, String> {
+    let named = server::params(body, "member");
+    let [member] = named.as_slice() else {
+        return Err("recovery unit must name exactly one symbol".to_owned());
+    };
+    let member = brutex_core::symbol::Symbol::new(member.trim()).map_err(failure)?;
+    let rung = ingest::parse_granularity(&server::param(body, "granularity"))
+        .ok_or("recovery unit names no rung this build reads")?;
+    let from = ingest::parse_day_field(body, "from").map_err(failure)?;
+    Ok(format!(
+        "{}|{}|{}",
+        member.as_str(),
+        rung.dir(),
+        from.year_month().map_err(failure)?
+    ))
+}
+
 /// Reconcile requests interrupted after storage but before their receipt, even
 /// if the parent's gap has disappeared. A lost receipt never invents new-row
 /// counts or marks the old request clean. Explicit reactivation may retry a
@@ -1058,6 +1081,17 @@ async fn reconcile_pending(
         if stopping(site) {
             return Err("stopped while reconciling interrupted requests".to_owned());
         }
+        // THE PLAN'S SCOPE FIRST, THEN THIS BUILD'S RULES (hunt-api-4,
+        // D-1584). The ledger is shared and append-only, and `checked` asks the
+        // CURRENT F&O table and window limits — which a later build changes.
+        // Checked first, one row naming a since-retired symbol refused every
+        // plan's reconciliation, forever. A row outside this plan's scopes is
+        // now skipped before it is judged; a row inside them is judged as
+        // strictly as before.
+        let Some(windows) = scopes.get(&stored_scope_key(&item.body)?) else {
+            continue;
+        };
+        let windows = windows.clone();
         let asked = checked(&item.body, today)?;
         if item.key != key(&item.body)
             || asked.window.days() != 1
@@ -1065,11 +1099,10 @@ async fn reconcile_pending(
         {
             return Err("shared attempt has invalid identity or non-day scope".to_owned());
         }
-        if !scopes.get(&scope_key(&asked)?).is_some_and(|windows| {
-            windows.iter().any(|window| {
-                asked.window.from() >= window.from() && asked.window.to() <= window.to()
-            })
-        }) {
+        if !windows
+            .iter()
+            .any(|window| asked.window.from() >= window.from() && asked.window.to() <= window.to())
+        {
             continue;
         }
         match assess(site, &item.body, lifecycle).await {
@@ -2187,6 +2220,83 @@ mod tests {
         assert!(!root.exists());
     }
 
+    /// audit-20261003 hunt-api-4, D-1584: ONE RETIRED SYMBOL CANNOT BLOCK
+    /// EVERY PLAN. The shared attempt ledger holds an `Unverified` row naming a
+    /// symbol this build's F&O table does not carry (a later build retired it;
+    /// D-0682 shows the table does change). A plan for NIFTY, in another month
+    /// and rung, must not be refused because of it: rows are filtered by plan
+    /// scope BEFORE the current build's rules are asked about them.
+    #[tokio::test]
+    async fn a_retired_symbol_outside_the_plan_does_not_block_it() {
+        let root = crate::scratch::path("recovery-retired-symbol");
+        std::fs::create_dir_all(&root).unwrap();
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        std::fs::create_dir_all(super::root(&site)).unwrap();
+        let mut plan = Journal::open(&root.join("plan.bin")).unwrap();
+        plan.append(record(canonical(
+            "NIFTY",
+            "1day",
+            Window::new(date(2026, 8, 30), date(2026, 8, 30)).unwrap(),
+            "scan",
+        )))
+        .unwrap();
+        let retired = canonical(
+            "ZZRETIRED",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "gap",
+        );
+        let now = ingest::today_ist().unwrap();
+        assert!(
+            checked(&retired, now).is_err(),
+            "the fixture names a symbol this build refuses"
+        );
+        let mut attempts = Journal::open(&super::root(&site).join("attempts.bin")).unwrap();
+        let mut stale = record(retired);
+        stale.status = Status::Unverified;
+        attempts.append(stale).unwrap();
+        let ran = execute(&site, &mut plan, &mut attempts, false).await;
+        if let Err(why) = &ran {
+            assert!(
+                !why.contains("recovery requires explicit F&O spot members"),
+                "a row outside this plan blocked it: {why}"
+            );
+        }
+        drop((plan, attempts));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The scope read from a stored body is the scope the checked parse gives,
+    /// so filtering on it first changes which rows are skipped and nothing else.
+    #[test]
+    fn a_stored_scope_matches_the_checked_scope() {
+        for (sym, dir) in [("NIFTY", "1day"), ("M&M", "1min")] {
+            let body = canonical(
+                sym,
+                dir,
+                Window::new(date(2026, 8, 3), date(2026, 8, 3)).unwrap(),
+                "gap",
+            );
+            assert_eq!(
+                stored_scope_key(&body).unwrap(),
+                scope_key(&checked(&body, today()).unwrap()).unwrap()
+            );
+        }
+        let retired = canonical(
+            "ZZRETIRED",
+            "1min",
+            Window::new(date(2026, 7, 1), date(2026, 7, 1)).unwrap(),
+            "gap",
+        );
+        assert!(checked(&retired, today()).is_err());
+        assert!(
+            stored_scope_key(&retired)
+                .unwrap()
+                .starts_with("ZZRETIRED|1min|")
+        );
+        assert!(stored_scope_key("target=fno&granularity=1min&from=2026-07-01").is_err());
+    }
+
     #[test]
     fn budgets_survive_restart_and_interrupted_attempts_are_charged() {
         let dir = crate::scratch::path("recovery-reserve-budget");
@@ -3021,6 +3131,8 @@ mod tests {
         );
         let hash = brutex_core::universe::fnv1a("NIFTY").to_le_bytes();
         let id = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+        // The writer never creates a missing store root (D-1522).
+        std::fs::create_dir_all(&root).unwrap();
         let mut file = store::file::BarFile::open_or_create(&root, path, id).unwrap();
         let ts = (i64::from(date(2026, 8, 27).days_from_epoch()) * 86_400 + 9 * 3600 + 15 * 60
             - pull::session::IST_OFFSET_SECS)

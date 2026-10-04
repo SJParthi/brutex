@@ -345,10 +345,10 @@ fn a_closed_stdout_is_said_on_stderr_and_never_panics() {
         1,
         "one `cli.output` event for the one failed write:\n{events:#?}\n{said}"
     );
+    let event = events.first().map_or("", String::as_str);
     assert!(
-        events[0].contains("\"level\":\"warn\"") && events[0].contains("\"exit\":0"),
-        "a WARN that records the exit code the run kept: {}",
-        events[0]
+        event.contains("\"level\":\"warn\"") && event.contains("\"exit\":0"),
+        "a WARN that records the exit code the run kept: {event}"
     );
     let _cleaned = std::fs::remove_dir_all(&logs);
 }

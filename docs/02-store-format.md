@@ -173,6 +173,22 @@ sidecar's own `fsync` makes its bytes durable, not its name, and a sealed month
 that loses the name after its first commit is refused forever: a writer may
 not recreate proof for existing records (§8). D-0688.
 
+**And every directory the writer creates has its entry flushed in its parent**
+(D-1522). Creating a month can make up to six directories below the store root
+(vendor .. rung); before D-1522 only the month's own directory was synced, so a
+crash could lose a directory whose month had returned `Committed`. **The store
+root itself is never created by the writer**: a missing root is refused by
+name, so a store on an unmounted volume cannot silently grow a second root on
+the parent filesystem (D-1522, the bar-writer half of D-0954).
+
+**A month whose header region is gone is re-initialised only when nothing was
+ever committed** (D-1520, D-1521). The writer repairs a file of at most 32,768
+bytes whose bytes past the first slot are zero and whose first slot does not
+decode — what an interrupted `initialise` leaves, all zeros or a torn genesis
+slot — and only when the checksum sidecar beside it is absent or empty. A
+sidecar with entries proves an append committed records, so such a file is
+refused as `CommittedRecordsLost` instead of being reopened empty.
+
 Consequences:
 
 * **A torn record is never served, and it is not always unobservable.** This
@@ -333,14 +349,19 @@ states what is not claimed.
 ## 7. Opening — boundary check
 
 ```
-if (len - 32768) % 56 != 0 {
-    // truncate to the last whole record, log loudly, continue
+if len > offset_of(n_valid) {
+    // bytes past the commit: log loudly with the count, open, do NOT truncate
 }
 ```
 
-A file whose length does not divide by the stride was interrupted. The tail is
-truncated to the last whole record and the event is logged with the byte count
-discarded. Never silently, never by ignoring the remainder.
+A file holding bytes past the extent its commit counter covers — a ragged
+record, or whole records an append wrote before it died — was interrupted. The
+month opens, and the event is logged (`store.open`, "bytes past the commit
+counter") with the byte count discarded. **The file is not truncated** (D-0189):
+no reader can reach those bytes, and the next append writes at exactly
+`offset_of(n_valid)` and overwrites them, so a destructive write at open buys
+nothing. Never silently, never by counting the remainder as records. This
+section said "truncated" until D-1527 corrected it to what D-0189 decided.
 
 A file shorter than the header region is all tail, and is reported as such.
 

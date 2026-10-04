@@ -3208,6 +3208,11 @@ fn audit_one(
         pull::gaps::classify_cash(&stamps, first, last, cash_schedule)
     } else if asked.segment == "INDEX" {
         pull::gaps::classify_spot_index_against(&stamps, first, last, calendar)
+    } else if asked.exchange == "NSE" && (asked.contract.is_some() || asked.segment == "FNO") {
+        // A DERIVATIVES SERIES OWES THE DERIVATIVES VENUE'S DATED HOURS, the
+        // ones `derive` folds it to (hunt-pull-1, D-1529): from 2026-08-03 a
+        // 385-minute day, so the ten minutes after 15:30 are audited too.
+        pull::gaps::classify_derivative_against(&stamps, first, last, calendar)
     } else {
         pull::gaps::classify_against(&stamps, first, last, calendar)
     };
@@ -7641,6 +7646,21 @@ async fn land_broker_member(
     landed_one
 }
 
+/// Runs blocking store work without starving the runtime's other tasks.
+///
+/// On the multi-threaded runtime the server runs on, `block_in_place` hands
+/// this worker's queue to another thread for the length of `work`, so the HTTP
+/// surface keeps answering while a landing fsyncs. `spawn_blocking` would need
+/// `'static` copies of a whole fetched window; this borrows it. On a
+/// current-thread runtime (a test's) there is no other worker to starve and
+/// `block_in_place` is not allowed, so the work runs where it is.
+fn off_the_workers<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(work),
+        _ => work(),
+    }
+}
+
 async fn land_spot(
     landed: &BrokerWindow,
     instrument: &brutex_core::instrument::InstrumentKey,
@@ -7653,16 +7673,23 @@ async fn land_spot(
     // manifest and re-derived the index calendar once per body. Taken here,
     // before the first append, it is the same snapshot-before-append the
     // observation has always been. See `land_bodies_observed`. W1-api5-0, D-1446.
-    let observed_calendar = ingestion_observations(landed, site);
+    //
+    // OFF THE WORKERS (o1surface2-3, D-1589): the observation and each landing
+    // are census reads, fsynced appends and possibly a calendar derivation —
+    // synchronous store I/O that used to hold a Tokio worker the HTTP surface
+    // shares for the length of a landing. See [`off_the_workers`].
+    let observed_calendar = off_the_workers(|| ingestion_observations(landed, site));
     for bodies in landed.bodies.chunks(1) {
         match prepare_cash_schedule(landed, bodies, instrument, site, dated).await {
-            Ok(schedule) => done.absorb(land_bodies_observed(
-                landed,
-                site,
-                schedule.as_ref(),
-                bodies,
-                observed_calendar.as_deref(),
-            )),
+            Ok(schedule) => done.absorb(off_the_workers(|| {
+                land_bodies_observed(
+                    landed,
+                    site,
+                    schedule.as_ref(),
+                    bodies,
+                    observed_calendar.as_deref(),
+                )
+            })),
             Err(why) => {
                 let _noted = telemetry::emit(
                     &telemetry::Event::error("api.pull", "cash schedule refused")
@@ -11132,14 +11159,76 @@ pub(crate) async fn pull_run_stop(
     )
 }
 
-pub(crate) async fn pull_spot(
-    axum::extract::State(site): axum::extract::State<Loaded>,
-    body: String,
-) -> (
+/// The answer a hand pull's route sends, once the pull has finished.
+type SpotAnswer = (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
     axum::response::Html<String>,
-) {
+);
+
+/// Runs a hand pull's whole answer on its own task, so the connection that
+/// asked for it cannot cancel it half-way.
+///
+/// audit-20261003 hunt-api-1, D-1581. Hyper drops a handler's future when its
+/// client goes away — a closed tab, a navigation, a client timeout. A pull that
+/// ran INSIDE the handler was cancelled wherever it happened to be awaiting:
+/// the instruments already landed had bars and a manifest on disk, but the
+/// `audit::Record` written after `broker_run` returns never was, the telemetry
+/// run id it claimed was never released, and `/autopilot.json` kept naming the
+/// last instrument as "now fetching" for the life of the process. Recovery
+/// already detached its work this way (`recovery::start`); sweeps run on their
+/// own blocking task. A spawned task is not dropped with its `JoinHandle`, so
+/// the pull, its journal record and its cleanup now always run to the end,
+/// whoever is still listening.
+///
+/// A task that panics is reported as a 500 naming the panic, never as a pull
+/// that did not start: by then it may already have written bars.
+async fn detached_pull<F>(scope: &'static str, work: F) -> (axum::http::StatusCode, String)
+where
+    F: std::future::Future<Output = (axum::http::StatusCode, String)> + Send + 'static,
+{
+    match tokio::spawn(work).await {
+        Ok(answer) => answer,
+        Err(why) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            render::receipt_page(&render::Receipt {
+                scope,
+                verdict: "FAILED",
+                reason: &format!(
+                    "the pull's task ended abnormally ({why}). It may have written bars \
+                     before it did; read /audit and the store before running it again."
+                ),
+                good: false,
+                facts: &[],
+                footnote: "What reached the store before the failure is still there.",
+            }),
+        ),
+    }
+}
+
+/// `POST /pull/spot`. The work is [`spot_pull_held`], on its own task: see
+/// [`detached_pull`].
+pub(crate) async fn pull_spot(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    body: String,
+) -> SpotAnswer {
+    let (code, page) = detached_pull("Spot pull", async move {
+        let (code, _, axum::response::Html(page)) = spot_pull_held(&site, &body).await;
+        (code, page)
+    })
+    .await;
+    (
+        code,
+        [(
+            axum::http::HeaderName::from_static(RECEIPT_HEADER),
+            SPOT_RECEIPT,
+        )],
+        axum::response::Html(page),
+    )
+}
+
+/// The body of `POST /pull/spot`, run detached by [`pull_spot`].
+async fn spot_pull_held(site: &Site, body: &str) -> SpotAnswer {
     // ONE STAMP, EVERY ARM. Built once here rather than at each `return`, so a
     // later arm cannot be the one that forgets it — the receipt marker is only
     // worth requiring if it is unconditional.
@@ -11184,7 +11273,7 @@ pub(crate) async fn pull_spot(
     // *"another pull already holds Dhan's seat"* for a request that said
     // `vendor=dahn`. Worse, it takes and holds Dhan's seat for the length of
     // the walk, so a real Dhan pull is refused by a typo. D-0355.
-    let asked_vendor = param(&body, "vendor");
+    let asked_vendor = param(body, "vendor");
     let Some(wants) = ingest::parse_feed(&asked_vendor) else {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -11236,7 +11325,7 @@ pub(crate) async fn pull_spot(
     // refusal arm is spelled out here. `dated`'s job was always to turn a bad
     // clock into a page, and that is what these three lines do.
     let (code, page) = match ingest::ist_day(now) {
-        Ok(today) => spot_answer(&body, today, now, &site).await,
+        Ok(today) => spot_answer(body, today, now, site).await,
         Err(why) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             refusal_html("Spot pull", &why),
@@ -14950,10 +15039,24 @@ fn fno_complete(
     page.say_counted(facts, axum::http::StatusCode::OK, outcome, why, counts)
 }
 
-/// Starting an expired-series pull. **POST only.**
+/// Starting an expired-series pull. **POST only.** The walk is
+/// [`fno_pull_held`], on its own task: see [`detached_pull`].
 pub(crate) async fn pull_fno(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
+) -> (axum::http::StatusCode, axum::response::Html<String>) {
+    let (code, page) = detached_pull("Expired F&O pull", async move {
+        let (code, axum::response::Html(page)) = fno_pull_held(&site, &body).await;
+        (code, page)
+    })
+    .await;
+    (code, axum::response::Html(page))
+}
+
+/// The body of `POST /pull/fno`, run detached by [`pull_fno`].
+async fn fno_pull_held(
+    site: &Site,
+    body: &str,
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let now = std::time::SystemTime::now();
     let journal = site.journal();
@@ -14997,7 +15100,7 @@ pub(crate) async fn pull_fno(
     // already answers the EMPTY string with Dhan, so the `unwrap_or` this
     // replaces caught only a feed somebody NAMED and this build does not read,
     // and then held Dhan's seat for the whole walk on its behalf. D-0355.
-    let asked_vendor = param(&body, "vendor");
+    let asked_vendor = param(body, "vendor");
     let Some(wants) = ingest::parse_feed(&asked_vendor) else {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -15048,7 +15151,7 @@ pub(crate) async fn pull_fno(
     // futures would touch every page that uses it for one caller's benefit, so
     // the day is resolved first and the refusal arm is spelled out here.
     let (code, page) = match ingest::ist_day(now) {
-        Ok(today) => fno_answer(&body, today, now, &journal, site.broker, &site).await,
+        Ok(today) => fno_answer(body, today, now, &journal, site.broker, site).await,
         Err(why) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             refusal_html("Expired F&O pull", &why),
@@ -16095,6 +16198,7 @@ fn admitted(table: axum::Router<Loaded>, site: Loaded, local_addr: SocketAddr) -
         // origin check below still answers first and the log above still sees
         // the refusal; outside `table`, so a refused request reaches no handler
         // and no audit journal. See [`request_bounds_refusal`]. D-1202.
+        .layer(axum::middleware::from_fn(one_value_per_form_field))
         .layer(axum::middleware::from_fn(within_request_bounds))
         // WHO ASKED, NOT ONLY WHICH VERB. `post` stops a crawler; it does not
         // stop the other tab in the operator's browser. Registered INSIDE
@@ -16225,6 +16329,119 @@ fn request_bounds_refusal(
             ),
         )
     })
+}
+
+/// The form fields a body may legitimately repeat: each is read with
+/// [`params`] or split by hand, as a LIST, by every reader in this crate.
+/// `member` is the ticked instruments of a pull; `leg` is one leg of a press.
+const MULTI_VALUED_FORM_FIELDS: [&str; 2] = ["member", "leg"];
+
+/// The first form-body key that appears twice and is not a list field, or
+/// `None`. The query rule ([`repeated_query_key`]) for the body.
+fn repeated_form_key(body: &str) -> Option<&str> {
+    let mut seen = std::collections::HashSet::with_capacity(
+        body.bytes()
+            .filter(|b| *b == b'&')
+            .count()
+            .saturating_add(1),
+    );
+    body.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
+        .filter(|key| !MULTI_VALUED_FORM_FIELDS.contains(key))
+        .find(|key| !seen.insert(*key))
+}
+
+/// The body bound [`one_value_per_form_field`] reads within, by route.
+///
+/// The two member routes carry their own larger `DefaultBodyLimit`,
+/// [`crate::ingest::MAX_MEMBER_FORM_BYTES`] (D-1499). This middleware runs
+/// outside every route layer, so reading at the shared [`MAX_FORM_BYTES`] here
+/// answered 750 ticked members with a 413 before the route's own bound was
+/// ever consulted (D-1592). Every other route keeps the shared bound, which its
+/// extractor enforces again. O(1): two comparisons against literal paths.
+/// Which route gets which bound is proven by
+/// `api::server::form_read_bound_is_wide_only_on_the_member_routes`; the
+/// constant cost is by construction and UNVERIFIED by any measurement
+/// (`docs/06-limits.md`, D-1459).
+fn form_read_bound(path: &str) -> usize {
+    if matches!(path, "/ingest/queue" | "/pull/spot") {
+        crate::ingest::MAX_MEMBER_FORM_BYTES
+    } else {
+        MAX_FORM_BYTES
+    }
+}
+
+/// Refuses a form body that names one field twice.
+///
+/// audit-20261003 hunt-api-5 / attacksweep-3, D-1587. D-1202 refused a
+/// repeated QUERY key; a POST body went through [`param`] — first match wins —
+/// with no such check, so `vendor=dhan&vendor=groww` pulled Dhan,
+/// `action=stop&action=start` stopped, and the second value, even an invalid
+/// one, was never read, on the very routes that spend vendor quota. The body is
+/// read here once, within [`MAX_FORM_BYTES`] (the bound `DefaultBodyLimit`
+/// already gave every handler, answered with the same `413` past it), checked,
+/// and handed on unchanged. A JSON body is not a form and is passed through.
+///
+/// O(body) once per request, bounded by [`form_read_bound`].
+async fn one_value_per_form_field(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let bound = form_read_bound(parts.uri.path());
+    let Ok(bytes) = axum::body::to_bytes(body, bound).await else {
+        return (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            format!(
+                "REFUSED — the request body is larger than the {bound} bytes \
+                 this server reads. Nothing was read or run.\n"
+            ),
+        )
+            .into_response();
+    };
+    let json = parts
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
+        || matches!(bytes.trim_ascii_start().first(), Some(b'{' | b'['));
+    if !json
+        && let Ok(text) = std::str::from_utf8(&bytes)
+        && let Some(key) = repeated_form_key(text)
+    {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            format!(
+                "REFUSED — the form names {:?} more than once. Every field this \
+                 server reads from a form is read once, so a second value would \
+                 be silently ignored; send each field once. Nothing was read or \
+                 run.\n",
+                note_alphabet(key)
+            ),
+        )
+            .into_response();
+    }
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
 }
 
 /// The first query key that appears twice, or `None`.
@@ -17044,7 +17261,8 @@ impl axum::serve::Listener for LimitedListener {
 enum HeadState {
     /// Waiting for a head to finish by `deadline`. `progress` is how much of
     /// the blank line that ends a head has been seen (`\n`, then optionally
-    /// `\r`); `partial` is whether any byte of this head has arrived.
+    /// `\r`); `partial` is whether any byte of this head's request line has
+    /// arrived — the CR/LF a client may send before it does not count.
     Awaiting {
         deadline: tokio::time::Instant,
         progress: u8,
@@ -17114,6 +17332,18 @@ impl HeadDeadline {
             return;
         };
         for &byte in fresh {
+            // LEADING EMPTY LINES ARE NOT A HEAD (attacksweep-1, D-1580). RFC
+            // 9112 §2.2 lets a server skip CR/LF before the request line, and
+            // httparse does — so before the first byte of a request line a
+            // `\n\n` ends nothing, and reading it as a finished head stopped
+            // the clock on a connection that had sent no request at all.
+            // `partial` stays false too: no request, so no 408 is invented.
+            if !partial {
+                if byte == b'\r' || byte == b'\n' {
+                    continue;
+                }
+                progress = 0;
+            }
             partial = true;
             // A head ends at an empty line: `\n` then `\n`, or `\n` `\r` `\n`.
             // httparse accepts the bare-LF form, so this must too, or a head
@@ -17241,8 +17471,15 @@ impl tokio::io::AsyncWrite for HeadDeadline {
         written
     }
 
+    /// `true`, because `poll_write_vectored` above forwards to a tokio
+    /// `TcpStream`, whose own `is_write_vectored` is the constant `true`.
+    /// Written as the constant rather than forwarded: forwarding left a
+    /// `-> true` mutant no test could tell apart (D-0192). The socket and the
+    /// wrapper are held equal by
+    /// `the_head_deadline_reports_its_sockets_vectored_writes`, so a tokio that
+    /// stopped writing vectored fails that test instead of drifting.
     fn is_write_vectored(&self) -> bool {
-        self.io.is_write_vectored()
+        true
     }
 
     fn poll_flush(
@@ -17325,7 +17562,10 @@ pub async fn serve_limited(
     clippy::panic
 )]
 mod head_deadline_tests {
-    use super::{ConnectionLimits, HEAD_READ_TIMEOUT, serve, serve_limited};
+    use super::{
+        ConnectionLimits, HEAD_READ_TIMEOUT, HeadDeadline, LimitedListener, Slot, Slots, serve,
+        serve_limited,
+    };
     use std::fmt::Write as _;
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -17405,6 +17645,94 @@ mod head_deadline_tests {
             got.extend_from_slice(&chunk[..n]);
         }
         String::from_utf8_lossy(&got).into_owned()
+    }
+
+    /// **THE WRAPPER ADVERTISES THE SOCKET'S VECTORED WRITES.** hyper asks
+    /// `is_write_vectored` to choose between one gathered `writev` of a
+    /// response's head and body and flattening them into one buffer first.
+    /// `HeadDeadline` forwards `poll_write_vectored` to the socket, so it must
+    /// report exactly what the socket reports; a wrapper answering `false`
+    /// over a vectored socket would make every response pay a copy.
+    #[tokio::test]
+    async fn the_head_deadline_reports_its_sockets_vectored_writes() {
+        use tokio::io::AsyncWrite as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (io, _) = listener.accept().await.unwrap();
+        let socket = io.is_write_vectored();
+        assert!(socket, "a tokio TCP socket writes vectored");
+        let slots = std::sync::Arc::new(Slots {
+            live: std::sync::atomic::AtomicUsize::new(1),
+            cap: 1,
+            freed: tokio::sync::Notify::new(),
+        });
+        let wrapped = HeadDeadline::new(io, Slot(std::sync::Arc::clone(&slots)), T);
+        assert_eq!(wrapped.is_write_vectored(), wrapped.io.is_write_vectored());
+        assert_eq!(wrapped.is_write_vectored(), socket);
+        drop(wrapped);
+        assert_eq!(
+            slots.live.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "the slot is given back with the wrapper"
+        );
+    }
+
+    /// **THE CAP IS EXACT: `cap` SLOTS, NOT `cap + 1`.** A slot is taken only
+    /// while fewer than `cap` are live, and a refused take leaves the count
+    /// where it was. D-1454.
+    #[test]
+    fn a_slot_is_taken_below_the_cap_and_refused_at_it() {
+        let slots = Slots {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            cap: 2,
+            freed: tokio::sync::Notify::new(),
+        };
+        let live = || slots.live.load(std::sync::atomic::Ordering::Acquire);
+        assert!(slots.try_take(), "0 of 2 live: taken");
+        assert_eq!(live(), 1);
+        assert!(slots.try_take(), "1 of 2 live: taken");
+        assert_eq!(live(), 2);
+        assert!(!slots.try_take(), "2 of 2 live: refused at the cap");
+        assert_eq!(live(), 2, "a refused take moves nothing");
+    }
+
+    /// **A FREE SLOT IS TAKEN AT ONCE, AND A FULL HOUSE WAITS FOR A CLOSE.**
+    /// `accept` with a slot free must reach the socket without waiting on the
+    /// freed signal — nobody will send one — and with every slot held it must
+    /// wait until one is given back. Each step is bounded by a short timeout,
+    /// so an accept that waits when it should not is a failure here, not a
+    /// hung test. D-1454.
+    #[tokio::test]
+    async fn accept_takes_a_free_slot_at_once_and_waits_only_when_full() {
+        use axum::serve::Listener as _;
+        let inner = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = inner.local_addr().unwrap();
+        let slots = std::sync::Arc::new(Slots {
+            live: std::sync::atomic::AtomicUsize::new(0),
+            cap: 1,
+            freed: tokio::sync::Notify::new(),
+        });
+        let mut listener = LimitedListener {
+            inner,
+            slots: std::sync::Arc::clone(&slots),
+            head_read_timeout: T,
+        };
+        let _first_client = TcpStream::connect(addr).await.unwrap();
+        let (first, _) = tokio::time::timeout(T, listener.accept())
+            .await
+            .expect("a free slot is taken without waiting for a close");
+        assert_eq!(slots.live.load(std::sync::atomic::Ordering::Acquire), 1);
+        let _second_client = TcpStream::connect(addr).await.unwrap();
+        assert!(
+            tokio::time::timeout(T, listener.accept()).await.is_err(),
+            "with the one slot held, a second connection is not accepted"
+        );
+        drop(first);
+        let (_second, _) = tokio::time::timeout(T, listener.accept())
+            .await
+            .expect("a slot given back admits the waiting connection");
+        assert_eq!(slots.live.load(std::sync::atomic::Ordering::Acquire), 1);
     }
 
     /// THE PROBE ITSELF, against the server the operator runs: a partial
@@ -17615,6 +17943,59 @@ mod head_deadline_tests {
             let (said, closed) = drain(&mut client, T * 10).await;
             assert!(closed && said.starts_with("HTTP/1.1 408"), "{said:?}");
         }
+        let _ = stop.send(());
+    }
+
+    /// audit-20261003 attacksweep-1, D-1580: LEADING BLANK LINES ARE NOT A
+    /// HEAD. RFC 9112 §2.2 lets a server skip empty lines before the request
+    /// line, and httparse does; the deadline scanner used to read the first
+    /// `\n\n` as a finished head and stop the clock, so a client sending only
+    /// `\r\n\r\n` held its slot forever. Each spelling must still be cut at
+    /// the deadline, silently, since no request was sent.
+    #[tokio::test]
+    async fn leading_blank_lines_do_not_stop_the_head_deadline() {
+        let (addr, stop) = start(limits(8)).await;
+        for prefix in [&b"\n\n"[..], b"\r\n\r\n", b"\r\n\n", b"\n\r\n\r\n\n"] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let began = Instant::now();
+            client.write_all(prefix).await.unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            let took = began.elapsed();
+            assert!(closed, "{prefix:?} held its slot past {took:?}");
+            assert_eq!(said, "", "{prefix:?}: no request, no reply");
+            assert!(took >= T_SLACK, "{prefix:?} cut early at {took:?}");
+            assert!(took < T * 4, "{prefix:?} cut late at {took:?}");
+        }
+        // And a real head behind leading blank lines is still served.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"\r\n\r\nGET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        let _ = stop.send(());
+    }
+
+    /// attacksweep-1 at the cap: four clients that send only `\r\n\r\n` cannot
+    /// keep a real request waiting beyond one deadline wave.
+    #[tokio::test]
+    async fn blank_line_holders_cannot_starve_a_real_request() {
+        let (addr, stop) = start(limits(4)).await;
+        let mut holders = Vec::new();
+        for _ in 0..4 {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(b"\r\n\r\n").await.unwrap();
+            holders.push(client);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut real = TcpStream::connect(addr).await.unwrap();
+        real.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut real, T * 6).await;
+        assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        drop(holders);
         let _ = stop.send(());
     }
 
@@ -18122,6 +18503,55 @@ pub const MISUSED: u8 = 2;
 /// of the two masters was missing.
 pub const DEGRADED: u8 = 3;
 
+/// How long a stopping process waits for blocking work still running.
+///
+/// audit-20261003 hunt-api-2, D-1582. `#[tokio::main]` drops its runtime on
+/// the way out, and that drop *waits forever* for every `spawn_blocking` task
+/// (tokio's own documentation of `Runtime`'s `Drop`). A sweep has no
+/// cancellation point inside `cli`, so Ctrl-C during one left a process with no
+/// HTTP surface, a released `serve.lock` and an exit already logged, still
+/// running for the rest of the sweep — next to a second `api serve` the free
+/// lock let start. The wait is now bounded by this, and what is abandoned is
+/// said, never silent.
+pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ends the process's runtime, waiting at most `grace` for blocking work.
+///
+/// Returns how many engine tasks (sweeps, descents, commands) were still
+/// running when the wait ran out — zero on a clean stop. Each one that is
+/// abandoned is said on stderr and in the log at `Error` before the runtime is
+/// dropped: it stops with the process, its invocation audit is left without a
+/// terminal phase (the shape a crash leaves, which recovery already reads as
+/// interrupted), and the operator is told rather than finding a ghost.
+pub fn end_runtime(runtime: tokio::runtime::Runtime, grace: std::time::Duration) -> usize {
+    let deadline = std::time::Instant::now() + grace;
+    while crate::sweeprun::engine_tasks_running() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let abandoned = crate::sweeprun::engine_tasks_running();
+    if abandoned > 0 {
+        warn_line!(
+            "STOPPING WITH {abandoned} ENGINE TASK(S) STILL RUNNING: the shutdown wait of \
+             {grace:?} ran out, so they end with this process. Their results are not \
+             recorded; their invocation audits stay non-terminal. Re-run them."
+        );
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Error,
+                "api.main",
+                "engine tasks abandoned at shutdown",
+            )
+            .with("abandoned", telemetry::Value::Uint(abandoned as u64))
+            .with(
+                "grace_ms",
+                telemetry::Value::Uint(u64::try_from(grace.as_millis()).unwrap_or(u64::MAX)),
+            ),
+        );
+    }
+    runtime.shutdown_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+    abandoned
+}
+
 /// Prints the report for `dir` and returns the exit code it earned.
 ///
 /// A separate function for the same reason [`stopped`] is one: which directory
@@ -18418,8 +18848,26 @@ fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Re
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map(|_| ())
         .map_err(|why| format!("{program}: {why}"))
+        .and_then(|child| {
+            reap_detached(child)
+                .map(drop)
+                .map_err(|why| format!("{program}: the child cannot be reaped: {why}"))
+        })
+}
+
+/// Waits for `child` on a thread of its own, so it is reaped when it exits.
+///
+/// audit-20261003 hunt-api-6, D-1590. The launcher's `Child` was dropped
+/// without `wait()`, so the handler process (`xdg-open`, `open`, ...) stayed a
+/// zombie for the life of the server. Waiting inline would block the banner
+/// behind a window; a detached thread waits instead.
+fn reap_detached(
+    mut child: std::process::Child,
+) -> std::io::Result<std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>>> {
+    std::thread::Builder::new()
+        .name("browser-launch-reaper".to_owned())
+        .spawn(move || child.wait())
 }
 
 /// Where the rolling log goes: `BRUTEX_LOGS`, else `./logs` when the process
@@ -19363,6 +19811,36 @@ mod tests {
         assert!(page.contains("derived bucket withheld"));
         assert!(!page.contains("Members failed"));
         assert!(!page.contains("members failed"));
+    }
+
+    /// **AN FNO LANDING KEEPS EXACTLY FIVE REASONS AND COUNTS EVERY REFUSAL.**
+    /// Six refusals are six failures, but only the first five reasons are
+    /// kept, verbatim and in order, with the credential marker stripped; the
+    /// sixth is counted and dropped. Only a refusal carrying the marker
+    /// answers that the credential must be re-read. D-0948.
+    #[test]
+    fn an_fno_landing_keeps_five_refusal_reasons_and_counts_all_six() {
+        let mut landed = FnoLanded::default();
+        let dead = format!("{CREDENTIAL_DEAD}NIFTY24JANFUT: token rejected");
+        assert!(
+            landed.record_refusal(&dead),
+            "the marker asks for a re-read"
+        );
+        for n in 2..=6 {
+            assert!(!landed.record_refusal(&format!("contract {n}: refused")));
+        }
+        assert_eq!(landed.failed, 6, "every refusal is counted");
+        assert_eq!(
+            landed.why,
+            vec![
+                "NIFTY24JANFUT: token rejected".to_owned(),
+                "contract 2: refused".to_owned(),
+                "contract 3: refused".to_owned(),
+                "contract 4: refused".to_owned(),
+                "contract 5: refused".to_owned(),
+            ],
+            "five reasons kept, the sixth dropped"
+        );
     }
 
     #[test]
@@ -20609,6 +21087,42 @@ mod tests {
         assert_eq!(empty.expected, absent.expected);
         assert_eq!(empty.lost, absent.lost);
         assert_eq!(empty.runs, absent.runs);
+    }
+
+    /// **ONLY AN NSE DERIVATIVES SERIES IS AUDITED AGAINST THE DERIVATIVES
+    /// VENUE'S HOURS.** From 2026-08-03 that venue trades to 15:40, a 385-minute
+    /// day where the exchange session is 375. An NSE futures series, by
+    /// segment or by contract, owes the ten extra minutes; the same series
+    /// named on another exchange, and an NSE series that is neither, owe the
+    /// exchange session alone. Each address below is absent from the store, so
+    /// the whole obligation is the classifier's and nothing else is measured.
+    #[test]
+    fn only_an_nse_derivatives_series_owes_the_derivatives_venue_hours() {
+        let root = store_root("gap-derivative-door");
+        let site = std::sync::Arc::new(Site::serving(
+            &masters("gap-derivative-door", None, None),
+            &root,
+        ));
+        let date = i64::from(day(2026, 8, 3).days_from_epoch());
+        let calendar =
+            pull::calendar::Calendar::from_observed(&[pull::calendar::Observed::from_runs(
+                date,
+                &[(555, 929)],
+            )]);
+        for (query, owed) in [
+            ("exchange=NSE&segment=FNO&symbol=NIFTY", 385),
+            ("exchange=BSE&segment=FNO&symbol=SENSEX", 375),
+            ("exchange=NSE&segment=SPOT&symbol=NIFTY", 375),
+        ] {
+            let asked = Addressed::parse(&format!(
+                "feed=zerodha&{query}&timeframe=1min&month=2026-08"
+            ))
+            .unwrap();
+            let audit = audit_one(&site, &asked, asked.month, Some(&calendar), None);
+            assert!(audit.absent_file.is_some(), "{query}");
+            assert_eq!(audit.expected, owed, "{query}");
+            assert_eq!(audit.lost, owed, "{query}");
+        }
     }
 
     #[test]
@@ -23397,6 +23911,54 @@ mod tests {
         .await;
     }
 
+    /// audit-20261003 hunt-api-5 / attacksweep-3, D-1587: A FORM BODY THAT
+    /// NAMES ONE FIELD TWICE IS REFUSED, as D-1202 refused it on the query —
+    /// before any handler, so no vendor is asked. A list field (`member`) may
+    /// repeat; a JSON body is not a form.
+    #[tokio::test]
+    async fn a_form_body_naming_a_field_twice_is_refused() {
+        with_server("repeatedbody", |addr| async move {
+            for (form, key) in [
+                (
+                    "target=swept&vendor=dhan&vendor=groww&from=2024-01-01&to=2024-01-31",
+                    "vendor",
+                ),
+                (
+                    "target=swept&target=..%2F..&from=2024-01-01&to=2024-01-31",
+                    "target",
+                ),
+                (
+                    "vendor=dhan&target=swept&from=2024-01-01&from=2023-01-01&to=2024-01-31",
+                    "from",
+                ),
+            ] {
+                let said = post(addr, "/pull/spot", form).await;
+                assert!(said.starts_with("HTTP/1.1 400"), "{form}: {said}");
+                assert!(
+                    said.contains(&format!("the form names \"{key}\" more than once")),
+                    "{form}: {said}"
+                );
+            }
+            let listed = post(
+                addr,
+                "/pull/spot",
+                "target=swept&member=NIFTY&member=BANKNIFTY&from=2024-01-01&to=2024-01-31",
+            )
+            .await;
+            assert!(!listed.contains("more than once"), "{listed}");
+        })
+        .await;
+        assert_eq!(
+            repeated_form_key("a=1&b=2&member=x&member=y&leg=1&leg=2"),
+            None
+        );
+        assert_eq!(repeated_form_key("a=1&&b=2&a"), Some("a"));
+        assert_eq!(
+            repeated_form_key("action=stop&action=start"),
+            Some("action")
+        );
+    }
+
     #[tokio::test]
     async fn a_body_larger_than_this_server_reads_is_refused_and_never_parsed() {
         // `ingest.rs` says every parser it holds works over "a form body whose
@@ -23456,6 +24018,23 @@ mod tests {
     /// member routes: 750 full-width symbols reach the parser, 2,001 reach the
     /// named refusal, 2,000 symbols percent-encoded at the worst 3x still
     /// reach it, and one byte past `MAX_MEMBER_FORM_BYTES` is a 413.
+    /// D-1592: the repeated-field middleware is wide on the two member routes
+    /// only. Every other path, including a near miss, keeps the shared bound.
+    #[test]
+    fn form_read_bound_is_wide_only_on_the_member_routes() {
+        assert_eq!(
+            form_read_bound("/ingest/queue"),
+            crate::ingest::MAX_MEMBER_FORM_BYTES
+        );
+        assert_eq!(
+            form_read_bound("/pull/spot"),
+            crate::ingest::MAX_MEMBER_FORM_BYTES
+        );
+        for path in ["/pull/fno", "/ingest/queue/", "/pull", "/", "/control"] {
+            assert_eq!(form_read_bound(path), MAX_FORM_BYTES, "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn every_ticked_member_fits_and_one_too_many_is_named_not_a_413() {
         let status = |reply: &str| {
@@ -24171,6 +24750,37 @@ mod tests {
             )
             .expect("no variable"),
             telemetry::dir_beneath_store(store),
+        );
+    }
+
+    /// audit-20261003 hunt-api-6, D-1590: THE LAUNCHED CHILD IS REAPED. A
+    /// child handed to `reap_detached` is waited for: the reaper returns its
+    /// exit status, which only `wait` can obtain, and a second `try_wait` on a
+    /// reaped pid is impossible because the `Child` was consumed. The child is
+    /// this test binary listing an absent test, which exits at once.
+    #[test]
+    fn a_launched_child_is_reaped_not_left_a_zombie() {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "no_such_test_d1590", "--list"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let status = reap_detached(child).unwrap().join().unwrap().unwrap();
+        assert!(status.success(), "{status:?}");
+        // The pid is gone from the process table: no zombie remains.
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists()
+                || !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .unwrap_or_default()
+                    .contains(") Z "),
+            "pid {pid} is still a zombie"
+        );
+        assert!(
+            include_str!("server.rs")
+                .contains(".and_then(|child| {\n            reap_detached(child)"),
+            "open_unless_suppressed hands its child to the reaper"
         );
     }
 
@@ -27526,6 +28136,116 @@ mod tests {
     /// claimed at the door*. The seat mechanism's own behaviour is proved by
     /// `autopilot`'s tests, which drive `take_seat` and `take_every_seat`
     /// against each other directly.
+    /// audit-20261003 o1surface2-3, D-1589: A LANDING DOES NOT HOLD THE ONLY
+    /// WORKER. On a one-worker multi-thread runtime, a task doing 400 ms of
+    /// blocking store work through `off_the_workers` leaves another task free
+    /// to run; inline, that task would wait the full 400 ms.
+    #[test]
+    fn blocking_landing_work_leaves_the_runtime_answering() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let began = std::time::Instant::now();
+            let landing = tokio::spawn(async {
+                off_the_workers(|| std::thread::sleep(std::time::Duration::from_millis(400)));
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let answered = tokio::spawn(async { std::time::Instant::now() })
+                .await
+                .unwrap();
+            assert!(
+                answered.duration_since(began) < std::time::Duration::from_millis(300),
+                "another task waited {:?} behind a landing",
+                answered.duration_since(began)
+            );
+            landing.await.unwrap();
+        });
+        // And both landing calls in `land_spot` go through it.
+        let source = include_str!("server.rs");
+        let tail = source.split_once("\nasync fn land_spot(").unwrap().1;
+        let body = &tail[..tail.find("\n}\n").unwrap()];
+        assert!(body.contains("off_the_workers(|| ingestion_observations(landed, site))"));
+        assert!(body.contains("done.absorb(off_the_workers(|| {"));
+    }
+
+    /// audit-20261003 hunt-api-1, D-1581: A CLOSED TAB DOES NOT CANCEL A
+    /// PULL. The route's future is dropped half-way (as hyper drops it when the
+    /// client disconnects); the work it started still runs to its end and
+    /// still does what follows its last await — which for a real pull is the
+    /// audit record, the run-id release and the "now fetching" reset.
+    #[tokio::test]
+    async fn a_dropped_pull_route_does_not_cancel_the_pull() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        let route = detached_pull("Spot pull", async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            (axum::http::StatusCode::OK, String::from("done"))
+        });
+        // The client goes away 20 ms in: the route's future is dropped.
+        let cut = tokio::time::timeout(std::time::Duration::from_millis(20), route).await;
+        assert!(
+            cut.is_err(),
+            "the route had not finished when it was dropped"
+        );
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !finished.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(
+                tokio::time::Instant::now() < until,
+                "dropping the route cancelled the pull it started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// A pull task that panics is a 500 that says bars may have been written —
+    /// never a "NOT STARTED" page, and never a silently dropped connection.
+    #[tokio::test]
+    async fn a_pull_task_that_panics_is_reported_as_failed() {
+        let (code, page) = detached_pull("Spot pull", async {
+            assert!(!std::hint::black_box(true), "leg exploded");
+            (axum::http::StatusCode::OK, String::new())
+        })
+        .await;
+        assert_eq!(code, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(page.contains("FAILED"), "{page}");
+        assert!(page.contains("may have written bars"), "{page}");
+        assert!(!page.contains("NOT STARTED"), "{page}");
+    }
+
+    /// Both hand-pull routes hand their whole body to [`detached_pull`], so
+    /// nothing between the seat and the audit record runs on the connection's
+    /// own future.
+    #[test]
+    fn both_pull_routes_run_detached_from_the_connection() {
+        let source = include_str!("server.rs");
+        for (route, held) in [
+            (
+                "pub(crate) async fn pull_spot(",
+                "spot_pull_held(&site, &body)",
+            ),
+            (
+                "pub(crate) async fn pull_fno(",
+                "fno_pull_held(&site, &body)",
+            ),
+        ] {
+            let tail = source.split_once(route).expect("route exists").1;
+            let body = &tail[..tail.find("\n}\n").expect("body ends")];
+            assert!(
+                body.contains("detached_pull(") && body.contains(held),
+                "{route} must run {held} through detached_pull"
+            );
+            assert!(
+                !body.contains("take_seat"),
+                "{route} must not hold the pull on the connection's future"
+            );
+        }
+    }
+
     #[test]
     fn both_pull_routes_claim_a_seat_before_they_reach_a_vendor() {
         let source = include_str!("server.rs");
@@ -27540,10 +28260,7 @@ mod tests {
                 .to_owned()
         };
 
-        for route in [
-            "pub(crate) async fn pull_spot",
-            "pub(crate) async fn pull_fno",
-        ] {
+        for route in ["async fn spot_pull_held", "async fn fno_pull_held"] {
             let body = body_of(route);
             assert!(
                 body.contains("site.autopilot.take_seat(wants)"),
@@ -28444,6 +29161,31 @@ mod tests {
     /// (§3 rule 8) and a mask recorded before the retirement still carries it;
     /// dropping the row would make an old run's bit decode to nothing, which
     /// reads as "no condition" rather than "one this build no longer sets".
+    /// audit-20261003 webcontract-1, D-1586: `/vocab.json` SENDS THE FIELD THE
+    /// PAGE READS. `commit_digest` is `blake3(commit)` — the digest a saved
+    /// grid records as its `commit` — as 64 lower-case hex characters, or JSON
+    /// `null` on an unstamped build.
+    #[test]
+    fn the_vocabulary_names_the_build_its_names_belong_to() {
+        let stamp = "0123456789abcdef0123456789abcdef01234567";
+        let value: serde_json::Value = serde_json::from_str(&vocab_body(Some(stamp))).unwrap();
+        let digest = value["commit_digest"]
+            .as_str()
+            .expect("a string when stamped");
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        assert_eq!(digest, hex32(brutex_core::blake3::hash(stamp.as_bytes())));
+        assert_ne!(digest, hex32(brutex_core::blake3::hash(b"another commit")));
+        assert_eq!(value["count"], vocab::table::COUNT);
+        let unstamped: serde_json::Value = serde_json::from_str(&vocab_body(None)).unwrap();
+        assert!(unstamped["commit_digest"].is_null());
+        assert_eq!(unstamped["bits"], value["bits"]);
+    }
+
     #[tokio::test]
     async fn the_vocabulary_is_served_whole_so_a_mask_can_be_read_as_names() {
         let (status, headers, body) = vocab_json().await;
@@ -28462,7 +29204,11 @@ mod tests {
             "{}",
             &body[..body.len().min(120)]
         );
-        assert!(body.ends_with("]}"));
+        let digest = cli::commit_stamp().map_or_else(
+            || "null".to_owned(),
+            |stamp| format!("\"{}\"", hex32(brutex_core::blake3::hash(stamp.as_bytes()))),
+        );
+        assert!(body.ends_with(&format!(r#"],"commit_digest":{digest}}}"#)));
 
         // EVERY POSITION IS PRESENT, tombstones included, and each carries its
         // OWN index rather than its place in the array.
@@ -33485,11 +34231,35 @@ fn indexmap_reading(site: &Site, feed: Vendor) -> (axum::http::StatusCode, Strin
 /// would make an old run's bit decode to nothing at all, which reads as "no
 /// condition" rather than "a condition this build no longer sets". `live` is
 /// the flag that separates them and the page says which.
+///
+/// # `commit_digest`: which build's names these are
+///
+/// audit-20261003 webcontract-1, D-1586. A saved research grid records
+/// `blake3(commit)` of the build that computed it, and the backtest page names
+/// a saved rule's conditions only when this table comes from that same build —
+/// otherwise a table from another build could silently rename a historical
+/// expression. The page read `commit_digest` from here and this route never
+/// sent it, so every saved rule rendered as "condition N (name not loaded)"
+/// even on the build that saved it. It is now the same digest the grid records,
+/// from this binary's own frozen stamp, and `null` — never a guess — on a
+/// build that carries no verified stamp.
 async fn vocab_json() -> (
     axum::http::StatusCode,
     [(axum::http::HeaderName, &'static str); 1],
     String,
 ) {
+    (
+        axum::http::StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        vocab_body(cli::commit_stamp()),
+    )
+}
+
+/// The `/vocab.json` document for a build stamped `stamp`.
+fn vocab_body(stamp: Option<&str>) -> String {
     // 370 rows of `{"i":N,"name":"...","live":B}` — about 20 KB, sent once.
     let mut out = String::with_capacity(24 * 1024);
     let _ = write!(
@@ -33520,15 +34290,17 @@ async fn vocab_json() -> (
             vocab::table::is_live(position)
         );
     }
-    out.push_str("]}");
-    (
-        axum::http::StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        out,
-    )
+    out.push_str(r#"],"commit_digest":"#);
+    match stamp {
+        Some(commit) => {
+            out.push('"');
+            out.push_str(&hex32(brutex_core::blake3::hash(commit.as_bytes())));
+            out.push('"');
+        }
+        None => out.push_str("null"),
+    }
+    out.push('}');
+    out
 }
 
 /// The identity a calendar is derived for — everything the store path needs.

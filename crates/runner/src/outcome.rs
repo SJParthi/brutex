@@ -614,9 +614,12 @@ impl Forward {
 /// [`Self::over`] does not TRUST the monotonicity above. A right end earlier
 /// than the last bar already pushed cannot be served from the deques, so they
 /// are cleared and rebuilt from the query's left end -- Θ(window) for that one
-/// query, and correct. `forward` never issues one; the branch exists so that a
-/// future caller with a different order gets the right answer rather than a
-/// stale maximum, and the unit test drives it.
+/// query, and correct. **`forward` does issue one** (o1eng2-1): since D-1410
+/// the deadline is `ts(i) + step_at(i)·H` and `step_at` is a prefix median
+/// that can step DOWN, so on a slice whose median cadence flips the exit
+/// moves backwards and the deques are rebuilt. The monotone argument above
+/// holds while the cadence is constant; `docs/06-limits.md` names the rebuild
+/// cost (D-1550).
 ///
 /// **UNVERIFIED as a measured bound.** No bench row times `forward`; the
 /// O(bars) total is argued from the shape above. `CLAUDE.md` §3 rule 6.
@@ -643,17 +646,35 @@ impl WindowExtremes {
     /// The highest high and lowest low over `bars[lo..=hi]`, or `None` when the
     /// range is empty or reaches past the slice.
     fn over(&mut self, bars: &[Candle], lo: usize, hi: usize) -> Option<(i64, i64)> {
-        if hi < lo || hi >= bars.len() {
+        // ONE BOUNDS CHECK, NOT TWO COMPARISONS (D-1452). `get(lo..=hi)` is
+        // `None` when `hi` reaches past the slice or `lo > hi + 1`, and the one
+        // empty `Some` is `lo == hi + 1`. The former `hi < lo || hi >= len`
+        // carried a `||` -> `&&` mutant no test could observe: every range it
+        // let through still answered `None` further down, so the operator
+        // decided only how much work a refusal cost. O(1) either way.
+        if bars.get(lo..=hi).is_none_or(<[Candle]>::is_empty) {
             return None;
         }
-        // BACKWARDS, OR A JUMP PAST EVERYTHING HELD: start again at `lo`. A
-        // right end before the last pushed bar cannot be served by popping, and
-        // a left end past `next` makes every held index stale.
-        if hi.saturating_add(1) < self.next || lo > self.next {
+        // BACKWARDS: start again at `lo`. A right end before the last pushed
+        // bar, `next - 1`, cannot be served by popping. The test is
+        // `next >= hi + 2` as a `checked_sub` (D-1455): spelled
+        // `hi + 1 < next`, its `<` could become `<=` unobserved, because at
+        // `hi == next - 1` a rebuild from `lo` and no rebuild give the same
+        // extremes, at different cost. `hi + 2` cannot saturate: a `hi` past
+        // the slice was refused above.
+        if self.next.checked_sub(hi.saturating_add(2)).is_some() {
             self.highs.clear();
             self.lows.clear();
             self.next = lo;
         }
+        // A JUMP PAST EVERYTHING HELD: skip the bars before `lo` (D-1455).
+        // Every held index is below `next`, so below `lo`, and the front pops
+        // after the push loop discard each of them once. This was a second
+        // reset clause, `|| lo > self.next`, and Gate 18 showed its `>` could
+        // become `==` or `>=` unobserved: without the reset the skipped bars
+        // were pushed and popped again, the same answer at more cost. `max` is
+        // the skip with no operator to mutate. O(1).
+        self.next = self.next.max(lo);
         while self.next <= hi {
             let bar = bars.get(self.next)?;
             while self.highs.back().is_some_and(|&(_, h)| h <= bar.high) {
@@ -1808,9 +1829,12 @@ impl OverlapWindow {
         // whose OLDER window had already EXITED by this entry: `forward` ends
         // every window at the earlier of the horizon and that day's forced
         // close, so a 15:08 hit and the next day's 09:15 hit are some 22 bars
-        // apart and share nothing at any horizon. `sources` strictly increase
-        // and exits only advance with the entry (see `WindowExtremes`), so both
-        // halves drain from the front and the drain is complete.
+        // apart and share nothing at any horizon. `sources` strictly increase,
+        // and exits advance with the entry WHILE THE CADENCE IS CONSTANT (see
+        // `WindowExtremes`). When the prefix median cadence steps down an exit
+        // can move backwards, and a queued hit whose exit precedes the front's
+        // stays queued until the front drains: its pairs are then counted as
+        // overlapping. `docs/06-limits.md` states that bound (D-1550).
         while let Some(&(offset, y_old, old_exit)) = self.queue.front() {
             let older = self
                 .anchor
@@ -3782,6 +3806,41 @@ mod tests {
             e.t
         );
     }
+    /// A ZERO MEAN IS READ LONG, and the boundary is the strict `< 0.0`.
+    ///
+    /// D-1178 swaps the path lanes only for a combination traded short, which
+    /// is `mean_paisa < 0` -- the rule `cli::side_of_evidence` and
+    /// [`Edge::payoff_bp`] use. A sample whose moves cancel exactly (+100 and
+    /// -100) has a mean of exactly `0.0` and is NOT short, so its up excursion
+    /// is the reward. Fixture: up runs summing to 300, down runs to 100.
+    /// Read long that is 3.00x; read short it would be 100/300 = 0.33x.
+    #[test]
+    fn a_zero_mean_path_ratio_is_read_on_the_long_side() {
+        let flat_mean = Edge {
+            n: 2,
+            mean_paisa: 0.0,
+            wins: 1,
+            win_sum: 100.0,
+            losses: 1,
+            loss_sum: -100.0,
+            favourable_sum: 300.0,
+            adverse_sum: 100.0,
+            ..Edge::default()
+        };
+        assert_eq!(
+            flat_mean.path_ratio_bp(),
+            300,
+            "a zero mean is read long: 300 up over 100 down is 3.00x"
+        );
+
+        // The control just below zero (the smallest normal negative) IS short, so the lanes swap and the
+        // same path reads 100 / 300, truncated to 33 bp.
+        let barely_short = Edge {
+            mean_paisa: -f64::MIN_POSITIVE,
+            ..flat_mean
+        };
+        assert_eq!(barely_short.path_ratio_bp(), 33);
+    }
 }
 
 #[cfg(test)]
@@ -4136,18 +4195,38 @@ mod window_tests {
                 "the deque outgrew [{lo}, {hi}]"
             );
         }
-        // Backwards, then a repeat, then a jump past everything held.
+        // Backwards, then a repeat, then a jump past everything held. A jump
+        // skips to `lo` rather than resetting (D-1455), so the indices held
+        // before it must still be gone: the deques fit the window afterwards.
         for (lo, hi) in [(10, 20), (5, 9), (5, 9), (300, 310), (0, 0), (399, 399)] {
             assert_eq!(
                 window.over(&bars, lo, hi),
                 scan(&bars, lo, hi),
                 "[{lo}, {hi}]"
             );
+            assert!(
+                window.highs.len() <= hi - lo + 1 && window.lows.len() <= hi - lo + 1,
+                "a stale index survived into [{lo}, {hi}]"
+            );
+            assert!(
+                window
+                    .highs
+                    .iter()
+                    .chain(&window.lows)
+                    .all(|&(at, _)| (lo..=hi).contains(&at)),
+                "a held index lies outside [{lo}, {hi}]"
+            );
         }
         // Empty and out of range are absent, never a stale maximum.
         assert_eq!(window.over(&bars, 7, 6), None);
         assert_eq!(window.over(&bars, 398, 400), None);
         assert_eq!(WindowExtremes::new().over(&[], 0, 0), None);
+        // Reversed by more than one, and `hi == usize::MAX`, whose `hi + 1`
+        // cannot be formed: both absent, and a valid query after them is still
+        // the scan (D-1452).
+        assert_eq!(window.over(&bars, 9, 3), None);
+        assert_eq!(window.over(&bars, 0, usize::MAX), None);
+        assert_eq!(window.over(&bars, 2, 5), scan(&bars, 2, 5));
     }
 
     /// And through `forward` itself: every measured excursion equals the scan

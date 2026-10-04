@@ -533,8 +533,9 @@ pub enum StoreError {
     /// Carries [`FormatError`], which names which disagreement it was:
     /// [`FormatError::CounterExceedsFile`] for a header claiming more records
     /// than the file can hold, [`FormatError::NoValidHeader`] when every slot
-    /// is damaged, [`FormatError::TimestampsOutOfOrder`] for a batch that does
-    /// not follow what is committed, and so on.
+    /// is damaged, [`FormatError::CounterOverflow`] for a batch the counter
+    /// cannot take, and so on. A batch that overlaps the committed range and
+    /// disagrees with it is [`Self::OverlapDisagrees`] (D-1525).
     Format {
         /// The bar file.
         path: PathBuf,
@@ -696,6 +697,118 @@ pub enum StoreError {
         /// The file's timeframe, from its header.
         timeframe_secs: u32,
     },
+    /// A bar file whose header region is gone while its checksum sidecar
+    /// proves records were committed. audit-20261003 attackdata-1, D-1520.
+    ///
+    /// The writer door repairs an interrupted `initialise` (a region of
+    /// zeros, or a torn genesis slot) because such a file provably held
+    /// nothing. That proof read only the bar file's own bytes. The sidecar is
+    /// written by an append, after the records and before the header slot, so
+    /// a sidecar with entries beside a region with no committed header is a
+    /// month that HELD bars and was truncated or zeroed. Re-initialising it
+    /// would reopen it empty and let the next append start again at index 0,
+    /// and the lost bars would never be named.
+    CommittedRecordsLost {
+        /// The bar file.
+        path: PathBuf,
+        /// The sidecar whose entries prove the commit.
+        sidecar: PathBuf,
+        /// How many bytes of sealed entries it holds.
+        sidecar_len: u64,
+    },
+    /// A batch overlapping what the month holds, whose overlap is not what the
+    /// month holds. audit-20261003 attackdata-7, D-1525.
+    ///
+    /// This was reported as [`FormatError::TimestampsOutOfOrder`], which is
+    /// what `Header::advance` says about any batch that does not follow the
+    /// tail. A batch reaching this refusal is ordered (`survey` proved that),
+    /// so the real fact is one of the three [`Conflict`]s, and an operator told
+    /// "out of order" is sent to look at the wrong thing.
+    OverlapDisagrees {
+        /// The bar file.
+        path: PathBuf,
+        /// Index within the batch of the first record that disagrees.
+        at: u64,
+        /// The offered stamp for [`Conflict::Restated`] and
+        /// [`Conflict::NotHeld`]; the HELD stamp the batch omits for
+        /// [`Conflict::Skipped`].
+        ts_micros: i64,
+        /// Which disagreement.
+        conflict: Conflict,
+    },
+}
+
+/// How an offered overlap disagrees with the records a month holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Conflict {
+    /// The month holds a record at this stamp and its bytes differ: the vendor
+    /// restated history.
+    Restated,
+    /// The stamp lies inside the held range and the month holds no record at
+    /// it. Append-only history cannot take a record in the middle.
+    NotHeld,
+    /// The batch runs past a held stamp without offering it.
+    Skipped,
+}
+
+impl fmt::Display for Conflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Restated => "restates the record held at",
+            Self::NotHeld => "is inside the held range at a stamp the month never held:",
+            Self::Skipped => "skips the record held at",
+        })
+    }
+}
+
+/// The [`StoreError::NotARegularFile`] sentence.
+fn write_not_regular(f: &mut fmt::Formatter<'_>, path: &Path, action: Action) -> fmt::Result {
+    write!(
+        f,
+        "{} is not a regular file (a FIFO, device or socket), {action} it",
+        path.display()
+    )
+}
+
+/// The [`StoreError::RaggedTail`] sentence.
+fn write_ragged(f: &mut fmt::Formatter<'_>, path: &Path, len: u64, extra: u64) -> fmt::Result {
+    write!(
+        f,
+        "{} is {len} bytes, {extra} past the last whole record",
+        path.display()
+    )
+}
+
+/// The [`StoreError::OverlapDisagrees`] sentence.
+fn write_overlap(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    at: u64,
+    ts_micros: i64,
+    conflict: Conflict,
+) -> fmt::Result {
+    write!(
+        f,
+        "{}: batch record {at} {conflict} {ts_micros}",
+        path.display()
+    )
+}
+
+/// The [`StoreError::CommittedRecordsLost`] sentence.
+fn write_committed_records_lost(
+    f: &mut fmt::Formatter<'_>,
+    path: &Path,
+    sidecar: &Path,
+    sidecar_len: u64,
+) -> fmt::Result {
+    write!(
+        f,
+        "{} has no committed header but {} holds {sidecar_len} bytes of sealed \
+         entries: records were committed to this month and are gone, so it is \
+         refused rather than re-initialised empty",
+        path.display(),
+        sidecar.display()
+    )
 }
 
 /// The [`StoreError::ImpossibleCount`] sentence.
@@ -872,12 +985,8 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotABarPath { found } => write_not_a_bar_path(f, *found),
-            Self::Locked { path } => {
-                write!(f, "another writer holds {}", path.display())
-            }
-            Self::DiskFull { path, action } => {
-                write!(f, "disk full {action} {}", path.display())
-            }
+            Self::Locked { path } => write!(f, "another writer holds {}", path.display()),
+            Self::DiskFull { path, action } => write!(f, "disk full {action} {}", path.display()),
             Self::Denied { path, action } => {
                 write!(f, "permission denied {action} {}", path.display())
             }
@@ -888,11 +997,7 @@ impl fmt::Display for StoreError {
                 write!(f, "{} is a directory, {action} it", path.display())
             }
             Self::NotADirectory { path, action } => write_not_a_directory(f, path, *action),
-            Self::NotARegularFile { path, action } => write!(
-                f,
-                "{} is not a regular file (a FIFO, device or socket), {action} it",
-                path.display()
-            ),
+            Self::NotARegularFile { path, action } => write_not_regular(f, path, *action),
             Self::Missing { path, action } => {
                 write!(f, "{} does not exist, {action} it", path.display())
             }
@@ -915,11 +1020,7 @@ impl fmt::Display for StoreError {
                 asked,
                 read,
             } => write_short_read(f, path, *offset, *asked, *read),
-            Self::RaggedTail { path, len, extra } => write!(
-                f,
-                "{} is {len} bytes, {extra} past the last whole record",
-                path.display()
-            ),
+            Self::RaggedTail { path, len, extra } => write_ragged(f, path, *len, *extra),
             Self::Format { path, source } => write!(f, "{}: {source}", path.display()),
             Self::SymbolMismatch {
                 path,
@@ -954,9 +1055,7 @@ impl fmt::Display for StoreError {
                 volume,
                 open_interest,
             } => write_impossible_count(f, *at, *volume, *open_interest),
-            Self::ImpossibleBar { at } => {
-                write!(f, "batch record {at} has impossible OHLC")
-            }
+            Self::ImpossibleBar { at } => write!(f, "batch record {at} has impossible OHLC"),
             Self::OutsideMonth {
                 at,
                 ts_micros,
@@ -967,6 +1066,17 @@ impl fmt::Display for StoreError {
                 ts_micros,
                 timeframe_secs,
             } => write_off_grid(f, *at, *ts_micros, *timeframe_secs),
+            Self::CommittedRecordsLost {
+                path,
+                sidecar,
+                sidecar_len,
+            } => write_committed_records_lost(f, path, sidecar, *sidecar_len),
+            Self::OverlapDisagrees {
+                path,
+                at,
+                ts_micros,
+                conflict,
+            } => write_overlap(f, path, *at, *ts_micros, *conflict),
         }
     }
 }
@@ -1162,6 +1272,21 @@ const OVERLAY_TABLE: &[Layout] = &[Layout::OVERLAY];
 /// The one geometry a `.grk` file can resolve to.
 const GREEKS_TABLE: &[Layout] = &[Layout::GREEKS];
 
+/// The geometries a `.bin` file may resolve to: the BAR versions only.
+///
+/// This was `Layout::KNOWN`, which also holds the overlay (version 9, 24-byte
+/// records) and the greeks sidecar (version 8, 80-byte records), because
+/// `Header::decode_parts` must be able to decode both. So an overlay or greeks
+/// file copied to a `.bin` name opened through the ordinary bar door and
+/// `read_record` served 56-byte bars read at 24- or 80-byte offsets, low above
+/// high and an open interest equal to a timestamp, every block CRC passing.
+/// `Layout::KNOWN`'s own doc promised "a `.bar` path is offered only the bar
+/// geometries whatever its header claims"; this table is what makes it true.
+/// audit-20261003 hunt-store-1, D-1523.
+const BAR_TABLE: &[Layout] = &[Layout::V2];
+
+const _: () = assert!(Layout::V2.record_stride() == crate::format::RECORD_STRIDE);
+
 /// The geometry a file of this kind is BORN at.
 ///
 /// Decided once, from the kind, so creation and reopen cannot disagree — a file
@@ -1180,19 +1305,21 @@ const fn geometry_of(kind: FileKind) -> Layout {
 
 /// The versions a file of this kind may resolve against.
 ///
-/// A sidecar gets a one-row table; a bar file gets every bar version this build
-/// can read. See [`geometry_of`] on why the two answers must be derived from
+/// A sidecar gets a one-row table; a bar file gets every BAR version this build
+/// can read, which is [`BAR_TABLE`] and not [`Layout::KNOWN`]. See [`geometry_of`] on why the two answers must be derived from
 /// the same input.
 const fn table_of(kind: FileKind) -> &'static [Layout] {
     match kind {
         FileKind::Overlay => OVERLAY_TABLE,
         FileKind::Greeks => GREEKS_TABLE,
-        _ => Layout::KNOWN,
+        _ => BAR_TABLE,
     }
 }
 
 impl BarFile {
-    /// Opens a month's bar file, creating it and its directory if absent.
+    /// Opens a month's bar file, creating it and its directories below the
+    /// store root if absent. **The store root itself must exist**: a missing
+    /// root is [`StoreError::Missing`] and is never created (D-1522).
     ///
     /// A file that does not exist, and one that exists with zero bytes, are
     /// the same thing to this function: both get a fresh 32768-byte header
@@ -1208,7 +1335,11 @@ impl BarFile {
     /// # Errors
     ///
     /// [`StoreError::NotABarPath`] for a path naming a sibling other than the
-    /// records. [`StoreError::Locked`] when another writer holds the month.
+    /// records. [`StoreError::Missing`] or [`StoreError::NotADirectory`] naming
+    /// the store root when it is absent or not a directory (D-1522).
+    /// [`StoreError::CommittedRecordsLost`] for a month with no committed header
+    /// whose sidecar proves records were committed (D-1520).
+    /// [`StoreError::Locked`] when another writer holds the month.
     /// [`StoreError::Denied`], [`StoreError::ReadOnly`],
     /// [`StoreError::IsADirectory`], [`StoreError::NotADirectory`],
     /// [`StoreError::DiskFull`] or [`StoreError::Io`] from the host.
@@ -1250,7 +1381,33 @@ impl BarFile {
         // alternative is a refusal arm no input can produce. Reaching it would
         // create the root and then fail loudly on the open below.
         let dir = bars_path.parent().unwrap_or(root).to_path_buf();
+
+        // THE STORE ROOT IS NEVER CREATED HERE. `create_dir_all` made every
+        // missing ancestor, the root included, so a store on an unmounted
+        // volume got a fresh root on the parent filesystem and bars landed
+        // there: append-only history split across two devices, with nothing
+        // said. api's journal fixed this class first (W1-api1-9, D-0954); the
+        // bar writer is now the same. audit-20261003 hunt-store-3, D-1522.
+        let root_meta = fault(fs::metadata(root), root, Action::Open)?;
+        if !root_meta.is_dir() {
+            return Err(StoreError::NotADirectory {
+                path: root.to_path_buf(),
+                action: Action::Open,
+            });
+        }
+
+        // EVERY DIRECTORY THIS OPEN CREATES HAS ITS ENTRY FLUSHED, not only
+        // the leaf. `create_dir_all` can make up to six (vendor .. rung) and
+        // only the month's own directory was synced, so after a crash a month
+        // whose first commit returned `Committed` could lose the directory
+        // that names it. Found before creating, so a directory that already
+        // existed costs nothing; bounded by the path's depth below the root.
+        // audit-20261003 hunt-store-4, D-1522.
+        let created = missing_below(root, &dir);
         fault(fs::create_dir_all(&dir), &dir, Action::CreateDir)?;
+        for made in &created {
+            fsync_dir(made.parent().unwrap_or(root))?;
+        }
 
         // The lock is taken before the bar file is opened, let alone measured.
         // Everything below this line assumes exactly one writer. Every `?`
@@ -1261,6 +1418,10 @@ impl BarFile {
         )
         .map_err(|refusal| lock_fault(&lock_path, refusal))?;
 
+        // Whether the month file was THERE before this open. Only a file that
+        // existed can have been truncated or zeroed; one this open creates was
+        // deleted whole, an explicit act D-1520 does not second-guess.
+        let existed = matches!(fs::symlink_metadata(&bars_path), Ok(meta) if meta.is_file());
         let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
 
@@ -1295,10 +1456,28 @@ impl BarFile {
         // `len == 0` is subsumed rather than kept beside this — an empty file
         // is the all-zero case with nothing in it, and two conditions that must
         // agree are two conditions that can drift.
+        //
+        // TWO REFINEMENTS, audit-20261003, D-1520 and D-1521.
+        //
+        // "Provably holds no data" read only this file's bytes. The checksum
+        // sidecar is written by an append, after the records and before the
+        // header slot, so a sidecar with entries proves records WERE committed:
+        // a month truncated to nothing, or zeroed back to its region, was
+        // reopened empty and the next append started again at index 0, the
+        // lost bars never named (attackdata-1). It is now refused by name.
+        //
+        // And a torn GENESIS SLOT — the fill landed and part of the 64-byte
+        // slot did — is the same interrupted `initialise`, but it is not all
+        // zeros, so it was refused on every open for ever (hunt-store-2). It is
+        // repaired when every byte past the first slot is zero and the slot
+        // does not decode: a slot that decodes is a commit, not a tear.
         if len <= REGION_LEN_U64 {
             let mut head = vec![0u8; usize::try_from(len).unwrap_or(REGION_LEN)];
             read_fully(&bars, &bars_path, 0, &mut head)?;
-            if head.iter().all(|&byte| byte == 0) {
+            if is_interrupted_genesis(&head) {
+                if existed {
+                    refuse_if_sealed(&bars_path, &path.with_file(checksum_kind).to_path_buf(root))?;
+                }
                 initialise(&bars, &bars_path, symbol_id, timeframe_secs, born)?;
                 fsync_dir(&dir)?;
                 len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
@@ -2042,9 +2221,9 @@ impl BarFile {
     ///
     /// [`StoreError::EmptyBatch`], [`StoreError::BatchNotOrdered`] or
     /// [`StoreError::ImpossibleBar`] before anything is written.
-    /// [`StoreError::Format`] carrying
-    /// [`FormatError::TimestampsOutOfOrder`] for a batch that overlaps the
-    /// committed range with different bars, or
+    /// [`StoreError::OverlapDisagrees`] for a batch that overlaps the
+    /// committed range with different bars, a stamp the month never held, or a
+    /// gap over a held one (D-1525). [`StoreError::Format`] carrying
     /// [`FormatError::CounterOverflow`] and
     /// [`FormatError::GenerationExhausted`] at the counters' ends. Anything
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
@@ -2138,10 +2317,16 @@ impl BarFile {
 
                 // THREE: a genuine conflict. The vendor restated history, or
                 // bars arrived out of order. Refused by name.
-                return Err(StoreError::Format {
+                //
+                // With the REAL diagnosis, which is one of three conflicts
+                // `Conflict` names: this used to hand
+                // back `advance`'s `TimestampsOutOfOrder`, which is true of
+                // every batch that does not follow the tail and sent an
+                // operator to look at ordering. attackdata-7, D-1525.
+                return Err(self.diagnose_overlap(batch).unwrap_or(StoreError::Format {
                     path: self.bars_path.clone(),
                     source,
-                });
+                }));
             }
         };
         let commit = refused(next.commit(), &self.bars_path)?;
@@ -2619,6 +2804,66 @@ impl BarFile {
         Ok(past)
     }
 
+    /// Why an ordered batch overlapping the held range was refused: the first
+    /// offered record that disagrees with what the month holds.
+    ///
+    /// Walks the overlap against the held records from the first held stamp
+    /// at or after the batch's first, one read per overlapping record, so it
+    /// is bounded by the batch and runs only on the refusal path. `None` only
+    /// when the walk finds no disagreement, which the two checks before it
+    /// make unreachable; the caller then keeps `advance`'s own refusal rather
+    /// than inventing one. A read that fails is that failure, named.
+    /// audit-20261003 attackdata-7, D-1525.
+    fn diagnose_overlap<R: Row>(&self, batch: &[R]) -> Option<StoreError> {
+        let n_valid = self.header.n_valid;
+        let held_through = self.header.last_ts_micros;
+        let read = |index| self.read_row::<R>(index);
+        let conflict = |at: usize, ts_micros, conflict| StoreError::OverlapDisagrees {
+            path: self.bars_path.clone(),
+            at: len_u64(at),
+            ts_micros,
+            conflict,
+        };
+        let first = batch.first()?;
+        let mut index = match first_at_or_after(n_valid, first.stamp(), read) {
+            Ok(index) => index,
+            Err(why) => return Some(why),
+        };
+        let mut offered = 0usize;
+        for (at, row) in batch.iter().enumerate() {
+            if row.stamp() > held_through {
+                break;
+            }
+            offered = at.saturating_add(1);
+            if index >= n_valid {
+                return Some(conflict(at, row.stamp(), Conflict::NotHeld));
+            }
+            let stored = match read(index) {
+                Ok(stored) => stored,
+                Err(why) => return Some(why),
+            };
+            if stored.stamp() > row.stamp() {
+                return Some(conflict(at, row.stamp(), Conflict::NotHeld));
+            }
+            if stored.stamp() < row.stamp() {
+                return Some(conflict(at, stored.stamp(), Conflict::Skipped));
+            }
+            if !stored.same_bytes(row) {
+                return Some(conflict(at, row.stamp(), Conflict::Restated));
+            }
+            index = index.saturating_add(1);
+        }
+        // Every overlapping record matched; if held records remain past them
+        // and the batch goes on beyond the held range, it skipped them.
+        if index < n_valid && offered < batch.len() {
+            return Some(match read(index) {
+                Ok(stored) => conflict(offered, stored.stamp(), Conflict::Skipped),
+                Err(why) => why,
+            });
+        }
+        None
+    }
+
     /// The part of `batch` that follows what is committed, when the part that
     /// does not follow is **already stored, byte for byte**.
     ///
@@ -2677,7 +2922,7 @@ impl BarFile {
         };
         for (offset, bar) in overlap.iter().enumerate() {
             let stored = self.read_row::<R>(start.saturating_add(len_u64(offset)))?;
-            if stored != *bar {
+            if !stored.same_bytes(bar) {
                 return Ok(None);
             }
         }
@@ -2900,7 +3145,7 @@ where
     }
 
     for (offset, bar) in batch.iter().enumerate() {
-        if read(at.saturating_add(len_u64(offset)))? != *bar {
+        if !read(at.saturating_add(len_u64(offset)))?.same_bytes(bar) {
             return Ok(None);
         }
     }
@@ -3120,6 +3365,67 @@ fn note_tail_past_the_commit(path: &Path, len: u64, n_valid: u64, discarded: u64
             .with("n_valid", telemetry::Value::Uint(n_valid))
             .with("discarded", telemetry::Value::Uint(discarded)),
     );
+}
+
+/// Whether a header region of at most [`REGION_LEN`] bytes is what an
+/// interrupted `initialise` leaves: nothing past the first slot, and a first
+/// slot that does not decode. All zeros is the case with nothing in the slot.
+///
+/// `initialise` writes the zero fill and then the genesis slot at offset 0, so
+/// a crash between or inside those writes can leave bytes only in `0..64`. A
+/// slot that DECODES — magic, known version, stride and its own CRC — was
+/// committed, so it is not a tear and this answers `false`. D-1521.
+fn is_interrupted_genesis(head: &[u8]) -> bool {
+    let (slot, rest) = head.split_at(head.len().min(crate::format::SLOT_LEN));
+    rest.iter().all(|&byte| byte == 0) && Header::decode(slot).is_err()
+}
+
+/// Refuses to re-initialise a month whose checksum sidecar holds entries.
+///
+/// The sidecar gains an entry only from an append, so one with any bytes in it
+/// is proof that records were committed to this month. Absent or empty, it
+/// proves nothing was, and the caller may repair. D-1520.
+///
+/// # Errors
+///
+/// [`StoreError::CommittedRecordsLost`] for a sidecar with entries, and the
+/// host's refusal, named, for one that cannot be measured.
+fn refuse_if_sealed(bars_path: &Path, sidecar: &Path) -> Result<(), StoreError> {
+    match fs::metadata(sidecar) {
+        Ok(meta) if meta.len() > 0 => Err(StoreError::CommittedRecordsLost {
+            path: bars_path.to_path_buf(),
+            sidecar: sidecar.to_path_buf(),
+            sidecar_len: meta.len(),
+        }),
+        Ok(_) => Ok(()),
+        Err(why) if why.kind() == ErrorKind::NotFound => Ok(()),
+        Err(why) => Err(classify(sidecar, Action::Measure, &why)),
+    }
+}
+
+/// The directories between `root` (exclusive) and `dir` (inclusive) that do
+/// not exist yet, outermost first.
+///
+/// Asked with `try_exists`, not `exists`: `exists` answers `false` for every
+/// stat error, so a directory that could not be examined would be counted as
+/// one this open created. A directory that cannot be examined (a file where a
+/// directory belongs, a component this process may not search) ends the walk
+/// instead, and is not counted: `create_dir_all` meets the same component next
+/// and refuses it by name, with the `CreateDir` action the operator needs.
+/// Bounded by the path's depth below the root, which a rendered store path
+/// fixes at six. D-1522.
+fn missing_below(root: &Path, dir: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut cursor = Some(dir);
+    while let Some(here) = cursor.filter(|&here| here != root && here.starts_with(root)) {
+        if !matches!(here.try_exists(), Ok(false)) {
+            break;
+        }
+        missing.push(here.to_path_buf());
+        cursor = here.parent();
+    }
+    missing.reverse();
+    missing
 }
 
 /// Flushes a directory, so a newly created file's **name** is durable.
@@ -4073,14 +4379,14 @@ mod tests {
         altered[2].close += 1;
         assert_eq!(
             file.append(&altered),
-            Err(StoreError::Format {
+            Err(StoreError::OverlapDisagrees {
                 path: path.clone(),
-                source: FormatError::TimestampsOutOfOrder {
-                    previous: bar(19).ts_micros,
-                    next: bar(5).ts_micros,
-                },
+                at: 2,
+                ts_micros: bar(7).ts_micros,
+                conflict: super::Conflict::Restated,
             }),
-            "a vendor restating history is refused, not absorbed"
+            "a vendor restating history is refused, not absorbed, and named \
+             as the restatement it is (D-1525)"
         );
 
         // And a batch that starts inside the month and runs past its end is a
@@ -5176,6 +5482,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("brutex-store-file-flockdup-{}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the store root (D-1522)");
         let month = crate::path::StorePath::new(crate::path::PathParts {
             vendor: brutex_core::vendor::Vendor::Groww,
             exchange: "NSE",

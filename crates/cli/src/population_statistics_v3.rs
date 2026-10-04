@@ -51,6 +51,11 @@ use crate::population_statistics_v2::{
 };
 use crate::pre_admission_data::{PreAdmissionDataReopenAuditV1, PreAdmissionDataV1};
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Statistics V3 record";
+
 /// Operator-facing refusal at the Statistics V3 boundary.
 pub type PopulationStatisticsV3Refusal = String;
 
@@ -4036,6 +4041,36 @@ mod tests {
             .expect("ensure_header exists");
         let body = body.split_once("\nfn ").map_or(body, |(head, _)| head);
         assert!(body.contains("return sync_parent(path);"), "{body}");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() -> Result<(), String> {
+        let root = TestDir::new()?;
+        let rollback_root = root.child("rollback")?;
+        let produced = produced_fixture(
+            StatisticsFamilyTerminalV3::Evaluated,
+            StatisticsFamilyTerminalV3::NaturallyExtinct,
+            31,
+        )?;
+        let planned = produced.records(0, 0)?;
+        let mut file = File::create(rollback_root.join(DATA_FILE))
+            .map_err(|why| format!("cannot create rollback Statistics V3 file: {why}"))?;
+        file.write_all(&header()?)
+            .and_then(|()| file.write_all(&planned[0]))
+            .and_then(|()| file.sync_all())
+            .map_err(|why| format!("cannot write rollback Statistics V3 prefix: {why}"))?;
+        drop(file);
+        crate::append_rollback::tests::inject_short_write(
+            &rollback_root.join(DATA_FILE),
+            APPEND_LABEL,
+            RECORD_BYTES,
+        );
+        let completed = produced.append_and_reopen(&rollback_root, bounds()?)?;
+        assert!(matches!(
+            completed,
+            PopulationStatisticsV3Commit::Written(_)
+        ));
+        Ok(())
     }
 
     #[test]

@@ -382,6 +382,7 @@ mod tests {
         let path = vix_path(vendor, month(), &key);
         let file_path = path.to_path_buf(&root);
         let symbol_id = brutex_core::universe::fnv1a(VIX_REFERENCE_SYMBOL) as u32;
+        std::fs::create_dir_all(&root).expect("the store root");
         let mut file = BarFile::open_or_create(&root, path, symbol_id).expect("VIX month opens");
         if !bars.is_empty() {
             file.append(bars).expect("fixture bars append");

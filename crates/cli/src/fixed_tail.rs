@@ -196,6 +196,9 @@ pub(crate) fn sync_or_roll_back(
 ///
 /// Whatever the barrier returned.
 pub(crate) fn sync_all_hooked(file: &File, path: &Path) -> std::io::Result<()> {
+    // Read only by the test fault hook below.
+    #[cfg(not(test))]
+    let _ = path;
     #[cfg(test)]
     if fault::take_sync(&path.display()) {
         return Err(std::io::Error::other("injected sync fault"));

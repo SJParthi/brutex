@@ -51,6 +51,11 @@ use crate::population_finalization_v4::{
 use crate::step3_orchestrator::CommittedStoredCandidatePreAdmissionV1;
 use runner::exit_grid_policy::ExecutionDispositionV1;
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Population V6 record";
+
 pub(crate) type PopulationV6Refusal = String;
 
 pub(crate) const POPULATION_V6_HEADER_BYTES: u64 = 64;
@@ -3595,6 +3600,42 @@ mod tests {
                     .expect_err("corrupt Runner decision must refuse")
                     .contains("Runner arithmetic")
             );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() -> Result<(), String> {
+        with_evaluated_prepared(|_source, prepared, root| {
+            let records = encoded_block(&prepared, 0, bounds())?;
+            let rollback_root = root.join("append-rollback");
+            std::fs::create_dir(&rollback_root)
+                .map_err(|why| format!("cannot create rollback root: {why}"))?;
+            drop(PopulationV6Ledger::open_write(&rollback_root, bounds())?);
+            let data_path = rollback_root.join(DATA_FILE);
+            crate::append_rollback::tests::inject_short_write(
+                &data_path,
+                APPEND_LABEL,
+                RECORD_BYTES,
+            );
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&data_path)
+                .map_err(|why| format!("cannot open rollback file: {why}"))?;
+            file.write_all(&records[0])
+                .and_then(|()| file.sync_all())
+                .map_err(|why| format!("cannot write rollback prefix: {why}"))?;
+            drop(file);
+            crate::append_rollback::tests::inject_short_write(
+                &data_path,
+                APPEND_LABEL,
+                RECORD_BYTES,
+            );
+            let mut writer = PopulationV6Ledger::open_write(&rollback_root, bounds())?;
+            let (written, receipt) = writer.append(&prepared)?;
+            assert!(written);
+            drop(writer);
+            PopulationV6Ledger::open_read(&rollback_root, bounds())?.read_complete(receipt)?;
             Ok(())
         })
     }

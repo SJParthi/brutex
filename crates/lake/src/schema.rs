@@ -17,7 +17,7 @@
 //! `OPTIONAL`, so every column carries definition levels and any of them could
 //! in principle be null.
 
-use parquet::basic::Type as PhysicalType;
+use parquet::basic::{LogicalType, TimeUnit, Type as PhysicalType};
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::error::{ColumnType, LakeError};
@@ -157,6 +157,22 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
                 got,
             });
         }
+        // THE TIMESTAMP'S UNIT AND ZONE ARE INVISIBLE TO THE PHYSICAL TYPE.
+        // Every timestamp is an INT64; only the logical type says whether it
+        // counts micro-, milli- or nanoseconds and whether it is UTC. One that
+        // is not UTC microseconds is refused rather than decoded wrong.
+        // hunt-store-5, D-1528.
+        if s.name == "timestamp"
+            && let Some(declared) = misread_timestamp(col.logical_type_ref())
+        {
+            note_shape(
+                "the timestamp declares a unit or zone this build would misread",
+                s.name,
+                "TIMESTAMP(MICROS, adjusted to UTC) or no logical type",
+                &declared,
+            );
+            return Err(LakeError::UnsupportedTimestamp { declared });
+        }
         // THE NESTING IS INVISIBLE TO EVERY CHECK ABOVE. `col.name()` is the
         // *leaf* name, so an `open_interest` wrapped in one optional group
         // presents as `open_interest` with the right physical type and passes
@@ -190,6 +206,34 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
         }
     }
     Ok(layout)
+}
+
+/// The rendered logical type of a `timestamp` leaf this reader would misread,
+/// or `None` when it is what the reader decodes: no logical type (the lake's
+/// plain INT64 microseconds) or `TIMESTAMP(MICROS)` adjusted to UTC.
+///
+/// That the real lake's files declare one of those two is UNVERIFIED in this
+/// tree; a real file declaring anything else is now refused by name rather
+/// than read at the wrong scale or zone.
+fn misread_timestamp(logical: Option<&LogicalType>) -> Option<String> {
+    match logical {
+        None => None,
+        Some(LogicalType::Timestamp(stamp)) => {
+            let unit = match stamp.unit {
+                TimeUnit::MICROS => None,
+                TimeUnit::MILLIS => Some("MILLIS"),
+                TimeUnit::NANOS => Some("NANOS"),
+            };
+            let zone = if stamp.is_adjusted_to_u_t_c {
+                "adjusted to UTC"
+            } else {
+                "not adjusted to UTC"
+            };
+            (unit.is_some() || !stamp.is_adjusted_to_u_t_c)
+                .then(|| format!("TIMESTAMP({}, {zone})", unit.unwrap_or("MICROS")))
+        }
+        Some(other) => Some(format!("{other:?}")),
+    }
 }
 
 /// Records one shape refusal, naming the column and the expected-versus-found.

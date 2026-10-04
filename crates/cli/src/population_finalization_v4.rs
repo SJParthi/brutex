@@ -50,6 +50,11 @@ use crate::population_admission_v4::{
     PopulationAdmissionV4FamilyProjection, PopulationAdmissionV4FinalizationProjection,
 };
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Finalization V4 record";
+
 /// Bytes before the first Finalization V4 fixed record.
 pub(crate) const POPULATION_FINALIZATION_V4_HEADER_BYTES: u64 = 64;
 /// Bytes in every Finalization V4 Data, Family, Decision or Completion record.
@@ -3338,6 +3343,40 @@ mod tests {
                 PopulationFinalizationV4Commit::Written(_)
             ));
         }
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let admission_root = TestRoot::new("rollback-admission");
+        let finalization_root = TestRoot::new("rollback-finalization");
+        let mut source = admission(
+            admission_root.path(),
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            44,
+        );
+        let prepared =
+            prepare_population_finalization_v4(&mut source).expect("prepare Finalization");
+        let records = encoded_block(&prepared, 0).expect("encode Finalization block");
+        write_prefix(finalization_root.path(), &records, 2);
+        crate::append_rollback::tests::inject_short_write(
+            &finalization_root.path().join(DATA_FILE),
+            APPEND_LABEL,
+            RECORD_BYTES,
+        );
+        let committed =
+            commit_population_finalization_v4(finalization_root.path(), bounds(), source)
+                .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(
+            committed,
+            PopulationFinalizationV4Commit::Written(_)
+        ));
+        assert_eq!(
+            std::fs::metadata(finalization_root.path().join(DATA_FILE))
+                .expect("stat completed Finalization data")
+                .len(),
+            HEADER_BYTES as u64 + 6 * RECORD_BYTES as u64
+        );
     }
 
     #[test]

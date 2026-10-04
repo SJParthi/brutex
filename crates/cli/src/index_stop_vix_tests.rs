@@ -848,6 +848,7 @@ fn index_stop_vix_compound_projection_excludes_each_writer_and_releases_on_error
 /// included, is returned. Measured on the source because a failed barrier
 /// after the receipt's bytes are visible cannot be produced here.
 #[test]
+#[expect(clippy::expect_used, reason = "a missing function is a failed fixture")]
 fn only_a_lost_owner_race_is_answered_by_the_committed_receipt() {
     let source = include_str!("index_stop_vix.rs");
     let (_, publish) = source

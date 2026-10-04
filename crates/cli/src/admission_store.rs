@@ -1414,7 +1414,14 @@ fn reconcile_all(
     blocks: &HashMap<[u8; 32], DecisionBlock>,
     completions: &HashMap<[u8; 32], AdmissionCompletionReceiptV1>,
 ) -> Result<(), AdmissionStoreRefusal> {
-    for (population_id, receipt) in completions {
+    // IN IDENTITY ORDER, NOT HASH ORDER. `completions` is a randomly seeded
+    // `HashMap`, so with two bad populations the refusal named whichever one
+    // this process's seed yielded first: one store, different text per run.
+    // Sorting the cold-open walk is O(n log n) over an O(n) open.
+    // audit-20261003 hunt-conc-3, D-1565.
+    let mut ordered: Vec<_> = completions.iter().collect();
+    ordered.sort_unstable_by_key(|(population_id, _)| **population_id);
+    for (population_id, receipt) in ordered {
         match (receipt.decision_count, blocks.get(population_id)) {
             (0, None) => validate_empty_receipt(receipt)?,
             (0, Some(_)) => {
@@ -2717,6 +2724,42 @@ mod tests {
                 .contains("generation changed")
         );
         drop(reader);
+        cleanup(&root);
+    }
+
+    /// audit-20261003 hunt-conc-3: when several populations are bad, the
+    /// refusal names the same one every time, whatever order a freshly seeded
+    /// `HashMap` yields. Each loop builds a new map, so a walk in hash order
+    /// names a different identity on some of the 32 rounds.
+    #[test]
+    fn reconcile_refuses_the_lowest_bad_population_whatever_the_map_order() {
+        let root = root("deterministic-refusal");
+        std::fs::create_dir_all(&root).expect("fixture root");
+        let path = root.join("probe.bin");
+        let mut file = std::fs::File::create(&path).expect("fixture file");
+        let policy = policy();
+        for _ in 0..32 {
+            let mut completions = std::collections::HashMap::new();
+            for seed in 1..=16_u8 {
+                let population_id = digest(seed);
+                let receipt = AdmissionCompletionReceiptV1::derive(
+                    population_id,
+                    digest(100),
+                    &policy,
+                    &four_decisions(population_id),
+                )
+                .expect("derived receipt");
+                completions.insert(population_id, receipt);
+            }
+            let why = super::reconcile_all(
+                &mut file,
+                &path,
+                &std::collections::HashMap::new(),
+                &completions,
+            )
+            .expect_err("every receipt lacks its decision block");
+            assert!(why.contains(&super::hex(&digest(1))), "{why}");
+        }
         cleanup(&root);
     }
 }

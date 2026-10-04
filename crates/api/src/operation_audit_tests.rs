@@ -164,10 +164,15 @@ fn every_registered_route_is_audited_or_exempt_by_name() {
             routes.iter().any(|r| r == route),
             "{route} is audited, not registered"
         );
-        let found = audited_route(route).expect("an audited route maps");
+        // The label is the list's own static, never the request's bytes. The
+        // request is a fresh heap copy, so a label that pointed at it would be
+        // caught; comparing against `route` itself compared two copies of one
+        // literal, which the compiler may or may not merge, and the coverage
+        // build did not (PR #74, run 1261). D-1461.
+        let request = String::from(route);
+        let found = audited_route(&request).expect("an audited route maps");
         assert_eq!(found, route);
-        // The label is the list's own static, never the request's bytes.
-        assert!(std::ptr::eq(found, route));
+        assert!(!std::ptr::eq(found, request.as_str()));
         assert_eq!(AUDITED.iter().filter(|other| **other == route).count(), 1);
     }
     for (route, why) in EXEMPT {

@@ -53,6 +53,11 @@ use crate::population_admission_v3::{
     PopulationAdmissionV3DecisionProjection,
 };
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "Finalization V3 fixed record";
+
 /// Bytes in one canonical Population Finalization V3 row.
 pub(crate) const POPULATION_FINALIZATION_V3_ROW_BYTES: usize = 2_048;
 /// Bytes in one receipt-last Population Finalization V3 Completion.
@@ -4076,6 +4081,37 @@ mod tests {
                     * POPULATION_FINALIZATION_V3_ROW_BYTES as u64,
             )
             .expect("truncate to whole-row prefix");
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let limits = bounds();
+        let value = prepared();
+        let full = TestRoot::new("rollback-reference");
+        write_block(full.path(), &value, true);
+        let root = TestRoot::new("append-rollback");
+        write_block(root.path(), &value, false);
+        truncate_rows(root.path(), 1);
+        for (name, width) in [
+            (ROW_FILE, POPULATION_FINALIZATION_V3_ROW_BYTES),
+            (COMPLETION_FILE, POPULATION_FINALIZATION_V3_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path().join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let commit = persist_population_finalization_v3(root.path(), limits, &value)
+            .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(commit, PopulationFinalizationV3Commit::Written(_)));
+        for name in [ROW_FILE, COMPLETION_FILE] {
+            assert_eq!(
+                std::fs::read(root.path().join(name)).expect("read recovered file"),
+                std::fs::read(full.path().join(name)).expect("read reference file"),
+                "{name} must equal the uncrashed bytes"
+            );
+        }
     }
 
     #[test]

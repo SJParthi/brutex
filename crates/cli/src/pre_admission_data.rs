@@ -58,6 +58,16 @@ use crate::candidate_universe::{
 use crate::population::{CompletionReconciliationV2, InstrumentFamilyV1, RequestedSpanIdentityV1};
 use crate::stored::{CompleteCalendarReceiptV2, StoredSpanLoadBoundV1};
 
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL: &str = "pre-admission record";
+
+/// The label #74's short-write test injects with. Appends to this ledger go
+/// through `fixed_tail`, which names the file instead (D-1770).
+#[cfg(test)]
+const APPEND_LABEL_V2: &str = "pre-admission V2 record";
+
 /// Operator-facing refusal from the Pre-Admission Data V1 boundary.
 pub type PreAdmissionDataRefusal = String;
 
@@ -4830,6 +4840,75 @@ mod tests {
             PreAdmissionDataLedgerV2::open_read(root.path(), configured),
             "V2 reader opens",
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_v1_or_v2_append_truncates_back_and_the_ledger_stays_open() -> TestResult {
+        let root = test_dir()?;
+        let configured = bounds(4)?;
+        drop(must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "headers initialize",
+        )?);
+        let data_path = root.path().join(DATA_FILE);
+        crate::append_rollback::tests::inject_short_write(&data_path, APPEND_LABEL, RECORD_BYTES);
+        let value = fixture(32)?.with_sequence(0);
+        let mut file = must(open_file(&data_path, true, false), "data file reopens")?;
+        let data_record = must(value.record(RecordKindV1::Data), "orphan Data encodes")?;
+        must(append_record(&mut file, &data_record), "orphan Data writes")?;
+        drop(file);
+        crate::append_rollback::tests::inject_short_write(&data_path, APPEND_LABEL, RECORD_BYTES);
+        let mut reopened = must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "the rolled-back orphan is recoverable",
+        )?;
+        assert!(matches!(
+            must(
+                reopened.append_complete(&value),
+                "the next append completes the orphan after the rollback",
+            )?,
+            PreAdmissionProductionCommitV1::Written(_)
+        ));
+
+        let root_v2 = test_dir()?;
+        let configured_v2 = bounds_v2(4)?;
+        drop(must(
+            PreAdmissionDataLedgerV2::open(root_v2.path(), configured_v2),
+            "V2 headers initialize",
+        )?);
+        let data_path_v2 = root_v2.path().join(DATA_FILE_V2);
+        crate::append_rollback::tests::inject_short_write(
+            &data_path_v2,
+            APPEND_LABEL_V2,
+            RECORD_BYTES_V2,
+        );
+        let orphan = zero_fixture_v2(185)?.with_sequence(0);
+        let mut file = must(open_file(&data_path_v2, true, false), "V2 file reopens")?;
+        must(
+            append_record_v2(
+                &mut file,
+                &must(orphan.record(RecordKindV2::Data), "V2 orphan encodes")?,
+            ),
+            "V2 orphan appends",
+        )?;
+        drop(file);
+        crate::append_rollback::tests::inject_short_write(
+            &data_path_v2,
+            APPEND_LABEL_V2,
+            RECORD_BYTES_V2,
+        );
+        let mut orphan_ledger = must(
+            PreAdmissionDataLedgerV2::open(root_v2.path(), configured_v2),
+            "the rolled-back V2 orphan is recoverable",
+        )?;
+        assert!(matches!(
+            must(
+                orphan_ledger.append_complete(&orphan),
+                "the next V2 append completes the orphan after the rollback",
+            )?,
+            PreAdmissionProductionCommitV2::Written(_)
+        ));
         Ok(())
     }
 
