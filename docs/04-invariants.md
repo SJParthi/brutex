@@ -4866,6 +4866,7 @@ not claim an exclusive lease against future writers.
 |---|---|
 | Raw report keys are unique at every nesting level after escape decoding and integer values retain exact precision | `raw_report_json_preserves_exact_numbers_and_rejects_recursive_duplicate_keys` |
 | Physical input and recursion limits remain finite; trailing JSON refuses | `strict_report_json_keeps_byte_recursion_and_complete_input_bounds` |
+| Under the workspace's `arbitrary_precision` serde_json a report decimal keeps its own digits, a nonfinite number refuses, and a forged number-token map with extra fields or non-number digits refuses (D-1463) | `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers` |
 | Contradictory checks and status cannot overwrite a failure or active observation | `duplicate_checks_and_status_fields_are_refused_without_observation` |
 | Duplicate coverage or mutation fields cannot become passing measurements; noninteger/overflow counts refuse | `duplicate_coverage_census_and_outcome_fields_cannot_replace_failures`, `coverage_requires_exact_line_branch_counts_and_all_source_files` |
 | A different real campaign checkpoint cannot replace a pinned completed-search claim | `a_new_campaign_checkpoint_cannot_replace_the_exact_pin_in_a_completed_search_claim` |
