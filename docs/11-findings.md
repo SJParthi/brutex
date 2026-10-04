@@ -822,3 +822,14 @@ Narrative only. No row is added to the table above.
 - **gaps-10** (no API or page for Selection V6): fixed by
   `/selection-v6.json` and `/selection`. Equities are refused with the
   `CLAUDE.md` §1 sentence. D-1578, AFF-62.
+
+### Rust and O(1) sweep, 2026-10-04 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **OS-1, OS-2, OS-3** (`pool-oos` memory, training matrix, serial walks):
+  fixed. D-2300, AFG-01.
+- **OS-4** (`pool`'s union reopened the parent ledger per instrument): fixed.
+  D-2301, AFG-02.
+- **`cli::swept_rung` call-site count** made stale by D-1576: corrected.
+  D-2302.

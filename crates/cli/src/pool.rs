@@ -793,11 +793,35 @@ pub(crate) fn union_of(
             return (union, unread);
         }
     };
+    // THE PARENTS ARE OPENED ONCE. `Frontier::of_run` on a read-only handle
+    // cold-opens the results ledger and the receipt sidecar on every call --
+    // O(history) each -- so a pool over 210 instruments paid that 210 times.
+    // One snapshot here makes each instrument one hash probe in each parent
+    // plus its own rows (sweep audit OS-4, D-2301). The proof is the same
+    // committed-receipt gate the API's detail readers use.
+    let mut parents = match crate::result_set::CommittedParents::open_read_bounded(root, u64::MAX) {
+        Ok(parents) => parents,
+        Err(why) => {
+            for s in screened {
+                if s.outcome.is_ok() {
+                    unread.push((s.symbol.clone(), format!("parent ledger not opened: {why}")));
+                }
+            }
+            return (union, unread);
+        }
+    };
     for s in screened {
         let Ok(record) = &s.outcome else {
             continue;
         };
-        match frontier.of_run(&record.identity) {
+        let receipt = match parents.committed(&record.identity) {
+            Ok(committed) => committed.map(|committed| committed.receipt),
+            Err(why) => {
+                unread.push((s.symbol.clone(), why));
+                continue;
+            }
+        };
+        match frontier.of_run_against_receipt(&record.identity, receipt) {
             Ok((rows, damage)) => {
                 if let Some(why) = damage {
                     unread.push((s.symbol.clone(), why));

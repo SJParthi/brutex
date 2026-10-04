@@ -24845,6 +24845,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **The pool's union opens the parent ledger once, not once per
+    /// instrument.** Rust and O(1) sweep OS-4, D-2301.
+    ///
+    /// Two committed runs and one refused screen. The union holds both runs'
+    /// frontier rows in screen order, the refused screen contributes nothing,
+    /// and the results ledger is opened exactly once for the whole union.
+    #[test]
+    fn the_pool_union_opens_the_parent_ledger_once_for_every_instrument() {
+        let root = result_commit_root("pool-union");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut screened = Vec::new();
+        for (tag, word) in [(81_u8, 1_u64), (82, 2)] {
+            let identity = [tag; 32];
+            let mut row = result_commit_frontier(identity, 11);
+            row.mask_words = [word, 0, 0, 0, 0, 0];
+            super::ensure_frontier_rows(&root, &identity, &[row]).expect("frontier");
+            super::ensure_trade_rows(&root, &identity, &[result_commit_trade(identity)])
+                .expect("trades");
+            super::ensure_detail_receipt(&root, identity, 1, 1, costs::fill::Direction::Short)
+                .expect("receipt");
+            let mut record = record_for_naming();
+            record.identity = identity;
+            record.combinations = 11;
+            record.trades = 1;
+            super::ensure_run_record(&root, &record).expect("commits");
+            screened.push(crate::pool::Screened {
+                symbol: format!("S{tag}"),
+                outcome: Ok(record),
+            });
+        }
+        screened.insert(
+            1,
+            crate::pool::Screened {
+                symbol: "REFUSED".to_owned(),
+                outcome: Err("not screened".to_owned()),
+            },
+        );
+        crate::results::OPENS.with(|n| n.set(0));
+        let (union, unread) = crate::pool::union_of(&root, &screened);
+        assert!(unread.is_empty(), "{unread:?}");
+        assert_eq!(
+            union.iter().map(|c| c.words[0]).collect::<Vec<_>>(),
+            vec![1, 2],
+            "both runs' rows, in screen order"
+        );
+        assert_eq!(
+            crate::results::OPENS.with(std::cell::Cell::get),
+            1,
+            "one parent-ledger open for the whole union"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_verified_rerun_retains_its_nonzero_ledger_index() {
         let root = result_commit_root("reuse-index");

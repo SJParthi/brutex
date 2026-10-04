@@ -41131,8 +41131,8 @@ answered, and one refusal's quote changes.
    - *The bullet is rewritten in place.* It names both callers and both
      routes. `swept_rung` and `pool_arm`'s rung refusal still quote raw.
      `pool_arm`'s one caller is `dispatch`'s `pool` arm, whose rung is typed.
-     `cli::swept_rung` has eleven call sites (this said eight until the sixth
-     correction), and the chains above them were not all followed to their
+     `cli::swept_rung` has twelve call sites (this said eight until the sixth
+     correction, and eleven until D-2302 counted `pool_oos::run`), and the chains above them were not all followed to their
      end; the bullet says so. `batch.rs` has a
      `swept_rung` of its own, whose raw quote only a word `stored::rung` has
      already accepted can reach.
@@ -56781,3 +56781,67 @@ decodes a genuine committed block to the authority's own `top_twenty_five`.
 `api::selectionv6json::tests::every_rung_is_absent_saved_or_refused_by_name`,
 `api::selectionv6json::tests::a_record_projects_exactly_and_the_family_selector_narrows_winners`,
 and `web/tests/selection-v6.test.js`.
+
+### D-2300 — `pool-oos` streams its spans and keeps no training series — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-1, OS-2, OS-3).** D-1576's `pool-oos`
+prepared every surface instrument's training and later spans in one parallel
+pass and held all of them until the judge returned, O(I × B) memory for up to
+210 instruments. It then built a dense U × N `i64` matrix for the training
+spans too, only to discard it, and allocated both matrices with an
+infallible `vec!`, so a family too large for memory aborted the process
+rather than refusing (§4). The I × U walks ran one after another inside each
+span, and the session index was rebuilt by a pairwise merge per instrument.
+
+**Change.** `walk_all` gives each Rayon lane one instrument: it prepares the
+training span, walks every union candidate over it, keeps only the tallies
+and the holding period, drops the span, then prepares and walks the later
+span at that TRAINING holding period and keeps the tallies and one
+`(candidate, day, ppm)` booking per trade. `walk_span` walks the candidates
+in parallel and gathers them in union order, so nothing depends on the
+thread count. `judge_walked` sums the tallies, counts the sessions through
+one ordered set, and builds only the later matrix, reserved with
+`try_reserve_exact`; a family that cannot be held is refused by name. Every
+figure is the same integer sum it was: each slot is the checked sum of the
+same trades' ppm, only in booking order.
+
+**Not changed.** Each training span is still prepared twice, once by pass 1's
+screen and once here: a constant factor, recorded in `docs/06-limits.md`.
+
+**Test.** `cli::pool_oos::tests::the_streamed_judge_books_every_trade_and_keeps_no_training_series`:
+a training walk keeps no booking, every tallied later trade is booked once,
+each pooled row sums to its tally, the streamed judge equals the judge over
+prepared spans row for row, and an impossible family is refused with
+"cannot be held". The four D-1576/D-1577 tests pass unchanged.
+
+### D-2301 — `pool`'s union opens the parent ledger once — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-4).** `pool::union_of`, which `pool` and
+`pool-oos` both call, asked `Frontier::of_run` for each screened
+instrument. On a read-only handle that call cold-opens the results ledger and
+the receipt sidecar every time, O(history) each, so one pool paid it up to
+210 times.
+
+**Change.** `union_of` opens `result_set::CommittedParents` once, the same
+committed-receipt gate the API's detail readers use, and hands each
+instrument's verified receipt to `Frontier::of_run_against_receipt`. A
+parent that cannot be opened names every screened instrument as unread, as a
+frontier that cannot be opened already did. A run with no parent or a
+missing receipt is refused exactly as before.
+
+**Test.** `cli::tests::the_pool_union_opens_the_parent_ledger_once_for_every_instrument`
+commits two runs, adds a refused screen, and finds both runs' rows in screen
+order with one results-ledger open, counted by a test-only counter in
+`results::Results::open_with`.
+
+### D-2302 — `cli::swept_rung` has twelve call sites — 2026-10-04
+
+**Finding.** D-1576 added `pool_oos::run`, a twelfth call of
+`cli::swept_rung`, and the raw-quote bullet in `docs/06-limits.md` and
+D-0696's fifth correction, item 3, still said eleven.
+`the_raw_quote_limit_counts_and_names_every_call_of_swept_rung` failed on the
+merged tree.
+
+**Change.** Both texts say twelve, name `pool_oos.rs`, and say they said
+eleven until this entry. `pool_oos::run` takes its rung as a parameter, as
+the bullet says of the others.

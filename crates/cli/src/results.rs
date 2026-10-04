@@ -873,6 +873,8 @@ impl Results {
                   refusal paths in one function and the release in another"
     )]
     fn open_with(root: &Path, writable: bool, max_bytes: Option<u64>) -> Result<Self, Refusal> {
+        #[cfg(test)]
+        OPENS.with(|n| n.set(n.get().saturating_add(1)));
         let dir = root.join("results");
         if writable {
             std::fs::create_dir_all(&dir)
@@ -2834,4 +2836,11 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&r);
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Results-ledger opens on this thread, so a test can prove a caller opens
+    /// the ledger once rather than once per instrument (D-2301).
+    pub(crate) static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }

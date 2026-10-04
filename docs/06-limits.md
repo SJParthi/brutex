@@ -9511,15 +9511,15 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   were measured on `pool` only, with a stamped build of D-0696's fifth
   correction. Each such refusal is the command's own and forges no completed
   run. `pool_arm`'s one caller is `dispatch`'s `pool` arm, a typed argument.
-  `cli::swept_rung` has eleven call sites (this said eight until D-0696's
-  sixth correction). One is in `pool.rs`, in `pool::run`. The `pool` verb
+  `cli::swept_rung` has twelve call sites (this said eight until D-0696's
+  sixth correction, and eleven until D-2302 counted `pool_oos::run`). One is in `pool.rs`, in `pool::run`. The `pool` verb
   reaches it only through `pool_arm`, which hands `pool::pool` a rung only
   after finding it among `EVERY_RUNG`'s entries, and `swept_rung` accepts
-  every one of those, so the verb never reaches that refusal. The other ten
+  every one of those, so the verb never reaches that refusal. The other eleven
   are `sweep_audited_stored`, `sweep_stored_inner`, `auto_stored_inner`,
   `audit_stored_inner`, `audit_range_inner` and `screen_range_inner` in
   `lib.rs`, and one each in `audited_stored.rs`, `audited_range.rs`,
-  `expression.rs` and `expression_search.rs`. Each of those takes the rung it
+  `expression.rs`, `expression_search.rs` and `pool_oos.rs`. Each of those takes the rung it
   checks as a parameter or a field of one, except `sweep_audited_stored`,
   which takes it from the `sweep-audited-stored` command's own argument
   list; the chains above them were not all followed to their end. `batch.rs`
@@ -14489,6 +14489,20 @@ most 100,000).
   on a rung above one minute they are coarser than the exit grid's minute
   replay. One later span is one draw. Multiplicity across separate
   `pool-oos` invocations is not controlled (gaps-12).
+- **`pool-oos` memory (D-2300).** The spans are streamed: each lane prepares
+  one span, walks every union candidate over it, and drops its bars and
+  column before the next, so at most one span per running Rayon lane is
+  held. What outlives a lane is O(U) tallies per span and one 24-byte
+  booking per later trade. The training span keeps no series. The one dense
+  structure is the later matrix, U × N `i64`, reserved fallibly: a family
+  too large to hold is refused by name, never aborted. Each instrument's
+  training span is still prepared twice, once by pass 1's screen
+  (`one_rung`) and once here, a constant factor of two on that half's
+  preparation, not a change of class. UNVERIFIED as a measured bound.
+- **`pool` and `pool-oos` union (D-2301).** The results ledger and receipt
+  sidecar are opened once per union, O(history) once; each instrument then
+  costs one hash probe in each and its own frontier rows. Before D-2301
+  every instrument cold-opened both, O(I × history).
 - **`/selection-v6.json`.** Eight files, at most 64 blocks of 16 KiB each,
   each hashed twice (identity and seal) and decoded once: O(blocks) per
   request, bounded by the cap. UNVERIFIED as a measured bound.

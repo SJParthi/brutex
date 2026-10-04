@@ -7,7 +7,7 @@
     reason = "test fixtures: a missing value must fail the test"
 )]
 
-use super::{Instrument, judge, write_catalog};
+use super::{Instrument, judge, judge_walked, pooled_later, walk_span, write_catalog};
 use crate::frontier::Direction;
 use crate::pool::{Candidate, PreparedSpan};
 use indicators::Candle;
@@ -219,6 +219,52 @@ fn a_planted_in_sample_only_winner_fails_out_of_sample_and_a_persistent_one_hold
             .all(|row| row.held),
         "with no split the planted Monday winner looks real"
     );
+}
+
+/// **The streamed judge holds no span and no training series, and loses no
+/// trade.** Rust and O(1) sweep OS-1, OS-2, D-2300.
+///
+/// A training walk keeps tallies only. A later walk books every trade it
+/// tallies, so each pooled row sums to exactly its tally. The judge over
+/// walked spans is the judge over prepared ones, row for row. A family too
+/// large to hold is refused by name, not aborted.
+#[test]
+fn the_streamed_judge_books_every_trade_and_keeps_no_training_series() {
+    let union = union();
+    let training = prepared(span(FIRST_MONDAY, 12, 2_000_000, 200, true));
+    let later = prepared(span(FIRST_MONDAY + 12 * 7, 12, 2_000_000, 200, false));
+    let horizon = training.horizon;
+    let walked_training = walk_span(&training, horizon, &union, false).expect("training walked");
+    assert!(
+        walked_training.bookings.is_empty(),
+        "no training series is kept"
+    );
+    assert!(walked_training.tallies.iter().all(|t| t.trades > 0));
+    let walked_later = walk_span(&later, horizon, &union, true).expect("later walked");
+    let booked: u64 = walked_later.bookings.len().try_into().expect("count");
+    let tallied: u64 = walked_later.tallies.iter().map(|t| t.trades).sum();
+    assert_eq!(booked, tallied, "every tallied trade is booked once");
+    let series = pooled_later(&[&walked_later], union.len(), &walked_later.days).expect("series");
+    for (row, tally) in series.iter().zip(&walked_later.tallies) {
+        let total: i128 = row.iter().map(|v| i128::from(*v)).sum();
+        assert_eq!(total, tally.sum_ppm, "the pooled row sums to its tally");
+    }
+    let streamed = judge_walked(&[(walked_training, walked_later)], &union).expect("streamed");
+    let held = judge(
+        &[Instrument {
+            training: &training,
+            later: &later,
+        }],
+        &union,
+    )
+    .expect("held");
+    assert_eq!(streamed.rows, held.rows);
+    assert_eq!(
+        (streamed.training_sessions, streamed.later_sessions),
+        (held.training_sessions, held.later_sessions)
+    );
+    let why = pooled_later(&[], usize::MAX / 2, &[1, 2]).expect_err("cannot be held");
+    assert!(why.contains("cannot be held"), "{why}");
 }
 
 /// An empty family has no verdict; none is invented.

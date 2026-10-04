@@ -82,12 +82,10 @@ use crate::pool::{Candidate, PreparedSpan, Screened};
 /// A month range, first and last month inclusive, as `(year, month)`.
 type Months = ((u16, u8), (u16, u8));
 
-/// Every candidate's pooled per-session series over one span, each
-/// candidate's tally there, and the session count.
-type PooledSeries = (Vec<Vec<i64>>, Vec<Tally>, usize);
-
 /// One instrument's two prepared spans. The training span's holding period is
-/// the one both are walked at.
+/// the one both are walked at. The verb streams through [`walk_all`] instead;
+/// this holds both spans and exists for the judge's fixtures.
+#[cfg(test)]
 pub(crate) struct Instrument<'a> {
     pub(crate) training: &'a PreparedSpan,
     pub(crate) later: &'a PreparedSpan,
@@ -127,33 +125,58 @@ pub(crate) struct Judged {
     pub(crate) reality: Option<runner::bootstrap::Verdict>,
 }
 
-/// The pooled per-session series of every candidate over one span, and each
-/// candidate's tally there.
+/// One span walked for every union candidate, with the span itself dropped.
 ///
-/// The session index is the union of every instrument's IST days on this
-/// span, ascending, so every series has the same length and the bootstrap
-/// cannot refuse the family for misalignment. A trade is booked on its exit
-/// bar's day.
-fn pooled_series(
-    spans: &[(&PreparedSpan, runner::outcome::Horizon)],
+/// This is what survives an instrument's preparation: its IST session days,
+/// one tally per candidate, and -- on the later span only -- one booking per
+/// trade. The bars and the condition column are gone once this exists, so a
+/// pool over 210 instruments never holds more than one lane's spans at once
+/// (sweep audit OS-1, D-2300).
+/// `(candidate, exit day, ppm)` for one trade.
+pub(crate) type Booking = (usize, i64, i64);
+
+#[derive(Debug, Default)]
+pub(crate) struct Walked {
+    /// The span's IST session days, ascending.
+    pub(crate) days: Vec<i64>,
+    /// One tally per union candidate, in union order.
+    pub(crate) tallies: Vec<Tally>,
+    /// `(candidate, exit day, ppm)` per trade, in candidate then trade order.
+    /// Empty when the span was walked for its tallies only.
+    pub(crate) bookings: Vec<Booking>,
+}
+
+/// Walk every union candidate over one span at `horizon`.
+///
+/// Each trade's pessimistic P&L is taken as ppm of its entry open, truncated
+/// toward zero (§7). The candidates are walked in parallel and gathered in
+/// union order, so the result does not depend on the thread count. With
+/// `book` false only the tallies are kept: the training span needs no series
+/// (sweep audit OS-2, D-2300).
+///
+/// # Errors
+///
+/// A trade naming a bar outside its span, a non-positive entry open, or a
+/// return that does not fit an `i64`. Nothing is clamped.
+pub(crate) fn walk_span(
+    span: &PreparedSpan,
+    horizon: runner::outcome::Horizon,
     union: &[Candidate],
-) -> Result<PooledSeries, String> {
-    let days = spans.iter().fold(Vec::new(), |days, (span, _)| {
-        merged(&days, &crate::session_index(&span.bars))
-    });
-    let index: HashMap<i64, usize> = days
-        .iter()
+    book: bool,
+) -> Result<Walked, String> {
+    let bars = span.bars.as_slice();
+    let per_candidate: Vec<Result<(Tally, Vec<Booking>), String>> = union
+        .par_iter()
         .enumerate()
-        .map(|(slot, day)| (*day, slot))
-        .collect();
-    let mut series = vec![vec![0_i64; days.len()]; union.len()];
-    let mut tallies = vec![Tally::default(); union.len()];
-    for (span, horizon) in spans {
-        let bars = span.bars.as_slice();
-        for ((candidate, row), tally) in union.iter().zip(&mut series).zip(&mut tallies) {
+        .map(|(at, candidate)| {
             let mask = vocab::ConditionMask::from_words(candidate.words);
             let walked =
-                runner::trade::walk(bars, &span.column, &mask, *horizon, candidate.direction);
+                runner::trade::walk(bars, &span.column, &mask, horizon, candidate.direction);
+            let mut tally = Tally::default();
+            let mut bookings = Vec::new();
+            if book {
+                bookings.reserve_exact(walked.trades.len());
+            }
             for trade in &walked.trades {
                 let (Some(entry), Some(exit)) =
                     (bars.get(trade.entry_bar), bars.get(trade.exit_bar))
@@ -171,75 +194,144 @@ fn pooled_series(
                     .map(|scaled| scaled / i128::from(entry.open))
                     .and_then(|ppm| i64::try_from(ppm).ok())
                     .ok_or("a trade's return in ppm does not fit an i64")?;
-                let slot = index
-                    .get(&indicators::ist_day(exit.ts_micros))
-                    .and_then(|slot| row.get_mut(*slot))
-                    .ok_or("a trade exited on a day outside the session index")?;
-                *slot = slot
-                    .checked_add(ppm)
-                    .ok_or("a pooled session return overflowed i64; no series was clamped")?;
                 tally.trades = tally.trades.saturating_add(1);
                 tally.sum_ppm = tally.sum_ppm.saturating_add(i128::from(ppm));
+                if book {
+                    bookings.push((at, indicators::ist_day(exit.ts_micros), ppm));
+                }
             }
-        }
+            Ok((tally, bookings))
+        })
+        .collect();
+    let mut out = Walked {
+        days: crate::session_index(bars),
+        tallies: Vec::with_capacity(union.len()),
+        bookings: Vec::new(),
+    };
+    for result in per_candidate {
+        let (tally, mut bookings) = result?;
+        out.tallies.push(tally);
+        out.bookings.append(&mut bookings);
     }
-    Ok((series, tallies, days.len()))
+    Ok(out)
 }
 
-/// Two ascending day lists as one, ascending, each day once.
+/// Every candidate's tally summed over the walked spans, and the number of
+/// distinct IST sessions they cover.
+fn summed(walked: &[&Walked], candidates: usize) -> Result<(Vec<Tally>, Vec<i64>), String> {
+    let mut tallies = vec![Tally::default(); candidates];
+    let mut days = std::collections::BTreeSet::new();
+    for span in walked {
+        if span.tallies.len() != candidates {
+            return Err(
+                "a walked span carries a different candidate count than the union".to_owned(),
+            );
+        }
+        for (sum, one) in tallies.iter_mut().zip(&span.tallies) {
+            sum.trades = sum.trades.saturating_add(one.trades);
+            sum.sum_ppm = sum.sum_ppm.saturating_add(one.sum_ppm);
+        }
+        days.extend(span.days.iter().copied());
+    }
+    Ok((tallies, days.into_iter().collect()))
+}
+
+/// The pooled later series: one row per candidate, one column per IST session
+/// in `days`, each slot the sum of the trades that exited that day.
 ///
-/// A merge rather than a sort: each instrument's days come from
-/// [`crate::session_index`], already ascending, so one pass over both lists
-/// is the whole of the work.
-fn merged(a: &[i64], b: &[i64]) -> Vec<i64> {
-    let mut out = Vec::with_capacity(a.len().saturating_add(b.len()));
-    let (mut a, mut b) = (a.iter().peekable(), b.iter().peekable());
-    loop {
-        let next = match (a.peek(), b.peek()) {
-            (Some(&&x), Some(&&y)) if x < y => a.next(),
-            (Some(&&x), Some(&&y)) if y < x => b.next(),
-            (Some(_), Some(_)) => {
-                b.next();
-                a.next()
-            }
-            (Some(_), None) => a.next(),
-            (None, Some(_)) => b.next(),
-            (None, None) => break,
-        };
-        if let Some(&day) = next {
-            out.push(day);
+/// The matrix is reserved fallibly, so a family too large for memory is
+/// refused by name rather than aborting the process (§4, sweep audit OS-2).
+fn pooled_later(
+    walked: &[&Walked],
+    candidates: usize,
+    days: &[i64],
+) -> Result<Vec<Vec<i64>>, String> {
+    let index: HashMap<i64, usize> = days
+        .iter()
+        .enumerate()
+        .map(|(slot, day)| (*day, slot))
+        .collect();
+    let mut series: Vec<Vec<i64>> = Vec::new();
+    series.try_reserve_exact(candidates).map_err(|why| {
+        format!("the later series of {candidates} candidate(s) cannot be held: {why}; nothing was judged")
+    })?;
+    for _ in 0..candidates {
+        let mut row = Vec::new();
+        row.try_reserve_exact(days.len()).map_err(|why| {
+            format!(
+                "the later series of {candidates} candidate(s) x {} session(s) cannot be held: {why}; nothing was judged",
+                days.len()
+            )
+        })?;
+        row.resize(days.len(), 0_i64);
+        series.push(row);
+    }
+    for span in walked {
+        for &(candidate, day, ppm) in &span.bookings {
+            let slot = index
+                .get(&day)
+                .and_then(|slot| series.get_mut(candidate)?.get_mut(*slot))
+                .ok_or("a trade exited on a day outside the session index")?;
+            *slot = slot
+                .checked_add(ppm)
+                .ok_or("a pooled session return overflowed i64; no series was clamped")?;
         }
     }
-    out
+    Ok(series)
 }
 
 /// Judge every union candidate on the later spans, with exits frozen at each
 /// instrument's training holding period, under one Romano-Wolf stepdown.
 ///
+/// The spans are walked here; [`judge_walked`] is the same judgement over
+/// spans already walked, which is how the verb streams its instruments.
+///
 /// # Errors
 ///
 /// When a series cannot be built without clamping, or when the stepdown has
 /// no complete receipt for this family. No verdict is invented for either.
+#[cfg(test)]
 pub(crate) fn judge(instruments: &[Instrument<'_>], union: &[Candidate]) -> Result<Judged, String> {
     if instruments.is_empty() || union.is_empty() {
         return Err("no instrument or no candidate to judge out of sample".to_owned());
     }
-    let training: Vec<_> = instruments
-        .iter()
-        .map(|i| (i.training, i.training.horizon))
-        .collect();
-    // FROZEN: the later span is walked at the TRAINING horizon.
-    let later: Vec<_> = instruments
-        .iter()
-        .map(|i| (i.later, i.training.horizon))
-        .collect();
-    let (_, training_tallies, training_sessions) = pooled_series(&training, union)?;
-    let (later_series, later_tallies, later_sessions) = pooled_series(&later, union)?;
+    let mut walked = Vec::with_capacity(instruments.len());
+    for instrument in instruments {
+        // FROZEN: the later span is walked at the TRAINING horizon.
+        let horizon = instrument.training.horizon;
+        walked.push((
+            walk_span(instrument.training, horizon, union, false)?,
+            walk_span(instrument.later, horizon, union, true)?,
+        ));
+    }
+    judge_walked(&walked, union)
+}
+
+/// [`judge`] over instruments whose spans were already walked by
+/// [`walk_span`]: training without bookings, later with them.
+///
+/// # Errors
+///
+/// As [`judge`].
+pub(crate) fn judge_walked(
+    walked: &[(Walked, Walked)],
+    union: &[Candidate],
+) -> Result<Judged, String> {
+    if walked.is_empty() || union.is_empty() {
+        return Err("no instrument or no candidate to judge out of sample".to_owned());
+    }
+    let training: Vec<&Walked> = walked.iter().map(|(training, _)| training).collect();
+    let later: Vec<&Walked> = walked.iter().map(|(_, later)| later).collect();
+    let (training_tallies, training_days) = summed(&training, union.len())?;
+    let (later_tallies, later_days) = summed(&later, union.len())?;
+    let training_sessions = training_days.len();
+    let later_sessions = later_days.len();
     if later_sessions == 0 {
         return Err(
             "the later span holds no session; nothing can be judged out of sample".to_owned(),
         );
     }
+    let later_series = pooled_later(&later, union.len(), &later_days)?;
     let draws = crate::bootstrap_draws(later_sessions);
     let receipt = runner::bootstrap::romano_wolf_receipt(
         &later_series,
@@ -511,17 +603,17 @@ fn run_under(
         );
         return Ok(out);
     }
-    let prepared = prepare_all(root, vendor, rung, &surface, (training, later));
+    let streamed = walk_all(root, vendor, rung, &surface, (training, later), &union);
     let mut instruments = Vec::new();
-    for (symbol, spans) in surface.iter().zip(&prepared) {
-        match spans {
-            Ok((training, later)) => instruments.push(Instrument { training, later }),
+    for (symbol, walked) in surface.iter().zip(streamed) {
+        match walked {
+            Ok(both) => instruments.push(both),
             Err(why) => {
                 let _ = writeln!(out, "  NOT IN THE OUT-OF-SAMPLE POOL: {symbol}: {why}");
             }
         }
     }
-    let judged = judge(&instruments, &union)?;
+    let judged = judge_walked(&instruments, &union)?;
     render(&mut out, &union, &judged, instruments.len());
     let heading = format!(
         "brutex pool-oos held candidates: feed {vendor_word}, rung {rung}, training \
@@ -541,22 +633,37 @@ fn run_under(
 }
 
 /// Every surface instrument's training and later spans, prepared through the
-/// screen's own sequence, in surface order. A refusal names its span.
-fn prepare_all(
+/// screen's own sequence and walked for every union candidate, in surface
+/// order. A refusal names its span.
+///
+/// STREAMED: each lane prepares one span, walks it, and drops the bars and
+/// the condition column before preparing the next, so peak memory is one
+/// span per running lane plus the walked tallies and bookings, not every
+/// instrument's two spans at once (sweep audit OS-1, D-2300). The later span
+/// is walked at the TRAINING span's holding period: the later prices choose
+/// nothing.
+fn walk_all(
     root: &Path,
     vendor: brutex_core::vendor::Vendor,
     rung: &'static str,
     surface: &[String],
     (training, later): (Months, Months),
-) -> Vec<Result<(PreparedSpan, PreparedSpan), String>> {
+    union: &[Candidate],
+) -> Vec<Result<(Walked, Walked), String>> {
     surface
         .par_iter()
         .map(|symbol| {
-            let training =
-                crate::pool::prepare_span(root, vendor, symbol, rung, training.0, training.1)
-                    .map_err(|why| format!("training span: {why}"))?;
-            let later = crate::pool::prepare_span(root, vendor, symbol, rung, later.0, later.1)
-                .map_err(|why| format!("later span: {why}"))?;
+            let (horizon, training) = {
+                let span =
+                    crate::pool::prepare_span(root, vendor, symbol, rung, training.0, training.1)
+                        .map_err(|why| format!("training span: {why}"))?;
+                (span.horizon, walk_span(&span, span.horizon, union, false)?)
+            };
+            let later = {
+                let span = crate::pool::prepare_span(root, vendor, symbol, rung, later.0, later.1)
+                    .map_err(|why| format!("later span: {why}"))?;
+                walk_span(&span, horizon, union, true)?
+            };
             Ok((training, later))
         })
         .collect()
