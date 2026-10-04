@@ -809,3 +809,16 @@ is unchanged.
   for the superseded Step-3 V1-V4 modules or a place for Benjamini-Hochberg,
   the V1 walk-forward overfit rate, the V3 walk-forward door or the V2/V3
   admission projections in the live chain (D-1568, D-1544 stand).
+
+### Audit 2026-10-03, fix worker 9 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **gaps-5** (out of sample and multiple comparisons across the pool): fixed by
+  the new verb `pool-oos`. D-1576, AFF-60.
+- **gaps-11** (discovery to qualification handoff): fixed. `pool-oos` writes
+  its held candidates as the catalog the qualification verbs read. D-1577,
+  AFF-61.
+- **gaps-10** (no API or page for Selection V6): fixed by
+  `/selection-v6.json` and `/selection`. Equities are refused with the
+  `CLAUDE.md` §1 sentence. D-1578, AFF-62.

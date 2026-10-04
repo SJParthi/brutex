@@ -325,3 +325,149 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
         [first.as_slice(), second.as_slice()].concat()
     );
 }
+
+/// Reseal a block after a deliberate edit, as a forger with the format would.
+fn resealed(mut block: Block) -> Block {
+    let identity = block_identity(&block).expect("identity");
+    block[24..56].copy_from_slice(&identity);
+    let digest = seal(&block).expect("seal");
+    block[SEAL_AT..].copy_from_slice(&digest);
+    block
+}
+
+/// **The display reader decodes a genuine committed block to the authority's
+/// own winners, and refuses any family but the two.** D-1578,
+/// audit-20261003 gaps-10.
+///
+/// The block is the one `commit_stored_selection_v6` writes from a genuine
+/// Execution V4 authority. Read back through `read_stored_selection_v6` from
+/// the `ROOT/selection/<rung>/` layout `ledger-v6` writes, every winner must
+/// equal `top_twenty_five` field for field: rank, family, digests, side,
+/// mask, score and metrics. Other rungs read as absent and name their path.
+///
+/// A sealed block whose family envelope or winner names any code but NIFTY's
+/// 1 or BANKNIFTY's 2 is refused with the `CLAUDE.md` §1 sentence, never
+/// shown under a guessed name, and so is an equity asked for by name.
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one genuine fixture carries the decode, the layout and both refusals"
+)]
+fn the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family() {
+    crate::step3_orchestrator::with_population_v6_evaluated_pair_fixture(
+        |finalization, nifty, banknifty, population_root| {
+            let upstream =
+                crate::population_v6::bind_population_v6_source_v1(finalization, nifty, banknifty)?;
+            let population = crate::population_v6::commit_population_v6(
+                population_root,
+                crate::population_v6::PopulationV6Bounds::new(4, 1_000_000, 512 * 1024 * 1024)?,
+                upstream,
+            )?
+            .into_authority();
+            let execution_root = Scratch::new();
+            let execution = crate::execution_v4::commit_stored_execution_v4(
+                &execution_root.0,
+                execution_bounds(),
+                population,
+            )?;
+            let selection_root = Scratch::new();
+            let policy = RankingPolicyV1::new(runner::topn::Weights::equal())
+                .map_err(|why| format!("{why:?}"))?;
+            let mut selection =
+                commit_stored_selection_v6(&selection_root.0, bounds(4), execution, policy)?;
+            let top = selection.top_twenty_five()?;
+            let bytes = std::fs::read(selection_root.0.join(FILE_NAME)).map_err(|e| e.to_string())?;
+            let block: Block = bytes.as_slice().try_into().map_err(|_| "one block")?;
+            let record = read::decode_block(&block)?;
+            assert_eq!(record.identity, selection.identity());
+            assert_eq!(record.winners.len(), top.len());
+            for (stored, authority) in record.winners.iter().zip(&top) {
+                assert_eq!(stored.rank, authority.rank);
+                assert_eq!(stored.family, authority.family);
+                assert_eq!(stored.disposition_id, authority.disposition_id);
+                assert_eq!(stored.selected_exit_digest, authority.selected_exit_digest);
+                let candidate = authority.ranked.candidate;
+                assert_eq!(stored.strategy_digest, candidate.strategy_digest.bytes());
+                assert_eq!(stored.mask_words, candidate.mask_words);
+                assert_eq!(stored.score, authority.ranked.score);
+                assert_eq!(
+                    stored.direction,
+                    match candidate.direction {
+                        costs::fill::Direction::Long => "long",
+                        costs::fill::Direction::Short => "short",
+                    }
+                );
+                let m = candidate.metrics;
+                assert_eq!(
+                    (stored.drawdown, stored.worst_loss, stored.pessimistic_profit),
+                    (m.drawdown, m.worst_loss, m.pessimistic_profit)
+                );
+                assert_eq!(
+                    (stored.loss_ratio_ppm, stored.reward_to_risk_ppm),
+                    (m.loss_ratio_ppm, m.reward_to_risk_ppm)
+                );
+            }
+            assert_eq!(
+                record.families.map(|f| f.family),
+                ["NIFTY", "BANKNIFTY"]
+            );
+
+            // THE LAYOUT `ledger-v6` WRITES.
+            let rung = crate::ledger_all::LEDGER_RUNGS
+                .into_iter()
+                .find(|rung| {
+                    crate::stored::rung_length_micros(rung).ok()
+                        == i64::try_from(record.rung_seconds).ok().map(|s| s * 1_000_000)
+                })
+                .ok_or("the fixture's rung is a ledger rung")?;
+            let ledger_root = Scratch::new();
+            let directory = ledger_root.0.join("selection").join(rung);
+            std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+            std::fs::write(directory.join(FILE_NAME), &bytes).map_err(|e| e.to_string())?;
+            for (name, read) in read_stored_selection_v6(&ledger_root.0, 4) {
+                match read {
+                    StoredSelectionV6Rung::Records(records) => {
+                        assert_eq!(name, rung);
+                        assert_eq!(records, vec![record.clone()]);
+                    }
+                    StoredSelectionV6Rung::Absent(path) => {
+                        assert_ne!(name, rung);
+                        assert!(path.ends_with(&format!("selection/{name}/{FILE_NAME}")));
+                    }
+                    StoredSelectionV6Rung::Refused(why) => panic!("{name}: {why}"),
+                }
+            }
+            // A FILE OVER THE READER'S BOUND IS REFUSED WHOLE, NOT CUT.
+            std::fs::write(directory.join(FILE_NAME), [bytes.as_slice(), &frame(7)].concat())
+                .map_err(|e| e.to_string())?;
+            let over = read_stored_selection_v6(&ledger_root.0, 1);
+            assert!(over.iter().any(|(name, read)| *name == rung
+                && matches!(read, StoredSelectionV6Rung::Refused(why) if why.contains("above the 1"))));
+
+            // ANY OTHER FAMILY CODE, RESEALED, IS REFUSED BY NAME.
+            let mut envelope = block;
+            envelope[672..680].copy_from_slice(&3_u64.to_le_bytes());
+            let why = read::decode_block(&resealed(envelope)).expect_err("family 3 refused");
+            assert!(why.contains(SELECTION_V6_EQUITY_REFUSAL), "{why}");
+            if !record.winners.is_empty() {
+                let mut winner = block;
+                winner[1056..1064].copy_from_slice(&3_u64.to_le_bytes());
+                let why = read::decode_block(&resealed(winner)).expect_err("winner family refused");
+                assert!(why.contains(SELECTION_V6_EQUITY_REFUSAL), "{why}");
+            }
+            Ok(())
+        },
+    )
+    .expect("real source-retaining successor");
+    for word in ["RELIANCE", "TCS"] {
+        let why = selection_v6_family(word).expect_err("an equity is refused");
+        assert!(
+            why.starts_with(&format!("{word} is a cash equity.")),
+            "{why}"
+        );
+        assert!(why.contains(SELECTION_V6_EQUITY_REFUSAL));
+    }
+    assert!(selection_v6_family("INDIAVIX").is_err());
+    assert_eq!(selection_v6_family("NIFTY"), Ok("NIFTY"));
+    assert_eq!(selection_v6_family("BANKNIFTY"), Ok("BANKNIFTY"));
+}

@@ -241,6 +241,7 @@ pub mod minute_gaps;
 pub mod operation_audit;
 mod ordered;
 pub mod pool;
+pub mod pool_oos;
 /// Complete, fixed-stride candidate populations and their receipt-last commit.
 pub mod population;
 /// Pre-finalization Admission V2 decisions and receipt-last structural audit.
@@ -274,6 +275,10 @@ pub mod selection_v4;
 /// Shared-generation Population V4/admission/Execution V2 authority adapter.
 pub mod selection_v4_authority;
 mod selection_v6;
+pub use selection_v6::{
+    SELECTION_V6_EQUITY_REFUSAL, StoredSelectionV6Family, StoredSelectionV6Record,
+    StoredSelectionV6Rung, StoredSelectionV6Winner, read_stored_selection_v6, selection_v6_family,
+};
 pub mod stability;
 /// Fail-closed human-readable comparison of the complete Step-3 authority chain.
 pub mod step3_comparison;
@@ -536,6 +541,15 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    the trades. Two tables: PER SYMBOL and
                                    POOLED. No cost is charged and it says so;
                                    in sample, unvalidated. Takes `auto` too.
+       cli pool-oos     VENDOR RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM LATER_FROM_Y LATER_FROM_M LATER_TO_Y LATER_TO_M CATALOG_OUT
+                                   the pool's discovery on the training months,
+                                   then the whole union judged on LATER months
+                                   it never saw: exits frozen at the training
+                                   holding period, one Romano-Wolf stepdown at
+                                   5% FWER over every candidate. The HELD ones
+                                   are written to CATALOG_OUT (created new) as
+                                   the CATALOG_FILE boolean-qualified-campaign-
+                                   stored reads. Gross of every charge.
        cli range-rung   VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M SUPPORT_PPM
                                    ONE rung, with the WHOLE machine. `range-all`
                                    divides the candidate ceiling by eight, so a
@@ -1652,6 +1666,77 @@ fn pool_arm(
     }
 }
 
+/// `pool-oos`: the words of [`pool_arm`] plus a later span and the catalog
+/// path, every one checked before anything is read. D-1576.
+fn pool_oos_arm(
+    out: &mut String,
+    vendor: &str,
+    rung: &str,
+    months: [(&str, &str); 4],
+    support_ppm: &str,
+    catalog: &str,
+) -> u8 {
+    // A loop over the eight-entry rung table, so the `&'static` spelling is
+    // the table's own and the bound is the table's length.
+    let mut known = None;
+    for candidate in EVERY_RUNG {
+        if candidate == rung {
+            known = Some(candidate);
+        }
+    }
+    let Some(known) = known else {
+        return refuse(
+            out,
+            &format!(
+                "`{rung}` is not a rung this engine sweeps. The eight are: {}",
+                EVERY_RUNG.join(", ")
+            ),
+        );
+    };
+    let month = |(year, month): (&str, &str)| -> Result<(u16, u8), &'static str> {
+        let year = year
+            .parse::<u16>()
+            .map_err(|_| "YEAR must be a number like 2026")?;
+        let month = month
+            .parse::<u8>()
+            .ok()
+            .filter(|m| (1..=12).contains(m))
+            .ok_or("MONTH must be 1..=12")?;
+        Ok((year, month))
+    };
+    let [from, to, later_from, later_to] = months;
+    let parsed = (|| {
+        Ok::<_, &'static str>((
+            (month(from)?, month(to)?),
+            (month(later_from)?, month(later_to)?),
+            parse_support_choice(support_ppm)?,
+        ))
+    })();
+    match parsed {
+        Ok(((from, to), (later_from, later_to), support))
+            if from <= to && to < later_from && later_from <= later_to =>
+        {
+            let text = pool_oos::pool_oos(
+                vendor,
+                known,
+                (from, to),
+                (later_from, later_to),
+                support,
+                std::path::Path::new(catalog),
+            );
+            let refused = carries_refusal(&text);
+            out.push_str(&text);
+            if refused { MISUSED } else { OK }
+        }
+        Ok(_) => refuse(
+            out,
+            "the training months must be ordered, and the later months ordered and strictly \
+             after them. Nothing was read.",
+        ),
+        Err(why) => refuse(out, why),
+    }
+}
+
 fn sweep_all_arm(out: &mut String, vendor: &str, rung: &str, min_hits: &str) -> u8 {
     match parse_min_hits(min_hits) {
         Ok(h) => {
@@ -2252,6 +2337,28 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         }
         ["research-plan", v] => research::command(v, out),
         ["pool", v, r, fy, fm, ty, tm, mh] => pool_arm(out, v, r, (fy, fm), (ty, tm), mh),
+        [
+            "pool-oos",
+            v,
+            r,
+            fy,
+            fm,
+            ty,
+            tm,
+            mh,
+            lfy,
+            lfm,
+            lty,
+            ltm,
+            catalog,
+        ] => pool_oos_arm(
+            out,
+            v,
+            r,
+            [(fy, fm), (ty, tm), (lfy, lfm), (lty, ltm)],
+            mh,
+            catalog,
+        ),
         ["range-all", v, u, fy, fm, ty, tm, mh] => range_all_arm(out, v, u, (fy, fm), (ty, tm), mh),
         ["range-rung", v, u, r, fy, fm, ty, tm, mh] => {
             range_rung_arm(out, v, u, r, (fy, fm), (ty, tm), mh)
@@ -2346,7 +2453,7 @@ fn unmatched(word: &str, given: usize) -> String {
 /// So it is written down, and `every_command_is_listed_in_both_places` asserts
 /// the list, the dispatch and the usage all name the same set. The duplication
 /// is real; the test is what makes it safe.
-const COMMANDS: [&str; 35] = [
+const COMMANDS: [&str; 36] = [
     "audit",
     "audit-audited-range",
     "audit-range",
@@ -2371,6 +2478,7 @@ const COMMANDS: [&str; 35] = [
     "ledger-v6-replay",
     "policy-check",
     "pool",
+    "pool-oos",
     "range-all",
     "range-rung",
     "research-plan",
@@ -2411,6 +2519,7 @@ pub fn is_sweep_command(command: &str) -> bool {
             | "ledger-v6"
             | "ledger-v6-replay"
             | "pool"
+            | "pool-oos"
             | "range-all"
             | "range-rung"
             | "screen"

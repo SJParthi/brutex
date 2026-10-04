@@ -56677,3 +56677,107 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+### D-1576 — `pool-oos`: the pool's discovery is judged out of sample under one Romano-Wolf stepdown — 2026-10-04
+
+**Finding (audit-20261003 gaps-5, medium).** `pool` ranks the union of every
+instrument's top combinations across the whole surface, and its own header
+says every figure is in sample and the table is the largest of
+`instruments × candidates` comparisons. `CLAUDE.md` §1 says such a result
+means nothing until it is validated out of sample. No verb did that for the
+pool.
+
+**Change.** A new verb, `cli pool-oos VENDOR RUNG FY FM TY TM SUPPORT_PPM
+LATER_FY LATER_FM LATER_TY LATER_TM CATALOG_OUT` (`crates/cli/src/pool_oos.rs`).
+Discovery is `pool`'s own pass 1 and union, on the training months only. The
+arm refuses a later span that does not start strictly after the training span
+ends, before anything is read. Every surface instrument's training and later
+spans are prepared through `pool::prepare_span`, which is the screen's
+sequence lifted out of `price_all` so the two cannot drift. Each candidate is
+walked with `runner::trade::walk` on the later bars at the TRAINING span's
+holding period, so later prices choose no exit, horizon or candidate. Each
+trade's pessimistic P&L is taken as ppm of its entry open, because pooling
+paisa would let a ₹20,000 index decide every day's sign over a ₹100 share. It
+is then pooled per IST session over the union of the instruments' days. The
+whole union is one family in `runner::bootstrap::romano_wolf_receipt`, at the
+audit stack's 5% FWER, seed, block and draw rule. A candidate HELD only when
+the stepdown rejects its non-positive-mean null. White's Reality Check and its
+measured calibration for the later session count are printed beside the
+table. If the stepdown has no complete receipt, the verb refuses rather than
+calling anything held or failed. The output stays gross of every charge, and
+the page says so.
+
+**What it does not do.** Fills are on the signal rung's bars, as the audit
+stack's bootstrap family's are. One later span is one draw. Neither the
+multiplicity across separate invocations (gaps-12) nor the coarse-fill gap is
+closed here; `docs/06-limits.md` records both.
+
+**Tests.** `cli::pool_oos::tests::a_planted_in_sample_only_winner_fails_out_of_sample_and_a_persistent_one_holds`
+plants "long on Monday" as a winner on twelve training weeks and a loser on
+the twelve later weeks, and "long on Tuesday" as a winner on both, across a
+₹20,000 and a ₹100 instrument. Monday FAILS and Tuesday HOLDS. The same judge
+with no split holds Monday, which is the in-sample reading this verb refuses.
+`cli::pool_oos::tests::the_pool_oos_arm_refuses_an_overlapping_split_and_bad_words_before_reading`.
+
+### D-1577 — `pool-oos` writes its held candidates as the catalog the qualification verbs read — 2026-10-04
+
+**Finding (audit-20261003 gaps-11, low).** The `boolean-*-stored`
+qualification verbs take a hand-written `CATALOG_FILE`. A discovered winner
+reached them only by transcription, with the D-0751 risk that displayed text
+cannot always be re-entered.
+
+**Change.** `pool-oos` writes every HELD candidate to `CATALOG_OUT`: one AND
+of decimal bit ids per line, one program per distinct mask (a catalog program
+is priced on both sides), and `#` comment lines that name the feed, rung and
+spans and say the content is gross research. The file is created new. An
+existing path is refused before any bar is read. Each line is parsed by
+`Expression::parse` before writing. A catalog over the readers' 65,536-byte
+`CATALOG_BYTES` is refused. After writing, the file is read back through
+`boolean_catalog_command::catalog`, the reader `boolean-qualified-campaign-stored`,
+`boolean-campaign-stored` and `boolean-oos-stored` call, and must decode to
+the same programs. With no held candidate, nothing is written, and the page
+says so.
+
+**Test.** `cli::pool_oos::tests::held_candidates_become_a_catalog_the_qualification_readers_read_back`.
+
+### D-1578 — `/selection-v6.json` and the `/selection` page show committed Selection V6; equities are refused — 2026-10-04
+
+**Finding (audit-20261003 gaps-10, low).** `ledger-v6` commits one sealed
+Selection V6 block per rung, and only its own terminal text showed it. No API
+route and no page read it, while `docs/07-plan.md` §11 order 5 asks the API
+and dashboard to expose the receipts the CLI does.
+
+**Change.** `cli::read_stored_selection_v6` (`crates/cli/src/selection_v6_read.rs`)
+reads `ROOT/selection/<rung>/global-selection-v6.bin` for each of the eight
+ledger rungs. It uses the commit door's no-follow, single-link open under a
+shared lock, with the generation unchanged across the read. Each block is
+verified by `verify_block` and decoded field for field as `encode_block`
+wrote it. A block the encoder could not have written is refused: a winner
+count over 25, a Top-10 that is not the prefix, an unknown family, terminal,
+direction or ratio word, a nonzero unused tail, a rung that disagrees with its
+directory, or a duplicate identity. A torn trailing block is refused, and so
+is a file holding more blocks than the reader shows (64 per rung through the
+API). A rung with no file is reported absent by path.
+
+The read does not re-authenticate the upstream Execution V4 / Population V6
+chain. It is a sealed stored record, not a fresh capability, and the payload's
+`authority` (`sealed-stored-selection-v6-record`) and `scope` say so. As
+`/boolean-oos.json` does, the dashboard's `BRUTEX_STORE` must be the
+`ledger-v6` ROOT.
+
+**Equities.** Selection V6 holds NIFTY (code 1) and BANKNIFTY (code 2). A
+block naming any other family code, in an envelope or a winner, is refused
+with `SELECTION_V6_EQUITY_REFUSAL`, the `CLAUDE.md` §1 sentence. The route's
+one selector, `family`, accepts only the two. `family=RELIANCE` is a 400 that
+says RELIANCE is a cash equity, followed by the sentence. Every payload
+carries the sentence as `equities`. The page offers the two families only,
+refuses an equity before making a request, and prints the sentence.
+
+The route is a sweep-result read, so it joins `operation_audit::AUDITED` (now
+22). It starts nothing and writes nothing.
+
+**Tests.** `cli::selection_v6::tests::the_display_reader_decodes_the_authoritys_winners_and_refuses_any_other_family`
+decodes a genuine committed block to the authority's own `top_twenty_five`.
+`api::selectionv6json::tests::an_equity_family_is_refused_loudly_and_only_the_two_indices_select`,
+`api::selectionv6json::tests::every_rung_is_absent_saved_or_refused_by_name`,
+`api::selectionv6json::tests::a_record_projects_exactly_and_the_family_selector_narrows_winners`,
+and `web/tests/selection-v6.test.js`.

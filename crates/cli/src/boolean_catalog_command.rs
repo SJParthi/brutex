@@ -14,7 +14,7 @@ use crate::ledger_all::{LedgerAllRequest, admission_policy, exit_policy, render_
 
 const VERB: &str = "boolean-catalog-stored";
 // A parser format bound, not a depth or candidate truncation setting.
-const CATALOG_BYTES: u64 = 65_536;
+pub(crate) const CATALOG_BYTES: u64 = 65_536;
 
 #[path = "boolean_catalog_prepared.rs"]
 pub(crate) mod prepared;

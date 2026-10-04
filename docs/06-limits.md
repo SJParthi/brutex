@@ -11744,7 +11744,7 @@ rule 6); every bound is read from the source.
   `/boolean-statistics.json`, `/boolean-admission.json`,
   `/boolean-qualification.json`, `/boolean-qualified-search.json`,
   `/boolean-campaign.json`, `/boolean-qualified-campaign.json`,
-  `/boolean-oos.json`, `/expression-search.json`, `/engine/top.json` and
+  `/boolean-oos.json`, `/selection-v6.json`, `/expression-search.json`, `/engine/top.json` and
   `/live.json`, several of them polled by the console, so the journal grows
   while the operator only watches.
 - **The code work per request is fixed; the filesystem's is not.** `begin`
@@ -14475,3 +14475,20 @@ UNVERIFIED for the rest:
   above) rests on the audit's measurement (14.13x open cost for 10x rows,
   o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
   `Results::open`, so no tracked bench repeats it.
+
+## `pool-oos` judging and the Selection V6 display read — D-1576, D-1578, 4 October 2026
+
+Let I be the surface's instruments, U the discovered union, B a span's bars,
+N the later IST sessions and D the bootstrap draws (`bootstrap_draws(N)`, at
+most 100,000).
+
+- **`pool-oos` judging.** Each span costs I × U walks of O(B) each, plus one
+  Romano-Wolf stepdown and one Reality Check of O(D × U × N) each. Neither
+  is a §3 rule-4 primitive. Nothing here is measured: UNVERIFIED. Fills are
+  on the signal rung's bars, as the audit stack's bootstrap family's are, so
+  on a rung above one minute they are coarser than the exit grid's minute
+  replay. One later span is one draw. Multiplicity across separate
+  `pool-oos` invocations is not controlled (gaps-12).
+- **`/selection-v6.json`.** Eight files, at most 64 blocks of 16 KiB each,
+  each hashed twice (identity and seal) and decoded once: O(blocks) per
+  request, bounded by the cap. UNVERIFIED as a measured bound.
