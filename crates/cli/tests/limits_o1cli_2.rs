@@ -2,7 +2,7 @@
 //! paid (audit o1cli-2).
 //!
 //! `one_rung` loads a rung's span and, when no support is named, builds its
-//! column to size the affordable floor; `audit_range_for_attempt` then loads
+//! column to size the affordable floor; the audit kernel then loads
 //! and builds the same span again. Only a code comment admitted it. This file
 //! holds `docs/06-limits.md` to the code: the section must state both costs,
 //! and the calls it describes must still be where it says, so the day the
@@ -67,12 +67,13 @@ fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
             "the limit must say: {sentence}\n{limit}"
         );
     }
-    let rung = body("\nfn one_rung(");
+    // D-1557: `one_rung` is `one_rung_cached` with a fresh cache.
+    let rung = body("\nfn one_rung_cached(");
     for call in [
         "stored::load_span(",
         "column_withholding_unsourceable_days(",
         "affordable_min_hits(",
-        "audit_range_for_attempt(",
+        "audit_range_cached(",
     ] {
         assert!(
             rung.contains(call),
@@ -83,7 +84,8 @@ fn a_rungs_second_load_and_build_are_stated_and_still_paid() {
         rung.find("stored::load_span(") < rung.find("named_ppm.is_some()"),
         "the span is loaded before the named-support branch, so even a named support pays the first load"
     );
-    let kernel = body("\nfn audit_range_kernel(");
+    // D-1557: the kernel's loads moved into its cached loader.
+    let kernel = body("\nfn load_audit_inputs(");
     for call in ["stored::load_span(", "column_withholding_at_build("] {
         assert!(
             kernel.contains(call),

@@ -1,6 +1,5 @@
 //! Immutable typed preparation shared by text catalogs and campaign batches.
 use super::*;
-use rayon::prelude::*;
 use runner::admission::AdmissionPolicyV1;
 use runner::exit_grid_policy::ExitGridPolicyV1;
 use std::path::PathBuf;
@@ -203,14 +202,11 @@ impl Prepared {
         if !crate::ledger_all::LEDGER_RUNGS.contains(&rung) {
             return Err("intraday rung required".into());
         }
-        let lanes = std::thread::available_parallelism()
-            .map_err(|why| why.to_string())?
-            .get()
-            .min(self.scope.families().len());
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(lanes)
-            .build()
-            .map_err(|why| why.to_string())?;
+        // ORDERED LANES, A CONSTANT WINDOW AT A TIME, so the evidence attempts
+        // each family begins land in an order fixed by the scope rather than
+        // by the thread schedule, and this line prints the same count on every
+        // machine. D-1556 (audit-20261003 hunt-conc-2).
+        let lanes = crate::ordered::WINDOW.min(self.scope.families().len());
         let _ = writeln!(
             out,
             "\n{} families × {} programs × both directions × all resolved exit cells; {} parallel family workers. Capture ceilings: {} bytes and {} records per family; strict source-file ceilings use these same values. These are physical admission limits, not a total process RAM guarantee.\nProfile minimum trades: {}. Individual family completion is not whole-cohort completion.",
@@ -221,16 +217,10 @@ impl Prepared {
             self.shared.max_records(),
             self.policy.values().min_trades
         );
-        let results: Vec<_> = pool.install(|| {
-            self.scope
-                .families()
-                .par_iter()
-                .map(|family| {
-                    let key = family.instrument();
-                    self.produce(self.request(rung, programs, key.underlying.as_str()))
-                })
-                .collect()
-        });
+        let results: Vec<_> = crate::ordered::map(self.scope.families(), |family| {
+            let key = family.instrument();
+            self.produce(self.request(rung, programs, key.underlying.as_str()))
+        })?;
         render_family_receipts(&results, out);
         for family in results.iter().filter_map(|value| value.as_ref().ok()) {
             family.require_current()?;

@@ -386,7 +386,10 @@ fn aliases_and_unsealed_legacy_data_never_gain_a_strict_receipt() {
     let file = fixture.open().expect("ordinary open");
     let mut header = file.header();
     drop(file);
+    // An unsealed month is a VERSION-2 month: version 3 refuses a slot
+    // without the flag (D-1571), and its geometry is version 2's.
     header.flags = 0;
+    header.format_version = 2;
     let commit = header.commit().expect("legacy header image");
     let file = fs::OpenOptions::new()
         .write(true)
@@ -408,7 +411,9 @@ fn source_changes_after_the_initial_snapshot_cannot_mint_cold_audit_authority() 
         let path = fixture.named(FileKind::Bars);
         if change_header {
             let mut header = file.header();
+            // Unsealed means version 2 since D-1571; the geometry is the same.
             header.flags = 0;
+            header.format_version = 2;
             let commit = header.commit().expect("valid changed header image");
             let writer = fs::OpenOptions::new()
                 .write(true)

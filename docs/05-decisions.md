@@ -57879,3 +57879,278 @@ and more code to prove, for a case where the walk usually stops early.
 Grouping tiers by key and walking each group to its end so only one key's
 grids are resident: it reorders the capture's tier records and its refusals,
 so a recorded run would differ from the per-tier walk.
+
+### D-1551 — A stopping server cancels running engine work at its structural boundaries — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-2. D-1582 bounded the shutdown
+wait at `SHUTDOWN_GRACE` and named what it abandoned, and said plainly what it
+did not do: the running sweep had no cancellation point, so a stop during a
+sweep abandoned it mid-run rather than stopping it.
+
+**The decision.** `cli::cancel` holds one process-wide stop flag, set by
+`cli::cancel::request` and never cleared (the only caller is a process that is
+ending). `api::server::end_runtime` sets it before it waits. Engine work checks
+it with `cli::cancel::check` at structural boundaries only: every stored
+instrument-month the loaders open (`stored`'s classified loader,
+`fold_audit::read_month`), each candidate of the exit-grid screen (the screen
+then refuses as a whole), before a range table is rendered, and at each
+single-stop timeframe boundary. Never inside the per-bar folds of `vocab`,
+`engine`, `indicators` or `runner`, which gate 17 keeps call-free. A check is
+one atomic load. A cancelled answer begins with `cli::cancel::CANCELLED` and
+names where it stopped. In `api`, `TaskFinisher::conduct` replaces any answer
+finished after the stop with that sentence, so a partial or late result is
+never presented as complete; `completion_audit` names the outcome `cancelled`
+at `Error`, and the invocation audit's terminal phase is `Cancelled`.
+`server::wait_then_end` is the wait without the stop, so a unit test can prove
+the bound without cancelling the other tests' work.
+
+**Rejected.** A per-run token threaded through `cli`: the rungs run on a
+parallel pool, so a thread-local cannot reach them, and threading a token
+through every command's signature changes hundreds of call sites for a flag
+whose only meaning is "this process is ending". Keying the stop by store root:
+two spellings of one root would silently miss.
+
+**Tests.** `cli::operator_boundary_tests::a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation`
+and `api::sweeprun::tests::shutdown_during_a_sweep_cancels_it_promptly_and_names_the_cancellation`,
+each run in a child process because the stop is process-wide. Before the
+change the first refused nothing after the stop and the second waited the full
+10 s grace and abandoned the task.
+
+### D-1552 — Same-origin failed-request lines are rationed and counted too — 2026-10-03
+
+**What was observed.** audit-20261003 hunt-api-3, left partial by D-1583: only
+requests whose `Sec-Fetch-Site` names another site were rationed, so a
+same-origin page in a retry loop or a local tool still wrote one line per
+failed request and could roll the 64 MiB retained log away.
+
+**The decision.** `logs::Rations` keeps two fixed-window counts:
+cross-site at `FAILED_LINES_PER_WINDOW` (50) and same-origin or header-less at
+`LOCAL_FAILED_LINES_PER_WINDOW` (200) per 60 s window. Each counts what it holds
+back and the first failed request of its class in a later window writes one
+Warn line, `same-origin failed-request lines suppressed in the previous window`
+or its cross-site twin, carrying `suppressed` = N and `origin`. Separate counts,
+so neither class can spend or silence the other. Nothing is dropped without a
+count; the honest limit D-1583 stated (a flood followed by silence leaves its
+last count unsaid) applies to both classes.
+
+**Test.** `api::logs::tests::a_same_origin_flood_is_bounded_and_counted_separately_from_cross_site`;
+it did not compile against the previous tree, which had no same-origin ration.
+
+### D-1553 — `Widths` fields are private; a swapped pair cannot be built outside its module — 2026-10-03
+
+**What was observed.** audit-20261003 errpaths-4, left partial by D-1546:
+`Widths::new` refused a swapped or baseless pair but the public fields let any
+caller build one directly.
+
+**The decision.** The fields are private. `Widths::new` (checked) and
+`Widths::pinned` are the only public doors; `fib()` and `pivot()` read them.
+The degraded path (a mismatched width is withheld as unknown, never answered)
+is still proved, inside the crate, through a `#[cfg(test)]` constructor
+`Widths::unchecked` that no linked build can call. The six readiness suites
+that built a mismatched width now assert that `Widths::new` refuses it by name.
+
+**Tests.** Two `compile_fail` doctests on `indicators::evaluator::Widths` (a
+struct literal and a field write from another crate; both compiled on the
+previous tree and the doctests failed),
+`indicators::evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`
+and `indicators::evaluator::tests::swapped_or_baseless_widths_are_refused_by_name`.
+
+### D-1556 — Whole-command fan-outs run as ordered lanes, so their shared durable writes follow the inputs — 2026-10-03
+
+**What happened.** audit-20261003 hunt-conc-1 and hunt-conc-2. D-1564 split
+`sweep-all` into ordered phases and stated that `range-all` (`sweep_rungs`),
+`pool` pass 1 and the Boolean family pools (`boolean_catalog_prepared`,
+`boolean_oos_command`) still allocated attempt tokens and appended `runs.bin`
+rows in completion order. `cli::ordered::tests::shared_durable_writes_follow_the_inputs_not_the_schedule`
+failed on the indexed parallel map those four sites used: one thread filed the
+twelve workers in input order, twelve threads with the earliest workers slowest
+filed them nearly backwards.
+
+**The change.** `cli::ordered::map` runs each item as a lane on its own scoped
+thread, `ordered::WINDOW` (8, a constant) lanes at a time, and returns results
+in input order. Every shared durable write takes `ordered::turn()` first: the
+evidence journal (`sweep_evidence::allocate` and `journal`), the run ledger
+(`results::with_shared_writer`) and the whole result-set transaction
+(`record_all_attempt`, before `LEDGER` and the cross-process lock). A lane's
+k-th write waits until each lower lane has made its k-th or finished and each
+higher lane its (k-1)-th or finished, so the writes land sorted by (k, lane).
+The turn is re-entrant on its thread, held for the whole transaction, and
+never waits outside a lane. The phases are therefore committed in an order
+fixed by the inputs without splitting the audit and candidate transactions:
+the ordering is imposed where they meet the shared files.
+
+**Why it cannot deadlock.** Every wait is for a strictly smaller (k, lane), so
+the smallest pending write always proceeds. Lanes are OS threads, never Rayon
+tasks, so no waiting lane is stacked under a stolen higher one; a window starts
+every lane at once, so no lane waits for one that has not started; a lane that
+fails to start is marked finished. Nested parallel work inside a lane uses the
+Rayon pool, which never takes a turn.
+
+**What else changed.** The Boolean pools no longer build a pool sized from
+`available_parallelism`; their "parallel family workers" line prints
+`min(WINDOW, families)`, the same on every machine. `pool` pass 1's
+concurrency is the window, not the Rayon width. The cost is stated in
+`docs/06-limits.md`. Invariants AFF-20, AFF-21 and AFF-22.
+
+### D-1557 — A descent holds its prepared audit inputs in one identity-keyed cache — 2026-10-03
+
+**What happened.** audit-20261003 o1surface2-1. D-1567 stated, and did not
+remove, that every `cli descend` step after the first re-ran `one_rung` from
+scratch: a raw span load, then the audit kernel's load of both spans and both
+contexts, the withholding, a fresh preparation attempt and the anchored column.
+It declined a cache because the audit checks its preparation digest against
+the identity it publishes.
+
+**The change.** `audit_range_kernel` is split into `load_audit_inputs`, which
+does everything up to and including that digest check and also computes the
+executed-data digest, and `audit_range_kernel_cached`, which takes the inputs
+from an `AuditCache` keyed by root, feed, instrument, rung, span and build. The
+column, contexts and digest are held together from one load that already
+passed the check, and each step's run identity takes its `data_digest` from the
+held digest of the held bytes, so a reused step sweeps exactly the bytes its
+identity names. A different key loads afresh; a held refusal repeats, as
+`ScreenCache` (D-0997) holds one. `one_rung` is `one_rung_cached` with a fresh
+cache, and caches its raw span the same way; `descend` passes one cache down
+the whole ladder through `descend_in`. `latest_for` takes the root `one_rung`
+already resolved instead of resolving it again.
+
+**Proof.** `cli::audited_stored::tests::a_range_descent_prepares_its_stored_inputs_once`:
+a four-step descent loads once (four times with a fresh cache per step, the
+pre-change shape, which the test was run against and failed); three audits
+through one cache print the same pages as three fresh ones on an identical
+store; another rung prepares afresh. The per-step bound is restated in
+`docs/06-limits.md`. Invariant AFF-23.
+
+### D-1569 — An abandoned Selection V6 tail is moved aside, not left to wedge the rung — 2026-10-03
+
+**What happened.** audit-20261003 hunt-cli-a-5. One interrupted Selection V6
+persist left an unsealed partial block in `global-selection-v6.bin`. Every
+read of every committed block on that rung then refused (`len % BLOCK_BYTES !=
+0`), and a different source could never be appended ("incomplete prefix
+belongs to different source; nothing repaired") until the file was edited by
+hand. `cli::selection_v6::tests::an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_source`
+failed on the first read.
+
+**The change.** `require_committed` reads whole sealed blocks only; an unsealed
+tail is never authority and no longer hides the blocks before it. `persist`,
+under its exclusive lock, still completes a tail that is a prefix of the exact
+block it writes. A tail from another source, or any tail when the exact block
+is already committed, is copied to `global-selection-v6.bin.abandoned-<offset>`
+and synced with its directory before the ledger is cut back to its committed
+length, then the write proceeds; a quarantine already holding different bytes
+refuses with nothing changed. The move is logged as a warning naming the
+file. Committed blocks are never rewritten. O(tail), at most one block, once
+per recovery. Invariant AFF-24.
+
+### D-1570 — A JSON price is snapped from the vendor's own digits: `serde_json` gains `arbitrary_precision` — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-4. `http::one_price` (and
+`rolling`'s `paisa`) snapped `Number::to_string()`, which without
+`arbitrary_precision` is the shortest rendering of an `f64`. Past about
+seventeen significant digits the float had already rounded, so
+`100.12499999999999999` stored 10013 paisa where its own text says 10012, and
+`92233720368547758.07` was refused although it fits. D-1494 and D-1528's
+neighbour entry recorded this as a limit only.
+
+**The decision.** The workspace builds `serde_json` with
+`arbitrary_precision` (one feature, no new crate; `cargo deny` is unaffected
+because licences, advisories and bans are per crate, not per feature). A
+number keeps the digits the body carried. `http::number_text` returns them,
+shifting an exponent form (`2.450075E4`) into a plain decimal exactly, and
+every reader that used the f64 text — `one_price`, `one_number`, and
+`rolling`'s `stamp`, `count` and `paisa` — now reads it. A text whose exponent
+puts the point more than `MAX_PRICE_TEXT` places away is refused by name, as
+is a price text over 64 bytes; the f64 path had rounded those silently.
+
+**Cost.** Each number node owns its digits on the heap, so the decode tree's
+argued peak is about twice D-1203's ~16x; stated on `decode_body` and in
+`docs/06-limits.md`, still unmeasured. `Value` stays 32 bytes.
+
+**Proof.** `pull::http::tests::a_json_price_is_snapped_from_the_vendors_own_text`
+and `pull::rolling::tests::a_rolling_price_is_snapped_from_the_vendors_own_text`
+(on the previous tree: 10013 for 10012, and 35413 for 35412). AFF-40.
+
+### D-1571 — Store format version 3: block checksums are mandatory; version 2 stays readable — 2026-10-03
+
+**What was observed.** audit-20261003 attackdata-8, recorded as a limit by
+D-1528. Block verification follows the header's `FLAG_CHECKSUMS`. Clearing it
+in both slots and recomputing their CRCs turned verification off for a sealed
+month, and the `.crc` beside it was ignored: a flipped price and a
+`ts = i64::MIN` record were served. D-1528 left it because closing it needs
+"sealed" recorded in a way the flag cannot undo, which is a new format version.
+
+**The decision.** Version 3 is minted (`MAGIC = b"BRUTEXB3"`,
+`FORMAT_VERSION = 3`, `Layout::V3`). Its geometry is version 2's byte for
+byte; its one rule is that block checksums are mandatory
+(`Layout::requires_checksums`). `Header::decode` refuses a version-3 slot
+without the flag as `FormatError::ChecksumsRequired(3)`, and `Header::commit`
+refuses to write one. `Layout::CURRENT` is version 3, so every new month is
+born at it. `BAR_TABLE` holds `[V2, V3]`: a version-2 month is opened,
+appended to and read at version 2 for its whole life, flag optional as before,
+and is never rewritten (§3 rule 8). Version 2's magic is now `MAGIC_V2`.
+
+**Not closed, and stated.** Version 2's optional flag is its meaning and is
+kept. An actor who rewrites a version-3 month's magic and version to 2 in both
+slots and recomputes the CRCs presents an unsealed version-2 month; the CRC is
+integrity, not authentication, and that actor can rewrite the `.crc` too.
+`docs/06-limits.md` says so. The read path still does no month or order check
+on records (format.rs: checked at the write boundary).
+
+**Proof.** `store::file::tests::a_new_month_is_version_three_and_a_cleared_checksum_flag_is_refused`
+(on the previous tree it does not compile: no `ChecksumsRequired`, and a new
+month was version 2), `store::file::tests::a_version_two_month_still_reads_and_appends_at_version_two`,
+and the updated constant pins in `store/tests/unit.rs` and `write.rs`.
+Recorded in `docs/02-store-format.md` §2.1. AFF-41, AFF-42.
+
+### D-1572 — `forward`'s window extremes and the Newey-West window are O(1) in any exit order — 2026-10-03
+
+**What was observed.** audit-20261003 o1eng2-1, documented only by D-1550.
+Since D-1410 an exit can move backwards when the prefix median cadence steps
+down. `WindowExtremes::over` then cleared and rebuilt its deques, Θ(window)
+per such query, and `OverlapWindow` drained only from the front, so a hit
+whose window had closed stayed queued behind an older one and its pairs were
+counted as overlapping.
+
+**The decision.** `WindowExtremes` keeps its two deques for queries whose ends
+advance and answers any other query from `BlockExtremes`: per-64-bar-block
+extremes plus a power-of-two table over blocks, built once per `forward` on
+the first such query (O(n)), each query then at most two partial blocks of
+reads and one lookup. `OverlapWindow` files each hit on a timing wheel of
+`min(H, bars + 1)` slots by its death `min(exit, o + H)` and retires exactly the
+hits dead by each new entry; its exact `i128` running sums are unchanged. Both
+are O(1) amortised per bar; the excursion answers equal a full scan and the
+cross-sums equal the pair-by-pair definition. With monotone exits the results
+are the previous ones (the existing full-scan and pairwise tests pass
+unchanged). The effect the old drain had on earlier runs' t-statistics stays
+UNVERIFIED.
+
+**Proof.** `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`
+(previous tree: 18,008,999 bars read for 17,999 queries over 20,000 bars) and
+`runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`
+(previous tree: 4 live hits where 3 windows were open at H=4). AFF-43, AFF-44.
+`docs/06-limits.md` restates the bounds.
+
+### D-1462 — Telemetry tests that reopen a sink wait out any forked child, because a fork shares the sink's `flock` — 2026-10-04
+
+**What was observed.** PR #74 run 1263 (head b23976f) failed Gate 1+2 on
+`sink::tests::a_file_that_ends_mid_line_is_terminated_at_open_and_not_appended_onto`.
+The reopen after `drop(again)` was refused: "another sink, in this process or
+another, holds this telemetry directory". The pushing session's diff touched no
+telemetry code. Reproduced locally on b23976f: 4 of 60 runs of
+`cargo test -p telemetry --lib` hit that refusal.
+
+**Cause.** D-1537's one-writer lock is an `flock` on `<dir>/events.lock`, and an
+`flock` belongs to the open file description. `crate::tests::where_permission_binds`
+re-runs a test in a child with `.uid(..)`, which makes `std` fork and then exec.
+A child forked while another test's sink is alive inherits that description, so
+it holds the lock until exec closes it. A concurrent test that drops its sink
+and reopens it inside that window is refused. This is a test-harness race:
+production opens the sink once per process. A POSIX record lock would not be
+inherited, but `std` offers only `flock`, and every crate here forbids `unsafe`.
+
+**The decision.** `crate::tests::FORK_GATE`, an `RwLock<()>` in test code, is held
+for writing while `where_permission_binds` runs its child. Every test that drops
+a sink and reopens one on the same directory holds it for reading: 14 in
+`sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
+line changes, and the lock's refusal stays exactly as strict. Proven locally:
+4 of 60 runs failed before the change and 0 of 60 after.

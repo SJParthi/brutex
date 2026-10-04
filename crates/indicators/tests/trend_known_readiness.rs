@@ -28,8 +28,11 @@ fn bar(index: i64, high: i64, low: i64, close: i64) -> Candle {
 }
 
 fn evaluator(tolerance: Tolerance) -> Evaluator {
-    let mut widths = Widths::pinned().expect("pinned widths");
-    widths.fib = tolerance;
+    let widths = Widths::new(
+        tolerance,
+        vocab::tolerance::pinned_pivot().expect("pinned pivot width"),
+    )
+    .expect("a Fibonacci width on the session range");
     Evaluator::with_calendar(
         widths,
         Availability::Absent,
@@ -284,23 +287,21 @@ fn a_missing_opposite_swing_stays_unknown_and_cannot_satisfy_negation() {
 
 #[test]
 fn each_swing_band_checks_its_exact_tolerance_and_inclusive_edges() {
-    for band in [
-        tolerance(0),
-        tolerance(100),
-        tolerance(i64::MAX),
-        Tolerance::from_milli(100).expect("baseless token"),
-        Tolerance::from_milli_on(Base::CprWidth, 100).expect("wrong family"),
-    ] {
+    for band in [tolerance(0), tolerance(100), tolerance(i64::MAX)] {
         for close in [63, 64, 70, 76, 77, 123, 124, 130, 136, 137] {
             let mut bars = both_references();
             bars.push(bar(5, close + 1, close - 1, close));
             let counts = exercise(&bars, band);
-            if band.base() != Some(Base::SessionRange) {
-                assert_eq!(counts.get(4), Some(&[0, 0, 6]));
-                assert_eq!(counts.get(5), Some(&[0, 0, 6]));
-            }
+            let folded = u64::try_from(bars.len()).expect("fixture length");
+            assert!(
+                counts.iter().all(|row| row.iter().sum::<u64>() == folded),
+                "{band:?}: every position answered every bar"
+            );
         }
     }
+    // A baseless or wrong-family band cannot reach an evaluator at all (D-1553);
+    // the degraded path is proved inside the crate.
+    refused_widths();
 }
 
 #[test]
@@ -387,4 +388,34 @@ fn existing_trend_history_carries_across_days_and_a_fresh_evaluator_resets_it() 
     let mut fresh = evaluator(tolerance(10));
     let (truth, known) = fresh.step_known(&next_day).expect("fresh valid candle");
     assert_answer(truth, known, [Truth::Unknown; 6]);
+}
+
+/// A wrong or missing base is refused by name before any evaluator exists.
+///
+/// The fields of `Widths` are private (errpaths-4, D-1553), so this suite can
+/// no longer hand an evaluator a mismatched width; that degraded path is
+/// proved inside the crate by
+/// `evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`.
+fn refused_widths() {
+    let fib = vocab::tolerance::pinned_fib().expect("pinned Fibonacci width");
+    let pivot = vocab::tolerance::pinned_pivot().expect("pinned pivot width");
+    let baseless = Tolerance::from_milli(10).expect("a width with no base");
+    for wrong in [pivot, baseless] {
+        assert!(matches!(
+            Widths::new(wrong, pivot),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::SessionRange,
+                ..
+            })
+        ));
+    }
+    for wrong in [fib, baseless] {
+        assert!(matches!(
+            Widths::new(fib, wrong),
+            Err(vocab::VocabError::WrongBand {
+                expected: Base::CprWidth,
+                ..
+            })
+        ));
+    }
 }

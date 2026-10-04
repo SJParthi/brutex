@@ -941,7 +941,10 @@ fn note_answer(
 /// `Value` is 32 bytes on this build (pinned by
 /// `the_json_tree_is_thirty_two_bytes_a_node`) against as few as two bytes of
 /// text for one array element (`0,`), so the tree alone can reach ~16× the
-/// body, and more while an array's backing vector doubles. A body is capped at
+/// body, and more while an array's backing vector doubles. Since D-1570
+/// (`arbitrary_precision`) a number node also owns its digits in one heap
+/// allocation, so a body of one-digit numbers can reach about twice that
+/// (~32×, allocator overhead included, also UNMEASURED). A body is capped at
 /// [`MAX_RESPONSE_BYTES`]. That is an ARGUED bound: no peak has been measured,
 /// and the typed or streaming decode that would remove the tree is not built.
 /// o1api-33, D-1203; `docs/06-limits.md` states it.
@@ -1469,6 +1472,61 @@ fn prices(
         .collect()
 }
 
+/// The vendor's own text for one JSON number, in plain decimal notation.
+///
+/// **THE TEXT IS THE VENDOR'S, NOT AN f64's (audit-20261003 attackdata-4,
+/// D-1570).** The workspace builds `serde_json` with `arbitrary_precision`, so
+/// a [`serde_json::Number`] keeps the digits the body carried and
+/// `to_string()` returns them unchanged. Without it the number was an `f64`
+/// and the snap read that float's shortest rendering: past about seventeen
+/// significant digits it had already rounded, and `100.12499999999999999`
+/// snapped to 100.13 where its own text says 100.12.
+///
+/// An exponent (`2.450075E4`) is shifted into a plain decimal exactly, by
+/// moving the point over the digits, so the readers below — which walk plain
+/// decimals digit by digit — see the same value. `None` when the exponent
+/// would put the point more than [`brutex_core::price::MAX_PRICE_TEXT`] places
+/// outside the digits: no price or count this build reads is that long, and
+/// the caller refuses the cell by name.
+pub(crate) fn number_text(number: &serde_json::Number) -> Option<String> {
+    let text = number.to_string();
+    let Some(at) = text.find(['e', 'E']) else {
+        return Some(text);
+    };
+    let mantissa = text.get(..at)?;
+    let exponent: i64 = text.get(at.checked_add(1)?..)?.parse().ok()?;
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa),
+    };
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = format!("{whole}{fraction}");
+    let width = i64::try_from(digits.len()).ok()?;
+    let bound = i64::try_from(brutex_core::price::MAX_PRICE_TEXT).ok()?;
+    let point = i64::try_from(whole.len()).ok()?.checked_add(exponent)?;
+    if point < bound.checked_neg()? || point > width.checked_add(bound)? {
+        return None;
+    }
+    let mut out = String::with_capacity(digits.len().saturating_add(3));
+    if negative {
+        out.push('-');
+    }
+    if point <= 0 {
+        out.push_str("0.");
+        out.push_str(&"0".repeat(usize::try_from(point.checked_neg()?).ok()?));
+        out.push_str(&digits);
+    } else if point >= width {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat(usize::try_from(point.checked_sub(width)?).ok()?));
+    } else {
+        let split = usize::try_from(point).ok()?;
+        out.push_str(digits.get(..split)?);
+        out.push('.');
+        out.push_str(digits.get(split..)?);
+    }
+    Some(out)
+}
+
 /// One price value, whatever shape carried it.
 ///
 /// Shared by both response shapes so a rupee is converted the same way whether
@@ -1492,20 +1550,20 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
-        // Rupees: `core`'s half-up reader owns the rule, applied to serde's
-        // re-rendering of the number — NOT the vendor's own text. Past ~17
-        // significant digits the f64 has already rounded and the snap can
-        // land one paisa from the vendor's text (audit-20261003 attackdata-4;
-        // a 2M-case differential found no realistic price affected). Stated
-        // in `docs/06-limits.md`. NOT `csv::paisa`, which refuses past two decimals — see the
-        // header on `prices` for why that refusal was wrong and what it cost.
+        // Rupees: `core`'s half-up reader owns the rule, applied to the
+        // VENDOR'S OWN TEXT as [`number_text`] recovers it (the number's
+        // digits, kept by `arbitrary_precision`; an exponent shifted exactly).
+        // Until D-1570 this read an f64's re-rendering, which past ~17
+        // significant digits had already rounded (audit-20261003
+        // attackdata-4). NOT `csv::paisa`, which refuses past two decimals —
+        // see the header on `prices` for why that refusal was wrong and what
+        // it cost.
         //
-        // STILL NO FLOAT. `serde_json` renders the number back to its shortest
-        // round-tripping text and the conversion walks that text digit by digit,
-        // so `clippy::float_arithmetic` stays satisfied and a two-decimal price
-        // round-trips character for character.
+        // STILL NO FLOAT. The conversion walks the text digit by digit, so
+        // `clippy::float_arithmetic` stays satisfied and a price round-trips
+        // character for character.
         PriceScale::Rupees => {
-            let text = number.to_string();
+            let text = number_text(number).ok_or_else(refuse)?;
             let snapped = brutex_core::price::Paisa::from_rupee_text_half_up(&text)
                 .map_err(|_| refuse())?
                 .raw();
@@ -2182,7 +2240,8 @@ fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
         detail: format!("{name:?} holds {v}, which is not a whole number"),
     };
     let number = v.as_number().ok_or_else(refuse)?;
-    let hundredths = crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?;
+    let hundredths =
+        crate::csv::paisa(&number_text(number).ok_or_else(refuse)?).ok_or_else(refuse)?;
     if hundredths % 100 == 0 {
         Ok(hundredths / 100)
     } else {
@@ -4276,6 +4335,44 @@ mod tests {
         }
     }
 
+    /// **A JSON PRICE IS SNAPPED FROM THE VENDOR'S OWN TEXT, NOT FROM AN f64
+    /// (audit-20261003 attackdata-4, D-1570).**
+    ///
+    /// Each text below is one an `f64` rounds before the snap sees it, so the
+    /// old re-rendering landed one paisa from the vendor's own digits (the
+    /// right-hand comment is what the f64 path gave). An exponent form is read
+    /// exactly as well, and a count in exponent form is still a whole count.
+    #[test]
+    fn a_json_price_is_snapped_from_the_vendors_own_text() {
+        for (sent, want) in [
+            ("100.12499999999999999", 10_012_i64), // f64: 100.125 -> 10013
+            ("100.0049999999999999999", 10_000),   // f64: 100.005 -> 10001
+            ("0.0149999999999999999", 1),          // f64: 0.015 -> 2
+            ("92233720368547758.07", i64::MAX),    // f64: refused out of range
+            ("1.0012499999999999999e2", 10_012),   // f64: 100.125 -> 10013
+            ("24500.75", 2_450_075),
+            ("2.450075E4", 2_450_075),
+        ] {
+            let body = format!(
+                "{{\"open\":[{sent}],\"high\":[{sent}],\"low\":[{sent}],\
+                  \"close\":[{sent}],\"volume\":[2.5e2],\"timestamp\":[1751337900]}}"
+            );
+            let window = decode_body(
+                &body,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity,
+            )
+            .unwrap_or_else(|why| panic!("{sent}: {why:?}"));
+            let row = &window.rows[0];
+            assert_eq!(
+                (row.open, row.high, row.low, row.close),
+                (want, want, want, want),
+                "{sent} rupees is {want} paisa by its own text"
+            );
+            assert_eq!(row.volume, 250, "2.5e2 is the whole count 250");
+        }
+    }
+
     /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
     /// exchange's own price.
     ///
@@ -4609,17 +4706,16 @@ mod tests {
         assert_eq!(window.rows.len(), 1, "array of objects");
     }
 
-    /// **THE JSON PARSE IS EXACT FOR A VENDOR'S PRICE TEXT, AND NOT PAST 15
-    /// SIGNIFICANT DIGITS (GAP16-24, D-1494).**
+    /// **THE JSON PARSE IS EXACT FOR A VENDOR'S PRICE TEXT AT EVERY LENGTH
+    /// (GAP16-24, D-1494; widened by D-1570).**
     ///
-    /// `serde_json` holds a number as an `f64` and `one_price` reads back its
-    /// shortest round-tripping text. For every text below — all three-decimal
-    /// values in two ranges and all four-decimal ones around a measured Dhan
-    /// float — that round trip yields the same paisa as reading the vendor's
-    /// text directly, so there is one rounding, not two. Past fifteen
-    /// significant digits it is not exact, and the extreme is asserted so the
-    /// limit cannot be forgotten: the largest `i64` paisa price, read as text,
-    /// fits, and through the JSON parse it does not.
+    /// For every text below — all three-decimal values in two ranges and all
+    /// four-decimal ones around a measured Dhan float — the JSON parse yields
+    /// the same paisa as reading the vendor's text directly. Until D-1570 the
+    /// parse went through an `f64` and the widest `i64` paisa price did NOT
+    /// survive it; with `arbitrary_precision` the number keeps its digits, and
+    /// that extreme is asserted equal so the limit cannot come back unseen.
+    /// (The name is kept: invariant AFX-05 cites it.)
     #[test]
     fn the_json_parse_is_exact_for_price_text_up_to_fifteen_digits() {
         let direct = |text: &str| {
@@ -4646,10 +4742,10 @@ mod tests {
         assert_eq!(checked, 40_000 + 100_000 + 20_000);
         let widest = "92233720368547758.07";
         assert_eq!(direct(widest), Ok(i64::MAX));
-        assert_ne!(
+        assert_eq!(
             through_json(widest),
             direct(widest),
-            "past fifteen significant digits the f64 parse is a second rounding"
+            "the parse keeps the vendor's digits, so even the widest price is one rounding"
         );
     }
 

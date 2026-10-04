@@ -565,3 +565,80 @@ fn a_report_that_cannot_be_written_is_said_and_never_panics() {
         OK
     );
 }
+
+/// audit-20261003 hunt-api-2, D-1551: A STOP IS HONOURED AT THE NEXT
+/// INSTRUMENT-MONTH AND NAMED. In a child process (the stop is process-wide and
+/// never withdrawn, so it must not reach this binary's other tests): the warmed
+/// month loads before the stop; after it, the month loader, the fold-audit
+/// reader and a whole range sweep each refuse with [`crate::cancel::CANCELLED`]
+/// and name where they stopped, and none of them returns a report.
+#[test]
+fn a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation()
+-> Result<(), Box<dyn std::error::Error>> {
+    const CHILD: &str = "BRUTEX_TEST_CANCEL_AT_BOUNDARY";
+    if std::env::var_os(CHILD).is_some() {
+        let root = crate::store_root()?;
+        let vendor = brutex_core::vendor::Vendor::Zerodha;
+        assert!(!crate::cancel::requested());
+        assert_eq!(crate::cancel::check(|| "unused".to_owned()), Ok(()));
+        let before = crate::stored::load(&root, vendor, "NIFTY", "1min", 2025, 5)?;
+        assert!(!before.bars.is_empty(), "the warmed month holds bars");
+
+        crate::cancel::request();
+        assert!(crate::cancel::requested());
+        let loaded = crate::stored::load(&root, vendor, "NIFTY", "1min", 2025, 5);
+        let why = loaded.err().ok_or("a load after the stop was answered")?;
+        assert!(why.starts_with(crate::cancel::CANCELLED), "{why}");
+        assert!(
+            why.contains("NIFTY 1min 2025-05, before it was read"),
+            "{why}"
+        );
+
+        let read = crate::fold_audit::read_month(
+            &root,
+            vendor,
+            &crate::stored::swept_index("NIFTY")?,
+            store::path::Timeframe::MINUTE_1,
+            store::path::YearMonth::new(2025, 5)?,
+        );
+        let why = read
+            .err()
+            .ok_or("a fold-audit read after the stop was answered")?;
+        assert!(why.starts_with(crate::cancel::CANCELLED), "{why}");
+
+        let report = crate::range_over("zerodha", "NIFTY", &["1min"], (2025, 5), (2025, 5), None);
+        assert!(report.starts_with("refused: "), "{report}");
+        assert!(report.contains(crate::cancel::CANCELLED), "{report}");
+        assert!(!report.contains(crate::STORED_PROVENANCE), "{report}");
+        assert!(
+            crate::cancel::observed() >= 3,
+            "{}",
+            crate::cancel::observed()
+        );
+        return Ok(());
+    }
+    assert!(
+        !crate::cancel::requested(),
+        "the stop leaked into the parent"
+    );
+    crate::audited_stored::with_warmed_store(|root| {
+        let result = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "operator_boundary_tests::a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "generated")
+            .env("BRUTEX_STORE", root)
+            .output()?;
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+        Ok(())
+    })
+}

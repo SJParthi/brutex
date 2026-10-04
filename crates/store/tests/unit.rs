@@ -188,9 +188,10 @@ fn the_record_is_exactly_the_documented_shape() {
     assert_eq!(size_of::<Bar>(), 56);
     assert_eq!(align_of::<Bar>(), 8);
     assert_eq!(u64::try_from(size_of::<Bar>()), Ok(RECORD_STRIDE));
-    assert_eq!(&MAGIC, b"BRUTEXB2");
+    // Version 3 since D-1571: version 2's geometry, checksums mandatory.
+    assert_eq!(&MAGIC, b"BRUTEXB3");
     assert_eq!(&MAGIC[..7], &MAGIC_FAMILY[..]);
-    assert_eq!(FORMAT_VERSION, 2);
+    assert_eq!(FORMAT_VERSION, 3);
     assert_eq!(FLAG_CHECKSUMS, 1);
 }
 
@@ -200,8 +201,10 @@ fn the_geometry_is_version_two_and_version_one_is_retired_not_reused() {
     // The header region, every field offset, the checksum width, the checksum
     // domain and the block length all changed, so this is a new version --
     // not an edit to version 1 wearing version 1's magic.
-    assert_eq!(FORMAT_VERSION, 2);
-    assert_eq!(&MAGIC, b"BRUTEXB2");
+    // The version written is 3 since D-1571; version 2's geometry is the one
+    // this test compares against version 1, and version 3 shares it.
+    assert_eq!(FORMAT_VERSION, 3);
+    assert_eq!(Layout::V2.magic(), *b"BRUTEXB2");
     assert_ne!(&MAGIC, b"BRUTEXB1");
     assert_eq!(RETIRED_VERSIONS, [1]);
     assert_eq!(Layout::for_version(1), Err(FormatError::RetiredVersion(1)));
@@ -851,22 +854,38 @@ fn decoding_reads_exactly_fifty_six_bytes_however_long_the_buffer_is() {
 
 #[test]
 fn the_constants_are_the_current_versions_layout() {
+    // The CURRENT version is 3 since D-1571, at version 2's geometry exactly;
+    // only the number, the magic and the checksum rule differ.
+    let v3 = Layout::V3;
+    assert_eq!(v3.version(), FORMAT_VERSION);
+    assert_eq!(v3.magic(), MAGIC);
+    assert_eq!(Layout::CURRENT, v3);
+    assert!(v3.requires_checksums());
     let v2 = Layout::V2;
-    assert_eq!(v2.version(), FORMAT_VERSION);
-    assert_eq!(v2.magic(), MAGIC);
+    assert_eq!(v2.version(), 2);
+    assert_eq!(v2.magic(), *b"BRUTEXB2");
+    assert!(!v2.requires_checksums());
+    assert!(!Layout::OVERLAY.requires_checksums() && !Layout::GREEKS.requires_checksums());
+    for (one, two) in [
+        (v2.header_len(), v3.header_len()),
+        (v2.slot_count(), v3.slot_count()),
+        (v2.record_stride(), v3.record_stride()),
+        (v2.records_per_block(), v3.records_per_block()),
+    ] {
+        assert_eq!(one, two, "version 3 is version 2's geometry");
+    }
     assert_eq!(v2.header_len(), HEADER_LEN);
     assert_eq!(v2.slot_count(), SLOT_COUNT);
     assert_eq!(v2.slot_stride(), SLOT_STRIDE);
     assert_eq!(v2.record_stride(), RECORD_STRIDE);
     assert_eq!(v2.records_per_block(), RECORDS_PER_BLOCK);
     assert_eq!(v2.block_len(), BLOCK_LEN);
-    assert_eq!(Layout::CURRENT, v2);
     // THREE GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
     // build read", and two of the three are sidecars: the overlay's 24-byte
     // records at version 9 and the computed greeks' 80 at version 8, beside the
     // bar's 56 at version 2. Resolution is by the file's own version number, so
     // none can be confused by a reader that reads the header it was handed.
-    assert_eq!(Layout::KNOWN, &[v2, Layout::OVERLAY, Layout::GREEKS]);
+    assert_eq!(Layout::KNOWN, &[v2, v3, Layout::OVERLAY, Layout::GREEKS]);
     assert_eq!(Layout::OVERLAY.record_stride(), 24);
     assert_eq!(Layout::GREEKS.record_stride(), 80);
 
@@ -882,6 +901,15 @@ fn the_constants_are_the_current_versions_layout() {
                 other.version(),
                 "two geometries share a version, which is what resolves them apart"
             );
+            // The two BAR versions share a geometry by design (D-1571): a
+            // record count is right for both, which is the point. Every other
+            // pair must differ.
+            if one.magic()[..7] == other.magic()[..7]
+                && one.record_stride() == RECORD_STRIDE
+                && [one.version(), other.version()] == [2, 3]
+            {
+                continue;
+            }
             assert_ne!(
                 one.record_stride(),
                 other.record_stride(),
@@ -900,8 +928,18 @@ fn the_constants_are_the_current_versions_layout() {
 
     // And the const row agrees with the declared form, byte for byte.
     assert_eq!(
-        Layout::declare(2, MAGIC, SLOT_COUNT, RECORD_STRIDE, RECORDS_PER_BLOCK),
+        Layout::declare(
+            2,
+            *b"BRUTEXB2",
+            SLOT_COUNT,
+            RECORD_STRIDE,
+            RECORDS_PER_BLOCK
+        ),
         Ok(v2),
+    );
+    assert_eq!(
+        Layout::declare(3, MAGIC, SLOT_COUNT, RECORD_STRIDE, RECORDS_PER_BLOCK),
+        Ok(v3),
     );
 }
 
@@ -945,7 +983,8 @@ fn unknown_version_refuses() {
     // 9 IS NO LONGER A STRANGER. The overlay sidecar took it, so a test that
     // wants "a version this build does not know" has to pick one that stays
     // unknown — 3 and 255 and u16::MAX still are, and 7 replaces the 9.
-    for version in [0u16, 3, 7, 255, u16::MAX] {
+    // 3 IS NO LONGER ONE EITHER: version 3 is the bar format since D-1571.
+    for version in [0u16, 4, 7, 255, u16::MAX] {
         let refusal = Layout::for_version(version);
         assert_eq!(refusal, Err(FormatError::UnknownVersion(version)));
         let rendered = refusal.unwrap_err().to_string();
@@ -973,11 +1012,11 @@ fn unknown_version_refuses() {
 
 #[test]
 fn a_known_version_keeps_its_stride_after_a_new_one_exists() {
-    // A hypothetical version 3 at a different stride and a different block
+    // A hypothetical version 4 at a different stride and a different block
     // size, declared through the same door a real one would be, and resolved
     // by the same function the read path calls.
-    let v3 = Layout::declare(3, *b"BRUTEXB3", 2, 72, 57).expect("a legal geometry");
-    let table = [Layout::V2, v3];
+    let v4 = Layout::declare(4, *b"BRUTEXB4", 2, 72, 57).expect("a legal geometry");
+    let table = [Layout::V2, v4];
 
     // Version 2 is untouched: same stride, same header length, same blocks.
     let v2 = Layout::resolve(&table, 2).expect("still there");
@@ -987,22 +1026,22 @@ fn a_known_version_keeps_its_stride_after_a_new_one_exists() {
     assert_eq!(v2.records_per_block(), 73);
     assert_eq!(v2.offset_of(145), Ok(40_888));
 
-    // And version 3 is read at its own stride, not at version 2's.
-    let read3 = Layout::resolve(&table, 3).expect("declared above");
-    assert_eq!(read3.record_stride(), 72);
-    assert_eq!(read3.block_len(), 72 * 57);
-    assert_eq!(read3.offset_of(145), Ok(32_768 + 145 * 72));
-    assert_ne!(read3.offset_of(145), v2.offset_of(145));
+    // And version 4 is read at its own stride, not at version 2's.
+    let read4 = Layout::resolve(&table, 4).expect("declared above");
+    assert_eq!(read4.record_stride(), 72);
+    assert_eq!(read4.block_len(), 72 * 57);
+    assert_eq!(read4.offset_of(145), Ok(32_768 + 145 * 72));
+    assert_ne!(read4.offset_of(145), v2.offset_of(145));
 
     // A version in neither table entry is still refused by number.
     assert_eq!(
-        Layout::resolve(&table, 4),
-        Err(FormatError::UnknownVersion(4)),
+        Layout::resolve(&table, 5),
+        Err(FormatError::UnknownVersion(5)),
     );
     // The production table does not silently gain the hypothetical version.
     assert_eq!(
-        Layout::for_version(3),
-        Err(FormatError::UnknownVersion(3)),
+        Layout::for_version(4),
+        Err(FormatError::UnknownVersion(4)),
         "KNOWN is the only table the read path consults",
     );
     // And a retired version cannot be resurrected by a caller's own table:
@@ -1342,7 +1381,7 @@ fn a_slot_round_trips_every_field_at_its_documented_offset() {
     // The bytes, at the offsets docs/02-store-format.md gives them.
     let b = &commit.bytes;
     assert_eq!(&b[0..8], &MAGIC[..]);
-    assert_eq!(u16::from_le_bytes([b[8], b[9]]), 2, "format_version");
+    assert_eq!(u16::from_le_bytes([b[8], b[9]]), 3, "format_version");
     assert_eq!(u16::from_le_bytes([b[10], b[11]]), 56, "record_stride");
     assert_eq!(
         u64::from_le_bytes(b[16..24].try_into().unwrap()),
@@ -1546,7 +1585,7 @@ fn a_magic_that_disagrees_with_the_version_field_is_refused() {
     slot[7] = b'9';
     assert_eq!(
         Header::decode(&slot),
-        Err(FormatError::MagicVersionMismatch(2)),
+        Err(FormatError::MagicVersionMismatch(3)),
     );
 }
 
@@ -1602,7 +1641,7 @@ fn a_header_this_build_cannot_write_is_refused_at_commit() {
 #[test]
 fn a_genesis_header_describes_an_empty_file() {
     let header = Header::genesis(7, 60, FLAG_CHECKSUMS);
-    assert_eq!(header.format_version, 2);
+    assert_eq!(header.format_version, 3, "the version written since D-1571");
     assert_eq!(header.record_stride, 56);
     assert_eq!(header.generation, 0);
     assert_eq!(header.n_valid, 0);
@@ -2947,13 +2986,32 @@ fn a_flag_bit_version_two_does_not_define_is_refused_on_read_and_on_write() {
             "bit {bit} on write"
         );
     }
-    // Both defined values still round-trip.
+    // Both defined values still round-trip AT VERSION 2, where the flag is
+    // optional.
     for flags in [0, FLAG_CHECKSUMS] {
-        let commit = Header::genesis(7, 60, flags)
+        let commit = Header::genesis_at(Layout::V2, 7, 60, flags)
             .commit()
             .expect("defined flags commit");
         assert_eq!(Header::decode(&commit.bytes).map(|h| h.flags), Ok(flags));
     }
+    // At version 3 the flag is mandatory (D-1571): a clear one is refused on
+    // write, and a slot rewritten to clear it is refused on read.
+    assert_eq!(
+        Header::genesis(7, 60, 0).commit(),
+        Err(FormatError::ChecksumsRequired(3))
+    );
+    let mut slot = genesis_slot();
+    slot[12..16].copy_from_slice(&0u32.to_le_bytes());
+    reseal(&mut slot);
+    assert_eq!(
+        Header::decode(&slot),
+        Err(FormatError::ChecksumsRequired(3))
+    );
+    assert!(
+        FormatError::ChecksumsRequired(3)
+            .to_string()
+            .contains("requires block checksums")
+    );
     assert!(
         FormatError::UnknownFlags(u32::MAX)
             .to_string()
