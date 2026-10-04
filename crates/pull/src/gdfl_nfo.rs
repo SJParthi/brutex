@@ -27,10 +27,13 @@
 //! that states no expiry DAY. The rule is the format's own: the first form is
 //! tried with the expiry a real weekday between the trade date and the trade
 //! date plus 2,200 days; exactly one such reading is the contract, two are
-//! refused as ambiguous, and none falls to the second form, which is refused
-//! by name because its expiry day is not in the name and no sourced monthly
-//! expiry calendar for 2018–2019 is recorded here (`docs/05-decisions.md`
-//! D-2806 names that missing fact).
+//! refused as ambiguous, and none falls to the second form. The second form
+//! states no expiry day, so its day is taken from the sourced table
+//! [`MONTHLY_EXPIRIES`] (D-3165): a month in it decodes to that day, a
+//! month not in it is refused by name as
+//! [`NfoRefusal::MonthlyExpiryUnstated`] (D-2806 named the missing fact; the
+//! table supplies it for exactly the months it lists and no others), and a
+//! name traded after its month's expiry is [`NfoRefusal::ExpiryRefused`].
 //!
 //! **The two forms overlap, and the trade day chooses between them.** A
 //! monthly name whose strike begins with two digits also reads as the dated
@@ -126,6 +129,58 @@ pub const DATED_BEFORE_CUTOVER: [&str; 2] = ["NIFTY", "BANKNIFTY"];
 /// as dated. Source: the same census, relayed 2026-10-04 (D-3160).
 pub const INDEX_WEEKLY_DATED_FROM: (u16, u8, u8) = (2018, 9, 3);
 
+/// A contract month, `(year, month)`.
+pub type ContractMonth = (u16, u8);
+
+/// A day, `(year, month, day)`.
+pub type ExpiryDay = (u16, u8, u8);
+
+/// The expiry day of each contract month a monthly-form name
+/// (`UNDERLYING YY MON STRIKE`) may name, `((year, month), (year, month,
+/// day))`, in month order (D-3165). A month not listed has no sourced day
+/// and its names are refused as [`NfoRefusal::MonthlyExpiryUnstated`].
+///
+/// Sources, and nothing else:
+/// 1. The census of the operator's GDFL options tree relayed 2026-10-04:
+///    all 1,218,362 tickers in the real zips; each month's expiry equals the
+///    vendor's last trade day of the month's contracts and the stated date of
+///    the dated-form twin, with 0 disagreements; index and stock contracts of
+///    one month share the date.
+/// 2. NSE's contract specifications page,
+///    <https://nseindia.com/products/content/derivatives/equities/contract_specifitns.htm>,
+///    OPTIDX expiry: "Last Thursday of the expiry month. If the last Thursday
+///    is a trading holiday, then the expiry day is the previous trading day."
+///
+/// 2018-09 to 2019-03 are the stock and index monthlies; 2019-06 onward are
+/// the long-dated index monthlies listed before the cutover.
+pub const MONTHLY_EXPIRIES: [(ContractMonth, ExpiryDay); 15] = [
+    ((2018, 9), (2018, 9, 27)),
+    ((2018, 10), (2018, 10, 25)),
+    ((2018, 11), (2018, 11, 29)),
+    ((2018, 12), (2018, 12, 27)),
+    ((2019, 1), (2019, 1, 31)),
+    ((2019, 2), (2019, 2, 28)),
+    ((2019, 3), (2019, 3, 28)),
+    ((2019, 6), (2019, 6, 27)),
+    ((2019, 9), (2019, 9, 26)),
+    ((2019, 12), (2019, 12, 26)),
+    ((2020, 6), (2020, 6, 25)),
+    ((2020, 12), (2020, 12, 31)),
+    ((2021, 6), (2021, 6, 24)),
+    ((2021, 12), (2021, 12, 30)),
+    ((2022, 12), (2022, 12, 29)),
+];
+
+/// The sourced expiry day of contract month `(year, month)`, if
+/// [`MONTHLY_EXPIRIES`] lists it: a walk bounded by the 15 rows of a
+/// compile-time table, never by the data.
+fn monthly_expiry(year: u16, month: u8) -> Option<Day> {
+    let (y, m, d) = MONTHLY_EXPIRIES
+        .into_iter()
+        .find_map(|(listed, expiry)| (listed == (year, month)).then_some(expiry))?;
+    Day::new(y, m, d).ok()
+}
+
 /// Why an options file, its name or a row was refused. Every refusal names
 /// itself; none is skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +198,8 @@ pub enum NfoRefusal {
         ticker: String,
     },
     /// The ticker is the monthly 2018–2019 form, whose expiry day is not in
-    /// the name; no sourced monthly expiry calendar is recorded (D-2806).
+    /// the name, and its month is not in the sourced table
+    /// [`MONTHLY_EXPIRIES`] (D-2806, D-3165).
     MonthlyExpiryUnstated {
         /// The ticker.
         ticker: String,
@@ -157,7 +213,9 @@ pub enum NfoRefusal {
     },
     /// From the dated-form cutover the ticker has the dated shape, but its
     /// `DD MON YY` is not a real weekday between the trade day and the
-    /// horizon (D-3164).
+    /// horizon (D-3164); or, before the cutover, the ticker is the monthly
+    /// form of a month whose sourced expiry day is before the trade day or
+    /// past the horizon (D-3165).
     ExpiryRefused {
         /// The ticker.
         ticker: String,
@@ -229,7 +287,7 @@ impl core::fmt::Display for NfoRefusal {
             ),
             Self::MonthlyExpiryUnstated { ticker } => write!(
                 f,
-                "{ticker}: the monthly form states no expiry day and no sourced monthly expiry calendar is recorded (D-2806)"
+                "{ticker}: the monthly form states no expiry day and its month is not in the sourced monthly expiry table (D-2806, D-3165)"
             ),
             Self::FormsAmbiguous { ticker } => write!(
                 f,
@@ -297,10 +355,9 @@ const fn is_weekday(day: Day) -> bool {
 
 /// The month number a three-letter upper-case month name states.
 fn month_of(name: &[u8]) -> Option<u8> {
-    MONTHS
-        .iter()
-        .position(|m| m.as_bytes() == name)
-        .and_then(|at| u8::try_from(at + 1).ok())
+    (1..=12)
+        .zip(MONTHS)
+        .find_map(|(number, month)| (month.as_bytes() == name).then_some(number))
 }
 
 /// Two ASCII digits as a number.
@@ -331,37 +388,43 @@ fn strike_paisa(text: &[u8]) -> Option<i64> {
     crate::csv::paisa(text).filter(|&paisa| paisa > 0)
 }
 
-/// Whether `body` (a ticker without its side) reads as the monthly form
-/// `YY MON STRIKE` at some split; with `window`, only a month holding at
-/// least one day of `[from, to]` (days from the epoch) counts.
-fn monthly_reading(body: &[u8], window: Option<(u32, u32)>) -> bool {
-    (1..body.len()).any(|at| {
-        let Some(rest) = body.get(at..) else {
-            return false;
-        };
-        let (Some(yy), Some(month)) = (
-            rest.get(0..2).and_then(two_digits),
-            rest.get(2..5).and_then(month_of),
-        ) else {
-            return false;
-        };
-        rest.get(5..).and_then(strike_paisa).is_some()
-            && window.is_none_or(|(from, to)| {
-                Day::new(2000 + u16::from(yy), month, 1).is_ok_and(|first| {
-                    first.end_of_month().days_from_epoch() >= from && first.days_from_epoch() <= to
-                })
-            })
+/// The monthly-form shape of `body` (a ticker without its side),
+/// `YY MON STRIKE`, its month not yet judged: `(split, year, month,
+/// strike)`. AT MOST ONE split has it: a strike holds no letter, so no other
+/// split's `MON` can sit inside this one's strike, nor this one's `MON`
+/// inside another's.
+fn monthly_shape(body: &[u8]) -> Option<(usize, u16, u8, i64)> {
+    (1..body.len()).find_map(|at| {
+        let rest = body.get(at..)?;
+        let yy = rest.get(0..2).and_then(two_digits)?;
+        let month = rest.get(2..5).and_then(month_of)?;
+        let strike = rest.get(5..).and_then(strike_paisa)?;
+        Some((at, 2000 + u16::from(yy), month, strike))
+    })
+}
+
+/// Whether contract month `year`/`month` holds any day of `[from, to]`
+/// (days from the epoch): the monthly reading could name a contract alive in
+/// the window. The sourced table does NOT narrow this to the month's own
+/// expiry day (D-3165): a monthly name traded after its month's expiry is a
+/// vendor fault to refuse, never a reason to prefer the other reading, so an
+/// index name both forms read stays [`NfoRefusal::FormsAmbiguous`] whenever
+/// the month overlaps the window.
+fn month_in_window(year: u16, month: u8, from: u32, to: u32) -> bool {
+    Day::new(year, month, 1).is_ok_and(|first| {
+        first.end_of_month().days_from_epoch() >= from && first.days_from_epoch() <= to
     })
 }
 
 /// The contract `ticker`, a file stem without `.NFO`, names for a file of
-/// trade day `trade`, by FORMAT.md §6 and the monthly-era rule (D-3160).
+/// trade day `trade`, by FORMAT.md §6, the monthly-era rule (D-3160) and
+/// the sourced monthly expiry table (D-3165).
 ///
 /// # Errors
 ///
 /// [`NfoRefusal::TickerUnparsed`],
 /// [`NfoRefusal::MonthlyExpiryUnstated`], [`NfoRefusal::FormsAmbiguous`],
-/// [`NfoRefusal::UnderlyingRefused`] and
+/// [`NfoRefusal::ExpiryRefused`], [`NfoRefusal::UnderlyingRefused`] and
 /// [`NfoRefusal::ContractUnrenderable`].
 pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusal> {
     let unparsed = || NfoRefusal::TickerUnparsed {
@@ -405,30 +468,48 @@ pub fn decode_ticker(ticker: &str, trade: Day) -> Result<OptionTicker, NfoRefusa
     // The era rule (D-3160): which forms the trade day admits.
     let on = (trade.year(), trade.month(), trade.day());
     let before = on < DATED_FORM_FROM;
+    let today = trade.days_from_epoch();
     let chosen = if before {
         let dated = first_form.filter(|&(at, ..)| {
             on >= INDEX_WEEKLY_DATED_FROM
                 && ticker
                     .get(..at)
-                    .is_some_and(|under| DATED_BEFORE_CUTOVER.contains(&under))
+                    .is_some_and(|under| DATED_BEFORE_CUTOVER.into_iter().any(|i| i == under))
         });
-        if dated.is_some() && monthly_reading(body, Some((trade.days_from_epoch(), latest))) {
+        let monthly = monthly_shape(body);
+        // Both readings could name a live contract: the name cannot choose.
+        if dated.is_some()
+            && monthly
+                .is_some_and(|(_, year, month, _)| month_in_window(year, month, today, latest))
+        {
             return Err(NfoRefusal::FormsAmbiguous {
                 ticker: ticker.to_owned(),
             });
         }
-        dated
+        match (dated, monthly) {
+            (Some(dated), _) => Some(dated),
+            // The monthly form: its day is the sourced table's (D-3165).
+            (None, Some((at, year, month, strike))) => {
+                let Some(expiry) = monthly_expiry(year, month) else {
+                    return Err(NfoRefusal::MonthlyExpiryUnstated {
+                        ticker: ticker.to_owned(),
+                    });
+                };
+                if expiry.days_from_epoch() < today || expiry.days_from_epoch() > latest {
+                    return Err(NfoRefusal::ExpiryRefused {
+                        ticker: ticker.to_owned(),
+                    });
+                }
+                Some((at, expiry, strike))
+            }
+            (None, None) => None,
+        }
     } else {
         first_form
     };
     let Some((at, expiry, strike)) = chosen else {
-        // Before the cutover, the monthly form: YY MON STRIKE, no expiry day.
         // From the cutover, the dated shape with a date that is not one.
-        return Err(if before && monthly_reading(body, None) {
-            NfoRefusal::MonthlyExpiryUnstated {
-                ticker: ticker.to_owned(),
-            }
-        } else if !before && shaped.is_some() {
+        return Err(if !before && shaped.is_some() {
             NfoRefusal::ExpiryRefused {
                 ticker: ticker.to_owned(),
             }

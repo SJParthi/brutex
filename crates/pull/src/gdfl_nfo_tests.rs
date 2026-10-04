@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests of the GDFL options reader. Every value is invented at run time.
 
 #![allow(
@@ -69,11 +70,17 @@ fn an_underlying_keeps_hyphens_ampersands_and_leading_digits() {
 }
 
 #[test]
-fn the_monthly_form_states_no_expiry_day_and_is_refused_by_name() {
+fn the_monthly_form_takes_its_day_from_the_sourced_table_or_is_refused_by_name() {
+    // October 2018 is in `MONTHLY_EXPIRIES`: its day is 2018-10-25 (D-3165).
     assert_eq!(
-        decode_ticker("ACC18OCT1280PE", day(2018, 10, 1)),
+        contract("ACC18OCT1280PE", day(2018, 10, 1)),
+        "2018-10-25-128000-PE"
+    );
+    // August 2018 is not: the name states no day and none is sourced.
+    assert_eq!(
+        decode_ticker("ACC18AUG1280PE", day(2018, 8, 1)),
         Err(NfoRefusal::MonthlyExpiryUnstated {
-            ticker: "ACC18OCT1280PE".to_owned()
+            ticker: "ACC18AUG1280PE".to_owned()
         })
     );
 }
