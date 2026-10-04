@@ -451,3 +451,56 @@ fn dpd_index_list_conversion_never_emits_a_misaligned_row() {
         }
     }
 }
+
+/// DPD-10, D-3158. An index document whose shape has drifted -- a value that is
+/// not a list, or an element that is not a string -- is REFUSED by name, and
+/// the catalogue already on disk is left byte-for-byte as it was. On the
+/// unmodified code both were silently skipped and a shorter catalogue, missing
+/// the dropped entries with nothing counted, replaced the good one.
+#[test]
+fn dpd_a_drifted_index_document_refuses_and_keeps_the_catalogue_on_disk() {
+    use pull::masters::{Landed, SOURCES, Shape, land, path_of};
+    let mut nse = None;
+    for source in &SOURCES {
+        if source.shape == Shape::NseIndexJson {
+            nse = Some(source);
+        }
+    }
+    let source = nse.expect("the NSE index source is listed");
+    let dir = std::env::temp_dir().join(format!("attack_decoder_dpd10_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let names: Vec<String> = (0..80)
+        .map(|n| format!("\"NIFTY TEST INDEX {n}\""))
+        .collect();
+    let good = format!("{{\"Broad Market Indices\":[{}]}}", names.join(","));
+    assert!(
+        matches!(land(&dir, source, &good), Landed::Written { .. }),
+        "the well-formed document lands"
+    );
+    let before = std::fs::read(path_of(&dir, source)).unwrap();
+
+    for drifted in [
+        format!("{{\"Broad Market Indices\":[{},42]}}", names.join(",")),
+        format!("{{\"Broad Market Indices\":[{},null]}}", names.join(",")),
+        format!(
+            "{{\"Broad Market Indices\":[{}],\"Sectoral\":\"NIFTY BANK\"}}",
+            names.join(",")
+        ),
+    ] {
+        let Landed::Refused(why) = land(&dir, source, &drifted) else {
+            panic!("a drifted document must refuse: {drifted}");
+        };
+        assert!(
+            why.contains("category `"),
+            "the refusal names the category: {why}"
+        );
+        assert_eq!(
+            std::fs::read(path_of(&dir, source)).unwrap(),
+            before,
+            "the catalogue on disk is untouched"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
