@@ -2455,6 +2455,18 @@ fn tail_fault_unless_answered(tail: &telemetry::Tail, answered: bool) -> Option<
     }
 }
 
+/// Damaged or unanswerable evidence: never clears a launch.
+fn uncertain_observation(at_millis: Option<i64>, why: &str) -> ExternalObservation {
+    ExternalObservation {
+        at_millis,
+        uncertain: true,
+        in_flight: false,
+        launch_clear: false,
+        unterminated: None,
+        body: unknown_status(why),
+    }
+}
+
 fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // Durable run/probe evidence uses this same target. Its completion cannot
     // replace a whole-command marker, nor can its uncorrelated token refresh
@@ -2476,14 +2488,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // cap cannot hide a newer one. With no marker found the cap is still the
     // answer: the latest sweep's marker may lie in the bytes it left unread.
     if let Some(why) = tail_fault_unless_answered(&lifecycle, marker.is_some()) {
-        return ExternalObservation {
-            at_millis: None,
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            unterminated: None,
-            body: unknown_status(&why),
-        };
+        return uncertain_observation(None, &why);
     }
     let Some(marker) = marker else {
         let legacy = status_tail(dir, CLI_SWEEP_TARGET, None, 1);
@@ -2508,14 +2513,7 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
     // marker is found before the cap. Reaching the cap empty-handed means none
     // is newer, and `last` falls back to the marker, the newest fact there is.
     if let Some(why) = tail_fault_unless_answered(&activity, true) {
-        return ExternalObservation {
-            at_millis: Some(marker.at_unix_millis),
-            uncertain: true,
-            in_flight: false,
-            launch_clear: false,
-            unterminated: None,
-            body: unknown_status(&why),
-        };
+        return uncertain_observation(Some(marker.at_unix_millis), &why);
     }
     let last = activity.records.first().unwrap_or(marker);
     let phase = match marker.field("phase") {
@@ -2563,7 +2561,21 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             "null".to_owned()
         }
     );
-    let unterminated = match marker.field("command") {
+    let unterminated = unterminated_marker(marker, named_sweep);
+    ExternalObservation {
+        at_millis: Some(last.at_unix_millis),
+        uncertain: status == "unknown",
+        in_flight: status == "running",
+        launch_clear: matches!(status, "completed" | "refused"),
+        unterminated,
+        body,
+    }
+}
+
+/// A named sweep's newest `command started` under a durable invocation id,
+/// as `(id, command)`; anything else is `None`. D-2764.
+fn unterminated_marker(marker: &telemetry::Record, named_sweep: bool) -> Option<(u64, String)> {
+    match marker.field("command") {
         Some(telemetry::OwnedValue::Str(command))
             if marker.message == "command started"
                 && named_sweep
@@ -2572,14 +2584,6 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
             Some((marker.run, command.clone()))
         }
         _ => None,
-    };
-    ExternalObservation {
-        at_millis: Some(last.at_unix_millis),
-        uncertain: status == "unknown",
-        in_flight: status == "running",
-        launch_clear: matches!(status, "completed" | "refused"),
-        unterminated,
-        body,
     }
 }
 
