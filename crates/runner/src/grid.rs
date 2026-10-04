@@ -2966,8 +2966,9 @@ pub fn materialize_expression_cell(
 
 /// [`materialize_expression_cell`] over slice facts the caller already holds
 /// -- the attested training token carries them (D-1141), so a per-ordinal
-/// replay no longer rebuilds them. The program walk itself is still per call;
-/// `docs/06-limits.md` names that bound. Public since D-1184 so `cli`'s
+/// replay no longer rebuilds them. The program walk is still per call here; a
+/// loop over the cells of one grid uses [`ExpressionCellReplay`], which walks
+/// once for all of them (D-1833). Public since D-1184 so `cli`'s
 /// candidate capture can pass the facts it builds once per slice. `facts` must
 /// be [`crate::trade::SliceFacts::of`] the same `bars` and `column`.
 ///
@@ -2988,57 +2989,137 @@ pub fn materialize_expression_cell_over(
     selected: &Cell,
     facts: &crate::trade::SliceFacts,
 ) -> Result<Vec<TradeRow>, String> {
-    let timed = crate::trade::walk_expression_over(
-        bars,
-        column,
-        expression,
-        horizon,
-        direction_of(side),
-        facts,
-    )?;
-    let mut rows = Vec::new();
-    if timed.occupancy.is_empty() {
-        let empty = one_variant(
+    ExpressionCellReplay::prepare(bars, column, expression, horizon, side, grid, facts)?
+        .materialize(selected)
+}
+
+/// [`materialize_expression_cell_over`] for MANY cells of one program's grid:
+/// the program walk and the crossing table are built once in
+/// [`ExpressionCellReplay::prepare`], and each
+/// [`ExpressionCellReplay::materialize`] pays only the cell's own fold.
+///
+/// # Cost (W3-runner2-1, D-1833)
+///
+/// `prepare` is O(B + signals) for the program walk and O(C·(span + L)) for
+/// the crossings over C candidate paths, once. `materialize` is O(C) per cell
+/// plus the rows it returns. Before this door every coordinate of a program
+/// re-walked the program and re-measured every crossing: O(G·(B + signals +
+/// C·(span + L))) for a grid of G cells.
+///
+/// The expression path keeps its own empty-walk rule, which differs from the
+/// mask path's [`CellReplay`]: a walk with no occupancy compares the selected
+/// cell to the empty fold rather than answering "no priceable trade". The
+/// answer is byte-identical to [`materialize_expression_cell`], which is now
+/// this door with a one-cell loop.
+pub struct ExpressionCellReplay<'a> {
+    bars: &'a [Candle],
+    grid: &'a Grid,
+    side: Side,
+    /// `None` when the program's walk had no occupancy at all.
+    prepared: Option<PreparedReplay<'a>>,
+}
+
+impl<'a> ExpressionCellReplay<'a> {
+    /// Walk `expression` once and measure every candidate path against
+    /// `grid`'s own ladders. `facts` must be [`crate::trade::SliceFacts::of`]
+    /// the same `bars` and `column`.
+    ///
+    /// # Errors
+    ///
+    /// The walk's column-alignment refusal, as
+    /// [`materialize_expression_cell`] reports it.
+    pub fn prepare(
+        bars: &'a [Candle],
+        column: &Column,
+        expression: &crate::expression::Expression,
+        horizon: Horizon,
+        side: Side,
+        grid: &'a Grid,
+        facts: &crate::trade::SliceFacts,
+    ) -> Result<Self, String> {
+        #[cfg(test)]
+        EXPRESSION_WALKS.with(|walks| walks.set(walks.get() + 1));
+        let timed = crate::trade::walk_expression_over(
             bars,
-            &[],
-            (
-                grid.stops.rungs(),
-                grid.targets.rungs(),
-                grid.trails.rungs(),
-            ),
-            Variant {
-                stop: selected.stop,
-                target: selected.target,
-                tsl: selected.tsl,
-                ttp: selected.ttp,
-            },
+            column,
+            expression,
+            horizon,
+            direction_of(side),
+            facts,
+        )?;
+        let prepared = (!timed.occupancy.is_empty()).then(|| {
+            PreparedReplay::of(
+                bars,
+                side,
+                Ladders {
+                    stops: &grid.stops,
+                    targets: &grid.targets,
+                    trails: &grid.trails,
+                },
+                facts,
+                &timed,
+            )
+        });
+        Ok(Self {
+            bars,
+            grid,
             side,
-            None,
-        );
-        return if empty == *selected {
-            Ok(rows)
-        } else {
-            Err("selected expression empty cell differs from exact replay".to_owned())
+            prepared,
+        })
+    }
+
+    /// Replays one already-selected cell and proves its detail rows, exactly
+    /// as [`materialize_expression_cell`] does.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`materialize_expression_cell`].
+    pub fn materialize(&self, selected: &Cell) -> Result<Vec<TradeRow>, String> {
+        let mut rows = Vec::new();
+        let Some(prepared) = &self.prepared else {
+            let empty = one_variant(
+                self.bars,
+                &[],
+                (
+                    self.grid.stops.rungs(),
+                    self.grid.targets.rungs(),
+                    self.grid.trails.rungs(),
+                ),
+                Variant {
+                    stop: selected.stop,
+                    target: selected.target,
+                    tsl: selected.tsl,
+                    ttp: selected.ttp,
+                },
+                self.side,
+                None,
+            );
+            return if empty == *selected {
+                Ok(rows)
+            } else {
+                Err("selected expression empty cell differs from exact replay".to_owned())
+            };
         };
+        let replay = prepared.variant(Chosen::from_cell(selected), Some(&mut rows));
+        if replay.cell.as_ref() != Some(selected) {
+            return Err("selected expression cell differs from exact replay".to_owned());
+        }
+        reconcile_rows(selected, &rows)?;
+        Ok(rows)
     }
-    let replay = levelled_timed(
-        bars,
-        side,
-        Ladders {
-            stops: &grid.stops,
-            targets: &grid.targets,
-            trails: &grid.trails,
-        },
-        Chosen::from_cell(selected),
-        Some(&mut rows),
-        facts,
-        &timed,
-    );
-    if replay.cell.as_ref() != Some(selected) {
-        return Err("selected expression cell differs from exact replay".to_owned());
-    }
-    reconcile_rows(selected, &rows)?;
-    Ok(rows)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Program walks [`ExpressionCellReplay::prepare`] has run on this thread
+    /// (test-only probe, D-1833).
+    static EXPRESSION_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Program walks run on the calling thread so far (test-only, D-1833).
+#[cfg(test)]
+pub(crate) fn expression_walks_on_this_thread() -> u64 {
+    EXPRESSION_WALKS.with(std::cell::Cell::get)
 }
 
 /// Proves the row sequence carries the selected cell's ledger aggregates.
@@ -6178,13 +6259,17 @@ mod exit_family_tests {
             "no facts per pending candidate"
         );
 
+        // D-1833: a later ordinal is materialised through the grid's one
+        // coordinate replay, which walks over the facts built with the grid.
         let later = include_str!("expression_oos.rs");
         let materialize = later
-            .split_once("pub fn materialize(&self, ordinal: usize)")
-            .map(|(_, rest)| rest.split_once("\n    }\n").map_or(rest, |(body, _)| body))
+            .split_once("impl LaterCoordinateReplayV1<'_> {")
+            .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
             .unwrap_or_default();
         assert!(
-            materialize.contains("materialize_expression_cell_over("),
+            materialize.contains("ExpressionCellReplay::prepare(")
+                && materialize.contains("&later.facts,")
+                && !materialize.contains(built),
             "a later ordinal is materialised over the facts built with its grid"
         );
     }

@@ -756,6 +756,8 @@ fn produce_side<'a>(
         let mut rows = Vec::new();
         rows.try_reserve_exact(evaluated.grid().cells.len())
             .map_err(display)?;
+        // One program walk for every coordinate of this grid (D-1833).
+        let replay = resolved.expression_coordinate_replay(attested, &valid);
         for (ordinal, cell) in evaluated.grid().cells.iter().enumerate() {
             let bytes = persistence::row_size(sessions.days.len(), cell.trades)?;
             if cell.trades > remaining.trades || bytes > remaining.bytes {
@@ -769,7 +771,7 @@ fn produce_side<'a>(
             }
             let disposition =
                 resolved.classify_expression_coordinate(&valid, Chosen::from_cell(cell))?;
-            let trades = resolved.materialize_expression_coordinate(attested, &valid, ordinal)?;
+            let trades = replay.materialize(ordinal)?;
             if trades.len() as u64 != cell.trades {
                 return Err("Boolean materialized trade count changed".to_owned());
             }

@@ -56711,3 +56711,36 @@ six groups, and the later comparison's stored-output tests are unchanged.
 minute context, beside the BLAKE3 pass the data digest takes over the same
 bytes; `docs/06-limits.md` states it under the D-0711 section.
 
+### D-1833 — Expression coordinates replay over one program walk per grid — 2026-10-03
+
+**What was found (W3-runner2-1; partly fixed by D-1141, left open in
+`docs/06-limits.md`).** Materializing one coordinate of a Boolean program's
+grid, in TRAINING (`materialize_expression_coordinate`), in the later period
+(`EvaluatedExpressionOosV1::materialize`) and through a fixed-training fold
+binding (`materialize_coordinate`), re-walked the program over the slice and
+re-measured every candidate path's crossings each time: O(B + signals +
+C·(span + L)) per coordinate, O(G·(...)) per program. The mask path already
+had `CellReplay` (D-1141); the expression path did not, because its empty-walk
+rule differs.
+
+**The change.** `runner::grid::ExpressionCellReplay` prepares the walk and the
+crossing table once and materializes each cell in O(C) plus its rows, keeping
+the expression path's empty-walk rule. `materialize_expression_cell_over` is
+now that value with one cell. `ExpressionCoordinateReplayV1` (TRAINING) and
+`LaterCoordinateReplayV1` (later period) hold one lazily built replay per
+grid; the source check is taken once and the walk on the first materialize,
+so each refusal is the one the per-ordinal door reports, in the same order,
+and a grid that materializes nothing walks nothing. A fold binding holds its
+own replay. `cli`'s Boolean TRAINING family and later comparison loop through
+the replay. No output, digest, format or identity changes; the rows are
+byte-identical.
+
+**What it proves.**
+`runner::exit_grid_policy::expression_execution::tests::every_coordinate_of_a_program_replays_over_one_walk`
+counts 30 walks through the per-ordinal door and 3 through the replay for 30
+coordinates over three programs (one never true), with identical rows and
+identical refusals for an absent ordinal and a foreign attestation;
+`runner::exit_grid_policy::expression_execution::later_period::tests::a_later_grid_replays_every_coordinate_over_one_walk`
+does the same for the later period; `an_expression_replay_refuses_a_forged_cell`
+refuses a forged cell on the traded and the empty-walk path.
+

@@ -583,6 +583,9 @@ fn append_rows(
     remaining: &mut Remaining,
     computed: &mut Computed,
 ) -> Result<(), String> {
+    // One program walk for every coordinate this group materializes outside a
+    // fold binding (D-1833); a binding holds its own.
+    let replay = evaluated.coordinate_replay();
     for (ordinal, cell) in evaluated.grid().cells.iter().enumerate() {
         let original = training
             .rows
@@ -607,7 +610,7 @@ fn append_rows(
                 let (trades, projection) = bound.materialize_coordinate(selected, ordinal)?;
                 (trades, Some(projection))
             }
-            None => (evaluated.materialize(ordinal)?, None),
+            None => (replay.materialize(ordinal)?, None),
         };
         let periods = sessions.observe(bars, cell, &trades)?;
         let mut h = Hasher::new();
