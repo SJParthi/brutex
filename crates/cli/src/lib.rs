@@ -1177,9 +1177,27 @@ fn auto_stored_arm(
         return MISUSED;
     };
     let text = auto_stored(vendor, underlying, rung, (fy, fm), (ty, tm));
-    let refused = carries_refusal(&text);
+    let code = auto_stored_exit(&text);
     out.push_str(&text);
-    if refused { MISUSED } else { OK }
+    code
+}
+
+/// The exit code of one rendered `auto-stored` page.
+///
+/// A search that settled on nothing, or whose sweep halted, records
+/// `Completion::Refused` / `Halted` in its sweep evidence. This arm tested
+/// [`carries_refusal`] alone and exited 0 on it, so `run_durable` wrote
+/// `Phase::Completed` for the same invocation and two durable records of one
+/// run disagreed. [`untrustworthy`] reads the verdict row the evidence's own
+/// predicate prints (P8-01, D-2720).
+fn auto_stored_exit(text: &str) -> u8 {
+    if carries_refusal(text) {
+        MISUSED
+    } else if untrustworthy(text) {
+        FAILED
+    } else {
+        OK
+    }
 }
 
 /// The `top` arm, beside [`results_arm`] because it reads the same store.
@@ -2305,8 +2323,18 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
         ["sweep-all", vendor, rung, min_hits] => sweep_all_arm(out, vendor, rung, min_hits),
         ["auto", sessions] => match parse_sessions(sessions) {
             Ok(s) => {
-                out.push_str(&auto(s));
-                OK
+                let text = auto(s);
+                // The search's own verdict decides the code, as `sweep`'s does
+                // above. This arm returned OK unconditionally, so `cli auto 1`
+                // printed `threshold chosen NONE` under an untrustworthy
+                // verdict and exited 0 (P8-01, D-2720).
+                let code = if carries_refusal(&text) || untrustworthy(&text) {
+                    FAILED
+                } else {
+                    OK
+                };
+                out.push_str(&text);
+                code
             }
             Err(why) => refuse(out, why),
         },
@@ -14700,6 +14728,27 @@ fn nothing_measured(text: &str) -> bool {
     })
 }
 
+/// Whether a rendered report's verdict says its answer may not be believed.
+///
+/// `runner::report`'s verdict prints `trustworthy as a whole answer  NO`
+/// exactly when `Outcome::is_complete` is false: a ladder that halted on a
+/// budget, a column that never warmed, and the `Sweep::default()` that
+/// `Sweeper::auto` substitutes when no rung measured anything. That is the
+/// same predicate `auto_stored_kernel` writes to the sweep evidence through
+/// `sweep_completion(found.affordable && found.outcome.is_complete(), ..)`,
+/// because `affordable == false` always carries a default (incomplete) sweep.
+/// So the exit code and the durable record cannot disagree (P8-01, D-2720).
+///
+/// Matched on the verdict row itself, the way [`nothing_measured`] is, so the
+/// phrase in prose cannot trip it.
+fn untrustworthy(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("trustworthy as a whole answer")
+            .is_some_and(|rest| rest.trim() == "NO")
+    })
+}
+
 /// Every step refused, so there is no page and no verdict on the rules.
 fn refused_walk(out: &mut String, steps: usize, first_refusal: Option<&str>) {
     let _ = writeln!(
@@ -20853,7 +20902,7 @@ mod tests {
     };
     use super::{Consistency, Horizon, consistency_of, evaluator, grid, grid_step_ppm, ladder_for};
     use super::{Direction, Side};
-    use super::{FAILED, carries_refusal, nothing_measured};
+    use super::{FAILED, carries_refusal, nothing_measured, untrustworthy};
     use super::{
         MAX_STOP_POINTS, NIFTY_REFERENCE, PAISA_PER_POINT, STOP_FLOOR_POINTS, hundredths_of,
         points_to_ppm_at, ppm_to_points_at, reference_price, return_over_drawdown_cell,
@@ -21252,8 +21301,43 @@ mod tests {
         );
 
         let mut out = String::new();
-        assert_eq!(run(&argv(&["auto", "1"]), &mut out), OK);
+        assert_eq!(run(&argv(&["auto", "6"]), &mut out), OK, "{out}");
         assert!(!out.is_empty(), "auto rendered something");
+    }
+
+    /// A THRESHOLD SEARCH THAT SETTLED ON NOTHING EXITS NON-ZERO. P8-01, D-2720.
+    ///
+    /// `cli auto 1` prints `threshold chosen NONE` and `trustworthy as a whole
+    /// answer NO`, and the arm returned `OK` unconditionally -- the same defect
+    /// probeapi-6 fixed for `sweep` alone. One to five sessions now exit
+    /// `FAILED` with the report still printed; six exit `OK`. The predicate
+    /// reads the verdict row only.
+    #[test]
+    fn an_auto_search_that_settled_on_nothing_exits_non_zero() {
+        for sessions in ["1", "2", "3", "4", "5"] {
+            let mut out = String::new();
+            assert_eq!(
+                run(&argv(&["auto", sessions]), &mut out),
+                FAILED,
+                "auto {sessions}:\n{out}"
+            );
+            assert!(out.contains("threshold chosen"), "{out}");
+            assert!(untrustworthy(&out), "{out}");
+            assert!(!carries_refusal(&out), "{out}");
+        }
+        assert!(untrustworthy(
+            "  trustworthy as a whole answer            NO  "
+        ));
+        assert!(!untrustworthy(
+            "  trustworthy as a whole answer           yes  "
+        ));
+        assert!(!untrustworthy(
+            "trustworthy as a whole answer NO, in prose here"
+        ));
+        assert!(!untrustworthy(
+            "  untrustworthy as a whole answer         NO"
+        ));
+        assert!(!untrustworthy(""));
     }
 
     /// Every refusal NAMES what was wrong and prints the usage.

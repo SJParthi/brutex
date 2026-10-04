@@ -57605,3 +57605,10 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2720 — `cli auto` and `cli auto-stored` exit non-zero when the search settled on nothing — 2026-10-04
+
+- P8-01 (tests-docs-security pass 8). The `auto` arm returned `OK` unconditionally, so `cli auto 1` printed `threshold chosen NONE` above a `trustworthy as a whole answer NO` verdict and exited 0 — the defect probeapi-6 fixed for `sweep` only. `auto_stored_arm` read `carries_refusal` alone, while `auto_stored_kernel` wrote `Completion::Refused` or `Halted` to the sweep evidence for the same run; exiting 0 made `run_durable` record `Phase::Completed`, so two durable records of one invocation disagreed.
+- Both arms now also read `untrustworthy`, which matches the verdict row `trustworthy as a whole answer  NO`. That row is printed exactly when `Outcome::is_complete` is false, and `Sweeper::auto` returns a default (incomplete) sweep whenever `affordable` is false, so the row is the predicate `sweep_completion(found.affordable && found.outcome.is_complete(), ..)` writes to the evidence. Such a run exits `FAILED` (1) and still prints its report. A `refused:` line keeps the code it had; D-2722 settles that code.
+- `a_valid_sweep_and_a_valid_auto_both_render_and_exit_zero` pinned `auto 1` as `OK`; it now pins `auto 6`, which completes.
+- Proved by `cli::tests::an_auto_search_that_settled_on_nothing_exits_non_zero` and `cli::audited_stored::tests::an_auto_stored_search_exits_as_its_sweep_evidence_records`, which reads the completion the kernel wrote and checks the exit against it (FB-21).

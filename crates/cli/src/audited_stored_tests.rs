@@ -2550,3 +2550,36 @@ fn a_range_descent_prepares_its_stored_inputs_once() {
     assert!(other.contains("1min"), "{other}");
     crate::knobs::clear_all();
 }
+
+/// AN `auto-stored` RUN EXITS AS ITS OWN SWEEP EVIDENCE RECORDS IT. P8-01, D-2720.
+///
+/// The arm read [`crate::carries_refusal`] alone, so a search over a column
+/// that never warmed printed `threshold chosen NONE` under a `NO` verdict,
+/// wrote `Completion::Refused` to its sweep evidence, and exited 0 -- which
+/// made `run_durable` record `Phase::Completed` for the same run. A seeded
+/// month cannot warm the 5min column and must exit `FAILED`; the warmed month
+/// completes and must exit `OK`. Each exit is checked against the completion
+/// the kernel itself wrote.
+#[test]
+fn an_auto_stored_search_exits_as_its_sweep_evidence_records() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    for (fixture, completed) in [(Fixture::new(), false), (Fixture::warmed(), true)] {
+        let report = fixture.auto("5min").expect("the kernel renders a page");
+        let evidence = crate::sweep_evidence::latest(&fixture.root, 1_048_576)
+            .expect("the evidence reads")
+            .expect("the search recorded an attempt");
+        assert_eq!(
+            evidence.completion == crate::sweep_evidence::Completion::Completed,
+            completed,
+            "{report}"
+        );
+        assert_eq!(
+            crate::auto_stored_exit(&report),
+            if completed { crate::OK } else { crate::FAILED },
+            "{report}"
+        );
+        assert_eq!(crate::untrustworthy(&report), !completed, "{report}");
+    }
+    crate::knobs::clear_all();
+}
