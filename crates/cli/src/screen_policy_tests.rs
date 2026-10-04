@@ -1017,7 +1017,7 @@ fn screen_reference<'a>(
         let (weakest, worst_period) = r
             .consistency
             .as_ref()
-            .map_or((i64::MIN, i64::MIN), calendar_terms);
+            .map_or((i64::MIN, i128::MIN), calendar_terms);
         core::cmp::Reverse((
             r.admitted,
             weakest,

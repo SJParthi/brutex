@@ -12702,6 +12702,7 @@ fn prune_cells(g: grid::Grid, envelope: Rules) -> grid::Grid {
         targets,
         trails,
         refused_paths,
+        refused_levels,
     } = g;
     let mut cells: Vec<grid::Cell> = cells
         .into_iter()
@@ -12716,6 +12717,7 @@ fn prune_cells(g: grid::Grid, envelope: Rules) -> grid::Grid {
         targets,
         trails,
         refused_paths,
+        refused_levels,
     }
 }
 
