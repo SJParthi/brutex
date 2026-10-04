@@ -6412,6 +6412,7 @@ old line regex the same input and watched it pass.
 | AFG-04 | `Sweep::depth` and `Streamed::depth` are the level count less one when the last level is empty, O(1), and equal the count of non-empty levels (D-2304) | `engine::tests::depth_is_the_level_count_less_the_empty_last_level` | ✓ |
 | AFG-05 | A bootstrap index buffer reused across draws yields exactly the indices fresh vectors do from the same seed (D-2305) | `runner::bootstrap::tests::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does` | ✓ |
 | AFG-06 | A signal-candle-stop evaluation over any day window seals the same digest as the full row walk did, and keeps only periods inside the window (D-2307) | `runner::signal_candle_stop::tests::a_bisected_day_window_seals_exactly_what_the_full_row_walk_did` | ✓ |
+| AFG-09 | `api::detail::Cached` holds its slot lock only for an O(1) look, install or clear: a cold `open`, a `refresh` (D-1560's growth re-hash included) and `f` each run with it free, and another root can be served from inside a cold open (D-2309) | `api::detail::tests::the_slot_lock_is_free_while_a_handle_opens_or_refreshes` | ✓ |
 
 ### Rust and O(1) sweep, data side (D-2370 onward)
 

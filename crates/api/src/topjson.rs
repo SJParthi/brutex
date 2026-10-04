@@ -480,6 +480,8 @@ mod tests {
         assert!(source.contains("let selected = SELECTION.with_verified("));
         let detail = include_str!("detail.rs");
         let verified = detail.split_once("pub fn with_verified<R>(").unwrap().1;
-        assert!(verified.contains("*held = None;\n                return Err(why);"));
+        assert!(
+            verified.contains("*held = None;\n                }\n                return Err(why);")
+        );
     }
 }

@@ -12529,6 +12529,19 @@ not:
   `append`, `append_exact` and the read-side `refresh` alike, and only on the
   growth branch. A handle's own appends and the unchanged-length branch stay
   O(1) plus the appended bytes. This is D-0936's accepted cost, extended.
+- **Which lock the api's held results handles pay that re-hash under
+  (D-2309).** `api::detail::Cached` (`TRADES`, `FRONTIER`, the parent and
+  ledger caches, `topjson`'s `SELECTION`) held its one process-global slot
+  mutex across the cold `open` and across `refresh`, so the growth re-hash
+  above, and any O(history) cold open, made every other request for that
+  cache wait while holding a blocking permit. The slot lock is now held only
+  for an O(1) look, install or clear. **What stays:** `refresh` and the
+  handler's work run under the HANDLE's own mutex, so requests for one
+  handle still take the O(indexed bytes) growth branch one at a time -- a
+  waiter is then served the refreshed handle rather than paying the re-hash
+  again beside it. Two requests that both find no usable handle each run the
+  cold open, O(history) bounded by `MAX_SCAN_BYTES`, and the later install
+  wins. Neither is timed.
 - **Reconciliation order (D-1565).** `admission_store::reconcile_all` and
   `population::reconcile_receipts{,_v3,_v4}` sort their entries by identity
   before walking them: O(n log n) once per cold open, where the open was

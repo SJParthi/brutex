@@ -57247,3 +57247,37 @@ the bar loop.
 **Decision.** At most `n - 1` gaps exist and each heap holds at most half of
 them plus one transient push, so both are created with capacity `ceil(n / 2)`.
 Output is unchanged; every prefix-cadence test is the proof that it is.
+
+### D-2309 — A detail cache's slot lock is held for a lookup, not for an open or a refresh — 2026-10-04
+
+**Finding (Rust and O(1) sweep OS-6).** `api::detail::Cached::with` and
+`with_verified` held the one process-global `std::sync::Mutex` behind
+`TRADES`, `FRONTIER`, `PARENTS`, `LEDGER` (and `topjson`'s `SELECTION`) across
+the cold `open` -- O(history), up to `MAX_SCAN_BYTES` -- and across `refresh`,
+whose D-1560 growth branch re-hashes every indexed byte. While a sweep
+appended, every other request for that cache waited behind one request's
+O(indexed bytes) work, each holding a blocking permit.
+
+**Change.** The slot holds `Arc<Mutex<T>>`. Its lock is taken only to read,
+install or clear that `Arc`, O(1), and is never held across `open`, `refresh`
+or `f`. A cold `open` runs holding no lock; the opener locks the fresh handle
+before installing it, so `f` runs on it before any other request can refresh
+it, and a replaced handle is dropped after the slot lock is released.
+`refresh` and `f` run under the handle's own mutex. `with_verified` clears a
+refused handle only if the slot still holds that same `Arc`, so a handle a
+racing request opened and checked is kept. Every refusal, the reopen-on-refusal
+of `with`, the failed-open-keeps-the-slot rule and the root comparison are
+unchanged.
+
+**Limits, stated.** Requests for ONE handle still run its `refresh`, and so
+D-1560's growth re-hash, one at a time under the handle's mutex: `refresh`
+mutates the handle, and a waiter is served the already-refreshed handle where
+a parallel refresh would pay the same re-hash again. Two requests that both
+find no usable handle now both open; the later install wins and each serves
+the handle it opened. `docs/06-limits.md` states both.
+
+**Tests.** `api::detail::tests::the_slot_lock_is_free_while_a_handle_opens_or_refreshes`
+`try_lock`s the slot inside every `open`, `refresh` and `f` of both methods and
+serves another root from inside a cold `open`, which deadlocked before.
+`api::topjson::tests::a_persistent_refusal_reopens_on_every_request_and_the_cost_is_stated`
+pins the new shape of the refused-handle clear. AFG-09.

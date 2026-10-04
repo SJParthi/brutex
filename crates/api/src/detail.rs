@@ -543,8 +543,38 @@ pub(crate) async fn hold_every_slot() -> Result<HeldSlots, &'static str> {
 /// on a warm cache, so it is now stricter than it needs to be -- but lifting it
 /// is a separate decision about what an unbounded results file should cost,
 /// and this change does not make it.
+///
+/// # Which lock is held, and for how long (D-2309)
+///
+/// The slot behind `inner` holds an `Arc` to the handle's own mutex, and the
+/// slot lock is held only to read, install or clear that `Arc`: O(1), never
+/// across `open`, `refresh` or `f`. A cold `open` -- O(history), up to
+/// [`MAX_SCAN_BYTES`] -- runs holding no lock at all, and a fresh handle is
+/// locked by its opener before it is installed, so `f` sees it before any
+/// other request can refresh it. Two requests that both find no usable handle
+/// both open; the later install replaces the earlier, and each serves the
+/// handle it opened and checked. That duplicated open is the stated price.
+///
+/// `refresh` and `f` run under the HANDLE's mutex, so requests for one
+/// handle still take its growth branch -- D-1560's O(indexed bytes) re-hash
+/// -- one at a time. That is not removed: `refresh` mutates the handle, and a
+/// second request that waits is served the already-refreshed handle, where
+/// refreshing beside it would pay the same re-hash again.
 pub struct Cached<T> {
-    inner: std::sync::Mutex<Option<(std::path::PathBuf, T)>>,
+    inner: std::sync::Mutex<Option<(std::path::PathBuf, Slot<T>)>>,
+}
+
+/// One handle, shared between the slot and every request using it.
+type Slot<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+/// READ THROUGH A POISONED LOCK, for the reason `calendar_of` gives: a panic
+/// while holding it means some other request died, and the handle is still a
+/// handle. Refusing to look would make one panicked request cost every later
+/// one the walk this exists to remove.
+fn lock_through_poison<V>(mutex: &std::sync::Mutex<V>) -> std::sync::MutexGuard<'_, V> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl<T> Cached<T> {
@@ -554,6 +584,29 @@ impl<T> Cached<T> {
         Self {
             inner: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The handle cached for `root`, if any: one O(1) look under the slot lock,
+    /// released before the caller touches the handle.
+    fn cached_for(&self, root: &std::path::Path) -> Option<Slot<T>> {
+        match lock_through_poison(&self.inner).as_ref() {
+            Some((at, slot)) if at.as_path() == root => Some(std::sync::Arc::clone(slot)),
+            _ => None,
+        }
+    }
+
+    /// Install a handle `open` has just returned and run `f` on it. The
+    /// handle's own lock is taken BEFORE it is published, so no other request
+    /// refreshes it before `f` has run; the slot lock is held only for the
+    /// O(1) store, and never while waiting on a handle's lock.
+    fn install<R>(&self, root: &std::path::Path, opened: T, f: impl FnOnce(&mut T) -> R) -> R {
+        let slot: Slot<T> = std::sync::Arc::new(std::sync::Mutex::new(opened));
+        let mut handle = lock_through_poison(&slot);
+        // The replaced handle is dropped after the slot lock is released.
+        let replaced = lock_through_poison(&self.inner)
+            .replace((root.to_path_buf(), std::sync::Arc::clone(&slot)));
+        drop(replaced);
+        f(&mut handle)
     }
 
     /// Run `f` against a handle on `root`, refreshing a cached one or opening
@@ -574,26 +627,18 @@ impl<T> Cached<T> {
         refresh: impl FnOnce(&mut T) -> Result<(), String>,
         f: impl FnOnce(&mut T) -> R,
     ) -> Result<R, String> {
-        // READ THROUGH A POISONED LOCK, for the reason `calendar_of` gives: a
-        // panic while holding it means some other request died, and the handle
-        // is still a handle. Refusing to look would make one panicked request
-        // cost every later one the walk this exists to remove.
-        let mut held = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, handle)) = held.as_mut()
-            && at.as_path() == root
-            && refresh(handle).is_ok()
-        {
-            return Ok(f(handle));
+        if let Some(slot) = self.cached_for(root) {
+            let mut handle = lock_through_poison(&slot);
+            if refresh(&mut handle).is_ok() {
+                return Ok(f(&mut handle));
+            }
         }
-        // Absent, a different root, or a refresh that refused: open fresh. The
-        // slot is overwritten rather than cleared first, so a failed `open`
-        // leaves whatever was there -- which the next request refreshes and
-        // judges again on its own terms.
-        let (_, handle) = held.insert((root.to_path_buf(), open()?));
-        Ok(f(handle))
+        // Absent, a different root, or a refresh that refused: open fresh,
+        // holding no lock. The slot is overwritten rather than cleared first,
+        // so a failed `open` leaves whatever was there -- which the next
+        // request refreshes and judges again on its own terms.
+        let opened = open()?;
+        Ok(self.install(root, opened, f))
     }
 
     /// Uses a refreshed handle, exposing any failed generation or integrity
@@ -610,21 +655,25 @@ impl<T> Cached<T> {
         refresh: impl FnOnce(&mut T) -> Result<(), String>,
         f: impl FnOnce(&mut T) -> R,
     ) -> Result<R, String> {
-        let mut held = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, handle)) = held.as_mut()
-            && at.as_path() == root
-        {
-            if let Err(why) = refresh(handle) {
-                *held = None;
+        if let Some(slot) = self.cached_for(root) {
+            let mut handle = lock_through_poison(&slot);
+            if let Err(why) = refresh(&mut handle) {
+                drop(handle);
+                // Discard the refused handle -- unless a racing open has
+                // already replaced it with one that passed its own checks.
+                let mut held = lock_through_poison(&self.inner);
+                if held
+                    .as_ref()
+                    .is_some_and(|(_, cached)| std::sync::Arc::ptr_eq(cached, &slot))
+                {
+                    *held = None;
+                }
                 return Err(why);
             }
-            return Ok(f(handle));
+            return Ok(f(&mut handle));
         }
-        let (_, handle) = held.insert((root.to_path_buf(), open()?));
-        Ok(f(handle))
+        let opened = open()?;
+        Ok(self.install(root, opened, f))
     }
 }
 
@@ -943,6 +992,72 @@ mod tests {
             cache.with_verified(root, || Ok(9), |_| Err("must open".to_owned()), |v| *v),
             Ok(9)
         );
+    }
+
+    /// THE SLOT LOCK IS NOT HELD ACROSS AN OPEN, A REFRESH OR `f`. D-2309.
+    ///
+    /// Every closure below takes the slot's own mutex with `try_lock`, which
+    /// fails while the lock is held: before D-2309 the cold `open` and the
+    /// O(indexed bytes) `refresh` ran under it, so a request for the handle
+    /// waited behind both. And a cold `open` can use the same cache for
+    /// another root while it runs -- the call would deadlock if the open
+    /// held the slot -- after which its own install still lands and is served.
+    #[test]
+    fn the_slot_lock_is_free_while_a_handle_opens_or_refreshes() {
+        let cache: Cached<u32> = Cached::new();
+        let root = std::path::Path::new("/slot-lock-root");
+        let free = |cache: &Cached<u32>| cache.inner.try_lock().is_ok();
+
+        let opened = cache.with_verified(
+            root,
+            || {
+                assert!(free(&cache), "a cold open runs outside the slot lock");
+                let other = cache.with(
+                    std::path::Path::new("/slot-lock-other"),
+                    || Ok(5),
+                    |_| Ok(()),
+                    |h| *h,
+                );
+                assert_eq!(other, Ok(5), "another root is served during the open");
+                Ok(7)
+            },
+            |_| Err("nothing was cached for this root".to_owned()),
+            |h| {
+                assert!(free(&cache), "`f` on a fresh handle runs outside it");
+                *h
+            },
+        );
+        assert_eq!(opened, Ok(7), "the open that ran second is installed");
+
+        let refreshed = cache.with_verified(
+            root,
+            || Err("the handle is cached".to_owned()),
+            |h| {
+                assert!(free(&cache), "a verified refresh runs outside it");
+                *h += 1;
+                Ok(())
+            },
+            |h| {
+                assert!(free(&cache), "`f` on a cached handle runs outside it");
+                *h
+            },
+        );
+        assert_eq!(refreshed, Ok(8));
+
+        let reopened = cache.with(
+            root,
+            || {
+                assert!(free(&cache), "a reopen after a refusal runs outside it");
+                Ok(11)
+            },
+            |_| {
+                assert!(free(&cache), "a refresh runs outside it");
+                Err("the file shrank".to_owned())
+            },
+            |h| *h,
+        );
+        assert_eq!(reopened, Ok(11));
+        assert!(free(&cache), "nothing is left holding the slot");
     }
 
     /// A CACHED HANDLE IS OPENED ONCE, REFRESHED AFTER, AND REOPENED ON A REFUSAL.
