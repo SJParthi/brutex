@@ -16546,6 +16546,13 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
             "/boolean-oos.json",
             axum::routing::get(crate::booleanoosjson::later_json),
         )
+        // THE SELECTION V6 RECORDS `ledger-v6` COMMITS. Until D-1578 they were
+        // printed once by the verb and read by nothing: no route, no page.
+        // Index families only; an equity selector is refused (CLAUDE.md §1).
+        .route(
+            "/selection-v6.json",
+            axum::routing::get(crate::selectionv6json::selection_v6_json),
+        )
         // WHAT IS RUNNING RIGHT NOW. `/frontier.json` above serves a FINISHED
         // run and shows the PREVIOUS one for however long this one takes;
         // `/backtest/run.json` says `in_flight` and a start stamp and no

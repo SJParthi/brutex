@@ -768,3 +768,15 @@ is unchanged.
 - **o1eng2-1**: documented in `docs/06-limits.md`. D-1550.
 - **hunt-runner-4**, **o1eng2-2**, **o1eng2-3** and **o1eng2-4**: stale text
   corrected (see D-1550).
+### Audit 2026-10-03, fix worker 9 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **gaps-5** (out of sample and multiple comparisons across the pool): fixed by
+  the new verb `pool-oos`. D-1576, AFF-60.
+- **gaps-11** (discovery to qualification handoff): fixed. `pool-oos` writes
+  its held candidates as the catalog the qualification verbs read. D-1577,
+  AFF-61.
+- **gaps-10** (no API or page for Selection V6): fixed by
+  `/selection-v6.json` and `/selection`. Equities are refused with the
+  `CLAUDE.md` §1 sentence. D-1578, AFF-62.
