@@ -1,3 +1,23 @@
+# FINAL SAVE (2026-10-04 06:00 UTC, account switch). Nothing is running.
+
+Exact heads at the save:
+
+| Branch | Head | Meaning |
+|---|---|---|
+| final/all-fixes (PR #74) | c97ff00 | Carries all 78 fixed findings. Verified locally before the push: 6743 passed, 0 failed, 12 ignored; fmt, clippy, cargo deny 0.19.0 and 29 gates green. CI re-runs there, and the "PR 74 CI and CLI test" thread watches it. |
+| audit-fix/w9 | 9e829f4 | gaps-5 (pool-oos out-of-sample judging), gaps-11 (catalog handoff) and gaps-10 (Selection V6 route and page), D-1576..D-1578. Built on b23976f. The worker was stopped while its full test suite was still running, so it is **NOT verified**. |
+| audit-fix/integrate-20261004 | c97ff00 | Same commit as PR #74; a backup. |
+
+Next steps for the new account:
+1. Check PR #74 CI on c97ff00 (or newer) and fix anything red that this batch caused. Gate 18 sees new code in api, cli, store, pull and runner.
+2. Finish gaps-5, gaps-10 and gaps-11, in a worktree off origin/final/all-fixes:
+   - Merge origin/audit-fix/w9; keep both sides at doc tails (keepboth.md).
+   - Read the D-1576..D-1578 entries and the code, and complete anything half-wired.
+   - Run fmt, clippy -D warnings, `cargo test --workspace --locked`, web tests under web/tests, and Gate 15 (no other language names).
+   - Send the commit to whoever drives PR #74, then push HEAD:final/all-fixes. Never force-push and open no PR.
+3. The 10 blocked findings need the owner (tables below). Everything else is done.
+4. Update STATUS.md here and republish the audit page from brutex-workspace-audit.html.md (rename it to .html; a new account publishes a new URL).
+
 # LATEST (2026-10-04 05:35 UTC): resumed on request, 2 agents running
 
 | Item | State |
