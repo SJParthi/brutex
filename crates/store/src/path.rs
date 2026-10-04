@@ -178,6 +178,7 @@ const _: () = {
         lock,
         overlay_checksums,
         greek_checksums,
+        time_index,
     ] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
@@ -186,6 +187,7 @@ const _: () = {
     assert!(lock.extension().len() <= MAX_EXTENSION_LEN);
     assert!(overlay_checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(greek_checksums.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(time_index.extension().len() <= MAX_EXTENSION_LEN);
 };
 
 /// The length of a rendered path, root excluded, when every segment is at its
@@ -691,11 +693,16 @@ pub enum FileKind {
     OverlayChecksums,
     /// Greek block checksums, isolated from bars and vendor overlays.
     GreekChecksums,
+    /// The bar file's time index: slot occupancy and counts that turn a
+    /// timestamp into a row in a constant number of reads. Derived from the
+    /// bars, maintained by `BarFile::append`, never a record stream itself.
+    /// See [`crate::time_index`]. D-2329.
+    TimeIndex,
 }
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Bars,
         Self::Checksums,
         Self::Overlay,
@@ -703,6 +710,7 @@ impl FileKind {
         Self::Lock,
         Self::OverlayChecksums,
         Self::GreekChecksums,
+        Self::TimeIndex,
     ];
 
     /// The file extension, dot included.
@@ -716,6 +724,7 @@ impl FileKind {
             Self::Lock => ".lock",
             Self::OverlayChecksums => ".ovl.crc",
             Self::GreekChecksums => ".grk.crc",
+            Self::TimeIndex => ".tix",
         }
     }
 
@@ -727,7 +736,11 @@ impl FileKind {
             Self::Bars => Some(Self::Checksums),
             Self::Overlay => Some(Self::OverlayChecksums),
             Self::Greeks => Some(Self::GreekChecksums),
-            Self::Checksums | Self::Lock | Self::OverlayChecksums | Self::GreekChecksums => None,
+            Self::Checksums
+            | Self::Lock
+            | Self::OverlayChecksums
+            | Self::GreekChecksums
+            | Self::TimeIndex => None,
         }
     }
 }
