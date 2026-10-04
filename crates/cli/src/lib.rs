@@ -3232,22 +3232,19 @@ pub fn deliver(
 /// three took the attempt only from a browser-started run, so a terminal sweep's
 /// events carried none. The rung events already fell back to
 /// [`binding_attempt`]; this is that rule, written once (CE-49, D-2656).
-fn with_live_context<'a>(
-    event: telemetry::Event<'a>,
-    recording: Option<Recording<'a>>,
-) -> telemetry::Event<'a> {
-    live_context_over(event, recording, binding_attempt())
+fn with_live_context<'a>(event: &mut telemetry::Event<'a>, recording: Option<Recording<'a>>) {
+    live_context_over(event, recording, binding_attempt());
 }
 
 /// [`with_live_context`] with the fallback attempt passed in, so the rule is
 /// provable without installing a process-wide sink.
 fn live_context_over<'a>(
-    mut event: telemetry::Event<'a>,
+    event: &mut telemetry::Event<'a>,
     recording: Option<Recording<'a>>,
     fallback: Option<u64>,
-) -> telemetry::Event<'a> {
+) {
     if let Some(held) = recording {
-        event = event
+        *event = event
             .with("feed", held.feed)
             .with("underlying", held.underlying)
             .with("from_year", u64::from(held.from.0))
@@ -3256,9 +3253,8 @@ fn live_context_over<'a>(
             .with("to_month", u64::from(held.to.1));
     }
     if let Some(attempt) = recording.and_then(|held| held.attempt).or(fallback) {
-        event = event.with("attempt", attempt);
+        *event = event.with("attempt", attempt);
     }
-    event
 }
 
 /// Emits one structural event under an exact browser-attempt key when one was
@@ -18837,13 +18833,14 @@ fn grid_entered_event(
     validate: bool,
 ) -> telemetry::Event<'_> {
     let rung = recording.map_or("", |held| held.timeframe);
-    let event = telemetry::Event::info("cli.audit", "exit grid entered")
+    let mut event = telemetry::Event::info("cli.audit", "exit grid entered")
         .with("rung", rung)
         .with("execution_bars", u64::try_from(bars).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
         .with("cap", u64::try_from(cap).unwrap_or(u64::MAX))
         .with("validate", u64::from(validate));
-    with_live_context(event, recording)
+    with_live_context(&mut event, recording);
+    event
 }
 
 fn note_grid_entered(
@@ -18962,7 +18959,7 @@ fn grid_progress_event(
     candidates: usize,
 ) -> telemetry::Event<'_> {
     let rung = recording.map_or("", |held| held.timeframe);
-    let event = telemetry::Event::info("cli.audit", "exit grid progress")
+    let mut event = telemetry::Event::info("cli.audit", "exit grid progress")
         .with("rung", rung)
         .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX));
@@ -18970,7 +18967,8 @@ fn grid_progress_event(
     // and underlying, never the span or an attempt, so `live-progress.ts`
     // refused the WHOLE fold the moment pricing began, another run's
     // progress line included (CE-49, D-2656).
-    with_live_context(event, recording)
+    with_live_context(&mut event, recording);
+    event
 }
 
 /// The other half of the bracket, and the count the live view cannot carry.
@@ -18988,12 +18986,13 @@ fn grid_finished_event(
     trades: usize,
 ) -> telemetry::Event<'_> {
     let rung = recording.map_or("", |held| held.timeframe);
-    let event = telemetry::Event::info("cli.audit", "exit grid finished")
+    let mut event = telemetry::Event::info("cli.audit", "exit grid finished")
         .with("rung", rung)
         .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
         .with("grid_trades", u64::try_from(trades).unwrap_or(u64::MAX));
-    with_live_context(event, recording)
+    with_live_context(&mut event, recording);
+    event
 }
 
 fn note_grid_finished(
@@ -19060,10 +19059,11 @@ fn validation_stage_event<'a>(
     } else {
         "validation stage finished"
     };
-    let event = telemetry::Event::info("cli.audit", msg)
+    let mut event = telemetry::Event::info("cli.audit", msg)
         .with("stage", stage)
         .with("rung", rung);
-    with_live_context(event, recording)
+    with_live_context(&mut event, recording);
+    event
 }
 
 /// Emit one boundary of the validation stack. See [`validation_stage_event`].
@@ -21123,7 +21123,7 @@ mod tests {
             validation_stage_event(Some(recording), "bootstrap", false),
             // CE-49, D-2656: the progress line between them was missing here,
             // and it carried neither the span nor an attempt.
-            grid_progress_event(Some(recording), 5, 25),
+            crate::grid_progress_event(Some(recording), 5, 25),
         ];
 
         for event in &events {
@@ -21183,7 +21183,8 @@ mod tests {
         };
         let bare = |message| telemetry::Event::info("cli.audit", message);
         for message in ["exit grid progress", "validation stage entered"] {
-            let with_sink = live_context_over(bare(message), Some(recording), Some(77));
+            let mut with_sink = bare(message);
+            crate::live_context_over(&mut with_sink, Some(recording), Some(77));
             assert!(
                 with_sink
                     .fields()
@@ -21194,7 +21195,8 @@ mod tests {
                 attempt: Some(41),
                 ..recording
             };
-            let chosen = live_context_over(bare(message), Some(browser), Some(77));
+            let mut chosen = bare(message);
+            crate::live_context_over(&mut chosen, Some(browser), Some(77));
             assert!(
                 chosen
                     .fields()
@@ -22550,7 +22552,7 @@ mod tests {
     /// the page will not show its events.
     #[test]
     fn the_log_banner_promises_the_logs_page_only_for_the_directory_it_reads() {
-        let store = PathBuf::from("/srv/store");
+        let store = std::path::PathBuf::from("/srv/store");
         let read = super::log_banner(&store.join("logs").join("cli"), Some(&store));
         assert!(read.contains("so these events appear there"), "{read}");
         assert!(!read.contains("will NOT show"), "{read}");
