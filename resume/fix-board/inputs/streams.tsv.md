@@ -1,9 +1,9 @@
 job	state	pill	head	done	next	waits
-PR #74 CI	CI running	p-run	final/all-fixes 8f58d915	Merged the Zerodha pull order and both Fix Board web batches	Run 37226157475: static gates, tests, coverage, mutation shards, then ci-ok	CI
+PR #74 CI	CI running	p-run	final/all-fixes 8f58d915	W, static gates, tests, coverage green on 8f58d915	Re-run Gate 8 (runner lost), mutation shards, then merge dee61cfd	CI
 Lane 1-b	Working	p-run	43c5fe8 (GAP12-6, D-2100..2102)	GAP13-13 and GAP13-16 on PR #74; GAP12-6, min-hits warmup, gate 10/12 segments and merge rivals fixed on branches	Finish mutation tests, then one push to PR #74	Its own mutation tests
 Attack audit	Working	p-run	F5 and F7 on PR #74 (8c9313c)	F5 and F7 merged into PR #74; F6, F8 (the 12 documented-only items) and F10 running	Finish F6, F8, F10 and the pull/store/lake hunter	Its own fixes
 Codebase sweep	Working	p-run	audit-fix/w9 9e829f4 plus 5 local commits	78 of 91 on PR #74; the rest fixed on branches (status file has 123 rows)	OS-6, OS-7, OE-1 and the ci.yml shell-to-Rust port, then one push through the PR #74 thread	10 findings need a fact only you can give
 Zero-findings loop	Restarting	p-run	final/all-fixes-zero 1f4de71	Batch D-1769 plus test-teeth and ledger-tails merged; api-routes fixed (D-1970..D-1974)	Full test on staging, merge zero/api-routes, zero/numeric and zero/cli-edges-2, mutants, hand to PR #74	Its own fixes
 Audit helpers (4)	Waiting	p-wait	read-only	Concurrency 4 passes, crash/edge 4 passes, numbers 3 passes, tests/docs/security 3 passes	Next pass on the zero loop's new staging head	A new zero-loop staging head
 GDFL build (your Mac)	Restarting	p-run	local only, never pushed	All 4 parts built; census r2 repair, core-second r3 review, store-grid r3 review, gdfl-cm r2 repair	Regenerate state, relaunch the continue script, then join into feat/gdfl-1s	Your Mac being online
-Fix Board	Pausing	p-wait	fix-queue resume/fix-board	8 web findings on PR #74; 7 api/pull concurrency findings fixed on fixboard/pr74-conc-api	Validate and hand over the concurrency batch	The 5-hour limit reset (22:03 UTC)
+Fix Board	Live	p-ok	fix-queue resume/fix-board	8 web findings on PR #74; 7 api/pull concurrency findings handed over on fixboard/pr74-conc-api dee61cfd	Take the next unclaimed findings	PR 74 CI merging dee61cfd
