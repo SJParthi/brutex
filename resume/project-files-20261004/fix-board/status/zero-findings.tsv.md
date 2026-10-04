@@ -33,11 +33,11 @@ Z1-slice18-F2	found	-
 Z1-slice18-F3	found	-
 Z1-slice19-F1	found	-
 Z1-slice20-F1	branch	3f22aed8
-Z1-slice23-F1	fixing	-
+Z1-slice23-F1	branch	9c6284c2
 Z1-slice23-F2	branch	3f22aed8
-Z1-slice24-F1	fixing	-
-Z1-slice24-F2	fixing	-
-Z1-slice24-F3	fixing	-
+Z1-slice24-F1	branch	9c6284c2
+Z1-slice24-F2	branch	9c6284c2
+Z1-slice24-F3	branch	9c6284c2
 Z1-slice26-F1	found	-
 engine-1	found	-
 server1-1	found	-
@@ -62,7 +62,7 @@ apicache-1	found	-
 apicache-2	found	-
 telemetry-1	found	-
 store1-1	found	-
-store1-2	found	-
+store1-2	branch	ledger-tails (merged bde50c0c)
 store2-1	found	-
 pull1-1	found	-
 pull1-2	found	-
@@ -77,28 +77,28 @@ cli1-2	found	-
 cli1-3	found	-
 cli1-4	found	-
 cli1-5	found	-
-cli2-1	found	-
+cli2-1	branch	ledger-tails (merged bde50c0c)
 cli2-2	found	-
 cli2-3	found	-
 cli2-4	found	-
 cli2-5	found	-
 cli3-1	branch	3f22aed8
 cli3-2	found	-
-cli3-3	found	-
-pop1-1	found	-
-pop1-2	found	-
+cli3-3	branch	ledger-tails (merged bde50c0c)
+pop1-1	branch	ledger-tails (merged bde50c0c)
+pop1-2	branch	ledger-tails (merged bde50c0c)
 pop1-3	found	-
-pop1-4	found	-
-pop2-1	found	-
+pop1-4	branch	ledger-tails (merged bde50c0c)
+pop2-1	branch	ledger-tails (merged bde50c0c)
 pop2-2	found	-
 pop2-3	found	-
-pop2-4	found	-
-pop2-5	found	-
+pop2-4	branch	ledger-tails (merged bde50c0c)
+pop2-5	branch	ledger-tails (merged bde50c0c)
 pop2-6	found	-
 pop2-7	found	-
-sel-1	found	-
+sel-1	branch	ledger-tails (merged bde50c0c)
 search-1	branch	3f22aed8
-search-2	found	-
+search-2	branch	ledger-tails (merged bde50c0c)
 xcut-1	found	-
 xcut-2	found	-
 xcut-3	found	-
@@ -108,7 +108,7 @@ press-2	found	-
 recauto-1	found	-
 recauto-2	found	-
 sweep-1	found	-
-sweep-2	found	-
+sweep-2	branch	ledger-tails (merged bde50c0c)
 sweep-3	found	-
 rangeall-1	found	-
 rangeall-2	found	-
@@ -149,7 +149,7 @@ clock-2	found	-
 clock-3	found	-
 clock-4	found	-
 clock-5	found	-
-resources-1	found	-
+resources-1	branch	ledger-tails (merged bde50c0c)
 resources-2	found	-
 resources-3	found	-
 resources-4	found	-
@@ -180,28 +180,28 @@ P1-08-03	found	-
 P1-08-04	found	-
 P1-08-05	found	-
 P1-09-01	found	-
-P1-10-01	found	-
-P1-10-02	found	-
-P1-10-03	found	-
-P1-10-04	found	-
-P1-11-01	found	-
-P1-11-02	found	-
-P1-11-03	found	-
-P1-12-01	found	-
-P1-12-02	found	-
-P1-12-03	found	-
-P1-12-04	found	-
-P1-12-05	found	-
-P1-13-01	found	-
-P1-13-02	found	-
-P1-13-03	found	-
-P1-14-01	found	-
-P1-14-02	found	-
-P1-14-03	found	-
-P1-14-04	found	-
-P1-14-05	found	-
-P1-14-06	found	-
-P1-14-07	found	-
+P1-10-01	branch	0ea46614 (merged bde50c0c)
+P1-10-02	branch	0ea46614 (merged bde50c0c)
+P1-10-03	branch	0ea46614 (merged bde50c0c)
+P1-10-04	branch	0ea46614 (merged bde50c0c)
+P1-11-01	branch	0ea46614 (merged bde50c0c)
+P1-11-02	branch	0ea46614 (merged bde50c0c)
+P1-11-03	branch	0ea46614 (merged bde50c0c)
+P1-12-01	branch	0ea46614 (merged bde50c0c)
+P1-12-02	branch	0ea46614 (merged bde50c0c)
+P1-12-03	branch	0ea46614 (merged bde50c0c)
+P1-12-04	branch	0ea46614 (merged bde50c0c)
+P1-12-05	branch	0ea46614 (merged bde50c0c)
+P1-13-01	branch	0ea46614 (merged bde50c0c)
+P1-13-02	branch	0ea46614 (merged bde50c0c)
+P1-13-03	branch	0ea46614 (merged bde50c0c)
+P1-14-01	branch	0ea46614 (merged bde50c0c)
+P1-14-02	branch	0ea46614 (merged bde50c0c)
+P1-14-03	branch	0ea46614 (merged bde50c0c)
+P1-14-04	branch	0ea46614 (merged bde50c0c)
+P1-14-05	branch	0ea46614 (merged bde50c0c)
+P1-14-06	branch	0ea46614 (merged bde50c0c)
+P1-14-07	branch	0ea46614 (merged bde50c0c)
 P1-15-01	branch	3f22aed8
 P1-15-02	branch	3f22aed8
 P1-15-03	branch	3f22aed8
@@ -218,10 +218,10 @@ P1-16-05	branch	3f22aed8
 P1-16-06	branch	3f22aed8
 P1-16-07	branch	3f22aed8
 P1-16-08	branch	3f22aed8
-P1-17-01	found	-
-P1-17-02	found	-
-P1-17-03	found	-
-P1-17-04	found	-
+P1-17-01	branch	0ea46614 (merged bde50c0c)
+P1-17-02	branch	0ea46614 (merged bde50c0c)
+P1-17-03	branch	0ea46614 (merged bde50c0c)
+P1-17-04	branch	0ea46614 (merged bde50c0c)
 P1-18-01	branch	dcdf7a6b
 P1-18-02	branch	dcdf7a6b
 P1-18-03	branch	dcdf7a6b
@@ -263,21 +263,21 @@ W3-runner2-7	found	-
 W3-runner5-0	found	-
 W1-api5-4	found	-
 CE-2	branch	3f22aed8
-CE-3	fixing	-
-CE-4	fixing	-
-CE-5	fixing	-
-CE-6	fixing	-
-CE-7	fixing	-
-CE-8	fixing	-
+CE-3	branch	ledger-tails (merged bde50c0c)
+CE-4	branch	9c6284c2
+CE-5	branch	9c6284c2
+CE-6	branch	9c6284c2
+CE-7	branch	9c6284c2
+CE-8	branch	9c6284c2
 CE-9	found	-
-CE-10	fixing	-
-CE-11	fixing	-
+CE-10	branch	9c6284c2
+CE-11	branch	ledger-tails (merged bde50c0c)
 CE-12	found	-
 CE-13	found	-
-CE-14	fixing	-
-CE-15	fixing	-
-CE-16	fixing	-
-CE-17	fixing	-
+CE-14	branch	9c6284c2
+CE-15	branch	9c6284c2
+CE-16	branch	9c6284c2
+CE-17	branch	9c6284c2
 CE-18	found	-
 P2-01-01	branch	77448192
 P2-01-02	branch	77448192
@@ -290,42 +290,42 @@ CE-23	branch	092a693b
 CE-24	branch	092a693b
 CE-25	branch	724e4a61
 CE-26	branch	724e4a61
-CE-27	fixing	-
-CE-28	fixing	-
-CE-29	fixing	-
-CE-30	fixing	-
-CE-31	fixing	-
-CE-32	fixing	-
-CE-33	fixing	-
-CE-34	fixing	-
-CE-35	fixing	-
-ledgers-1	fixing	-
-ledgers-2	fixing	-
-ledgers-3	fixing	-
-locks-1	fixing	-
-locks-2	fixing	-
-locks-3	fixing	-
-P3-01-01	found	-
+CE-27	branch	9c6284c2
+CE-28	branch	9c6284c2
+CE-29	branch	9c6284c2
+CE-30	branch	9c6284c2
+CE-31	branch	ledger-tails (merged bde50c0c)
+CE-32	branch	9c6284c2
+CE-33	branch	9c6284c2
+CE-34	branch	9c6284c2
+CE-35	branch	9c6284c2
+ledgers-1	branch	9c6284c2
+ledgers-2	branch	9c6284c2
+ledgers-3	branch	9c6284c2
+locks-1	branch	9c6284c2
+locks-2	branch	9c6284c2
+locks-3	branch	9c6284c2
+P3-01-01	branch	9c6284c2
 P3-01-02	found	-
 P3-01-03	found	-
 P3-01-04	found	-
-P3-01-05	fixing	-
+P3-01-05	branch	9c6284c2
 P3-02-01	found	-
-P3-02-02	fixing	-
-P3-02-03	fixing	-
-P3-02-04	fixing	-
-P3-02-05	fixing	-
+P3-02-02	branch	9c6284c2
+P3-02-03	branch	9c6284c2
+P3-02-04	branch	9c6284c2
+P3-02-05	branch	9c6284c2
 P3-02-06	found	-
 P3-02-07	found	-
 CE-19	found	-
-CE-21	fixing	-
+CE-21	branch	9c6284c2
 CE-20	found	-
 CE-22	branch	3f22aed8
-CE-36	fixing	-
-CE-37	fixing	-
-CE-38	fixing	-
-CE-39	fixing	-
-CE-40	fixing	-
-CE-41	fixing	-
-p3floor-1	fixing	-
-p3floor-2	fixing	-
+CE-36	branch	9c6284c2
+CE-37	branch	9c6284c2
+CE-38	branch	9c6284c2
+CE-39	branch	9c6284c2
+CE-40	branch	9c6284c2
+CE-41	branch	9c6284c2
+p3floor-1	branch	9c6284c2
+p3floor-2	branch	9c6284c2

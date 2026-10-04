@@ -14,4 +14,6 @@ Per-finding ledger (v12, 13:35 UTC 2026-10-03; user said "nothing should ever be
 - Shared snapshot: /mnt/project-files/fix-board/ledger-snapshot.json. Threads may write per-item status to /mnt/project-files/fix-board/status/<thread>.tsv (id, state, commit, note); the builder applies them.
 - If the scratchpad is lost, rebuild the builder from this description.
 
+State at 22:44 UTC 2026-10-03 (board v24): every job paused at 93% weekly usage. PR #74 head b23976f, CI red on one telemetry sink lock test (sink.rs:4116). 819 findings: 382 on PR, 161 on a branch or being fixed, 276 waiting. Refresh routine trig_01LoE9DZ1fHXjfnjP6ZJN8eU disabled. Builder scripts live only in the old session's scratchpad; on a new account rebuild them from this description. Gotcha: Python %-formatting breaks on strings containing "90%".
+
 Related: [[audit-20261003-state]], [[resume-20261003-pr74-state]].

@@ -18,3 +18,5 @@ Redo of the 55 lane 1-b findings that the 2026-10-03 audit found NOT fixed on fi
 Fix Board: per-finding state lives in /mnt/project-files/fix-board/status/lane1.tsv (id, state, commit; state = found|fixing|branch|pushed|green). Update it when a group merges, when the one push lands on final/all-fixes (pushed), and when CI is green (green).
 
 State 2026-10-03 18:45 UTC: staging final/all-fixes-00bbns (90de0cc) has A, C, D, E merged and verified (fmt, clippy, tests, all 28 static gates); B not merged (follow-ups); mutation testing not done; nothing pushed to final/all-fixes yet. Full resume: fix-queue resume/RESUME-20261003.md section lane1b-redo.
+
+FINAL 2026-10-03 20:15 UTC: all 5 groups merged on staging bacd5a2 (pushed); fmt+clippy clean; full test cut by timeout (1,374 pass, 0 fail). Nothing on final/all-fixes yet. Next steps in fix-queue resume/RESUME-20261003.md section lane1b-redo.

@@ -13,14 +13,14 @@ Full resume state lives on the fix-queue branch, under resume/workspace-audit-20
 - STATUS.md: all 91 findings.
 - QUEUE.md, FIXRULES2.md.
 
-State as of 2026-10-03 18:55 UTC:
-- 71 of 91 fixed.
-- On PR #74: 0cab319, which carries a21d031 (D-1520..D-1592).
-- w6 is done on origin audit-fix/w6 @ 700e644, not yet pushed to PR #74.
-- w7 (cli) is in progress, w8 is WIP (d2ed52d, untested), and w9 (features) is not started.
+Final state at 2026-10-03 20:12 UTC (stopped at 93% weekly usage):
+- 78 of 91 fixed; 68 on PR #74 (0cab319).
+- 10 done on branches but not pushed: audit-fix/w6 @ 700e644, w7 @ 858c8bb, and w8 @ c6d03c6. w8's final checks were not confirmed.
+- w9 (gaps-5, gaps-10, gaps-11) is not started.
 - Per-finding board file: /mnt/project-files/fix-board/status/sweep.tsv.
 
 Blocked, and code cannot fix them:
+- No owner decision on wiring the superseded modules: gaps-1, gaps-3.
 - No charter source: gaps-6 threshold, gaps-7, gaps-8, hunt-costs-5, hunt-runner-5.
 - Owner setting: hunt-ci-1.
 - Operator data: testgaps-7.
