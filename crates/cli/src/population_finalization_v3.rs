@@ -31,11 +31,6 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "the append-only successor exposes authenticated projection fields reserved for the downstream integration still blocked on Population V4"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -1188,6 +1183,14 @@ impl PopulationFinalizationV3Authority {
     ///
     /// Refuses an out-of-range ordinal or any stale, replaced, corrupt,
     /// reordered or crosswired retained source.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) fn row_projection(
         &mut self,
         global_sequence: u64,
@@ -2144,6 +2147,14 @@ impl PopulationFinalizationV3Ledger {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     fn authenticated_row(
         &mut self,
         receipt: PopulationFinalizationV3StructuralReceipt,

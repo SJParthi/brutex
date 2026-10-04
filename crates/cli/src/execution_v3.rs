@@ -35,10 +35,6 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "Execution V3 remains crate-private until Selection V5 consumes its source-retaining production capability"
-)]
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -2575,6 +2571,11 @@ impl ExecutionV3Ledger {
         self.require_unchanged()
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     fn authenticated_disposition(
         &mut self,
         receipt: ExecutionV3StructuralReceipt,
@@ -2704,6 +2705,11 @@ impl ExecutionV3Authority {
         self.receipt
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) fn authenticated_disposition(
         &mut self,
         global_sequence: u64,
@@ -2784,6 +2790,11 @@ impl ExecutionV3SuccessorDisposition {
     }
 
     #[must_use]
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn parameter_id(&self) -> [u8; 32] {
         self.record.parameter_id
     }

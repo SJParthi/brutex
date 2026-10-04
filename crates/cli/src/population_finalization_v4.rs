@@ -22,11 +22,6 @@
 //! times this, so the shape above is read from the source rather
 //! than measured. `CLAUDE.md` §3 rule 6.
 
-#![expect(
-    dead_code,
-    reason = "the version-separated Finalization V4 authority is the typed Population successor seam and awaits its non-test all-rung caller"
-)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -1677,30 +1672,74 @@ impl PopulationFinalizationV4StructuralReceipt {
         self.completion_id
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_block_id(self) -> [u8; 32] {
         self.admission_block_id
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn admission_completion_id(self) -> [u8; 32] {
         self.admission_completion_id
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn nifty_terminal(self) -> AdmissionV4FamilyTerminal {
         self.nifty_terminal
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn banknifty_terminal(self) -> AdmissionV4FamilyTerminal {
         self.banknifty_terminal
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn nifty_candidate_count(self) -> u64 {
         self.nifty_candidate_count
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn banknifty_candidate_count(self) -> u64 {
         self.banknifty_candidate_count
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn decision_count(self) -> u64 {
         self.decision_count
     }
@@ -1713,6 +1752,11 @@ pub(crate) struct PopulationFinalizationV4SourceProjection {
 }
 
 impl PopulationFinalizationV4SourceProjection {
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn finalization_id(&self) -> [u8; 32] {
         self.source.finalization_id
     }
@@ -1797,6 +1841,14 @@ impl PopulationFinalizationV4SourceProjection {
         self.source.policy_digest
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn candidate_count(&self) -> u64 {
         self.source.candidate_count
     }
@@ -1995,10 +2047,23 @@ impl PopulationFinalizationV4DecisionProjection {
         self.record.statistics_sequence
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn family(&self) -> AdmissionV4Family {
         self.record.family
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn family_sequence(&self) -> u64 {
         self.record.family_sequence
     }
@@ -2011,10 +2076,20 @@ impl PopulationFinalizationV4DecisionProjection {
         self.record.admission_decision_id
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn candidate_semantic_id(&self) -> [u8; 32] {
         self.record.candidate_semantic_id
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn candidate_row_digest(&self) -> [u8; 32] {
         self.record.candidate_row_digest
     }
@@ -2043,10 +2118,23 @@ impl PopulationFinalizationV4DecisionProjection {
         &self.record.runner_decision
     }
 
+    #[expect(
+        dead_code,
+        reason = "no caller, production or test, reaches this item; narrowed from a
+                  module-wide expect so a NEW dead item in this module warns (CE-95, D-1956)"
+    )]
     pub(crate) const fn comparison_values(&self) -> AdmissionEvidenceValuesV1 {
         self.comparison_values
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn verdict(&self) -> AdmissionVerdictV1 {
         self.verdict
     }
@@ -2941,6 +3029,14 @@ pub(crate) struct CommittedStoredPopulationFinalizationV4 {
 }
 
 impl CommittedStoredPopulationFinalizationV4 {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) const fn structural_receipt(&self) -> PopulationFinalizationV4StructuralReceipt {
         self.finalization.receipt
     }
@@ -2975,6 +3071,14 @@ pub(crate) enum PopulationFinalizationV4Commit {
 }
 
 impl PopulationFinalizationV4Commit {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reached only from tests; narrowed from a module-wide expect so a
+                      NEW dead item in this module warns (CE-95, D-1956)"
+        )
+    )]
     pub(crate) fn authority_mut(&mut self) -> &mut CommittedStoredPopulationFinalizationV4 {
         match self {
             Self::Written(value) | Self::Reused(value) => value,
