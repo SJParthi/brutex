@@ -68,3 +68,11 @@ Main thread: D-1930..D-1949 (D-1930 used). D-1771..1799 are all used. The helper
   6. Hand the one commit to the PR 74 CI thread. Do not push final/all-fixes.
 - The docs-batch helper (D-1950..1969) is still running on zero/docs-batch.
 - Disk: about 5 GB free. Delete /home/claude/target-net and the agent worktree targets if more is needed.
+
+## Update 19:40 UTC (docs-batch done)
+- zero/docs-batch pushed at 768d742d (base 502f0171), D-1955..D-1969, docs/04 DB-01..DB-08.
+  Covers P17-02..21, P18-01..05, P14-01..06, p19num-1/2, p16num-2/3, CE-95..97, stride and FIELD_SUM also-noted items.
+- It raises gate 11 pricing.rs 22 -> 23 in ci.yml; expect a ci.yml conflict against zero-work's gate edits (union both).
+- First step at resume: merge zero/docs-batch into zero-work, then do the PR 74 merge.
+- Flagged, not fixed: Indices form note says "never swept"; api/src/server.rs has 3 strings saying single stocks are never swept.
+- Fix Board says runs-1, recovery-1/2, apicache-1, sweep-1, pull2-1 and census-1 are on fixboard/pr74-conc-api dee61cfd, and conc18-3/4/5 and p14num-2 are on #74 8f58d915.
