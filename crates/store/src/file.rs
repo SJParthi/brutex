@@ -145,7 +145,7 @@ use std::fs::{self, File, TryLockError};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::format::{
     Bar, FormatError, GREEK_LEN, HEADER_LEN, MAX_SLOT_COUNT, OVERLAY_LEN, RECORD_LEN, Row,
@@ -179,6 +179,7 @@ use crate::flock::Flock;
 use crate::header::Header;
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath, YearMonth};
+use crate::time_index::{Entry, Fault, Geometry, Held, Why};
 
 /// The largest header region the format family can declare, as a length.
 ///
@@ -688,6 +689,15 @@ pub enum StoreError {
         /// The file's timeframe, from its header.
         timeframe_secs: u32,
     },
+    /// The month's `.tix` time index could not be kept in step with an
+    /// append, for the reason given. Refused before the header slot, so the
+    /// bars it would have described are not committed. D-2329.
+    TimeIndex {
+        /// The `.tix` file.
+        path: PathBuf,
+        /// What went wrong, as `crate::time_index::Why` says it.
+        reason: String,
+    },
     /// A bar file whose header region is gone while its checksum sidecar
     /// proves records were committed. audit-20261003 attackdata-1, D-1520.
     ///
@@ -879,6 +889,11 @@ fn write_off_grid(
     )
 }
 
+/// The [`StoreError::TimeIndex`] sentence. See [`write_not_a_bar_path`].
+fn write_time_index(f: &mut fmt::Formatter<'_>, path: &Path, reason: &str) -> fmt::Result {
+    write!(f, "{}: time index refused: {reason}", path.display())
+}
+
 /// The [`StoreError::NotABarPath`] sentence.
 ///
 /// Lifted out for [`write_impossible_count`]'s reason and no other: that match
@@ -1056,6 +1071,7 @@ impl fmt::Display for StoreError {
                 ts_micros,
                 timeframe_secs,
             } => write_off_grid(f, *at, *ts_micros, *timeframe_secs),
+            Self::TimeIndex { path, reason } => write_time_index(f, path, reason),
             Self::CommittedRecordsLost {
                 path,
                 sidecar,
@@ -1238,6 +1254,11 @@ pub struct BarFile {
     /// month and the header timeframe; [`Self::append`] asks it of every bar.
     /// D-0915.
     admission: Admission,
+    /// The month's `.tix` time index, for a BAR file opened through a door
+    /// that knows its path; `None` for an overlay, a greeks file and the
+    /// in-module test harness, whose lookups bisect as they always have.
+    /// D-2329.
+    tix: Option<Tix>,
     /// The advisory lock, held for its **drop** and never read again.
     ///
     /// Underscored because that is what it is: dropping this guard is what
@@ -1250,6 +1271,45 @@ pub struct BarFile {
     /// of the descriptor is open — one inherited by a child another thread
     /// spawned is enough. The guard unlocks explicitly. D-0693.
     _lock: Option<Flock<File>>,
+}
+
+/// One month's `.tix` time index, as a handle holds it. D-2329.
+///
+/// `state` is decided ONCE per handle: at open for the writer, which must
+/// keep the index in step with every append, and at the first lookup for a
+/// reader, so a sweep that opens a month and never asks for a timestamp pays
+/// nothing for it. The reader holds the month's shared lock for its whole
+/// life, so the index it decided on cannot change under it.
+#[derive(Debug)]
+struct Tix {
+    /// `<yyyy-mm>.tix` beside the `.bin`, composed by `crate::path`.
+    path: PathBuf,
+    /// The slots this month's path and header imply.
+    geometry: Geometry,
+    /// Ready, or bisecting for a named reason.
+    state: OnceLock<TixState>,
+}
+
+/// Whether a handle's lookups go through its index.
+#[derive(Debug)]
+enum TixState {
+    /// The index is open and describes the committed bars.
+    Ready(File),
+    /// It does not, for this reason, and every lookup bisects (D-1434). The
+    /// reason was written to the log when this state was entered.
+    Bisecting(Why),
+}
+
+/// How a handle answers [`BarFile::first_at_or_after`]. D-2329.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TimeLookup {
+    /// Through the month's `.tix` index: at most one entry read and one bar
+    /// read per lookup, whatever the month holds.
+    Indexed,
+    /// By the D-1434 bisection, for the reason named — which this handle has
+    /// also written to the log as a `store.tix` warning.
+    Bisection(Why),
 }
 
 /// The only geometry a `.ovl` file may have.
@@ -1495,6 +1555,7 @@ impl BarFile {
             bars,
             bars_path,
             Some(path.with_file(checksum_kind).to_path_buf(root)),
+            time_index_path(root, path),
             Some(lock),
             len,
             symbol_id,
@@ -1593,6 +1654,7 @@ impl BarFile {
             bars,
             bars_path,
             Some(path.with_file(checksum_kind).to_path_buf(root)),
+            time_index_path(root, path),
             lock,
             len,
             symbol_id,
@@ -1634,6 +1696,7 @@ impl BarFile {
             bars,
             bars_path,
             Some(path.with_file(FileKind::Checksums).to_path_buf(root)),
+            time_index_path(root, path),
             Some(lock),
             len,
             symbol_id,
@@ -1689,6 +1752,10 @@ impl BarFile {
         // drifts. `None` at the doors that have no `StorePath` to ask -- only
         // the test harness.
         crc_path: Option<PathBuf>,
+        // WHERE THE TIME INDEX WOULD BE, for a bar file and nothing else,
+        // composed by `crate::path` exactly as the sidecar path is. `None`
+        // for an overlay or greeks file and for the in-module harness. D-2329.
+        tix_path: Option<PathBuf>,
         lock: Option<Flock<File>>,
         len: u64,
         symbol_id: u32,
@@ -1935,7 +2002,12 @@ impl BarFile {
         } else {
             None
         };
-        Ok(Self {
+        let tix = tix_path.map(|path| Tix {
+            path,
+            geometry: Geometry::new(month, timeframe_secs, symbol_id),
+            state: OnceLock::new(),
+        });
+        let mut file = Self {
             bars,
             bars_path,
             layout,
@@ -1951,8 +2023,15 @@ impl BarFile {
             crc_path: if sealed { crc_path } else { None },
             verified: Mutex::new(VerifiedBlock::EMPTY),
             admission: Admission::new(month, timeframe_secs),
+            tix,
             _lock: lock,
-        })
+        };
+        // THE WRITER KEEPS THE INDEX IN STEP, SO IT DECIDES AT OPEN. A reader
+        // decides at its first lookup instead (`Self::tix_state`). D-2329.
+        if access == Access::Write {
+            file.index_on_open()?;
+        }
+        Ok(file)
     }
 
     /// Seals every block an append touched, into the checksum sidecar.
@@ -2266,7 +2345,10 @@ impl BarFile {
                 // month refused the whole window as a vendor restating history
                 // — for bars it already held, byte for byte. Only a re-pull
                 // that happened to end at the file's last record could answer.
-                let located = already_stored(batch, first_ts, self.header.n_valid, |index| {
+                // LOCATED BY THE TIME INDEX when the month has one (D-2329):
+                // one entry read instead of the bisection.
+                let at = self.locate::<R>(first_ts)?;
+                let located = already_stored(batch, at, self.header.n_valid, |index| {
                     self.read_row::<R>(index)
                 })?;
                 if let Some(first_index) = located {
@@ -2317,6 +2399,14 @@ impl BarFile {
         let first_index = self.header.n_valid;
         let at = refused(self.layout.offset_of(first_index), &self.bars_path)?;
 
+        // THE TIME INDEX'S SHARE OF THIS APPEND IS COMPUTED BEFORE ANY BYTE IS
+        // WRITTEN, because it can refuse or retire the index: a bar in the slot
+        // of the bar before it removes the `.tix` (D-2330), and either one
+        // after the records landed would leave an index claiming bars it does
+        // not hold.
+        // In memory, plus one entry read. D-2329.
+        let indexed = self.index_batch(batch)?;
+
         // THE OLD TAIL BLOCK IS PROVED BEFORE ANYTHING IS WRITTEN. D-0910.
         //
         // This forward path reads no record, and `seal_committed` below
@@ -2355,6 +2445,16 @@ impl BarFile {
         // It is the argument `Header::commit` already makes for records before
         // header, extended by one step.
         self.seal_committed(first_index, commit.header.n_valid)?;
+
+        // THE TIME INDEX, AFTER THE CHECKSUMS AND BEFORE THE HEADER — step 3b
+        // of `docs/02-store-format.md` §5. Written and synced ahead of the slot
+        // that commits the bars it describes, so a committed bar is never
+        // missing from the index; a crash here leaves entries AHEAD of the
+        // commit, which `time_index::resume` masks off and the next append
+        // overwrites. D-2329.
+        if let Some((bucket, entries)) = &indexed {
+            self.write_entries(*bucket, entries)?;
+        }
 
         // Step 4 and step 5: one write of one self-checked 64-byte unit, into
         // the slot that does not hold the previous commit.
@@ -2432,34 +2532,338 @@ impl BarFile {
     /// `n_valid` when every bar is older, which is the correct answer for a
     /// window starting past the end of the month rather than an error.
     ///
-    /// # Why this is public now
+    /// # A constant number of reads, through the time index — D-2329
     ///
-    /// The bisection has existed since the append path needed it, privately.
-    /// `/bars.json` meanwhile read THE WHOLE MONTH and applied the day window
-    /// afterwards — an O(1) audit measured the shape as "reads every bar,
-    /// filters after", so a one-day query against a one-minute month read
-    /// ~8,250 records, one `pread` each, to return ~375.
+    /// When the month's `.tix` index describes its committed bars, the lookup
+    /// costs at most ONE 16-byte entry read and ONE bar read, whatever the
+    /// month holds: the header's first and last stamps answer a timestamp
+    /// outside them with no read at all, and inside them the entry for the
+    /// timestamp's slot gives the row by a popcount (`crate::time_index`). The
+    /// bar read happens only on the daily rung, for a timestamp strictly
+    /// inside a day that holds a bar; an intraday lookup never reads one.
+    /// The read count is asserted at every month size up to the one-second
+    /// ceiling by `store::time_index::every_lookup_reads_at_most_one_entry_and_one_bar`,
+    /// and the answer is checked against the bisection on real files by
+    /// `store::tix::the_index_answers_every_timestamp_exactly_as_the_bisection_does`.
+    /// C-TIX-01 and C-TIX-02 time it. The first lookup through a READ handle
+    /// also opens the index and reads its header and two entries, once.
     ///
-    /// Bars in a file are strictly increasing by timestamp — the writer refuses
-    /// otherwise, which is what the bisection has always rested on — so the
-    /// window start is addressable in `log2(n_valid)` reads rather than found by
-    /// walking. At 8,250 bars that is fourteen.
+    /// # The legacy path, and it is loud
     ///
-    /// **The probe count is proven; the time is not.** At most
-    /// `ceil(log2(n_valid + 1))` record reads — fourteen at the one-minute
-    /// month ceiling of 31 × 375 = 11,625 — asserted by
+    /// A month with no usable index — written before D-2329, or by a writer
+    /// that does not maintain one, or one whose index is damaged — is answered
+    /// by the D-1434 bisection: at most `ceil(log2(n_valid + 1))` record reads,
+    /// asserted by
     /// `store::file::first_at_or_after_never_probes_more_than_the_bisection_height`.
-    /// Each read may also pay one cold block verify (up to 4,088 bytes read,
-    /// a 4-byte sidecar read, a CRC-32C) when its block is not the one
-    /// cached. No bench times the lookup, so its wall-clock cost is
-    /// UNVERIFIED. `docs/06-limits.md`, D-1434; `CLAUDE.md` §3 rule 6.
+    /// The handle writes one `store.tix` warning naming why, and
+    /// [`Self::time_lookup`] reports which path it takes. A writer open of such
+    /// a month builds the index (`docs/02-store-format.md` §8.1).
     ///
     /// # Errors
     ///
     /// Anything a record read can fail with. A refusal means the file could not
     /// be addressed, not that the window is empty.
     pub fn first_at_or_after(&self, ts: i64) -> Result<u64, StoreError> {
-        first_at_or_after::<Bar, _>(self.header.n_valid, ts, |index| self.read_record(index))
+        self.locate::<Bar>(ts)
+    }
+
+    /// Which path [`Self::first_at_or_after`] takes on this handle, and why.
+    ///
+    /// Asking decides it, for a read handle that has not looked anything up
+    /// yet — the same once-per-handle decision a lookup makes, warning
+    /// included when the answer is the bisection.
+    #[must_use]
+    pub fn time_lookup(&self) -> TimeLookup {
+        match self.tix_state() {
+            None => TimeLookup::Bisection(Why::NotBars),
+            Some(TixState::Ready(_)) => TimeLookup::Indexed,
+            Some(TixState::Bisecting(why)) => TimeLookup::Bisection(why.clone()),
+        }
+    }
+
+    /// Time to row for any record kind this handle holds: the index when it
+    /// is ready, the D-1434 bisection otherwise. Every locate in this module
+    /// goes through here — the public lookup, `append`'s re-offer check and
+    /// its overlap diagnosis — so none of them can drift onto the slow path
+    /// while another stays on the fast one.
+    fn locate<R: Row>(&self, ts: i64) -> Result<u64, StoreError> {
+        let n_valid = self.header.n_valid;
+        let bisect = || first_at_or_after(n_valid, ts, |index| self.read_row::<R>(index));
+        // An empty month answers 0 by either path and reads nothing; asking
+        // nothing of the index keeps an empty reader silent.
+        if n_valid == 0 {
+            return bisect();
+        }
+        let Some(tix) = self.tix.as_ref() else {
+            return bisect();
+        };
+        let TixState::Ready(index) = self.decided(tix) else {
+            return bisect();
+        };
+        match crate::time_index::locate(
+            &tix.geometry,
+            Held::of(&self.header),
+            ts,
+            |bucket| read_entry(index, &tix.path, bucket),
+            |row| self.read_row::<R>(row).map(|found| found.stamp()),
+        ) {
+            Ok(row) => Ok(row),
+            Err(Fault::Bar(why)) => Err(why),
+            // THE INDEX FAILED THIS ONE LOOKUP — an entry that no longer reads
+            // or no longer checks. The answer still comes back, by the slower
+            // path, and the reason is written down. `CLAUDE.md` §4.
+            Err(Fault::Index(why)) => {
+                note_lookup_bisects(&tix.path, &why);
+                bisect()
+            }
+        }
+    }
+
+    /// This handle's index state, deciding it for a reader on first use.
+    fn tix_state(&self) -> Option<&TixState> {
+        self.tix.as_ref().map(|tix| self.decided(tix))
+    }
+
+    /// `tix.state`, decided once: a writer's was set at open; a reader's is
+    /// decided here, by opening the `.tix` read-only and confirming it.
+    fn decided<'t>(&self, tix: &'t Tix) -> &'t TixState {
+        tix.state.get_or_init(|| {
+            let index = match open_read(&tix.path) {
+                Ok(index) => index,
+                Err(why) if why.is_absent() => return bisecting(&tix.path, Why::Absent),
+                Err(why) => {
+                    return bisecting(&tix.path, Why::Unreadable(why.refusal(&tix.path)));
+                }
+            };
+            match self.confirm_index(&index, tix) {
+                Ok(()) => TixState::Ready(index),
+                Err(why) => bisecting(&tix.path, why),
+            }
+        })
+    }
+
+    /// Whether `index` is this month's index and describes its committed bars:
+    /// the header against the geometry, then `time_index::confirm`. One
+    /// 64-byte read and two 16-byte reads.
+    fn confirm_index(&self, index: &File, tix: &Tix) -> Result<(), Why> {
+        let mut head = [0u8; 64];
+        read_fully(index, &tix.path, 0, &mut head).map_err(|why| match why {
+            StoreError::ShortRead { .. } => Why::Header("it is shorter than its header"),
+            other => Why::Unreadable(other),
+        })?;
+        tix.geometry.check(&head)?;
+        crate::time_index::confirm(&tix.geometry, Held::of(&self.header), |bucket| {
+            read_entry(index, &tix.path, bucket)
+        })
+    }
+
+    /// The writer's half of opening: create the `.tix` if absent, and leave
+    /// this handle with an index that describes the committed bars — or with
+    /// none, said out loud.
+    ///
+    /// An empty month gets a header and no entries. A month with records
+    /// keeps its index when `confirm_index` accepts it, at the cost of three
+    /// reads; otherwise the index is rebuilt from the bars, once, which reads
+    /// every committed record (`Self::rebuild_index`). That is the explicit
+    /// migration path for a month written before D-2329 or by another writer:
+    /// a writer open, through this door.
+    fn index_on_open(&mut self) -> Result<(), StoreError> {
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(());
+        };
+        let existed = matches!(fs::symlink_metadata(&tix.path), Ok(meta) if meta.is_file());
+        let index = fault(open_rw(&tix.path), &tix.path, Action::Open)?;
+        if !existed {
+            fsync_dir(tix.path.parent().unwrap_or(&tix.path))?;
+        }
+        let state = if self.header.n_valid == 0 {
+            let fresh = fault(index.metadata(), &tix.path, Action::Measure)?.len()
+                == crate::time_index::HEADER_LEN
+                && self.confirm_index(&index, tix).is_ok();
+            if !fresh {
+                write_index(&index, tix, &[])?;
+            }
+            TixState::Ready(index)
+        } else {
+            match self.confirm_index(&index, tix) {
+                Ok(()) => TixState::Ready(index),
+                Err(why) => self.rebuild_index(index, tix, &why)?,
+            }
+        };
+        self.set_tix_state(state);
+        Ok(())
+    }
+
+    /// Replaces this handle's index state — the writer's, at open or after a
+    /// rebuild an append needed.
+    fn set_tix_state(&mut self, state: TixState) {
+        if let Some(tix) = self.tix.as_mut() {
+            tix.state = OnceLock::from(state);
+        }
+    }
+
+    /// Rebuilds `index` from every committed bar, because `why`.
+    ///
+    /// O(`n_valid`) record reads, through the verified read path, and paid
+    /// once per month: the writer that rebuilt it keeps it in step from then
+    /// on. Logged as a `store.tix` info line naming the reason.
+    ///
+    /// When the bars cannot be indexed — one shares a slot with the bar before
+    /// it, lies off its rung's grid or outside the month, or does not read —
+    /// no index is left
+    /// claiming them: the `.tix` is removed, the handle bisects, and the
+    /// reason is logged as a warning. The month stays openable and appendable,
+    /// exactly as it was before D-2329.
+    fn rebuild_index(&self, index: File, tix: &Tix, why: &Why) -> Result<TixState, StoreError> {
+        let held = Held::of(&self.header);
+        let stamps =
+            (0..held.n_valid).map(|row| self.read_row::<Bar>(row).map(|bar| bar.ts_micros));
+        let built = crate::time_index::extend(&tix.geometry, 0, Entry::EMPTY, 0, stamps).and_then(
+            |entries| {
+                // THE BARS AND THE HEADER MUST AGREE about which bars are
+                // first and last, or the lookup's two no-read answers would
+                // contradict the entries built here.
+                crate::time_index::confirm(&tix.geometry, held, |bucket| {
+                    usize::try_from(bucket)
+                        .ok()
+                        .and_then(|at| entries.get(at).copied())
+                        .ok_or(Why::Entry { bucket })
+                })
+                .map(|()| entries)
+            },
+        );
+        match built {
+            Ok(entries) => {
+                write_index(&index, tix, &entries)?;
+                note_index_built(&tix.path, why, held.n_valid, len_u64(entries.len()));
+                Ok(TixState::Ready(index))
+            }
+            Err(cannot) => {
+                drop(index);
+                remove_index(&tix.path)?;
+                Ok(bisecting(&tix.path, cannot))
+            }
+        }
+    }
+
+    /// The entries this append adds to the index, and the bucket they start
+    /// at — `None` when this handle keeps no index.
+    ///
+    /// One entry read (`time_index::resume`) and one pass over the batch. An
+    /// entry that no longer puts the last committed bar where the header does
+    /// — a torn write from an append that failed on this handle — rebuilds
+    /// the index first, loudly, and is asked again.
+    ///
+    /// A bar in the slot of the bar before it — a second daily bar on one IST
+    /// day, which the daily rung admits (D-0915) — is not refused: the append
+    /// is what it was before D-2329, and this month stops being indexed,
+    /// loudly, before any byte moves (`Self::retire_index`, D-2330).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::OffGrid`] or [`StoreError::OutsideMonth`] for a bar the
+    /// admission already refuses, should one ever reach here; whatever a
+    /// rebuild's write refuses; and whatever removing a retired `.tix`
+    /// refuses.
+    fn index_batch<R: Row>(
+        &mut self,
+        batch: &[R],
+    ) -> Result<Option<(u64, Vec<Entry>)>, StoreError> {
+        let held = Held::of(&self.header);
+        let resumed = match self.tix.as_ref() {
+            Some(tix) => match tix.state.get() {
+                Some(TixState::Ready(index)) => {
+                    crate::time_index::resume(&tix.geometry, held, |bucket| {
+                        read_entry(index, &tix.path, bucket)
+                    })
+                }
+                _ => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+        let (bucket, start) = match resumed {
+            Ok(found) => found,
+            Err(why) => {
+                self.reindex(&why)?;
+                let Some(tix) = self.tix.as_ref() else {
+                    return Ok(None);
+                };
+                let Some(TixState::Ready(index)) = tix.state.get() else {
+                    return Ok(None);
+                };
+                match crate::time_index::resume(&tix.geometry, held, |bucket| {
+                    read_entry(index, &tix.path, bucket)
+                }) {
+                    Ok(found) => found,
+                    Err(why) => return Err(index_refused(&tix.path, &why)),
+                }
+            }
+        };
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(None);
+        };
+        let stamps = batch.iter().map(|row| Ok(row.stamp()));
+        let extended =
+            crate::time_index::extend(&tix.geometry, bucket, start, held.n_valid, stamps);
+        match extended {
+            Ok(entries) => Ok(Some((bucket, entries))),
+            Err(why @ Why::SharedSlot { .. }) => {
+                self.retire_index(why)?;
+                Ok(None)
+            }
+            Err(Why::OffGrid { index, ts_micros }) => Err(StoreError::OffGrid {
+                at: index.saturating_sub(held.n_valid),
+                ts_micros,
+                timeframe_secs: self.header.timeframe_secs,
+            }),
+            Err(Why::Outside { index, ts_micros }) => Err(StoreError::OutsideMonth {
+                at: index.saturating_sub(held.n_valid),
+                ts_micros,
+                month: self.admission.month,
+            }),
+            Err(other) => Err(index_refused(&tix.path, &other)),
+        }
+    }
+
+    /// Stops indexing this month, because `why`: the handle bisects from now
+    /// on, saying so (`store.tix` warning), and the `.tix` is removed and its
+    /// directory synced — all before the append that made it necessary writes
+    /// a byte, so no index is ever left claiming bars it does not describe.
+    /// A later writer open tries the rebuild again, finds the same reason,
+    /// and says so again. D-2330.
+    fn retire_index(&mut self, why: Why) -> Result<(), StoreError> {
+        let Some(path) = self.tix.as_ref().map(|tix| tix.path.clone()) else {
+            return Ok(());
+        };
+        // Dropping the `Ready` state closes the handle before the unlink.
+        self.set_tix_state(bisecting(&path, why));
+        remove_index(&path)
+    }
+
+    /// Rebuilds a writer's index mid-life, because `why`: reopens the `.tix`
+    /// and goes through `Self::rebuild_index` exactly as an open would.
+    fn reindex(&mut self, why: &Why) -> Result<(), StoreError> {
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(());
+        };
+        let index = fault(open_rw(&tix.path), &tix.path, Action::Open)?;
+        let state = self.rebuild_index(index, tix, why)?;
+        self.set_tix_state(state);
+        Ok(())
+    }
+
+    /// Writes an append's entries at `bucket`, cuts anything an interrupted
+    /// append left past them, and syncs — before the header slot that commits
+    /// the bars they describe.
+    fn write_entries(&self, bucket: u64, entries: &[Entry]) -> Result<(), StoreError> {
+        let Some(tix) = self.tix.as_ref() else {
+            return Ok(());
+        };
+        let Some(TixState::Ready(index)) = tix.state.get() else {
+            return Ok(());
+        };
+        put_entries(index, &tix.path, bucket, entries)?;
+        fault(index.sync_all(), &tix.path, Action::Sync)
     }
 
     /// One record of whatever kind this file holds.
@@ -2809,7 +3213,7 @@ impl BarFile {
             conflict,
         };
         let first = batch.first()?;
-        let mut index = match first_at_or_after(n_valid, first.stamp(), read) {
+        let mut index = match self.locate::<R>(first.stamp()) {
             Ok(index) => index,
             Err(why) => return Some(why),
         };
@@ -3015,7 +3419,7 @@ pub(crate) struct Admission {
 
 /// `pull::fold`'s open anchor: the IST offset less the 555 minutes from IST
 /// midnight to 09:15, in microseconds. Negative, and `rem_euclid` floors.
-const OPEN_ANCHOR_MICROS: i64 = (crate::path::IST_OFFSET_SECS
+pub(crate) const OPEN_ANCHOR_MICROS: i64 = (crate::path::IST_OFFSET_SECS
     - crate::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT as i64 * 60)
     * 1_000_000;
 
@@ -3072,17 +3476,19 @@ impl Admission {
 /// caller's problem to refuse or to resume from; answering "already present"
 /// for any of them is the fallback `CLAUDE.md` §4 bans.
 ///
-/// `first_ts` is the batch's first timestamp, which [`survey`] has already
-/// computed and already proven is the smallest. Taking it as an argument
-/// rather than re-reading `batch[0]` is what keeps this function free of an
-/// empty-batch arm that [`survey`] makes unreachable.
+/// `at` is where the batch's first timestamp would sit — the insertion point
+/// `BarFile::locate` found for it, through the month's time index when it has
+/// one and by the bisection otherwise (D-2329). Locating is the caller's so
+/// this function is the comparison and nothing else.
 ///
 /// # Cost, stated exactly
 ///
-/// `O(log n_valid)` reads to locate the run, then one read per offered bar —
-/// so it is bounded by the batch plus a bisection, never by the month. It runs
-/// only when a batch overlaps the committed range, which is the re-pull case;
-/// an ordinary forward append never enters it.
+/// The locate is the caller's: at most one index entry read and one record
+/// read through a ready time index, `O(log n_valid)` reads by the bisection
+/// without one. Then one read per offered bar — so it is bounded by the batch
+/// plus the locate, never by the month. It runs only when a batch overlaps
+/// the committed range, which is the re-pull case; an ordinary forward append
+/// never enters it.
 ///
 /// **This is NOT an O(1) path and does not claim to be.** `CLAUDE.md` §3 rule
 /// 4's constant-cost list is bar lookup, condition lookup, mask evaluation,
@@ -3104,15 +3510,13 @@ impl Admission {
 /// the read COUNT rather than assert the cost in a comment.
 fn already_stored<W: Row, F>(
     batch: &[W],
-    first_ts: i64,
+    at: u64,
     n_valid: u64,
     read: F,
 ) -> Result<Option<u64>, StoreError>
 where
     F: Fn(u64) -> Result<W, StoreError>,
 {
-    let at = first_at_or_after(n_valid, first_ts, &read)?;
-
     // THE RUN MUST LIE WHOLLY INSIDE WHAT IS COMMITTED. Without this the
     // comparison below would ask for a record past the counter and get
     // `StoreError::NotCommitted` back — turning a batch that merely EXTENDS
@@ -3176,6 +3580,110 @@ where
         }
     }
     Ok(low)
+}
+
+/// Where a month's time index lives: beside a BAR file, and nowhere for any
+/// other record kind. D-2329.
+fn time_index_path(root: &Path, path: StorePath<'_>) -> Option<PathBuf> {
+    (path.file() == FileKind::Bars).then(|| path.with_file(FileKind::TimeIndex).to_path_buf(root))
+}
+
+/// The entry for `bucket`, read and checked. A short read or a failed
+/// checksum is [`Why::Entry`]; any other refusal is carried as
+/// [`Why::Unreadable`].
+fn read_entry(index: &File, path: &Path, bucket: u64) -> Result<Entry, Why> {
+    let mut raw = [0u8; 16];
+    match read_fully(
+        index,
+        path,
+        crate::time_index::entry_offset(bucket),
+        &mut raw,
+    ) {
+        Ok(()) => Entry::decode(&raw, bucket).ok_or(Why::Entry { bucket }),
+        Err(StoreError::ShortRead { .. }) => Err(Why::Entry { bucket }),
+        Err(other) => Err(Why::Unreadable(other)),
+    }
+}
+
+/// Writes a whole index: cut to nothing, the entries, a sync, then the
+/// header and a sync. The header goes LAST so a crash mid-write leaves a file
+/// whose header does not check, which every reader refuses and the next
+/// writer rebuilds — never a valid header over entries half old, half new.
+fn write_index(index: &File, tix: &Tix, entries: &[Entry]) -> Result<(), StoreError> {
+    fault(index.set_len(0), &tix.path, Action::Write)?;
+    put_entries(index, &tix.path, 0, entries)?;
+    fault(index.sync_all(), &tix.path, Action::Sync)?;
+    write_fully(index, &tix.path, 0, &tix.geometry.encode())?;
+    fault(index.sync_all(), &tix.path, Action::Sync)
+}
+
+/// Writes `entries` from `bucket` on in one positional write, and sets the
+/// file's length to end exactly after them, so entries an interrupted append
+/// wrote further out are not left lying past the ones that replace them.
+fn put_entries(
+    index: &File,
+    path: &Path,
+    bucket: u64,
+    entries: &[Entry],
+) -> Result<(), StoreError> {
+    let width = usize::try_from(crate::time_index::ENTRY_LEN).unwrap_or(16);
+    let mut image = Vec::with_capacity(entries.len().saturating_mul(width));
+    for (at, entry) in (bucket..).zip(entries) {
+        image.extend_from_slice(&entry.encode(at));
+    }
+    write_fully(index, path, crate::time_index::entry_offset(bucket), &image)?;
+    let end = crate::time_index::entry_offset(bucket.saturating_add(len_u64(entries.len())));
+    fault(index.set_len(end), path, Action::Write)
+}
+
+/// Enters the bisecting state for `why`, saying so. The one place the
+/// `store.tix` warning is decided, so no path can fall back silently.
+fn bisecting(path: &Path, why: Why) -> TixState {
+    note_lookup_bisects(path, &why);
+    TixState::Bisecting(why)
+}
+
+/// Removes a `.tix` that must no longer claim its month, and syncs the
+/// directory so the removal survives a crash. Already gone is done.
+fn remove_index(path: &Path) -> Result<(), StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => fsync_dir(path.parent().unwrap_or(path)),
+        Err(gone) if gone.kind() == ErrorKind::NotFound => Ok(()),
+        Err(refusal) => Err(classify(path, Action::Write, &refusal)),
+    }
+}
+
+/// An index failure an append cannot route around, as a refusal.
+fn index_refused(path: &Path, why: &Why) -> StoreError {
+    match why {
+        Why::Unreadable(inner) => inner.clone(),
+        other => StoreError::TimeIndex {
+            path: path.to_path_buf(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+/// `store.tix`, WARN: this month's time lookups bisect, and why. Once when a
+/// handle decides it, and once per lookup whose entry fails after that.
+fn note_lookup_bisects(path: &Path, why: &Why) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("store.tix", "time lookup falls back to bisection")
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("reason", telemetry::Value::Str(&why.to_string())),
+    );
+}
+
+/// `store.tix`, INFO: a writer rebuilt this month's time index from its bars,
+/// and why it had to.
+fn note_index_built(path: &Path, why: &Why, n_valid: u64, entries: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("store.tix", "time index rebuilt from the bars")
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("reason", telemetry::Value::Str(&why.to_string()))
+            .with("n_valid", telemetry::Value::Uint(n_valid))
+            .with("entries", telemetry::Value::Uint(entries)),
+    );
 }
 
 /// Writes a fresh header region: zeros, then the genesis commit.
@@ -4037,6 +4545,7 @@ mod tests {
             // what `crate::path` composes for a real store.
             Some(path.with_extension("crc")),
             None,
+            None,
             len,
             SYMBOL,
             60,
@@ -4060,6 +4569,7 @@ mod tests {
             bars,
             path.to_path_buf(),
             Some(path.with_extension("crc")),
+            None,
             None,
             len,
             SYMBOL,
@@ -4430,8 +4940,10 @@ mod tests {
             Ok(held[usize::try_from(index).expect("an index fits a usize")])
         };
 
+        let at = first_at_or_after(4, bar(1).ts_micros, read).expect("an in-memory read");
+        assert_eq!(at, 1, "the bisection probes 2, 1, 0 and never 3");
         assert_eq!(
-            already_stored(&held[1..4], bar(1).ts_micros, 4, read),
+            already_stored(&held[1..4], at, 4, read),
             Err(StoreError::NotCommitted {
                 index: 3,
                 n_valid: 4,

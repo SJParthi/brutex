@@ -3,7 +3,7 @@
 //!
 //! # What was unproven
 //!
-//! This crate holds nine emit sites and, until this module, not one of them
+//! This crate holds eleven emit sites and, until this module, not one of them
 //! was asserted to reach a file. Each could have been deleted outright — the
 //! whole body replaced with `()` — and `cargo test`, `cargo clippy` and the
 //! mutation gate would all have stayed green, because nothing anywhere read
@@ -11,22 +11,24 @@
 //! untested branch is worth, which is what `CLAUDE.md` §4's ban on a test that
 //! asserts nothing says in the other direction.
 //!
-//! It is worse than an ordinary coverage hole. Eight of these nine fire only
+//! It is worse than an ordinary coverage hole. Ten of these eleven fire only
 //! once something has already gone wrong — a header region of zeros, a commit
 //! walked back a generation, a block whose bytes are not the bytes that were
 //! sealed, an append that died before its header slot reached the disk, a lock
-//! whose unlock the host refused — so the run that needs them is the run nobody
-//! can repeat afterwards. A line that was never proved to be written is not
-//! evidence.
+//! whose unlock the host refused, a month with no usable time index — so the
+//! run that needs them is the run nobody can repeat afterwards. A line that was
+//! never proved to be written is not evidence.
 //!
-//! Four of those eight are not refusals. `store.open` **accepts** the month and
+//! Six of those ten are not refusals. `store.open` **accepts** the month and
 //! names the damage. Since D-0688 the `store.block` interrupted-append line
 //! accepts a tail block whose entry was sealed past the commit and names the
 //! append that died. The `store.header` fall-back returns an older committed
-//! generation's header and names the newer one it rejected. Those three hand
-//! back working data, so the line is the only trace there is. The fourth is
+//! generation's header and names the newer one it rejected. Since D-2329 the
+//! two `store.tix` lines name a month whose time lookup bisects and a month
+//! whose time index a writer rebuilt from its bars. Those five hand
+//! back working data, so the line is the only trace there is. The sixth is
 //! `store.flock` (D-0693): it fires from a `Drop`, which cannot hand anybody
-//! anything. Those are the four sites in this crate whose deletion is
+//! anything. Those are the six sites in this crate whose deletion is
 //! invisible from outside the log. The other four hand the caller a
 //! `FormatError` as well as writing a line, so a lost emit still leaves a
 //! trace somewhere: the unreadable header, the refused commit, the block with
@@ -215,14 +217,15 @@ enum Handed {
     Success,
 }
 
-/// `n` as the header spells it, for the nine sites and the tallies of them.
+/// `n` as the header spells it, for the eleven sites and the tallies of them.
 fn spelt(n: usize) -> &'static str {
     [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven",
     ]
     .get(n)
     .copied()
-    .unwrap_or_else(|| panic!("the header spells no count above nine, got {n}"))
+    .unwrap_or_else(|| panic!("the header spells no count above eleven, got {n}"))
 }
 
 /// [`spelt`] opening a sentence.
@@ -479,6 +482,65 @@ fn drive_flock_unlock_refused(root: &Path) -> Handed {
     Handed::Nothing
 }
 
+/// A month with no `.tix`, asked how it looks a timestamp up: the
+/// `store.tix` warning in `crate::file`'s `bisecting`. D-2329.
+///
+/// Empty, so nothing commits and `store.append` stays silent: the writer door
+/// makes the month and its index, the index is taken away, and a READ handle
+/// is asked. `time_lookup` hands back the reason — working data, and the line
+/// is the only other trace of it.
+fn drive_tix_absent(root: &Path) -> Handed {
+    let made = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
+    drop(made);
+    std::fs::remove_file(bars_path().with_file(FileKind::TimeIndex).to_path_buf(root))
+        .expect("the writer door made the index");
+    let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("the month reads");
+    assert_eq!(
+        reader.time_lookup(),
+        crate::file::TimeLookup::Bisection(crate::time_index::Why::Absent)
+    );
+    Handed::Data
+}
+
+/// A month holding bars and no `.tix`, opened by a writer: the `store.tix`
+/// rebuild line in `crate::file`'s `rebuild_index`. D-2329.
+///
+/// The two bars are committed by hand — records, block checksum, header slot,
+/// exactly the bytes `BarFile::append` writes — because an append would fire
+/// `store.append`, a second line for a site this table drives once. Then the
+/// index is taken away and the writer door opens the month: it rebuilds the
+/// index from the bars and the lookup is served by it.
+fn drive_tix_rebuilt(root: &Path) -> Handed {
+    let made = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("a fresh month opens");
+    let (layout, header) = (made.layout(), made.header());
+    let bars = made.path().to_path_buf();
+    drop(made);
+    let mut image = Vec::new();
+    for index in 0..2 {
+        crate::format::Row::write_into(&bar(index), &mut image);
+    }
+    let sum = block::seal(layout, 2, 0, &image).expect("one block of two records");
+    let commit = header
+        .advance(2, bar(0).ts_micros, bar(1).ts_micros)
+        .and_then(|next| next.commit())
+        .expect("two bars after nothing");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&bars)
+        .expect("the month is there");
+    std::os::unix::fs::FileExt::write_all_at(&file, &image, HEADER_LEN).expect("records");
+    std::os::unix::fs::FileExt::write_all_at(&file, &commit.bytes, commit.offset).expect("slot");
+    std::fs::write(bars.with_extension("crc"), sum.to_le_bytes()).expect("the block sum");
+    std::fs::remove_file(bars_path().with_file(FileKind::TimeIndex).to_path_buf(root))
+        .expect("the writer door made the index");
+
+    let writer = BarFile::open_or_create(root, bars_path(), SYMBOL).expect("the month opens");
+    assert_eq!(writer.records(), 2, "the premise: two committed bars");
+    assert_eq!(writer.time_lookup(), crate::file::TimeLookup::Indexed);
+    assert_eq!(writer.first_at_or_after(bar(1).ts_micros), Ok(1));
+    Handed::Data
+}
+
 /// Copies one commit's 64 bytes into the region at the offset it names.
 ///
 /// Written as a zipped walk rather than a slice assignment for the reason
@@ -533,7 +595,7 @@ fn scratch(tag: &str) -> PathBuf {
 ///
 /// At module scope rather than inside the test that walks it, so the table can
 /// grow without the test body growing with it.
-const SITES: [Site; 9] = [
+const SITES: [Site; 11] = [
     Site {
         target: "store.header",
         message: "no committed header",
@@ -587,6 +649,18 @@ const SITES: [Site; 9] = [
         message: "advisory lock not released by its guard",
         level: telemetry::Level::Warn,
         drive: drive_flock_unlock_refused,
+    },
+    Site {
+        target: "store.tix",
+        message: "time lookup falls back to bisection",
+        level: telemetry::Level::Warn,
+        drive: drive_tix_absent,
+    },
+    Site {
+        target: "store.tix",
+        message: "time index rebuilt from the bars",
+        level: telemetry::Level::Info,
+        drive: drive_tix_rebuilt,
     },
 ];
 
