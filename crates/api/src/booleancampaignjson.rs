@@ -113,8 +113,8 @@ fn render_qualified(root: &Path, asked: &Asked) -> Result<Value, String> {
         "waiting"
     };
     let body = json!({"schema_version":1,"status":"saved","authority":"acknowledged-qualified-campaign-history","identity":crate::server::hex32(reader.identity()),"pin":crate::server::hex32(reader.pin()),"sequence":reader.sequence().to_string(),"descriptor_digest":crate::server::hex32(reader.descriptor()),"timeframes":reader.rungs().labels(),"state":state,"owner_active":reader.owner_observed(),"history_records":reader.history_records().to_string(),"admitted_bytes":reader.admitted_bytes().to_string(),"history_checked":true,"child_completion_receipts_checked":false,"child_bodies_checked":false,"rows":rows,"refusal":null,"scope":"Complete bounded acknowledged qualification history only. Child pins are recorded links; their separate detail reader authenticates receipt bodies and ancestors. An owner observation is not liveness. No current raw-source, Selection V6, live-trading or future-profitability approval."});
-    // NO SECOND HISTORY RE-READ. This ended in `reader.require_current()`,
-    // which reads all H acknowledged records again; `QualifiedCampaign::open`
+    // NO SECOND HISTORY RE-READ. This ended in a second currency check on
+    // the reader, which reads all H acknowledged records again; `QualifiedCampaign::open`
     // already ends in that same call, and every byte of `body` was built from
     // the reader's memory after it, so the second pass could only refuse a
     // change made after the observation the page reports, and paid H reads for

@@ -26742,9 +26742,43 @@ mod tests {
         );
 
         // UNSEALED, A ZERO TAIL: nothing can detect the zeros, so it reads.
+        // Forged as a version-2 file, the only version that may be unsealed
+        // (D-1571): a header naming ten records over three real ones and seven
+        // records of zeros, as an append whose records never reached the disk.
         let root = store_root("barspastunsealed");
-        let (bin, header) = write(&root, 3);
-        zero_tail(&bin, header, 10, 0);
+        let genesis =
+            store::header::Header::genesis_at(store::layout::Layout::V2, symbol_id, 60, 0);
+        let named = genesis.advance(10, stamp(0), stamp(2)).expect("a commit");
+        let mut image = vec![0u8; usize::try_from(store::format::HEADER_LEN).expect("small")];
+        for commit in [
+            genesis.commit().expect("genesis"),
+            named.commit().expect("commit"),
+        ] {
+            let at = usize::try_from(commit.offset).expect("small");
+            image
+                .iter_mut()
+                .skip(at)
+                .zip(commit.bytes)
+                .for_each(|(dst, src)| *dst = src);
+        }
+        for m in 0..3 {
+            image.extend_from_slice(&bar(m).image());
+        }
+        image.resize(
+            usize::try_from(store::layout::Layout::V2.offset_of(10).expect("an offset"))
+                .expect("small"),
+            0,
+        );
+        let bin = path.to_path_buf(&root);
+        std::fs::create_dir_all(bin.parent().expect("a parent")).expect("the month's directory");
+        std::fs::write(&bin, &image).expect("the forged month");
+        assert!(
+            !store::file::BarFile::open_existing(&root, path, symbol_id)
+                .expect("the forged month opens")
+                .header()
+                .checksums_present(),
+            "the premise: an unsealed month"
+        );
         let (code, _, body) = ask(&root, "barspastunsealed", "&from=2024-01-01").await;
         assert_eq!(code, axum::http::StatusCode::OK, "{body}");
         assert_eq!(
