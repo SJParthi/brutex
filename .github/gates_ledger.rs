@@ -271,7 +271,9 @@ fn flag_override(line: &str) -> bool {
             return false;
         };
         let rest = rest.trim_start_matches(is_space);
-        ["off", "n", "false", "0"].iter().any(|v| rest.starts_with(v))
+        ["off", "n", "false", "0"]
+            .iter()
+            .any(|v| rest.starts_with(v))
     })
 }
 
@@ -326,7 +328,11 @@ fn gate25(tree: &dyn Tree, leaves: &str, out: &mut Out) -> bool {
                 .is_some_and(|f| f.rsplit('/').next() == Some("Cargo.toml"))
         })
         .collect();
-    let root = |want: &str| leaves.iter().any(|l| leaf_of(l, "Cargo.toml") == Some(want));
+    let root = |want: &str| {
+        leaves
+            .iter()
+            .any(|l| leaf_of(l, "Cargo.toml") == Some(want))
+    };
     if !root("profile.release = {table}") {
         out.say("  REFUSED  Cargo.toml has no [profile.release] table at all");
         bad = true;
@@ -395,7 +401,12 @@ fn gate25(tree: &dyn Tree, leaves: &str, out: &mut Out) -> bool {
     let sat: usize = listed(tree, &["crates/**/*.rs"])
         .iter()
         .filter_map(|f| tree.read(f))
-        .map(|b| records(&text_of(&b)).iter().map(|l| census(l)).sum::<usize>())
+        .map(|b| {
+            records(&text_of(&b))
+                .iter()
+                .map(|l| census(l))
+                .sum::<usize>()
+        })
         .sum();
     say!(
         out,
@@ -474,7 +485,11 @@ fn gate27(tree: &dyn Tree, out: &mut Out) -> bool {
     for id in &ids {
         *count.entry(id).or_default() += 1;
     }
-    let dupes: Vec<&str> = count.iter().filter(|(_, c)| **c > 1).map(|(d, _)| *d).collect();
+    let dupes: Vec<&str> = count
+        .iter()
+        .filter(|(_, c)| **c > 1)
+        .map(|(d, _)| *d)
+        .collect();
     say!(out, "read {n} invariant row id(s) in {INVARIANTS}");
     if !dupes.is_empty() {
         out.say("");
@@ -633,7 +648,10 @@ fn gate26(tree: &dyn Tree, out: &mut Out) -> bool {
             say!(out, "  ok  {f} — {n} site(s), {g} guard(s)");
         }
     }
-    say!(out, "checked {sites} client construction site(s) in {files} file(s)");
+    say!(
+        out,
+        "checked {sites} client construction site(s) in {files} file(s)"
+    );
     if sites == 0 {
         out.say("GATE 26 FOUND NO CLIENT SITES. Either reqwest left the workspace");
         out.say("or the pattern stopped matching. A silent zero is not a pass.");
@@ -696,9 +714,7 @@ fn opens_inline_mod(line: &str) -> bool {
     if name.len() == r.len() {
         return false;
     }
-    let end = name
-        .find(|c: char| !is_ascii_word(c))
-        .unwrap_or(name.len());
+    let end = name.find(|c: char| !is_ascii_word(c)).unwrap_or(name.len());
     if end == 0 {
         return false;
     }
@@ -935,7 +951,8 @@ fn note_call_at(r: &str) -> bool {
 
 /// `note_[a-z_]+\(` anywhere in `t`.
 fn calls_note(t: &str) -> bool {
-    t.match_indices("note_").any(|(at, _)| note_call_at(&t[at..]))
+    t.match_indices("note_")
+        .any(|(at, _)| note_call_at(&t[at..]))
 }
 
 /// `^[[:space:]]*fn[[:space:]]+note_[a-z_]+\(`: a helper's own signature,
@@ -1028,7 +1045,10 @@ fn gate19(tree: &dyn Tree, out: &mut Out) -> bool {
         out.say("change, not this message.");
         return false;
     }
-    say!(out, "checked {counted} production failure-recording site(s)");
+    say!(
+        out,
+        "checked {counted} production failure-recording site(s)"
+    );
     if !found.is_empty() {
         out.say("");
         out.say("A FAILURE IS RECORDED HERE AND NOTHING IS LOGGED:");
@@ -1073,7 +1093,9 @@ fn path_fn_line(line: &str) -> String {
     let parsed = line.rsplit_once(':').and_then(|(head, name)| {
         let (file, digits) = head.rsplit_once(':')?;
         let mut c = name.chars();
-        let ident = c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        let ident = c
+            .next()
+            .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
             && c.all(is_ascii_word);
         let num = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
         (ident && num).then(|| format!("{file}\t{name}"))
@@ -1213,8 +1235,14 @@ fn gate10(tree: &dyn Tree, path_fns: &str, allow: &[(&str, &str)], out: &mut Out
         }
     }
     say!(out, "read {rows} table row(s) in {INVARIANTS}");
-    say!(out, "  {checked} named test(s) checked against a tracked crate");
-    say!(out, "  {pending} module-first, resolved by invariant_paths.rs above");
+    say!(
+        out,
+        "  {checked} named test(s) checked against a tracked crate"
+    );
+    say!(
+        out,
+        "  {pending} module-first, resolved by invariant_paths.rs above"
+    );
     say!(out, "  {exempt} exempted by the allowlist in this file");
     say!(out, "  {missing} missing");
     if checked == 0 {
@@ -1225,7 +1253,10 @@ fn gate10(tree: &dyn Tree, path_fns: &str, allow: &[(&str, &str)], out: &mut Out
     let mut bad = missing != 0;
     for (i, _) in allow {
         if !records(&doc).iter().any(|l| is_row_of(l, i)) {
-            say!(out, "STALE ALLOWLIST ENTRY — {i} is not a row in {INVARIANTS}");
+            say!(
+                out,
+                "STALE ALLOWLIST ENTRY — {i} is not a row in {INVARIANTS}"
+            );
             bad = true;
         }
     }
@@ -1448,7 +1479,10 @@ const ALLOW_PANIC: Allow = &[
 /// different questions, "this construct appears" and "the lint that would
 /// have caught it is switched off here", and a file could earn one without
 /// the other.
-const ALLOW_DISARM: Allow = &[("crates/api/src/server.rs", 1), ("crates/pull/src/ssm.rs", 1)];
+const ALLOW_DISARM: Allow = &[
+    ("crates/api/src/server.rs", 1),
+    ("crates/pull/src/ssm.rs", 1),
+];
 
 /// Rule 5d. `assert!` is a panic that clippy does not lint.
 const ALLOW_ASSERT: Allow = &[
@@ -1641,7 +1675,9 @@ fn rule3(r: &str) -> bool {
     ["HashMap::", "HashSet::"].iter().any(|w| {
         bounded(r, w, false).iter().any(|end| {
             let t = &r[*end..];
-            t.starts_with("new()") || t.starts_with("default()") || t.starts_with("with_capacity(0)")
+            t.starts_with("new()")
+                || t.starts_with("default()")
+                || t.starts_with("with_capacity(0)")
         })
     })
 }
@@ -1756,7 +1792,11 @@ fn chain_self_test() -> Result<(), (usize, Vec<String>)> {
     let joined = got
         .iter()
         .any(|r| r == "a.rs:1:    let x = xs.iter().position(is_one);");
-    if hits == 3 && joined { Ok(()) } else { Err((hits, got)) }
+    if hits == 3 && joined {
+        Ok(())
+    } else {
+        Err((hits, got))
+    }
 }
 
 /// Rule 5c's corpus: from a line beginning with an allow or an expect attribute, count
@@ -1787,9 +1827,15 @@ fn disarms(scope: &[(String, &Line)]) -> Vec<String> {
             d += brackets(t);
         }
         if d <= 0
-            && ["unwrap_used", "expect_used", "panic", "todo", "unimplemented"]
-                .iter()
-                .any(|lint| acc.contains(&format!("clippy::{lint}")))
+            && [
+                "unwrap_used",
+                "expect_used",
+                "panic",
+                "todo",
+                "unimplemented",
+            ]
+            .iter()
+            .any(|lint| acc.contains(&format!("clippy::{lint}")))
         {
             out.push(format!("{sp}:{sn}:{acc}"));
         }
@@ -1808,7 +1854,10 @@ fn opens_const(s: &str) -> bool {
         return false;
     }
     let mut c = name.chars();
-    if !c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') {
+    if !c
+        .next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+    {
         return false;
     }
     let end = name.find(|c: char| !is_ascii_word(c)).unwrap_or(name.len());
@@ -1871,10 +1920,7 @@ fn check(rule: &Rule<'_>, src: &[String], tracked: &BTreeSet<&str>, out: &mut Ou
     for f in &files {
         let mine: Vec<&&String> = hits.iter().filter(|r| file_of(r) == *f).collect();
         let c = mine.len();
-        let a = allow
-            .iter()
-            .find(|(p, _)| p == f)
-            .map_or(0, |(_, n)| *n);
+        let a = allow.iter().find(|(p, _)| p == f).map_or(0, |(_, n)| *n);
         if c > a {
             say!(out, "  REFUSED  {f} — {c} occurrence(s), {a} allowed");
             for r in mine.iter().take(8) {
@@ -1951,7 +1997,11 @@ fn gate11(tree: &dyn Tree, lists: &Allowlists, out: &mut Out) -> bool {
         .iter()
         .flat_map(|(f, s)| s.corpus.iter().map(move |l| render(f, l)))
         .collect();
-    say!(out, "walked {} non-test source file(s) under crates/*/src/", w.walked);
+    say!(
+        out,
+        "walked {} non-test source file(s) under crates/*/src/",
+        w.walked
+    );
     say!(
         out,
         "  {} line(s) in scope, {} inside a #[cfg(test)] module",
@@ -2047,7 +2097,10 @@ fn gate11(tree: &dyn Tree, lists: &Allowlists, out: &mut Out) -> bool {
     // deleting one line of the table disarms the deny everywhere.
     out.say("");
     out.say("rule 5b: the lint table that denies rule 5 workspace-wide");
-    let manifest = tree.read("Cargo.toml").map(|b| text_of(&b)).unwrap_or_default();
+    let manifest = tree
+        .read("Cargo.toml")
+        .map(|b| text_of(&b))
+        .unwrap_or_default();
     for lint in DENIED_LINTS {
         if denies(&manifest, lint) {
             say!(out, "  present  clippy::{lint} = deny");
@@ -2128,8 +2181,7 @@ fn read_text(path: &str) -> Result<String, String> {
 
 fn read_stdin() -> Result<String, String> {
     let mut b = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::stdin(), &mut b)
-        .map_err(|e| format!("stdin: {e}"))?;
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut b).map_err(|e| format!("stdin: {e}"))?;
     Ok(text_of(&b))
 }
 
@@ -2260,7 +2312,14 @@ mod tests {
     #[test]
     fn gate25_passes_the_two_keys_and_counts_the_census() {
         let (ok, text) = g25(
-            &[ROOT, WF, ("crates/a/src/x.rs", "a.checked_add(b).saturating_sub(c); unchecked_x\n")],
+            &[
+                ROOT,
+                WF,
+                (
+                    "crates/a/src/x.rs",
+                    "a.checked_add(b).saturating_sub(c); unchecked_x\n",
+                ),
+            ],
             GOOD_LEAVES,
         );
         assert!(ok, "{text}");
@@ -2275,7 +2334,9 @@ mod tests {
         assert!(!ok);
         assert_eq!(text, "GATE 25: no root Cargo.toml\n");
         let tree = Mem(
-            [("Cargo.toml".to_owned(), Vec::new())].into_iter().collect(),
+            [("Cargo.toml".to_owned(), Vec::new())]
+                .into_iter()
+                .collect(),
             Vec::new(),
         );
         let mut out = quiet();
@@ -2297,7 +2358,10 @@ mod tests {
             let leaves = GOOD_LEAVES.replace("Cargo.toml:", member);
             let (ok, text) = g25(&[ROOT, ("crates/a/Cargo.toml", ""), WF], &leaves);
             assert!(!ok);
-            assert!(text.contains("no longer sets overflow-checks = true."), "{text}");
+            assert!(
+                text.contains("no longer sets overflow-checks = true."),
+                "{text}"
+            );
         }
         // A value other than exactly `true` is not presence.
         let off = GOOD_LEAVES.replace("checks = true", "checks = false");
@@ -2426,18 +2490,29 @@ mod tests {
     fn gate27b_refuses_a_reused_number_a_third_copy_and_a_removed_pin() {
         let (ok, text) = g27b("## D-0001 a\n### D-0001 b\n", &[]);
         assert!(!ok);
-        assert!(text.contains("  D-0001: 2 heading(s), allowed 1\n      1:## D-0001 a\n      2:### D-0001 b\n"), "{text}");
+        assert!(
+            text.contains(
+                "  D-0001: 2 heading(s), allowed 1\n      1:## D-0001 a\n      2:### D-0001 b\n"
+            ),
+            "{text}"
+        );
         let (ok, text) = g27b("## D-0009\n## D-0009\n## D-0009\n", &[("D-0009", 2)]);
         assert!(!ok);
         assert!(text.contains("  D-0009: 3 heading(s), allowed 2"));
         let (ok, text) = g27b("## D-0001\n", &[("D-0009", 2)]);
         assert!(!ok);
-        assert!(text.contains("  D-0009: 0 heading(s), allowed 2\n"), "{text}");
+        assert!(
+            text.contains("  D-0009: 0 heading(s), allowed 2\n"),
+            "{text}"
+        );
         // Five digits head the four-digit number, as the old extraction read
         // it; the listing then shows only the exact heading.
         let (ok, text) = g27b("## D-1234 a\n## D-12345 b\n", &[]);
         assert!(!ok);
-        assert!(text.contains("  D-1234: 2 heading(s), allowed 1\n      1:## D-1234 a\n\n"), "{text}");
+        assert!(
+            text.contains("  D-1234: 2 heading(s), allowed 1\n      1:## D-1234 a\n\n"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2464,8 +2539,14 @@ mod tests {
         assert!(ok, "{text}");
         assert!(text.contains("  ok  crates/pull/src/http.rs — 1 site(s), 1 guard(s)"));
         let (ok, text) = g26(&[
-            ("crates/pull/src/a.rs", "ensure_tls_provider();\nClient::builder()\n"),
-            ("crates/pull/src/b.rs", "Client::builder()\nClient::builder()\nensure_tls_provider()\n"),
+            (
+                "crates/pull/src/a.rs",
+                "ensure_tls_provider();\nClient::builder()\n",
+            ),
+            (
+                "crates/pull/src/b.rs",
+                "Client::builder()\nClient::builder()\nensure_tls_provider()\n",
+            ),
         ]);
         assert!(!ok);
         assert!(text.contains("UNGUARDED CLIENT  crates/pull/src/b.rs — 2 Client::builder() call(s), 1 ensure_tls_provider()"), "{text}");
@@ -2474,7 +2555,10 @@ mod tests {
 
     #[test]
     fn gate26_refuses_a_silent_zero_and_reads_only_crates() {
-        let (ok, text) = g26(&[(".github/x.rs", "Client::builder()\n"), ("crates/a/src/x.rs", "\n")]);
+        let (ok, text) = g26(&[
+            (".github/x.rs", "Client::builder()\n"),
+            ("crates/a/src/x.rs", "\n"),
+        ]);
         assert!(!ok);
         assert!(text.contains("GATE 26 FOUND NO CLIENT SITES."));
     }
@@ -2509,7 +2593,12 @@ mod tests {
 
     #[test]
     fn the_stripper_reads_the_module_shapes_the_old_pattern_read() {
-        for open in ["pub mod t {", "pub(crate) mod t {", "pub (super) mod t { ", "\tmod t_1 {\t"] {
+        for open in [
+            "pub mod t {",
+            "pub(crate) mod t {",
+            "pub (super) mod t { ",
+            "\tmod t_1 {\t",
+        ] {
             let ind = if open.starts_with('\t') { "\t" } else { "" };
             let src = format!("#[cfg(test)]\n{open}\n    x.unwrap();\n{ind}}}\n");
             let s = strip(&src).unwrap_or_else(|| panic!("{open}"));
@@ -2571,13 +2660,22 @@ mod tests {
     #[test]
     fn gate19_refuses_a_failure_that_borrows_or_lacks_an_event() {
         // Two failures, one event: the second cannot borrow the first's.
-        let shared = "fn a() {\n    telemetry::emit(x);\n    failures.push(f);\n    failures: vec![g],\n}\n";
+        let shared =
+            "fn a() {\n    telemetry::emit(x);\n    failures.push(f);\n    failures: vec![g],\n}\n";
         let (ok, text) = g19(&[("crates/api/src/a.rs", shared)]);
         assert!(!ok);
-        assert!(text.contains("A FAILURE IS RECORDED HERE AND NOTHING IS LOGGED:\n  crates/api/src/a.rs:4\n"), "{text}");
+        assert!(
+            text.contains(
+                "A FAILURE IS RECORDED HERE AND NOTHING IS LOGGED:\n  crates/api/src/a.rs:4\n"
+            ),
+            "{text}"
+        );
         // An event below the failure, on its line, past the window, in a
         // whole-line comment or a helper's own signature is no event.
-        let far = format!("telemetry::emit(x);\n{}failures.push(f);\n", "\n".repeat(12));
+        let far = format!(
+            "telemetry::emit(x);\n{}failures.push(f);\n",
+            "\n".repeat(12)
+        );
         for src in [
             "failures.push(f);\ntelemetry::emit(x);\n",
             "failures.push(f); // see telemetry::emit\n",
@@ -2590,7 +2688,10 @@ mod tests {
             assert!(text.contains("  crates/pull/src/a.rs:"), "{text}");
         }
         // Exactly twelve lines above is inside the window.
-        let near = format!("telemetry::emit(x);\n{}failures.push(f);\n", "\n".repeat(11));
+        let near = format!(
+            "telemetry::emit(x);\n{}failures.push(f);\n",
+            "\n".repeat(11)
+        );
         assert!(g19(&[("crates/pull/src/a.rs", &near)]).0);
     }
 
@@ -2605,7 +2706,10 @@ mod tests {
         let (ok, text) = g19(&[
             ("crates/pull/src/lib.rs", lib),
             ("crates/pull/src/emit_sites.rs", "failures.push(f);\n"),
-            ("crates/pull/src/b.rs", "telemetry::emit(x);\nfailures.push(f);\n"),
+            (
+                "crates/pull/src/b.rs",
+                "telemetry::emit(x);\nfailures.push(f);\n",
+            ),
         ]);
         assert!(ok, "{text}");
         assert!(text.starts_with("walked 2 production"));
@@ -2616,7 +2720,10 @@ mod tests {
 
     #[test]
     fn gate19_refuses_an_undelimited_module_and_a_silent_walk() {
-        let (ok, text) = g19(&[("crates/api/src/a.rs", "#[cfg(test)]\nmod t {\nfn x() {}\n}\n")]);
+        let (ok, text) = g19(&[(
+            "crates/api/src/a.rs",
+            "#[cfg(test)]\nmod t {\nfn x() {}\n}\n",
+        )]);
         assert!(!ok);
         assert!(text.contains("UNDELIMITED TEST MODULE  crates/api/src/a.rs\n"));
         assert!(text.contains("the boundary is what has to\nchange, not this message.\n"));
@@ -2636,7 +2743,10 @@ mod tests {
             ("crates/store/src/unit.rs", ""),
         ]);
         let mut out = quiet();
-        (gate10(&tree, &path_declarations(FNS), allow, &mut out), out.text)
+        (
+            gate10(&tree, &path_declarations(FNS), allow, &mut out),
+            out.text,
+        )
     }
 
     #[test]
@@ -2644,7 +2754,10 @@ mod tests {
         let doc = "| S-01 | x | `store::unit::reads` | ✓ |\n| M-01 | `server::tests::x` |\n| S-02 | `store::other::reads` and `a::b` |";
         let (ok, text) = g10(doc, &[]);
         assert!(ok, "{text}");
-        assert!(text.starts_with("read 3 table row(s) in docs/04-invariants.md\n"), "{text}");
+        assert!(
+            text.starts_with("read 3 table row(s) in docs/04-invariants.md\n"),
+            "{text}"
+        );
         assert!(text.contains("  2 named test(s) checked"));
         assert!(text.contains("  1 module-first"));
     }
@@ -2654,11 +2767,20 @@ mod tests {
         let doc = "| S-01 | `store::unit::gone` |\n| S-02 | `store::unit::tool_fn` |\n";
         let (ok, text) = g10(doc, &[]);
         assert!(!ok);
-        assert!(text.contains("INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: store::unit::gone (S-01)"));
-        assert!(text.contains("INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: store::unit::tool_fn (S-02)"));
+        assert!(
+            text.contains(
+                "INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: store::unit::gone (S-01)"
+            )
+        );
+        assert!(text.contains(
+            "INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: store::unit::tool_fn (S-02)"
+        ));
         assert!(text.contains("  2 missing"));
         // The last row counts even with no newline after it.
-        let (ok, _) = g10("| S-01 | `store::unit::reads` |\n| S-02 | `store::unit::gone` |", &[]);
+        let (ok, _) = g10(
+            "| S-01 | `store::unit::reads` |\n| S-02 | `store::unit::gone` |",
+            &[],
+        );
         assert!(!ok);
     }
 
@@ -2670,9 +2792,14 @@ mod tests {
         assert!(text.contains("EXEMPT (allowlisted) P-03 — store::unit::gone"));
         let (ok, text) = g10(doc, &[("P-03", "why"), ("X-13", "why")]);
         assert!(!ok);
-        assert!(text.contains("STALE ALLOWLIST ENTRY — X-13 is not a row in docs/04-invariants.md"));
+        assert!(
+            text.contains("STALE ALLOWLIST ENTRY — X-13 is not a row in docs/04-invariants.md")
+        );
         // An empty id is never exempt.
-        let (ok, _) = g10("|  | `store::unit::gone` |\n| S-01 | `store::unit::reads` |\n", &[("P-03", "")]);
+        let (ok, _) = g10(
+            "|  | `store::unit::gone` |\n| S-01 | `store::unit::reads` |\n",
+            &[("P-03", "")],
+        );
         assert!(!ok);
     }
 
@@ -2690,7 +2817,10 @@ mod tests {
         assert_eq!(out.text, "GATE 10 READ NO MODULE MOUNTING.\n");
         let mut out = quiet();
         assert!(!module_table("a.rs\tx\nUNRESOLVED b.rs: mod y\n", &mut out));
-        assert_eq!(out.text, "UNRESOLVED b.rs: mod y\nGATE 10: a module mounting could not be resolved.\n");
+        assert_eq!(
+            out.text,
+            "UNRESOLVED b.rs: mod y\nGATE 10: a module mounting could not be resolved.\n"
+        );
         let mut out = quiet();
         assert!(module_table("a.rs\tx\n", &mut out));
         assert!(out.text.is_empty());
@@ -2698,13 +2828,25 @@ mod tests {
 
     #[test]
     fn gate10_token_and_table_parsing_match_the_old_patterns() {
-        assert_eq!(qualified_tokens("`a::b::c` x `d::e` `f::g::h::i` `A::b::c`"), vec!["a::b::c", "f::g::h::i"]);
+        assert_eq!(
+            qualified_tokens("`a::b::c` x `d::e` `f::g::h::i` `A::b::c`"),
+            vec!["a::b::c", "f::g::h::i"]
+        );
         assert_eq!(qualified_tokens("`x` `a::b::c` `"), vec!["a::b::c"]);
         assert_eq!(qualified_tokens("` `a::b::c`"), vec!["a::b::c"]);
-        assert_eq!(path_fn_line("crates/a/src/x.rs:12:name"), "crates/a/src/x.rs\tname");
+        assert_eq!(
+            path_fn_line("crates/a/src/x.rs:12:name"),
+            "crates/a/src/x.rs\tname"
+        );
         assert_eq!(path_fn_line("odd line"), "odd line");
-        assert_eq!(path_declarations(FNS), "crates/store/src/unit.rs\treads\n.github/t.rs\ttool_fn\nodd line\n");
-        assert_eq!(crate_fn("crates/a/src/x.rs\tname").as_deref(), Some("a name"));
+        assert_eq!(
+            path_declarations(FNS),
+            "crates/store/src/unit.rs\treads\n.github/t.rs\ttool_fn\nodd line\n"
+        );
+        assert_eq!(
+            crate_fn("crates/a/src/x.rs\tname").as_deref(),
+            Some("a name")
+        );
         assert_eq!(crate_fn(".github/x.rs\tname"), None);
         assert!(is_row_of("|  P-03 | x", "P-03"));
         assert!(!is_row_of("| P-030 | x", "P-03"));
@@ -2775,7 +2917,10 @@ mod tests {
         refused("let x: f64 = 1.0;\n", "2");
         refused("fn a(x: f32) {}\n", "2");
         refused("let m = HashMap::new();\n", "3");
-        refused("let m = std::collections::HashSet::with_capacity(0);\n", "3");
+        refused(
+            "let m = std::collections::HashSet::with_capacity(0);\n",
+            "3",
+        );
         refused("xs.sort();\n", "4");
         refused("xs.sort_unstable_by_key(k);\n", "4");
         refused("let h = BinaryHeap::with_capacity(9);\n", "4");
@@ -2785,7 +2930,12 @@ mod tests {
         refused("unreachable!(\"z\");\n", "5");
         refused("    let p = xs.iter().position(|x| x == y);\n", "6");
         refused("if xs.contains(&y) {}\n", "7");
-        refused("fn f() {\n    assert!(x);\n}\n".replace("fn f() {\n", "").as_str(), "5d");
+        refused(
+            "fn f() {\n    assert!(x);\n}\n"
+                .replace("fn f() {\n", "")
+                .as_str(),
+            "5d",
+        );
         refused("assert_eq!(a, b);\n", "5d");
     }
 
@@ -2808,7 +2958,13 @@ mod tests {
             let (ok, text) = g11(&[("crates/a/src/x.rs", clean)], &lists());
             assert!(ok, "{clean}: {text}");
         }
-        for hit in ["let a = [f64; 2];\n", "(f32)\n", "x:f64\n", "core::panic!(x);\n", "xs.sort_by(f);\n"] {
+        for hit in [
+            "let a = [f64; 2];\n",
+            "(f32)\n",
+            "x:f64\n",
+            "core::panic!(x);\n",
+            "xs.sort_by(f);\n",
+        ] {
             let (ok, _) = g11(&[("crates/a/src/x.rs", hit)], &lists());
             assert!(!ok, "{hit}");
         }
@@ -2823,7 +2979,10 @@ mod tests {
         assert!(text.contains("           crates/a/src/x.rs:2\n"));
         // A chain never joins across a file boundary.
         let (ok, text) = g11(
-            &[("crates/a/src/x.rs", "let p = xs\n"), ("crates/a/src/y.rs", "    .iter().find(f);\n")],
+            &[
+                ("crates/a/src/x.rs", "let p = xs\n"),
+                ("crates/a/src/y.rs", "    .iter().find(f);\n"),
+            ],
             &lists(),
         );
         assert!(!ok);
@@ -2834,7 +2993,10 @@ mod tests {
     #[test]
     fn gate11_allows_up_to_the_count_and_refuses_one_more() {
         const ONE: Allow = &[("crates/a/src/x.rs", 1)];
-        let l = Allowlists { panic: ONE, ..lists() };
+        let l = Allowlists {
+            panic: ONE,
+            ..lists()
+        };
         let (ok, text) = g11(&[("crates/a/src/x.rs", "x.unwrap();\n")], &l);
         assert!(ok, "{text}");
         assert!(text.contains("  allowed  crates/a/src/x.rs — 1 of 1"));
@@ -2843,7 +3005,11 @@ mod tests {
         assert!(text.contains("  REFUSED  crates/a/src/x.rs — 2 occurrence(s), 1 allowed"));
         // Both unread and read rule-6 entries count toward one file.
         const HALF: Allow = &[("crates/a/src/x.rs", 1)];
-        let l = Allowlists { scan: HALF, scan_unread: HALF, ..lists() };
+        let l = Allowlists {
+            scan: HALF,
+            scan_unread: HALF,
+            ..lists()
+        };
         let src = "xs.iter().find(a);\nxs.iter().find(b);\n";
         assert!(g11(&[("crates/a/src/x.rs", src)], &l).0);
     }
@@ -2851,10 +3017,15 @@ mod tests {
     #[test]
     fn gate11_refuses_a_stale_entry_and_warns_on_a_loose_one() {
         const STALE: Allow = &[("crates/a/src/gone.rs", 1), ("crates/a/src/x.rs", 1)];
-        let l = Allowlists { search: STALE, ..lists() };
+        let l = Allowlists {
+            search: STALE,
+            ..lists()
+        };
         let (ok, text) = g11(&[("crates/a/src/x.rs", "fn a() {}\n")], &l);
         assert!(!ok);
-        assert!(text.contains("  STALE ALLOWLIST ENTRY — crates/a/src/gone.rs is not a tracked file"));
+        assert!(
+            text.contains("  STALE ALLOWLIST ENTRY — crates/a/src/gone.rs is not a tracked file")
+        );
         assert!(text.contains("  ::warning title=Gate 11 allowlist is loose::crates/a/src/x.rs no longer matches rule 1 — tighten it"));
     }
 
@@ -2865,7 +3036,9 @@ mod tests {
             let tree = Mem::new(&[("Cargo.toml", &table), ("crates/a/src/x.rs", "fn a() {}\n")]);
             let mut out = quiet();
             assert!(!gate11(&tree, &lists(), &mut out), "{lint}");
-            assert!(out.text.contains(&format!("  REFUSED  Cargo.toml no longer denies clippy::{lint}\n")));
+            assert!(out.text.contains(&format!(
+                "  REFUSED  Cargo.toml no longer denies clippy::{lint}\n"
+            )));
         }
         assert!(!denies("unwrap_used = \"warn\"\n", "unwrap_used"));
         assert!(!denies("panic_in_result_fn = \"deny\"\n", "panic"));
@@ -2890,7 +3063,9 @@ mod tests {
         let (ok, text) = g11(&[("crates/a/src/x.rs", &clean)], &lists());
         assert!(ok, "{text}");
         // An allow inside a test module is not shipping code.
-        let src = format!("#[cfg(test)]\nmod t {{\n    {ALLOW_ATTR}clippy::unwrap_used)]\n    fn a() {{}}\n}}\nfn b() {{}}\n");
+        let src = format!(
+            "#[cfg(test)]\nmod t {{\n    {ALLOW_ATTR}clippy::unwrap_used)]\n    fn a() {{}}\n}}\nfn b() {{}}\n"
+        );
         assert!(g11(&[("crates/a/src/x.rs", &src)], &lists()).0);
     }
 
@@ -2901,17 +3076,29 @@ mod tests {
         assert!(!ok);
         assert!(text.contains("rule 5d: 1 occurrence(s)"), "{text}");
         assert!(text.contains("           crates/a/src/x.rs:6\n"));
-        assert!(text.contains("rule 5d scope: 3 line(s) inside an fn, 4\n"), "{text}");
+        assert!(
+            text.contains("rule 5d scope: 3 line(s) inside an fn, 4\n"),
+            "{text}"
+        );
         let quoted = "fn f() {}\n// const X: () = assert!(true);\n";
         assert!(g11(&[("crates/a/src/x.rs", quoted)], &lists()).0);
     }
 
     #[test]
     fn gate11_refuses_an_empty_fn_scope_an_undelimited_file_and_a_silent_walk() {
-        let (ok, text) = g11(&[("crates/a/src/x.rs", "const A: u8 = {\n1\n};\n")], &lists());
+        let (ok, text) = g11(
+            &[("crates/a/src/x.rs", "const A: u8 = {\n1\n};\n")],
+            &lists(),
+        );
         assert!(!ok);
-        assert!(text.contains("  REFUSED  rule 5d classified NO line as fn scope."), "{text}");
-        let (ok, text) = g11(&[("crates/a/src/x.rs", "#[cfg(test)]\nmod t {\n")], &lists());
+        assert!(
+            text.contains("  REFUSED  rule 5d classified NO line as fn scope."),
+            "{text}"
+        );
+        let (ok, text) = g11(
+            &[("crates/a/src/x.rs", "#[cfg(test)]\nmod t {\n")],
+            &lists(),
+        );
         assert!(!ok);
         assert!(text.contains("UNDELIMITED TEST MODULE  crates/a/src/x.rs\n"));
         assert!(text.contains("the boundary above is what\nhas to change, not this message.\n"));
@@ -2930,18 +3117,33 @@ mod tests {
     #[test]
     fn every_shipped_allowlist_entry_is_a_crate_source_with_a_count() {
         let all = [
-            ALLOW_SEARCH, ALLOW_FLOAT, ALLOW_UNSIZED, ALLOW_SORT, ALLOW_PANIC, ALLOW_DISARM,
-            ALLOW_ASSERT, ALLOW_SCAN, ALLOW_SCAN_UNREAD, ALLOW_MEMBER,
+            ALLOW_SEARCH,
+            ALLOW_FLOAT,
+            ALLOW_UNSIZED,
+            ALLOW_SORT,
+            ALLOW_PANIC,
+            ALLOW_DISARM,
+            ALLOW_ASSERT,
+            ALLOW_SCAN,
+            ALLOW_SCAN_UNREAD,
+            ALLOW_MEMBER,
         ];
         for list in all {
             let mut seen = BTreeSet::new();
             for (p, n) in list {
-                assert!(p.starts_with("crates/") && p.contains("/src/") && p.ends_with(".rs"), "{p}");
+                assert!(
+                    p.starts_with("crates/") && p.contains("/src/") && p.ends_with(".rs"),
+                    "{p}"
+                );
                 assert!(*n > 0, "{p}");
                 assert!(seen.insert(*p), "{p} listed twice");
             }
         }
         assert!(ALLOW_SCAN_UNREAD.is_empty());
-        assert!(ALLOW_PENDING.iter().all(|(id, why)| id_grammar(id) && why.contains("CLOSED BY")));
+        assert!(
+            ALLOW_PENDING
+                .iter()
+                .all(|(id, why)| id_grammar(id) && why.contains("CLOSED BY"))
+        );
     }
 }
