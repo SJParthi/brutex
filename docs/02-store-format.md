@@ -188,9 +188,18 @@ checksum rather than returning half of each image.
 1. pwrite the new records at offset  32768 + n_valid * 56
 2. fsync the data, through Commit::durable_through
 3. pwrite the affected block checksums into the .crc sidecar, then fsync it
+3b. pwrite the time-index entries the batch touches into the .tix, then fsync it
 4. pwrite the 64-byte header slot for generation g   <- one write
 5. fsync the header
 ```
+
+Step 3b is D-2329's and §8.1 describes it. Like step 3 it lands before the
+slot that commits the bars it describes, so a committed bar is never missing
+from the index; a crash between 3b and 5 leaves index entries AHEAD of the
+commit, which the next append masks off and overwrites (§8.1). A batch the
+index cannot hold — a second daily bar on one IST day — is admitted exactly as
+before; the `.tix` is removed before step 1 and the month bisects, loudly
+(D-2330).
 
 **This list used to put the sidecar before the data `fsync`.** The writer has
 always done it in the order above (`BarFile::append`: records, `sync_all`,
@@ -415,6 +424,7 @@ an absent overlay or a pricing refusal can leave different row counts.
 | `.ovl.crc` | overlay block checksums, using the overlay's own geometry |
 | `.grk` | computed Greeks and their provenance, 80-byte records, version 8 |
 | `.grk.crc` | Greek block checksums, using the Greek file's own geometry |
+| `.tix` | the bar file's time index, version 1 (§8.1, D-2329) |
 | `.lock` | the advisory lock one writer holds for the month (§5, §9) |
 
 ```
@@ -435,6 +445,125 @@ checksum sibling is missing; it does not borrow the bar checksum or fabricate
 proof. Writers may create a checksum sibling only for a stream with no
 committed records; a missing proof for existing sealed records refuses before
 creation. This change does not repair or reseal previously damaged history.
+
+### 8.1 The time index — `.tix`, version 1 (D-2329, D-2330)
+
+`BarFile::first_at_or_after` — the first committed bar stamped at or after a
+timestamp — was a bisection over the records (D-1434). The header names the
+timeframe and the path names the IST month, so a timestamp's SLOT on the
+rung's grid is arithmetic; but a month has nights, holidays and missing
+minutes, so the slot is not the row, and no field of the bar header recovers
+the row from it. The slot-to-row table is therefore this new file at its own
+version and stride; the `.bin`, `.crc` and every existing version are
+untouched (`CLAUDE.md` §3 rule 8, §4).
+
+**Slots.** One slot is one timeframe. Intraday slots start on the grid §5's
+admission uses — `(ts + anchor) mod width == 0`, anchored at 09:15 IST — so
+slot 0 starts at the last grid point at or before 00:00 IST on the 1st (that
+instant itself for 1s, 1, 3, 5 and 15 minutes; earlier for 2, 10, 30 and 60
+minutes), and every admitted intraday stamp is a slot's first instant. Daily
+slots are IST days, slot 0 starting 00:00 IST on the 1st. A month has
+`slot_count = (until − 1 − origin) / width + 1` slots: 44,640 at one minute
+and 2,678,400 at one second in a 31-day month.
+
+**At most one bar per slot, and an intraday bar AT its slot's start.** Every
+intraday stamp the writer admits is a grid point (D-0915), so it is the first
+instant of its slot and two strictly increasing ones are two slots: every
+intraday rung holds this for free, and only a month written before D-0915 can
+break it (such a month gets no index; see below). The daily rung
+admits any whole second (D-0915), so it can hold a second bar on one IST day.
+That bar is still admitted, because D-2329 does not narrow what the writer
+accepts. Before any byte of that append is written the `.tix` is removed and
+its directory synced, and from then on the month bisects with the `store.tix`
+warning. A later writer open retries the rebuild, meets the same bar, and warns
+again (D-2330).
+
+**Header, 64 bytes at offset 0, little-endian:**
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `BRUTEXT1` |
+| 8 | 2 | version `1` |
+| 10 | 2 | entry stride `16` |
+| 12 | 4 | timeframe seconds, as the bar header |
+| 16 | 8 | origin: the first instant of slot 0, epoch microseconds, `i64` |
+| 24 | 8 | slot width, microseconds, `i64` |
+| 32 | 8 | slot count, `u64` |
+| 40 | 4 | symbol id, as the bar header |
+| 44 | 16 | reserved, zero |
+| 60 | 4 | CRC-32C over bytes `0..60` |
+
+A reader recomputes all of it from the path and the bar header and refuses
+any difference: a header that fails its checksum, a magic that is not
+`BRUTEXT1`, a version that is not 1, or a geometry that is not this month's.
+
+**Entry *b*, 16 bytes at `64 + 16·b`,** one per 64 slots `64b .. 64b+63`:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | occupancy, `u64`: bit `j` set when a bar lies in slot `64b + j` |
+| 8 | 4 | before, `u32`: bars in every slot below `64b` |
+| 12 | 4 | CRC-32C over bytes `0..12` followed by `b` as 8 little-endian bytes |
+
+The checksum binds an entry to its position, so an entry copied to another
+bucket or a run shifted by a lost write fails it. Entries exist from bucket 0
+through the bucket of the last committed bar, and the file ends there: an
+empty month's `.tix` is the 64-byte header alone; a full one-minute month's
+is `64 + 698·16` bytes, a full one-second month's `64 + 41,850·16`.
+
+**The lookup.** For `ts` at or before the header's `first_ts_micros` the
+answer is 0, and after its `last_ts_micros` it is `n_valid`, with no read.
+Otherwise `ts` lies in slot `q` no later than the last bar's, and one entry
+read gives
+
+```
+row = before[q/64] + popcount(occupancy[q/64] & ((1 << (q mod 64)) − 1))
+```
+
+the row of the first bar in slot `q` or later. When slot `q` is empty, or
+`ts` is its first instant, that is the answer. Otherwise `ts` is strictly
+inside an occupied slot. On an intraday rung the bar in it IS the slot's first
+instant — the index holds no other (below) — so it is before `ts` and the
+answer is `row + 1`. On the daily rung the bar may sit anywhere in its day,
+and one read of bar `row` decides between `row` and `row + 1`. **At most one
+entry read and, on the daily rung only, one bar read, whatever `n_valid` is.** A read
+handle decides once, at its first lookup, whether the index is usable: one
+open, the 64-byte header, and the two entries holding the bars the header
+stamps first and last, which must be rows `0` and `n_valid − 1` in their
+slots.
+
+**The writer keeps it in step.** `BarFile::append` computes the entries a
+batch touches before writing anything — one entry read, the one holding the
+last committed bar, with every bit above that bar cleared — and writes them
+at step 3b, cutting the file to end after them. A crash between 3b and 5
+leaves entries for bars that never committed; every reader ignores them
+(the lookup never consults a slot past the last committed bar), and the next
+append clears them by the same masking. Re-offering held bars
+(`AlreadyPresent`) writes nothing. The same bars written in any batching give
+the same `.tix`, byte for byte.
+
+**A month without a usable index is served loudly, never silently.** A `.tix`
+that is absent (a month written before D-2329, or by a writer that does not go
+through `BarFile::append`), refused, or not describing the committed bars
+leaves the handle on the D-1434 bisection: the same answers, at
+`ceil(log2(n_valid + 1))` record reads, with one `store.tix` warning per
+handle naming the reason (`BarFile::time_lookup` reports it). A read door
+never writes a `.tix`. The writer door — `BarFile::open_or_create` — rebuilds
+one from the committed bars when it finds none it can confirm: O(`n_valid`)
+verified record reads, once per month, logged as a `store.tix` info line. That
+open IS the explicit migration path for existing months. When the bars cannot
+be indexed (a block that fails its checksum, two bars in one slot, an intraday
+bar off the grid, a bar outside the month) the writer leaves no `.tix`, the
+month still opens and appends exactly as before, and its lookups bisect,
+saying why.
+
+**What the reader's confirmation does not prove.** It checks the header and
+the two entries holding the first and last bars, not every entry between: an
+index rewritten by hand, or one left by a writer that replaced the month's
+bars with others that happen to start and end in the same slots at the same
+rows, would pass it. `docs/06-limits.md` (D-2329) states the residue. A writer
+that changes a `.bin` other than through `BarFile::append` must delete the
+`.tix` beside it.
 
 Every one of those names is rendered by `store::path::StorePath` and nothing
 else. The vendor is the first segment (D-0019); every segment is

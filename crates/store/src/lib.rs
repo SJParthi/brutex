@@ -71,6 +71,7 @@ pub mod layout;
 pub mod open_flags;
 pub mod path;
 pub mod repair;
+pub mod time_index;
 
 /// Proof that this crate's nine `telemetry::emit` sites — `store.flock`'s
 /// unreleased-lock note among them (D-0693) — reach a file, driven

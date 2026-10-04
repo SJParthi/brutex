@@ -60687,3 +60687,100 @@ unchanged.
 
 **Proof.** `web/tests/rank-rows-unmeasurable.test.js`, which runs the page's
 own `rankRows` and pins the `cli::ranked` rule it mirrors. Gate W2 runs it.
+
+### D-2329 — Bar lookup by time reads a per-month `.tix` index: one entry, not a bisection — 2026-10-04
+
+**Finding.** `BarFile::first_at_or_after`, the time-to-row lookup behind
+`/bars.json`'s day window and `append`'s re-offer check, was the D-1434
+bisection: up to `ceil(log2(n_valid + 1))` record reads, fourteen at a
+one-minute session month and twenty-two at a full one-second month, each able
+to pay a cold block verify. `CLAUDE.md` §3 rule 4 names bar lookup as a
+constant-cost operation. Measured on the base commit (`x86_64` shared host,
+release, 200,000 lookups, reopened handle): p50 28.8 µs and p99 52.9 µs at a
+11,625-bar one-minute month, p50 51.6 µs and p99 89.0 µs at a 517,500-bar
+one-second month, against 3.6 to 3.9 µs for a random-row `read_record`.
+
+**Decision.** A new sibling file per bar month, `<yyyy-mm>.tix`, version 1
+(`docs/02-store-format.md` §8.1). A 64-byte checksummed header records the
+slot geometry: one slot per timeframe on the D-0915 admission grid, IST days
+for the daily rung. Then one 16-byte entry per 64 slots holds a 64-bit
+occupancy word, the count of bars before the entry, and a CRC-32C bound to
+the entry's position. A lookup answers from the bar header outside the bars'
+span, and otherwise reads one entry and takes a popcount; the daily rung adds
+at most one bar read. The bar format, its versions and the `.crc` are
+unchanged.
+
+* **Written by the writer, on every append**, at step 3b: after the block
+  checksums and before the header slot, so a committed bar is never missing
+  from the index. A crash between leaves entries ahead of the commit; readers
+  never consult them, and the next append masks and overwrites them.
+* **Old months are not mutated.** A read handle with no usable `.tix` uses the
+  bisection — the D-1434 code, unchanged — and writes one `store.tix` warning
+  naming why (`CLAUDE.md` §4: degrade loudly, name the reason).
+  `BarFile::time_lookup` reports the path. The writer door
+  (`BarFile::open_or_create`) rebuilds a missing or unconfirmable index from
+  the committed bars, once, logged as `store.tix` info. That open is the
+  explicit migration path. When the bars cannot be indexed, the writer removes
+  any `.tix` and the month keeps working as before, bisecting loudly.
+* **Not chosen:** keeping the bisection behind a cache (still log-many reads
+  cold); interpolation search (not constant on gapped data); a per-slot `u32`
+  table (10.7 MB for a one-second month against 0.67 MB here); building on a
+  READ open (a read door must never write; D-1432's `open_existing`).
+
+**What it changes.** Every bar month written through `BarFile::append` gains
+a `.tix` beside it, so catalog censuses count one more `other_kind` sibling
+per month (`store::fifo` now expects three). On every month whose records are
+the bytes that were committed, every answer equals the bisection's. They can
+differ only on a month whose records are NOT those bytes: the zero-extent case
+`crates/api/src/server.rs` describes, where a header names records whose
+extent reads back as zeros. There the index answers from the stamps the writer
+committed, and the bisection answered from the zeros. Both answers are
+positions, and `/bars.json` filters the rows it then reads. A REBUILD reads the
+records and refuses to index such a month, so it stays on the bisection.
+
+**Proof.** `store::time_index::every_lookup_reads_at_most_one_entry_and_one_bar`
+(read counts, 0 to 2,678,400 bars).
+`store::tix::the_index_answers_every_timestamp_exactly_as_the_bisection_does`
+(answers against the bisection on real files).
+`store::tix::every_way_an_index_can_be_wrong_is_named_and_the_answer_still_comes_back`
+and `store::tix::a_month_without_an_index_bisects_and_a_writer_open_builds_one_once`
+(the loud fallback and the rebuild).
+`store::tix::an_index_left_ahead_of_the_commit_is_masked_and_then_overwritten`
+(crash ordering). `store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`
+(both `store.tix` lines). Gate 8 rows C-TIX-01 and C-TIX-02. Measured after,
+same host and file: p50 322 ns and p99 520 ns (one-minute), p50 362 ns and
+p99 603 ns (one-second). `docs/06-limits.md` D-2329 section. AFG-28.
+
+### D-2330 — A second daily bar in one IST day is admitted, and its month keeps no time index — 2026-10-04
+
+**Finding.** D-2329's index holds at most one bar per slot. Every intraday
+rung keeps that already: an admitted intraday stamp is a grid point (D-0915),
+so two strictly increasing stamps are two slots. The daily rung admits any
+whole second, so it accepts two bars on one IST day, for example one at
+midnight and one at the close. No index of one bar per slot can hold that
+month. A first draft refused such a batch as a new `StoreError::SharedSlot`.
+That narrowed what the writer admits, and `cli`'s
+`stored::tests::typed_daily_and_minute_context_doors_keep_the_header_bound_protective`,
+which seeds four daily bars a minute apart on one day, failed on it. A
+lookup index has no business changing which bars a month may hold
+(`CLAUDE.md` §3 rule 5).
+
+**Decision.** Admission is unchanged. When `BarFile::append` finds a bar in
+the slot of the bar before it, within the batch or after the last committed
+bar, it retires the index before writing anything. The handle switches to the
+bisection with the `store.tix` warning naming the reason, the `.tix` is
+removed, and the directory is synced. The append then runs exactly as it did
+before D-2329. Every later reader finds no `.tix` and warns. Every later writer
+open retries the rebuild, meets the same bar, removes the `.tix` it opened,
+and warns again. The month is never served by an index that
+does not describe it. One bar per IST day, the normal daily month, keeps its
+index. The alternative, a one-second slot for the daily rung, would make
+every daily month O(1) at the cost of an index of up to 670 KB for about 22
+bars. It was not taken. A daily month of one bar per session keeps its index, and
+only a month that departs from that pays the bisection. `docs/06-limits.md`
+states that cost.
+
+**Proof.** `store::tix::a_second_daily_bar_on_one_ist_day_is_admitted_and_the_month_stops_being_indexed`
+(after a commit and within one batch, writer, reopened writer and reader
+lookups against expected rows, the next IST day's midnight kept indexed),
+and the `cli` test above passing unchanged. AFG-29.
