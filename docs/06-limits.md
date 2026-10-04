@@ -14152,10 +14152,16 @@ bounds are all nonzero.
 - **Gate 10, bare proof names (D-1606).** Only names with three or more
   underscores, in the cell before a status glyph, are read. A shorter name,
   or one in prose, is still checked by nothing.
-- **Gate 0 `spawns` (D-1603).** Reads only a string literal passed straight
-  to `Command::new`. A program held in a variable (`api`'s browser opener,
-  D-1202) or built at run time is not seen, and `sh`/`bash` are not shadowed
-  on gate 1e's PATH because the `git` the tests spawn may start a shell.
+- **Gate 0 `spawns` (D-1603, narrowed by D-2344).** A program held in a
+  variable is now resolved one step in the same file (the nearest `let` that
+  binds it, or the body of the `fn` it calls) and must name only
+  `current_exe`, a `CARGO_BIN_EXE_*` path or a listed program; anything it
+  cannot resolve is refused. A value threaded through two functions, a field,
+  or another file is not followed, and is refused rather than read. `sh` and
+  `bash` are now shadowed on gate 1e's PATH: git starts a shell by the absolute
+  path it was built with, and `core`'s `findings` and `store`'s
+  `cited_commits` tests ran on 2026-10-04 with both stubbed and invoked
+  neither.
 - **The `.github/*.rs` gate tools (D-1600).** Gate 6c holds them to rustfmt
   and clippy `-D warnings`; no coverage or mutation measure applies to them.
 - **Twelve `#[ignore]`d tests never run in CI, by design (D-1613,
@@ -14492,3 +14498,44 @@ most 100,000).
 - **`/selection-v6.json`.** Eight files, at most 64 blocks of 16 KiB each,
   each hashed twice (identity and seal) and decoded once: O(blocks) per
   request, bounded by the cap. UNVERIFIED as a measured bound.
+
+## Language-purity gate limits after the RO sweep — D-2340..D-2350, 4 October 2026
+
+- **Inline awk in `ci.yml` (D-2342).** Gate 0 now refuses an `awk` program
+  operand, but 71 inline awk programs remain in `ci.yml`, all in gates that
+  pre-date the scanner. They are a pinned ratchet, not an exemption: the
+  scanner's `AWK_IN_CI` must EQUAL the count, so a new program anywhere is
+  refused and a removed one forces the pin down. Moving each into a
+  `.github/*.rs` tool is the remaining work; until then section 2 holds for
+  every other file and is bounded, not met, in this one.
+- **What Gate 0 reads as a command (D-2342).** Words are split on whitespace
+  and on `;`, `&&`, `||`, `|`, `$(`, a backtick and `<(`; quoting is not
+  parsed. A program named by a variable (`p=node; $p -e x`), a name assembled
+  from pieces, or a flag built at run time is not seen. A `gh --jq` or `jq`
+  operand passes only as a bare field path (`.sha`, `.a.b`).
+- **Gate 1g environment names (D-2346).** The refusals are line patterns: a
+  variable-built name (`export "$n=..."`, `declare`, `printf -v`), any
+  `GITHUB_PATH` write, and any `GITHUB_ENV` write other than the two literal
+  `printf 'SOURCE_SCAN=%s\n'` and `'CARGO_TARGET_DIR=%s\n'` lines. A name
+  assembled across lines, or written through a file descriptor other than
+  `>> "$GITHUB_ENV"`, is not modelled.
+- **`cfg` evaluation (D-2340).** CI compiles x86-64 Linux with `test` and
+  `debug_assertions` each on or off; a `cfg` on a module, an inner `#![cfg]`
+  or an `include!` is evaluated over those four configurations. `feature`,
+  `doc`, `miri` and any name or key not listed in `cfg_pred` are refused
+  rather than guessed, so a future `#[cfg(feature = ..)] mod` needs that
+  function taught first.
+- **Workflow `run:` lines (D-2341).** Built tools are read from `run:` block
+  and single-line bodies, with heredoc bodies skipped by their terminator
+  word. A `<<` inside a quoted string can open a heredoc that never closes,
+  which hides later lines: the tool then reads as unbuilt and gate 1 refuses
+  it as an orphan, which fails closed.
+- **Build scripts (D-2347).** Gate 2 reads the production tokens of every
+  file a build script compiles. A directive whose value comes from a
+  format argument (`rustc-env=BRUTEX_COMMIT={commit}`) is checked by its
+  literal prefix only; the value is `build_provenance`'s 40-hex commit or
+  empty.
+- **Gate 1e on a worktree without `web/` (D-2345).** Not run locally for the
+  change that introduced it: this machine is shared and the full workspace
+  build and test is CI's job. What was run locally is recorded in D-2345.
+

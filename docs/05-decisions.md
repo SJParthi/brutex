@@ -56781,3 +56781,163 @@ decodes a genuine committed block to the authority's own `top_twenty_five`.
 `api::selectionv6json::tests::every_rung_is_absent_saved_or_refused_by_name`,
 `api::selectionv6json::tests::a_record_projects_exactly_and_the_family_selector_narrows_winners`,
 and `web/tests/selection-v6.test.js`.
+
+### D-2340 — Gate 1 counts a module compiled only under a configuration CI builds — 2026-10-04
+
+**Finding (sweep/gates-ro RO-1).** `source_scan closure` followed every
+`mod x;` whatever its attributes, so `#[cfg(any())] mod x;` (or
+`#[cfg(windows)]`, `#[cfg(target_os = "macos")]`) made `x.rs` "compiled" for
+gate 1 while rustc never opened it. Verified at 560ce8c: `x.rs` holding
+another language passed gate 1.
+
+**Change.** The resolver evaluates every `cfg` on a `mod` declaration, an
+enclosing inline module, an inner `#![cfg]` and an `include!` over the four
+configurations CI compiles (x86-64 Linux, `test` and `debug_assertions` each
+on or off), carrying the set across files and reading each file under the
+union of the sets that reach it. A declaration no configuration reaches, a
+`cfg` name or key it cannot decide, a `cfg_attr` that applies `cfg`, and an
+`include!` inside a non-module block are refused. A tracked `.rs` outside
+`web/` that does not lex as Rust is refused by `source_scan content`. Limits:
+`docs/06-limits.md`. AFG-40.
+
+### D-2341 — Only a `run:` command that starts with `rustc` builds a `.github/*.rs` tool; Gate 0 reads every `.github/*.yml` — 2026-10-04
+
+**Finding (RO-2, RO-3).** A `.github/*.rs` counted as built when any workflow
+line mentioned `rustc` and its path, so a `name:` or `echo` line made an
+unbuilt file "compiled". Gate 0 read only `.github/workflows/*.yml`, so a
+composite action under `.github/actions/` was never scanned.
+
+**Change.** `run_lines` reads the command lines of `run:` keys (block and
+single-line), joins continuations and skips comments and heredoc bodies; a
+tool is a root only when such a line's command word is `rustc`. Every tracked
+`.github/**.yml` is read for roots, by Gate 0's workflow scan, and by gate
+1g. AFG-41.
+
+### D-2342 — Gate 0 refuses inline programs in every form it can read; inline awk is a pinned ratchet — 2026-10-04
+
+**Finding (RO-4).** The inline-program check read only the word after the
+interpreter, so `node --no-warnings -e`, `perl -w -e`, `ruby3.3 -e`
+(versioned), `"$(command -v perl)" -e`, `pwsh -c`, `Rscript -e`, `osascript
+-e`, `bash -c "$prog"`, `curl | sh`, `eval`, `awk '...'`, `jq '...'` and `gh
+--jq '...'` all passed.
+
+**Change.** Each command segment is scanned whole for an interpreter (version
+suffixes and quoting/expansion punctuation removed) and for any of its inline
+flags; shells are refused for a run-time-built `-c` program, `-s` and a pipe;
+`eval` is refused; awk and jq are refused for a program operand, jq and `gh
+--jq` passing only a bare field path. The existing workflows carried 71
+inline awk programs in `ci.yml`: rewriting every pre-scanner gate in one
+change was not done, so they are an EXACT pinned count (`AWK_IN_CI`) that
+refuses any new one and must be lowered as each moves into a `.github/*.rs`
+tool. The jq programs were moved (D-2343). AFG-42; limits in
+`docs/06-limits.md`.
+
+### D-2343 — The auto-merge and main re-check JSON rules are Rust, built from main — 2026-10-04
+
+**Finding (RO-10).** `auto-merge.yml` and `main-check.yml` carried seven
+inline `gh --jq` programs, the code-owner approval rule of D-1604 among them:
+a second language in tracked files outside `web/`.
+
+**Change.** `.github/gh_json.rs`, a dependency-free reader built by rustc,
+answers each question (`armed`, `pr-for-head`, `pr-fields`, `check-runs`,
+`filenames`, `approvers`, `ci-run-count`) from a stream of JSON documents, as
+`gh api --paginate` prints them, and fails closed on a missing field. Gate 0
+runs its tests. Both workflows check out `main` (never the pull request; no
+credentials persisted) and build it, so a pull request cannot rewrite the
+rule that judges it, as `pull_request_target` already ensured for the
+workflow file. The candidate read moved from `< <(...)` to a substitution, so
+a failed read stops the job. `--jq` with a bare field path (`.sha`,
+`.behind_by`, `.state`) remains. AFG-43.
+
+### D-2344 — Every spawn names the running binary, a cargo-built binary or a listed program — 2026-10-04
+
+**Finding (RO-5).** `source_scan spawns` refused only a shell or interpreter
+spelled as a literal: `let p = "sh"; Command::new(p)`, any unlisted program,
+and a renamed `Command` passed; `.github/*.rs` was not scanned; gate 1e did
+not shadow `sh` or `bash`.
+
+**Change.** A `Command::new` argument must name `current_exe`, a
+`CARGO_BIN_EXE_*` path, or one of `git`, `mkfifo`, `/usr/bin/mkfifo`,
+`xdg-open`, `open`, `explorer.exe` (the browser opener of D-1202), directly or
+through the nearest `let` that binds it or the `fn` it calls in the same
+file; anything else is refused, as is `Command as`. Gate 0 scans
+`.github/*.rs` too, and gate 1e shadows `sh` and `bash`. AFG-44.
+
+### D-2345 — Gate 1e builds and tests a worktree of the commit with `web/` deleted — 2026-10-04
+
+**Finding (RO-6).** CLAUDE.md section 2 says gate 1e's premise is "that the
+workspace builds with the front end moved aside"; the gate only shadowed PATH
+in the checkout, `web/` present, and its own comment said section 2 did not
+require `web/` to be absent.
+
+**Change.** The gate adds a detached worktree of `HEAD`, deletes its `web/`,
+refuses if it is still there, and runs the same stubbed `cargo build
+--all-targets` and `cargo test` inside it, so the claim CLAUDE.md makes is
+the gate's behaviour (CLAUDE.md is unchanged). `crates/api` reads `web/` at
+run time only (`assets.rs`), and the crate tests that name `web` build their
+own temporary roots. Run locally: `cargo test -p core --test findings` and
+`-p store --test cited_commits` with `sh`/`bash` stubbed (no stub invoked).
+The full worktree build and test was not run locally; CI runs it.
+
+### D-2346 — Gate 1g refuses rustdoc, runtool and variable-built environment doors — 2026-10-04
+
+**Finding (RO-7).** Gate 1g's pattern missed `CARGO_BUILD_RUSTDOC`,
+`RUSTDOCFLAGS` with a linker, link argument or `--runtool`, and an
+environment name assembled from a shell variable or written to `GITHUB_ENV`
+or `GITHUB_PATH`.
+
+**Change.** Added `CARGO_BUILD_RUSTDOC`, `RUSTC_LINKER`, `RUSTUP_TOOLCHAIN`,
+`RUSTUP_HOME`; `RUSTFLAGS`/`RUSTDOCFLAGS` (and the encoded and per-target
+forms, which contain those words) carrying `linker`, `link-arg`, `fuse-ld`,
+`runtool` or `link-self-contained`; `--runtool`/`--test-runtool`;
+`export`/`declare`/`typeset`/`readonly`/`local`/`env` with a `$` in the name;
+`printf -v`; any `GITHUB_PATH`; and any `GITHUB_ENV` line other than the two
+literal names this workflow sets. Gate 1g reads every `.github/*.yml`.
+
+### D-2347 — A build script prints only listed directives and writes nothing — 2026-10-04
+
+**Finding (RO-8).** Gate 2's literal check read whole literals, so
+`concat!("cargo:rustc-link", "-arg=...")`, a `format!`-built directive printed
+through `"{k}"`, `env::var("CARGO_HOME")` and `fs::write` passed.
+
+**Change.** On a build script's production tokens: `print!`/`println!` must
+take a literal format string starting with `cargo:` or `cargo::` and one of
+`rerun-if-env-changed=`, `rerun-if-changed=`, `rustc-env=BRUTEX_COMMIT=`,
+`warning=` (exactly what `crates/cli/build.rs` prints); `concat!`, `stdout`,
+`OpenOptions`, links, `fs::`/`File::` writes, creates, copies, renames and
+removes, renamed or group imports from `fs`, and the literals `CARGO_HOME`,
+`HOME` and `USERPROFILE` are refused. `crates/cli/build.rs` and its two
+modules pass unchanged. AFG-45.
+
+### D-2348 — `.gitignore` and `.gitattributes` only at the root or under web/ — 2026-10-04
+
+**Finding (rustonly2-5).** Gate 1 allowed both names at any depth with any
+content, an extensionless file the content checks never scanned as source.
+Tracked today: `.gitignore` and `web/.gitignore` only.
+
+**Change.** Gate 1 refuses either name anywhere but the root and `web/`,
+which section 2 leaves unrestricted.
+
+### D-2349 — Every `.github/*.rs` tool forbids unsafe, and gate 16 checks it — 2026-10-04
+
+**Finding.** `.github/source_scan.rs`, `invariant_paths.rs` and
+`mutation_gate.rs` carried no `#![forbid(unsafe_code)]`, and gate 16 read
+crate roots only.
+
+**Change.** All four tools (with `gh_json.rs`) carry it, and gate 16 layer 1c
+refuses a tool without it or with any `unsafe` token.
+
+### D-2350 — The banned runtime lists name WebAssembly runtimes and further interpreters — 2026-10-04
+
+**Finding (RO-9).** Gate 13, gate 13b, `deny.toml` and `FORBIDDEN` named no
+WebAssembly runtime and missed several embeddable interpreters.
+
+**Change.** Added `wasmtime`, `wasmer`, `wasmi`, the Rust implementation of
+the best-known interpreted language (spelled through its word's parts),
+`deno_runtime`, `quick-js`, `rb-sys`, `extendr`, `extendr-api`,
+`extendr-engine`, `jlrs`, `starlark`, `rune`, `gluon`, `mun`, `koto`,
+`steel-core`, `piccolo`, `libR-sys`, `perl-sys`, `libperl-sys`, `tcl` to all
+four lists, which `the_three_banned_lists_agree` holds together. crates.io
+answered 200 for each on 2026-10-04 except `extendr` and `perl-sys` (404),
+kept for their families; `libperl-sys` is the published binding. None is in
+`Cargo.lock`. AFG-46.

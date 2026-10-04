@@ -822,3 +822,28 @@ Narrative only. No row is added to the table above.
 - **gaps-10** (no API or page for Selection V6): fixed by
   `/selection-v6.json` and `/selection`. Equities are refused with the
   `CLAUDE.md` §1 sentence. D-1578, AFF-62.
+
+### Language-purity gate sweep (sweep/gates-ro) — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **RO-1** (a `cfg`-dead `mod` counted compiled): fixed. D-2340, AFG-40.
+- **RO-2** (any line mentioning rustc built a tool) and **RO-3** (Gate 0 read
+  workflows only): fixed. D-2341, AFG-41.
+- **RO-4** (inline programs past the first flag, other interpreters, awk,
+  jq): fixed; 71 inline awk programs in `ci.yml` are an exact pinned ratchet,
+  not yet moved into Rust. D-2342, AFG-42.
+- **RO-5** (spawns by variable, unlisted programs, `.github/*.rs`, no shell
+  stubs): fixed. D-2344, AFG-44.
+- **RO-6** (gate 1e did not move the front end aside): fixed in the gate;
+  the full run is CI's. D-2345.
+- **RO-7** (gate 1g's rustdoc, runtool and variable-built doors): fixed.
+  D-2346.
+- **RO-8** (split literals, CARGO_HOME, writes in build scripts): fixed.
+  D-2347, AFG-45.
+- **RO-9** (banned lists): fixed. D-2350, AFG-46.
+- **RO-10** (inline jq in auto-merge and main re-check): fixed by
+  `.github/gh_json.rs`. D-2343, AFG-43.
+- **rustonly2-5** (nested `.gitignore`/`.gitattributes`): fixed. D-2348.
+- **`.github/*.rs` without `#![forbid(unsafe_code)]`**: fixed, gate 16 layer
+  1c. D-2349.

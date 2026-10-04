@@ -68,7 +68,8 @@ name: Auto-merge
 #
 # SECURITY. No value from the event payload is interpolated into a `run:`
 # body. Every value crosses into the shell through `env:` and is quoted at the
-# point of use, so a branch name or a title cannot become a command. The base
+# point of use, so a branch name or a title cannot become a command. The only
+# checkout is of `main`, for the Rust JSON reader (D-2343). The base
 # branch is a literal rather than `github.event.*.default_branch`, so nothing
 # attacker-shaped decides what we compare against.
 
@@ -95,6 +96,16 @@ jobs:
     name: Enable squash auto-merge on green
     runs-on: ubuntu-24.04
     steps:
+      # D-2343 (RO-10): the JSON rules below, the approval rule among them,
+      # are Rust in .github/gh_json.rs, not inline query programs. They are
+      # built from MAIN's copy, never the pull request's, so a pull request
+      # cannot rewrite the rule that judges it, exactly as this file itself
+      # runs from main under pull_request_target. Nothing of the pull request
+      # is checked out or run.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { ref: main, persist-credentials: false }
+      - name: Build the GitHub JSON reader from main
+        run: rustc --edition=2024 -D warnings .github/gh_json.rs -o "$RUNNER_TEMP/gh-json"
       - name: Evaluate every gate, then enable or refuse
         env:
           GH_TOKEN: ${{ github.token }}
@@ -114,6 +125,7 @@ jobs:
           REQUIRED_CHECK: ci-ok
         run: |
           set -euo pipefail
+          j="$RUNNER_TEMP/gh-json"
 
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
 
@@ -142,8 +154,7 @@ jobs:
           # says which of the three states the pull request is really in.
           disarm() {
             [ -n "${pr:-}" ] || { echo "no pull request was identified, so nothing is armed"; return; }
-            armed=$(gh pr view "$pr" --repo "$REPO" --json autoMergeRequest \
-                      --jq 'if .autoMergeRequest == null then "no" else "yes" end') \
+            armed=$(gh pr view "$pr" --repo "$REPO" --json autoMergeRequest | "$j" armed) \
               || { echo "COULD NOT READ whether auto-merge is armed on #${pr}; treat it as ARMED"; return; }
             if [ "$armed" = "no" ]; then
               echo "auto-merge is not armed on #${pr}"
@@ -181,8 +192,7 @@ jobs:
             # `commits/{sha}/pulls` also lists open PRs that merely CONTAIN
             # the sha (a stacked PR). Only the one whose HEAD is this sha is
             # the PR this CI run judged (hunt-ci-9, D-1604).
-            pr=$(gh api "repos/${REPO}/commits/${sha}/pulls" \
-                   --jq '[.[] | select(.state == "open" and .head.sha == env.SHA_FROM_RUN)] | .[0].number // empty')
+            pr=$(gh api "repos/${REPO}/commits/${sha}/pulls" | "$j" pr-for-head "$SHA_FROM_RUN")
           fi
           # No pull request is the shape of every CI run on main, INCLUDING a
           # failed one. Quiet is right there: the red X belongs to that CI run
@@ -196,11 +206,10 @@ jobs:
           # ---------------------------------------------------------------
           # 2. Is it even a candidate?
           # ---------------------------------------------------------------
-          read -r state draft fork head < <(
-            gh pr view "$pr" --repo "$REPO" \
-              --json state,isDraft,isCrossRepository,headRefOid \
-              --jq '[.state, (.isDraft|tostring), (.isCrossRepository|tostring), .headRefOid] | @tsv'
-          )
+          # A substitution, not `< <(...)`: a failed read now stops the job.
+          fields=$(gh pr view "$pr" --repo "$REPO" \
+                     --json state,isDraft,isCrossRepository,headRefOid | "$j" pr-fields)
+          read -r state draft fork head <<< "$fields"
           say "State ${state} · draft ${draft} · fork ${fork} · head ${head}"
 
           [ "$state" = "OPEN" ]  || not_yet "the pull request is ${state}, not OPEN."
@@ -277,7 +286,7 @@ jobs:
           # transient 5xx now paints this job red instead of arming a merge on
           # gates nobody looked at.
           if ! runs=$(gh api "repos/${REPO}/commits/${head}/check-runs" --paginate \
-                        --jq '.check_runs[] | [.name, .status, (.conclusion // "none")] | @tsv'); then
+                        | "$j" check-runs); then
             stopped "the check-run list for ${head} could not be read, so no claim about the gates can be made. Re-run this job."
           fi
 
@@ -309,7 +318,7 @@ jobs:
           # ---------------------------------------------------------------
           # Every read here that fails is a STOP, never an empty answer.
           if ! files=$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate \
-                         --jq '.[] | .filename, (.previous_filename // empty)'); then
+                         | "$j" filenames); then
             stopped "the changed-file list of #${pr} could not be read, so whether it changes a gate is unknown."
           fi
           [ -n "$files" ] || stopped "the changed-file list of #${pr} is empty, which no pull request can be."
@@ -325,8 +334,8 @@ jobs:
             [ -n "$owners" ] || stopped "the CODEOWNERS on ${BASE_BRANCH} names no owner."
             # The latest review per reviewer on THIS head; an approval of an
             # older head approves code that is no longer the pull request.
-            if ! approvers=$(HEAD_SHA="$head" gh api "repos/${REPO}/pulls/${pr}/reviews" --paginate \
-                   --jq '[.[] | select(.commit_id == env.HEAD_SHA and .state != "COMMENTED" and .state != "PENDING")] | group_by(.user.login) | map(max_by(.submitted_at)) | .[] | select(.state == "APPROVED") | .user.login'); then
+            if ! approvers=$(gh api "repos/${REPO}/pulls/${pr}/reviews" --paginate \
+                   | "$j" approvers "$head"); then
               stopped "the reviews of #${pr} could not be read."
             fi
             approved_by=$(comm -12 <(sort -u <<< "$owners") <(sort -u <<< "$approvers"))

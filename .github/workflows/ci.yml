@@ -44,6 +44,9 @@ jobs:
           rustc --edition=2024 --test -D warnings .github/source_scan.rs -o "${tool}-tests"
           "${tool}-tests"
           rustc --edition=2024 -D warnings .github/source_scan.rs -o "$tool"
+          # D-2343: the auto-merge and main re-check JSON rules, tested here.
+          rustc --edition=2024 --test -D warnings .github/gh_json.rs -o "${tool}-gh-json-tests"
+          "${tool}-gh-json-tests"
           if [ -n "${GITHUB_ENV:-}" ]; then
             printf 'SOURCE_SCAN=%s\n' "$tool" >> "$GITHUB_ENV"
           fi
@@ -57,7 +60,9 @@ jobs:
           #   * an interpreter handed a program inline (`node -e`, `perl -e`)
           #     is a second language in a tracked file outside web/ (CLAUDE.md
           #     section 2); such a program lives under web/ and is run by path.
-          wfs=$(git ls-files '.github/workflows/*.yml')
+          #     D-2342 widens the forms; awk is a pinned ratchet (06-limits).
+          # Every tracked .yml under .github/, not only workflows/ (D-2341).
+          wfs=$(git ls-files '.github/*.yml')
           [ -n "$wfs" ] || { echo "GATE 0 READ NO WORKFLOW."; exit 1; }
           # shellcheck disable=SC2086
           if ! "$tool" workflow $wfs; then
@@ -72,8 +77,10 @@ jobs:
             echo "GATE 0 FAILED: ci-ok no longer guards every gate. See D-1601."
             exit 1
           fi
+          # D-2344: every spawn names current_exe, a CARGO_BIN_EXE_ path or a
+          # listed program; .github/*.rs tools are read too.
           # shellcheck disable=SC2046
-          if ! "$tool" spawns $(git ls-files 'crates/*.rs'); then
+          if ! "$tool" spawns $(git ls-files 'crates/*.rs' '.github/*.rs'); then
             echo "GATE 0 FAILED: crate code above starts a shell or interpreter. D-1603."
             exit 1
           fi
@@ -133,8 +140,9 @@ jobs:
           # The names used to pass at any depth, so `crates/x/LICENSE` could
           # hold anything (UC-8). A licence and a code-owners file mean
           # something at the root (and CODEOWNERS under .github/ or docs/,
-          # where GitHub reads it); the two git files mean something in any
-          # directory. D-1104.
+          # where GitHub reads it). D-1104. The two git files now pass only at
+          # the root and under web/ (rustonly2-5, D-2348): a nested one could
+          # hold anything, and none is tracked anywhere else.
           root_names='LICENSE|CODEOWNERS'
           any_depth_names='\.gitignore|\.gitattributes'
           bad=0
@@ -168,7 +176,13 @@ jobs:
                    bad=1
                  fi ;;
             esac
-            if grep -Eq "^(${any_depth_names})$" <<< "$base"; then continue; fi
+            if grep -Eq "^(${any_depth_names})$" <<< "$base"; then
+              case "$f" in
+                .gitignore|.gitattributes|web/*) continue ;;
+                *) printf 'FORBIDDEN FILE  %s  (%s is allowed only at the root)\n' "$f" "$base"
+                   bad=1; continue ;;
+              esac
+            fi
             if grep -Eq "^(${root_names})$" <<< "$base"; then
               case "$f" in
                 LICENSE|CODEOWNERS|.github/CODEOWNERS|docs/CODEOWNERS) continue ;;
@@ -254,11 +268,12 @@ jobs:
           #    machine with no Node, no package manager and no `web/` build ever
           #    run."
           #
-          # The operative words are "no `web/` BUILD ever run". `web/build/` is
-          # TRACKED, so a fresh clone already has the bundle and `crates/api` may
-          # embed it without any bundler existing. §2 does not require the build to
-          # survive `web/` being absent -- it requires it to survive the TOOLCHAIN
-          # being absent.
+          # RO-6, D-2345: this gate used to claim the build ran "with the front
+          # end moved aside" while it only shadowed PATH in the checkout, web/
+          # present. It now builds and tests a WORKTREE OF THIS COMMIT WITH web/
+          # DELETED, so the claim CLAUDE.md section 2 makes for gate 1e is what
+          # runs: no crate can need web/, its toolchain, or a web/ build. `api`
+          # reads web/ at run time (crates/api/src/assets.rs), never at build.
           #
           # The old gate moved the whole `web/` tree aside, which breaks `api`'s
           # embed by construction. Its own comment called that failure "expected",
@@ -277,6 +292,11 @@ jobs:
           #
           # A crate that shells out to a bundler trips clause 2 AND, because the
           # stub exits 127, clause 1 as well.
+          tree="${RUNNER_TEMP:-/tmp}/gate-1e-no-web"
+          git worktree add --detach "$tree" HEAD
+          rm -rf "$tree/web"
+          [ ! -e "$tree/web" ] || { echo "GATE 1E: web/ was not removed"; exit 1; }
+          cd "$tree"
           stub="$(mktemp -d)"
           # Each stub APPENDS TO A FILE as well as writing to stderr, and the file is
           # what the check reads. Cargo suppresses a build script's stderr unless the
@@ -294,8 +314,9 @@ jobs:
           # is why gate 2's token check is the one that carries the rule. The
           # py-family names are assembled because gate 15 bans the word itself.
           snake="$(printf 'py')thon"
+          # sh and bash too (D-2344): no crate code starts a shell.
           for tool in node npm npx yarn pnpm bun deno vite webpack esbuild rollup tsc \
-                      "$snake" "${snake}3" perl ruby php lua luajit; do
+                      "$snake" "${snake}3" perl ruby php lua luajit sh bash; do
             printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "%s"\necho "GATE-1E-INVOKED: %s" >&2\nexit 127\n' \
               "$tool" "$invoked" "$tool" > "$stub/$tool"
             chmod +x "$stub/$tool"
@@ -378,8 +399,8 @@ jobs:
             printf '%s\n' "$tout" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
             exit 1
           fi
-          echo "OK — the workspace builds AND tests with node, npm, yarn, pnpm and"
-          echo "     five bundlers shadowed, and no stub was ever invoked."
+          echo "OK — the workspace builds AND tests with web/ deleted, every"
+          echo "     front-end tool, interpreter and shell shadowed, and no stub invoked."
       - name: Gate 1b — .json and .yml are confined
         run: |
           set -euo pipefail
@@ -472,15 +493,21 @@ jobs:
             'toolchain|toolchain\.(channel|components|targets|profile)'
           check_keys .config/nextest.toml \
             'profile\.[A-Za-z0-9_-]+\.overrides\[\](\.(filter|priority))?'
-          wf=$(git ls-files '.github/workflows/*.yml')
+          wf=$(git ls-files '.github/*.yml')
           # shellcheck disable=SC2086
-          envs=$(grep -nE '(^|[^A-Za-z0-9_])(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|RUSTC|RUSTDOC|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]|cargo[^#|;]*[[:space:]]--config[[:space:]=]' $wf || true)
+          envs=$(grep -nE '(^|[^A-Za-z0-9_])(RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC_WRAPPER|CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER|CARGO_BUILD_RUSTC|CARGO_BUILD_RUSTDOC|RUSTC|RUSTDOC|RUSTC_LINKER|RUSTUP_TOOLCHAIN|RUSTUP_HOME|CARGO_TARGET_[A-Z0-9_]+_(RUNNER|LINKER))[[:space:]]*[:=]|cargo[^#|;]*[[:space:]]--config[[:space:]=]' $wf || true)
           # D-1612 (rustonly2-7): the same doors by other names -- a linker in
           # RUSTFLAGS, a CARGO_HOME whose config.toml is any tracked file, and
           # a nextest configuration under another name. Comment lines skipped.
           # shellcheck disable=SC2086
-          envs2=$( { grep -nHE '(^|[^A-Za-z0-9_])CARGO_HOME[[:space:]]*[:=]|RUSTFLAGS[^#]*(linker|link-arg|fuse-ld)|nextest[^#|;]*--(tool-)?config-file' $wf || true; } \
+          # D-2346 (RO-7): RUSTDOCFLAGS and the encoded and per-target flag
+          # forms, a doc runtool, and an environment NAME built from a shell
+          # variable or written to GITHUB_ENV/GITHUB_PATH beyond the two
+          # literal names this workflow sets. See docs/06-limits.md.
+          envs2=$( { grep -nHE '(^|[^A-Za-z0-9_])CARGO_HOME[[:space:]]*[:=]|(RUSTFLAGS|RUSTDOCFLAGS)[^#]*(linker|link-arg|fuse-ld|runtool|link-self-contained)|--(test-)?runtool|nextest[^#|;]*--(tool-)?config-file|(^|[[:space:];&|(])(export|declare|typeset|readonly|local|env)([[:space:]]+-[A-Za-z]+)*[[:space:]]+[^=[:space:]]*\$[^=[:space:]]*=|printf[[:space:]]+-v|GITHUB_PAT[H]' $wf || true; } \
                    | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)
+          envs3=$( { grep -nHE 'GITHUB_EN[V]' $wf || true; } | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(#|if \[ -n "\$\{GITHUB_EN[V]:-\}" \]; then$|printf .(SOURCE_SCAN|CARGO_TARGET_DIR)=%s\\n. "\$[a-z_]+" >> "\$GITHUB_EN[V]"$)' || true)
+          envs2="${envs2}${envs3:+${envs2:+$'\n'}$envs3}"
           envs="${envs}${envs2:+${envs:+$'\n'}$envs2}"
           if [ -n "$envs" ]; then
             printf 'REFUSED  a workflow sets a compiler wrapper, runner or linker:\n%s\n' "$envs"
@@ -2195,6 +2222,9 @@ jobs:
           jni j4rs
           ruby-sys magnus rutie
           ext-php-rs
+          wasmtime wasmer wasmi rust${snake} deno_runtime quick-js rb-sys jlrs
+          extendr extendr-api extendr-engine
+          starlark rune gluon mun koto steel-core piccolo libR-sys perl-sys libperl-sys tcl
           "
 
           # THE ESCAPE HATCHES ARE HERE, NEVER IN THE CODE. `path max_count`,
@@ -2969,6 +2999,18 @@ jobs:
           done < <(printf '%s\n' "$allow_root" | awk 'NF{print $1}')
 
           # ---- layer 2: the workspace deny, and who has opted in to it. -----
+          echo
+          echo "layer 1c: every .github/*.rs gate tool forbids unsafe and holds none (D-2349)"
+          tools=$(git ls-files '.github/*.rs')
+          [ -n "$tools" ] || { echo "  REFUSED  no .github/*.rs tool read"; bad=1; }
+          for f in $tools; do
+            if grep -qE '^#!\[forbid\([^]]*\bunsafe_code\b' "$f" && "$scan" unsafe "$f" > /dev/null; then
+              printf '  ok       %s\n' "$f"
+            else
+              printf '  REFUSED  %s lacks #![forbid(unsafe_code)] or uses unsafe\n' "$f"; bad=1
+            fi
+          done
+
           echo
           echo "layer 2: the workspace lint table, and every member inheriting it"
           if grep -qE '^[[:space:]]*unsafe_code[[:space:]]*=[[:space:]]*"deny"' "$root"; then
@@ -7065,6 +7107,9 @@ jobs:
           jni j4rs
           ruby-sys magnus rutie
           ext-php-rs
+          wasmtime wasmer wasmi rust${snake} deno_runtime quick-js rb-sys jlrs
+          extendr extendr-api extendr-engine
+          starlark rune gluon mun koto steel-core piccolo libR-sys perl-sys libperl-sys tcl
           ring aws-lc-rs aws-lc-sys cc openssl-sys
           "
           pattern=$(printf '%s\n' $banned_built | sed 's/.*/&|&[-_][A-Za-z0-9_-]+/' | paste -sd'|')
