@@ -10,7 +10,7 @@
    *
    * 2. A run that refused 407 of 785 instruments showed ONE reason. The
    *    receipt renders `done.failures.iter().take(5)` — five, and the run's
-   *    own `Members failed` count is beside it, so the page can SEE that it
+   *    own `Failure diagnostics` count is beside it, so the page can SEE that it
    *    was truncated and say so instead of implying the list is complete.
    *
    * 3. The bar length was not askable. `api::ingest::parse_spot` has read a
@@ -64,7 +64,7 @@
     watchStore,
     foldMonths
   } from '$lib/store.svelte.js';
-  import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  import { failureCount, notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
   // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
   //
   // `readFolder` declares its own `const ask` for probing folder segments. A
@@ -5728,11 +5728,9 @@
 
   /** Every `Failed` row the receipt carried — the server sends at most five. */
   const namedFailures = $derived((receipt?.facts ?? []).filter((f) => f.k === 'Failed'));
-  const failedCount = $derived.by(() => {
-    const raw = factValue.get('Members failed');
-    const parsed = Number(String(raw ?? '').replace(/[^0-9]/g, ''));
-    return Number.isFinite(parsed) ? parsed : 0;
-  });
+  // `Failure diagnostics`, through `$lib/receipt.js`: the key the server
+  // emits, pinned against `server.rs` by `tests/receipt.test.js` (P17-01).
+  const failedCount = $derived(failureCount(receipt?.facts ?? []));
   /**
    * THE TRUNCATION, STATED. `landed_answer` writes
    * `for f in done.failures.iter().take(5)`, so a run with 407 failures puts
@@ -5891,7 +5889,7 @@
         group = GROUP.silent;
         reason =
           hiddenFailures > 0
-            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failed member(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
+            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failure diagnostic(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
             : 'The run reported no failure for this instrument and the store gained nothing for it. It was named by the universe and is not accounted for.';
         tone = 'warn';
       }
