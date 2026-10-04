@@ -94,3 +94,4 @@ Artifacts.
 - Pending at pause: Fix Board hand-off 3 origin/fixboard/pr74-conc-api dee61cfd (api+pull Rust, D-2760..2766, already merges 8f58d91). Merge on resume; shards will likely have started, so decide merge-now vs after the Gate 18 phase.
 - Local survivor (fix on resume): crates/runner/src/bootstrap.rs:1847:17 replace > with == in ExactPrefix::sum (see /tmp/claude-0/mp/sw/runner/mutants.out).
 - Pending at pause: sweep 446c8cd on claude/project-thread-v8j0jv (zf/store-o1 D-2329/2330, .tix time index, store benches C-TIX-01/02; already merges 8f58d91).
+- Pending at pause: attack audit batch 2 wip/audit-batch2 6cf0582 (D-1854/1860/1861/2270/2271; on fc6dbb9, merges cleanly with 8f58d91). Reply SHA to session_016tvv63ByrRGE6qoEFR5ctD after merge.
