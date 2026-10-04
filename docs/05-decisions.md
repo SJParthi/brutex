@@ -56477,3 +56477,90 @@ struct literal and a field write from another crate; both compiled on the
 previous tree and the doctests failed),
 `indicators::evaluator::tests::a_mismatched_width_is_withheld_as_unknown_and_never_answered`
 and `indicators::evaluator::tests::swapped_or_baseless_widths_are_refused_by_name`.
+
+### D-1556 — Whole-command fan-outs run as ordered lanes, so their shared durable writes follow the inputs — 2026-10-03
+
+**What happened.** audit-20261003 hunt-conc-1 and hunt-conc-2. D-1564 split
+`sweep-all` into ordered phases and stated that `range-all` (`sweep_rungs`),
+`pool` pass 1 and the Boolean family pools (`boolean_catalog_prepared`,
+`boolean_oos_command`) still allocated attempt tokens and appended `runs.bin`
+rows in completion order. `cli::ordered::tests::shared_durable_writes_follow_the_inputs_not_the_schedule`
+failed on the indexed parallel map those four sites used: one thread filed the
+twelve workers in input order, twelve threads with the earliest workers slowest
+filed them nearly backwards.
+
+**The change.** `cli::ordered::map` runs each item as a lane on its own scoped
+thread, `ordered::WINDOW` (8, a constant) lanes at a time, and returns results
+in input order. Every shared durable write takes `ordered::turn()` first: the
+evidence journal (`sweep_evidence::allocate` and `journal`), the run ledger
+(`results::with_shared_writer`) and the whole result-set transaction
+(`record_all_attempt`, before `LEDGER` and the cross-process lock). A lane's
+k-th write waits until each lower lane has made its k-th or finished and each
+higher lane its (k-1)-th or finished, so the writes land sorted by (k, lane).
+The turn is re-entrant on its thread, held for the whole transaction, and
+never waits outside a lane. The phases are therefore committed in an order
+fixed by the inputs without splitting the audit and candidate transactions:
+the ordering is imposed where they meet the shared files.
+
+**Why it cannot deadlock.** Every wait is for a strictly smaller (k, lane), so
+the smallest pending write always proceeds. Lanes are OS threads, never Rayon
+tasks, so no waiting lane is stacked under a stolen higher one; a window starts
+every lane at once, so no lane waits for one that has not started; a lane that
+fails to start is marked finished. Nested parallel work inside a lane uses the
+Rayon pool, which never takes a turn.
+
+**What else changed.** The Boolean pools no longer build a pool sized from
+`available_parallelism`; their "parallel family workers" line prints
+`min(WINDOW, families)`, the same on every machine. `pool` pass 1's
+concurrency is the window, not the Rayon width. The cost is stated in
+`docs/06-limits.md`. Invariants AFF-20, AFF-21 and AFF-22.
+
+### D-1557 — A descent holds its prepared audit inputs in one identity-keyed cache — 2026-10-03
+
+**What happened.** audit-20261003 o1surface2-1. D-1567 stated, and did not
+remove, that every `cli descend` step after the first re-ran `one_rung` from
+scratch: a raw span load, then the audit kernel's load of both spans and both
+contexts, the withholding, a fresh preparation attempt and the anchored column.
+It declined a cache because the audit checks its preparation digest against
+the identity it publishes.
+
+**The change.** `audit_range_kernel` is split into `load_audit_inputs`, which
+does everything up to and including that digest check and also computes the
+executed-data digest, and `audit_range_kernel_cached`, which takes the inputs
+from an `AuditCache` keyed by root, feed, instrument, rung, span and build. The
+column, contexts and digest are held together from one load that already
+passed the check, and each step's run identity takes its `data_digest` from the
+held digest of the held bytes, so a reused step sweeps exactly the bytes its
+identity names. A different key loads afresh; a held refusal repeats, as
+`ScreenCache` (D-0997) holds one. `one_rung` is `one_rung_cached` with a fresh
+cache, and caches its raw span the same way; `descend` passes one cache down
+the whole ladder through `descend_in`. `latest_for` takes the root `one_rung`
+already resolved instead of resolving it again.
+
+**Proof.** `cli::audited_stored::tests::a_range_descent_prepares_its_stored_inputs_once`:
+a four-step descent loads once (four times with a fresh cache per step, the
+pre-change shape, which the test was run against and failed); three audits
+through one cache print the same pages as three fresh ones on an identical
+store; another rung prepares afresh. The per-step bound is restated in
+`docs/06-limits.md`. Invariant AFF-23.
+
+### D-1569 — An abandoned Selection V6 tail is moved aside, not left to wedge the rung — 2026-10-03
+
+**What happened.** audit-20261003 hunt-cli-a-5. One interrupted Selection V6
+persist left an unsealed partial block in `global-selection-v6.bin`. Every
+read of every committed block on that rung then refused (`len % BLOCK_BYTES !=
+0`), and a different source could never be appended ("incomplete prefix
+belongs to different source; nothing repaired") until the file was edited by
+hand. `cli::selection_v6::tests::an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_source`
+failed on the first read.
+
+**The change.** `require_committed` reads whole sealed blocks only; an unsealed
+tail is never authority and no longer hides the blocks before it. `persist`,
+under its exclusive lock, still completes a tail that is a prefix of the exact
+block it writes. A tail from another source, or any tail when the exact block
+is already committed, is copied to `global-selection-v6.bin.abandoned-<offset>`
+and synced with its directory before the ledger is cut back to its committed
+length, then the write proceeds; a quarantine already holding different bytes
+refuses with nothing changed. The move is logged as a warning naming the
+file. Committed blocks are never rewritten. O(tail), at most one block, once
+per recovery. Invariant AFF-24.

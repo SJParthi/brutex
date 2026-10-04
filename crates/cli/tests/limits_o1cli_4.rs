@@ -80,7 +80,8 @@ fn the_kernels_second_context_read_is_stated_and_still_paid() {
         build.contains("return Ok((column, digest));"),
         "the build hands back the column and digest, not the contexts: update the limit"
     );
-    let kernel = body("\nfn audit_range_kernel(");
+    // D-1557: the kernel's loads moved into its cached loader.
+    let kernel = body("\nfn load_audit_inputs(");
     let after = kernel
         .split_once("column_withholding_at_build(")
         .expect("the kernel builds its column")

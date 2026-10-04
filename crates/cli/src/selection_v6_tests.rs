@@ -95,7 +95,7 @@ fn reopen_reuse_and_append_preserve_exact_history_and_capacity() {
 }
 
 #[test]
-fn incomplete_prefix_is_never_authority_and_only_exact_resume_appends() {
+fn incomplete_prefix_is_never_authority_and_a_foreign_one_is_set_aside() {
     let expected = frame(7);
     for len in [
         1,
@@ -122,15 +122,18 @@ fn incomplete_prefix_is_never_authority_and_only_exact_resume_appends() {
     let foreign = frame(8);
     let path = scratch.0.join(FILE_NAME);
     std::fs::write(&path, &foreign[..4096]).expect("foreign prefix");
-    assert!(persist(&scratch.0, bounds(1), &expected).is_err());
+    // D-1569: a foreign unsealed prefix is moved aside whole, never lost.
+    assert!(persist(&scratch.0, bounds(1), &expected).expect("foreign tail set aside"));
+    assert_eq!(std::fs::read(path).expect("completed bytes"), expected);
     assert_eq!(
-        std::fs::read(path).expect("preserved foreign prefix"),
+        std::fs::read(scratch.0.join(format!("{FILE_NAME}.abandoned-0")))
+            .expect("preserved foreign prefix"),
         &foreign[..4096]
     );
 }
 
 #[test]
-fn duplicate_corrupt_wrong_version_and_trailing_partial_refuse_without_repair() {
+fn duplicate_corrupt_and_wrong_version_refuse_without_repair() {
     let first = frame(3);
     let mut corrupt = first;
     corrupt[400] ^= 1;
@@ -140,7 +143,6 @@ fn duplicate_corrupt_wrong_version_and_trailing_partial_refuse_without_repair() 
         [first.as_slice(), first.as_slice()].concat(),
         corrupt.to_vec(),
         old_version.to_vec(),
-        [first.as_slice(), &[1]].concat(),
     ] {
         let scratch = Scratch::new();
         let path = scratch.0.join(FILE_NAME);
@@ -269,4 +271,57 @@ fn genuine_execution_v4_authority_reaches_v6_and_corrupt_selection_refuses() {
         },
     )
     .expect("real source-retaining successor");
+}
+
+/// **An abandoned partial tail neither hides committed history nor wedges a
+/// new source.** audit-20261003 hunt-cli-a-5, D-1569.
+///
+/// One interrupted persist left an unsealed partial block after a committed
+/// one. Every read of the committed block then refused, and a different
+/// source could never be appended: "incomplete prefix belongs to different
+/// source; nothing repaired". The partial tail is now never read as authority,
+/// committed blocks before it stay readable, and the next writer, under the
+/// exclusive lock, moves the abandoned bytes aside into a named quarantine
+/// file before appending, so nothing is lost and nothing is hidden.
+#[test]
+fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_source() {
+    let scratch = Scratch::new();
+    let first = frame(11);
+    let foreign = frame(12);
+    let second = frame(13);
+    assert!(persist(&scratch.0, bounds(3), &first).expect("first write"));
+    let path = scratch.0.join(FILE_NAME);
+    let mut torn = std::fs::read(&path).expect("committed first");
+    torn.extend_from_slice(&foreign[..4096]);
+    std::fs::write(&path, &torn).expect("interrupted foreign persist");
+
+    require_committed(&scratch.0, bounds(3), &first)
+        .expect("a committed block stays readable behind an unsealed tail");
+    assert!(
+        require_committed(&scratch.0, bounds(3), &foreign).is_err(),
+        "an unsealed tail is never authority"
+    );
+    assert!(persist(&scratch.0, bounds(3), &second).expect("a new source appends"));
+    assert_eq!(
+        std::fs::read(&path).expect("repaired history"),
+        [first.as_slice(), second.as_slice()].concat()
+    );
+    let quarantine = scratch
+        .0
+        .join(format!("{FILE_NAME}.abandoned-{SELECTION_V6_BLOCK_BYTES}"));
+    assert_eq!(
+        std::fs::read(&quarantine).expect("abandoned bytes kept aside"),
+        &foreign[..4096]
+    );
+    require_committed(&scratch.0, bounds(3), &first).expect("first retained");
+    require_committed(&scratch.0, bounds(3), &second).expect("second committed");
+    // Exact reuse behind a tail also clears the tail aside, then reuses.
+    let mut torn = std::fs::read(&path).expect("two committed");
+    torn.extend_from_slice(&foreign[..10]);
+    std::fs::write(&path, &torn).expect("second interruption");
+    assert!(!persist(&scratch.0, bounds(3), &second).expect("exact reuse"));
+    assert_eq!(
+        std::fs::read(&path).expect("tail moved aside"),
+        [first.as_slice(), second.as_slice()].concat()
+    );
 }

@@ -710,7 +710,7 @@ fn no_text_says_pool_pass_1_lifts_a_section() {
     let run_under = body(POOL, "\nfn run_under(", "");
     assert!(
         run_under.contains(
-            "outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None)\n                .outcome,"
+            "outcome: crate::one_rung(vendor_word, symbol, rung, from, to, support_ppm, None).outcome,"
         ),
         "premise: pass 1 keeps each rung's outcome alone:\n{run_under}"
     );

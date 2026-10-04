@@ -302,15 +302,15 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
     file.lock().map_err(|why| why.to_string())?;
     let result = (|| {
         let (len, found) = scan(&mut file, &path, bounds, expected)?;
+        let first = len - len % BLOCK_BYTES;
         if found {
             if len % BLOCK_BYTES != 0 {
-                return Err("Selection V6 has an incomplete trailing block".to_owned());
+                set_aside_abandoned_tail(&mut file, root, first, len)?;
             }
             file.sync_all().map_err(|why| why.to_string())?;
             sync_directory(root)?;
             return Ok(false);
         }
-        let first = len - len % BLOCK_BYTES;
         if first / BLOCK_BYTES >= bounds.records
             || first
                 .checked_add(BLOCK_BYTES)
@@ -318,7 +318,8 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
         {
             return Err("Selection V6 has no space inside declared record bounds".to_owned());
         }
-        let partial = usize::try_from(len % BLOCK_BYTES).map_err(|why| why.to_string())?;
+        let mut partial = usize::try_from(len % BLOCK_BYTES).map_err(|why| why.to_string())?;
+        let mut len = len;
         if partial != 0 {
             let mut prefix = [0; SELECTION_V6_BLOCK_BYTES];
             file.seek(SeekFrom::Start(first))
@@ -328,13 +329,17 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
                 .ok_or("Selection V6 prefix bound")?;
             file.read_exact(prefix).map_err(|why| why.to_string())?;
             if Some(&*prefix) != expected.get(..partial) {
-                return Err(
-                    "Selection V6 incomplete prefix belongs to different source; nothing repaired"
-                        .to_owned(),
-                );
+                // ANOTHER SOURCE'S UNSEALED TAIL. It was never authority, and
+                // leaving it in place wedged the rung for every other source.
+                // It is moved aside whole, under this exclusive lock, before
+                // anything is appended (D-1569).
+                set_aside_abandoned_tail(&mut file, root, first, len)?;
+                partial = 0;
+                len = first;
             }
         }
-        // Reuse only the exact acknowledged prefix; never truncate or replace.
+        // Reuse only the exact acknowledged prefix; a foreign unsealed tail was
+        // moved aside above, and committed blocks are never touched.
         file.seek(SeekFrom::Start(len))
             .map_err(|why| why.to_string())?;
         if partial < SEAL_AT {
@@ -358,6 +363,58 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
     result.and_then(|value| released.map(|()| value))
 }
 
+/// Moves an interrupted writer's unsealed tail, `committed..len`, into
+/// `<file>.abandoned-<committed>` and cuts it from the ledger. audit-20261003
+/// hunt-cli-a-5, D-1569.
+///
+/// The bytes are copied and synced, with their directory, BEFORE the ledger
+/// is shortened, so a crash between the two leaves the tail in both places
+/// rather than in neither. Committed sealed blocks, `..committed`, are never
+/// rewritten. An existing quarantine at the same offset must hold exactly the
+/// same bytes, otherwise this refuses and changes nothing. The move is named
+/// in the log, so the repair is never silent.
+fn set_aside_abandoned_tail(
+    file: &mut File,
+    root: &Path,
+    committed: u64,
+    len: u64,
+) -> Result<(), String> {
+    let tail_len = usize::try_from(len - committed).map_err(|why| why.to_string())?;
+    let mut tail = vec![0; tail_len];
+    file.seek(SeekFrom::Start(committed))
+        .map_err(|why| why.to_string())?;
+    file.read_exact(&mut tail).map_err(|why| why.to_string())?;
+    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}"));
+    match OpenOptions::new().write(true).create_new(true).open(&aside) {
+        Ok(mut out) => {
+            out.write_all(&tail)
+                .and_then(|()| out.sync_all())
+                .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
+        }
+        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
+            let held = std::fs::read(&aside)
+                .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
+            if held != tail {
+                return Err(format!(
+                    "Selection V6 abandoned tail quarantine {} already holds different bytes; nothing repaired",
+                    aside.display()
+                ));
+            }
+        }
+        Err(why) => return Err(format!("Selection V6 abandoned tail quarantine: {why}")),
+    }
+    sync_directory(root)?;
+    file.set_len(committed).map_err(|why| why.to_string())?;
+    file.sync_all().map_err(|why| why.to_string())?;
+    crate::note(
+        &telemetry::Event::warn("cli.selection_v6", "abandoned unsealed tail set aside")
+            .with("committed_bytes", committed)
+            .with("tail_bytes", len - committed)
+            .with("quarantine", aside.display().to_string().as_str()),
+    );
+    Ok(())
+}
+
 fn sync_directory(root: &Path) -> Result<(), String> {
     File::open(root)
         .and_then(|directory| directory.sync_all())
@@ -371,11 +428,13 @@ fn require_committed(
 ) -> Result<(), String> {
     let (mut file, path) = open(root, false)?;
     file.lock_shared().map_err(|why| why.to_string())?;
-    let checked = scan(&mut file, &path, bounds, expected).and_then(|(len, found)| {
-        if len % BLOCK_BYTES != 0 || !found {
-            Err("Selection V6 is incomplete or lacks the requested exact block".to_owned())
-        } else {
+    // An unsealed trailing partial block is never authority, and it no longer
+    // hides the committed blocks before it (D-1569).
+    let checked = scan(&mut file, &path, bounds, expected).and_then(|(_, found)| {
+        if found {
             Ok(())
+        } else {
+            Err("Selection V6 lacks the requested exact committed block".to_owned())
         }
     });
     let released = file.unlock().map_err(|why| why.to_string());

@@ -781,3 +781,12 @@ is unchanged.
   and counted too. D-1552, AFF-03.
 - **errpaths-4** (audit-20261003): fixed. The `Widths` fields are private.
   D-1553, AFF-04.
+
+### audit-20261003 — fix worker 7 — 2026-10-03
+
+Narrative only. No row is added to the table above.
+
+- **audit-20261003 hunt-conc-1** (`range-all`, `pool` pass 1): fixed. D-1556, AFF-20, AFF-21.
+- **audit-20261003 hunt-conc-2** (Boolean family pools): fixed. D-1556, AFF-20, AFF-21.
+- **audit-20261003 hunt-cli-a-5**: fixed. D-1569, AFF-24.
+- **audit-20261003 o1surface2-1**: fixed. D-1557, AFF-23.
