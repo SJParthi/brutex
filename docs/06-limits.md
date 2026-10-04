@@ -11338,6 +11338,9 @@ the counts the tests assert: no bench times the fold.
   first row that traded, and the calendar key leads with `admitted`, so an
   unmeasured row that passed the rules can rise above measured rows that did
   not. Both read the whole order. Stated from the code's shape; not timed.
+  Since D-1734 both sorts are in `finish_screen`, which `screen` calls once;
+  a tier walk calls it only for a tier whose rows the cell rules admitted,
+  and for the last tier.
   Held to the code by
   `the_screens_two_full_sorts_are_stated_and_the_full_order_still_read` in
   `crates/cli/tests/limits_o1cli_6.rs`.
@@ -14677,30 +14680,53 @@ Each entry names a cost that is not O(1), says what it grows with, and points
 at the decision that measured or bounded it. None is a per-bar or
 per-candidate primitive from `CLAUDE.md` §3 rule 4.
 
-- **`screen_cascade`, per cascade: `O(T × (M + C × 2 × G))`** (W2-cli8-0,
-  D-1720). `T` is the tiers screened, `M` is one screen's setup over the
-  execution bars, `C` is the priced candidates (at most `screen_cap()`), and
-  `G` is one exit grid's evaluation, done for both sides. Every tier walked is
-  a full re-screen, because a tier's `max_mae_ppm` is merged into the stop
-  ladder as `grid::Levels::forced`, so each tier prices a different grid.
-  `walk_ladder` screens strictest first and stops at the first tier that
-  admits, so `T` is that tier's rank plus one, and the WHOLE ladder when nothing
-  admits. `tiers` generates `stops × ratios × rates` tiers, 960 at eight grid
-  rungs and 4,800 at forty, so a span where nothing admits costs up to 960 to
-  4,800 full re-screens where the probe cost one. MEASURED on the debug test
-  `tests::the_audit_renders_every_stage_of_the_institutional_stack`: 6.0 s with
-  D-1720's mildest-first probe in place, and still running after 2,960 s with the full walk
-  (killed, not finished). That worst case is paid on exactly the
-  spans with no answer. D-1720's mildest-first probe cut it to one screen, and
-  D-1731 removed it: a stricter tier's forced stop can price a rung the
-  mildest grid lacks, so "the mildest admits nothing" does not prove "no tier
-  admits". The cost is measured only as a count
-  (`the_tier_walk_checks_each_tier_in_order_and_stops_at_the_first_admission`,
-  SCB-01); the time per screen is UNVERIFIED, as no bench times a cascade, and
-  the ~20 s per 60min pass over 577 candidates quoted in the source is an
-  operator log reading, not a measurement taken here. An O(1) tier would need one grid holding every tier's
-  forced stop. That is a different grid and a different identity, and it was
-  rejected.
+- **`screen_cascade`, per cascade: `O(S × (M + C × 2 × G) + T × C × 2 × K + A × F)`**
+  (W2-cli8-0, D-1720, D-1731, D-1734). `S` is the distinct grid keys the
+  walk reaches, `M` one screen's setup over the execution bars, `C` the priced
+  candidates (at most `screen_cap()`), `G` one exit grid's evaluation (done for
+  both sides), `T` the tiers judged, `K` the cells one pruned side holds, and
+  `A` the tiers whose rows the cell rules admitted, plus the last tier, each
+  paying `F`, the rest of one screen (`measure_top`, two sorts, the page).
+  A grid depends on a tier only through its forced stop (`max_mae_ppm`, merged
+  into the stop ladder as `grid::Levels::forced`) and four admission terms no
+  tier relaxes; `GridKey` names those five, and within one cascade the four
+  agree, so `S` is the number of distinct forced stops reached: at most one
+  per rung of `stop_rungs_in_points`, so at most 64. `walk_tiers` prices each
+  key ONCE with `price_grids`, keeps each side's cells the key's envelope
+  (each floor's minimum over the tiers sharing the key) admits plus the
+  fallback cell, and judges every tier on its own floors against them. The
+  walk still stops at the first tier that admits, so `T` is that tier's rank
+  plus one, and the WHOLE ladder when nothing admits; no tier is skipped
+  (D-1731). The ladder is `stops × ratios × rates`, and its size follows the
+  sample: 2,520 tiers on the 8-session synthetic fixture, 18,480 on the audit
+  test below (D-1731's "960 to 4,800" was low).
+  MEASURED on the debug test
+  `tests::the_audit_renders_every_stage_of_the_institutional_stack` (18,480
+  tiers, one key, 98 candidates, nothing admits): 6.0 s at `8cdac60` (the
+  unsound probe), not finished after 2,960 s at `02e13b3` (one full screen per
+  tier, killed), and 3.2 s with D-1734 (one grid pass for the walk, plus one
+  for the operator's own rules). The pass count is proven by
+  `the_tier_walk_builds_one_grid_pass_per_distinct_forced_stop` (SCB-13) and
+  the answer by `the_cached_tier_walk_equals_the_full_walk_on_real_screens`.
+  UNVERIFIED: the time on a real operator rung; the ~20 s per 60min pass over
+  577 candidates quoted in the source is an operator log reading, not a
+  measurement taken here, and with D-1734 it is paid about `S` times rather
+  than `T` times.
+
+  **Memory, bounded by the distinct keys.** Every key's `PricedGrids` stays
+  resident until the walk ends: per key, `C × 2` `PrunedSide` values (384
+  bytes each, measured) holding the side's ladders (a few `i64` rungs) and its
+  pruned cells (264 bytes each, measured). A pruned side holds the cells its
+  key's envelope admits plus the copies of its fallback cell, so the worst
+  case is `S × C × 2 × G` cells, the same cells the full walk evaluated, now
+  held at once. When nothing admits, which is the case that cost hours, a
+  side holds its fallback alone: measured on the audit test, 196 cells for
+  98 candidates, about 0.14 MB for the walk's one key. UNVERIFIED: the
+  resident size on a real rung where the mildest floors admit many cells;
+  `screen_cap()` (default 10,000) and `S <= 64` bound it, at worst
+  `64 × 10,000 × 2 × G × 264` bytes, which is a bound and not a figure
+  anyone should expect to reach, because a key whose envelope admits cells is
+  a key whose mildest tier is likely to end the walk.
 
 - **`tiers`, per generated ladder** (W2-cli8-1, D-1726). The work is a fixed
   number of O(N) scans over the bars (`reference_price`, `grid_step_ppm`,
@@ -14710,8 +14736,9 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   `T <= 64 × 28 × 396` generated tiers. Before D-1726 the ceiling scan ran
   once per rung and the floor search once per tier.
 
-- **`measure_top`, per screen: `O(band × (G + 7 × trades))`** (W2-cli8-7,
-  D-1727). `band = measured_band(top) = max(8 × top, 32)` rows, each a full
+- **`measure_top`, per finished screen: `O(band × (G + 7 × trades))`**
+  (W2-cli8-7, D-1727). Since D-1734 a tier walk pays it only for a tier
+  whose rows the cell rules admitted, and for the last tier. `band = measured_band(top) = max(8 × top, 32)` rows, each a full
   exit-grid rebuild plus a per-trade walk bucketed at seven calendar grains.
   `top <= TOP_CEILING` (1,000) at every door, so `band <= 8,000`. The rows are
   measured across cores with an indexed `par_iter_mut`, and the answer is
