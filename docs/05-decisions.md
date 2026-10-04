@@ -56793,3 +56793,39 @@ failed on c97ff00 (the O(G) entry existed) and passes now; it requires the
 only entry to take a `ValidatedExitGridV1` and to call no
 `validate_evaluation`.
 
+### D-1835 — Institutional evidence binds its complete population once, not per cell — 2026-10-03
+
+**What was found (W2-cli7-0, W2-cli15-2; stated, not fixed, by D-1638 and
+D-1636).** `build_institutional_evidence_v1` with a `Measured` population
+authority called `derive_population_id_v1` for every cell, which validates the
+whole authority and hashes over the one-minute execution identity, and a
+`Complete` data source added `require_population`, which walks and hashes
+every execution bar: O(E) per cell, O(C·E) per population. Neither depends on
+the cell. The `Measured` path also had no test at all: no test or caller ever
+built evidence with a complete population authority.
+
+**The change.** `InstitutionalCompletenessV1::population_authority` now
+carries a `BoundPopulationCompletenessV1`. Its one constructor, `bind`,
+derives the population identity and reconciles the data source once, with the
+refusal text the per-cell path gave. Each cell checks, in O(1): the ranking
+policy (as before), that its context's population identity is the bound one,
+and that its data source is exactly the one the binding verified (a
+different source is refused, never silently replaced). The completeness
+values a cell receives are the ones the per-cell path computed. No stored
+byte, digest or identity changes; `build_institutional_evidence_v1` has no
+production caller yet, so no shipping output moves. A refusal of an
+underivable authority or a foreign data authority now surfaces at `bind`,
+before the first cell, instead of inside it.
+
+**What it proves.**
+`cli::population_admission_writer::tests::evidence_binds_the_complete_population_once_not_per_cell`
+builds evidence for every cell of a complete population through the
+`Measured` path: on c97ff00 (with the authority passed per cell) it counted
+1,961 identity derivations for 1,960 cells and failed; now it counts 2 and
+passes, and every cell reports population and calendar `Complete`.
+`a_bound_population_refuses_a_foreign_cell_policy_or_data_source` refuses a
+foreign ranking policy, a different data source and a cell of another
+population. `cli::stored_data_completeness::tests::institutional_complete_requires_reopened_matching_authority`
+binds a matching durable data authority and refuses one of another
+population.
+
