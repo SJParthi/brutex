@@ -7796,10 +7796,13 @@ jobs:
           at=$(grep -n '^pub fn decode_master_row(' "$probe" | cut -d: -f1)
           [ -n "$at" ] || { echo "GATE 8 SELF-TEST: no decode_master_row in $probe"; exit 1; }
           sed -i "${at}a\\    core::hint::black_box(row.trading_symbol.bytes().fold(0_u8, u8::wrapping_add));" "$probe"
-          set +e
-          cargo bench --locked -p core --bench ratio > /tmp/gate8-probe.log 2>&1
-          probe_status=$?
-          set -e
+          # No `set +e`: gate 14 refuses any bench run after one, because the
+          # real run below must stay blocking. The status is caught in an `if`.
+          if cargo bench --locked -p core --bench ratio > /tmp/gate8-probe.log 2>&1; then
+            probe_status=0
+          else
+            probe_status=$?
+          fi
           git checkout -- "$probe"
           git diff --quiet -- "$probe" || { echo "GATE 8 SELF-TEST did not restore $probe"; exit 1; }
           caught=no
