@@ -82,3 +82,11 @@ Artifacts.
 - Local gates: extract jobs.language-purity steps with python yaml to /tmp/claude-0/gates2, run with RUNNER_TEMP and GITHUB_ENV set, source GITHUB_ENV between steps.
 - 13:43 UTC pause-ready. Open items: watch run 1269 (id 37205839728) on bb6b3b4; read Gate 18 shard survivors via get_job_logs and route attack-audit ones to session_016tvv63ByrRGE6qoEFR5ctD. If cli lib.rs traded_preamble "xyzzy" mutant TIMEOUTs in CI, the attack-audit thread adds a fast unit test. send_later trig_016wFqHSSpwEsDi4JQjSUMwt fires 14:16 UTC. Sweep thread has OS-7 (D-2319) coming; lane 1 merges bb6b3b4 before pushing.
 - 17:10 UTC: pending merge of sweep 913b9dc (branch claude/project-thread-v8j0jv, D-2320, .github+docs only) into next push after run 1271 Gate 18. Local mutant pre-run of sweep diff (8c9313c..1071b51) in wt-c, results /tmp/claude-0/mp/sw/summary.txt.
+
+## 2026-10-04 18:50 UTC pause point (usage 93% guard)
+- final/all-fixes = 8b1e5bd = 1f588aa + sweep c863e92 (D-2321..2331, new Gate 6d root discovery). Contents since bb6b3b4: sweep b97b2ca/913b9dc/c863e92, W3 fix 1071b51, lane1-b 31f1619 (D-2100..2105), gate-tool rustfmt 956424c, pull holds_exactly mutant fixes ddf6d69+66edfe2, Zerodha pull order 2d9e7f2 (D-3000..3002), Fix Board web18 891d8f8.
+- All 29 static gates, fmt, clippy pass locally on 8b1e5bd. Gate 6d new step was running locally (/tmp/claude-0/g6d.log); sweep asked to watch 6d in CI first.
+- Local Gate 18 pre-run on sweep diff 8c9313c..1071b51: telemetry/engine/store/lake/pull clean after holds_exactly fixes; runner and api in progress (/tmp/claude-0/mp/sw/).
+- Run 1271's shards: none finished in 70 min (timeout 240, max-parallel 20, 127 shards): Gate 18 takes many hours. Push only before shards start.
+- Policy agreed: lane1-b and sweep send batches to this thread, no direct pushes. zero-work: zero-findings thread will merge onto head and hand one validated commit (coordinator).
+- Watch CI via public API through proxy: curl https://api.github.com/repos/SJParthi/brutex/actions/runs?branch=final/all-fixes (15000/hr).
