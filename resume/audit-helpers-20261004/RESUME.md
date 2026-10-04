@@ -73,3 +73,12 @@ Zero thread at 09:30 had local fix branches (zero/edges-3, ci-web, calendar, dat
 | Data shaping | 10 | folding, paisa, OI | p10num-1 med (GDFL LTQ=0 quote rows folded into bar prices), p10num-2 low | numeric-pass10.md |
 | Test strength | 10 | 50 hand/CM mutations | P10-01 med (GST-rate mutant survives, ran), P10-02 med (lane-order mutant), P10-03..07 low | tests-docs-security-pass10.md |
 Total new across rounds 1-7: 100. Round 7 = 5 medium, 10 low. Re-checked still open: ledgerall-1, pop2-7, ledgerv6-1.
+
+## Round 8 (same head 1f4de71) — done 2026-10-04 ~13:30 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 13 | arithmetic and panic routes | CE-74 low (cross-vendor row sum overflow aborts api) | crash-edge-pass13.md |
+| Concurrency | 11 | filesystem failure (ENOSPC, EIO, EMFILE, dir fsync) | conc11-1..3 low | conc-pass11.md |
+| Indicators | 11 | condition bit semantics vs standard formulas | p11num-1 med (gapped day dropped before evaluator shifts later trend bits, ran), p11num-2..4 low | numeric-pass11.md |
+| Security | 11 | api, credentials, supply chain, history | P11-01 med (cross-site bar reads make pull writes fail Locked, ran), P11-02..04 low | tests-docs-security-pass11.md |
+Total new across rounds 1-8: 112. Round 8 = 2 medium, 10 low. P10-02 confirmed by run. Owner item added: P11-04 (personal paths/emails in docs and commit history; history rewrite is the owner's call). Newly fixed: hunt-ci-12, locks-1.

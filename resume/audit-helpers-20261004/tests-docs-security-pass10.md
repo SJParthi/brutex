@@ -23,7 +23,7 @@ A CM survivor turns gate 18 red whenever the line falls inside a diff. A hand su
 
 The two medium findings:
 - **P10-01 (medium, ran):** the GST-rate choice in `costs::trip::charge_stack_legs` carries a CM mutant that survives the whole `costs` suite.
-- **P10-02 (medium):** reversing the documented `(k, i)` order in `cli::ordered::Turns::ready` is a CM mutant. The ordering test cannot kill it, because the test compares runs only with each other and never with the input order.
+- **P10-02 (medium, ran):** reversing the documented `(k, i)` order in `cli::ordered::Turns::ready` is a CM mutant. The ordering test cannot kill it, because the test compares runs only with each other and never with the input order.
 
 Of the 50 sites, 43 have a killing test, and most of those test the exact boundary: equal bodies, `limit=1000`, `p = 0.05`, `MAX_DEPTH`, 18 and 19 schema elements, and block length equal to periods. Rollback and barrier memory are well defended. Every rollback deletion and every failed-barrier "memory" deletion that was tried is killed by a byte-identity or `BarrierFailed` assertion.
 
@@ -76,7 +76,7 @@ Of the 50 sites, 43 have a killing test, and most of those test the exact bounda
 | 38 | `api::autopilot::probe_store_halts` (autopilot.rs:3008) | CM: `attempt >= STORE_PROBES` to `<` / hand `>` | `the_last_failed_write_probe_names_no_next_probe`: `assert!(!last.contains("next probe is in"))` | killed |
 | 39 | `api::autopilot::frontier` (:2481, :2503) | hand: delete either clamp | `a_caught_up_feed_stays_on_the_month_still_being_written`: `assert_eq!(at, month(2026, 10), ..)`; `assert_eq!(back, month(2026, 10))` | killed |
 | 40 | `cli::cancel::check` (cancel.rs:77) | CM: return `Ok(())`; hand: drop the `OBSERVED` increment | `operator_boundary_tests::a_requested_stop_refuses_at_the_next_month_and_names_the_cancellation`: `why.starts_with(CANCELLED)`, `crate::cancel::observed() >= 3` | killed |
-| 41 | `cli::ordered::Turns::ready` (ordered.rs:87) | CM: `other < at` to `other > at` | none: `shared_durable_writes_follow_the_inputs_not_the_schedule` compares runs only with each other | **SURVIVES: P10-02** |
+| 41 | `cli::ordered::Turns::ready` (ordered.rs:87) | CM: `other < at` to `other > at` | none. **Ran:** all 3 `ordered::tests` pass with the mutant. The ordering test compares runs only with each other. | **SURVIVES: P10-02** |
 | 42 | same | hand: drop `lane.finished \|\|` | same test: a lane that finished blocks the rest, so it hangs to the timeout | killed (timeout) |
 | 43 | `cli::result_set::PrefixDigest::require_unchanged` (result_set.rs:664) | CM: `\|\|` to `&&` | result_set.rs:1642 `assert!(why.contains("rewrote already-indexed"))` (same length, different bytes) | killed |
 | 44 | `PrefixDigest::extend_from` (:641) | hand: delete the `read != wanted` refusal | none: no test shrinks the file between the scan and the hash | **SURVIVES: P10-05** |
@@ -123,7 +123,7 @@ The module docs (ordered.rs:16-22) state the contract: "Event `k` of lane `i` wa
 
 The only ordering test is `ordered_tests::shared_durable_writes_follow_the_inputs_not_the_schedule`. Its assertions are `assert_eq!(first_slowest, one)`, `assert_eq!(last_slowest, one)` and `assert_eq!(rerun, one)`. They compare runs with each other and never compare `one` with the input order. The test's own doc says "one thread filed workers 0, 1, 2…", but nothing asserts it. So the mutant passes, and the journal and ledger order that the module and D-1556 document (input order) is unpinned. The other test, `a_turn_outside_a_lane_or_inside_a_held_one_never_waits`, only checks the returned `Vec`, which `map` builds by joining in input order whatever the turn order is.
 
-**Repro.** RESULT_PLACEHOLDER
+**Repro (ran).** In `/home/claude/wt/scratch-tds10` at 1f4de71, `sed -i "s/if other < at { round }/if other > at { round }/" crates/cli/src/ordered.rs` was applied, then `cargo test -p cli --lib --locked -- ordered::` ran. All 3 `ordered::tests` passed with the mutant, including `shared_durable_writes_follow_the_inputs_not_the_schedule ... ok` (1.38s). The worktree was then removed.
 
 **Minimal fix.** In `shared_durable_writes_follow_the_inputs_not_the_schedule`, also assert that the ledger identities are `(0..WORKERS).map(|w| id(w, 0))` in that order. Also assert that the journal's first `WORKERS` rows are each worker's outer `begin` in input order.
 
