@@ -469,7 +469,7 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    LARGEST loss, 0 drops the rule. TOP is how many
                                    to print.
        cli elite        VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
-                        MAX_POINTS TOP
+                        MAX_POINTS TOP [LENS]
                                    THE RARE-WINNER HUNT, and it takes NO support
                                    threshold. Whatever number you type for that,
                                    you have already decided how often the answer
@@ -499,6 +499,13 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
                                    in the search at all: support is walked, every
                                    quality floor is measured off the bars, and the
                                    stop ladder is a percentile of the span.
+                                   LENS picks which question decides who survives
+                                   the screen cut, and it is part of the run
+                                   identity: `payoff` (the default, mean win over
+                                   mean loss), `asymmetry` (the smallest win over
+                                   the largest loss -- the 3x rule itself),
+                                   `path` (move over the excursion against
+                                   entry) or `detectability` (|t|).
        cli descend      VENDOR UNDERLYING RUNG FROM_Y FROM_M TO_Y TO_M
                         CEILING_PPM CADENCE
                                    sweep ONE rung at successively LOWER supports,
@@ -1255,7 +1262,16 @@ fn elite_arm(
     rung: &str,
     span: (&str, &str, &str, &str),
     limits: (&str, &str),
+    lens: Option<&str>,
 ) -> u8 {
+    // THE LENS IS THE OPERATOR'S TO CHOOSE (AC-whp-tb-2, D-1645). `Asymmetry`
+    // is the only lens that ranks by the operator's own min-win >= 3x max-loss
+    // rule, and no command could select it: `elite` hard-coded `Payoff`. Absent
+    // keeps `Payoff`, so every existing invocation is the same run.
+    let lens = match lens.map_or(Ok(runner::rank::Lens::Payoff), parse_lens) {
+        Ok(lens) => lens,
+        Err(why) => return refuse(out, &why),
+    };
     let (max_points, top) = limits;
     let (from_y, from_m, to_y, to_m) = span;
     let numbers = (
@@ -1317,8 +1333,15 @@ fn elite_arm(
             // parser was the one caller left on the constant. It reads the
             // reference off the span it is about to sweep, so nothing here
             // needs to know a price.
-            let text =
-                elite_descend_in_points(vendor, underlying, rung, (fy, fm), (ty, tm), pts, n);
+            let text = elite_descend_in_points_inner(
+                vendor,
+                underlying,
+                rung,
+                ((fy, fm), (ty, tm)),
+                (pts, n),
+                lens,
+                None,
+            );
             let refused = carries_refusal(&text);
             out.push_str(&text);
             if refused { MISUSED } else { OK }
@@ -1334,6 +1357,20 @@ fn elite_arm(
             "MAX_POINTS must be a whole number of index points, 1 or more",
         ),
         (_, (_, Err(_))) => refuse(out, "TOP must be a whole number, 1 or more"),
+    }
+}
+
+/// The `elite` LENS word, one per [`runner::rank::Lens`]; anything else is
+/// refused by name rather than read as the default. D-1645.
+fn parse_lens(word: &str) -> Result<runner::rank::Lens, String> {
+    match word {
+        "payoff" => Ok(runner::rank::Lens::Payoff),
+        "asymmetry" => Ok(runner::rank::Lens::Asymmetry),
+        "path" => Ok(runner::rank::Lens::Path),
+        "detectability" => Ok(runner::rank::Lens::Detectability),
+        other => Err(format!(
+            "LENS must be one of payoff, asymmetry, path or detectability, not `{other}`"
+        )),
     }
 }
 
@@ -2333,7 +2370,10 @@ fn dispatch(args: &[String], out: &mut String) -> u8 {
             screen_arm(out, v, u, r, (fy, fm, ty, tm), (sup, pts, rr, n))
         }
         ["elite", v, u, r, fy, fm, ty, tm, pts, n] => {
-            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n))
+            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n), None)
+        }
+        ["elite", v, u, r, fy, fm, ty, tm, pts, n, lens] => {
+            elite_arm(out, v, u, r, (fy, fm, ty, tm), (pts, n), Some(lens))
         }
         ["research-plan", v] => research::command(v, out),
         ["pool", v, r, fy, fm, ty, tm, mh] => pool_arm(out, v, r, (fy, fm), (ty, tm), mh),
@@ -5731,8 +5771,9 @@ fn grid_exposure(outcome: &runner::RankedOutcome, bars: &[indicators::Candle]) -
 /// It is not invented, and it is not a preference. It is the arithmetic the
 /// three consumers of the series force:
 ///
-/// * the walk-forward splits into [`WALK_FORWARD_SPLITS`] anchored folds, so a
-///   fold's TEST window is roughly `sessions / splits`;
+/// * the walk-forward splits into [`walk_forward_splits`] anchored folds,
+///   DERIVED from the bar count (two to twenty), so a fold's TEST window is
+///   roughly `sessions / (folds + 1)`;
 /// * the bootstrap resamples in stationary blocks of
 ///   [`runner::bootstrap::DEFAULT_BLOCK`], so a draw is roughly
 ///   `sessions / block` blocks;
@@ -5765,7 +5806,11 @@ const MIN_AUDIT_SESSIONS: usize = 50;
 /// computed over ~20 sessions rendered in **exactly the same format** as one
 /// computed over 3,650, with nothing on the page to tell them apart. The number
 /// was not wrong; the impression it gave was.
-fn sample_warning(sessions: usize) -> String {
+///
+/// `folds` is the count the walk-forward actually uses on these bars,
+/// [`walk_forward_splits`] of the bar count. This printed a fixed five that no
+/// fold had used since the count was derived (D-1646).
+fn sample_warning(sessions: usize, folds: usize) -> String {
     if sessions >= MIN_AUDIT_SESSIONS {
         return String::new();
     }
@@ -5773,7 +5818,7 @@ fn sample_warning(sessions: usize) -> String {
     let mut out = String::with_capacity(512);
     let _ = writeln!(
         out,
-        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {WALK_FORWARD_SPLITS} · \
+        "\nSAMPLE\n  sessions {sessions} · walk-forward folds {folds} · \
          bootstrap block {block}\n  \
          THIN. Below {MIN_AUDIT_SESSIONS} sessions each fold tests on roughly \
          {} day(s) and each bootstrap draw is roughly {} block(s), so the \
@@ -5781,7 +5826,7 @@ fn sample_warning(sessions: usize) -> String {
          sample does not have. They render in the same format they would over \
          ten years; they do not mean the same thing. The trades, the exit grid \
          and the excursions are unaffected — those measure what happened.",
-        sessions / WALK_FORWARD_SPLITS.max(1),
+        sessions / folds.saturating_add(1),
         sessions / block.max(1),
     );
     out
@@ -6037,26 +6082,6 @@ fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
     }
     days
 }
-
-/// How many anchored folds the walk-forward uses.
-///
-/// # A stated assumption, in the form this crate already uses for one
-///
-/// `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` are both constants
-/// their own documentation calls "a stated assumption and not a derivation", and
-/// this is the third. `CLAUDE.md` §3 rule 1 forbids PRETENDING a number is
-/// derived; it does not forbid choosing one and saying so.
-///
-/// Five is the anchored-walk-forward count in common use, and the trade it makes
-/// is legible: each additional fold buys another independent out-of-sample
-/// verdict and costs one more full sweep, while shortening every training window.
-/// On a 91,874-bar column that is roughly 18,000 test bars per fold — enough that
-/// a fold's verdict is not one afternoon.
-///
-/// Nothing in the data says where that trade sits, and no charter source names a
-/// fold count, so this is the assumption and the report prints it beside the
-/// result rather than burying it.
-const WALK_FORWARD_SPLITS: usize = 5;
 
 /// How many anchored folds to split a column into, DERIVED from its length.
 ///
@@ -8981,7 +9006,7 @@ fn traded_preamble(
 ) -> String {
     let mut out = traded_line(first, direction);
     out.push_str(&grid_exposure(outcome, bars));
-    out.push_str(&sample_warning(sessions));
+    out.push_str(&sample_warning(sessions, walk_forward_splits(bars.len())));
     out
 }
 
@@ -11492,9 +11517,10 @@ fn descent_banner(
 /// # Why only the survivor pays for this
 ///
 /// Every step of a descent runs with `validate: false`, which is what makes the
-/// walk finishable: the stack costs `WALK_FORWARD_SPLITS` sweeps twice over plus
-/// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade
-/// re-walks — none of it sized by the data. MEASURED: a 60-minute audit over six
+/// walk finishable: the stack costs [`walk_forward_splits`] sweeps (two to
+/// twenty, derived from the bar count) twice over plus `BOOTSTRAP_DRAWS` x
+/// `BOOTSTRAP_CANDIDATES` — sixteen thousand full trade re-walks, a figure no
+/// trade count moves. MEASURED: a 60-minute audit over six
 /// months did not finish in sixty seconds at a candidate ceiling of one
 /// thousand; the same sweep without the stack takes 0.005s.
 ///
@@ -14475,8 +14501,8 @@ pub fn elite_descend(
         underlying,
         rung,
         (from, to),
-        max_mae_ppm,
-        top,
+        (max_mae_ppm, top),
+        runner::rank::Lens::Payoff,
         None,
     )
 }
@@ -14619,10 +14645,11 @@ fn elite_descend_with_attempt(
     underlying: &str,
     rung: &str,
     span: ((u16, u8), (u16, u8)),
-    max_mae_ppm: i64,
-    top: usize,
+    limits: (i64, usize),
+    lens: runner::rank::Lens,
     attempt: Option<u64>,
 ) -> String {
+    let (max_mae_ppm, top) = limits;
     let (from, to) = span;
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
         return format!(
@@ -14677,7 +14704,8 @@ fn elite_descend_with_attempt(
     let ladder = support_ladder(DESCENT_CEILING_PPM, floor);
     let policy = Policy {
         rules,
-        lens: runner::rank::Lens::Payoff,
+        // The operator's lens (D-1645); `Payoff` unless `elite` named another.
+        lens,
         // NO VALIDATION PER STEP. Ten supports x sixteen thousand trade re-walks
         // is what made this walk impossible to finish; the step only needs to
         // know whether anything cleared the rules. The survivor is re-run with
@@ -14937,8 +14965,8 @@ pub fn elite_descend_in_points(
         underlying,
         rung,
         (from, to),
-        max_points,
-        top,
+        (max_points, top),
+        runner::rank::Lens::Payoff,
         None,
     )
 }
@@ -14964,8 +14992,8 @@ pub fn elite_descend_in_points_for_attempt(
         underlying,
         rung,
         span,
-        max_points,
-        top,
+        (max_points, top),
+        runner::rank::Lens::Payoff,
         Some(attempt),
     )
 }
@@ -14975,11 +15003,12 @@ fn elite_descend_in_points_inner(
     underlying: &str,
     rung: &str,
     span: ((u16, u8), (u16, u8)),
-    max_points: i64,
-    top: usize,
+    limits: (i64, usize),
+    lens: runner::rank::Lens,
     attempt: Option<u64>,
 ) -> String {
     let (from, to) = span;
+    let (max_points, top) = limits;
     if max_points <= 0 {
         return "refused: the stop ceiling must be a whole number of index \
                 points, 1 or more. A ceiling of zero admits no trade and a \
@@ -15031,8 +15060,8 @@ fn elite_descend_in_points_inner(
         underlying,
         rung,
         (from, to),
-        max_mae_ppm,
-        top,
+        (max_mae_ppm, top),
+        lens,
         attempt,
     )
 }
@@ -16808,9 +16837,10 @@ struct AuditOptions<'a> {
     ///
     /// # Why a search must be able to say no
     ///
-    /// These three cost `WALK_FORWARD_SPLITS` sweeps twice over plus
-    /// `BOOTSTRAP_DRAWS` x `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade
-    /// re-walks, and none of that is sized by the data. MEASURED: a 60-minute
+    /// These three cost `walk_forward_splits` sweeps (two to twenty, derived
+    /// from the bar count) twice over plus `BOOTSTRAP_DRAWS` x
+    /// `BOOTSTRAP_CANDIDATES` = sixteen thousand full trade re-walks, a figure no
+    /// trade count moves. MEASURED: a 60-minute
     /// audit over six months did not finish in sixty seconds at a candidate
     /// ceiling of ONE THOUSAND, while the same sweep without them takes 0.005s.
     ///
@@ -20136,10 +20166,11 @@ fn audit_bars_work(
     // `validate::walk_forward` was built, tested and never called: this report
     // printed "NOT SUPPLIED to this render" for it on every run since the
     // function existed. What it needed was a fold count, and
-    // `WALK_FORWARD_SPLITS` supplies one as a STATED ASSUMPTION -- the form
-    // `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` already use.
+    // `walk_forward_splits` DERIVES one from the bar count (two to twenty); the
+    // fixed five it replaced was printed in the thin-sample note long after no
+    // fold used it (D-1646).
     //
-    // It re-sweeps once per fold, so it costs about `WALK_FORWARD_SPLITS` times
+    // It re-sweeps once per fold, so it costs about `walk_forward_splits` times
     // the sweep above. That is what an out-of-sample verdict costs, and it is
     // paid here rather than skipped.
     // A FRESH EVALUATOR PER FOLD, AND IT IS A COPY RATHER THAN A REBUILD.
@@ -20193,9 +20224,9 @@ fn audit_bars_work(
     // THE WHOLE VALIDATION STACK IS SKIPPABLE, AND SKIPPING IT IS WHAT MAKES A
     // SEARCH POSSIBLE AT ALL.
     //
-    // Below this line are three stages whose cost is fixed by constants rather
-    // than by the data: `both_shapes` runs `WALK_FORWARD_SPLITS` sweeps twice
-    // over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
+    // Below this line are three stages whose cost no trade count moves:
+    // `both_shapes` runs `walk_forward_splits` sweeps (two to twenty, derived
+    // from the bar count) twice over, `pbo` ranks every fold's candidates, and `bootstrap_family` draws
     // `BOOTSTRAP_DRAWS` (1,000) resamples for each of `BOOTSTRAP_CANDIDATES`
     // (16) — sixteen thousand full trade re-walks, whether the run has forty
     // trades or forty thousand.
@@ -20967,6 +20998,7 @@ mod tests {
         rung_sweeping_event, validation_stage_event,
     };
     use super::{cadence_floor_ppm, months_between, support_ladder};
+    use super::{dispatch, parse_lens};
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| (*w).to_owned()).collect()
@@ -21608,6 +21640,11 @@ mod tests {
         // streamed frontier correctly refuses before every stage below.
         let text = audit_run_within(12, 1_400, 50_000);
         assert!(text.starts_with(PROVENANCE), "provenance leads it too");
+        // THE THIN-SAMPLE NOTE NAMES THE FOLDS THE WALK-FORWARD USED: a 12-session
+        // column is far under 6,000 bars, so `walk_forward_splits` clamps to two.
+        // It printed a fixed five here until D-1646.
+        assert!(text.contains("walk-forward folds 2 ·"), "{text}");
+        assert!(!text.contains("walk-forward folds 5"), "{text}");
         // GENERATED BARS NAME NO INSTRUMENT, so `audit_with` keeps the index
         // header under the PROVENANCE banner, and no share's label. D-0681.
         assert!(
@@ -22420,14 +22457,14 @@ mod tests {
     fn a_thin_sample_is_named_and_a_sufficient_one_says_nothing() {
         // SUFFICIENT: silent, exactly at the boundary and above it.
         assert!(
-            sample_warning(MIN_AUDIT_SESSIONS).is_empty(),
+            sample_warning(MIN_AUDIT_SESSIONS, 5).is_empty(),
             "the boundary itself is sufficient; a warning here would fire on \
              every adequate run and teach the reader to ignore it"
         );
-        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000).is_empty());
+        assert!(sample_warning(MIN_AUDIT_SESSIONS + 1_000, 20).is_empty());
 
         // THIN: named, with the two numbers that decide it.
-        let thin = sample_warning(20);
+        let thin = sample_warning(20, 3);
         assert!(thin.contains("THIN"), "the verdict is stated: {thin}");
         assert!(
             thin.contains("sessions 20"),
@@ -22447,7 +22484,16 @@ mod tests {
         // ZERO SESSIONS MUST NOT PANIC. The divisors are constants here, but a
         // future change to either could make one zero, and this is the arm that
         // would catch a division by it.
-        assert!(sample_warning(0).contains("THIN"));
+        assert!(sample_warning(0, 0).contains("THIN"));
+        assert!(sample_warning(0, usize::MAX).contains("roughly 0 day(s)"));
+
+        // THE FOLD COUNT PRINTED IS THE ONE PASSED, never a constant (D-1646):
+        // twenty sessions over three folds test on 20 / (3 + 1) = 5 days each.
+        assert!(thin.contains("walk-forward folds 3 ·"), "{thin}");
+        assert!(thin.contains("roughly 5 day(s)"), "{thin}");
+        let seven = sample_warning(20, 7);
+        assert!(seven.contains("walk-forward folds 7 ·"), "{seven}");
+        assert!(seven.contains("roughly 2 day(s)"), "{seven}");
     }
 
     /// THE LOG DIRECTORY IS DECIDED WITHOUT TOUCHING THE ENVIRONMENT.
@@ -23424,6 +23470,113 @@ mod tests {
             start,
             "a different holding period is a different run"
         );
+    }
+
+    /// AC-whp-tb-2, D-1645: `elite` takes every ranking lens by its word, and a
+    /// word that names none is refused by name before a number or the store is
+    /// read -- never read as the default.
+    #[test]
+    fn elite_takes_every_lens_by_name_and_refuses_any_other_word() {
+        for (word, lens) in [
+            ("payoff", runner::rank::Lens::Payoff),
+            ("asymmetry", runner::rank::Lens::Asymmetry),
+            ("path", runner::rank::Lens::Path),
+            ("detectability", runner::rank::Lens::Detectability),
+        ] {
+            assert_eq!(parse_lens(word), Ok(lens), "{word}");
+        }
+        for word in ["", "Asymmetry", "ASYMMETRY", "asym", "payoff ", "3"] {
+            let why = parse_lens(word).expect_err(word);
+            assert!(why.contains(&format!("not `{word}`")), "{why}");
+            assert!(why.contains("payoff, asymmetry, path or detectability"));
+        }
+        let args: Vec<String> = [
+            "elite",
+            "zerodha",
+            "NIFTY",
+            "1min",
+            "2026",
+            "8",
+            "2026",
+            "8",
+            "bad-points",
+            "10",
+            "sideways",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        let mut report = String::new();
+        assert_eq!(dispatch(&args, &mut report), MISUSED);
+        assert!(
+            report.starts_with(
+                "refused: LENS must be one of payoff, asymmetry, path or \
+                 detectability, not `sideways`\n"
+            ),
+            "{report}"
+        );
+        assert!(!report.contains("bad-points"), "{report}");
+        // A known lens passes the parse and the numbers are judged next.
+        let mut args = args;
+        "asymmetry".clone_into(args.get_mut(10).expect("the LENS word"));
+        let mut report = String::new();
+        assert_eq!(dispatch(&args, &mut report), MISUSED);
+        assert!(report.starts_with("refused: "), "{report}");
+        assert!(!report.contains("LENS must"), "{report}");
+        assert!(USAGE.contains("MAX_POINTS TOP [LENS]"));
+        assert!(USAGE.contains("`asymmetry` (the smallest win over"));
+    }
+
+    /// D-1645: every elite entry still refuses a bad request by name before
+    /// the store is read, through the lens-threaded inner path.
+    #[test]
+    fn every_elite_entry_refuses_a_bad_request_by_name() {
+        let span = ((2025, 5), (2025, 5));
+        let rung = super::elite_descend("zerodha", "NIFTY", "9min", span.0, span.1, 1, 1);
+        assert!(rung.starts_with("refused: `9min` is not a rung"), "{rung}");
+        let zero = super::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, 0, 1);
+        assert!(
+            zero.starts_with("refused: the stop ceiling must be"),
+            "{zero}"
+        );
+        let top =
+            super::elite_descend_in_points_for_attempt("zerodha", "NIFTY", "1min", span, 1, 0, 7);
+        assert!(top.starts_with("refused: TOP must be 1 or more"), "{top}");
+        let attempt =
+            super::elite_descend_in_points_for_attempt("zerodha", "NIFTY", "1min", span, 1, 1, 0);
+        assert!(
+            attempt.starts_with("refused: browser attempt zero"),
+            "{attempt}"
+        );
+    }
+
+    /// Each of the four lenses is its own identity term, numbered append-only
+    /// (D-0593): two runs that rank by different questions never share an
+    /// identity. Only two lenses were compared here until D-1645.
+    #[test]
+    fn every_lens_is_its_own_identity_term() {
+        let bars = runner::synthetic::sessions(2);
+        let base = crate::Rules::elite(400, 25);
+        let rungs = grid_rungs(&bars);
+        let ids: Vec<[u64; 20]> = [
+            runner::rank::Lens::Detectability,
+            runner::rank::Lens::Payoff,
+            runner::rank::Lens::Path,
+            runner::rank::Lens::Asymmetry,
+        ]
+        .into_iter()
+        .map(|lens| policy_of(&bars, base, lens, true, Horizon::DEFAULT, rungs))
+        .collect();
+        for (term, id) in ids.iter().enumerate() {
+            assert_eq!(
+                Ok(id[1]),
+                u64::try_from(term),
+                "the lens term is position one"
+            );
+            for other in ids.iter().skip(term + 1) {
+                assert_ne!(id, other, "two lenses share one identity");
+            }
+        }
     }
 
     #[test]

@@ -248,6 +248,12 @@ fn real_stored_witness_observer_refuses_before_each_computation_and_binds_actual
     }
 }
 
+/// Ceilings no fixture reaches, for tests about something else. Indexed by the
+/// fixture's stream id, so every `attempt(id, ..)` up to 255 has a slot.
+fn open_quality() -> Vec<StreamQuality> {
+    vec![StreamQuality::frozen(u64::MAX, u64::MAX); 256]
+}
+
 // Private scheduling facts only; the production constructor never accepts these.
 fn attempt(
     id: u8,
@@ -325,7 +331,14 @@ fn global_occupancy_crosses_family_direction_and_rung_and_retains_unpriced_hold(
         calls: Vec::new(),
         exact: false,
     };
-    let audit = schedule(&attempts, &mut rows, bounds(), &mut vix).expect("chronological schedule");
+    let audit = schedule(
+        &attempts,
+        &mut open_quality(),
+        &mut rows,
+        bounds(),
+        &mut vix,
+    )
+    .expect("chronological schedule");
     assert_eq!(audit.counters.offered, 4);
     assert_eq!(audit.counters.admitted, 2);
     assert_eq!(audit.counters.blocked_simultaneous, 1);
@@ -349,7 +362,7 @@ fn scheduler_ties_are_order_invariant_duplicate_keys_and_overwide_minutes_refuse
             calls: Vec::new(),
             exact: false,
         };
-        let audit = schedule(rows, &mut out, bounds(), &mut vix)?;
+        let audit = schedule(rows, &mut open_quality(), &mut out, bounds(), &mut vix)?;
         Ok::<_, String>((audit, out))
     };
     assert_eq!(
@@ -371,6 +384,7 @@ fn reference_changes_publication_bytes_but_never_economic_decisions() {
     let mut exact = Vec::new();
     let a = schedule(
         &input,
+        &mut open_quality(),
         &mut absent,
         bounds(),
         &mut Stamps {
@@ -381,6 +395,7 @@ fn reference_changes_publication_bytes_but_never_economic_decisions() {
     .expect("absent reference");
     let b = schedule(
         &input,
+        &mut open_quality(),
         &mut exact,
         bounds(),
         &mut Stamps {
@@ -407,6 +422,7 @@ fn empty_records() -> Vec<Record> {
     }
     let audit = schedule(
         &[],
+        &mut open_quality(),
         &mut rows,
         bounds(),
         &mut Stamps {
@@ -515,8 +531,14 @@ fn genuine_stored_oos_witness_reaches_private_projection_and_chronological_sched
         }
         let mut rows = Vec::new();
         let capacity = GlobalReplayV4Bounds::new(1_000_000, 1_000_000 * codec::STRIDE as u64)?;
+        // The real frozen ceilings this witness was sealed with (D-1643).
+        let mut quality = [StreamQuality::frozen(
+            replay.max_ambiguous_bars(),
+            replay.max_gap_fills(),
+        )];
         let audit = schedule(
             &attempts,
+            &mut quality,
             &mut rows,
             capacity,
             &mut Stamps {
@@ -568,4 +590,140 @@ fn the_candidate_budget_reserves_three_records_per_candidate() {
     assert!(candidate_budget(9, 0).is_err());
     assert!(candidate_budget(209, 200).is_err());
     assert!(candidate_budget(u64::MAX, u64::MAX).is_err());
+}
+
+fn with_quality(mut attempt: Attempt, ambiguous_bars: u64, gap_fills: u64) -> Attempt {
+    if let PathProjection::Priceable(price) = &mut attempt.candidate.path {
+        price.ambiguous_bars = ambiguous_bars;
+        price.gap_fills = gap_fills;
+    }
+    attempt
+}
+
+fn schedule_with(
+    attempts: &[Attempt],
+    quality: &mut [StreamQuality],
+) -> Result<GlobalReplayV4Audit, String> {
+    schedule(
+        attempts,
+        quality,
+        &mut Vec::new(),
+        bounds(),
+        &mut Stamps {
+            calls: Vec::new(),
+            exact: false,
+        },
+    )
+}
+
+/// GAP15-19, D-1643: a stream's globally admitted ambiguous bars and gap fills
+/// are summed and refused past the frozen exit policy's ceilings, as Global
+/// Replay V1 did. Equality admits; one more refuses; blocked, unpriced and
+/// other streams' trades never count; a stream with no ceilings refuses.
+#[test]
+fn admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings() {
+    // Stream 1 has three sequential priced trades, each one ambiguous bar.
+    let three = [
+        with_quality(attempt(1, 1, 1, 1, "NIFTY", 1, true), 1, 0),
+        with_quality(attempt(1, 2, 2, 1, "NIFTY", 1, true), 1, 0),
+        with_quality(attempt(1, 3, 3, 1, "NIFTY", 1, true), 1, 0),
+    ];
+    let mut quality = open_quality();
+    quality[1] = StreamQuality::frozen(3, 0);
+    let audit = schedule_with(&three, &mut quality).expect("three bars at a ceiling of three");
+    assert_eq!(audit.money_rows, 3);
+    assert_eq!(quality[1].admitted_ambiguous_bars, 3);
+    assert_eq!(quality[1].admitted_gap_fills, 0);
+    quality[1] = StreamQuality::frozen(2, 0);
+    let refused =
+        schedule_with(&three, &mut quality).expect_err("three bars past a ceiling of two");
+    assert!(
+        refused.contains("stream 1 globally admitted quality 3/0 exceeds its frozen ceilings 2/0"),
+        "{refused}"
+    );
+
+    // Gap fills are summed the same way, independently of ambiguity.
+    let gaps = [
+        with_quality(attempt(1, 1, 1, 1, "NIFTY", 1, true), 0, 1),
+        with_quality(attempt(1, 2, 2, 1, "NIFTY", 1, true), 0, 1),
+    ];
+    quality[1] = StreamQuality::frozen(0, 2);
+    schedule_with(&gaps, &mut quality).expect("two gap fills at a ceiling of two");
+    quality[1] = StreamQuality::frozen(0, 1);
+    let refused = schedule_with(&gaps, &mut quality).expect_err("two gap fills past one");
+    assert!(
+        refused.contains("2/2") || refused.contains("0/2 exceeds its frozen ceilings 0/1"),
+        "{refused}"
+    );
+
+    // The ceiling is per stream: stream 3 at zero is not charged stream 1's trades.
+    let mixed = [
+        with_quality(attempt(1, 1, 1, 1, "NIFTY", 1, true), 1, 1),
+        with_quality(attempt(3, 2, 2, 2, "BANKNIFTY", 5, true), 0, 0),
+    ];
+    quality[1] = StreamQuality::frozen(1, 1);
+    quality[3] = StreamQuality::frozen(0, 0);
+    schedule_with(&mixed, &mut quality).expect("each stream within its own ceilings");
+    assert_eq!(quality[3].admitted_ambiguous_bars, 0);
+
+    // A trade the scheduler blocks, or an admitted unpriced hold, adds nothing.
+    let blocked = [
+        attempt(1, 1, 3, 1, "NIFTY", 1, false),
+        with_quality(attempt(2, 2, 2, 2, "BANKNIFTY", 5, true), 1, 1),
+    ];
+    quality[1] = StreamQuality::frozen(0, 0);
+    quality[2] = StreamQuality::frozen(0, 0);
+    let audit = schedule_with(&blocked, &mut quality).expect("blocked trade is not charged");
+    assert_eq!(audit.counters.blocked_occupied, 1);
+    assert_eq!(audit.admitted_pricing_refused, 1);
+    assert_eq!(quality[2].admitted_ambiguous_bars, 0);
+
+    // An admitted priced trade whose stream has no ceilings refuses loudly.
+    let missing = [with_quality(attempt(9, 1, 1, 1, "NIFTY", 1, true), 0, 0)];
+    let mut short = vec![StreamQuality::frozen(u64::MAX, u64::MAX); 9];
+    assert_eq!(
+        schedule_with(&missing, &mut short),
+        Err("Global Replay V4 admitted a trade of a stream with no frozen ceilings".to_owned())
+    );
+    short.push(StreamQuality::frozen(0, 0));
+    schedule_with(&missing, &mut short).expect("stream 9 now has a slot");
+}
+
+#[test]
+fn admitted_quality_counts_refuse_on_overflow_instead_of_wrapping() {
+    let price = |ambiguous_bars, gap_fills| PriceProjection {
+        row: runner::grid::TradeRow {
+            signal_bar: 0,
+            entry_bar: 1,
+            exit_bar: 1,
+            best: 0,
+            worst: 0,
+            entry_micros: MINUTE,
+            exit_micros: MINUTE,
+            adverse: 0,
+            adverse_paisa: 0,
+            favourable: 0,
+            favourable_paisa: 0,
+        },
+        ambiguous_bars,
+        gap_fills,
+    };
+    let mut full = StreamQuality::frozen(u64::MAX, u64::MAX);
+    full.admitted_ambiguous_bars = u64::MAX;
+    assert_eq!(
+        full.absorb(0, price(1, 0)),
+        Err("Global Replay V4 admitted ambiguous-bar count overflow".to_owned())
+    );
+    let mut full = StreamQuality::frozen(u64::MAX, u64::MAX);
+    full.admitted_gap_fills = u64::MAX;
+    assert_eq!(
+        full.absorb(0, price(0, 1)),
+        Err("Global Replay V4 admitted gap-fill count overflow".to_owned())
+    );
+    let mut edge = StreamQuality::frozen(u64::MAX, u64::MAX);
+    edge.admitted_ambiguous_bars = u64::MAX - 1;
+    edge.admitted_gap_fills = u64::MAX - 1;
+    assert_eq!(edge.absorb(0, price(1, 1)), Ok(()));
+    assert_eq!(edge.admitted_ambiguous_bars, u64::MAX);
+    assert_eq!(edge.admitted_gap_fills, u64::MAX);
 }

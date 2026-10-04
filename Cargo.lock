@@ -38,6 +38,7 @@ dependencies = [
  "axum",
  "cli",
  "core",
+ "http-body",
  "pull",
  "serde",
  "serde_json",

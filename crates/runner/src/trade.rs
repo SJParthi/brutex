@@ -222,8 +222,42 @@ pub struct Occupancy {
     /// missing minutes, as a slice index: [`SliceFacts::first_missing_within`]
     /// over this interval. A missing minute is the hole a crossing table
     /// cannot see, so this is the location only the walk can record. Always
-    /// `None` on a priceable path. No walk or grid decision reads it yet (D-1191).
+    /// `None` on a priceable path. The grid reads it through
+    /// [`Self::hole_offset`] (D-1514).
     pub first_missing: Option<usize>,
+    /// The path's time exit was unpriceable ONLY because of a hole on it -- a
+    /// refused record or a missing minute strictly after a priceable entry --
+    /// so a level exit strictly before that hole was read off whole, accepted,
+    /// contiguous bars and can be priced (D-1514).
+    ///
+    /// Until D-1514 such a path was block-only: a hole AFTER a stop, target or
+    /// trail had closed the position un-priced that exit and held the position
+    /// to the time exit, so a bar after the exit decided whether the exit
+    /// counted -- the look-ahead `CLAUDE.md` §3 rule 7 forbids. Always `false`
+    /// on a priceable path and on every other unpriceable one (a missing
+    /// horizon bar, a slice cut before its square-off, an unpriceable exit
+    /// record), whose time exit is not merely hidden behind a hole.
+    pub priceable_before_hole: bool,
+}
+
+impl Occupancy {
+    /// The offset from [`Self::entry_bar`] of this path's first hole, when a
+    /// level exit strictly before it is priceable: the earlier of
+    /// [`Self::first_refused`] and [`Self::first_missing`]. `None` on every
+    /// path that is not [`Self::priceable_before_hole`]. O(1), UNVERIFIED as a
+    /// measurement; `docs/06-limits.md` states it (D-1514).
+    #[must_use]
+    pub fn hole_offset(&self) -> Option<usize> {
+        if !self.priceable_before_hole {
+            return None;
+        }
+        let hole = match (self.first_refused, self.first_missing) {
+            (Some(refused), Some(missing)) => refused.min(missing),
+            (Some(hole), None) | (None, Some(hole)) => hole,
+            (None, None) => return None,
+        };
+        hole.checked_sub(self.entry_bar)
+    }
 }
 
 /// Every trade one combination produced, and what was skipped to get there.
@@ -881,7 +915,27 @@ fn held(
         priceable,
         first_refused: facts.first_refused_within(entry_bar, exit_bar),
         first_missing: facts.first_missing_within(entry_bar, exit_bar),
+        priceable_before_hole: false,
     }
+}
+
+/// [`held`] for a path whose time exit is unpriceable only because of a hole
+/// on it (D-1514). Its entry has already passed `facts.accepts`, so the hole is
+/// strictly after it; the entry must also be priceable both ways, or no level
+/// exit before the hole can be priced either and the path stays block-only.
+fn held_before_hole(
+    bars: &[Candle],
+    (signal_bar, entry_bar, exit_bar): (usize, usize, usize),
+    direction: Direction,
+    facts: &SliceFacts,
+) -> Occupancy {
+    // `path_accepts` failed, so the path holds a hole and the two locations
+    // say where (`slice_facts_locate_the_first_refused_record_and_missing_minute`
+    // proves the equivalence); `Occupancy::hole_offset` still answers `None`
+    // were neither recorded.
+    let mut path = held(signal_bar, entry_bar, exit_bar, false, facts);
+    path.priceable_before_hole = entry_is_priceable(bars, entry_bar, direction, facts);
+    path
 }
 
 /// The walk itself, over facts that have already been derived.
@@ -1191,10 +1245,18 @@ fn walk_core(
             continue;
         }
         // ONE REFUSED INTERIOR BAR MAKES EVERY LEVEL ORDER AND EVERY PATH
-        // EXTREMUM UNKNOWABLE. Keep the occupied interval, but publish no
-        // trade and let the grid retain it as block-only.
+        // EXTREMUM AT OR AFTER IT UNKNOWABLE. Keep the occupied interval and
+        // publish no time-exit trade. What is BEFORE the hole was read off
+        // whole bars, so the grid may still price a level exit there; it was
+        // block-only until D-1514, which let a bar after a stop decide whether
+        // the stop counted.
         if !facts.path_accepts(entry, exit) {
-            out.occupancy.push(held(signal, entry, exit, false, facts));
+            out.occupancy.push(held_before_hole(
+                bars,
+                (signal, entry, exit),
+                direction,
+                facts,
+            ));
             if !blocked {
                 open_until = Some(exit);
             }
@@ -2557,6 +2619,94 @@ mod tests {
         }
     }
 
+    /// D-1514. A path is `priceable_before_hole` exactly when its time exit was
+    /// refused for a hole on it and nothing else; its `hole_offset` is the
+    /// earlier hole, from its entry. Every other path, priceable or not, says
+    /// neither. Both kinds of hole are met.
+    #[test]
+    fn a_path_held_only_by_a_hole_says_where_it_can_still_be_priced() {
+        let (bars, column, refused, missing) = holed();
+        let facts = super::SliceFacts::of(&bars, &column);
+        for direction in [Direction::Long, Direction::Short] {
+            let walked = walk(&bars, &column, &ConditionMask::default(), h(15), direction);
+            let mut met = (false, false);
+            for path in &walked.occupancy {
+                let holed = !facts.path_accepts(path.entry_bar, path.exit_bar);
+                if path.priceable || !holed {
+                    assert!(!path.priceable_before_hole, "{path:?}");
+                    assert_eq!(path.hole_offset(), None, "{path:?}");
+                    continue;
+                }
+                assert!(path.priceable_before_hole, "{direction:?}: {path:?}");
+                let first = [path.first_refused, path.first_missing]
+                    .into_iter()
+                    .flatten()
+                    .min()
+                    .expect("a holed path has a hole");
+                assert_eq!(path.hole_offset(), Some(first - path.entry_bar), "{path:?}");
+                assert!(first > path.entry_bar, "the hole is after the entry");
+                met.0 |= first == refused;
+                met.1 |= first == missing;
+            }
+            assert_eq!(met, (true, true), "{direction:?}: both kinds of hole");
+        }
+    }
+
+    /// D-1514. `hole_offset` reads the EARLIER of the two holes, and nothing on
+    /// a path that is not `priceable_before_hole`, whatever it records.
+    #[test]
+    fn hole_offset_is_the_earlier_hole_and_only_on_a_path_priced_before_it() {
+        let path = |refused, missing, before| super::Occupancy {
+            signal_bar: 9,
+            entry_bar: 10,
+            exit_bar: 40,
+            priceable: false,
+            first_refused: refused,
+            first_missing: missing,
+            priceable_before_hole: before,
+        };
+        assert_eq!(path(Some(14), Some(12), true).hole_offset(), Some(2));
+        assert_eq!(path(Some(12), Some(14), true).hole_offset(), Some(2));
+        assert_eq!(path(Some(13), None, true).hole_offset(), Some(3));
+        assert_eq!(path(None, Some(15), true).hole_offset(), Some(5));
+        assert_eq!(path(None, None, true).hole_offset(), None);
+        assert_eq!(path(Some(13), Some(12), false).hole_offset(), None);
+        // A location before the entry cannot be an offset on this path.
+        assert_eq!(path(Some(3), None, true).hole_offset(), None);
+    }
+
+    /// D-1514. An entry the evaluator accepted but no fill can be bracketed on
+    /// (a high under one tick) prices no exit at all, so its holed path stays
+    /// block-only rather than offering a level exit to the grid.
+    #[test]
+    fn a_holed_path_whose_entry_cannot_be_filled_stays_block_only() {
+        let (mut bars, _, refused, _) = holed();
+        let entry = refused - 2;
+        let bar = bars.get_mut(entry).expect("inside");
+        (bar.open, bar.high, bar.low, bar.close) = (3, 4, 2, 3);
+        let column = Column::build(&bars, &mut evaluator());
+        let facts = super::SliceFacts::of(&bars, &column);
+        assert!(facts.accepts(entry), "premise: the evaluator accepts it");
+        let walked = walk(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Direction::Long,
+        );
+        let path = walked
+            .occupancy
+            .iter()
+            .find(|path| path.entry_bar == entry)
+            .expect("the tiny entry still holds the position");
+        assert!(
+            !path.priceable && path.first_refused == Some(refused),
+            "{path:?}"
+        );
+        assert!(!path.priceable_before_hole, "{path:?}");
+        assert_eq!(path.hole_offset(), None);
+    }
+
     /// Both stateful evaluator refusals gate every role a bar can play in a
     /// long or short trade. A refused interior/exit also leaves a conservative
     /// occupancy interval so the next signal cannot overlap an unresolved
@@ -3303,5 +3453,52 @@ mod tests {
         assert!(code.contains("Anchor::PrintedExtreme"));
         assert!(!code.contains("Anchor::AdverseExtreme"));
         assert!(!code.contains("worst_case_fills("));
+    }
+
+    /// The manifest's fill-model paragraph names the one fill call the crate
+    /// makes and claims no charge, and the production code agrees. It said
+    /// `trade` prices through `worst_case_fills` until D-1498 and charges
+    /// through `costs::trip::price` until D-1646; neither is called.
+    #[test]
+    fn the_manifest_fill_model_names_the_calls_the_crate_makes() {
+        let manifest = include_str!("../Cargo.toml");
+        let paragraph = manifest
+            .split_once("# THE FILL MODEL.")
+            .and_then(|(_, rest)| rest.split_once("costs       ="))
+            .map(|(paragraph, _)| paragraph)
+            .expect("the manifest keeps its fill-model paragraph");
+        let prose = paragraph
+            .lines()
+            .map(|line| line.trim_start_matches('#').trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prose.contains("price every entry and exit through `costs::fill::fills_at`"),
+            "{prose}"
+        );
+        assert!(
+            prose.contains("`costs::trip::price` is never called"),
+            "{prose}"
+        );
+        assert!(!prose.contains("charges through `costs::trip::price`, rather"));
+        assert!(!prose.contains("exit through `costs::fill::worst_case_fills`"));
+        let trip = ["costs", "::trip::"].concat();
+        let worst = ["worst_case", "_fills("].concat();
+        for (name, source) in [
+            ("trade.rs", include_str!("trade.rs")),
+            ("grid.rs", include_str!("grid.rs")),
+        ] {
+            // Comments and string literals are prose, not calls; this test's own
+            // needles are built from pieces so they never match themselves.
+            let code = source
+                .lines()
+                .map(str::trim_start)
+                .filter(|line| !line.starts_with("//") && !line.contains('"'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!code.contains(&trip), "{name} charges through costs::trip");
+            assert!(!code.contains(&worst), "{name} calls the adverse-tick fill");
+            assert!(code.contains("fills_at("), "{name} prices through fills_at");
+        }
     }
 }
