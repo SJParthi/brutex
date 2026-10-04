@@ -1,12 +1,13 @@
-# Fix Board thread: resume state (2026-10-04 13:42 UTC)
+# Fix Board thread: resume state (2026-10-04 18:50 UTC; pausing for the 5-hour limit, resume 22:03 UTC)
 
 Saved ahead of a 5-hour usage pause. GitHub state wins over this file.
 
 ## The board
-- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 10 at 13:20 UTC).
+- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 14 at 18:2x UTC).
 - Hourly routine trig_01BEoTSneJLtU8Rb1PLXNhWe fires at :19.
 - Builder: `resume/fix-board/builder` (Rust, standalone). Steps and the refresh command: `resume/fix-board/README.md`.
-- Last refresh 13:2x UTC: 1,065 distinct findings (404 on PR #74, 308 branch, 116 fixing, 6 partial, 13 doc, 218 not started). PR #74 head 8c9313c.
+- Last refresh 18:2x UTC: 1,183 rows (495 pushed, 285 branch, 132 fixing, 5 partial, 17 doc, 249 found). PR #74 head fc6dbb9d, run 37223441970. Since then head is 1f588aae (web batch 1 merged).
+- This thread's own status file: /mnt/project-files/fix-board/status/fixboard.tsv (run.sh globs every status tsv).
 
 ## Local wrapper used for every refresh (recreate as /tmp/claude-0/run.sh; the worktree of fix-queue is /tmp/claude-0/fq)
 ```
@@ -31,7 +32,10 @@ All on branches from final/all-fixes-zero 1f4de71a; hashes sent to zero-findings
 - fixboard/zero-p10 7b2ffdd9: P10-01/02/03/05/06/07a killed; P10-04 was already killed (false finding); P10-07b restructured (D-2740).
 - fixboard/zero-p8 c26d8db5: P8-01..05 and p8num-1 all done (D-2720..2725, FB-21..27), handed to zero-findings 17:3x UTC. Base failure found: api sweeprun::strict_tests::strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_start (reported to zero-findings).
 
+- fixboard/pr74-web18 (worktree /tmp/claude-0/wt-pr74-web18): batch 1 P17-01, p14num-1, conc18-1, conc18-2 (tip 891d8f8d) MERGED into PR #74 as 1f588aae. Batch 2 conc18-3 5620eae8, conc18-4 e4a6158d, conc18-5 ed207d0e, p14num-2 f460a400 (D-2750), merged with final/all-fixes at 605c5299, handed to PR 74 CI 18:45 UTC. Not merged with origin/zero-work (it does not contain PR #74 head; 58 conflict hunks; PR 74 CI owns that integration). CE-77 left to zero-findings 356b15ae.
+- fixboard/pr74-conc-api (worktree /tmp/claude-0/wt-pr74-conc-api, base ddf6d693, D-2760..2769, FB-61..69): runs-1, recovery-1, recovery-2, apicache-1, sweep-1, pull2-1, census-1. Agent told to commit/push by 19:15 UTC (WIP commit for unfinished). On resume: read its branch head, verify, hand to PR 74 CI and zero-findings, finish the WIP items.
+
 ## Next
-1. Hourly refresh as above.
-2. Finish zero-p8 and send its hashes to zero-findings; ask it for more unassigned items.
-3. Tests running as root fail with PermissionDenied for re-exec-as-nobody tests when binaries sit under a 0700 dir; run those binaries from a readable dir.
+1. On resume (22:03 UTC): fetch, check fixboard/pr74-conc-api and 605c5299 status on head; update fixboard.tsv.
+2. Hourly refresh (routine at :19): inputs checks/pr/streams, run.sh, render check, republish, commit to fix-queue.
+3. Take more unclaimed found rows (tell zero-findings first). Free D-numbers: D-2751..2759, D-2770..2799.
