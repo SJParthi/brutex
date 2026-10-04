@@ -54735,3 +54735,28 @@ Evidence → Admission V4 → Selection V6 chain; the losing-rate half reaches
 them through Runner, the other four do not, and each needs its own version.
 
 **What it proves.** AGA-03 to AGA-05 in `docs/04-invariants.md`.
+
+### D-1645 — `elite` takes the ranking lens on the command line — 2026-10-04
+
+**What was wrong (cli half of AC-whp-tb-2).** `Lens::Asymmetry` is the only
+lens that ranks by the operator's own rule, the smallest win against the
+largest loss, and no command could choose it: `elite` built `Payoff` as a
+constant and every other production lens is a fixed constant too. D-1498
+fixed Runner's half and left this open. `cli`'s identity test also compared
+only two lenses, so mapping `Asymmetry` onto another lens's term would have
+passed.
+
+**The change.** `cli elite … MAX_POINTS TOP [LENS]` takes an optional
+eleventh word: `payoff`, `asymmetry`, `path` or `detectability`. Anything
+else is refused by name before a number or the store is read; it is never
+read as the default. Absent keeps `Payoff`, so every existing invocation is
+the same run with the same identity. The lens is threaded through
+`elite_descend_in_points_inner` and `elite_descend_with_attempt` into every
+descent step's `Policy` and the validated re-run, and the run identity
+already carries it (`policy_of` term 1: 0, 1, 2, 3). The public library
+entries and the browser's attempt entry keep `Payoff`.
+
+**Which results change.** None unless a LENS word is given. A run naming a
+lens other than `payoff` ranks by it and records under that lens's identity.
+
+**What it proves.** AGA-06.
