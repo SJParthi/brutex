@@ -213,6 +213,24 @@ pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 /// name `runner`, so the figure reaches it through this crate.
 pub const MIN_JUDGEABLE_OBSERVATIONS: u64 = runner::report::MIN_OBSERVATIONS;
 
+/// Whether one live row clears its run's bar, by the rule the end-of-run
+/// report applies to the same row.
+///
+/// Three conditions, all required: at least [`MIN_JUDGEABLE_OBSERVATIONS`]
+/// (xcut-1, D-1991); `|t_milli|` strictly above the normal bar carried as its
+/// ceiling (CE-7, D-1769); and the Student-t tail at the row's own `n - 1`
+/// degrees of freedom within the Bonferroni share of `trials`. The last is new:
+/// at a Bonferroni tail the normal bar understates a Student-t one badly even
+/// at thirty observations, and `/live.json` called such a row clear while the
+/// report, which now holds it to the Student-t tail, does not (p8num-1,
+/// D-2725). `api` does not name `runner`, so the rule reaches it through here.
+#[must_use]
+pub fn clears_bar(row: &Row, summary: &Summary) -> bool {
+    row.n >= MIN_JUDGEABLE_OBSERVATIONS
+        && row.t_milli.saturating_abs() > summary.bar_milli
+        && runner::significance::clears_bonferroni_milli(row.t_milli, row.n, summary.trials)
+}
+
 /// What a run has found so far, and what it must clear.
 ///
 /// # Why the bar travels with the rows
