@@ -57642,3 +57642,22 @@ path and proves the block is cut and the exact rerun commits, and that the
 retry over a prefix issues a barrier of its own (a fault armed on that retry
 cuts the prefix too, which an in-place re-sync never did). The Selection V6
 and Global Replay V4 tests were run against the previous code and failed.
+
+### D-2554 — Selection V6's abandoned-tail quarantine is written under a scratch name and keyed by content — 2026-10-04
+
+**The finding.** conc4-1. D-1569 moved a foreign unsealed Selection V6 tail
+into `global-selection-v6.bin.abandoned-<offset>`, created with `create_new`
+under that final name. A failed or killed copy left a partial file there, and
+a second abandoned tail at the same offset met the first one's bytes; either
+way every later `persist` on the rung refused "already holds different bytes",
+the permanent wedge D-1569 had removed, moved into the quarantine.
+
+**The decision.** The copy is written to `<quarantine>.writing` through
+`fixed_tail::write_at_end`, synced, and renamed to
+`<file>.abandoned-<offset>-<blake3 of the tail>`; the directory is synced
+before the ledger is cut, as before. A failed copy removes its scratch file and
+leaves the ledger unchanged, so the rerun repeats the move. Two different
+tails at one offset get two quarantines. An existing quarantine of the same
+name holds the same bytes by construction and is replaced by the rename.
+
+**Evidence.** ZK-02.

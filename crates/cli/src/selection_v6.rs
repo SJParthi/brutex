@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::execution_v4::CommittedStoredExecutionV4;
@@ -375,15 +375,18 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
 }
 
 /// Moves an interrupted writer's unsealed tail, `committed..len`, into
-/// `<file>.abandoned-<committed>` and cuts it from the ledger. audit-20261003
-/// hunt-cli-a-5, D-1569.
+/// `<file>.abandoned-<committed>-<blake3 of the tail>` and cuts it from the
+/// ledger. audit-20261003 hunt-cli-a-5, D-1569; conc4-1, D-2554.
 ///
 /// The bytes are copied and synced, with their directory, BEFORE the ledger
 /// is shortened, so a crash between the two leaves the tail in both places
 /// rather than in neither. Committed sealed blocks, `..committed`, are never
-/// rewritten. An existing quarantine at the same offset must hold exactly the
-/// same bytes, otherwise this refuses and changes nothing. The move is named
-/// in the log, so the repair is never silent.
+/// rewritten. The copy is written under a scratch name, synced, and only then
+/// renamed to a name keyed by the tail's CONTENT as well as its offset, so a
+/// torn or failed copy never sits under a final name, and a second abandoned
+/// tail at the same offset gets its own quarantine rather than wedging the
+/// rung against the first. A failed copy removes its scratch file. The move is
+/// named in the log, so the repair is never silent.
 fn set_aside_abandoned_tail(
     file: &mut File,
     root: &Path,
@@ -395,24 +398,32 @@ fn set_aside_abandoned_tail(
     file.seek(SeekFrom::Start(committed))
         .map_err(|why| why.to_string())?;
     file.read_exact(&mut tail).map_err(|why| why.to_string())?;
-    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}"));
-    match OpenOptions::new().write(true).create_new(true).open(&aside) {
-        Ok(mut out) => {
-            out.write_all(&tail)
-                .and_then(|()| out.sync_all())
-                .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
-        }
-        Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
-            let held = std::fs::read(&aside)
-                .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
-            if held != tail {
-                return Err(format!(
-                    "Selection V6 abandoned tail quarantine {} already holds different bytes; nothing repaired",
-                    aside.display()
-                ));
+    let digest = brutex_core::blake3::hash(&tail);
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}"));
+    let scratch = root.join(format!("{FILE_NAME}.abandoned-{committed}-{hex}.writing"));
+    let copied = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&scratch)
+        .and_then(|mut out| {
+            crate::fixed_tail::write_at_end(&mut out, &scratch.display(), 0, &tail, Write::write_all)
+                .map_err(std::io::Error::other)?;
+            crate::fixed_tail::sync_all_hooked(&out, &scratch)
+        })
+        .and_then(|()| std::fs::rename(&scratch, &aside));
+    if let Err(why) = copied {
+        let removed = match std::fs::remove_file(&scratch) {
+            Err(gone) if gone.kind() != std::io::ErrorKind::NotFound => {
+                format!("; removing scratch {} also failed: {gone}", scratch.display())
             }
-        }
-        Err(why) => return Err(format!("Selection V6 abandoned tail quarantine: {why}")),
+            _ => String::new(),
+        };
+        return Err(format!(
+            "Selection V6 abandoned tail quarantine {}: {why}{removed}; the ledger was not changed",
+            aside.display()
+        ));
     }
     sync_directory(root)?;
     file.set_len(committed).map_err(|why| why.to_string())?;

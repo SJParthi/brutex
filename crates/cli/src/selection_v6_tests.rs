@@ -38,6 +38,15 @@ fn frame(seed: u8) -> Block {
     block
 }
 
+/// Where an abandoned tail at `offset` holding `tail` is set aside (D-2554).
+fn quarantine(root: &Path, offset: impl std::fmt::Display, tail: &[u8]) -> PathBuf {
+    let hex: String = brutex_core::blake3::hash(tail)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    root.join(format!("{FILE_NAME}.abandoned-{offset}-{hex}"))
+}
+
 fn bounds(records: u64) -> SelectionV6Bounds {
     SelectionV6Bounds::new(records, records * BLOCK_BYTES).expect("finite bounds")
 }
@@ -126,7 +135,7 @@ fn incomplete_prefix_is_never_authority_and_a_foreign_one_is_set_aside() {
     assert!(persist(&scratch.0, bounds(1), &expected).expect("foreign tail set aside"));
     assert_eq!(std::fs::read(path).expect("completed bytes"), expected);
     assert_eq!(
-        std::fs::read(scratch.0.join(format!("{FILE_NAME}.abandoned-0")))
+        std::fs::read(quarantine(&scratch.0, 0, &foreign[..4096]))
             .expect("preserved foreign prefix"),
         &foreign[..4096]
     );
@@ -306,9 +315,7 @@ fn an_abandoned_partial_tail_neither_hides_committed_history_nor_wedges_a_new_so
         std::fs::read(&path).expect("repaired history"),
         [first.as_slice(), second.as_slice()].concat()
     );
-    let quarantine = scratch
-        .0
-        .join(format!("{FILE_NAME}.abandoned-{SELECTION_V6_BLOCK_BYTES}"));
+    let quarantine = quarantine(&scratch.0, SELECTION_V6_BLOCK_BYTES, &foreign[..4096]);
     assert_eq!(
         std::fs::read(&quarantine).expect("abandoned bytes kept aside"),
         &foreign[..4096]
@@ -360,4 +367,38 @@ fn a_failed_selection_v6_barrier_is_cut_and_the_retry_rewrites() {
     assert_eq!(std::fs::metadata(&path).expect("measure").len(), 0);
     assert!(persist(&scratch.0, bounds(1), &expected).expect("the exact rerun writes"));
     assert_eq!(std::fs::read(&path).expect("committed"), expected);
+}
+
+/// conc4-1, D-2554: a quarantine copy that fails part way leaves no file under
+/// any name and the ledger unchanged, so the rerun sets the tail aside; and a
+/// second abandoned tail at the SAME offset gets its own quarantine instead of
+/// refusing every later persist on the rung.
+#[test]
+fn a_failed_or_repeated_quarantine_never_wedges_the_rung() {
+    use crate::fixed_tail::fault::{Armed, Kind};
+    let scratch = Scratch::new();
+    let path = scratch.0.join(FILE_NAME);
+    let (first, second, own) = (frame(21), frame(22), frame(23));
+    std::fs::write(&path, &first[..4096]).expect("first abandoned prefix");
+    {
+        let _armed = Armed::arm("abandoned", Kind::Write { keep: 100 });
+        assert!(persist(&scratch.0, bounds(1), &own).is_err());
+    }
+    let left: Vec<_> = std::fs::read_dir(&scratch.0)
+        .expect("list")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(left, [std::ffi::OsString::from(FILE_NAME)], "no partial copy");
+    assert_eq!(std::fs::read(&path).expect("ledger"), &first[..4096]);
+    assert!(persist(&scratch.0, bounds(2), &own).expect("the rerun sets it aside"));
+    // A second source abandons a tail at the same offset after a cut.
+    std::fs::write(&path, &second[..300]).expect("second abandoned prefix");
+    assert!(persist(&scratch.0, bounds(2), &own).expect("own block again"));
+    assert_eq!(std::fs::read(&path).expect("ledger"), own);
+    for tail in [&first[..4096], &second[..300]] {
+        assert_eq!(
+            std::fs::read(quarantine(&scratch.0, 0, tail)).expect("both kept"),
+            tail
+        );
+    }
 }
