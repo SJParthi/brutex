@@ -1038,7 +1038,12 @@ fn run() -> Result<(), String> {
             };
             // "fixed" is how a thread writes "fixed on its branch"; reaching PR #74 is
             // proved from git in step 6, never taken from the word.
-            let st = if st == "fixed" { "branch" } else { st.as_str() };
+            // "operator" / "held" mean not started because it waits on the operator.
+            let st = match st.as_str() {
+                "fixed" => "branch",
+                "operator" | "held" => "found",
+                other => other,
+            };
             if !STATES.contains(&st) {
                 unmatched.push(format!("{name}: {raw} (unknown state {st})"));
                 continue;

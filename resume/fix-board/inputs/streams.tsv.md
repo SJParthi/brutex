@@ -1,5 +1,5 @@
 job	state	pill	head	done	next	waits
-PR #74 CI	CI running	p-run	final/all-fixes 8c9313c	Gate 6d fixed (D-1463): every build and test gate green on 73441e5	Gate 8, coverage and the Gate 18 mutation shards on 8c9313c (never yet run to the end on this content)	CI
+PR #74 CI	Fixing	p-run	final/all-fixes 8c9313c	Every build, test and O(1) gate green on 8c9313c (run 37191256038)	Cover or declare 11 new uncovered lines in telemetry sink.rs (Gate 20), then the Gate 18 mutation shards	Its own fix
 Lane 1-b	Restarting	p-run	final/all-fixes-00bbns ae479d2; wip/lane1b-merge2 52772b6	Blocker fixed: exit grids priced once per forced stop (D-1734 closes D-1731)	Finish the unfinished merge of the newest final/all-fixes, full non-root tests, gates, mutants, one push	The PR #74 merge gate
 Attack audit	Working	p-run	F5 and F7 on PR #74 (8c9313c)	F5 and F7 merged into PR #74; F6, F8 (the 12 documented-only items) and F10 running	Finish F6, F8, F10 and the pull/store/lake hunter	Its own fixes
 Codebase sweep	Working	p-run	audit-fix/w9 9e829f4 plus 5 local commits	78 of 91 on PR #74; the rest fixed on branches (status file has 123 rows)	OS-6, OS-7, OE-1 and the ci.yml shell-to-Rust port, then one push through the PR #74 thread	10 findings need a fact only you can give
