@@ -151,3 +151,12 @@ Total new across rounds 1-14: 229. Round 14 = 2 medium, 24 low.
 | Leakage | 18 | in-sample vs out-of-sample | p18num-1 low (latent purge width h vs h+1, ran) | numeric-pass18.md |
 | Decisions | 18 | superseded decisions cited as current | P18-01..05 low | tests-docs-security-pass18.md |
 Total new across rounds 1-15: 244. Round 15 = 2 medium, 13 low.
+
+## Round 16 (same head 1f4de71) — done 2026-10-04 ~19:10 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| HTTP | 21 | protocol edges | CE-99..101 low | crash-edge-pass21.md |
+| Journals | 19 | audit trails as evidence | conc19-1..3 low | conc-pass19.md |
+| VIX | 19 | reference-only VIX | p19num-1, p19num-2 low | numeric-pass19.md |
+| Web tests | 19 | web test strength (54 mutants) | P19-01 med (rankRows untested, ran), P19-02..07 low | tests-docs-security-pass19.md |
+Total new across rounds 1-16: 259. Round 16 = 1 medium, 14 low. Newly fixed: cli3-1, replay-2, ledgers-1, CE-8, probeapi-5.
