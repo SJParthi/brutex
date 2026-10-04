@@ -1513,18 +1513,22 @@ fn hold_directory(dir: &Path) -> Result<File, String> {
         .write(true)
         .open(&path)
         .map_err(|e| format!("{}: cannot open the sink's lock — {e}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(format!(
-            "{}: another sink, in this process or another, holds this telemetry directory; \
-             refused rather than writing one event stream from two writers",
-            dir.display()
-        )),
-        Err(std::fs::TryLockError::Error(e)) => Err(format!(
-            "{}: cannot lock the sink's directory — {e}",
+    // ONE REFUSAL FOR BOTH WAYS THE LOCK IS NOT HELD (D-1464). `WouldBlock`
+    // is another sink; any other error is a filesystem that cannot take the
+    // lock at all, which no test can stage, so its own arm was four lines the
+    // coverage gate could never see run. Converted to the `io::Error` std
+    // defines for it, the cause is printed either way and the refusal is the
+    // same: no sink writes a directory it could not lock.
+    file.try_lock().map_err(std::io::Error::from).map_err(|e| {
+        format!(
+            "{}: another sink, in this process or another, holds this telemetry directory, \
+             or its lock {} cannot be taken ({e}); refused rather than writing one event \
+             stream from two writers",
+            dir.display(),
             path.display()
-        )),
-    }
+        )
+    })?;
+    Ok(file)
 }
 
 /// Whether the file's last byte is anything but a newline.
@@ -3562,10 +3566,8 @@ mod tests {
         let _gate = crate::tests::no_fork_in_flight();
         let dir = scratch("two-sinks");
         let held = Sink::open(&Config::new(&dir)).expect("the first sink opens");
-        let refused = Sink::open(&Config::new(&dir));
-        let Err(why) = refused else {
-            panic!("a second sink on a held directory must be refused");
-        };
+        let why = Sink::open(&Config::new(&dir))
+            .expect_err("a second sink on a held directory must be refused");
         assert!(
             why.contains("another") && why.contains(&dir.display().to_string()),
             "the refusal names the directory and why: {why}"
@@ -3664,6 +3666,11 @@ mod tests {
             "the event reported Written must be readable on its own line: {text}"
         );
         drop(sink);
+        // The double fails nothing but the append: its sync and reopen succeed,
+        // so every `Dropped` above is the full disk's and no other step's.
+        let mut target = Arc::clone(&full);
+        assert!(Target::sync(&target).is_ok());
+        assert!(Target::reopen(&mut target, Path::new("unused")).is_ok());
     }
 
     /// A target that accepts `cut_at` bytes of one append and then refuses

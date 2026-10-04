@@ -784,11 +784,22 @@ impl BlockExtremes {
                 (high, low)
             })
             .collect();
+        // ONLY THE LEVELS A QUERY CAN READ (D-1464). `over_blocks` hands
+        // [`Self::over`] the blocks strictly between a query's first and last,
+        // so a run is at most `blocks - 2` long and its deepest level is
+        // `ilog2(blocks - 2)`. The loop stopped at `doubled > below.len()`,
+        // which also built a top level no query reaches whenever
+        // `blocks + 1` is three times a power of two -- and Gate 18 showed its
+        // `>` could become `>=` unobserved. Bounded by the readable run
+        // instead, every level is read by some query, and
+        // `the_block_table_builds_exactly_the_levels_a_middle_run_reads`
+        // pins the count.
+        let longest_middle = base.len().saturating_sub(2);
         let mut levels = vec![base];
         let mut span = 1_usize;
         while let Some(below) = levels.last() {
             let doubled = span.saturating_mul(2);
-            if doubled > below.len() {
+            if doubled > longest_middle {
                 break;
             }
             let level: Vec<(i64, i64)> = below
@@ -4509,6 +4520,68 @@ mod window_tests {
             window.touched
         );
     }
+    /// **A LEFT END BEFORE THE ONE ALREADY POPPED IS ANSWERED FROM THE BLOCK
+    /// TABLE, AND ONE EQUAL TO IT IS NOT (Gate 18, D-1464).**
+    ///
+    /// The deques no longer hold bars left of `popped_to`, so a query reaching
+    /// back past it must take the block table or it misses their extremes:
+    /// bar 2 is the highest here, and `[0, 12]` after `[5, 10]` must see it. A
+    /// query whose left end EQUALS `popped_to` is still served by the deques:
+    /// growing `[0, 10]` to `[0, 20]` reads the ten new bars and builds no
+    /// table. Both mutants of `lo < self.popped_to` (`==`, `<=`) survived
+    /// every earlier test.
+    #[test]
+    fn a_left_end_behind_the_popped_one_reads_the_block_table_and_an_equal_one_does_not() {
+        let mut bars = wobble(200);
+        bars[2].high = i64::MAX / 2;
+        let mut back = WindowExtremes::new();
+        assert_eq!(back.over(&bars, 5, 10), scan(&bars, 5, 10));
+        assert_eq!(back.over(&bars, 0, 12), scan(&bars, 0, 12));
+        assert_eq!(scan(&bars, 0, 12).map(|(high, _)| high), Some(i64::MAX / 2));
+
+        let mut same = WindowExtremes::new();
+        assert_eq!(same.over(&bars, 0, 10), scan(&bars, 0, 10));
+        let before = same.touched;
+        assert_eq!(same.over(&bars, 0, 20), scan(&bars, 0, 20));
+        assert_eq!(same.touched - before, 10, "only the ten new bars are read");
+        assert!(
+            same.blocks.is_none(),
+            "a forward query built the block table"
+        );
+    }
+
+    /// **THE BLOCK TABLE BUILDS EXACTLY THE LEVELS A MIDDLE RUN READS, AND
+    /// EVERY RUN IT CAN BE ASKED IS ANSWERED (Gate 18, D-1464).**
+    ///
+    /// For 1 to 40 blocks the level count is `ilog2(blocks - 2) + 1` from
+    /// three blocks up and 1 below that, and every middle run `first ..= last`
+    /// a query can hand [`super::BlockExtremes::over`] equals the scan of its
+    /// bars. A bound one level short leaves the longest runs unanswered; one
+    /// level long builds memory no query reads.
+    #[test]
+    fn the_block_table_builds_exactly_the_levels_a_middle_run_reads() {
+        let block = super::EXTREME_BLOCK;
+        for blocks in 1..=40_usize {
+            let bars = wobble(blocks * block);
+            let mut touched = 0;
+            let table = super::BlockExtremes::of(&bars, &mut touched);
+            let expected = blocks
+                .checked_sub(2)
+                .filter(|&m| m > 0)
+                .map_or(1, |m| usize::try_from(m.ilog2()).expect("small") + 1);
+            assert_eq!(table.levels.len(), expected, "{blocks} blocks");
+            for first in 1..blocks.saturating_sub(1) {
+                for last in first..blocks - 1 {
+                    assert_eq!(
+                        table.over(first, last),
+                        scan(&bars, first * block, (last + 1) * block - 1),
+                        "{blocks} blocks, run {first}..={last}"
+                    );
+                }
+            }
+        }
+    }
+
     /// And through `forward` itself: every measured excursion equals the scan
     /// over the bars the position was exposed to, `[i + 1, exit]`.
     #[test]

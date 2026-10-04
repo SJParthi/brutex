@@ -56708,3 +56708,59 @@ limit; one extra key read per object.
 `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers`
 pins the digits of `100.12499999999999999`, refuses `-1e999` and `1E+309`, and
 refuses a token map with extra fields or non-number digits.
+
+### D-1464 — Gate 18 survivors on PR #74 killed ahead of CI, and the telemetry lock refusal loses its unreachable arm — 2026-10-04
+
+**What was observed.** Gate 18 had not run on PR #74's content since the
+rounds D-1452..D-1456 killed. A local pre-run of every changed-line mutant since
+0cab319 (353 cases, then 189 more for 8c9313c) left eight survivors on code
+this branch changed:
+
+- `runner::outcome::WindowExtremes::over`, `lo < self.popped_to` → `==` and
+  `<=`. A left end behind the popped one must take the block table, and one equal
+  to it must not; no test asked either query.
+- `runner::outcome::BlockExtremes::of`, `doubled > below.len()` → `>=`. The
+  loop built one level no query reads whenever `blocks + 1` is three times a
+  power of two, so dropping it changed nothing observable.
+- `pull::http::number_text`, all five mutants of the comparison that bounds an
+  exponent's shift. The price tests never reach either edge.
+
+Separately, run 1267 on 8c9313c failed Gate 20: `telemetry/src/sink.rs` had 31
+uncovered lines against 20 declared. A non-root `cargo llvm-cov -p telemetry`
+reproduced 31 exactly. The pre-D-1537 tree measured 20, and the 11 new lines are
+these:
+
+- four in `hold_directory`'s `TryLockError::Error` arm, which no test can
+  stage;
+- the `panic!` of a `let … else` in
+  `a_second_sink_on_a_held_directory_is_refused_by_name`;
+- the `sync` and `reopen` bodies of the `StillFull` double, which no test
+  called.
+
+**The decision.**
+
+- `BlockExtremes::of` builds levels only while a middle run can read them:
+  `doubled > blocks - 2` stops it. That is one level less memory in those
+  cases, and every remaining level is read.
+- Tests pin both `popped_to` cases, the exact level count with every middle
+  run's answer, and both edges of `number_text`'s bound.
+- `hold_directory` converts the lock error to the `io::Error` std defines for
+  it and refuses once with the cause printed. That is the same refusal and no
+  unreachable arm.
+- The held-directory test uses `expect_err`.
+- The `StillFull` test calls the double's `sync` and `reopen`, which proves
+  each `Dropped` it sees came from the append.
+
+No production result changes. The lock is still refused whenever it is not
+held, and `BlockExtremes` answers every query it answered.
+
+**Proof.** The mutants were re-run against the new tests:
+
+- all eight survivors are now caught;
+- the 27 `WindowExtremes::over` and `over_blocks` mutants that run reached are all caught;
+- the three `BlockExtremes::of` mutants are caught;
+- all 12 `pull::http::number_text` mutants are caught, 0 missed.
+
+The non-root telemetry coverage counts `sink.rs` 20 again, with `clock.rs` 1,
+`level.rs` 1, `lib.rs` 6, `record.rs` 1 and `tail.rs` 3. That equals gate 20's
+declaration, so no count changes. CIM-01..03.
