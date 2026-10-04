@@ -1628,6 +1628,52 @@ fn a_torn_genesis_slot_with_nothing_committed_is_repaired() {
     }
 }
 
+/// The other half of D-1520's proof: a sidecar that EXISTS but is EMPTY proves
+/// nothing was committed, which is the state an append leaves when it creates
+/// the `.crc` and dies before writing an entry. Beside a torn genesis slot it
+/// must be repaired like an absent one, not refused for ever. P10-03: `> 0`
+/// mutated to `>= 0` in `refuse_if_sealed` wedged exactly this month and no
+/// test noticed, because every other fixture's sidecar is absent or non-empty.
+#[test]
+fn a_torn_genesis_slot_beside_an_empty_sidecar_is_repaired() {
+    for torn_at in [1_usize, 63] {
+        let scratch = Scratch::new(&format!("tornslotemptycrc{torn_at}"));
+        let on_disk = bars_path().to_path_buf(scratch.root());
+        let sidecar = bars_path()
+            .with_file(FileKind::Checksums)
+            .to_path_buf(scratch.root());
+        fs::create_dir_all(on_disk.parent().expect("a parent")).expect("the month directory");
+
+        let donor = Scratch::new(&format!("tornslotemptycrcdonor{torn_at}"));
+        drop(open(donor.root()).expect("a healthy empty month"));
+        let healthy = image(donor.root());
+        let mut torn = vec![0u8; 32_768];
+        torn[..torn_at].copy_from_slice(&healthy[..torn_at]);
+        fs::write(&on_disk, &torn).expect("the torn file");
+        fs::write(&sidecar, []).expect("the empty sidecar");
+        assert_eq!(
+            fs::metadata(&sidecar)
+                .expect("the premise: it exists")
+                .len(),
+            0,
+            "the premise: it is empty"
+        );
+
+        let opened = open(scratch.root()).unwrap_or_else(|why| {
+            panic!(
+                "{torn_at}: an empty sidecar proves nothing and the month must be repaired: {why}"
+            )
+        });
+        assert_eq!(opened.records(), 0, "{torn_at}: repaired to an empty month");
+        drop(opened);
+        assert_eq!(
+            image(scratch.root()),
+            healthy,
+            "{torn_at}: the repair writes the genesis region a fresh month has"
+        );
+    }
+}
+
 /// hunt-store-2's restraint: a slot that DECODES is a commit, not a tear, and
 /// a file whose region holds anything outside the first slot is not the shape
 /// a torn genesis can leave. Neither is re-initialised.

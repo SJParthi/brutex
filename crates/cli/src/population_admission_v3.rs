@@ -6548,6 +6548,66 @@ mod tests {
         assert!(PopulationAdmissionV3Ledger::open_read(lock_root.path(), bounds()).is_err());
     }
 
+    /// A trailing prefix of the SAME block whose rows differ from the retry's
+    /// is not an exact retry: it is cut and the block commits with the
+    /// prepared rows, never completed into a block that mixes the two.
+    /// `complete_trailing` appends only the missing tail and never compares
+    /// the rows already held, so the `starts_with` clause in `append_locked`
+    /// is the only thing that refuses it. P10-06: deleting that clause passed
+    /// every other test, because the two fixtures beside it are an exact
+    /// prefix and a foreign block.
+    #[test]
+    fn a_same_block_prefix_with_other_rows_is_cut_not_completed() {
+        let prepared = prepared();
+        assert!(
+            prepared.decisions.len() > 1,
+            "the premise: a tail to append"
+        );
+        let root = TestRoot::new("same-block-other-rows");
+        drop(
+            PopulationAdmissionV3Ledger::open_write(root.path(), bounds()).expect("create ledger"),
+        );
+        let mut altered = prepared.decisions.first().expect("first decision").clone();
+        altered.candidate_row_digest = [0xAB; 32];
+        altered.decision_id = altered.derive_decision_id();
+        assert_eq!(altered.block_id, prepared.source.block_id, "the same block");
+        assert_ne!(&altered, prepared.decisions.first().expect("first"));
+        let mut decisions = OpenOptions::new()
+            .append(true)
+            .open(root.path().join(DECISION_FILE))
+            .expect("open decisions");
+        decisions
+            .write_all(&encode_decision(&altered).expect("encode altered"))
+            .and_then(|()| decisions.sync_data())
+            .expect("altered prefix lands");
+        drop(decisions);
+
+        let mut ledger =
+            PopulationAdmissionV3Ledger::open_write(root.path(), bounds()).expect("opens");
+        assert_eq!(
+            ledger.trailing.as_ref().map(|trailing| trailing.block_id),
+            Some(prepared.source.block_id),
+            "the premise: a same-block trailing prefix is held"
+        );
+        assert!(matches!(
+            ledger
+                .append(&prepared)
+                .expect("the altered prefix is cut and the block commits"),
+            PopulationAdmissionV3StructuralCommit::Written(_)
+        ));
+        drop(ledger);
+        let expected: Vec<u8> = prepared
+            .decisions
+            .iter()
+            .flat_map(|decision| encode_decision(decision).expect("encode"))
+            .collect();
+        assert_eq!(
+            std::fs::read(root.path().join(DECISION_FILE)).expect("decision file"),
+            expected,
+            "exactly the prepared rows, none of the altered prefix"
+        );
+    }
+
     #[test]
     fn self_consistent_reseal_is_structural_only_and_stale_generation_refuses() {
         let prepared = prepared();

@@ -57974,3 +57974,23 @@ change.
 
 **Proof.** `cli::tests::the_calendar_gate_refuses_an_inconsistent_row_past_the_printed_top`
 fails on the previous gate. FB-15.
+
+### D-2740 — The store's append barrier injects its test fault by adding a branch, never by forking the shipped line — 2026-10-04
+
+**What was observed.** `store::file::barrier` chose its sync with a
+`#[cfg(test)]` arm that consulted `tests::sync_fault_fires()` and a
+`#[cfg(not(test))]` arm, `let synced = file.sync_all();`, that shipped. No test
+build compiles a `cfg(not(test))` line, so the line that runs in production was
+the one line of the barrier no test could execute or mutate, and D-1907, which
+records the barrier memory, did not mention the injector at all
+(tests-docs-security pass 10, P10-07b).
+
+**The decision.** The sync goes through one `store::file::sync_hooked`, the shape
+D-1902 gave `cli::fixed_tail::sync_all_hooked`: under test the thread-local
+injector is an extra early return, compiled out of production, and
+`file.sync_all()` is the same line in both builds. `barrier` keeps its failure
+memory unchanged. The injector stays test-only and thread-local, as D-1907's
+tests (`a_failed_append_barrier_is_never_confirmed_by_a_later_append`) arm it.
+
+**Proof.** No behaviour changes: the whole `store` suite passes before and after,
+and the fault tests still fire through the new function.

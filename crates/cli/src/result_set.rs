@@ -1710,4 +1710,38 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// A file that ends short of the validated prefix being hashed is refused,
+    /// and the digest does not claim the bytes it never read. Without the
+    /// refusal a peer truncating the manifest between the receipt scan and the
+    /// hash would leave a digest of `[0, 10)` labelled `[0, 20)`, and the next
+    /// `require_unchanged` would compare against a different range. P10-05.
+    #[test]
+    fn a_prefix_hash_that_runs_off_the_end_of_the_file_is_refused() {
+        let root = root("prefix-short");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("short.bin");
+        std::fs::write(&path, [7_u8; 10]).expect("ten bytes");
+        let mut file = std::fs::File::open(&path).expect("open");
+
+        let why = super::PrefixDigest::over(&mut file, &path, 20)
+            .expect_err("ten bytes cannot cover a twenty-byte prefix");
+        assert!(
+            why.contains("ended at byte 10 while its validated prefix up to byte 20"),
+            "{why}"
+        );
+
+        // Extending an honest digest past the end refuses too, and leaves what
+        // it covered where it was: the ten bytes still verify.
+        let mut digest = super::PrefixDigest::over(&mut file, &path, 10).expect("ten bytes");
+        let why = digest
+            .extend_from(&mut file, &path, 15)
+            .expect_err("five bytes past the end");
+        assert!(why.contains("ended at byte 10"), "{why}");
+        digest
+            .require_unchanged(&mut file, &path)
+            .expect("the covered prefix is unchanged");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
