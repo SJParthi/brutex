@@ -931,6 +931,18 @@ impl Decoded {
 /// instruments beside real ones, and they would be indistinguishable later.
 const TEST_MARKERS: [&str; 2] = ["NSETEST", "BSETEST"];
 
+/// Whether `haystack` holds `needle`, ignoring ASCII case.
+///
+/// The identity a kept row gets is case-folded by `Symbol::new`, so a marker
+/// that decides whether a row is kept must be case-blind too, or the two steps
+/// disagree about which instrument a row names. D-3152.
+fn holds_ignoring_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// `name` with every ASCII space removed, on the stack.
 ///
 /// Returns the bytes in a fixed buffer rather than a `String`: this runs on
@@ -1471,10 +1483,14 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     }
     let exchange = Exchange::Nse;
 
-    if TEST_MARKERS
-        .iter()
-        .any(|m| row.underlying.contains(m) || row.trading_symbol.contains(m))
-    {
+    // CASE-BLIND, because `Symbol::new` is. A case-sensitive scan let
+    // `031nsetest` through and the symbol fold then stored it as `031NSETEST`,
+    // the identity this decline exists to keep out. D-3152. Both fields are
+    // already bounded by `MAX_FIELD_BYTES`, so the window walk is a constant.
+    if TEST_MARKERS.iter().any(|m| {
+        holds_ignoring_ascii_case(row.underlying, m)
+            || holds_ignoring_ascii_case(row.trading_symbol, m)
+    }) {
         return declined(Skip::TestInstrument);
     }
 
@@ -1614,7 +1630,14 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // rather than a choice. `INDIA VIX` needs no row there: it collapses to
     // `INDIAVIX`, which is already what Groww writes.
     let underlying = if ty == "IDX" {
-        let collapsed = collapse_spaces(name)?;
+        let mut collapsed = collapse_spaces(name)?;
+        // THE ALIAS IS LOOKED UP ON THE FOLDED NAME, because `Symbol::new`
+        // folds case one line later. Unfolded, `Nifty 50` missed the alias and
+        // was kept as a second index `NIFTY50` beside `NIFTY` -- identity
+        // decided case-sensitively in one step and case-blind in the next.
+        // Folding here changes nothing else: the symbol would be folded anyway.
+        // D-3153.
+        collapsed.bytes.make_ascii_uppercase();
         match vendor.index_alias(collapsed.as_str()) {
             Some(canonical) => Symbol::new(canonical)?,
             None => Symbol::new(collapsed.as_str())?,

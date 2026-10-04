@@ -1075,7 +1075,15 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
         (head, Some((strike, side)))
     };
     let (underlying, token) = head.rsplit_once('-')?;
-    if underlying.is_empty() {
+    // THE UNDERLYING MUST ALREADY BE A CANONICAL SYMBOL. It becomes the
+    // store's symbol segment, which `Symbol` bounds at 24 bytes of an
+    // uppercase alphabet. This checked only for emptiness, so a 1,000-byte
+    // underlying, `a b` or `nifty` read and was copied out whole, for the
+    // chain's ask comparison to catch later or not at all. Equality with the
+    // folded symbol refuses lower case rather than folding it: the vendor
+    // writes upper case, and anything else is not its documented grammar.
+    // D-3156.
+    if !brutex_core::symbol::Symbol::new(underlying).is_ok_and(|s| s.as_str() == underlying) {
         return None;
     }
     // THE EXPIRY COMES FROM THE DISCOVERY, NOT FROM THE NAME.
@@ -1116,6 +1124,13 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
                 "PE" => brutex_core::instrument::OptionSide::Put,
                 _ => return None,
             };
+            // ONE SPELLING PER STRIKE. A leading zero (`019200`, `00.05`) reads to
+            // the same paisa as the plain number, so it is a second name for one
+            // contract and the chain would file it twice. D-3157. A zero or
+            // negative strike is refused by `Contract::of` below (D-3150).
+            if strike.len() > 1 && strike.starts_with('0') && !strike.starts_with("0.") {
+                return None;
+            }
             let strike = brutex_core::price::Paisa::from_raw(paisa_of(strike)?);
             (
                 brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
@@ -1159,33 +1174,45 @@ pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Opti
 /// from 2020 and this build stores nothing older, so there is no century to be
 /// ambiguous about.
 fn expiry_token_agrees(token: &str, known: brutex_core::instrument::Expiry) -> bool {
-    let (day, rest) = match token.len() {
+    // READ AS BYTES IN FIXED PLACES, DIGITS ONLY WHERE DIGITS BELONG.
+    //
+    // This parsed the day and the year with `str::parse`, which reads a
+    // leading `+`, so `+4Jan24` and `Jan+4` were read as the 4th and as 2004:
+    // a second spelling of one contract, which the chain (deduplicating by
+    // name) files twice. The same defect `csv::digits` closed for clock
+    // fields (D-1201). Each place is now one byte with one alphabet, and a
+    // multi-byte character can only fail to be a digit or a month letter.
+    // D-3155.
+    let (day, word, year) = match *token.as_bytes() {
         // `27Mar25` — the day is stated, so it is checked.
-        7 => match token.get(0..2).and_then(|d| d.parse::<u8>().ok()) {
-            Some(day) => (Some(day), token.get(2..)),
-            None => return false,
-        },
+        [d1, d2, m1, m2, m3, y1, y2] => (Some([d1, d2]), [m1, m2, m3], [y1, y2]),
         // `Mar25` — the vendor states no day for a monthly.
-        5 => (None, token.get(0..)),
+        [m1, m2, m3, y1, y2] => (None, [m1, m2, m3], [y1, y2]),
         _ => return false,
     };
-    let Some(rest) = rest else { return false };
-    let Some(word) = rest.get(0..3).map(str::to_ascii_lowercase) else {
+    let two_digits = |[tens, units]: [u8; 2]| {
+        (tens.is_ascii_digit() && units.is_ascii_digit())
+            .then(|| (tens - b'0') * 10 + (units - b'0'))
+    };
+    let Some(year) = two_digits(year) else {
         return false;
     };
-    let Some(month) = MONTHS.iter().position(|m| *m == word) else {
-        return false;
+    let day = match day.map(two_digits) {
+        None => None,
+        Some(Some(stated)) => Some(stated),
+        Some(None) => return false,
     };
-    let Ok(month) = u8::try_from(month + 1) else {
-        return false;
-    };
-    let Some(Ok(year)) = rest.get(3..).map(str::parse::<u16>) else {
-        return false;
-    };
-    let Some(year) = 2000u16.checked_add(year) else {
-        return false;
-    };
-    year == known.year() && month == known.month() && day.is_none_or(|stated| stated == known.day())
+    let word = word.map(|c| c.to_ascii_lowercase());
+    let mut month = 0_u8;
+    for (number, name) in (1_u8..).zip(MONTHS) {
+        if name.as_bytes() == word {
+            month = number;
+        }
+    }
+    month != 0
+        && 2000 + u16::from(year) == known.year()
+        && month == known.month()
+        && day.is_none_or(|stated| stated == known.day())
 }
 
 /// A strike in rupees, as an exact number of paisa.
