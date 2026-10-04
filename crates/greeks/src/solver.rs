@@ -178,6 +178,11 @@ pub const MAX_ITERATIONS: u32 =
 /// A Newton step this small ends the search.
 const NEWTON_STEP_TOLERANCE: f64 = 1.0e-12;
 
+/// The spacing of the subnormal doubles: the smallest positive `f64`, and the
+/// last place of every quote whose scale is below `f64::MIN_POSITIVE`.
+/// D-3101.
+const SUBNORMAL_GAP: f64 = f64::MIN_POSITIVE * f64::EPSILON;
+
 /// One unit in the last place of the market price may move the answer by this
 /// fraction of itself, and no more. Past it the price does not determine a
 /// volatility and [`GreeksError::Indeterminate`] is returned.
@@ -324,7 +329,21 @@ impl Contract {
         // vega underflows to zero, and `+inf > bound` is true, so the
         // degenerate case is still refused. A NaN would slip through a `>`,
         // and there is no path to one here.
-        let uncertainty = (checked.price_scale() / solved.vega) * f64::EPSILON / volatility;
+        //
+        // AND THE GRANULARITY HAS A FLOOR. Below `f64::MIN_POSITIVE` the
+        // spacing of doubles stops shrinking with the magnitude: every
+        // subnormal is a multiple of `SUBNORMAL_GAP`, so `scale * EPSILON`
+        // understates the quote's last place once `scale` is subnormal.
+        // Measured: `S = K = f64::MIN_POSITIVE`, `T = 100`, `r = 0.0946`,
+        // `q = 0.05`, `sigma = 1` was answered with `uncertainty = 1.55e-10`
+        // while the answer was wrong by `8.6e-9` of itself -- the stated last
+        // place was 150x finer than any double there. The floor is the spacing
+        // the quote really has; it changes nothing at a normal scale, where
+        // `scale * EPSILON` is the larger. `max` is NaN-safe here for the
+        // reason given above: neither quotient is ever a NaN. D-3101.
+        let relative = (checked.price_scale() / solved.vega) * f64::EPSILON;
+        let floor = SUBNORMAL_GAP / solved.vega;
+        let uncertainty = relative.max(floor) / volatility;
         if uncertainty > MAX_RELATIVE_UNCERTAINTY {
             return Err(GreeksError::Indeterminate {
                 volatility,
