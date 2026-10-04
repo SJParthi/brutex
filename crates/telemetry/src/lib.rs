@@ -364,6 +364,28 @@ mod tests {
     /// inherited, so a coverage run's `LLVM_PROFILE_FILE` reaches the child.
     ///
     /// `test` is the harness's name for the caller: its full module path.
+    /// Held for WRITING while `where_permission_binds` runs a child, and for
+    /// READING by every test that drops a sink and opens another on the same
+    /// directory.
+    ///
+    /// **Why.** The sink's one-writer lock (D-1537) is an `flock` on
+    /// `events.lock`, and an `flock` belongs to the open file description,
+    /// which `fork` shares with the child. `.uid(..)` makes `std` fork and then
+    /// exec, so a child forked while another test's sink is alive holds that
+    /// sink's lock from the fork until its exec closes the descriptor. A test
+    /// that drops its sink and reopens it inside that window is refused with
+    /// "another sink ... holds this telemetry directory". PR #74 run 1263 hit
+    /// exactly that. Readers never wait on each other; only a child's spawn
+    /// waits for them, and they for it. D-1462.
+    pub(crate) static FORK_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// A reader's hold on [`FORK_GATE`], for a test that reopens a sink.
+    pub(crate) fn no_fork_in_flight() -> std::sync::RwLockReadGuard<'static, ()> {
+        FORK_GATE
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(crate) fn where_permission_binds(test: &str, body: impl FnOnce()) {
         use std::os::unix::process::CommandExt as _;
         const CHILD: &str = "BRUTEX_PERMISSION_BINDS_CHILD";
@@ -375,6 +397,9 @@ mod tests {
         let uid = Some(effective_uid())
             .filter(|&uid| uid != 0)
             .unwrap_or(NOBODY);
+        let _no_sink_alive = FORK_GATE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new(std::env::current_exe().expect("this binary"))
             .args(["--exact", test, "--nocapture", "--test-threads=1"])
             .env(CHILD, "1")

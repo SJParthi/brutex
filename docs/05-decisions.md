@@ -56652,3 +56652,27 @@ UNVERIFIED.
 `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`
 (previous tree: 4 live hits where 3 windows were open at H=4). AFF-43, AFF-44.
 `docs/06-limits.md` restates the bounds.
+### D-1462 — Telemetry tests that reopen a sink wait out any forked child, because a fork shares the sink's `flock` — 2026-10-04
+
+**What was observed.** PR #74 run 1263 (head b23976f) failed Gate 1+2 on
+`sink::tests::a_file_that_ends_mid_line_is_terminated_at_open_and_not_appended_onto`.
+The reopen after `drop(again)` was refused: "another sink, in this process or
+another, holds this telemetry directory". The pushing session's diff touched no
+telemetry code. Reproduced locally on b23976f: 4 of 60 runs of
+`cargo test -p telemetry --lib` hit that refusal.
+
+**Cause.** D-1537's one-writer lock is an `flock` on `<dir>/events.lock`, and an
+`flock` belongs to the open file description. `crate::tests::where_permission_binds`
+re-runs a test in a child with `.uid(..)`, which makes `std` fork and then exec.
+A child forked while another test's sink is alive inherits that description, so
+it holds the lock until exec closes it. A concurrent test that drops its sink
+and reopens it inside that window is refused. This is a test-harness race:
+production opens the sink once per process. A POSIX record lock would not be
+inherited, but `std` offers only `flock`, and every crate here forbids `unsafe`.
+
+**The decision.** `crate::tests::FORK_GATE`, an `RwLock<()>` in test code, is held
+for writing while `where_permission_binds` runs its child. Every test that drops
+a sink and reopens one on the same directory holds it for reading: 14 in
+`sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
+line changes, and the lock's refusal stays exactly as strict. Proven locally:
+4 of 60 runs failed before the change and 0 of 60 after.
