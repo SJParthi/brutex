@@ -57631,3 +57631,8 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - CE-42. `frontier::Row::verdict` returned `stop_unchecked: true` and a default (false) `protective_exits_unchecked` for an unpriced row, while the field's own doc says "Always `true`" and `web/src/lib/frontier-analytics.js` refuses any row where it is not. Every run whose TOP exceeded what `screen_cap` priced therefore had its whole frontier refused on the backtest page.
 - The unpriced arm now sets both flags. No stored byte changes: the verdict is computed on read.
 - Proved by `cli::frontier::tests::an_unpriced_row_fails_every_rule_and_is_marked_unpriced` (ZX-05).
+
+### D-2654 — Three invariant rows cite the tests that prove them now — 2026-10-04
+
+- P4-01 (medium; gate 10 red at 1f4de71) and P4-02, from the tests/docs/security helper's pass 4. RS-03 cited `a_torn_prepared_tail_blocks_every_later_commit`, renamed by D-1901 when the writer began cutting a torn detail tail; PS-02 cited `exact_trailing_prefix_retry_completes_and_foreign_retry_refuses`, split by D-1905; AFD-15 cited a `/masters` page test renamed by D-1760..1764.
+- Each row now cites the live test, and the RS-03 and PS-02 TEXT says what those tests prove: a torn prepared-detail tail is cut and the exact preparation resumes (ZL-04), and a foreign receipt-less orphan is scratch the next writer cuts (ZL-09, ZL-10). The old text still said "refuse" and "never truncated", contradicting ZL-04, ZL-09 and ZL-10.
