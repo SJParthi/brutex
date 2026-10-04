@@ -42,6 +42,10 @@ struct Args {
     checks: Option<PathBuf>,
     pr: Option<PathBuf>,
     streams: Option<PathBuf>,
+    corrections: Option<PathBuf>,
+    same_as: Option<PathBuf>,
+    not_a_fix: Vec<String>,
+    base_ref: String,
     as_of: String,
     link_base: String,
 }
@@ -49,6 +53,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         pr_ref: "origin/final/all-fixes".into(),
+        base_ref: "origin/main".into(),
         link_base: "https://github.com/SJParthi/brutex/blob/fix-queue/".into(),
         ..Args::default()
     };
@@ -67,6 +72,10 @@ fn parse_args() -> Result<Args, String> {
             "--checks" => a.checks = Some(v()?.into()),
             "--pr" => a.pr = Some(v()?.into()),
             "--streams" => a.streams = Some(v()?.into()),
+            "--corrections" => a.corrections = Some(v()?.into()),
+            "--same-as" => a.same_as = Some(v()?.into()),
+            "--not-a-fix" => a.not_a_fix.push(v()?),
+            "--base-ref" => a.base_ref = v()?,
             "--as-of" => a.as_of = v()?,
             "--link-base" => a.link_base = v()?,
             _ => return Err(format!("unknown argument {k}")),
@@ -97,17 +106,91 @@ struct Found {
     sev: String,
     title: String,
     link: String,
+    area: String,
 }
 
+fn finding_bullet(l: &str) -> bool {
+    l.trim_start()
+        .strip_prefix("- **")
+        .and_then(|r| r.find("**").map(|e| id_like(&r[..e])))
+        .unwrap_or(false)
+}
+
+/// The lines of the section a finding heads: its own heading or bullet line, up to
+/// the next heading or the next finding bullet. A range heading (`CE-18..CE-22`) is
+/// not the section of CE-18; its bullet is.
+fn section<'a>(text: &'a str, id: &str) -> Vec<&'a str> {
+    let bullet = format!("- **{id}**");
+    let mut lines = text.lines().skip_while(|l| {
+        let h = l.trim_start_matches('#');
+        let is_head = h.len() != l.len() && h.trim().starts_with(id) && {
+            let r = &h.trim()[id.len()..];
+            r.is_empty()
+                || r.starts_with([' ', ':', '('])
+                || (r.starts_with('.') && !r.starts_with(".."))
+        };
+        !(is_head || l.trim_start().starts_with(&bullet))
+    });
+    let Some(first) = lines.next() else {
+        return Vec::new();
+    };
+    std::iter::once(first)
+        .chain(lines.take_while(|l| !l.starts_with('#') && !finding_bullet(l)))
+        .collect()
+}
+
+/// The first source path (`crates/x/src/f.rs:12` or `x/src/f.rs`) in a finding's section.
+fn area_for(text: &str, id: &str) -> String {
+    for l in section(text, id) {
+        for tok in l.split(|c: char| {
+            c.is_whitespace() || matches!(c, '`' | ',' | '(' | ')' | ';' | '*' | '[' | ']')
+        }) {
+            let tok = tok.trim_end_matches(['.', ':']);
+            if tok.contains("/src/") || (tok.starts_with("crates/") && tok.len() > 7) {
+                return tok.trim_start_matches("crates/").to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// A `Severity: high` line inside a finding's own section.
+fn section_severity(text: &str, id: &str) -> String {
+    for l in section(text, id) {
+        let low = l.to_ascii_lowercase();
+        if let Some(i) = low.find("severity") {
+            let sev = severity(
+                &low[i + "severity".len()..]
+                    .chars()
+                    .take(30)
+                    .collect::<String>(),
+            );
+            if !sev.is_empty() {
+                return sev;
+            }
+        }
+    }
+    String::new()
+}
+
+/// The first severity word in `s`, matched as a whole word ("follows" is not "low").
 fn severity(s: &str) -> String {
     let l = s.to_ascii_lowercase();
-    // the first severity word wins; "(plausible, design call)" carries none
+    let b = l.as_bytes();
     let mut best: Option<(usize, &str)> = None;
     for w in ["high", "medium", "low", "info"] {
-        if let Some(i) = l.find(w) {
-            if best.is_none_or(|(j, _)| i < j) {
-                best = Some((i, w));
+        let mut from = 0;
+        while let Some(k) = l[from..].find(w) {
+            let i = from + k;
+            let end = i + w.len();
+            let edge = |c: Option<&u8>| c.is_none_or(|c| !c.is_ascii_alphanumeric());
+            if edge(i.checked_sub(1).and_then(|j| b.get(j))) && edge(b.get(end)) {
+                if best.is_none_or(|(j, _)| i < j) {
+                    best = Some((i, w));
+                }
+                break;
             }
+            from = end;
         }
     }
     best.map_or("", |(_, w)| w).to_string()
@@ -191,14 +274,23 @@ fn headings(text: &str, accept: impl Fn(&str) -> bool) -> Vec<(String, String, S
 /// `- **CE-37** text` bullets (crash-edge pass 4 lists several ids under one heading).
 fn bullets(text: &str, prefix: &str) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
+    let mut group_sev = String::new();
     for line in text.lines() {
+        if line.starts_with('#') {
+            // a range heading such as "CE-36..CE-39: ... (all low; ...)" rates its bullets
+            group_sev = severity(line);
+            continue;
+        }
         let Some(r) = line.trim_start().strip_prefix("- **") else {
             continue;
         };
         let Some(end) = r.find("**") else { continue };
         let id = &r[..end];
         if id.starts_with(prefix) && id_like(id) {
-            let sev = severity(&r[end..].chars().take(40).collect::<String>());
+            let mut sev = severity(&r[end..].chars().take(40).collect::<String>());
+            if sev.is_empty() {
+                sev = group_sev.clone();
+            }
             out.push((id.to_string(), sev, clean_title(&r[end + 2..])));
         }
     }
@@ -243,16 +335,20 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, String> {
     let mut out = Vec::new();
     let link = |f: &str| format!("{link_base}{rel}/{f}");
-    let push =
-        |out: &mut Vec<Found>, group, (id, sev, title): (String, String, String), l: String| {
-            out.push(Found {
-                id,
+    let push = |out: &mut Vec<Found>,
                 group,
-                sev,
-                title,
-                link: l,
-            })
-        };
+                (id, sev, title): (String, String, String),
+                l: String,
+                area: String| {
+        out.push(Found {
+            id,
+            group,
+            sev,
+            title,
+            link: l,
+            area,
+        })
+    };
     // concurrency helper: summary file, then every pass directory
     let mut conc = vec![dir.join("concurrency.md")];
     for p in [
@@ -270,14 +366,21 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
     }
     for f in conc.iter().filter(|f| f.exists()) {
         let rel_f = f.strip_prefix(dir).unwrap_or(f).display().to_string();
-        for h in headings(&read(f)?, |id| {
+        let t = read(f)?;
+        for h in headings(&t, |id| {
             id_like(id) && id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         }) {
+            let area = area_for(&t, &h.0);
+            let mut h = h;
+            if h.1.is_empty() {
+                h.1 = section_severity(&t, &h.0);
+            }
             push(
                 &mut out,
                 "Zero-rounds: concurrency",
                 (format!("conc:{}", h.0), h.1, h.2),
                 link(&rel_f),
+                area,
             );
         }
     }
@@ -288,35 +391,48 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
             .into_iter()
             .chain(bullets(&t, "CE-"))
         {
+            let area = area_for(&t, &h.0);
+            let mut h = h;
+            if h.1.is_empty() {
+                h.1 = section_severity(&t, &h.0);
+            }
             push(
                 &mut out,
                 "Zero-rounds: crashes and edge inputs",
                 h,
                 link("crash-edge.md"),
+                area,
             );
         }
     }
     let td = dir.join("tests-docs-security.md");
     if td.exists() {
+        let t = read(&td)?;
         let accept = |id: &str| id.starts_with('P') && id_like(id) && id.split('-').count() == 3;
-        for h in headings(&read(&td)?, accept) {
+        for h in headings(&t, accept) {
+            let area = area_for(&t, &h.0);
+            let mut h = h;
+            if h.1.is_empty() {
+                h.1 = section_severity(&t, &h.0);
+            }
             push(
                 &mut out,
                 "Zero-rounds: tests, docs, security",
                 h,
                 link("tests-docs-security.md"),
+                area,
             );
         }
     }
     let nc = dir.join("numeric-complexity.md");
     if nc.exists() {
         for (id, sev, area, title) in sev_tables(&read(&nc)?) {
-            let _ = area;
             push(
                 &mut out,
                 "Zero-rounds: numbers and complexity",
                 (format!("num:{id}"), sev, title),
                 link("numeric-complexity.md"),
+                area,
             );
         }
     }
@@ -332,14 +448,21 @@ fn zero_sources(dir: &Path, link_base: &str, rel: &str) -> Result<Vec<Found>, St
         if !stem.starts_with("slice") || stem.contains('.') {
             continue;
         }
-        for h in headings(&read(&f)?, |id| {
+        let t = read(&f)?;
+        for h in headings(&t, |id| {
             id.len() >= 2 && id.starts_with('F') && id[1..].chars().all(|c| c.is_ascii_digit())
         }) {
+            let area = area_for(&t, &h.0);
+            let mut h = h;
+            if h.1.is_empty() {
+                h.1 = section_severity(&t, &h.0);
+            }
             push(
                 &mut out,
                 "Zero-findings loop: round 1",
                 (format!("Z1-{stem}-{}", h.0), h.1, h.2),
                 link(&format!("r1-slices/{name}")),
+                area,
             );
         }
     }
@@ -411,14 +534,138 @@ fn on_head(repo: &Path, head: &str, sha: &str, cache: &mut HashMap<String, OnHea
     v
 }
 
+/// Tab-separated rows after the header. A line whose first cell opens more
+/// parentheses than it closes was wrapped by its writer: it is joined with the
+/// next line, whose other cells are the entry's.
 fn tsv(p: &Path) -> Result<Vec<Vec<String>>, String> {
     let text = read(p)?;
-    Ok(text
-        .lines()
-        .skip(1)
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.split('\t').map(|c| c.trim().to_string()).collect())
-        .collect())
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut open: Option<String> = None;
+    for l in text.lines().skip(1).filter(|l| !l.trim().is_empty()) {
+        let mut cells: Vec<String> = l.split('\t').map(|c| c.trim().to_string()).collect();
+        if let Some(head) = open.take() {
+            cells[0] = format!("{head} {}", cells[0]);
+        }
+        let depth = cells[0].matches('(').count() as i64 - cells[0].matches(')').count() as i64;
+        if depth > 0 {
+            open = Some(cells[0].clone());
+            continue;
+        }
+        out.push(cells);
+    }
+    if let Some(head) = open {
+        return Err(format!(
+            "{}: unbalanced parentheses in the last entry {head}",
+            p.display()
+        ));
+    }
+    Ok(out)
+}
+
+/// found < fixing = partial < branch < doc < pushed < green
+fn rank(state: &str) -> u8 {
+    match state {
+        "found" => 0,
+        "fixing" | "partial" => 1,
+        "branch" => 2,
+        "doc" => 3,
+        "pushed" => 4,
+        "green" => 5,
+        _ => 0,
+    }
+}
+
+/// Finding ids named on a commit-message line that reads as a fix. A line that says
+/// the finding is still open, not fixed, or reopened does not count.
+const NOT_A_FIX: [&str; 25] = [
+    "still open",
+    "not fixed",
+    "reopen",
+    "todo",
+    "left open",
+    "not yet",
+    "unfixed",
+    "deferred",
+    "remains open",
+    "not this",
+    "stated",
+    "documented",
+    "blocked",
+    "not changed",
+    " half",
+    "limits",
+    "unverified",
+    "queued",
+    "state that",
+    "unwired",
+    "not wired",
+    "they stay",
+    "detect no",
+    "refuse no",
+    "and leave",
+];
+
+/// Finding ids named on a fix line of each chunk `label\0text\x1e` (a commit
+/// message, or a decision entry added on the PR).
+fn message_mentions(log: &str) -> HashMap<String, (String, String)> {
+    let mut out: HashMap<String, (String, String)> = HashMap::new();
+    for commit in log.split('\u{1e}') {
+        let Some((sha, body)) = commit.trim_start().split_once('\0') else {
+            continue;
+        };
+        for line in body.lines() {
+            let low = line.to_ascii_lowercase();
+            if NOT_A_FIX.iter().any(|w| low.contains(w)) {
+                continue;
+            }
+            for tok in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+                let tok = tok.trim_matches('-');
+                let parts: Vec<&str> = tok.split('-').collect();
+                let shaped = parts.len() >= 2
+                    && tok.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()))
+                    && parts
+                        .last()
+                        .is_some_and(|p| p.chars().all(|c| c.is_ascii_digit()));
+                if shaped && !tok.starts_with("D-") {
+                    out.entry(tok.to_string())
+                        .or_insert_with(|| (sha.to_string(), line.trim().to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Added decision entries from a diff of `docs/05-decisions.md`, as
+/// `decision D-n on head\0lines\x1e` chunks, skipping entries whose title is not a fix.
+fn decision_chunks(diff: &str) -> String {
+    let mut out = String::new();
+    let mut cur: Option<(String, String)> = None;
+    let flush = |cur: &mut Option<(String, String)>, out: &mut String| {
+        if let Some((label, body)) = cur.take() {
+            out.push_str(&format!("{label}\0{body}\u{1e}"));
+        }
+    };
+    for l in diff.lines() {
+        let Some(added) = l.strip_prefix('+') else {
+            continue;
+        };
+        if let Some(head) = added.strip_prefix("### D-") {
+            flush(&mut cur, &mut out);
+            let num: String = head.chars().take_while(char::is_ascii_digit).collect();
+            let low = head.to_ascii_lowercase();
+            cur = (!NOT_A_FIX.iter().any(|w| low.contains(w)))
+                .then(|| (format!("decision D-{num} on head"), String::new()));
+        } else if let Some((_, body)) = cur.as_mut() {
+            body.push_str(added);
+            body.push('\n');
+        }
+    }
+    flush(&mut cur, &mut out);
+    out
 }
 
 fn s<'a>(r: &'a Map<String, Value>, k: &str) -> &'a str {
@@ -438,10 +685,42 @@ fn run() -> Result<(), String> {
         .filter_map(|r| r.as_object().cloned())
         .collect();
     let catalog_rows = rows.len();
-    // The old project's shared folder is gone; its copy lives on fix-queue.
+    // Every run rebuilds each note from the note the row first came with, so a
+    // second run over its own output adds nothing.
     for r in rows.iter_mut() {
-        if let Some(rest) = s(r, "link").strip_prefix("/mnt/project-files/") {
-            let l = format!("{}resume/project-files-20261004/{rest}", a.link_base);
+        let base = match r.get("base_note").and_then(Value::as_str) {
+            Some(b) => b.to_string(),
+            None => s(r, "note").to_string(),
+        };
+        r.insert("base_note".into(), json!(base));
+        r.insert("note".into(), json!(base));
+        r.remove("same_as");
+    }
+    // The old project's shared folder and the old account's artifacts are gone for
+    // this account; their copies live on fix-queue.
+    const OLD: [(&str, &str); 2] = [
+        (
+            "https://claude.ai/artifact/YYYZhcv7YjfW5txZL12Ki1",
+            "resume/workspace-audit-20261003/brutex-workspace-audit.html.md",
+        ),
+        (
+            "https://claude.ai/artifact/K6QyihZvvh1d4UXQnApVZT",
+            "resume/audit-20261003/brutex-audit-ledger.html",
+        ),
+    ];
+    for r in rows.iter_mut() {
+        let link = s(r, "link").to_string();
+        let new = if let Some(rest) = link.strip_prefix("/mnt/project-files/") {
+            Some(format!(
+                "{}resume/project-files-20261004/{rest}",
+                a.link_base
+            ))
+        } else {
+            OLD.iter()
+                .find(|(u, _)| link == *u)
+                .map(|(_, p)| format!("{}{p}", a.link_base))
+        };
+        if let Some(l) = new {
             r.insert("link".into(), json!(l));
         }
     }
@@ -470,6 +749,9 @@ fn run() -> Result<(), String> {
                 if s(r, "title").is_empty() {
                     r.insert("title".into(), json!(f.title));
                 }
+                if s(r, "area").is_empty() && !f.area.is_empty() {
+                    r.insert("area".into(), json!(f.area));
+                }
                 continue;
             }
             index.insert(f.id.clone(), rows.len());
@@ -479,13 +761,14 @@ fn run() -> Result<(), String> {
                 ("id", json!(f.id)),
                 ("group", json!(f.group)),
                 ("sev", json!(f.sev)),
-                ("area", json!("")),
+                ("area", json!(f.area)),
                 ("title", json!(f.title)),
                 ("link", json!(f.link)),
                 ("was", json!("new")),
                 ("owner", json!(ZERO_OWNER)),
                 ("state", json!("found")),
-                ("note", json!("Added from its source file at this refresh")),
+                ("note", json!("Added from its source file")),
+                ("base_note", json!("Added from its source file")),
             ] {
                 r.insert(k.into(), v);
             }
@@ -505,11 +788,21 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    // Every run starts each row from `base_state`, the state it had before this builder
+    // first saw it (the old board's last snapshot), never from a state an earlier run
+    // derived, so dropping a same-as pair or a correction cannot leave its effect behind.
+    // The snapshot itself only supplies `prev`.
     for r in rows.iter_mut() {
         let key = format!("{}|{}", s(r, "group"), s(r, "id"));
-        if let Some(st) = prev.get(&key) {
-            r.insert("state".into(), json!(st));
-        }
+        let base = match r.get("base_state").and_then(Value::as_str) {
+            Some(b) => b.to_string(),
+            None => prev
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| s(r, "state").to_string()),
+        };
+        r.insert("base_state".into(), json!(base));
+        r.insert("state".into(), json!(base));
     }
 
     // 4. status files
@@ -528,6 +821,7 @@ fn run() -> Result<(), String> {
         hits
     };
     let mut commits: Vec<Vec<String>> = vec![Vec::new(); rows.len()];
+    let mut backed: Vec<Option<u8>> = vec![None; rows.len()];
     let mut unmatched: Vec<String> = Vec::new();
     let mut applied = 0usize;
     for p in &a.status {
@@ -583,6 +877,7 @@ fn run() -> Result<(), String> {
                         ("owner", json!(owner)),
                         ("state", json!("found")),
                         ("note", json!("")),
+                        ("base_note", json!("")),
                     ] {
                         r.insert(k.into(), v);
                     }
@@ -590,6 +885,7 @@ fn run() -> Result<(), String> {
                     hits.push(rows.len());
                     rows.push(r);
                     commits.push(Vec::new());
+                    backed.push(None);
                     added += 1;
                 }
                 if hits.is_empty() {
@@ -597,10 +893,18 @@ fn run() -> Result<(), String> {
                     continue;
                 }
             }
+            let line_commits = hex_tokens(&commit);
             for i in hits {
                 applied += 1;
                 let r = &mut rows[i];
-                r.insert("state".into(), json!(st));
+                // A later line never lowers a state that an earlier line backed with a commit.
+                if !line_commits.is_empty() {
+                    backed[i] = backed[i].max(Some(rank(st)));
+                }
+                let keep = backed[i].is_some_and(|b| rank(st) < b);
+                if !keep {
+                    r.insert("state".into(), json!(st));
+                }
                 let mut n = format!("Status from {name}");
                 let c = commit.trim_matches('-').trim();
                 if !c.is_empty() {
@@ -609,9 +913,56 @@ fn run() -> Result<(), String> {
                 if !note.trim_matches(['|', ' ']).is_empty() {
                     n += &format!(": {}", note.trim_matches(['|', ' ']));
                 }
+                if keep {
+                    n += &format!(
+                        " (not applied: an earlier status line backed '{}' with a commit)",
+                        s(r, "state")
+                    );
+                    if let Some(old) = r.get("note").and_then(Value::as_str) {
+                        n = format!("{old}; {n}");
+                    }
+                }
                 r.insert("note".into(), json!(n));
-                commits[i] = hex_tokens(&format!("{commit} {note}"));
+                for c in &line_commits {
+                    if !commits[i].contains(c) {
+                        commits[i].push(c.clone());
+                    }
+                }
             }
+        }
+    }
+
+    // 4b. corrections: hand-checked states, each with its evidence in the note. They
+    // win over every status line and are never re-promoted by commit-message evidence.
+    let mut pinned = vec![false; rows.len()];
+    if let Some(p) = &a.corrections {
+        for line in tsv(p)? {
+            let (Some(id), Some(st)) = (line.first(), line.get(1)) else {
+                continue;
+            };
+            if !STATES.contains(&st.as_str()) {
+                return Err(format!("corrections: {id} has unknown state {st}"));
+            }
+            let Some(&i) = index.get(id) else {
+                return Err(format!("corrections: {id} is not a ledger row"));
+            };
+            let r = &mut rows[i];
+            r.insert("state".into(), json!(st));
+            let note = line.get(3).cloned().unwrap_or_default();
+            r.insert("note".into(), json!(format!("Checked by hand: {note}")));
+            if let Some(title) = line.get(4).filter(|t| !t.is_empty()) {
+                r.insert("title".into(), json!(title));
+            }
+            if let Some(link) = line.get(5).filter(|t| !t.is_empty()) {
+                r.insert("link".into(), json!(link));
+            }
+            commits[i] = hex_tokens(line.get(2).map_or("", String::as_str));
+            pinned[i] = true;
+        }
+    }
+    for c in &a.not_a_fix {
+        for list in commits.iter_mut() {
+            list.retain(|x| !c.starts_with(x.as_str()) && !x.starts_with(c.as_str()));
         }
     }
 
@@ -639,7 +990,7 @@ fn run() -> Result<(), String> {
                 .map(|c| (c.clone(), on_head(repo, &a.pr_ref, c, &mut cache)))
                 .collect();
             if let Some((c, _)) = verdicts.iter().find(|(_, v)| *v == OnHead::Yes) {
-                if !DONE.contains(&st.as_str()) {
+                if !DONE.contains(&st.as_str()) && !pinned[i] {
                     evidence += 1;
                     r.insert("state".into(), json!("pushed"));
                 }
@@ -664,6 +1015,104 @@ fn run() -> Result<(), String> {
                 r.insert("note".into(), json!(n));
             }
             r.insert("flags".into(), Value::Array(flags));
+        }
+    }
+
+    // 5b. a commit on the PR (base..head) whose message names the finding as fixed
+    let mut by_message = 0usize;
+    if let Some(repo) = &a.repo {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "log",
+                "--format=head commit %h%x00%B%x1e",
+                &format!("{}..{}", a.base_ref, a.pr_ref),
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!("git log {}..{} failed", a.base_ref, a.pr_ref));
+        }
+        let mut log = String::from_utf8_lossy(&out.stdout).to_string();
+        // decision entries the PR added; an entry whose title says the finding is only
+        // stated, blocked or not changed is not a fix
+        let diff = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["diff", &a.base_ref, &a.pr_ref, "--", "docs/05-decisions.md"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        let diff = String::from_utf8_lossy(&diff.stdout).to_string();
+        log.push_str(&decision_chunks(&diff));
+        let mentions = message_mentions(&log);
+        for (i, r) in rows.iter_mut().enumerate() {
+            let st = s(r, "state").to_string();
+            if pinned[i] || DONE.contains(&st.as_str()) || r.get("same_as").is_some() {
+                continue;
+            }
+            let id = s(r, "id");
+            let bare = id
+                .strip_prefix("conc:")
+                .or_else(|| id.strip_prefix("num:"))
+                .unwrap_or(id);
+            if bare.len() < 5 || bare.split('-').count() < 2 {
+                continue;
+            }
+            if let Some((sha, line)) = mentions.get(bare) {
+                by_message += 1;
+                let n = format!(
+                    "{}; {sha} names it as fixed: \"{}\"",
+                    s(r, "note"),
+                    clean_title(line)
+                );
+                r.insert("state".into(), json!("pushed"));
+                r.insert("note".into(), json!(n));
+            }
+        }
+    }
+
+    // 5c. the same defect filed twice: both rows take the further state, and the
+    // duplicate is marked so the page counts the pair once.
+    let mut same = 0usize;
+    if let Some(p) = &a.same_as {
+        for line in tsv(p)? {
+            let (Some(dup), Some(primary)) = (line.first(), line.get(1)) else {
+                continue;
+            };
+            let (Some(&d), Some(&q)) = (index.get(dup), index.get(primary)) else {
+                return Err(format!("same-as: {dup} or {primary} is not a ledger row"));
+            };
+            let (sd, sq) = (
+                s(&rows[d], "state").to_string(),
+                s(&rows[q], "state").to_string(),
+            );
+            let (best, from) = if rank(&sd) > rank(&sq) {
+                (sd, d)
+            } else {
+                (sq, q)
+            };
+            let carried = s(&rows[from], "note").to_string();
+            for i in [d, q] {
+                if s(&rows[i], "state") != best {
+                    rows[i].insert("state".into(), json!(best));
+                    rows[i].insert(
+                        "note".into(),
+                        json!(format!(
+                            "Same defect as {}: {carried}",
+                            if i == d { primary } else { dup }
+                        )),
+                    );
+                }
+            }
+            rows[d].insert("same_as".into(), json!(primary));
+            let ev = line.get(2).cloned().unwrap_or_default();
+            let n = format!(
+                "{} [counted once with {primary}: {ev}]",
+                s(&rows[d], "note")
+            );
+            rows[d].insert("note".into(), json!(n));
+            same += 1;
         }
     }
 
@@ -726,7 +1175,7 @@ fn run() -> Result<(), String> {
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
-    for r in &rows {
+    for r in rows.iter().filter(|r| !r.contains_key("same_as")) {
         let g = s(r, "group").to_string();
         if !counts.contains_key(&g) {
             order.push(g.clone());
@@ -803,7 +1252,7 @@ fn run() -> Result<(), String> {
     }
     eprintln!(
         "fixboard: {} rows ({catalog_rows} catalog + {added} new from sources); {applied} status lines applied, {} unmatched; \
-         {evidence} promoted by git evidence, {demoted} demoted; head {head_short}; ci green: {ci_green}; states {by_state:?}",
+         {evidence} promoted by status commits on head, {by_message} by head commit messages, {demoted} demoted, {same} same-as pairs; head {head_short}; ci green: {ci_green}; states {by_state:?}",
         ledger["rows"].as_array().map_or(0, Vec::len),
         unmatched.len()
     );
@@ -861,6 +1310,90 @@ mod tests {
             (p[0].1.as_str(), p[0].2.as_str()),
             ("low", "Expect re-arms")
         );
+    }
+
+    #[test]
+    fn area_comes_from_the_findings_own_section() {
+        let t = "## a-1 (low): x\nsee `crates/api/src/server.rs:12`\n## a-2 (low): y\nno path\n- **CE-9** bad cli/src/lib.rs:4\n";
+        assert_eq!(area_for(t, "a-1"), "api/src/server.rs:12");
+        assert_eq!(area_for(t, "a-2"), "");
+        assert_eq!(area_for(t, "CE-9"), "cli/src/lib.rs:4");
+        assert_eq!(area_for(t, "a-3"), "");
+    }
+
+    #[test]
+    fn severity_is_a_whole_word() {
+        assert_eq!(severity("it follows the rule (high)"), "high");
+        assert_eq!(severity("a below-the-bar row (medium)"), "medium");
+        assert_eq!(severity("allow flow highlight information"), "");
+        assert_eq!(severity("CE-36..CE-39: config (all low; re-read)"), "low");
+    }
+
+    #[test]
+    fn severity_comes_from_the_section_and_the_range_heading() {
+        let t = "### CE-23: torn file\n- Severity: high (wedges the rung)\n### CE-36..CE-39: empty values (all low)\n- **CE-36** an empty BRUTEX_LOGS writes into crates/api/src/server.rs:18380\n";
+        assert_eq!(section_severity(t, "CE-23"), "high");
+        assert_eq!(bullets(t, "CE-")[0].1, "low");
+        assert_eq!(area_for(t, "CE-36"), "api/src/server.rs:18380");
+    }
+
+    #[test]
+    fn a_wrapped_status_line_is_joined() {
+        let dir = std::env::temp_dir().join(format!("fixboard-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.tsv");
+        fs::write(
+            &f,
+            "id\tstate\ncli-14 (W2-cli11-0/-1\nW2-cli12-3/-4)\tfound\nX-1\tbranch\n",
+        )
+        .unwrap();
+        let rows = tsv(&f).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], "cli-14 (W2-cli11-0/-1 W2-cli12-3/-4)");
+        assert_eq!(
+            status_ids(&rows[0][0]),
+            [
+                "cli-14",
+                "W2-cli11-0",
+                "W2-cli11-1",
+                "W2-cli12-3",
+                "W2-cli12-4"
+            ]
+        );
+        fs::write(&f, "id\tstate\nA-1 (B-2\tfound\n").unwrap();
+        assert!(tsv(&f).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn commit_messages_count_only_fix_lines() {
+        let log = "abc1234\0Fix the ledger (GAP13-16, which D-1420 left)\nGAP11-0 is still open\n\u{1e}def5678\0KNOWN W2-cli13-5, re-reported by hunt-cli-b\nW2-cli9-9 not fixed here\n\u{1e}";
+        let m = message_mentions(log);
+        assert_eq!(m.get("GAP13-16").map(|x| x.0.as_str()), Some("abc1234"));
+        assert!(!m.contains_key("GAP11-0"));
+        assert_eq!(m.get("W2-cli13-5").map(|x| x.0.as_str()), Some("def5678"));
+        assert!(!m.contains_key("W2-cli9-9"));
+        assert!(!m.contains_key("D-1420"));
+    }
+
+    #[test]
+    fn decision_entries_count_unless_their_title_is_not_a_fix() {
+        let diff = "+### D-1563 — Markers appear whole — 2026\n+**What happened.** KNOWN GAP11-0 and W2-cli13-5, re-reported\n+### D-1631 — Lineage costs are stated, not fixed — 2026\n+W2-cli1-2 here\n context W9-x-1\n";
+        let m = message_mentions(&decision_chunks(diff));
+        assert_eq!(
+            m.get("GAP11-0").map(|x| x.0.as_str()),
+            Some("decision D-1563 on head")
+        );
+        assert!(m.contains_key("W2-cli13-5"));
+        assert!(!m.contains_key("W2-cli1-2"));
+        assert!(!m.contains_key("W9-x-1"));
+    }
+
+    #[test]
+    fn states_rank_in_fix_order() {
+        assert!(rank("found") < rank("fixing") && rank("fixing") == rank("partial"));
+        assert!(rank("partial") < rank("branch") && rank("branch") < rank("doc"));
+        assert!(rank("doc") < rank("pushed") && rank("pushed") < rank("green"));
     }
 
     #[test]
