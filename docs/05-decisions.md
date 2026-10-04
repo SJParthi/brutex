@@ -58624,3 +58624,92 @@ left one directory per `loaded()` call before). The contention figures are
 measurements on a 4-core shared container, labelled as such; a contention-free
 emit under today's contract stays UNVERIFIED until it is measured on an idle
 machine with at least 8 cores.
+
+### D-2326 — Both reads on the credential path are bounded: `~/.aws/credentials` and the Parameter Store answer — 2026-10-04
+
+**Finding (P1-19-03, tests-docs-security).** `ssm::AwsIdentity::from_credentials_file`
+read `~/.aws/credentials` with `std::fs::read_to_string`: no `is_file` check
+and no bound. A FIFO there blocked `AwsIdentity::discover` in `open` forever
+with nothing logged, and a symlink to a device grew the string until the
+allocator gave up. These are the two failures D-0036 removed from
+`credentials.toml`, which is read on the same start-up path. `get_parameter`
+also read the SSM answer whole with `answer.text()`, bounded only by the
+client's 10 s timeout, while every other vendor read in the crate goes through
+a capped reader.
+
+**Decision.** `config::read_bounded` becomes `pub(crate)` and the AWS
+credentials file is read through it. The order is `metadata` first, so a
+non-regular file is refused before it is opened, and then a read capped by
+`take` at `config::MAX_FILE_BYTES` + 1. One bound and one refusal order now
+cover both credential files. Each refusal has its own sentence naming the path:
+not a regular file, more than 65536 bytes, not UTF-8.
+
+The SSM answer is read by `ssm::answer_within`. It goes through `http::body_within`
+(made `pub(crate)`) with `ssm::MAX_ANSWER_BYTES` = 16 KiB, and an answer that
+runs past the cap is refused naming the cap and the status before any parse
+sees the cut prefix. 16 KiB is this build's choice. A `GetParameter` answer is
+one small JSON object holding one header-sized value. What AWS caps a parameter
+value at is UNVERIFIED, because `docs/00-charter.md` records no AWS source, so
+the refusal names the number and raising it takes a decision. Refusal bodies
+go through the same cap. They are only matched against fault names and never
+quoted.
+
+**What it changes.** Credentials that load today still load. A FIFO, device,
+directory, oversized or non-UTF-8 `~/.aws/credentials` is now refused promptly
+and by name. A non-UTF-8 file used to fall into the "neither the environment
+nor" sentence. An SSM answer over 16 KiB is refused, where before it was held
+whole.
+
+**Proof.** `pull::ssm::a_fifo_credentials_file_is_refused_without_opening_it`
+puts a FIFO at the path and expects the refusal within 5 s.
+`pull::ssm::an_oversized_credentials_file_is_refused_by_size` reads a file of
+exactly 65536 bytes, refuses 65537, and refuses non-UTF-8.
+`pull::ssm::an_oversized_parameter_store_answer_is_refused_by_size` uses a
+loopback socket: exactly 16384 bytes are returned, 16385 are refused, and a
+cut body is refused. `pull::ssm::get_parameter_reads_its_answer_through_the_bounded_reader`
+pins the call site, because `get_parameter`'s host is fixed to AWS. Against the
+old reads, the FIFO test timed out, the 65537-byte file loaded, an uncapped
+body read returned 16385 bytes, and the shape test failed. All four fail on the
+old code. AFG-26.
+
+### D-2327 — `/logs.json` and `/logs` walk the log off the async workers, behind their own admission — 2026-10-04
+
+**Finding (log-3 in concurrency; P1-04-02 in tests-docs-security, the same
+defect).** Both handlers called `both_halves` inline in their `async fn`. That
+is two `telemetry::tail` walks of up to `logs::SCAN_BYTES` (4 MiB) each,
+decoding every line, on a Tokio worker, with no admission. The backtest page
+polls `/logs.json?limit=200&run=…` every 2 s per running sweep. A browser
+sweep's events are in the server half and a CLI sweep's are in the `cli` half,
+so one half never fills its limit and is read to its cap on every poll. A
+`target=` that matches nothing does the same to both halves. A few tabs could
+hold every worker in synchronous multi-MiB decodes. Every other bounded reader
+in the crate goes through `crate::detail`'s `spawn_blocking` doors.
+
+**Decision.** `detail::run_log_read` is a pool of its own with
+`MAX_LOG_READ_CONCURRENT` = 4 slots. It uses `run_calendar`'s and
+`run_store_read`'s shape (`Permit::try_take_from`, then `spawn_blocking`). It
+does not share their slots, for the reason D-1443 and D-1508 gave: a 2-second
+poll must neither be refused because a folder read is busy nor fill the pool a
+folder read needs. Both handlers run their walk in it. A full pool is refused
+before anything is read: `/logs.json` answers `detail::admission_refused`'s 429
+JSON naming "log read", the bound and `Saturated`, and `/logs` answers a 429
+page whose halt says the same and keeps the form. A join failure is 503.
+`logs_page` now returns its status with its page.
+
+**What was not done, and why.** Neither finding's optional per-request
+narrowing was taken. Skipping the half that cannot hold a `run` would need the
+attempt's origin, which the handler does not have. A cap on lines scanned when
+the filter matches nothing would change what a successful answer holds (its
+`bytes_read`, `hit_scan_cap` and records). A successful response is unchanged
+byte for byte. The remaining cost is stated in `docs/06-limits.md` under this
+decision: an admitted request still reads and decodes up to 2 × 4 MiB, and the
+pool bounds how many do so at once.
+
+**Proof.** `api::logs::the_log_routes_refuse_by_name_when_every_log_read_slot_is_held`
+holds all four slots. Both handlers then answer 429 with the named refusal and
+the page shell, and 200 once the slots are released. Against a `run_log_read`
+that runs inline without admission, which is the old behaviour, it fails.
+`api::detail::a_log_read_runs_off_the_worker_and_refuses_past_its_bound`
+checks three things: the work runs on a thread other than the worker, the
+fifth admission is `Saturated` while the calendar pool still admits, and the
+count returns to zero. AFG-27.
