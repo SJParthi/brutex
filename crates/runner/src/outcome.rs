@@ -635,7 +635,7 @@ struct WindowExtremes {
     /// Bars read so far, deque pushes and block scans alike: the cost a test
     /// holds to O(1) amortised per query (o1eng2-1, D-1572).
     /// Proved by
-    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     touched: u64,
     /// The left end the deques were last popped to. A query left of it cannot
     /// be served from them.
@@ -767,7 +767,7 @@ fn scan_extremes(bars: &[Candle], lo: usize, hi: usize, touched: &mut u64) -> Op
 /// removed, whose two `n·log₂ n` tables were 21 levels deep at 1,222,791 bars;
 /// this one is 15 levels of 19,107 pairs there, about 4.6 MB. The 4.6 MB is
 /// arithmetic, not a measurement; the O(1) query is proved by
-/// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+/// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
 struct BlockExtremes {
     /// `levels[k][b]`: the extremes of blocks `b ..= b + 2^k - 1`.
     levels: Vec<Vec<(i64, i64)>>,
@@ -784,11 +784,18 @@ impl BlockExtremes {
                 (high, low)
             })
             .collect();
+        // A level of runs of `2^k` blocks exists exactly when `2^k` is at most
+        // the BLOCK COUNT; it holds `blocks - 2^k + 1` runs. This compared the
+        // next span with the level below, which is `2^(k-1) - 1` shorter than
+        // the block count, so it stopped up to one level early and a backward
+        // query over most of the slice found no level and answered `None`
+        // (D-2702).
+        let blocks = base.len();
         let mut levels = vec![base];
         let mut span = 1_usize;
         while let Some(below) = levels.last() {
             let doubled = span.saturating_mul(2);
-            if doubled > below.len() {
+            if doubled > blocks {
                 break;
             }
             let level: Vec<(i64, i64)> = below
@@ -804,7 +811,7 @@ impl BlockExtremes {
 
     /// The extremes of blocks `first ..= last`: two overlapping runs, O(1).
     /// Proved by
-    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     fn over(&self, first: usize, last: usize) -> Option<(i64, i64)> {
         let count = last.checked_sub(first)?.checked_add(1)?;
         let depth = count.ilog2();
@@ -4354,7 +4361,7 @@ mod refusal_coverage {
     reason = "the exception every test module in this workspace takes."
 )]
 mod window_tests {
-    use super::{Horizon, WindowExtremes, forward};
+    use super::{BlockExtremes, EXTREME_BLOCK, Horizon, WindowExtremes, forward};
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -4485,7 +4492,7 @@ mod window_tests {
     /// the scan, and the bars read must stay within a constant per query plus
     /// one pass over the slice. Rebuilding the deques on every backward query
     /// read ~1,000 bars per query. This test is
-    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     #[test]
     fn a_backward_right_end_is_answered_in_constant_reads() {
         let n = 20_000_usize;
@@ -4539,20 +4546,91 @@ mod window_tests {
         }
     }
 
-    /// The sparse table is gone from the live path, not merely unused: its
-    /// doubling loop was the Θ(n log n) build and its tables the n·log n memory.
+    /// **A LONG BACKWARD QUERY IS ANSWERED ON EVERY SLICE LENGTH** (D-2702).
+    ///
+    /// `BlockExtremes::of` stopped doubling when the next span passed the
+    /// length of the level BELOW, which shrinks by the span at every level,
+    /// rather than the block count. On 20 blocks it built levels 0 to 3, so a
+    /// backward query whose middle run was 16 to 18 blocks asked for level 4,
+    /// found none, and `over` answered `None` where a scan has extremes: a
+    /// measured excursion silently became absent. Every slice length from 3 to
+    /// 40 blocks, and the longest backward query each one admits, now agrees
+    /// with the scan.
     #[test]
-    fn forward_builds_no_power_of_two_table() {
+    fn a_backward_query_spanning_most_of_the_slice_is_answered() {
+        for blocks in 3..=40_usize {
+            let n = blocks * EXTREME_BLOCK;
+            let bars = wobble(n);
+            let mut window = WindowExtremes::new();
+            assert_eq!(window.over(&bars, 0, n - 1), scan(&bars, 0, n - 1));
+            for (lo, hi) in [(1, n - 2), (0, n - 2), (EXTREME_BLOCK - 1, n - 2)] {
+                assert_eq!(
+                    window.over(&bars, lo, hi),
+                    scan(&bars, lo, hi),
+                    "{blocks} blocks, backward [{lo}, {hi}]"
+                );
+            }
+        }
+    }
+
+    /// **NO PER-BAR SPARSE TABLE; THE ONE POWER-OF-TWO TABLE IS PER BLOCK**
+    /// (D-1170, D-1572, P5-03, D-2701).
+    ///
+    /// D-1170 removed `RangeExtremes`, a per-bar sparse table of `n·log₂ n`
+    /// pairs. D-1572 then built [`BlockExtremes`], a power-of-two table over
+    /// `EXTREME_BLOCK`-bar blocks, for backward queries. This test was named
+    /// `forward_builds_no_power_of_two_table` and only grepped D-1170's old
+    /// spellings, so it passed beside a power-of-two table. It now measures
+    /// the table `forward` can build: its base level is one pair per block, not
+    /// per bar; it has one level per power of two up to the block count; it is
+    /// built in exactly one pass over the bars; and the whole table holds fewer
+    /// pairs than there are bars. A per-bar table (`EXTREME_BLOCK` of 1) fails
+    /// the pair count.
+    #[test]
+    fn forward_builds_no_per_bar_sparse_table() {
+        let n = 20_000_usize;
+        let bars = wobble(n);
+        let mut touched = 0_u64;
+        let table = BlockExtremes::of(&bars, &mut touched);
+        let blocks = n.div_ceil(EXTREME_BLOCK);
+        assert_eq!(
+            touched,
+            u64::try_from(n).expect("small"),
+            "built in one pass over the bars"
+        );
+        assert_eq!(
+            table.levels.first().map(Vec::len),
+            Some(blocks),
+            "the base level is one pair per {EXTREME_BLOCK}-bar block, not per bar"
+        );
+        assert_eq!(
+            table.levels.len(),
+            usize::try_from(blocks.ilog2()).expect("small") + 1,
+            "one level per power of two up to the block count"
+        );
+        let pairs: usize = table.levels.iter().map(Vec::len).sum();
+        assert!(
+            pairs < n,
+            "{pairs} pairs over {n} bars: a per-bar table is back"
+        );
+        // Every level answers what it says: `levels[k][b]` is the extremes of
+        // blocks `b ..= b + 2^k - 1`, read here by direct scan.
+        for (k, level) in table.levels.iter().enumerate() {
+            for (b, &pair) in level.iter().enumerate().step_by(37) {
+                let lo = b * EXTREME_BLOCK;
+                let hi = ((b + (1 << k)) * EXTREME_BLOCK).min(n) - 1;
+                assert_eq!(Some(pair), scan(&bars, lo, hi), "level {k}, block {b}");
+            }
+        }
         let source = include_str!("outcome.rs");
         let live = source
             // Up to the first test MODULE: D-1410 put test-only items above it.
             .split("\n#[cfg(test)]\n#[allow(")
             .next()
             .expect("a source prefix");
-        assert!(!live.contains("RangeExtremes"), "the sparse table is back");
         assert!(
-            !live.contains("width.saturating_mul(2) <= n"),
-            "the doubling build is back"
+            !live.contains("RangeExtremes"),
+            "the per-bar sparse table is back"
         );
         assert!(live.contains("WindowExtremes::new()"), "forward must slide");
     }
