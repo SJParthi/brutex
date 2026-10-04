@@ -545,6 +545,16 @@ pub fn store_due(probe: Option<&Probe>, now_unix: i64) -> Due {
             ),
         };
     }
+    // A DEADLINE FURTHER AWAY THAN THE WAIT THAT ARMED IT means this clock is
+    // now behind the instant it was armed at: an NTP step back, or a fast RTC
+    // corrected since. The wall clock used to postpone the probe by the size of
+    // the step -- months, for a clock once a season ahead -- while the page said
+    // "the next probe is in 60s". A probe is a few bytes, so a stepped clock
+    // probes now rather than wait for real time to catch up. D-2756 (CE-84).
+    let armed_wait = i64::try_from(probe_secs(probe.made.saturating_sub(1))).unwrap_or(i64::MAX);
+    if probe.due_unix.saturating_sub(now_unix) > armed_wait {
+        return Due::Now { made: probe.made };
+    }
     if now_unix < probe.due_unix {
         return Due::Later {
             due_unix: probe.due_unix,
@@ -1544,7 +1554,13 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
             continue;
         }
         for (nth, stall) in state.stalls.iter().enumerate() {
-            let due = now_unix.saturating_sub(stall.at_unix) >= STALL_RECHECK_SECS;
+            // A CLOCK BEHIND THE STAMP cannot age it: an NTP step back (or a
+            // fast RTC corrected since) used to hold the recheck until real
+            // time caught up, which for a clock once ahead is months. It is
+            // due now, still within the finite `STALL_RETRIES` allowance, and
+            // the sentence says the clock stepped. D-2756 (CE-84).
+            let due = now_unix < stall.at_unix
+                || now_unix.saturating_sub(stall.at_unix) >= STALL_RECHECK_SECS;
             if stall.retried >= STALL_RETRIES || !due {
                 continue;
             }
@@ -1558,6 +1574,7 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
     let state = feeds.get_mut(slot)?;
     let feed = state.feed.display().to_owned();
     let stall = state.stalls.get_mut(nth)?;
+    let stepped = now_unix < stall.at_unix;
     stall.retried = stall.retried.saturating_add(1);
     stall.at_unix = now_unix;
     let month = stall.month;
@@ -1573,11 +1590,18 @@ pub fn reconsider(feeds: &mut [FeedState], now_unix: i64) -> Option<String> {
     } else {
         state.parked = Place::at(month);
     }
+    let spacing = if stepped {
+        "now, because this server's clock is behind the stall's own stamp (the \
+         clock stepped back), so the wait since the last one cannot be measured"
+            .to_owned()
+    } else {
+        format!("at least {STALL_RECHECK_SECS}s since the last one")
+    };
     Some(format!(
         "nothing else is missing, so {feed}'s stalled {rung} month {month} is being \
          reconsidered — \
-         attempt {retried} of {STALL_RETRIES} allowed after the stall, at least \
-         {STALL_RECHECK_SECS}s since the last one. Nothing is replayed: the window is \
+         attempt {retried} of {STALL_RETRIES} allowed after the stall, {spacing}. \
+         Nothing is replayed: the window is \
          re-derived from what the store already holds, so a day already stored is not \
          asked for twice. It was stalled for: {reason}"
     ))
@@ -6742,6 +6766,46 @@ mod tests {
                 month(2026, 1),
             )
         }
+    }
+
+    /// CE-84 / D-2756: a wall clock stepped BACK behind a probe's arming
+    /// instant, or behind a stall's stamp, makes the wait due now -- it does
+    /// not postpone it by the size of the step, and the stall's sentence says
+    /// the clock stepped. A clock merely early in the armed wait still waits.
+    #[test]
+    fn a_clock_stepped_back_behind_a_stamp_does_not_freeze_the_probe_or_the_recheck() {
+        let armed_at = 2_000_000_000i64;
+        let wait = i64::try_from(probe_secs(0)).expect("a small wait");
+        let probe = Probe {
+            made: 1,
+            due_unix: armed_at + wait,
+        };
+        assert_eq!(
+            store_due(Some(&probe), armed_at + 1),
+            Due::Later {
+                due_unix: armed_at + wait
+            },
+            "inside the armed wait it still waits"
+        );
+        assert_eq!(
+            store_due(Some(&probe), armed_at - 86_400),
+            Due::Now { made: 1 },
+            "a day behind the arming instant is a stepped clock, not a day to wait"
+        );
+
+        let stamped = 2_000_000_000i64;
+        let mut feeds = vec![stalled(month(2021, 3), 0, stamped)];
+        let said = reconsider(&mut feeds, stamped - 30 * 86_400)
+            .expect("a clock behind the stall's stamp cannot hold it for a month");
+        assert!(said.contains("clock stepped back"), "{said}");
+        assert!(
+            !said.contains("at least"),
+            "it claims no spacing it did not see: {said}"
+        );
+        assert_eq!(
+            feeds[0].stalls[0].retried, 1,
+            "it spends one of the finite retries"
+        );
     }
 
     /// **A stalled month is reconsidered at most [`STALL_RETRIES`] times per

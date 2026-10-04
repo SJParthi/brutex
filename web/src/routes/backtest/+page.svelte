@@ -2993,6 +2993,7 @@
    * @property {boolean} halted
    * @property {number} unsealed
    * @property {number | null} best_complete
+   * @property {string} [in_sample] the ledger's in-sample, validation-unrecorded statement (D-2792)
    * @property {string[]} signal_rungs exact `cli::EVERY_RUNG` values published by the server
    * @property {string | null} refusal
    * @property {Run[]} runs
@@ -4151,6 +4152,31 @@
    * (`CLAUDE.md` §1). D-0946.
    */
   const openCharges = $derived(chargeScope(openRun));
+  /**
+   * THE HEADLINE SAYS WHAT ITS FIGURES ARE MADE OF (CE-94). The crown ranks
+   * across instruments, so a cash equity crowned here carries the gross-of-
+   * every-charge statement CLAUDE.md §1 requires of every ranked equity
+   * report, not only after "Drill in". Same `chargeScope` the drill-down uses.
+   */
+  const bestCharges = $derived(chargeScope(best));
+  /** The first gross statement among the rows the comparison board ranks. */
+  const boardChargeNote = $derived.by(() => {
+    for (const run of rankableRuns) {
+      const scope = chargeScope(run);
+      if (scope.gross) return scope.serverNote ?? scope.note;
+    }
+    return null;
+  });
+  /**
+   * The ledger's own in-sample statement (CE-93, D-2792): every recorded run
+   * is the best of its search, scored on the bars it was chosen on, and the
+   * ledger records no validation verdict. Shown above the crown and the board.
+   */
+  const ledgerInSample = $derived(
+    typeof ledger?.in_sample === 'string' && ledger.in_sample.trim() !== ''
+      ? ledger.in_sample.trim()
+      : null
+  );
 
   /**
    * Did the open run never open a trade?
@@ -7924,6 +7950,14 @@
                 <b>{money(best.fillGap)}</b> higher, which is how much of
                 the headline is fill assumption rather than edge.
               </p>
+              {#if bestCharges.gross}
+                <p class="crown-note equity-note" data-crown-charges>
+                  {bestCharges.serverNote ?? bestCharges.note}
+                </p>
+              {/if}
+              {#if ledgerInSample}
+                <p class="crown-note in-sample-note" data-crown-in-sample>{ledgerInSample}</p>
+              {/if}
             </div>
             <button class="btn ghost sm" onclick={(event) => toggle(best, event.currentTarget)}>
               {openIndex === best.index ? 'Close' : 'Drill in'}
@@ -7984,6 +8018,12 @@
             {exact(comparedRuns.length)} shown
           </span>
         </div>
+        {#if boardChargeNote}
+          <p class="inline-note equity-note" data-board-charges>{boardChargeNote}</p>
+        {/if}
+        {#if ledgerInSample}
+          <p class="inline-note in-sample-note" data-board-in-sample>{ledgerInSample}</p>
+        {/if}
 
         {#if rankableRunCount > 0}
           <div

@@ -5449,6 +5449,7 @@ impl Site {
         // A file changed during parsing must remain visibly newer than this
         // snapshot, not be hidden by a timestamp taken after the read.
         let parsed_at = std::time::SystemTime::now();
+        let stamps = crate::mastersrun::stamps(masters);
         let read = universe(masters);
         // A PARSE THAT READ NOTHING MUST NOT REPLACE ONE THAT DID. Swapping an
         // empty universe in would take a working page to a blank one because a
@@ -5499,6 +5500,7 @@ impl Site {
         *held = Parsed {
             read,
             at: parsed_at,
+            stamps,
             targets,
             generation,
         };
@@ -5562,6 +5564,7 @@ impl Site {
                 // question is when THIS universe was read, and a lazily taken
                 // stamp would answer a different one.
                 at: std::time::SystemTime::now(),
+                stamps: Vec::new(),
                 targets,
                 generation: 0,
             }),
@@ -5588,11 +5591,19 @@ impl Site {
     /// The whole site, read off disk once.
     #[must_use]
     pub fn load(masters: &Path, store_root: &Path) -> Self {
-        Self::new(
+        // STAMPED BEFORE THE READ, for the reason `reparse` does: a master
+        // changed while it is parsed stays visibly changed. D-2757.
+        let stamps = crate::mastersrun::stamps(masters);
+        let mut site = Self::new(
             universe(masters),
             census::read_all(store_root),
             store_root.to_path_buf(),
-        )
+        );
+        site.parsed
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stamps = stamps;
+        site
     }
 
     /// The same site, permitted to reach a live broker.
@@ -5731,6 +5742,11 @@ pub struct Parsed {
     pub read: Read,
     /// When this process parsed the masters into [`Self::read`].
     pub at: std::time::SystemTime,
+    /// Each master file's (mtime, length), taken just before the parse read
+    /// it, so `/masters/status.json` reports a file CHANGED since the parse
+    /// without comparing a filesystem's clock to this one. Empty for a site
+    /// that read no masters directory. D-2757 (CE-85).
+    pub stamps: Vec<crate::mastersrun::Stamp>,
     /// How many instruments each spot target names, counted from [`Self::read`].
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
     /// Zero at load, and moved by every [`Site::reparse`] that swaps a universe
@@ -7120,13 +7136,35 @@ fn note_member_failure(
             .with("rung", telemetry::Value::Str(asked.granularity.dir()))
             .with("why", telemetry::Value::Str(&failure.why)),
     );
-    debug_assert!(
-        noted.is_written() || telemetry::global().is_none(),
-        "a member that reached the vendor and did not land is the failure this \
-         event exists to name"
-    );
-    site.autopilot
-        .fail(&failure.instrument, month, &failure.why);
+    settle_member_failure(noted, failure, month, site);
+}
+
+/// The half of [`note_member_failure`] that runs after the emit, whatever the
+/// emit answered.
+///
+/// A dropped log append is an ENVIRONMENTAL outcome (a full or erroring log
+/// volume), counted in the sink's own health, and it is most likely exactly
+/// when this event exists to be read. It used to be a `debug_assert!`, which
+/// in the dev-profile binary the operator runs panicked the pull before the
+/// in-memory failure below was recorded. It now degrades loudly instead: the
+/// failure is recorded, and its sentence says the log line was not. D-2751.
+fn settle_member_failure(
+    noted: telemetry::Emitted,
+    failure: &pull::ingest::Failure,
+    month: &str,
+    site: &Site,
+) {
+    if noted == telemetry::Emitted::Dropped {
+        let why = format!(
+            "{} (the log line for this failure could not be written; the \
+             sink's health on /logs counts the drop)",
+            failure.why
+        );
+        site.autopilot.fail(&failure.instrument, month, &why);
+    } else {
+        site.autopilot
+            .fail(&failure.instrument, month, &failure.why);
+    }
 }
 
 /// What the pull order has to say about this request, or [`None`] to proceed.
@@ -7368,10 +7406,10 @@ fn spot_mapping_refusal(
     let resolved: std::collections::HashSet<_> =
         targets.iter().map(|key| key.underlying.as_str()).collect();
     let expected: Vec<&str> = if asked.members.is_empty() {
-        asked
-            .target
-            .members()
-            .map_or_else(Vec::new, <[&str]>::to_vec)
+        // `expected`, not `members`: the swept surface has a compile-time
+        // roster and no published list, and reading `members` left it empty,
+        // so a swept name no master lists was never an issue. D-2759.
+        asked.target.expected().unwrap_or_default()
     } else {
         asked
             .members
@@ -9031,7 +9069,7 @@ async fn fetch_chunks(
                     // Emitted here, unwrapped, the reason is the whole field and
                     // fits. The bound rose to 512 later; what still holds is that
                     // the field carries the answer rather than the preamble.
-                    let noted = telemetry::emit(
+                    let _logged = telemetry::emit(
                         &telemetry::Event::error("pull.http", "vendor refused a window")
                             .with("instrument_id", telemetry::Value::Str(instrument_id))
                             .with("feed", telemetry::Value::Str(asked.feed.wire()))
@@ -9041,10 +9079,9 @@ async fn fetch_chunks(
                             .with("to", telemetry::Value::Str(&chunk.to().to_string()))
                             .with("vendor_said", telemetry::Value::Str(why)),
                     );
-                    debug_assert!(
-                        noted.is_written() || telemetry::global().is_none(),
-                        "the vendor's reason is the one field this event exists to carry"
-                    );
+                    // A dropped append is counted in the sink's health and is
+                    // not an invariant: the sentence below carries the vendor's
+                    // words whatever the log answered (D-2751).
                     format!(
                         "the broker did not answer with a window. This was \
                          request {} of {}, covering {}..={}. The {} chunk(s) \
@@ -10085,7 +10122,7 @@ fn note_instrument_refusal(
     of: usize,
     why: &str,
 ) {
-    let emitted = telemetry::emit(
+    let _logged = telemetry::emit(
         &telemetry::Event::error("pull.spot", "instrument refused")
             .with("instrument", telemetry::Value::Str(instrument))
             .with("month", telemetry::Value::Str(month))
@@ -10094,10 +10131,9 @@ fn note_instrument_refusal(
             .with("of", telemetry::Value::Uint(of as u64))
             .with("why", telemetry::Value::Str(why)),
     );
-    debug_assert!(
-        emitted.is_written() || telemetry::global().is_none(),
-        "a refusal that cannot be logged is the defect this event exists to remove"
-    );
+    // A dropped append is counted in the sink's health; it is not an
+    // invariant to assert, and asserting it panicked the dev-profile broker
+    // loop on a full log volume (D-2751).
 }
 
 /// What the page says when the breaker stops a run.
@@ -16381,19 +16417,37 @@ async fn one_value_per_form_field(
     }
     let (parts, body) = request.into_parts();
     let bound = form_read_bound(parts.uri.path());
-    let Ok(bytes) = axum::body::to_bytes(body, bound).await else {
-        return (
-            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            format!(
-                "REFUSED — the request body is larger than the {bound} bytes \
-                 this server reads. Nothing was read or run.\n"
-            ),
-        )
-            .into_response();
+    let bytes = match read_within(body, bound).await {
+        Ok(bytes) => bytes,
+        Err(BodyUnread::TooLarge) => {
+            return (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                format!(
+                    "REFUSED — the request body is larger than the {bound} bytes \
+                     this server reads. Nothing was read or run.\n"
+                ),
+            )
+                .into_response();
+        }
+        Err(BodyUnread::Broken(why)) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                format!(
+                    "REFUSED — the request body could not be read: {why}. It was \
+                     malformed or cut off before its end, not too large. Nothing \
+                     was read or run.\n"
+                ),
+            )
+                .into_response();
+        }
     };
     let json = parts
         .headers
@@ -16426,6 +16480,47 @@ async fn one_value_per_form_field(
         axum::body::Body::from(bytes),
     ))
     .await
+}
+
+/// Why [`read_within`] returned no body.
+#[derive(Debug, PartialEq, Eq)]
+enum BodyUnread {
+    /// More than the bound arrived, or was announced.
+    TooLarge,
+    /// The transport failed mid-body: a bad chunk-size line, a chunked body
+    /// cut off before its last chunk, a `Content-Length` body the peer
+    /// half-closed early. Its own arm because it used to be the `413` above,
+    /// which told the sender of a 10-byte body that it exceeded 8,192 bytes.
+    /// D-2753 (CE-101).
+    Broken(String),
+}
+
+/// The whole body, at most `bound` bytes, telling the two failures apart.
+///
+/// `axum::body::to_bytes` folds a length-limit error and a transport error
+/// into one `axum::Error`. This reads the frames itself so each failure keeps
+/// its own name. Same O(body) once per request, same bound.
+async fn read_within<B>(body: B, bound: usize) -> Result<axum::body::Bytes, BodyUnread>
+where
+    B: http_body::Body<Data = axum::body::Bytes>,
+    B::Error: std::fmt::Display,
+{
+    use http_body::Body as _;
+    let mut body = std::pin::pin!(body);
+    if usize::try_from(body.size_hint().lower()).map_or(true, |lower| lower > bound) {
+        return Err(BodyUnread::TooLarge);
+    }
+    let mut held: Vec<u8> = Vec::new();
+    while let Some(frame) = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+        let frame = frame.map_err(|why| BodyUnread::Broken(why.to_string()))?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > bound.saturating_sub(held.len()) {
+                return Err(BodyUnread::TooLarge);
+            }
+            held.extend_from_slice(&data);
+        }
+    }
+    Ok(axum::body::Bytes::from(held))
 }
 
 /// The first query key that appears twice, or `None`.
@@ -16811,8 +16906,94 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // every line above keeps winning and nothing on disk can shadow one.
         .fallback(move |request: axum::extract::Request| {
             let assets = std::sync::Arc::clone(&assets);
-            async move { assets.respond(request.method(), request.uri().path()) }
+            async move {
+                let path = request.uri().path();
+                match route_variant(path) {
+                    Some(route) => route_variant_refusal(request.method(), path, route),
+                    None => assets.respond(request.method(), path),
+                }
+            }
         })
+}
+
+/// Every extensionless path [`route_table`] registers, in the order it does.
+///
+/// The fallback consults it to tell a SPELLING VARIANT of a server route
+/// (`/health/`, `//health`, `/Health`) from a front-end path. axum matches
+/// the raw path exactly and does no trailing-slash redirect, so a variant
+/// used to fall through to the shell and answer `200 text/html` — and a
+/// monitor pointed at `/health/` read "healthy" for ever, whatever `/health`
+/// said. A `.json` route needs no entry: its `.` already makes the shell
+/// answer 404. `route_variants_cover_every_extensionless_route` reads
+/// [`route_table`]'s own source so this list cannot drift. D-2752.
+const EXTENSIONLESS_ROUTES: &[&str] = &[
+    "/dashboard",
+    "/instruments",
+    "/pull",
+    "/pull/spot",
+    "/pull/fno",
+    "/pull/run",
+    "/pull/recovery",
+    "/pull/run/stop",
+    "/universe/resolve",
+    "/autopilot/pause",
+    "/autopilot/resume",
+    "/autopilot/control",
+    "/ingest/queue",
+    "/audit",
+    "/store",
+    "/bars",
+    "/logs",
+    "/backtest/run",
+    "/backtest/descend",
+    "/engine/command",
+    "/masters",
+    "/masters/refresh",
+    "/health",
+];
+
+/// The server route `path` is a spelling variant of, if it is one.
+///
+/// Empty segments are collapsed (one trailing `/`, a doubled `//`) and the
+/// comparison ignores ASCII case. A path that IS the route never reaches the
+/// fallback, so equality with the raw path is excluded. A fixed list of 23
+/// rows on the fallback path only.
+fn route_variant(path: &str) -> Option<&'static str> {
+    let mut normal = String::with_capacity(path.len());
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        normal.push('/');
+        normal.push_str(segment);
+    }
+    EXTENSIONLESS_ROUTES
+        .iter()
+        .copied()
+        .find(|route| *route != path && route.eq_ignore_ascii_case(&normal))
+}
+
+/// `404`, naming the route the request almost spelled.
+///
+/// Not the shell (a `200` that hides a server route's own status), not a
+/// redirect (which would move a state-changing POST to a path the caller did
+/// not name), and not a `405` (the method is not the fault, the path is).
+fn route_variant_refusal(
+    method: &axum::http::Method,
+    path: &str,
+    route: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        format!(
+            "no route answers {method} {path}: server routes match exactly, \
+             with no trailing-slash, doubled-slash or case variant. The route \
+             this spells is {route}.\n"
+        ),
+    )
+        .into_response()
 }
 
 /// The fetch-metadata header a browser stamps on every request it issues.
@@ -23374,6 +23555,116 @@ mod tests {
             .await
             .expect("task")
             .expect("a graceful shutdown is not a failure");
+    }
+
+    /// CE-100 / D-2752: a spelling variant of a server route is a 404 naming
+    /// the route, never the `200` front-end shell -- a monitor pointed at
+    /// `/health/` used to read "healthy" for ever, whatever `/health` said.
+    /// CE-99: an unrouted POST is a 404 naming the path, not a 405.
+    #[tokio::test]
+    async fn a_variant_of_a_server_route_is_refused_rather_than_served_the_shell() {
+        with_server("route-variant", |addr| async move {
+            for path in ["/health/", "//health", "/Health", "/store/", "/pull//"] {
+                let got = get(addr, path).await;
+                assert!(got.contains("404"), "{path}: {got}");
+                assert!(
+                    !got.contains("<title>shell</title>"),
+                    "{path} must not answer with the front end: {got}"
+                );
+                assert!(got.contains("server routes match exactly"), "{path}: {got}");
+            }
+            let health = get(addr, "/health").await;
+            assert!(
+                !health.contains("<title>shell</title>"),
+                "the route itself still answers: {health}"
+            );
+            let db = get(addr, "/db/").await;
+            assert!(
+                db.contains("200 OK"),
+                "a client route keeps the shell: {db}"
+            );
+            let posted = post(addr, "/pull/spot/", "vendor=dhan").await;
+            assert!(posted.contains("404"), "{posted}");
+            assert!(
+                posted.contains("no route answers POST /pull/spot/"),
+                "a wrong path is named as one: {posted}"
+            );
+        })
+        .await;
+    }
+
+    /// The variant list is [`route_table`]'s own extensionless routes, read
+    /// from its source, so a route added there without a row here fails.
+    #[test]
+    fn route_variants_cover_every_extensionless_route() {
+        let source = include_str!("server.rs");
+        let start = source
+            .find("fn route_table(")
+            .expect("route_table is in this file");
+        let end = start
+            + source[start..]
+                .find("\n}\n")
+                .expect("route_table has an end");
+        let body = &source[start..end];
+        let mut registered = Vec::new();
+        let mut rest = body;
+        while let Some(at) = rest.find(".route(") {
+            rest = &rest[at + ".route(".len()..];
+            let open = rest.find('"').expect("a route names a path");
+            let tail = &rest[open + 1..];
+            let close = tail.find('"').expect("a path is closed");
+            let path = &tail[..close];
+            if !path.contains('.') {
+                registered.push(path);
+            }
+        }
+        // `/backtest` is named only in a comment: the front end owns it.
+        registered.retain(|path| *path != "/backtest");
+        assert_eq!(registered, EXTENSIONLESS_ROUTES, "route_table drifted");
+        assert_eq!(route_variant("/health"), None, "the route itself is routed");
+        assert_eq!(route_variant("/health/"), Some("/health"));
+        assert_eq!(route_variant("/HEALTH"), Some("/health"));
+        assert_eq!(
+            route_variant("/db/"),
+            None,
+            "a client route is not a variant"
+        );
+    }
+
+    /// CE-101 / D-2753: a malformed chunked body is a `400` naming a body
+    /// that could not be read, never the `413` "larger than N bytes" it used to
+    /// share with a body that really was too large.
+    #[tokio::test]
+    async fn a_malformed_chunked_body_is_refused_as_unreadable_not_too_large() {
+        with_server("torn-chunk", |addr| async move {
+            let host = format!("localhost:{}", addr.port());
+            let request = format!(
+                "POST /autopilot/control HTTP/1.1\r\nHost: {host}\r\n\
+                 Origin: http://{host}\r\nSec-Fetch-Site: same-origin\r\n\
+                 Content-Type: application/x-www-form-urlencoded\r\n\
+                 Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+                 zz\r\nx\r\n0\r\n\r\n"
+            );
+            let got = tokio::task::spawn_blocking(move || {
+                use std::io::{Read as _, Write as _};
+                let mut s = std::net::TcpStream::connect(addr).expect("connect");
+                s.write_all(request.as_bytes()).expect("write");
+                let mut buf = String::new();
+                let _ = s.read_to_string(&mut buf);
+                buf
+            })
+            .await
+            .expect("the client thread must not panic");
+            assert!(got.contains("400"), "{got}");
+            assert!(!got.contains("413"), "not a size refusal: {got}");
+            assert!(got.contains("could not be read"), "{got}");
+        })
+        .await;
+        // And the bound still answers as one.
+        let big = axum::body::Body::from(vec![b'a'; 9]);
+        assert_eq!(read_within(big, 8).await, Err(BodyUnread::TooLarge));
+        let fits = axum::body::Body::from(vec![b'a'; 8]);
+        assert_eq!(read_within(fits, 8).await.map(|b| b.len()), Ok(8));
     }
 
     /// **A WRITE FROM ANOTHER ORIGIN IS REFUSED, OVER A REAL SOCKET.**
@@ -31749,6 +32040,46 @@ mod tests {
         );
     }
 
+    /// CE-98 / D-2751: a log append the sink DROPPED (full or erroring log
+    /// volume) is an environmental outcome, not an invariant. The member's
+    /// failure is still recorded, and its sentence names the dropped line,
+    /// rather than a dev-profile `debug_assert!` panicking the pull first.
+    #[tokio::test]
+    async fn a_dropped_failure_log_line_still_records_the_failure_and_says_so() {
+        let empty = masters("dropped-note", None, None);
+        let site = Site::serving(&empty, &store_root("dropped-note"));
+        settle_member_failure(
+            telemetry::Emitted::Dropped,
+            &pull::ingest::Failure {
+                instrument: "DROPPEDLOG".to_owned(),
+                why: "the store refused the month".to_owned(),
+            },
+            "2026-08",
+            &site,
+        );
+        let status = site.autopilot.json();
+        assert!(
+            status.contains("DROPPEDLOG")
+                && status.contains("the store refused the month")
+                && status.contains("could not be written"),
+            "the failure is recorded and names the dropped log line: {status}"
+        );
+        settle_member_failure(
+            telemetry::Emitted::Written,
+            &pull::ingest::Failure {
+                instrument: "WRITTENLOG".to_owned(),
+                why: "a plain refusal".to_owned(),
+            },
+            "2026-08",
+            &site,
+        );
+        let status = site.autopilot.json();
+        assert!(
+            status.contains("a plain refusal\""),
+            "a written line adds nothing to the sentence: {status}"
+        );
+    }
+
     /// **THE SITE INSIDE `broker_run`'S LOOP, DRIVEN OVER A REAL UNIVERSE.**
     ///
     /// `pull.spot instrument refused` is the last of the three
@@ -31996,8 +32327,9 @@ mod tests {
 
         // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
         // directly because the only other way in is through a live socket, and
-        // it is the one site in this file whose `debug_assert` already demands
-        // `is_written` — which, with no sink installed, was vacuous.
+        // it was once the one site in this file whose `debug_assert` demanded
+        // `is_written`; that assertion is gone (D-2751), and this test reads
+        // the line back instead.
         let from = crate::emitted::mark();
         note_member_failure(
             &pull::ingest::Failure {

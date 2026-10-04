@@ -370,7 +370,7 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
 }
 
 /// Moves an interrupted writer's unsealed tail, `committed..len`, into
-/// `<file>.abandoned-<committed>` and cuts it from the ledger. audit-20261003
+/// `<file>.abandoned-<committed>-<digest16>` and cuts it from the ledger. audit-20261003
 /// hunt-cli-a-5, D-1569.
 ///
 /// The bytes are copied and synced, with their directory, BEFORE the ledger
@@ -390,7 +390,22 @@ fn set_aside_abandoned_tail(
     file.seek(SeekFrom::Start(committed))
         .map_err(|why| why.to_string())?;
     file.read_exact(&mut tail).map_err(|why| why.to_string())?;
-    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}"));
+    // NAMED BY OFFSET AND CONTENT. The committed length moves only when a
+    // block commits, so two interrupted writes with no commit between them
+    // land at one offset: an offset-only name made the second quarantine
+    // collide with the first and wedged every later persist (CE-88). Sixteen
+    // hex digits of the tail's own digest keep the "same name, same bytes"
+    // idempotence and give different bytes a different name. D-2790.
+    let mut digest = brutex_core::blake3::Hasher::new();
+    digest.update(b"brutex-selection-v6-abandoned-tail\0");
+    digest.update(&tail);
+    let digest = digest.finalize();
+    let mut tag = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write as _;
+        let _ = write!(tag, "{byte:02x}");
+    }
+    let aside = root.join(format!("{FILE_NAME}.abandoned-{committed}-{tag}"));
     match OpenOptions::new().write(true).create_new(true).open(&aside) {
         Ok(mut out) => {
             out.write_all(&tail)

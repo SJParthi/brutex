@@ -134,10 +134,17 @@ fn respond(asked: crate::detail::Selector) -> (axum::http::StatusCode, JsonHeade
     // instrument, so a RELIANCE run's frontier carries the gross label and the
     // corporate-action sentence `cli top` prints over the same rows. Decided
     // from this one snapshot; an index run's payload gains no key. AF-19.
-    let note = crate::detail::equity_note_member(
-        committed
-            .as_ref()
-            .map(|committed| committed.underlying.as_str()),
+    // AND EVERY RECORDED RUN'S ROWS ARE IN SAMPLE, validation unrecorded.
+    // Carried in the same member string so every body that names the note
+    // names this too. D-2792 (CE-93).
+    let note = format!(
+        r#"{},"in_sample":{}"#,
+        crate::detail::equity_note_member(
+            committed
+                .as_ref()
+                .map(|committed| committed.underlying.as_str()),
+        ),
+        crate::render::json_string(cli::LEDGER_IN_SAMPLE)
     );
     let receipt = committed.map(|committed| committed.receipt);
     if let Some(committed) = receipt
@@ -901,6 +908,13 @@ mod tests {
             respond(Ok(dir.clone()), &format!("identity={}", "96".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{index_body}");
         assert!(!index_body.contains("equity_note"), "{index_body}");
+        // CE-93 / D-2792: every recorded run's rows say they are in sample
+        // and that their validation is not recorded, index or stock.
+        let in_sample = format!(
+            r#","in_sample":{}"#,
+            crate::render::json_string(cli::LEDGER_IN_SAMPLE)
+        );
+        assert!(index_body.contains(&in_sample), "{index_body}");
         let (status, _, stock_body) =
             respond(Ok(dir.clone()), &format!("identity={}", "97".repeat(32)));
         assert_eq!(status, axum::http::StatusCode::OK, "{stock_body}");
@@ -908,7 +922,7 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&stock_body).expect("valid JSON");
         assert!(
             stock_body.starts_with(&format!(
-                r#"{{"identity":"{}"{member},"rows":[{{"rank":1,"#,
+                r#"{{"identity":"{}"{member}{in_sample},"rows":[{{"rank":1,"#,
                 "97".repeat(32)
             )),
             "beside the identity, before the ranked rows: {stock_body}"

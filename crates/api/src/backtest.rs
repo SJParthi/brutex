@@ -956,6 +956,13 @@ impl Ledger {
             }
             None => out.push_str(r#","best_complete":null"#),
         }
+        // EVERY LEDGER ROW IS IN SAMPLE AND ITS VALIDATION IS NOT RECORDED,
+        // so the ledger says it once, beside the crown it qualifies. D-2792.
+        let _ = write!(
+            out,
+            r#","in_sample":{}"#,
+            render::json_string(cli::LEDGER_IN_SAMPLE)
+        );
         match self.refusal {
             Some(ref why) => {
                 let _ = write!(out, r#","refusal":{}"#, render::json_string(why));
@@ -1659,6 +1666,14 @@ mod tests {
         assert!(ledger.best_complete().is_none());
         assert_eq!(ledger.halted_count(), 2);
         assert!(ledger.to_json().contains(r#""best_complete":null"#));
+        // CE-93 / D-2792: the ledger states its rows are in sample.
+        assert!(
+            ledger.to_json().contains(&format!(
+                r#""in_sample":{}"#,
+                crate::render::json_string(cli::LEDGER_IN_SAMPLE)
+            )),
+            "the ledger names the in-sample, unrecorded-validation state"
+        );
     }
 
     #[test]

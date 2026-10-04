@@ -1450,9 +1450,13 @@ fn completion_audit(progress: &Progress) -> CompletionAudit<'_> {
 pub(crate) fn emit_completion(
     progress: &Progress,
     operation: &str,
-    elapsed_micros: u64,
+    began: std::time::Instant,
 ) -> telemetry::Emitted {
     let audit = completion_audit(progress);
+    // A duration taken from `Instant`, never from two wall-clock reads: a
+    // backward clock step used to record "took 0 µs" through `.max(0)`, a
+    // measurement nobody took (`CLAUDE.md` §3 rule 6). D-2754 (CE-86).
+    let elapsed_micros = u64::try_from(began.elapsed().as_micros()).unwrap_or(u64::MAX);
     telemetry::emit_for_run(
         progress.attempt,
         &telemetry::Event::new(audit.level, "api.sweep", "an engine task finished")
@@ -1462,7 +1466,8 @@ pub(crate) fn emit_completion(
             .with("underlying", progress.underlying.as_str())
             .with("outcome", audit.outcome)
             .with("why", audit.why)
-            .with("elapsed_micros", elapsed_micros),
+            .with("elapsed_micros", elapsed_micros)
+            .with("elapsed_basis", "monotonic"),
     )
 }
 
@@ -1996,11 +2001,14 @@ pub(crate) fn run_with(
     // ARMED BEFORE SPAWN. If Tokio drops a queued closure during shutdown, the
     // captured guard still releases the slot even though the closure body never
     // begins. A guard constructed inside the closure would miss that window.
+    // MONOTONIC, for the duration only: `started` stays the wall-clock stamp
+    // the page shows, and an NTP step during the run cannot make the recorded
+    // `elapsed_micros` a clamped 0 or an inflated figure. D-2754 (CE-86).
+    let began = std::time::Instant::now();
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
         let finished = guard.conduct(|| conduct(&asked, started, attempt));
-        let elapsed = now_micros().saturating_sub(started);
-        let _outcome = emit_completion(&finished, "sweep", elapsed.max(0).unsigned_abs());
+        let _outcome = emit_completion(&finished, "sweep", began);
         let mut done = finished;
         done.finished_micros = Some(now_micros());
         guard.finish(done);
@@ -2131,11 +2139,14 @@ pub(crate) fn descend_with(
         "attempt" => telemetry::Value::Uint(attempt),
     );
 
+    // MONOTONIC, for the duration only: `started` stays the wall-clock stamp
+    // the page shows, and an NTP step during the run cannot make the recorded
+    // `elapsed_micros` a clamped 0 or an inflated figure. D-2754 (CE-86).
+    let began = std::time::Instant::now();
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     tokio::task::spawn_blocking(move || {
         let finished = guard.conduct(|| conduct_descent(&asked, started, attempt));
-        let elapsed = now_micros().saturating_sub(started);
-        let _outcome = emit_completion(&finished, "descent", elapsed.max(0).unsigned_abs());
+        let _outcome = emit_completion(&finished, "descent", began);
         let mut done = finished;
         done.finished_micros = Some(now_micros());
         guard.finish(done);
@@ -2521,8 +2532,22 @@ fn observe_elsewhere(dir: &std::path::Path, now: i64) -> ExternalObservation {
         _ => "unknown",
     };
     let named_sweep = matches!(marker.field("command"), Some(telemetry::OwnedValue::Str(command)) if cli::is_sweep_command(command));
-    let age = now.saturating_sub(last.at_unix_millis).max(0);
+    // SIGNED. The CLI's sink clamps stamps up to a floor it resumes from disk,
+    // so after a backward clock step its events can be stamped AHEAD of this
+    // clock. `.max(0)` used to read that as "age 0", and a dead CLI stayed
+    // "running" for the size of the step. A negative age is now named as an
+    // unageable one. D-2755 (CE-87).
+    let age = now.saturating_sub(last.at_unix_millis);
+    let ahead = (age < 0).then(|| {
+        format!(
+            "the newest CLI event is stamped {} ms ahead of this server's clock, so its activity cannot be aged; silence is not completion",
+            age.unsigned_abs()
+        )
+    });
     let (status, why) = match (marker.message.as_str(), phase) {
+        ("command started", "running") if ahead.is_some() && marker.run > 0 && named_sweep => {
+            ("unknown", ahead.as_deref().unwrap_or_default())
+        }
         ("command started", "running")
             if age <= STALE_AFTER_MILLIS && marker.run > 0 && named_sweep =>
         {
@@ -3287,6 +3312,10 @@ fn command_with_configuration(
         "attempt" => telemetry::Value::Uint(attempt),
     );
 
+    // MONOTONIC, for the duration only: `started` stays the wall-clock stamp
+    // the page shows, and an NTP step during the run cannot make the recorded
+    // `elapsed_micros` a clamped 0 or an inflated figure. D-2754 (CE-86).
+    let began = std::time::Instant::now();
     let guard = TaskFinisher::audited(std::sync::Arc::clone(site), audit).with_lease(lease);
     let store_root = site.store_root.clone();
     let launch_site = std::sync::Arc::clone(site);
@@ -3309,8 +3338,7 @@ fn command_with_configuration(
                 None => conduct_command(&asked, started, attempt),
             },
         });
-        let elapsed = now_micros().saturating_sub(started);
-        let emitted = emit_completion(&finished, asked.word(), elapsed.max(0).unsigned_abs());
+        let emitted = emit_completion(&finished, asked.word(), began);
         let mut done = finished;
         command_terminal_audit(&asked, &mut done, emitted);
         done.finished_micros = Some(now_micros());
@@ -6285,13 +6313,23 @@ mod tests {
             "the window is reported so the page decides, not this: {json}"
         );
 
-        // A CLOCK BEHIND THE STORE'S must not read as a sweep in the future.
+        // A CLOCK BEHIND THE STORE'S cannot age the newest event, so it is
+        // neither a sweep in the future nor a live one: CE-87 / D-2755. The
+        // age is reported signed, and the status names the clock.
         let skewed = elsewhere_over(&dir, 0);
         assert!(
-            skewed.contains(r#""age_millis":0"#),
-            "age is clamped at zero under clock skew: {skewed}"
+            skewed.contains(r#""age_millis":-"#),
+            "a stamp ahead of this clock is reported as a negative age: {skewed}"
         );
-        assert!(skewed.contains(r#""status":"running""#));
+        assert!(skewed.contains(r#""status":"unknown""#), "{skewed}");
+        assert!(
+            skewed.contains("ahead of this server's clock"),
+            "the reason names the clock: {skewed}"
+        );
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"running""#),
+            "the same marker, aged by a clock that is not behind it, is running"
+        );
         assert!(
             json.contains(r#""status":"unknown""#),
             "stale is not completed"
@@ -6318,16 +6356,20 @@ mod tests {
             );
         };
         emit("command started", "running");
-        let status =
-            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0));
+        let status = super::observed_status(
+            Some(&local),
+            super::external_observation(Some(&dir), super::now_micros() / 1_000),
+        );
         assert!(
             status.contains(r#""attempt":44"#),
             "new CLI attempt replaces finished browser slot: {status}"
         );
         assert!(status.contains(r#""status":"running""#));
         local.finished_micros = Some(i64::MAX);
-        let overlapping =
-            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0));
+        let overlapping = super::observed_status(
+            Some(&local),
+            super::external_observation(Some(&dir), super::now_micros() / 1_000),
+        );
         assert!(
             overlapping.contains(r#""status":"running""#),
             "a CLI command that started before browser completion remains active: {overlapping}"
@@ -6335,7 +6377,7 @@ mod tests {
         local.finished_micros = Some(2);
         let _ = sink.emit_for_run(44, &telemetry::Event::info("cli.audit", "rung finished"));
         assert!(
-            elsewhere_over(&dir, 0).contains(r#""status":"running""#),
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"running""#),
             "rung completion does not finish its command"
         );
         emit("command finished", "completed");
@@ -6343,13 +6385,16 @@ mod tests {
         assert!(completed.contains(r#""status":"completed""#));
         assert!(completed.contains(r#""in_flight":false"#));
         emit("command finished", "refused");
-        let refused = elsewhere_over(&dir, 0);
+        let refused = elsewhere_over(&dir, super::now_micros() / 1_000);
         assert!(refused.contains(r#""status":"refused""#));
         assert!(!refused.contains(r#""refusal":null"#));
         local.finished_micros = Some(i64::MAX);
         assert!(
-            super::observed_status(Some(&local), super::external_observation(Some(&dir), 0))
-                .contains("old completed browser run")
+            super::observed_status(
+                Some(&local),
+                super::external_observation(Some(&dir), super::now_micros() / 1_000)
+            )
+            .contains("old completed browser run")
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -6369,12 +6414,12 @@ mod tests {
         for _ in 0..255 {
             assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
         }
-        let observed = elsewhere_over(&dir, 0);
+        let observed = elsewhere_over(&dir, super::now_micros() / 1_000);
         assert!(observed.contains(r#""status":"running""#), "{observed}");
         assert!(observed.contains(r#""attempt":91"#), "{observed}");
         assert!(!observed.contains(r#""attempt":92"#), "{observed}");
         assert_eq!(sink.emit_for_run(0, &attempt), telemetry::Emitted::Written);
-        let capped = elsewhere_over(&dir, 0);
+        let capped = elsewhere_over(&dir, super::now_micros() / 1_000);
         assert!(capped.contains(r#""status":"unknown""#), "{capped}");
         let finished = telemetry::Event::info("cli.lifecycle", "command finished")
             .with("phase", "completed")
@@ -6409,7 +6454,7 @@ mod tests {
                 sink.emit_for_run(102, &inspected),
                 telemetry::Emitted::Written
             );
-            let observed = elsewhere_over(&dir, 0);
+            let observed = elsewhere_over(&dir, super::now_micros() / 1_000);
             assert!(
                 observed.contains(r#""status":"running""#),
                 "{command}: {observed}"
@@ -6425,7 +6470,9 @@ mod tests {
             sink.emit_for_run(103, &malformed),
             telemetry::Emitted::Written
         );
-        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
+        );
         let mut tail = super::status_tail(&dir, "cli.lifecycle", None, 1);
         assert!(super::tail_fault(&tail).is_none());
         tail.records.first_mut().expect("latest fixture record").cut = true;
@@ -6498,7 +6545,7 @@ mod tests {
         );
 
         marker("command started", "running");
-        let running = super::observe_elsewhere(&dir, 0);
+        let running = super::observe_elsewhere(&dir, super::now_micros() / 1_000);
         assert!(
             running.body.contains(r#""status":"running""#),
             "{}",
@@ -6514,7 +6561,7 @@ mod tests {
         // PAST THE WINDOW: newer traffic pushes the marker out of the newest
         // 4 MiB, and no marker found means the cap still answers `unknown`.
         fill(over_cap);
-        let lost = super::observe_elsewhere(&dir, 0);
+        let lost = super::observe_elsewhere(&dir, super::now_micros() / 1_000);
         assert!(lost.body.contains(r#""status":"unknown""#), "{}", lost.body);
         assert!(lost.body.contains("scan cap true"), "{}", lost.body);
         assert!(lost.uncertain && !lost.launch_clear, "{}", lost.body);
@@ -6573,14 +6620,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let sink = telemetry::Sink::open(&telemetry::Config::new(&dir)).expect("sink");
         let _ = sink.emit_for_run(45, &telemetry::Event::info("cli.audit", "rung finished"));
-        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
+        );
         assert!(
             super::observed_status(None, super::external_observation(None, 0))
                 .contains(r#""status":"unknown""#)
         );
         std::fs::remove_file(telemetry::current_path(&dir)).expect("remove fixture log");
         std::fs::create_dir(telemetry::current_path(&dir)).expect("unreadable log fixture");
-        assert!(elsewhere_over(&dir, 0).contains(r#""status":"unknown""#));
+        assert!(
+            elsewhere_over(&dir, super::now_micros() / 1_000).contains(r#""status":"unknown""#)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

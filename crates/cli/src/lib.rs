@@ -8460,6 +8460,8 @@ pub fn render_top_record(
     use crate::columns::{left, right};
     let mut out = stored_provenance(&crate::results::read_field(&rows.underlying));
     blank_line_after_banner(&mut out);
+    // THE IN-SAMPLE LINE, ON THE READER `range-all` WAS NOT. D-2792.
+    let _ = writeln!(out, "\n  !! {LEDGER_IN_SAMPLE}");
     let _ = writeln!(
         out,
         "\nTOP COMBINATIONS\n  feed {} · {} · {} · {}-{:02}..{}-{:02}\n  run {}",
@@ -16949,6 +16951,21 @@ const IN_SAMPLE_WARNING: &str = "\n  \
     `range-all` computes the walk-forward, the PBO and the bootstrap per rung\n  \
     and discards the report that carries them. Treat these totals as an upper\n  \
     bound on what the setup did, not as an estimate of what it will do.\n";
+
+/// What every reader of a RECORDED run says about its figures. CE-93, D-2792.
+///
+/// The ledger stores whether a budget halted a run and nothing about
+/// validation: `validate` is folded into the identity and cannot be read back,
+/// and walk-forward, PBO and bootstrap verdicts are never stored. So every row
+/// a ledger reader shows -- `cli top`, `/engine/top.json`, `/backtest.json`,
+/// `/frontier.json` and the page's crown -- is an in-sample best-of-search
+/// figure whose validation state is unknown, and `range-all`'s
+/// [`IN_SAMPLE_WARNING`] was the only reader that said anything like it.
+pub const LEDGER_IN_SAMPLE: &str = "IN SAMPLE, VALIDATION NOT RECORDED. A recorded run's totals are the \
+    best of its search, chosen and scored on the same bars. The ledger does not record whether \
+    walk-forward, PBO or the bootstrap ran for it, and stores none of their verdicts, so a \
+    recorded run is a CANDIDATE, not a finding. The best run across the ledger is the largest of \
+    many searches and is an upper bound, not an estimate.";
 
 /// The exact run a recorded rung's page names, read back from the store BY
 /// IDENTITY.

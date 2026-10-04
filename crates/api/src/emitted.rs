@@ -813,10 +813,12 @@ fn cases() -> Vec<Case> {
             );
             progress.finished_micros = Some(2);
             progress.refusal = Some("no result was recorded".into());
-            crate::sweeprun::emit_completion(&progress, "sweep", 1);
+            crate::sweeprun::emit_completion(&progress, "sweep", std::time::Instant::now());
         }),
         mine: Box::new(|record| {
-            says(record, "operation", "sweep")
+            // CE-86 / D-2754: the duration is monotonic and says so.
+            says(record, "elapsed_basis", "monotonic")
+                && says(record, "operation", "sweep")
                 && says(record, "outcome", "refused")
                 && says(record, "why", "no result was recorded")
         }),
