@@ -47,7 +47,8 @@
 //!
 //! No cost of any kind. On the indices that is correct by charter — an index
 //! is not tradeable. On a cash equity it is NOT correct: brokerage, STT, stamp
-//! duty, exchange charges, the SEBI fee and GST are real, and no rate for any of
+//! duty, exchange charges, the SEBI fee, the IPFT, DP charges and GST are real
+//! (an UNVERIFIED list, D-1779), and no rate for any of
 //! them is quoted here because `docs/00-charter.md` records no source for an
 //! equity charge (`CLAUDE.md` §3 rule 1; D-0681). The operator
 //! asked for this pass without costs so that the rare tail is visible before
@@ -663,8 +664,8 @@ fn not_on_the_surface(out: &mut String, elsewhere: &[String]) {
 /// `sweep_wiring_tests::every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate`
 /// holds it to the header `runner::audit::render` prints.
 pub(crate) const EQUITY_TOTALS_GROSS: &str = "NO COST OF ANY KIND IS CHARGED. Correct on an index by charter; NOT correct on a\n\
-     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee and\n\
-     GST all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
+     cash equity, where brokerage, STT, stamp duty, exchange charges, the SEBI fee, the\n\
+     IPFT, DP charges and GST (an UNVERIFIED list) all apply and none is subtracted: every equity total is GROSS OF EVERY CHARGE.\n\
      COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result\n\
      carries Selection V6 or execution authority until a charter-sourced equity charge\n\
      stack exists.";
@@ -2672,7 +2673,7 @@ mod tests {
         assert!(!charges.contains("0.025"), "{charges}");
         for claim in [
             "NO COST OF ANY KIND IS CHARGED",
-            "brokerage, STT, stamp duty, exchange charges, the SEBI fee and\nGST",
+            "brokerage, STT, stamp duty, exchange charges, the SEBI fee, the\nIPFT, DP charges and GST (an UNVERIFIED list)",
             "every equity total is GROSS OF EVERY CHARGE",
             "COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681)",
             "No equity result\ncarries Selection V6",

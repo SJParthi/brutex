@@ -1049,7 +1049,9 @@ impl Ladder {
         }
     }
 
-    /// The same ladder with a different per-level candidate ceiling.
+    /// The same ladder with a different candidate ceiling: CUMULATIVE across every
+    /// level past k=1, not per level, as `Ladder::exhausted` counts it
+    /// (Z1-slice09-F2, D-1771).
     ///
     /// A ceiling of zero is raised to one, for the reason
     /// [`Ladder::with_min_hits`] raises `min_hits`: a ceiling of zero refuses
@@ -1068,7 +1070,8 @@ impl Ladder {
         }
     }
 
-    /// The per-level candidate ceiling this ladder will actually apply.
+    /// The cumulative candidate ceiling this ladder will actually apply, across
+    /// every level past k=1.
     #[must_use]
     pub const fn ceiling(&self) -> usize {
         self.ceiling

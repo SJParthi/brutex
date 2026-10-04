@@ -8753,7 +8753,7 @@
             {#if runState && (runState.running || runState.passes > 0)}
               <div class="runcard">
                 <div class="runtop">
-                  <span><b>{n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
+                  <span><b>{runState.rowsNow == null || runState.rowsAtStart == null ? 'an unknown number of' : n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
                   <span>pass <b>{n(runState.passes)}</b></span>
                   {#if runState.retries > 0}<span><b>{n(runState.retries)}</b> retried</span>{/if}
                   <span class="runwhere">{runState.running ? (runState.stopping ? 'stopping at the next leg' : 'running on the server') : 'finished'}</span>

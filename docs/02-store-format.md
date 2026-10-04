@@ -1294,7 +1294,11 @@ the completion is appended and synced last. The semantic completion identity
 excludes physical first offsets, so a valid crash orphan remains evidence but
 does not re-key an exact retry. Reopen validates every record and reconstructs
 the parameter blocks, exact row order, row count, sparse-capability/refusal
-partition, admission marginals, 4×2 matrix and ordered digests before indexing.
+partition, 4×2 matrix and ordered digests before indexing. Admission marginals
+are proven once, at preparation, where `from_ledgers` holds the admission
+ledger (`require_admission_marginals`); reopen is given no admission ledger, so
+it proves the matrix consistent with the rows it holds, not with admission
+(Z1-slice17-F2, D-1771).
 Missing rows, foreign authority, torn or corrupt records, a semantically
 resealed matrix redistribution and same-length post-open mutation all refuse.
 Pages are limited to 256 rows. Preparation and reopen are O(rows); only an

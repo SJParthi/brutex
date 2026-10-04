@@ -439,6 +439,14 @@ pub enum ConfigError {
         /// The number of bytes read before the reader stopped.
         at_least: u64,
     },
+    /// The file opens with a byte-order mark, U+FEFF.
+    ///
+    /// Refused by name. It used to fall through to line 1's parse and come
+    /// back as an unknown key or an unparseable line, which is loud but sends
+    /// the operator looking for a typo they cannot see (CE-77, D-1780). It is
+    /// not stripped: §4 bans a fallback that hides a failure, and an editor
+    /// that writes one is worth knowing about.
+    ByteOrderMark,
     /// A line is longer than [`MAX_LINE_BYTES`].
     LineTooLong {
         /// One-based line number.
@@ -568,6 +576,10 @@ impl fmt::Display for ConfigError {
             Self::LineTooLong { line, len } => {
                 write!(f, "line {line} is {len} bytes, max {MAX_LINE_BYTES}")
             }
+            Self::ByteOrderMark => write!(
+                f,
+                "the file starts with a byte-order mark (U+FEFF); save it as UTF-8 without one"
+            ),
             Self::Unparseable { line } => write!(f, "line {line} is not a line this reader knows"),
             Self::UnknownTable { line } => {
                 write!(f, "line {line} is not a [vendor.<name>] table header")
@@ -832,6 +844,9 @@ impl CredentialConfig {
         let mut vendors: Vec<VendorPaths> = Vec::with_capacity(Vendor::ALL.len());
         let mut current: Option<Pending> = None;
 
+        if text.starts_with('\u{feff}') {
+            return Err(ConfigError::ByteOrderMark);
+        }
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
             if raw.len() > MAX_LINE_BYTES {

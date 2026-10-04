@@ -229,10 +229,11 @@ pub struct Progress {
     pub passes: u32,
     /// How many subsequent passes actually retried at least one failed feed.
     pub retries: u32,
-    /// The store's row count when the run started.
-    pub rows_at_start: u64,
-    /// The store's row count as of the last pass.
-    pub rows_now: u64,
+    /// The store's row count when the run started; `None` when the census
+    /// total does not fit a `u64` (see [`rows_now`]).
+    pub rows_at_start: Option<u64>,
+    /// The store's row count as of the last pass; `None` as above.
+    pub rows_now: Option<u64>,
     /// One per vendor, in the order the feeds were ticked.
     pub feeds: Vec<FeedReport>,
     /// The summary, once there is one. `None` means still running, and it is
@@ -293,9 +294,17 @@ impl Progress {
         out.push_str(",\"retries\":");
         out.push_str(&self.retries.to_string());
         out.push_str(",\"rowsAtStart\":");
-        out.push_str(&self.rows_at_start.to_string());
+        out.push_str(
+            &self
+                .rows_at_start
+                .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
+        );
         out.push_str(",\"rowsNow\":");
-        out.push_str(&self.rows_now.to_string());
+        out.push_str(
+            &self
+                .rows_now
+                .map_or_else(|| "null".to_owned(), |rows| rows.to_string()),
+        );
         out.push_str(",\"stopping\":");
         out.push_str(if self.stopping { "true" } else { "false" });
         out.push_str(",\"finished\":");
@@ -605,13 +614,26 @@ pub fn by_feed(legs: Vec<Leg>) -> Vec<(String, Vec<Leg>)> {
 /// `docs/06-limits.md` "Pull-run and recovery row counts (D-1382)" says why a
 /// header-only read is not used. UNVERIFIED: the bound is read from the
 /// code and has not been measured.
-pub(crate) fn rows_now(site: &Site) -> u64 {
+pub(crate) fn rows_now(site: &Site) -> Option<u64> {
     let (censuses, _) = crate::server::census_now(site);
-    censuses
-        .iter()
-        .filter_map(census::VendorCensus::counters)
-        .map(|(_months, rows, _entries)| rows)
-        .sum()
+    rows_total(
+        censuses
+            .iter()
+            .filter_map(census::VendorCensus::counters)
+            .map(|(_months, rows, _entries)| rows),
+    )
+}
+
+/// The vendors' row counts added, or `None` when the total does not fit.
+///
+/// A plain `.sum()` here panicked on overflow, and the release profile aborts
+/// on a panic: two CRC-valid manifests each claiming about `u64::MAX` rows
+/// (`Entry::check` refuses only zero) killed the server on the first pull
+/// POST and on every restart after it (CE-74, D-1776). The page shows the
+/// count as unknown instead, and the pass loop treats an unknown count as no
+/// proven growth.
+fn rows_total(mut rows: impl Iterator<Item = u64>) -> Option<u64> {
+    rows.try_fold(0_u64, u64::checked_add)
 }
 
 /// Edits the live progress, if a run still owns the slot.
@@ -676,8 +698,11 @@ fn stopping(site: &Site) -> bool {
 /// `/pull/run` refuses to start a second one while it holds. A task that
 /// panicked, or that was cancelled at a shutdown, would leave that `None` in
 /// place forever and every later press would be refused with `AlreadyRunning`
-/// against a run that no longer exists. `Drop` runs on the panic path, so the
-/// slot is released on every exit rather than only the happy one.
+/// against a run that no longer exists. `Drop` runs when the task is cancelled
+/// or dropped at shutdown, in every build, so the slot is released on those
+/// exits as well as the happy one. A panic is covered only where it unwinds:
+/// `dev` and `test`. `release` sets `panic = "abort"` (root `Cargo.toml`), so
+/// there a panic ends the process and the slot dies with it (poison-1, D-1771).
 ///
 /// It writes only when nothing else has: a run that finished normally has
 /// already put its own summary there, and this must not paint over it.
@@ -1077,7 +1102,9 @@ where
         {
             break;
         }
-        if after > before {
+        // Growth is proven only by two known counts; an unknown one (CE-74)
+        // proves nothing, so the pass is judged as if nothing landed.
+        if matches!((before, after), (Some(before), Some(after)) if after > before) {
             clean_empty = 0;
             continue;
         }
@@ -1108,14 +1135,17 @@ where
         progress.finished = Some(run_summary(
             progress,
             &outcomes,
-            current_rows.saturating_sub(started_rows),
+            current_rows
+                .zip(started_rows)
+                .map(|(now, start)| now.saturating_sub(start)),
         ));
     });
 }
 
 /// Terminal feeds remain part of the final verdict even while other feeds
 /// reach an idle stop. Neither a skipped feed nor a stopped task is success.
-fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> String {
+fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: Option<u64>) -> String {
+    let landed_said = landed_words(landed);
     let halted: Vec<String> = progress
         .feeds
         .iter()
@@ -1131,7 +1161,7 @@ fn run_summary(progress: &Progress, outcomes: &[PassOutcome], landed: u64) -> St
         .collect();
     if !halted.is_empty() {
         return format!(
-            "INCOMPLETE after {} pass(es); {landed} bar(s) added to the store census. \
+            "INCOMPLETE after {} pass(es); {landed_said} bar(s) added to the store census. \
              {} pass(es) were retried after a failure. Halted feed(s): {} \
              Full basket coverage has not been verified.{}",
             progress.passes,
@@ -1186,10 +1216,20 @@ fn note_dead_chain(site: &Site, nth: usize, attempted: usize, dead: &tokio::task
     });
 }
 
+/// The bars-added figure in words: the number, or `an unknown number of`
+/// when the census total did not fit a `u64` (CE-74, D-1776).
+fn landed_words(landed: Option<u64>) -> String {
+    landed.map_or_else(
+        || "an unknown number of".to_owned(),
+        |rows| rows.to_string(),
+    )
+}
+
 /// Describe an operator stop, pass ceiling, or idle stop. Store growth and
 /// receipt verdicts cannot establish coverage of every requested instrument.
 #[must_use]
-pub fn summary_of(passes: u32, retries: u32, landed: u64, stopped: bool) -> String {
+pub fn summary_of(passes: u32, retries: u32, landed: Option<u64>, stopped: bool) -> String {
+    let landed = landed_words(landed);
     // NOT `retried`: clippy denies a binding whose name is one letter from
     // `retries` beside it, and it is right — the two mean different things.
     let note = if retries > 0 {
@@ -1683,6 +1723,24 @@ mod tests {
         assert!(progress.json().contains("\"running\":false"));
     }
 
+    /// CE-74: a census total past `u64::MAX` is unknown, not a panic, and the
+    /// page is told so.
+    #[test]
+    fn a_row_total_that_does_not_fit_is_unknown_not_a_panic() {
+        assert_eq!(rows_total([u64::MAX, 1].into_iter()), None);
+        assert_eq!(rows_total([u64::MAX - 1, 1].into_iter()), Some(u64::MAX));
+        assert_eq!(rows_total(std::iter::empty()), Some(0));
+        let unknown = Progress {
+            rows_at_start: Some(5),
+            rows_now: None,
+            started: true,
+            ..Progress::default()
+        };
+        let json = unknown.json();
+        assert!(json.contains(r#""rowsAtStart":5,"rowsNow":null"#), "{json}");
+        assert!(summary_of(2, 0, None, false).contains("an unknown number of bar(s)"));
+    }
+
     /// Every field the page reads is in the document, with the name it reads.
     ///
     /// Hand-written JSON has no compiler checking the key names against the
@@ -1692,8 +1750,8 @@ mod tests {
         let progress = Progress {
             passes: 7,
             retries: 2,
-            rows_at_start: 10,
-            rows_now: 99,
+            rows_at_start: Some(10),
+            rows_now: Some(99),
             stopping: true,
             finished: None,
             started: true,
@@ -1776,9 +1834,9 @@ mod tests {
     /// backfill was complete when it was cut short.
     #[test]
     fn the_ceiling_stop_is_not_worded_as_a_finished_window() {
-        let finished = summary_of(3, 0, 500, false);
-        let ceiling = summary_of(MAX_PASSES, 4, 500, false);
-        let stopped = summary_of(9, 1, 500, true);
+        let finished = summary_of(3, 0, Some(500), false);
+        let ceiling = summary_of(MAX_PASSES, 4, Some(500), false);
+        let stopped = summary_of(9, 1, Some(500), true);
 
         assert!(finished.contains("Idle retries stopped"), "{finished}");
         assert!(finished.contains("Full basket coverage has not been verified"));
@@ -2289,7 +2347,7 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(
             (progress.passes, progress.retries, progress.rows_now),
-            (1, 0, 0)
+            (1, 0, Some(0))
         );
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 1, 0));
@@ -2319,7 +2377,7 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 6);
         assert_eq!(
             (progress.passes, progress.retries, progress.rows_now),
-            (3, 0, 0)
+            (3, 0, Some(0))
         );
         assert_eq!(progress.feeds[0].legs_done, 2);
         let summary = progress.finished.expect("idle summary");
@@ -2600,7 +2658,7 @@ mod tests {
             assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
             assert_eq!(feed.credential_dead, code == 401);
             assert_eq!(progress.retries, 1);
-            let summary = run_summary(&progress, &passes.outcomes, 0);
+            let summary = run_summary(&progress, &passes.outcomes, Some(0));
             assert!(summary.contains("INCOMPLETE") && summary.contains(&format!("HTTP {code}")));
             assert!(!summary.contains("HTTP 503"));
         }
@@ -2628,7 +2686,7 @@ mod tests {
         let feed = &progress.feeds[0];
         assert_eq!((feed.legs_done, feed.skipped, feed.retries), (1, 2, 1));
         assert!(feed.finished && feed.doing.is_empty());
-        assert!(run_summary(&progress, &passes.outcomes, 0).contains("pressed stop"));
+        assert!(run_summary(&progress, &passes.outcomes, Some(0)).contains("pressed stop"));
         assert!(passes.respond(&[]).await.is_empty());
         assert_eq!(
             observed(&passes.site),
@@ -2775,7 +2833,7 @@ mod tests {
                 progress.rows_at_start,
                 progress.rows_now
             ),
-            (5, 1, 0, 1)
+            (5, 1, Some(0), Some(1))
         );
         assert_eq!(
             (
@@ -2834,7 +2892,7 @@ mod tests {
             let progress = observed(&passes.site);
             assert_eq!(progress.retries, index);
             assert_eq!(progress.feeds[0].retries, index);
-            assert_eq!(rows_now(&passes.site), 0);
+            assert_eq!(rows_now(&passes.site), Some(0));
         }
         let progress = observed(&passes.site);
         assert!(
@@ -2844,7 +2902,7 @@ mod tests {
                 .unwrap()
                 .contains("HTTP 200")
         );
-        let summary = summary_of(MAX_PASSES, progress.retries, 0, false);
+        let summary = summary_of(MAX_PASSES, progress.retries, Some(0), false);
         assert!(
             summary.contains("ceiling")
                 && summary.contains("Full basket coverage has not been verified")
@@ -2938,7 +2996,7 @@ mod tests {
             .as_deref()
             .expect("terminal cause");
         assert!(why.contains("HTTP 422") && !why.contains("HTTP 503"));
-        assert!(run_summary(&progress, &outcomes, 0).contains("INCOMPLETE"));
+        assert!(run_summary(&progress, &outcomes, Some(0)).contains("INCOMPLETE"));
     }
 
     #[tokio::test]
@@ -3199,8 +3257,8 @@ mod tests {
         let progress = Progress {
             passes: 3,
             retries: 9,
-            rows_at_start: 0,
-            rows_now: 500,
+            rows_at_start: Some(0),
+            rows_now: Some(500),
             stopping: false,
             finished: None,
             started: true,

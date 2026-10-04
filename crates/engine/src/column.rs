@@ -112,8 +112,10 @@ impl Column {
     ///
     /// # Why this exists, and what it measured
     ///
-    /// [`crate::Ladder::walk`]'s `seen` set rejects a duplicate by its MASK -- which
-    /// bits a candidate names. Two candidates that name different bits and select the
+    /// [`crate::Ladder::walk`] rejected a duplicate by its MASK -- which bits a
+    /// candidate names -- through a `seen` set that D-1440 removed once the prefix
+    /// join was shown injective; masks are still the only thing that keys a
+    /// candidate (P9-04). Two candidates that name different bits and select the
     /// SAME BARS are not duplicates to it, and they are the same hypothesis to
     /// everything downstream: the same trades, the same mean, the same t-statistic.
     ///
@@ -622,8 +624,9 @@ mod tests {
     ///
     /// Bit 9 is set on exactly the bars bit 3 is set on, so a candidate naming
     /// `{3}`, one naming `{9}` and one naming `{3,9}` all select the same bars.
-    /// `Ladder::walk`'s mask-keyed `seen` calls those three distinct candidates,
-    /// and they are one hypothesis.
+    /// `Ladder::walk` keys candidates by mask (its former `seen` set did too,
+    /// until D-1440), so it calls those three distinct candidates, and they are
+    /// one hypothesis (P9-04).
     #[test]
     fn masks_that_differ_but_select_the_same_bars_share_a_fingerprint() {
         let bars = 300;

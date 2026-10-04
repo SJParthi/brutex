@@ -3081,21 +3081,41 @@ fn log_dir_from(
 pub fn install_log() -> String {
     let dir = match log_dir_from(std::env::var_os("BRUTEX_LOG_DIR"), store_root().ok()) {
         Ok(dir) => dir,
-        Err(why) => return format!("events are NOT being recorded: {why}"),
+        Err(why) => return format!("{UNLOGGED}: {why}"),
     };
     let Some(dir) = dir else {
-        return "events are NOT being recorded: neither BRUTEX_LOG_DIR nor a store root \
+        return format!(
+            "{UNLOGGED}: neither BRUTEX_LOG_DIR nor a store root \
                 is set, so there is nowhere to write them. Set BRUTEX_LOG_DIR, or set \
                 BRUTEX_STORE or HOME so the log can sit beside the store."
-            .to_owned();
+        );
     };
     let shown = log_banner(&dir, store_root().ok().as_deref());
     match telemetry::install(&telemetry::Config::new(dir)) {
-        Err(why) => format!("events are NOT being recorded: {why}"),
+        Err(why) => format!("{UNLOGGED}: {why}"),
         // THE DIRECTORY, NOT A TICK. "recorded successfully" would leave the
         // operator exactly where the measurement above found them: told it
         // worked, and unable to find the file.
         Ok(_installed) => shown,
+    }
+}
+
+/// The opening words of every [`install_log`] answer that means no sink.
+pub const UNLOGGED: &str = "events are NOT being recorded";
+
+/// Says on `err`, before the command runs, that this run has no log.
+///
+/// [`install_log`]'s answer is printed above the report, so it reached the
+/// operator only when the command ENDED. Since D-1537 a second `cli` on one
+/// store is refused the sink, so a long sweep started beside another ran
+/// unlogged for hours with nothing said until exit (conc9-2, D-1774). A
+/// refusal is now also written to `err` at once; a sink that installed writes
+/// nothing here. The answer above the report is unchanged.
+pub fn announce_unlogged(line: &str, err: &mut impl std::io::Write) {
+    if line.starts_with(UNLOGGED) {
+        // Best effort, like every stderr write here: a closed stderr must not
+        // stop the computation it was only describing.
+        let _closed = writeln!(err, "{line}").and_then(|()| err.flush());
     }
 }
 
@@ -5444,8 +5464,19 @@ fn grid_rungs(bars: &[indicators::Candle]) -> usize {
     // anywhere -- and this knob is settable over HTTP from a free-text box, so
     // a typo silently bought a different grid. `CLAUDE.md` §4: degrade loudly
     // and name the reason, or refuse. `audit_bars` prints what was refused.
-    if let Some(n) = crate::knobs::count_usize("BRUTEX_GRID_RUNGS") {
-        return n.min(rungs_within_cell_budget()).max(2);
+    //
+    // AND A VALUE OUTSIDE 2..=budget IS REFUSED BY NAME, NOT CLAMPED. This
+    // clamped silently (1 became 2, 100000 became the budget) while
+    // `knobs::refused()` stayed `None`, so the report claimed the operator's
+    // grid; `strict_range_knobs` refuses the same values (CE-75, D-1778).
+    // A refused value falls back to the derived count, and the report says so.
+    if let Some(n) =
+        crate::knobs::count_usize_within("BRUTEX_GRID_RUNGS", rungs_within_cell_budget())
+    {
+        if n >= 2 {
+            return n;
+        }
+        crate::knobs::refuse_value("BRUTEX_GRID_RUNGS", &n.to_string());
     }
     let reference = reference_price(bars);
     // ONE BAR: this sizes a DISPLAY rung count, not a priced ladder, and it has
@@ -8372,7 +8403,10 @@ fn newest_complete(
         if feed.is_some_and(|f| crate::results::read_field(&record.feed) != f) {
             continue;
         }
-        if underlying.is_some_and(|u| crate::results::read_field(&record.underlying) != u) {
+        if underlying.is_some_and(|u| {
+            canonical_underlying(&crate::results::read_field(&record.underlying))
+                != canonical_underlying(u)
+        }) {
             continue;
         }
         // `>=` so a later run wins a tie: two runs with identical totals are
@@ -8535,8 +8569,10 @@ fn results_at(root: &std::path::Path, feed: Option<&str>, underlying: Option<&st
             Err(why) => return format!("refused: {why}\n"),
             Ok(record) => {
                 let keep = feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
-                    && underlying
-                        .is_none_or(|u| crate::results::read_field(&record.underlying) == u);
+                    && underlying.is_none_or(|u| {
+                        canonical_underlying(&crate::results::read_field(&record.underlying))
+                            == canonical_underlying(u)
+                    });
                 if keep {
                     rows.push(record);
                 }
@@ -16054,13 +16090,13 @@ fn latest_for(
     let count = store.len()?;
     let (feed, name, tf) = (
         crate::results::field(vendor_word),
-        crate::results::field(underlying),
+        canonical_underlying(underlying),
         crate::results::field(rung),
     );
     for back in 1..=count {
         let record = store.read(count.saturating_sub(back))?;
         if record.feed == feed
-            && record.underlying == name
+            && canonical_underlying(&crate::results::read_field(&record.underlying)) == name
             && record.timeframe == tf
             && record.from_year == from.0
             && record.from_month == from.1
@@ -17428,6 +17464,98 @@ fn identity_hex(identity: &[u8; 32]) -> String {
     out
 }
 
+/// One cached writer handle per process, for one root at a time.
+///
+/// # Why (p12num-1, D-1777)
+///
+/// `ensure_frontier_rows`, `ensure_trade_rows` and `ensure_detail_receipt`
+/// opened `frontier.bin`, `chosen-trades.bin` and `detail-sets.bin` afresh for
+/// every recorded run, and each open reads and seal-checks every row: Θ(total rows) per run, so Θ(runs × rows) per
+/// `sweep-all` (the helper extrapolated about 9.9 GB read over 1,680 runs), and
+/// the frontier's open does it under the exclusive lock. `frontier`'s own doc
+/// promised the walk "once per process". This keeps one handle and brings it
+/// up to date with its `refresh`, which reads only the rows appended since:
+/// O(delta) per run, the same trade `results::with_shared_writer` makes.
+///
+/// # When it opens fresh instead
+///
+/// A different root, a path that now names a different file than the handle
+/// holds (compared by device and inode, two `stat`s), or a refused refresh
+/// (for example a ragged tail another process is still writing) each drop the
+/// handle and open fresh, which is exactly what each type's `refresh` doc tells
+/// a cache to do. A refused operation drops it too, so the next run reopens.
+/// Off unix there is no inode to compare, and every call opens fresh, as before.
+fn with_cached_handle<H, T>(
+    cache: &std::sync::Mutex<Option<CachedHandle<H>>>,
+    root: &std::path::Path,
+    file: &std::path::Path,
+    open: impl Fn(&std::path::Path) -> Result<H, String>,
+    refresh: impl Fn(&mut H) -> Result<(), String>,
+    operation: impl FnOnce(&mut H) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut held = cache
+        .lock()
+        .map_err(|_| "a cached result-file handle is poisoned; nothing was written".to_owned())?;
+    let named = file_identity(file);
+    let reusable = held.take().and_then(|mut cached| {
+        let same = cached.root == root && named.is_some() && cached.identity == named;
+        (same && refresh(&mut cached.handle).is_ok()).then_some(cached)
+    });
+    let mut cached = match reusable {
+        Some(cached) => cached,
+        None => {
+            let handle = open(root)?;
+            CachedHandle {
+                root: root.to_path_buf(),
+                identity: file_identity(file),
+                handle,
+            }
+        }
+    };
+    let result = operation(&mut cached.handle);
+    if result.is_ok() {
+        *held = Some(cached);
+    }
+    result
+}
+
+/// A handle kept by [`with_cached_handle`], with what it was opened for.
+struct CachedHandle<H> {
+    root: std::path::PathBuf,
+    /// `(device, inode)` of the file at open time; `None` off unix, which
+    /// never matches, so every call opens fresh there.
+    identity: Option<(u64, u64)>,
+    handle: H,
+}
+
+/// The `(device, inode)` a path names now, or `None` when it cannot be read.
+fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// The process's one cached frontier writer.
+static FRONTIER_WRITER: std::sync::Mutex<Option<CachedHandle<frontier::Frontier>>> =
+    std::sync::Mutex::new(None);
+
+/// The process's one cached chosen-trades writer.
+static TRADES_WRITER: std::sync::Mutex<Option<CachedHandle<trades::Trades>>> =
+    std::sync::Mutex::new(None);
+
+/// The process's one cached detail-receipt writer.
+static RECEIPT_WRITER: std::sync::Mutex<Option<CachedHandle<result_set::Receipts>>> =
+    std::sync::Mutex::new(None);
+
 /// Makes one exact frontier block durable, or verifies the block a killed
 /// invocation left before the ledger commit.
 fn ensure_frontier_rows(
@@ -17455,29 +17583,38 @@ fn ensure_frontier_rows(
         ))
     };
 
-    let mut store = frontier::Frontier::open(root)?;
-    if store.holds(identity) {
-        return verify(&mut store);
-    }
-    if rows.is_empty() {
-        store.confirm_durable()?;
-        return Ok(Prepared::Empty);
-    }
-    match store.append_all(rows) {
-        Ok(_) => Ok(Prepared::Written(rows.len())),
-        // Another process may have won the same identity between `holds` and
-        // the append lock. Reopen and compare bytes before calling that a safe
-        // rerun; every other refusal remains a refusal.
-        Err(first) => {
-            let mut reopened = frontier::Frontier::open(root)
-                .map_err(|why| format!("{first}; reopening to verify it also failed: {why}"))?;
-            if reopened.holds(identity) {
-                verify(&mut reopened)
-            } else {
-                Err(first)
+    with_cached_handle(
+        &FRONTIER_WRITER,
+        root,
+        &frontier::Frontier::path(root),
+        frontier::Frontier::open,
+        frontier::Frontier::refresh,
+        |store| {
+            if store.holds(identity) {
+                return verify(store);
             }
-        }
-    }
+            if rows.is_empty() {
+                store.confirm_durable()?;
+                return Ok(Prepared::Empty);
+            }
+            match store.append_all(rows) {
+                Ok(_) => Ok(Prepared::Written(rows.len())),
+                // Another process may have won the same identity between `holds` and
+                // the append lock. Reopen and compare bytes before calling that a safe
+                // rerun; every other refusal remains a refusal.
+                Err(first) => {
+                    let mut reopened = frontier::Frontier::open(root).map_err(|why| {
+                        format!("{first}; reopening to verify it also failed: {why}")
+                    })?;
+                    if reopened.holds(identity) {
+                        verify(&mut reopened)
+                    } else {
+                        Err(first)
+                    }
+                }
+            }
+        },
+    )
 }
 
 /// Makes one exact trade block durable, with the same resume rule as
@@ -17501,26 +17638,35 @@ fn ensure_trade_rows(
         ))
     };
 
-    let mut store = trades::Trades::open(root)?;
-    if store.holds(identity) {
-        return verify(&mut store);
-    }
-    if rows.is_empty() {
-        store.confirm_durable()?;
-        return Ok(Prepared::Empty);
-    }
-    match store.append_all(rows) {
-        Ok(_) => Ok(Prepared::Written(rows.len())),
-        Err(first) => {
-            let mut reopened = trades::Trades::open(root)
-                .map_err(|why| format!("{first}; reopening to verify it also failed: {why}"))?;
-            if reopened.holds(identity) {
-                verify(&mut reopened)
-            } else {
-                Err(first)
+    with_cached_handle(
+        &TRADES_WRITER,
+        root,
+        &trades::Trades::path(root),
+        trades::Trades::open,
+        trades::Trades::refresh,
+        |store| {
+            if store.holds(identity) {
+                return verify(store);
             }
-        }
-    }
+            if rows.is_empty() {
+                store.confirm_durable()?;
+                return Ok(Prepared::Empty);
+            }
+            match store.append_all(rows) {
+                Ok(_) => Ok(Prepared::Written(rows.len())),
+                Err(first) => {
+                    let mut reopened = trades::Trades::open(root).map_err(|why| {
+                        format!("{first}; reopening to verify it also failed: {why}")
+                    })?;
+                    if reopened.holds(identity) {
+                        verify(&mut reopened)
+                    } else {
+                        Err(first)
+                    }
+                }
+            }
+        },
+    )
 }
 
 fn record_trades(
@@ -17736,7 +17882,14 @@ fn ensure_detail_receipt(
         direction,
         trade_policy: result_set::TradePolicy::ChosenGridV1,
     };
-    let state = result_set::Receipts::open(root)?.append_exact(receipt)?;
+    let state = with_cached_handle(
+        &RECEIPT_WRITER,
+        root,
+        &result_set::Receipts::path(root),
+        result_set::Receipts::open,
+        result_set::Receipts::refresh,
+        |receipts| receipts.append_exact(receipt),
+    )?;
     Ok(match state {
         result_set::Prepared::Written => format!(
             "  detail receipt prepared and synced: frontier={frontier_rows}, chosen trades={trade_rows}, direction={direction}, policy={}\n",
@@ -17779,7 +17932,36 @@ impl Committed {
 fn same_run_answer(mut left: results::Record, mut right: results::Record) -> bool {
     left.finished_micros = 0;
     right.finished_micros = 0;
+    // The instrument as the CANONICAL symbol on both sides: rows written before
+    // CE-76 hold the word as typed (`nifty`), and a rerun of the same identity
+    // now records `NIFTY`. The identity already names the canonical key, so
+    // the spelling is not a deterministic field of the computation.
+    left.underlying = results::field(&canonical_underlying(&results::read_field(
+        &left.underlying,
+    )));
+    right.underlying = results::field(&canonical_underlying(&results::read_field(
+        &right.underlying,
+    )));
     left == right
+}
+
+/// The instrument word as the ledger records and matches it: the canonical
+/// symbol of the key [`stored::swept_index`] resolves it to, or the word itself
+/// when it resolves to none (a synthetic run names no swept instrument).
+///
+/// # Why (CE-76, D-1778)
+///
+/// Run identity is built from the canonical key, so `nifty`, `NiFtY` and
+/// `NIFTY` are one identity, but the ledger stored the word as typed and
+/// compared it byte for byte. A rerun spelt differently was refused as
+/// "deterministic fields differ", which told the operator the engine was
+/// nondeterministic, and `cli top dhan NIFTY` found nothing over a run recorded
+/// as `nifty` and exited 0. One resolution per row read or written.
+fn canonical_underlying(word: &str) -> String {
+    stored::swept_index(word).map_or_else(
+        |_| word.to_owned(),
+        |key| key.underlying.as_str().to_owned(),
+    )
 }
 
 /// Durability barrier for names created under `results/`.
@@ -17927,7 +18109,7 @@ fn record_run(
         // a clock before 1970 is REFUSED by name, never clamped to 0 (CE-50).
         finished_micros: finished_micros_at(std::time::SystemTime::now())?,
         feed: results::field(into.feed),
-        underlying: results::field(into.underlying),
+        underlying: results::field(&canonical_underlying(into.underlying)),
         timeframe: results::field(into.timeframe),
         from_year: into.from.0,
         from_month: into.from.1,
@@ -18901,6 +19083,8 @@ const GRID_PROGRESS_STEPS: usize = 10;
 /// beside the constant they depend on is where a reader will look for them.
 struct GridProgress<'a> {
     counted: std::sync::atomic::AtomicUsize,
+    /// The highest count already written, held while the line is written.
+    spoken: std::sync::Mutex<usize>,
     total: usize,
     stride: usize,
     recording: Option<Recording<'a>>,
@@ -18912,6 +19096,7 @@ impl<'a> GridProgress<'a> {
     fn over(total: usize, recording: Option<Recording<'a>>) -> Self {
         Self {
             counted: std::sync::atomic::AtomicUsize::new(0),
+            spoken: std::sync::Mutex::new(0),
             total,
             stride: total.div_ceil(GRID_PROGRESS_STEPS).max(1),
             recording,
@@ -18919,17 +19104,38 @@ impl<'a> GridProgress<'a> {
     }
 
     /// Counts one priced candidate and speaks on a stride boundary.
-    ///
-    /// `Relaxed` is the right ordering: nothing is synchronised through this
-    /// counter, it is read only to decide whether to print, and a race that
-    /// prints one tenth twice or skips one costs a log line and nothing else.
     fn tick(&self) {
+        self.tick_with(|done| note_grid_progress(self.recording, done, self.total));
+    }
+
+    /// [`Self::tick`] over any writer, so the ordering is testable.
+    ///
+    /// # Written counts only go up (conc9-1, D-1773)
+    ///
+    /// The counter is `Relaxed`, because nothing is synchronised through it.
+    /// But the count was taken here and the sink's mutex later, so a worker
+    /// holding 10 could write after one holding 20, and the file's `priced`
+    /// went backwards. The browser reads a drop as a refusal, so a healthy run
+    /// was marked failed for the rest of the rung: 585 drops in 300 rounds of
+    /// 10 candidates when measured. A boundary count is now written only while
+    /// holding `spoken`, and only if it is above the last one written; a lower
+    /// count that arrives late is dropped, because a higher one already said
+    /// more. The lock is taken only on stride boundaries, about eleven times
+    /// per rung, never per candidate.
+    fn tick_with(&self, write: impl FnOnce(usize)) {
         let done = self
             .counted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         if done.is_multiple_of(self.stride) || done == self.total {
-            note_grid_progress(self.recording, done, self.total);
+            let mut spoken = self
+                .spoken
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if done > *spoken {
+                *spoken = done;
+                write(done);
+            }
         }
     }
 }
@@ -19290,7 +19496,7 @@ fn opening(banner: &str, refused: Option<&str>) -> String {
 /// it.
 const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING IS GROSS OF EVERY CHARGE.\n  \
      A share trade pays brokerage, STT, stamp duty, exchange charges, the SEBI\n  \
-     fee and GST, and none is subtracted, so the ranking above is on GROSS\n  \
+     fee, the IPFT, DP charges and GST (an UNVERIFIED list), and none is subtracted, so the ranking above is on GROSS\n  \
      returns. COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525,\n  \
      D-0681). No equity result carries Selection V6 or execution authority\n  \
      until a charter-sourced equity charge stack exists.\n\n";
@@ -19303,7 +19509,8 @@ const EQUITY_RANKING_GROSS: &str = "  CASH EQUITY: EVERY FIGURE IN THIS RANKING 
 /// lines carry the legend's two-space indent. The same test that binds
 /// [`EQUITY_RANKING_GROSS`] to the audit header binds this.
 const SHARE_MEAN_LEGEND: &str = "ONE share, GROSS OF EVERY CHARGE: brokerage, STT, stamp duty, exchange \
-     charges, the SEBI fee and GST all apply to a share trade\n  and none is subtracted. \
+     charges, the SEBI fee, the IPFT, DP charges and GST (an UNVERIFIED list) all apply to a \
+     share trade\n  and none is subtracted. \
      COST-EXCLUDED RESEARCH, NOT A NET RESULT (D-0509, D-0525, D-0681). No equity result \
      carries\n  Selection V6 or execution authority until a charter-sourced equity charge \
      stack exists.";
@@ -20906,6 +21113,140 @@ fn record_all_attempt(
               test that cannot panic cannot fail."
 )]
 mod tests {
+    /// conc9-2: a run with no sink says so on stderr before it starts; a run
+    /// with one says nothing there.
+    #[test]
+    fn an_unlogged_run_is_announced_at_once_and_a_logged_one_is_not() {
+        let mut err = Vec::new();
+        let refused = format!("{}: the sink is held by another process", crate::UNLOGGED);
+        crate::announce_unlogged(&refused, &mut err);
+        assert_eq!(err, format!("{refused}\n").into_bytes());
+        let mut quiet = Vec::new();
+        crate::announce_unlogged("events -> /store/logs/cli", &mut quiet);
+        assert!(
+            quiet.is_empty(),
+            "an installed sink is not announced on stderr"
+        );
+    }
+
+    /// p12num-1: the cached handle opens once, refreshes on reuse, and opens
+    /// fresh for a new root, a replaced file, a refused refresh or a refused
+    /// operation.
+    #[test]
+    fn a_cached_handle_refreshes_by_the_delta_and_reopens_when_it_must() {
+        use std::cell::Cell;
+        let dir = std::env::temp_dir().join(format!("brutex-cached-handle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("ledger.bin");
+        std::fs::write(&file, b"a").expect("file");
+        let cache = std::sync::Mutex::new(None);
+        let (opens, refreshes, fail_refresh) = (Cell::new(0), Cell::new(0), Cell::new(false));
+        let other = dir.join("other");
+        let call = |root: &std::path::Path, fail_op: bool| {
+            crate::with_cached_handle(
+                &cache,
+                root,
+                &file,
+                |_| {
+                    opens.set(opens.get() + 1);
+                    Ok(0_u32)
+                },
+                |_| {
+                    refreshes.set(refreshes.get() + 1);
+                    if fail_refresh.get() {
+                        Err("ragged".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |handle| {
+                    *handle += 1;
+                    if fail_op {
+                        Err("refused".to_owned())
+                    } else {
+                        Ok(*handle)
+                    }
+                },
+            )
+        };
+        assert_eq!(call(&dir, false), Ok(1));
+        assert_eq!(call(&dir, false), Ok(2), "the same handle is reused");
+        assert_eq!(
+            (opens.get(), refreshes.get()),
+            (1, 1),
+            "one open, then one refresh"
+        );
+        assert_eq!(call(&other, false), Ok(1), "a new root opens fresh");
+        assert_eq!(opens.get(), 2);
+        std::fs::remove_file(&file).expect("remove");
+        std::fs::write(&file, b"b").expect("replace");
+        assert_eq!(call(&other, false), Ok(1), "a replaced file opens fresh");
+        fail_refresh.set(true);
+        assert_eq!(call(&other, false), Ok(1), "a refused refresh opens fresh");
+        fail_refresh.set(false);
+        assert!(call(&other, true).is_err());
+        let before = opens.get();
+        assert_eq!(
+            call(&other, false),
+            Ok(1),
+            "a refused operation drops the handle"
+        );
+        assert_eq!(opens.get(), before + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CE-76: the ledger keys the instrument by its canonical symbol, so a
+    /// rerun spelt differently is the same answer, and an unknown word is kept.
+    #[test]
+    fn an_instrument_spelt_in_another_case_is_the_same_ledger_answer() {
+        assert_eq!(crate::canonical_underlying("nifty"), "NIFTY");
+        assert_eq!(crate::canonical_underlying("BankNifty"), "BANKNIFTY");
+        assert_eq!(crate::canonical_underlying("synthetic"), "synthetic");
+        let row = |word: &str| crate::results::Record {
+            underlying: crate::results::field(word),
+            ..record_for_naming()
+        };
+        assert!(crate::same_run_answer(row("nifty"), row("NIFTY")));
+        assert!(!crate::same_run_answer(row("NIFTY"), row("BANKNIFTY")));
+    }
+
+    /// conc9-1: written progress counts never go backwards, however the
+    /// workers interleave. Before, a worker holding 10 could write after one
+    /// holding 20, and the page read the drop as a refusal.
+    #[test]
+    fn grid_progress_writes_counts_that_only_go_up() {
+        let total = 365;
+        for _round in 0..200 {
+            let progress = crate::GridProgress::over(total, None);
+            let written = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        for _ in 0..=(total / 4) {
+                            progress.tick_with(|done| {
+                                written.lock().expect("test lock").push(done);
+                            });
+                        }
+                    });
+                }
+            });
+            let written = written.into_inner().expect("test lock");
+            assert!(!written.is_empty(), "boundaries were reached");
+            assert!(
+                written.windows(2).all(|pair| pair.first() < pair.last()),
+                "file order is count order: {written:?}"
+            );
+        }
+        // The lock is ordering, not suppression: one thread writes every boundary.
+        let progress = crate::GridProgress::over(100, None);
+        let mut written = Vec::new();
+        for _ in 0..100 {
+            progress.tick_with(|done| written.push(done));
+        }
+        assert_eq!(written, (1..=10).map(|step| step * 10).collect::<Vec<_>>());
+    }
+
     /// **Text arguments pass through unchanged; the first that is not text is
     /// refused by position, as a misuse, and nothing is dispatched.** D-0998.
     #[cfg(unix)]
@@ -21900,6 +22241,10 @@ mod tests {
         for (name, bad) in [
             ("BRUTEX_SCREEN_CAP", "abc"),
             ("BRUTEX_GRID_RUNGS", "0"),
+            // CE-75, D-1778: below two and above the cell budget were clamped
+            // in silence.
+            ("BRUTEX_GRID_RUNGS", "1"),
+            ("BRUTEX_GRID_RUNGS", "99999999999"),
             ("BRUTEX_SCREEN_BUDGET_MS", "-1"),
             ("BRUTEX_GRID_RESOLUTION", "half"),
             ("BRUTEX_SIZING_RATE_BP", "5000"),

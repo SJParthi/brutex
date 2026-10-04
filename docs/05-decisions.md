@@ -57698,3 +57698,86 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 
 - FB-01, found by the Fix Board thread (its branch `fixboard/zero-p5`, b83845d1). `BlockExtremes::of` stopped doubling when the next span exceeded the length of the level below, which is shorter than the block count by `2^(k-1) - 1`, so it built one level too few on many slice lengths. A backward query whose middle run needed the missing level got `None` from `over`, and `forward` recorded no excursion where a scan has one: a silent loss on the D-1572 path.
 - The loop now compares the next span with the block count. `runner::outcome::window_tests::a_backward_query_spanning_most_of_the_slice_is_answered` checks every slice from 3 to 40 blocks against a full scan, and `forward_builds_no_per_bar_power_of_two_table` now also asserts one level per power of two up to the block count. ZX-15.
+
+### D-1771 — Eight comments and one store-format paragraph that described code which had changed — 2026-10-04
+
+Main-thread number from its own D-1771..1799 block, because the zero-findings D-26xx blocks are held by the running fix agents. Doc-only; no behaviour changed.
+
+- cli1-5. The cli log-directory doc said one writer per directory needed "no lock, no coordination". Since D-1537 the sink holds an `flock` on `<dir>/events.lock`, so a second `cli` process on one store is refused its sink, `install_log` says events are NOT being recorded and why, and that run proceeds without a log. The doc now says so.
+- poison-1. Five guard comments in `api` (`pullrun::Finisher`, `sweeprun::Applied`, `sweeprun::TaskFinisher`, and the two `Site` slot docs) said `Drop` covers a panic. The release profile sets `panic = "abort"`, so in the shipped binary a panic ends the process. Each comment now says the guards cover cancellation and shutdown in every build and a panic only where it unwinds (`dev`, `test`).
+- Z1-slice17-F2. `docs/02-store-format.md` said execution-disposition reopen validates admission marginals. Only `from_ledgers` calls `require_admission_marginals`; reopen holds no admission ledger. The paragraph now says marginals are proven at preparation and reopen proves the matrix against its own rows.
+- Z1-slice09-F2. `Ladder::with_ceiling` and `ceiling` now say the ceiling is cumulative across levels.
+- P9-04. Two `engine::column` passages about the removed `seen` set are in the past tense.
+- Z1-slice00-F3. The runner audit legend now says which columns are paisa, which are ppm and which are ratios in hundredths, and names the fill cost.
+- Z1-slice03-F1. `runner::trade` explains `Sourced::Fill` beside `signal_bar` and `entry_bar`.
+- Z1-slice18-F2 and Z1-slice26-F1. `cli::frontier::Row` lists its money fields, and `cli::results` states the v3 stride (261, seal over the first 253) beside v2 (213/205) and v1 (205).
+
+### D-1772 — The folder census counts ingest's key, the rolling body escapes control characters, and a non-UTF-8 AWS variable is refused — 2026-10-04
+
+Found by the audit helpers' crash pass 11 (`/mnt/project-files/zero-rounds/crash-edge-pass11.md`).
+
+- CE-67. `folder::census_of` counted a collision only when two stems were byte-identical, but ingest keys a member by `Symbol::new`, which folds ASCII case. On a case-sensitive filesystem `reliance.csv` and `RELIANCE.csv` reported `collisions: 0` and were appended into one series. The census now counts collisions on the upper-cased key; the listed names stay as the files spell them. `stems_that_differ_only_in_case_are_counted_as_a_collision` in `crates/pull/tests/folder.rs`.
+- CE-68. `rolling::push_pair` escaped only `"` and `\`. A security id is vendor text and may hold a control character, which produced a body no JSON parser accepts. Below 0x20 is now escaped as `api::pullrun::quote_for_json` does. `a_control_character_in_a_value_still_makes_valid_json` parses the result.
+- CE-69. `ssm` read `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` and `AWS_PROFILE` with `env::var(..).ok()`, so a non-UTF-8 value was read as unset and the request was signed as `[default]`. `from_env` and `discover` now refuse such a variable by name first. `a_non_unicode_aws_variable_is_refused_by_name`.
+
+### D-1773 — Grid progress counts are written in rising order — 2026-10-04
+
+- conc9-1, found by the audit helpers' concurrency pass 9 (`/mnt/project-files/zero-rounds/conc-pass9.md`). `GridProgress::tick` took its count from a relaxed `fetch_add` and the sink's mutex later, so a worker holding a lower stride boundary could write after one holding a higher one, and the `priced` field went backwards in file order. The page treats a drop as a refusal, so a healthy run was shown failed for the rest of the rung (the helper measured 585 drops in 300 rounds of 10 candidates).
+- A boundary count is now written only while holding a small mutex, and only if it is above the highest count already written; a lower count that arrives late is dropped. The mutex is taken only on stride boundaries (about eleven times per rung), never per candidate, so the per-candidate cost is still one relaxed `fetch_add`. The old comment that a race "costs a log line and nothing else" is gone. `cli::tests::grid_progress_writes_counts_that_only_go_up` runs four workers over 365 candidates two hundred times and requires rising order.
+
+### D-1774 — An unlogged CLI run says so at once, a line being written is re-read, and a held clock is shown — 2026-10-04
+
+Found by the audit helpers' concurrency pass 9 (`/mnt/project-files/zero-rounds/conc-pass9.md`).
+
+- conc9-2, first half. Since D-1537 a second `cli` command on one store is refused the sink and runs without a log, but `install_log`'s answer was printed only with the report, when the command ended. `cli::announce_unlogged` now writes a refusal to stderr before the command runs; an installed sink writes nothing there. The refusal prefix is the one constant `cli::UNLOGGED`. `cli::tests::an_unlogged_run_is_announced_at_once_and_a_logged_one_is_not`.
+- conc9-2, second half. The sweep admission counted `partial_tail` as damage on one read, so a CLI line caught mid-`write` refused a browser launch and turned `/backtest/run.json` to `unknown`. `sweeprun::settled_tail` reads once more when the first read ends on a partial line; a torn line left by a dead writer is still there and still refuses, because it may be a newer marker. This narrows the window to a write spanning both reads and does not close it. Taking `events.lock` to close it was rejected: the probe would refuse a CLI opening its sink at that instant. `a_line_being_written_is_reread_and_a_torn_one_still_refuses`.
+- conc9-3. `Health::clock_held` was counted and rendered nowhere, and `last_error` was shown only beside a loss. `/logs.json` now carries `clock_held`, and its `loud` and the banner use `logs::banner_is_loud`: a loss, a held clock or a standing error. `Health::is_loud` keeps its meaning (events lost), because the dropped-events note keys on it. `a_held_clock_and_a_standing_error_are_shown`.
+
+### D-1775 — The vocabulary's look-ahead and daily-bar sections, and two indicator docs, say what the code does — 2026-10-04
+
+Found by the audit helpers' numbers pass 11 (`/mnt/project-files/zero-rounds/numeric-pass11.md`). Doc-only; no bit changes.
+
+- p11num-3. `daily::bits` listed 63 `narrow_cpr_day` as never set, and `pattern`'s module doc said the crate refuses to compute it; `bits_with` sets 63, 274 or 275 at `CprWidth::CLASSICAL`, whose cuts are declared UNVERIFIED. It also called 71 `near_fib_424` an orphan on no ladder; 71 is the 4.236 rung of `fib::PREV_DAY_UP`. Both docs now say so.
+- p11num-4. `docs/03-vocabulary.md` §3 said every carried state updates after the bar is emitted; the description families (VWAP, session extremes) fold the bar first and then emit, deliberately, and still read nothing past bar *i*. §3 now names the anchor/description split. §4 said time-of-day and VWAP bits are cleared on daily bars; no code clears them, because `1day` is not in `cli::EVERY_RUNG`. And it said VWAP abstains permanently on the two engine instruments; since D-0506/D-0507 it is live on the 208 cash equities and abstains on the indices.
+
+### D-1776 — The pull row total is checked, and a signing request prints no credential — 2026-10-04
+
+Found by the audit helpers' crash pass 13 and security pass 11 (`/mnt/project-files/zero-rounds/`).
+
+- CE-74. `pullrun::rows_now` added every vendor census's row count with a plain `.sum()`. `Entry::check` refuses only zero rows, so two CRC-valid manifests each claiming about `u64::MAX` rows overflowed the sum on the first pull POST, and the release profile's `panic = "abort"` killed the server on that request and on every restart. `rows_total` now adds with `checked_add` and answers `None` when the total does not fit. `Progress::rows_at_start` and `rows_now` are `Option<u64>`, `/pull/run.json` sends `null`, the ingest page and the run summary say "an unknown number of" bars, and the pass loop counts growth only between two known totals. `a_row_total_that_does_not_fit_is_unknown_not_a_panic`.
+- P11-02. `ssm::Signable` derived `Debug`, so any formatted value printed the request body (which names the real parameter path, kept out of tracked files by `CLAUDE.md` §8) and the session token. It now redacts both, as `AwsIdentity` does. `a_signable_prints_no_parameter_path_and_no_token`.
+
+### D-1777 — Recording a run refreshes its three detail files by the delta instead of reopening them — 2026-10-04
+
+- p12num-1, found by the audit helpers' numbers pass 12 (`/mnt/project-files/zero-rounds/numeric-pass12.md`), with W2-cli16-2's `chosen-trades.bin` case of the same shape. `ensure_frontier_rows`, `ensure_trade_rows` and `ensure_detail_receipt` opened their files afresh for every recorded run; each open reads and seal-checks every row, so a `sweep-all` read Θ(runs × rows), the frontier's under its exclusive lock, while `frontier`'s module doc said "once per process".
+- Now one writer handle per file per process (`cli::with_cached_handle`, three statics), refreshed by each type's existing `refresh` before use. Each append already re-absorbs other processes' rows under its exclusive lock before checking duplicates, so a cached handle sees the same disk state a fresh open would. It opens fresh for a different root, for a path that now names a different file (device and inode compared), for a refused refresh (a ragged tail another process is still writing) and after a refused operation. Off unix there is no inode, so it opens fresh every time, as before.
+- `cli::tests::a_cached_handle_refreshes_by_the_delta_and_reopens_when_it_must` pins each reopen case. docs/06 records the new per-run cost beside W2-cli16-2; it is UNVERIFIED as a measurement.
+
+### D-1778 — The ledger keys the instrument by its canonical symbol, and an out-of-range grid width is refused by name — 2026-10-04
+
+Found by the audit helpers' crash pass 14 (`/mnt/project-files/zero-rounds/crash-edge-pass14.md`).
+
+- CE-76. Run identity is built from the canonical key `stored::swept_index` resolves, so `nifty` and `NIFTY` are one identity, but the results ledger stored the word as typed and compared it byte for byte. A rerun spelt differently was refused as "deterministic fields differ", breaking `CLAUDE.md` §3 rule 5 and telling the operator the engine was nondeterministic; `cli top dhan NIFTY` found nothing over a run recorded as `nifty` and exited 0. `cli::canonical_underlying` now gives the canonical symbol (or the word itself when it names no swept instrument). New rows record it; `same_run_answer`, `newest_complete`, `results_at` and `latest_for` compare canonical forms, so rows already written as typed still match. `an_instrument_spelt_in_another_case_is_the_same_ledger_answer`.
+- CE-75. `BRUTEX_GRID_RUNGS` (also the browser's `grid_rungs`) clamped 1 to 2 and anything past the cell budget to the budget, with `knobs::refused()` still `None`, so the report claimed the operator's grid. A value outside `2..=rungs_within_cell_budget()` is now refused by name, as `strict_range_knobs` already refused it, and the run takes the derived width with the refusal printed. The knob-refusal test now includes `1` and `99999999999`.
+
+### D-1779 — Three cost statements stop claiming sources and prices they do not have — 2026-10-04
+
+Found by the audit helpers' numbers pass 13 (`/mnt/project-files/zero-rounds/numeric-pass13.md`).
+
+- p13num-1. `costs::rate::NSE_IPFT` cited `NSE/FA/56129` as its source. `docs/06-limits.md` records that circular as covering 2023-04 to 2024-03 and as never retrieved, so it cannot source a figure in force from 2024-10-01. The doc now cites `COSTS_VERIFIED` §5 alone and marks the circular citation UNVERIFIED. No rate changes.
+- p13num-2. `docs/00-charter.md` said the NIFTY and BANKNIFTY strike intervals are assumed nowhere in code. `costs::strike::strike_step_on` encodes 50 and 100 rupees from 2021-01-01 and refuses every earlier day. The row now says so.
+- p13num-3. Every equity gross-charge statement listed brokerage, STT, stamp duty, exchange charges, the SEBI fee and GST as the charges a share trade pays, as though the list were complete and sourced. It left out the IPFT and DP charges, and no charter source enumerates an equity charge stack. Every copy (`runner::audit`'s header and `CASH_EQUITY_GROSS`, `cli`'s ranking label and share legend, `pool`'s opening, the browser's `charge-scope.js`) now names the IPFT and DP charges and calls the list UNVERIFIED. The existing word-for-word test binds the copies to the header, and `SHARE_TRADE_CHARGES` requires the two new names and the marker. No rate is named.
+- p13num-5. `docs/06-limits.md` said every trade before 2023-04-01 "is currently priced 25% too high on STT", while the section before it says every trip before 2024-10-01 refuses on the exchange charge. The sentence now says `stt_options_rate` alone returns the higher rate and no trade is priced at it.
+- p13num-4 (whether the 2023-04-01 STT change is real) stays open for the operator: it needs the Finance Act 2023 text, which this repository has not retrieved.
+
+### D-1780 — `pat_in_neck` (211) takes the classical shape and thrusting (212) starts above it — 2026-10-04
+
+Found by the audit helpers' numbers pass 11 (`/mnt/project-files/zero-rounds/numeric-pass11.md`, p11num-2). This changes results.
+
+**Finding.** 211 required `prior low < close <= prior close`: a close on the prior black bar's lower shadow, which is neither in-neck nor on-neck. The textbook in-neck, a white bar closing at the prior close or just into the black body, was filed under 212 thrusting because 212 began one paisa above the prior close. The exemplar fixture pinned the wrong shape (close 1005 against a prior close of 1010).
+
+**Change.** In-neck is now `close >= prior close` and `(close − prior close) × 1000 ≤ prior range × IN_NECK_BAND`, with `IN_NECK_BAND = 200` (20% of the prior range). Thrusting begins above that band and still ends below the prior body's midpoint. The band is the classical convention (Nison; the TA-Lib `Near` factor for the predicate of the same name), taken on the one prior bar's range rather than a five-bar average. Like every threshold in `pattern.rs` it is UNVERIFIED against any source `docs/00-charter.md` records. It is a module constant, not a `Thresholds` field, because the six fields are encoded into `brutex/eval/v1` and a seventh would re-key every recorded run; the commit term binds it. `VOCAB_VERSION` stays 3 for D-1542's reason, as D-1543 did for the same kind of change.
+
+**Tests.** `indicators::pattern::exemplars::in_neck_closes_at_or_just_into_the_prior_body` (the textbook in-neck, the band edge, one paisa past it, and the lower-shadow close that is now neither). `every_edge_of_the_partial_recovery_window_is_required` gains the band edge, and the exemplar fixtures for 211 and 212 were moved to the new shapes.
+
+**CE-77 (in the same entry, being a one-line refusal).** Found by crash pass 14: a `~/.brutex/credentials.toml` starting with U+FEFF was refused as an unknown key or an unparseable line 1, loud but naming nothing the operator could see. `pull::config::ConfigError::ByteOrderMark` now refuses it by name before line 1 is read; the mark is not stripped. `pull::unit::a_byte_order_mark_is_refused_by_name`.
