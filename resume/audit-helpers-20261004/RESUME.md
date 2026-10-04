@@ -53,4 +53,4 @@ Total new across rounds 1-4: 59. Severity trend: round 4 = 1 medium, 9 low.
 | Network | 8 | pull clients, retries, credentials | conc8-1 med (5xx breaker can never trip, ran), conc8-2..4 low | conc-pass8.md |
 | Statistics | 8 | RC, SPA, Romano-Wolf, bootstrap vs literature | p8num-1 med (n>=30 normal bar overspends Bonferroni alpha up to 1,322x) | numeric-pass8.md |
 | Docs vs behaviour | 8 | 35 cli commands, 50 routes | P8-01..05 low | tests-docs-security-pass8.md |
-Total new across rounds 1-5: 74. Each round still finds 1-3 mediums, so rounds continue.
+Total new across rounds 1-5: 72. Each round still finds 1-3 mediums, so rounds continue.
