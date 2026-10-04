@@ -57247,3 +57247,87 @@ the bar loop.
 **Decision.** At most `n - 1` gaps exist and each heap holds at most half of
 them plus one transient push, so both are created with capacity `ceil(n / 2)`.
 Output is unchanged; every prefix-cadence test is the proof that it is.
+
+### D-2315 — The gates after language purity decide in Rust, not in awk and sed — 2026-10-04
+
+**Finding.** Every gate in `.github/workflows/ci.yml` after the language-purity
+job decided with inline awk, sed and grep pipelines: the build job's crate
+probe and gates 13a, 13b, 13c, 6c, 5 and 6d; the coverage job's probe and gate
+20; gate 18's mutation plan; gate 8's bench count; and the browser job's gates
+W1, W3, W4, W5 and W6. That is a second language in a tracked file outside
+`web/`, which CLAUDE.md section 2 forbids, and the operator's standing rule
+(Rust in every corner but the front end) covers CI.
+
+**Decision.** Those decisions are `.github/gates_jobs.rs`: one std-only tool,
+`#![forbid(unsafe_code)]`, one subcommand per gate, built by `rustc` in each job
+that uses it (once per job, reused from `$RUNNER_TEMP`) after its own `--test`
+binary passes, and linted by gate 6c like the other `.github/*.rs` tools. Four
+inline awk programs and nine sed invocations leave the workflow, so gate 0's
+`AWK_IN_CI` ratchet falls by exactly four; that constant is not edited here.
+What stays in the workflow is deliberate:
+
+- Gate 0's `spawns` (D-2344) lets a `.github/*.rs` tool start only `git`, so
+  `cargo`, `rustc`, `rustfmt`, `clippy-driver`, `npm` and `node` are still
+  started by the workflow, each as one straight-line command writing a file the
+  tool reads. Gate 6d's per-crate `--extern` list becomes a rustc `@file`, and
+  its four test binaries are four explicit lines instead of a loop.
+- Gate 13b's `banned_built` list stays in its step as data, because
+  `crates/core/tests/banned_lists.rs` reads it there.
+- The coverage step keeps `cargo llvm-cov --workspace --locked` (read by
+  `c4_cli_02_limits`); its probe is `gates_jobs no-crates && exit 0`, which skips
+  only on an affirmative "no crate is tracked", never on a probe failure.
+- Gate 8 keeps the top-level `git ls-files --error-unmatch` and
+  `cargo bench --workspace --locked` lines gate 14 proves through `step-runs`.
+- Not ported: ci-ok's verify step (gate 0's `aggregator` pins its shell lines and
+  the job has no checkout), the coverage-target step, both "Install pinned
+  mutation tools" steps, the mutation shard's run step and W3's
+  `npm ... | tee ... || true` line. The `--jq` uses left in `auto-merge.yml` and
+  `main-check.yml` are bare field paths, which gate 0 and D-2343 allow.
+
+Two old holes close: gate 5 handed `git ls-files` through `xargs`, so a path
+with a space was split, grep's error was swallowed by `|| true` and its
+exceptions went uncounted (three exceptions in `crates/core/src/a b.rs` passed
+the old gate and fail the new one); gate W5's `$(find ...)` split the same way
+and crashed node instead of reading the file.
+
+**Proof.** The tool's 23 tests run in every job that builds it, among them
+`gate_13b_family_matching_is_the_old_pattern`,
+`gate_13b_refuses_a_banned_package_an_empty_graph_and_a_broken_list`,
+`gate_13c_refuses_a_linked_library_an_object_and_no_build_script`,
+`gate_5_counts_every_exception_form`,
+`gate_6d_finds_exactly_one_rlib_per_crate`,
+`sha256_matches_the_standard_vectors`,
+`gate_20_clears_the_file_on_any_header_d0167`,
+`gate_20_line_shapes_are_the_old_patterns`,
+`mark_probe_appends_to_the_line_after_the_function`,
+`w3_reads_both_summary_formats_and_refuses_above_the_ceiling`,
+`w4_counts_distinct_selectors_and_refuses_a_log_without_a_build` and
+`w6_accepts_the_bound_script_and_refuses_each_breach`. Each ported step was run
+in its old and its new form on this tree and on adversarial inputs, with
+`cargo`, `npm` or `cargo-mutants` replaced where needed by a stub printing a
+fixture, and returned the same verdict every time. Gates 13c and 6d were not run
+against this workspace's own build, which needed more free disk than the
+machine had; their real-cargo evidence is the scratch builds named below.
+Gate 13a on a reachable
+`js-sys`, a whitespace-only `web-sys` tree and a failing `cargo tree`; gate 13b
+on `ring`, `openssl-sys` and `mlua-sys (*)` beside the near misses `luau` and
+`ccache`, an empty graph, and a list missing `cc` or widened by `luau` (the
+fixture refuses both); gate 13c on real cargo messages from a scratch workspace
+whose build scripts link `m` and leave `x.o` in a directory with a space, and
+on fixtures with a nested `libz.a`, a unicode path and no build script; gate 6c
+on an unformatted and a clippy-failing tool and on no tool; gate 5 on four
+exceptions, the `reason` and `expect` forms with CRLF and in `web/`, and the
+boundary; gate 6d on two `tokio` rlibs, no `vocab` and an `.rmeta`-only
+`serde`, with its extern list and SHA-256 values byte-identical to the old ones
+on a real scratch build; the coverage probe with and without crates; gate 20
+on an extra, a missing and a new uncovered file, a degraded profile, a CRLF
+report and the D-0167 case; the mutation plan on a pull request, a push, a root
+commit and the D-0677 branch (every planned file and the matrix identical), and
+refusing a renamed or indented `delta_varint`, a probe that plans nothing and
+an empty walk; gate 8 with no bench; W1 on a stale and a deleted bundle file;
+W3 on both summary formats, CRLF, a missing summary and a trailing zero; W4 on
+duplicate, unquoted and empty-quoted selectors against ceilings 0, 3 and 4 and
+on a log with no `built in <digit>`; W5 with node on a swallowing comment, an
+unterminated one and no style file; and W6 on a call on load, a CRLF call, a
+lost fact, an indented `status();`, a changed binding, an untracked test and a
+missing script.
