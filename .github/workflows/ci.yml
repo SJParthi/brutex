@@ -4244,30 +4244,19 @@ jobs:
           # breach (a compile error must not count as a catch); the file is
           # restored and the tree must be clean before the real run.
           probe=crates/core/src/vendor.rs
-          at=$(grep -n '^pub fn decode_master_row(' "$probe" | cut -d: -f1)
-          [ -n "$at" ] || { echo "GATE 8 SELF-TEST: no decode_master_row in $probe"; exit 1; }
-          sed -i "${at}a\\    core::hint::black_box(row.trading_symbol.bytes().fold(0_u8, u8::wrapping_add));" "$probe"
+          # `gate-8-plant` inserts that line after the signature, or refuses when
+          # the signature is gone; `gate-8-caught` decides the catch (D-2317).
+          "$gates" gate-8-plant "$probe"
           # No `set +e`: gate 14 refuses any bench run after one, because the
           # real run below must stay blocking. The status is caught in an `if`.
-          if cargo bench --locked -p core --bench ratio > /tmp/gate8-probe.log 2>&1; then
+          if cargo bench --locked -p core --bench ratio > "$RUNNER_TEMP/gate8-probe.log" 2>&1; then
             probe_status=0
           else
             probe_status=$?
           fi
           git checkout -- "$probe"
           git diff --quiet -- "$probe" || { echo "GATE 8 SELF-TEST did not restore $probe"; exit 1; }
-          caught=no
-          if [ "$probe_status" -ne 0 ] && grep -q 'C-09 decode, field 4 MiB .*BREACH' /tmp/gate8-probe.log; then
-            caught=yes
-          fi
-          if [ "$caught" != yes ]; then
-            cat /tmp/gate8-probe.log
-            echo "GATE 8 SELF-TEST: a planted O(n) in decode_master_row was NOT refused"
-            echo "(exit $probe_status). The ratio check cannot see a data-dependent cost."
-            exit 1
-          fi
-          echo "self-test: the planted O(n) was refused:"
-          grep 'BREACH' /tmp/gate8-probe.log
+          "$gates" gate-8-caught "$RUNNER_TEMP/gate8-probe.log" "$probe_status"
           cargo bench --workspace --locked
 
   web:

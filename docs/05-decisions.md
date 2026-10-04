@@ -58281,3 +58281,27 @@ fold count and per-fold day estimate it prints. No identity, digest or
 selection moves.
 
 **What it proves.** AGA-07.
+
+### D-2317 — Gate 8's self-test plants and judges in Rust — 2026-10-04
+
+**Finding.** D-1509 added Gate 8's planted-O(n) self-test on the base branch
+while D-2311..D-2315 were moving every `ci.yml` text program into
+`.github/gates_*.rs`. Merged, it brought back a `grep | cut` to find
+`decode_master_row`, a `sed -i` to plant the line and a `grep` to decide the
+catch, in the step the jobs tool already owns.
+
+**Decision.** `gates_jobs gate-8-plant FILE` inserts the same line after the
+first line starting `pub fn decode_master_row(` and refuses by name when there
+is none; `gates_jobs gate-8-caught LOG STATUS` passes only for a non-zero exit
+whose log has a `C-09 decode, field 4 MiB … BREACH` line, so a compile error or
+another row's breach is no catch, and prints the breach lines. `cargo bench`,
+`git checkout` and `git diff --quiet` stay in the step as plain commands
+(gate 0 lets a tool start only git, and gate 14 reads the bench lines). The
+probe log moved from a fixed `/tmp` name to `$RUNNER_TEMP`. AGC-01 is
+unchanged.
+
+**Proof.** The plant on the real `crates/core/src/vendor.rs` is byte-identical
+to the old `sed` edit (`cmp`, measured locally). The tool's tests
+`gate_8_plants_once_after_the_signature_and_refuses_without_it` and
+`gate_8_counts_a_catch_only_for_a_nonzero_exit_naming_c09` cover every refusal
+branch; the full bench probe is CI's to run.

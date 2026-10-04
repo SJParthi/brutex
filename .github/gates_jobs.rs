@@ -1152,9 +1152,74 @@ fn arg<'a>(rest: &'a [String], i: usize, what: &str) -> Result<&'a str, String> 
         .ok_or_else(|| format!("missing argument: {what}"))
 }
 
+/// The line Gate 8's self-test plants (D-1509): a byte fold over
+/// `trading_symbol`, ahead of `decode_master_row`'s width gate, so C-09's
+/// 4 MiB row pays 4 MiB.
+const GATE_8_PLANT: &str =
+    "    core::hint::black_box(row.trading_symbol.bytes().fold(0_u8, u8::wrapping_add));";
+const GATE_8_SIGNATURE: &str = "pub fn decode_master_row(";
+
+/// `text` with [`GATE_8_PLANT`] inserted after the first line that starts with
+/// [`GATE_8_SIGNATURE`], or a refusal naming its absence.
+fn planted(text: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(text.len() + GATE_8_PLANT.len() + 1);
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        out.push_str(line);
+        if !done && line.starts_with(GATE_8_SIGNATURE) {
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(GATE_8_PLANT);
+            out.push('\n');
+            done = true;
+        }
+    }
+    if done {
+        Ok(out)
+    } else {
+        Err("GATE 8 SELF-TEST: no decode_master_row in the probe file".into())
+    }
+}
+
+fn gate_8_plant(path: &str) -> Verdict {
+    let text = read(path)?;
+    std::fs::write(path, planted(&text)?).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Whether the probe run refused the plant: a non-zero exit AND a
+/// `C-09 decode, field 4 MiB ... BREACH` line, so a compile error is no catch.
+fn caught<'a>(log: &'a str, status: &str) -> Result<Vec<&'a str>, String> {
+    let code: i64 = status
+        .trim()
+        .parse()
+        .map_err(|_| format!("GATE 8 SELF-TEST: exit status `{status}` is not a number"))?;
+    let breaches: Vec<&str> = log.lines().filter(|l| l.contains("BREACH")).collect();
+    let named = breaches.iter().any(|l| {
+        l.find("C-09 decode, field 4 MiB ")
+            .is_some_and(|at| l[at + "C-09 decode, field 4 MiB ".len()..].contains("BREACH"))
+    });
+    if code != 0 && named {
+        Ok(breaches)
+    } else {
+        Err(format!(
+            "{log}\nGATE 8 SELF-TEST: a planted O(n) in decode_master_row was NOT refused\n(exit {code}). The ratio check cannot see a data-dependent cost."
+        ))
+    }
+}
+
+fn gate_8_caught(log: &str, status: &str) -> Verdict {
+    let breaches = caught(log, status)?;
+    println!("self-test: the planted O(n) was refused:");
+    for l in breaches {
+        println!("{l}");
+    }
+    Ok(())
+}
+
 fn run(args: &[String]) -> Verdict {
     let (cmd, rest) = args.split_first().ok_or(
-        "usage: gates_jobs <probe|gate-13a|gate-13b|gate-13c|tools|gate-5|gate-6d|gate-20|mutant-diff|mutant-walked|mutant-probe-mark|mutant-probe-check|output|gate-8|w1|w3|w4|w5-files|w6> ARGS",
+        "usage: gates_jobs <probe|gate-13a|gate-13b|gate-13c|tools|gate-5|gate-6d|gate-20|mutant-diff|mutant-walked|mutant-probe-mark|mutant-probe-check|output|gate-8|gate-8-plant|gate-8-caught|w1|w3|w4|w5-files|w6> ARGS",
     )?;
     match cmd.as_str() {
         "probe" => probe(),
@@ -1178,6 +1243,11 @@ fn run(args: &[String]) -> Verdict {
         "mutant-probe-check" => mutant_probe_check(arg(rest, 0, "the probe's mutant list")?),
         "output" => output(arg(rest, 0, "the key")?, arg(rest, 1, "the value file")?),
         "gate-8" => gate_8(tracked("crates/*/benches/*.rs")?.len()),
+        "gate-8-plant" => gate_8_plant(arg(rest, 0, "the source to plant into")?),
+        "gate-8-caught" => gate_8_caught(
+            &read(arg(rest, 0, "the probe bench log")?)?,
+            arg(rest, 1, "the probe bench exit status")?,
+        ),
         "w1" => w1(),
         "w3" => w3(
             &read(arg(rest, 0, "the log")?)?,
@@ -1210,6 +1280,44 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_8_plants_once_after_the_signature_and_refuses_without_it() {
+        let src = "fn a() {}\npub fn decode_master_row(row: &Row) -> X {\n    body\n}\npub fn decode_master_row(again)\n";
+        let out = planted(src).unwrap();
+        assert_eq!(out.matches(GATE_8_PLANT).count(), 1);
+        assert!(out.contains(&format!("-> X {{\n{GATE_8_PLANT}\n    body")));
+        assert_eq!(
+            planted("pub fn decode_master_row(x)").unwrap(),
+            format!("pub fn decode_master_row(x)\n{GATE_8_PLANT}\n")
+        );
+        assert!(planted("fn decode_master_row(\n  pub fn decode_master_row(\n").is_err());
+        assert!(planted("").is_err());
+    }
+
+    #[test]
+    fn gate_8_counts_a_catch_only_for_a_nonzero_exit_naming_c09() {
+        let hit = "C-01 ok\nC-09 decode, field 4 MiB   ratio 900x BREACH\n";
+        assert_eq!(
+            caught(hit, "101").unwrap(),
+            ["C-09 decode, field 4 MiB   ratio 900x BREACH"]
+        );
+        assert!(caught(hit, "0").is_err(), "a pass is no catch");
+        assert!(
+            caught("error[E0425]: compile error\n", "101").is_err(),
+            "a compile error is no catch"
+        );
+        assert!(
+            caught("C-07 x BREACH\n", "1").is_err(),
+            "another row is no catch"
+        );
+        assert!(
+            caught("BREACH C-09 decode, field 4 MiB\n", "1").is_err(),
+            "BREACH must follow the row name"
+        );
+        assert!(caught(hit, "x").is_err());
+        assert!(caught(hit, " 1\n").is_ok());
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| (*x).to_owned()).collect()
