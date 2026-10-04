@@ -56677,3 +56677,37 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-1831 — The later Boolean comparison seals every run against slice digests taken once — 2026-10-03
+
+**What was found (W3-runner2-3, W3-runner2-5; the remainder D-0711 and the
+Fix Board left open).** The later comparison minted each program × side's run
+through `ExpressionExecutionRunV1::new_with_daily_reference`. That
+constructor hashed the signal, minute-context and daily streams, searched the
+minute context for the evaluated slice and hashed the execution bars, every
+time. None of that depends on the program or the side. The Boolean source
+loads its execution span as a separate `Vec`, so the D-1196 pointer test
+never placed it and every mint also paid the linear search: O(S + M + D + E)
+per program × side.
+
+**The change.** `boolean_oos_v1::compute` takes the slice digests once,
+through the same `slice_digests` TRAINING uses, on the first group (so a
+family with no group still hashes nothing), and `execution_run` seals each run
+with `ExpressionExecutionRunV1::with_digests`. `slice_digests` gains the
+daily-refusal label so the later comparison keeps its own message ("Boolean
+later daily identity:"). The now-unused `SourceDigest` is deleted. The checks,
+their order, the run identity and every stored byte are unchanged:
+`with_digests` was proven equal to the hashing constructor by
+`sealing_against_hoisted_digests_equals_hashing_per_run` (D-1143).
+
+**What it proves.**
+`cli::candidate_universe::boolean_candidate_v1::oos::tests::the_later_loop_seals_each_run_against_digests_taken_once`
+failed on c97ff00 (the loop called `execution_run` over
+`new_with_daily_reference` and held a `SourceDigest`) and passes now;
+`cli_digests_a_later_comparisons_source_once` still counts one cli pass for
+six groups, and the later comparison's stored-output tests are unchanged.
+
+**What is still linear.** The one subslice check per comparison walks the
+minute context, beside the BLAKE3 pass the data digest takes over the same
+bytes; `docs/06-limits.md` states it under the D-0711 section.
+

@@ -6393,3 +6393,9 @@ old line regex the same input and watched it pass.
 | AFF-42 | A version-2 month still opens, appends and reads back verified at version 2 and is never rewritten as version 3; an unflagged version-2 month still reads (D-1571) | `store::file::tests::a_version_two_month_still_reads_and_appends_at_version_two`, `store::file::tests::a_month_born_without_the_checksum_flag_still_reads_and_gains_no_sidecar` | ✓ |
 | AFF-43 | `WindowExtremes::over` answers every query, including a right end that steps back, exactly as a full scan does, and reads at most `3n + 130` bars per query over a slice of `n` bars when every other right end steps back half a 2,000-bar window (D-1572) | `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`, `runner::outcome::window_tests::the_sliding_window_agrees_with_a_full_scan_on_every_query` | ✓ |
 | AFF-44 | `OverlapWindow` retires each hit at `min(exit, o + H)` in any exit order: its live count is exactly the hits whose windows are open, and its long-run sum equals the pair-by-pair Newey-West definition when exits step back (D-1572) | `runner::outcome::overlap_window_tests::a_backward_exit_leaves_the_window_when_its_own_window_closes`, `runner::outcome::overlap_window_tests::the_running_sums_reproduce_every_pair` | ✓ |
+
+### Audit fixer F8 (D-1831 onward)
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AGD-01 | The later Boolean comparison seals every program × side run with `ExpressionExecutionRunV1::with_digests` against slice digests taken once per comparison; no `new_with_daily_reference`, `data_digest_with_daily_reference` or per-group source digest remains in its loop (D-1831) | `cli::candidate_universe::boolean_candidate_v1::oos::tests::the_later_loop_seals_each_run_against_digests_taken_once`, `cli::candidate_universe::boolean_candidate_v1::oos::tests::cli_digests_a_later_comparisons_source_once` | ✓ |
