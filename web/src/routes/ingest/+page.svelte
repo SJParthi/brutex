@@ -10,7 +10,7 @@
    *
    * 2. A run that refused 407 of 785 instruments showed ONE reason. The
    *    receipt renders `done.failures.iter().take(5)` — five, and the run's
-   *    own `Members failed` count is beside it, so the page can SEE that it
+   *    own `Failure diagnostics` count is beside it, so the page can SEE that it
    *    was truncated and say so instead of implying the list is complete.
    *
    * 3. The bar length was not askable. `api::ingest::parse_spot` has read a
@@ -64,7 +64,7 @@
     watchStore,
     foldMonths
   } from '$lib/store.svelte.js';
-  import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  import { failureCount, notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
   // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
   //
   // `readFolder` declares its own `const ask` for probing folder segments. A
@@ -5442,7 +5442,7 @@
    */
   /** @param {CensusRow} row */
   async function pullRow(row) {
-    if (phase === 'running') return;
+    if (phase === 'running' || pressing) return;
     const span = shortSpan(row);
     if (!span) return;
     await runPull(
@@ -5458,6 +5458,15 @@
   // decides what the right-hand column shows.
 
   let phase = $state('idle');
+  /**
+   * HELD FROM THE PRESS UNTIL `phase` IS SET, synchronously, before the first
+   * `await`. `phase` turns `running` only after the pre-run census, which takes
+   * hundreds of milliseconds, so a guard on `phase` alone let a second press
+   * through: two snapshots and either a false pre-run error or two
+   * `POST /pull/run`, the loser of which set `done` over a live run and hid
+   * Stop. conc18-1.
+   */
+  let pressing = $state(false);
   let startedAt = $state(0);
   let finishedAt = $state(0);
   /**
@@ -5728,11 +5737,9 @@
 
   /** Every `Failed` row the receipt carried — the server sends at most five. */
   const namedFailures = $derived((receipt?.facts ?? []).filter((f) => f.k === 'Failed'));
-  const failedCount = $derived.by(() => {
-    const raw = factValue.get('Members failed');
-    const parsed = Number(String(raw ?? '').replace(/[^0-9]/g, ''));
-    return Number.isFinite(parsed) ? parsed : 0;
-  });
+  // `Failure diagnostics`, through `$lib/receipt.js`: the key the server
+  // emits, pinned against `server.rs` by `tests/receipt.test.js` (P17-01).
+  const failedCount = $derived(failureCount(receipt?.facts ?? []));
   /**
    * THE TRUNCATION, STATED. `landed_answer` writes
    * `for f in done.failures.iter().take(5)`, so a run with 407 failures puts
@@ -5891,7 +5898,7 @@
         group = GROUP.silent;
         reason =
           hiddenFailures > 0
-            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failed member(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
+            ? `The store gained nothing for this instrument and no reason was sent for it. The run recorded ${n(failedCount)} failure diagnostic(s) and put only ${n(namedFailures.length)} reason(s) on the wire, so this may be one of the ${n(hiddenFailures)} whose reason the server truncated.`
             : 'The run reported no failure for this instrument and the store gained nothing for it. It was named by the universe and is not accounted for.';
         tone = 'warn';
       }
@@ -6669,7 +6676,7 @@
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
-    if (problems.length > 0 || phase === 'running') return;
+    if (problems.length > 0 || phase === 'running' || pressing) return;
 
     /* THE SAME LIST THE PAGE COUNTS, AND THAT IS THE WHOLE POINT.
      *
@@ -6717,6 +6724,9 @@
 
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every count the
     // card shows is a difference against it.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6725,6 +6735,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -6755,6 +6767,12 @@
           `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
         phase = 'done';
         finishedAt = Date.now();
+        releaseWatch?.();
+        releaseWatch = null;
+        /* 409 IS "A RUN IS ALREADY IN FLIGHT". That run is real and this page
+           must show it, not a finished card with Stop gone: pick it up exactly
+           as a page load does. The refusal stays in `netError`. conc18-1. */
+        if (r.status === 409) await resumeRun();
         return;
       }
     } catch (why) {
@@ -6899,7 +6917,7 @@
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
-    if (bodies.length === 0 || phase === 'running') return;
+    if (bodies.length === 0 || phase === 'running' || pressing) return;
 
     receipt = null;
     receipts = [];
@@ -6915,6 +6933,9 @@
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every outcome
     // below is a difference against it; without one there is nothing to
     // subtract and the page would have to guess.
+    // THE LATCH IS TAKEN BEFORE THE FIRST AWAIT AND RELEASED IN THE SAME
+    // SYNCHRONOUS CONTINUATION THAT SETS `phase`, so no press lands between.
+    pressing = true;
     try {
       baseline = await snapshot();
       live = baseline;
@@ -6923,6 +6944,8 @@
       live = null;
       netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
       return;
+    } finally {
+      pressing = false;
     }
 
     startedAt = Date.now();
@@ -7165,6 +7188,8 @@
       said = await r.json();
     } catch (why) {
       stopAsked = false;
+      // NOTHING WAS STOPPED, so the run is not an aborted one. conc18-2.
+      aborted = false;
       pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
       return;
     }
@@ -7175,6 +7200,7 @@
        done nothing. */
     if (said?.stopping !== true) {
       stopAsked = false;
+      aborted = false;
       pollError =
         'Nothing was stopped: the server reports no run in progress. It may have finished on its own — the status below is the reading that matters.';
       return;
@@ -7193,6 +7219,7 @@
     sent = { done: 0, of: 0, label: '' };
     askedKeys = new Set();
     netError = null;
+    pollError = null;
     outcomes = [];
     outcomeIndex = new Map();
     baseline = null;
@@ -8558,7 +8585,7 @@
             {/if}
 
             <div class="actions">
-              <button class="btn primary" type="submit" disabled={phase === 'running'}>
+              <button class="btn primary" type="submit" disabled={phase === 'running' || pressing}>
                 {#if phase === 'running'}
                   <span class="spin ring" aria-hidden="true"></span> Running…
                 {:else}
@@ -8621,6 +8648,25 @@
               {/if}
 
             </div>
+
+            <!-- THE RUN'S OWN REFUSALS, SAID OUT LOUD. `netError` (a refused or
+                 unreachable `/pull/run`, a pre-run census that failed, a dropped
+                 leg) and `pollError` (an unreadable run status, a Stop the
+                 server never took, a census poll that failed) were written by
+                 every handler and rendered nowhere, so a press that failed
+                 looked like a press that did nothing. Shown whatever `phase`
+                 is. conc18-2, CLAUDE.md §4. -->
+            {#if netError}
+              <p class="note wrap warn" role="alert" data-run-error="net">{netError}</p>
+            {/if}
+            {#if pollError}
+              <p class="note wrap warn" role="alert" data-run-error="poll">
+                {#if phase === 'running'}The progress shown is the last reading this page took. {/if}{pollError}
+              </p>
+            {/if}
+            {#if phase === 'done' && aborted && !netError}
+              <p class="note wrap" data-run-error="stopped">Stopped at your request. What landed before the stop is counted below.</p>
+            {/if}
 
             <!-- ══════════════ HOW FAR THROUGH THE RUN IS ══════════════
 
@@ -9623,7 +9669,7 @@
                           <button
                             class="btn sm"
                             type="button"
-                            disabled={phase === 'running' || problems.length > 0 || sp === null}
+                            disabled={phase === 'running' || pressing || problems.length > 0 || sp === null}
                             title={phase === 'running'
                               ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
                               : problems.length > 0
