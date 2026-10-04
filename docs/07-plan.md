@@ -640,11 +640,14 @@ after Cargo has already selected its output locations.
 No dependency is authorized at this checkpoint. `cap-std` has no locally
 auditable source or index metadata and therefore remains `UNVERIFIED`.
 `rustix` 1.1.4 is locally auditable and exposes the required macOS relative-I/O
-primitives without native C/C++ source, but its unconditional `build.rs`
-launches `rustc`; that violates the repository's no-external-process build-
-script law even though existing CI does not inspect registry build scripts.
-Adding either package without first resolving those facts would replace one
-unproved guarantee with another.
+primitives without native C/C++ source. Its unconditional `build.rs` launches
+`rustc`, which is the same `rustc` probe thirteen packages already in the
+native graph run; `docs/06-limits.md` §96 records that §2's build-script ban is
+held against this repository's own build scripts and not against dependencies,
+so that probe alone is not a reason to refuse it (D-2328). Whether §2 should
+reach dependencies at all is an open owner question, not something this plan
+decides. Adding either package without first resolving `cap-std`'s source and
+that question would replace one unproved guarantee with another.
 
 The later Global Replay V2 checkpoint is narrower and newer: its focused module
 is **6/6 green** and its public test carries eight Selection V4 receipts,

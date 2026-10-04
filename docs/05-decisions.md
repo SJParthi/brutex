@@ -60284,6 +60284,410 @@ lines and the new subcommand take effect together once main carries both.
 `.github/source_scan.rs` now lists `--jq .sha`, `--jq '.behind_by'`, `-q
 .state` and `jq .sha f` as refusals. AFG-20.
 
+### D-2328 — The dependency build-script inventory is re-measured, and the plan stops calling `rustix`'s probe a violation — 2026-10-04
+
+**Finding (zero-findings P13-04).** `docs/06-limits.md` §96 records that §2's
+build-script ban is held against this repository and not its dependencies.
+`docs/07-plan.md` nonetheless refused `rustix` because its `build.rs` launches
+`rustc`, the ground §96 and D-0311 call selective. §96's own table was also
+wrong: it listed `wasm-bindgen-shared`, which is not in the native graph,
+omitted `num-traits` (whose `autocfg` probe compiles with `rustc`), and its text
+said "fourteen" against thirteen rows.
+
+**Decision.** §96 is re-measured on the current `Cargo.lock` against the native
+host graph (`cargo tree -e normal,build -i`). Thirteen packages spawn:
+`serde`, `serde_core`, `libc`, `proc-macro2`, `quote`, `httparse`, `zmij`,
+`crc32fast`, `getrandom`, `zerocopy`, `ahash` and `generic-array` (via
+`version_check`), and `num-traits` (via `autocfg`). `ring`, `rustversion` and
+`wasm-bindgen-shared` spawn but are locked for other targets only. The plan's
+`rustix` paragraph now cites §96 instead of asserting a violation. `CLAUDE.md`
+§2 is not edited here: whether its build-script sentence should reach
+dependencies is the owner's call, and stays named as an open owner question
+beside D-0555 and D-1602.
+
+**Proof.** The inventory was taken from `cargo metadata --locked` and
+`cargo tree -e normal,build -i <package>` on this tree; the commands and the
+thirteen names are in §96. No code changes.
+
+### D-2321 — Gate 0 refuses a step `shell:` other than bash or sh — 2026-10-04
+
+**Finding (P15-07).** Gate 0's inline-program rule reads the word after an
+interpreter, so `shell: node {0}` (or `perl {0}`, or the best-known
+interpreter's `{0}` form) passed: `{0}` is neither an inline flag nor `-`,
+and the key makes the `run:` body itself the program. The finding also said
+gate 0 read only `.github/workflows/*.yml`; that half was already closed by
+D-2341, whose listing `git ls-files '.github/*.yml'` matches nested paths
+(checked locally on a scratch repository holding
+`.github/actions/x/action.yml`).
+
+**Decision.** `source_scan workflow` reads every `shell` key on a logical
+line (at the line start, after `- `, `{` or `,`, bare or quoted) and refuses
+any value but `bash` or `sh` followed only by `{0}`, `--noprofile`,
+`--norc`, a short-option cluster of `e o u x v` and, after an `o` cluster,
+one `set -o` name. GitHub's own default `bash --noprofile --norc -eo
+pipefail {0}` passes. A flow-mapping value keeps its closing brace and is
+refused: fail closed rather than parse flow YAML. No tracked workflow has a
+`shell:` key today.
+
+**Proof.** `a_step_shell_other_than_bash_or_sh_is_refused` in
+`.github/source_scan.rs`. Run against a copy of the scanner with the new
+check removed, it fails on its first case. AFG-21.
+
+### D-2322 — Gate 1g refuses a wrapper variable named in any position — 2026-10-04
+
+**Finding (P15-08).** Gate 1g's pattern missed `CARGO_BUILD_RUSTDOC` and a
+`GITHUB_ENV` write that never spells `NAME=`, such as
+`printf '%s=%s\n' RUSTC_WRAPPER /tmp/z >> "$GITHUB_ENV"`. At this branch's
+base both had been closed by D-2346: `CARGO_BUILD_RUSTDOC` is in the list,
+and every `GITHUB_ENV` line but the two sanctioned writes is refused. What
+remained open was the same door one step removed: a value assembled on one
+line (`tool=$(printf '%s=%s' RUSTC_WRAPPER /tmp/z)` or `$'x\nRUSTC_WRAPPER=y'`)
+and written by a sanctioned `printf 'SOURCE_SCAN=%s\n' "$tool"` line, whose
+newline then sets the wrapper.
+
+**Decision.** The first pattern now refuses a listed name (the eleven
+`WRAPPERS` and `CARGO_TARGET_*_RUNNER|LINKER`) in any position, bounded on the
+left by a character that is not `[A-Z0-9_]` and on the right by one that is
+not `[A-Za-z0-9_]`. No workflow line names one of these for any other reason;
+the tree passes unchanged. `MY_RUSTC_WRAPPER`, `RUSTC_WRAPPERS` and
+`RUSTC_VERSION` are still other variables.
+
+**Proof.** `gate_1g_refuses_a_wrapper_name_in_any_position` in
+`.github/gates_tree.rs` holds the finding's three lines and the assembled
+forms. Built against the old `sets_wrapper`, it fails on the `printf ...
+RUSTC_WRAPPER` line. AFG-22.
+
+### D-2323 — Gate 25 reads the overflow flag with `-` or `_`, in every `.github` YAML — 2026-10-04
+
+**Finding (P15-09).** Gate 25 matched the codegen flag only with a hyphen
+between its two words. rustc normalises `-C` option names, so the
+underscore form is the same option. It is appended after cargo's own `-C
+...=on`, the last flag wins, and the release build wraps. The no-space
+`-C...` form was already read, because the key is searched anywhere in the
+line.
+
+**Decision.** `flag_override` matches the key's two words joined by `-` or
+`_`, and accepts one quote before the value. The workflows gate 25 reads are
+now `.github/workflows/*` and every tracked `.github/*.yml` (composite
+actions), as gate 0 and gate 1g read them since D-2341.
+
+**Proof.** `gate25_refuses_every_spelling_of_the_codegen_flag` in
+`.github/gates_ledger.rs`. Built against the old `flag_override`, it fails
+on `-D warnings -C ..._checks=off`. AFG-23.
+
+### D-2324 — Gate 6d derives its roots under `web/` and runs every one — 2026-10-04
+
+**Finding (P15-17).** Gate 6d named four files. Gate 1's orphan check exempts
+`web/`, so a new native Rust root there was compiled by nothing.
+`web/sweep-readiness/probes/support_lanes.rs` was compiled by no step, and
+`verify.rs` was built but never run.
+
+**Decision.** `source_scan web-roots` lists every tracked `web/**.rs` that no
+other `web/` file mounts (by `#[path]`, `mod` or `include!`, through
+`module_paths`). Each root carries its kinds: `test` when it or a file it
+mounts has a `#[test]`, `main` when it defines a top-level `fn main`. A
+mount that does not resolve, and files that mount only each other, are
+errors. `gates_jobs gate-6d` refuses an empty list, an `UNRESOLVED` line, a
+root with neither kind and two roots with one binary name. It writes one
+rustc `@file` per root. A root with tests is built with `--test` and its
+tests run; that build compiles its `main` but never runs it. A root with
+only `main` is built and run. `-L dependency=` is the one `deps` directory
+the linked rlibs sit in. `engine` joins the linked libraries for
+`support_lanes.rs`. The step builds the scanner, hands rustc the `@file`
+list through `xargs`, and runs the binaries through `xargs -I{} env {}`
+(GNU xargs does not substitute into the command word), one line each.
+
+Today that is six roots. Four keep their test runs and skips. `verify.rs`
+gains a test module (D-2325) and its tests run. `support_lanes.rs` is built
+and run.
+
+**Proof.** `every_unmounted_rust_file_under_web_is_a_root_with_its_kind` in
+`.github/source_scan.rs` and `gate_6d_builds_and_runs_every_derived_root` in
+`.github/gates_jobs.rs`. Neither has an old-code counterpart, because the
+old roots were a shell list. The step's body, without its cargo line, was
+run locally after `cargo build -p api -p cli --lib --tests --locked`, against
+a hard-linked snapshot of that build's `target/debug` (the shared target
+directory was being rebuilt by other work at the same time). All six roots
+built; the five test binaries passed 13 (2 filtered by the skips), 36, 7, 13
+and 1 tests; `support_lanes` printed its success line. AFG-24.
+
+### D-2325 — `verify.rs --purity` is removed; gate 1 is the one extension checker — 2026-10-04
+
+**Finding (P13-05).** `web/sweep-readiness/verify.rs --purity` was a second
+extension checker, weaker than gate 1. It allowed `LICENSE`/`CODEOWNERS` at
+any depth and had no mode or content check, and it printed "Extension
+boundary: passed" on trees gate 1 refuses. Run at this branch's base on the
+current tree, it printed that line and exited 0.
+
+**Decision.** The mode and its `language_paths` function are deleted. The
+README points at gate 1 (`.github/gates_tree.rs gate-1`). The verifier now
+refuses any argument but `--focused` (exit 2, naming gate 1), so a stale
+`--purity` call is refused rather than read as a request for the full audit.
+Nothing else called `--purity`: `git grep` found only the verifier and its
+README.
+
+**Proof.** `purity_is_not_a_second_extension_checker` in
+`web/sweep-readiness/verify.rs`, run by gate 6d (D-2324). The file carries
+`#![cfg_attr(test, allow(dead_code))]` because its `--test` build leaves the
+audit functions unreached. AFG-25.
+
+### D-2331 — Log emit keeps its lock: the lock-free designs measured here did not beat it without weakening `Written`, and the telemetry bench stops leaking its scratch sinks — 2026-10-04
+
+**Finding.** `docs/06-limits.md` reports emit p99 rising from 3,125 ns at one
+thread to 503,083 ns at eight on the operator's Mac, because every emit takes
+one `Mutex` and writes under it. Separately, `crates/telemetry/benches/ratio.rs`
+`loaded()` returned a bare `PathBuf` that most callers never removed, so each
+bench run left about 60 MB of preloaded sinks in the temp directory; repeated
+runs filled this container's disk.
+
+**Decision.** Emit's contract stays: `Written` means the line is in the page
+cache when emit returns, `seq` order is file order, and a failed append is
+counted and named. Two designs that keep it were built and measured (render
+outside the lock; flat combining). Neither improved the tail on this machine
+without a cost elsewhere, so neither is adopted; the numbers are in
+`docs/06-limits.md`. An asynchronous writer would remove the wait but turns
+`Written` into "queued" and loses events on a release panic, which the sink's
+own documentation promises survive; that is a contract change for the owner,
+not this sweep. `loaded()` now returns a `Scratch` guard that removes its
+directory on drop.
+
+**Proof.** A bench run with a private `TMPDIR` leaves 0 entries behind (it
+left one directory per `loaded()` call before). The contention figures are
+measurements on a 4-core shared container, labelled as such; a contention-free
+emit under today's contract stays UNVERIFIED until it is measured on an idle
+machine with at least 8 cores.
+
+### D-2326 — Both reads on the credential path are bounded: `~/.aws/credentials` and the Parameter Store answer — 2026-10-04
+
+**Finding (P1-19-03, tests-docs-security).** `ssm::AwsIdentity::from_credentials_file`
+read `~/.aws/credentials` with `std::fs::read_to_string`: no `is_file` check
+and no bound. A FIFO there blocked `AwsIdentity::discover` in `open` forever
+with nothing logged, and a symlink to a device grew the string until the
+allocator gave up. These are the two failures D-0036 removed from
+`credentials.toml`, which is read on the same start-up path. `get_parameter`
+also read the SSM answer whole with `answer.text()`, bounded only by the
+client's 10 s timeout, while every other vendor read in the crate goes through
+a capped reader.
+
+**Decision.** `config::read_bounded` becomes `pub(crate)` and the AWS
+credentials file is read through it. The order is `metadata` first, so a
+non-regular file is refused before it is opened, and then a read capped by
+`take` at `config::MAX_FILE_BYTES` + 1. One bound and one refusal order now
+cover both credential files. Each refusal has its own sentence naming the path:
+not a regular file, more than 65536 bytes, not UTF-8.
+
+The SSM answer is read by `ssm::answer_within`. It goes through `http::body_within`
+(made `pub(crate)`) with `ssm::MAX_ANSWER_BYTES` = 16 KiB, and an answer that
+runs past the cap is refused naming the cap and the status before any parse
+sees the cut prefix. 16 KiB is this build's choice. A `GetParameter` answer is
+one small JSON object holding one header-sized value. What AWS caps a parameter
+value at is UNVERIFIED, because `docs/00-charter.md` records no AWS source, so
+the refusal names the number and raising it takes a decision. Refusal bodies
+go through the same cap. They are only matched against fault names and never
+quoted.
+
+**What it changes.** Credentials that load today still load. A FIFO, device,
+directory, oversized or non-UTF-8 `~/.aws/credentials` is now refused promptly
+and by name. A non-UTF-8 file used to fall into the "neither the environment
+nor" sentence. An SSM answer over 16 KiB is refused, where before it was held
+whole.
+
+**Proof.** `pull::ssm::a_fifo_credentials_file_is_refused_without_opening_it`
+puts a FIFO at the path and expects the refusal within 5 s.
+`pull::ssm::an_oversized_credentials_file_is_refused_by_size` reads a file of
+exactly 65536 bytes, refuses 65537, and refuses non-UTF-8.
+`pull::ssm::an_oversized_parameter_store_answer_is_refused_by_size` uses a
+loopback socket: exactly 16384 bytes are returned, 16385 are refused, and a
+cut body is refused. `pull::ssm::get_parameter_reads_its_answer_through_the_bounded_reader`
+pins the call site, because `get_parameter`'s host is fixed to AWS. Against the
+old reads, the FIFO test timed out, the 65537-byte file loaded, an uncapped
+body read returned 16385 bytes, and the shape test failed. All four fail on the
+old code. AFG-26.
+
+### D-2327 — `/logs.json` and `/logs` walk the log off the async workers, behind their own admission — 2026-10-04
+
+**Finding (log-3 in concurrency; P1-04-02 in tests-docs-security, the same
+defect).** Both handlers called `both_halves` inline in their `async fn`. That
+is two `telemetry::tail` walks of up to `logs::SCAN_BYTES` (4 MiB) each,
+decoding every line, on a Tokio worker, with no admission. The backtest page
+polls `/logs.json?limit=200&run=…` every 2 s per running sweep. A browser
+sweep's events are in the server half and a CLI sweep's are in the `cli` half,
+so one half never fills its limit and is read to its cap on every poll. A
+`target=` that matches nothing does the same to both halves. A few tabs could
+hold every worker in synchronous multi-MiB decodes. Every other bounded reader
+in the crate goes through `crate::detail`'s `spawn_blocking` doors.
+
+**Decision.** `detail::run_log_read` is a pool of its own with
+`MAX_LOG_READ_CONCURRENT` = 4 slots. It uses `run_calendar`'s and
+`run_store_read`'s shape (`Permit::try_take_from`, then `spawn_blocking`). It
+does not share their slots, for the reason D-1443 and D-1508 gave: a 2-second
+poll must neither be refused because a folder read is busy nor fill the pool a
+folder read needs. Both handlers run their walk in it. A full pool is refused
+before anything is read: `/logs.json` answers `detail::admission_refused`'s 429
+JSON naming "log read", the bound and `Saturated`, and `/logs` answers a 429
+page whose halt says the same and keeps the form. A join failure is 503.
+`logs_page` now returns its status with its page.
+
+**What was not done, and why.** Neither finding's optional per-request
+narrowing was taken. Skipping the half that cannot hold a `run` would need the
+attempt's origin, which the handler does not have. A cap on lines scanned when
+the filter matches nothing would change what a successful answer holds (its
+`bytes_read`, `hit_scan_cap` and records). A successful response is unchanged
+byte for byte. The remaining cost is stated in `docs/06-limits.md` under this
+decision: an admitted request still reads and decodes up to 2 × 4 MiB, and the
+pool bounds how many do so at once.
+
+**Proof.** `api::logs::the_log_routes_refuse_by_name_when_every_log_read_slot_is_held`
+holds all four slots. Both handlers then answer 429 with the named refusal and
+the page shell, and 200 once the slots are released. Against a `run_log_read`
+that runs inline without admission, which is the old behaviour, it fails.
+`api::detail::a_log_read_runs_off_the_worker_and_refuses_past_its_bound`
+checks three things: the work runs on a thread other than the worker, the
+fifth admission is `Saturated` while the calendar pool still admits, and the
+count returns to zero. AFG-27.
+### D-3000 — The autopilot pulls the day rung over the whole span before any minute rung — 2026-10-04
+
+**The rule.** The operator, 4 Oct 2026: *"zerodha will always pull one day as
+the first point for the entire dates and only then one min will be pulled."*
+
+**What the build did.** `api::ladder::gate` already refused a minute request
+whose window's day months were not held, so a hand-made pull over a window was
+day-first over that window. The autopilot was not. `fly` alternated the two
+pulled rungs tick by tick through `rung_for(tick)` (D-1454), and the gate is
+asked per month, so minute bars for an early month were fetched as soon as that
+month's day file landed, while the day pass was still years short of
+yesterday.
+
+**Decision.** `fly` drives the day rung until a day pass finds nothing chosen
+and nothing reconsidered, then the minute rung. `round` now answers a `Pass`
+carrying `owed` beside the wait. The proof that the day rung is clear is
+stamped with the last finished IST day and the masters generation it was taken
+for (`DayClear`). Either one moving sends the next tick back to the day rung,
+because a new finished day is a day bar nobody has asked for and a re-parse can
+add an instrument whose whole day history is owed. The choice is two integer
+compares per tick and reads no census.
+
+**What cannot wedge it.** A day month that will not land is passed over after
+`MAX_MONTH_ATTEMPTS` and reconsidered `STALL_RETRIES` times (D-0949). After
+that the day pass finds nothing chosen and the minute rung starts. The per-month
+ladder gate still refuses any minute month whose day month is missing.
+
+**Scope.** One proof covers every drivable feed together, so a feed's minute
+pass also waits for the other feeds' day passes. The rule names Zerodha and
+the autopilot drives all REST feeds through one loop, so the stricter reading
+is applied to all of them rather than inventing a per-feed handover.
+
+**Proof.** `api::autopilot::tests::the_day_pass_runs_over_the_whole_span_before_any_minute`
+walks `rung_for` and `after_pass` as `fly` does: day while owed, minute once
+proven, day again on a new day or a re-parse, day with no clock.
+`api::autopilot::tests::a_round_with_nothing_missing_reconsiders_a_stalled_month_and_says_which_attempt`
+asserts a reconsidering pass is `owed` and the following empty pass is not.
+`api::autopilot::tests::the_backfill_drives_the_day_rung_as_well_as_the_minute_rung`
+pins that `fly` chooses through `rung_for(day_clear, now)` and records through
+`after_pass` before `round` runs.
+
+### D-3001 — Zerodha's pulled day bar is checked against the days its minute bars fold to, and never replaced — 2026-10-04
+
+**The rule.** The operator, 4 Oct 2026, after the pull order above: *"and then
+entirely rederive internal calculation also should happen."* Every intraday
+rung is already folded from the minute bars (`pull::ingest::derive_all`), and
+the day rung stays served, never derived (D-0077).
+
+**What was missing.** Two answers exist for one day once both passes have run:
+the day bar the vendor served and the day its own minute bars add up to.
+Nothing compared them, so a missing minute inside a session, or a day the
+vendor corrected after serving the minutes, was invisible.
+
+**Decision.** `pull::daycheck::compare` folds the month's committed minute bars
+to IST days and merges them against the pulled day file on the IST calendar
+day. It counts agreed days, differing days, minute days with no pulled day, and
+pulled days the minute pass has not reached yet. That last count is not a
+fault, because the day pass runs first. The first disagreement is named field
+by field with both values. `pull::ingest::check_day` runs it once per
+instrument-month after Zerodha minute bars land and writes one `pull.daycheck`
+line: `info` when clean, `warn` when anything differs or the day file cannot be
+read. It writes no bar and fails nothing.
+
+**Zerodha only.** Groww's day bar opens at the previous session's close,
+measured 181 points from Dhan's on one instrument on one day (D-0077). Checking
+Groww would log every day as different and hide a real gap.
+
+**Cost.** `O(minutes + days)` per instrument-month, once, after the minute
+bars are already read for derivation. Argued from the shape of the code and not
+measured; `docs/06-limits.md`.
+
+**Proof.** `pull::daycheck::tests::*` cover agreement, every field named with
+both values, a day pass ahead of the minute pass at either end, minutes with no
+pulled day in the middle and at the end, which disagreement is named first,
+out-of-order minutes refused by the fold, and two empty sides.
+
+### D-3002 — A spot run keeps up to three instruments on the wire at once — 2026-10-04
+
+**What the build did.** `api::server::broker_run` awaited one instrument's
+whole fetch before asking for the next. Feeds ran concurrently with each other,
+but within one feed the request rate was set by network latency and store
+landing time, not by the feed's budget. Zerodha's historical cap is 3 requests
+a second (`pull::rate::ZERODHA_PER_SECOND`, `docs/00-charter.md` §4z), so any
+round trip slower than a third of a second left part of it unused on every
+instrument.
+
+**Decision.** `BROKER_LANES = 3` instruments are fetched together through
+`Lanes::next`, which joins three `broker_lane` calls. Three is the strictest
+per-second cap of the REST feeds, so no feed has more instruments in flight
+than it may send in one second. The rate is still held by the feed's one shared
+governor, which every lane waits on. Lanes add concurrency, never permits.
+
+**What stays serial.** Landing: answers are filed one instrument at a time in
+target order, so the store, the census, the vendor-down breaker and the
+credential check see the sequence they always did. The credential: a run
+starts with one lane and widens only after the vendor answered without
+rejecting the token. A rejection drops every lane fetched ahead and narrows
+back to one, so `CLAUDE.md` §8's single re-read still holds and a token that
+dies mid-run costs at most two extra requests carrying it. A stop (pause,
+breaker or credential halt) can leave up to two fetched lanes unlanded. They are
+asked again on the next run, because the resume point is the store's own.
+
+**Proof.** `api::server::credential_law_tests::a_spot_run_keeps_up_to_three_instruments_on_the_wire_and_never_more`
+runs seven indices against a loopback vendor that holds every request open
+for 300 ms. The vendor sees all seven, at least two were open together and
+never more than three, and each instrument read its credential once. The five
+existing §8 tests in the same file still pass unchanged: one request after a
+first-request rejection, the rotated token on the next instrument, a flapped
+value never sent, a failed re-read halting, and a configuration fault sending
+nothing.
+
+**Not measured.** The throughput gain against Zerodha itself. It depends on
+the real round trip, which this box cannot reach.
+
+### D-2750 — The web leaderboard scores an unbounded ratio as the worst, and a never-lost row's win:loss term as zero — 2026-10-04
+
+**Finding (p14num-2).** `rankRows` in `web/src/routes/backtest/+page.svelte`
+normalises each of the operator's eleven criteria across the run's rows and
+gave every unmeasurable value the midpoint, 0.5. Two values it treated as
+unmeasurable are not. A row with losses and no wins had `lossRatio` `null`,
+although its loss ratio is unbounded and so the worst there is; it beat every
+measured row in the lower half on "less losing ratio". A row that never lost
+arrives from `/frontier.json` with `reward_to_risk_bp` `null`, the
+`i64::MAX` sentinel `measurable` writes, and `cli::ranked` demotes exactly that
+sentinel to last in all four server ranking keys ("a cell that never lost is
+UNTESTED, not best"). The page placed it mid-board instead, against the server
+`rank` its own sort breaks ties on.
+
+**Decision.** `lossRatio` is `Infinity` when nothing was won and something was
+lost, and `null` only when neither sum moved. `norm` places `+Infinity` at the
+top of the range and `-Infinity` at the bottom; only `null`, `undefined` and
+`NaN` take the midpoint. The `rewardRisk` term is 0 for a `null`
+`reward_to_risk_bp`, matching `cli::ranked`. Both rows then score what the
+worst measured row scores, and the server rank breaks the tie.
+
+**What it changes.** Only the web re-rank's order when a run holds a never-won
+or never-lost row and the matching slider is non-zero. The server's ranking,
+the PASS/FAIL verdicts and the rendered `—` for an unmeasurable ratio are
+unchanged.
+
+**Proof.** `web/tests/rank-rows-unmeasurable.test.js`, which runs the page's
+own `rankRows` and pins the `cli::ranked` rule it mirrors. Gate W2 runs it.
+
 ### D-2760 — A pull run's edits are addressed to its own claim of the run slot — 2026-10-04
 
 **Finding (conc:runs-1).** `pullrun::conduct_with` publishes its summary,

@@ -3382,6 +3382,20 @@ an artefact of the fixture.
    constant is a constant.** What was wrong was never the bound — it was that the
    number attached to it everywhere was the wrong number.
 
+**Re-measured 2026-10-04 on a Linux container, and two lock-free designs tried
+(D-2331).** Intel Xeon @ 2.10 GHz, `nproc` 4, ext4, shared with other builds
+(load average 5 to 9), so the 8-thread rows oversubscribe it. Medians over 60
+alternated runs of the bench: p99 2,797 ns at 1 thread, 4,642 ns at 4 and
+4,279 ns at 8, with a quarter of runs near 25 to 37 µs. Rendering the line
+outside the lock did not improve the tail. Flat combining made each run's p99
+tighter (q90 at or under 11 µs) but raised the 8-thread p50 3.4× and the max
+2 to 2.5×. Neither was adopted. The remaining tail is wake-up and scheduling
+latency, which stays on the emit path while emit must wait for its own write
+to reach the page cache. Only an asynchronous writer removes it, and that
+gives up `Written` and loses queued events on a release panic (`panic =
+"abort"`). **A contention-free emit with today's contract is UNVERIFIED: it
+needs a measurement on an idle machine with at least 8 cores.**
+
 ### The flatness claim is now gated at p99 as well as at the mean
 
 C-T-01b applies the **same** `CEILING_PERMILLE` to the **same** claim, measured
@@ -6133,8 +6147,9 @@ and (D-1603) cargo-configuration paths, link arguments and spawning crates -- an
 layer 3 refuses every tracked build script its allowlist does not name. **Both read
 `git ls-files`.** Neither has ever looked at a dependency.
 
-**Measured, 2026-08-26**, by walking every package in `Cargo.lock` and grepping
-its vendored build script:
+**Measured, 2026-08-26, and re-measured 2026-10-04 (D-2328)** by walking every
+package in `Cargo.lock`, grepping its vendored build script and keeping only
+the packages `cargo tree -e normal,build -i` finds in the native host graph:
 
 | Package | Spawns |
 |---|---|
@@ -6142,9 +6157,15 @@ its vendored build script:
 | `libc` | `Command::new` `std::process` |
 | `proc-macro2` `quote` | `Command::new` `std::process` |
 | `httparse` | `Command::new` `std::process` |
-| `zmij` `wasm-bindgen-shared` | `Command::new` `std::process` |
+| `zmij` | `Command::new` `std::process` |
 | `crc32fast` `getrandom` `zerocopy` | `Command::new` |
 | `ahash` `generic-array` | `version_check` (which runs `rustc`) |
+| `num-traits` | `autocfg` (`emit_expression_cfg` compiles probes with `rustc`) |
+
+Thirteen packages. The 2026-08-26 table listed `wasm-bindgen-shared`, which is
+in `Cargo.lock` but not in the native graph, and missed `num-traits`. `ring`,
+`rustversion` and `wasm-bindgen-shared` also spawn, and are in `Cargo.lock` for
+other targets only; `cargo tree -i` on the host finds none of them.
 
 Almost all of these are the same thing: a probe that runs `rustc --version` to
 decide which language features to enable. `serde` and `libc` are not removable
@@ -6152,8 +6173,8 @@ from this workspace, so **the ban as written cannot be held at the dependency
 level**, and the sentence in §2 is stronger than the tree.
 
 **Why this is recorded rather than fixed.** A gate banning dependency build
-scripts would fail on `serde`. A gate with an allowlist of the fourteen would
-pass everything on the list forever and say nothing about the fifteenth. Neither
+scripts would fail on `serde`. A gate with an allowlist of the thirteen would
+pass everything on the list forever and say nothing about the fourteenth. Neither
 is worth the ceremony, and inventing a narrower rule here would be `CLAUDE.md`'s
 own warning about a gate that widens the law to match the tree, run in reverse.
 
@@ -6171,7 +6192,7 @@ named binding libraries.
 
 **What is not held**: the literal sentence, against dependencies. A reader
 finding a `build.rs` that runs `rustc` in `~/.cargo/registry` has found
-something true and something this workspace already contains fourteen of. See
+something true and something this workspace already contains thirteen of. See
 D-0311, where that rule was invoked against one crate before it was measured
 against the rest.
 
@@ -14373,10 +14394,12 @@ bounds are all nonzero.
   `vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses` and
   `exact_saved_search_rejects_foreign_pin_through_existing_handler` need an
   operator-captured vocabulary file and a completed search in a real store;
-  they are skipped by name and run only by hand. `web/sweep-readiness/verify.rs`
-  is a runner, not a test file: CI compiles it and does not run it, because it
-  executes the whole workspace suite and the browser toolchain. Gate 10 does
-  not read `web/` paths, so the eleven rows that cite these files are still
+  they are skipped by name and run only by hand. Since D-2324 the roots are
+  derived (`source_scan web-roots`), not listed: `web/sweep-readiness/verify.rs`
+  is built with `--test` and its unit tests run, but its audit `main` is not
+  run, because it executes the whole workspace suite and the browser
+  toolchain; `probes/support_lanes.rs` is built and run. Gate 10 does
+  not read `web/` paths, so the rows that cite these files are still
   checked by name by nothing; Gate 6d is what makes their tests run.
 ## Audit 2026-10-03 worker 2 — non-monotone exits, SPA's i.i.d. scale and corporate actions, D-1540 to D-1550
 
@@ -14768,7 +14791,7 @@ UNVERIFIED as measurements.
 - **Telemetry level lookup (D-2373).** At most 8 prefixes of at most 48 bytes
   each per event that clears the fast floor: constant.
 
-## Language-purity gate limits after the RO sweep — D-2340..D-2350, 4 October 2026
+## Language-purity gate limits after the RO sweep — D-2340..D-2350 and D-2321..D-2325, 4 October 2026
 
 - **Inline awk in `ci.yml` (D-2342).** Gate 0 now refuses an `awk` program
   operand, but 71 inline awk programs remain in `ci.yml`, all in gates that
@@ -14786,9 +14809,11 @@ UNVERIFIED as measurements.
 - **Gate 1g environment names (D-2346).** The refusals are line patterns: a
   variable-built name (`export "$n=..."`, `declare`, `printf -v`), any
   `GITHUB_PATH` write, and any `GITHUB_ENV` write other than the two literal
-  `printf 'SOURCE_SCAN=%s\n'` and `'CARGO_TARGET_DIR=%s\n'` lines. A name
-  assembled across lines, or written through a file descriptor other than
-  `>> "$GITHUB_ENV"`, is not modelled.
+  `printf 'SOURCE_SCAN=%s\n'` and `'CARGO_TARGET_DIR=%s\n'` lines. Since
+  D-2322 a listed wrapper name is refused in any position on any workflow
+  line, so a value assembled on one line for a sanctioned write is refused.
+  A name assembled from pieces (`RUSTC_WRAP""PER`), or written through a file
+  descriptor other than `>> "$GITHUB_ENV"`, is not modelled.
 - **`cfg` evaluation (D-2340).** CI compiles x86-64 Linux with `test` and
   `debug_assertions` each on or off; a `cfg` on a module, an inner `#![cfg]`
   or an `include!` is evaluated over those four configurations. `feature`,
@@ -14805,6 +14830,19 @@ UNVERIFIED as measurements.
   format argument (`rustc-env=BRUTEX_COMMIT={commit}`) is checked by its
   literal prefix only; the value is `build_provenance`'s 40-hex commit or
   empty.
+- **Step `shell:` keys (D-2321).** A `shell` key is read when its line starts
+  with it, or with `- `, `{` or `,` before it. A key reached through a YAML
+  anchor or merge (`<<: *x`) is not resolved. A flow-style value is refused
+  rather than parsed.
+- **Gate 25's flag (D-2323).** The `-C` key is read with `-` or `_` between
+  its words and the value with one optional quote; a value taken from a shell
+  variable (`-C ..._checks=$x`) is not resolved.
+- **Gate 6d roots (D-2324).** A root's kind is read from tokens: `#[test]`
+  (by path too) anywhere in its module closure, and a top-level `fn main`
+  outside `#[cfg(test)]`. A test generated by a macro is not seen; such a
+  root would be built and run as a program, or refused as having neither.
+  Every root links the same ten libraries. Run locally for D-2324 against a
+  snapshot of a shared target directory, not a fresh CI checkout.
 - **Gate 1e on a worktree without `web/` (D-2345).** Not run locally for the
   change that introduced it: this machine is shared and the full workspace
   build and test is CI's job. What was run locally is recorded in D-2345.
@@ -15120,3 +15158,31 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   eight extra context loads and column builds. The commit then loads its own
   copy again. `ledger-v6` already held that context, so it only adds the
   column build. Not measured; read off the source.
+
+- **The Zerodha day check (D-3001).** `pull::daycheck::compare` folds one
+  instrument-month of minute bars to days, O(minutes), and merges two
+  ascending day lists, O(days); `pull::ingest::check_day` reads the month's
+  day file once, O(days). It runs once per instrument-month after Zerodha
+  minute bars land, on bars `derive_all` has already read. Argued from the
+  shape of the code and not timed. The autopilot's day-then-minute choice
+  (D-3000) is two integer compares per tick and reads no census.
+
+## `/logs.json` and `/logs` still read up to 8 MiB per admitted request — D-2327, 4 October 2026
+
+- **What D-2327 bounded.** The two-half tail walk no longer runs on a Tokio
+  worker. It runs in `detail::run_log_read`'s pool of
+  `MAX_LOG_READ_CONCURRENT` = 4 blocking slots, and a fifth request is
+  refused with a named 429 before it reads anything. At most 4 × 2 ×
+  `logs::SCAN_BYTES` = 32 MiB of log is being read and decoded at once, and
+  none of it holds an async worker.
+- **What it did not bound: the cost of one admitted request is O(file), not
+  O(1).** Each request still walks each half newest-first until it has
+  `limit` matches or has read `SCAN_BYTES` (4 MiB), and decodes every line it
+  reads. A `run=` filter whose events are all in the other half, or a
+  `target=` nothing logs, reads that half to its cap on every call. The
+  backtest page's 2-second poll is such a call for one half. It was not cut
+  further because a cut changes what a successful answer contains: its
+  records, `bytes_read` and `hit_scan_cap`. Skipping the half that cannot hold
+  a run would need the attempt's origin, which the handler does not receive.
+- **Not timed.** No bench measures a log walk. The 4 MiB per half is the
+  configured cap, not a measurement, and the time it takes is UNVERIFIED.

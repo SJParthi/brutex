@@ -193,7 +193,7 @@ pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 /// arm no test could reach. The assertion below keeps the two honest, and
 /// `pull::unit::the_configuration_file_is_bounded_before_it_is_read` pins the
 /// value itself so the expression cannot drift.
-const MAX_FILE_BYTES_LEN: usize = 64 * 1024;
+pub(crate) const MAX_FILE_BYTES_LEN: usize = 64 * 1024;
 
 const _: () = assert!(MAX_FILE_BYTES == 65_536 && MAX_FILE_BYTES_LEN == 65_536);
 
@@ -1018,7 +1018,13 @@ impl CredentialConfig {
 /// `?`: their failure arms then live in `std`, which is not this repository's code to measure, instead
 /// of being two arms in this function that a test would have to force a
 /// permission error to reach.
-fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+///
+/// **Two callers, one shape.** `crate::ssm::AwsIdentity::from_credentials_file`
+/// reads `~/.aws/credentials` through this too: it sits beside this file on the
+/// same start-up path and was read with an unbounded `read_to_string`, so the
+/// FIFO hang and the device OOM this function removes were still reachable one
+/// file over. P1-19-03, D-2326.
+pub(crate) fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     if !std::fs::metadata(path)?.is_file() {
         return Ok(None);
     }

@@ -218,6 +218,9 @@ fn before(s: &str, at: usize) -> Option<char> {
 const ENV_HEAD: &str = concat!("CARGO_PRO", "FILE_");
 const ENV_TAIL: &str = concat!("_OVER", "FLOW_CHECKS");
 const FLAG_KEY: &str = concat!("over", "flow-checks");
+/// The flag's two words, which rustc joins with `-` or `_` (D-2323).
+const FLAG_HEAD: &str = concat!("over", "flow");
+const FLAG_TAIL: &str = "checks";
 
 /// `^FILE:[0-9]*:REST$` with FILE given: the REST of a scanner leaf.
 fn leaf_of<'a>(line: &'a str, file: &str) -> Option<&'a str> {
@@ -263,14 +266,26 @@ fn env_override(line: &str) -> bool {
 }
 
 /// The codegen flag set to `off`, `no`, `n`, `false` or `0`, spaces allowed
-/// around the `=`. As before it is a prefix test: `n` covers `no`.
+/// around the `=` and one quote allowed before the value. As before it is a
+/// prefix test: `n` covers `no`. The two words of the key are joined by a
+/// hyphen OR an underscore (P15-09, D-2323): rustc normalises `-C` option
+/// names, so `-C over..._checks=off` is the same option, comes after cargo's
+/// own `-C ...=on`, and wraps. The key is found anywhere in the line, so the
+/// `-C` written with no space before it is read too.
 fn flag_override(line: &str) -> bool {
-    line.match_indices(FLAG_KEY).any(|(at, _)| {
-        let rest = line[at + FLAG_KEY.len()..].trim_start_matches(is_space);
+    line.match_indices(FLAG_HEAD).any(|(at, _)| {
+        let Some(rest) = line[at + FLAG_HEAD.len()..]
+            .strip_prefix(['-', '_'])
+            .and_then(|r| r.strip_prefix(FLAG_TAIL))
+        else {
+            return false;
+        };
+        let rest = rest.trim_start_matches(is_space);
         let Some(rest) = rest.strip_prefix('=') else {
             return false;
         };
         let rest = rest.trim_start_matches(is_space);
+        let rest = rest.strip_prefix(['"', '\'']).unwrap_or(rest);
         ["off", "n", "false", "0"]
             .iter()
             .any(|v| rest.starts_with(v))
@@ -374,7 +389,9 @@ fn gate25(tree: &dyn Tree, leaves: &str, out: &mut Out) -> bool {
         bad = true;
     }
     let mut envs = Vec::new();
-    for w in listed(tree, &[".github/workflows/*"]) {
+    // Every tracked `.yml` under `.github/` too, composite actions included,
+    // as gate 0 and gate 1g read them (D-2341, D-2323).
+    for w in listed(tree, &[".github/workflows/*", ".github/*.yml"]) {
         let Some(bytes) = tree.read(&w) else {
             say!(out, "  REFUSED  {w} could not be read");
             bad = true;
@@ -2449,6 +2466,43 @@ mod tests {
             format!("# the {FLAG_KEY} = true default\n"),
             format!("{ENV_HEAD}OVERFLOW_CHECKS: 1\n"),
             format!("{FLAG_KEY}=yes\n"),
+        ] {
+            let wf = format!("jobs:\n{body}");
+            let (ok, text) = g25(&[ROOT, (".github/workflows/ci.yml", &wf)], GOOD_LEAVES);
+            assert!(ok, "{body}: {text}");
+        }
+    }
+
+    #[test]
+    fn gate25_refuses_every_spelling_of_the_codegen_flag() {
+        // P15-09, D-2323. rustc reads `_` as `-` in a `-C` option name.
+        let under = FLAG_KEY.replace('-', "_");
+        for body in [
+            format!("      RUSTFLAGS: -D warnings -C {under}=off\n"),
+            format!("      RUSTFLAGS: -C{under}=off\n"),
+            format!("      RUSTFLAGS: -C{FLAG_KEY}=no\n"),
+            format!("      RUSTFLAGS: -C {under} = false\n"),
+            format!("      RUSTFLAGS: \"-C {FLAG_KEY}='off'\"\n"),
+            format!("      RUSTFLAGS: -C {under}=\"n\"\n"),
+        ] {
+            let wf = format!("jobs:\n{body}");
+            let (ok, text) = g25(&[ROOT, (".github/workflows/ci.yml", &wf)], GOOD_LEAVES);
+            assert!(!ok, "{body}");
+            assert!(text.contains("from the environment:\n"), "{text}");
+        }
+        // A composite action is a tracked `.yml` under `.github/` too.
+        let act = format!("runs:\n  steps:\n    - run: RUSTFLAGS='-C {under}=off' x\n");
+        let (ok, text) = g25(
+            &[ROOT, WF, (".github/actions/a/action.yml", &act)],
+            GOOD_LEAVES,
+        );
+        assert!(!ok, "{text}");
+        assert!(text.contains(".github/actions/a/action.yml:3:"), "{text}");
+        for body in [
+            format!("RUSTFLAGS: -C {under}=on\n"),
+            format!("RUSTFLAGS: -C{under}=yes\n"),
+            format!("x: {under}s=off\n"),
+            format!("x: {FLAG_HEAD} {FLAG_TAIL}=off\n"),
         ] {
             let wf = format!("jobs:\n{body}");
             let (ok, text) = g25(&[ROOT, (".github/workflows/ci.yml", &wf)], GOOD_LEAVES);

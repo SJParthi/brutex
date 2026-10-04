@@ -900,23 +900,87 @@ pub const RUNGS: [pull::vendor::Granularity; 2] = [
     pull::vendor::Granularity::Minute1,
 ];
 
-// `fly` counts ticks with `wrapping_add` and [`rung_for`] reduces the count
-// modulo this length, so the alternation survives the wrap at `usize::MAX`
-// only when the length divides 2^64.
-const _: () = assert!(RUNGS.len().is_power_of_two());
-
-/// The rung tick number `tick` of the autopilot drives: [`RUNGS`] in turn,
-/// from the first: one remainder and one array read.
+/// The day pass a feed set has been proven clear for: the last finished IST
+/// day the pass was aimed at, and the masters generation it walked.
 ///
-/// A function rather than an expression inside `fly` so the alternation is
-/// tested directly: `fly` is an endless loop over a live store, and a choice
-/// made there that always picked the day rung would starve the minute rung
-/// with nothing to observe it. D-1454.
-fn rung_for(tick: usize) -> pull::vendor::Granularity {
-    RUNGS
-        .get(tick % RUNGS.len())
-        .copied()
-        .unwrap_or(pull::vendor::Granularity::Day1)
+/// # The operator's rule, 4 Oct 2026
+///
+/// *"zerodha will always pull one day as the first point for the entire dates
+/// and only then one min will be pulled."* The ladder gate already refuses a
+/// minute MONTH whose day month is not held, and that was not the rule: the
+/// autopilot alternated the two rungs tick by tick, so minute bars for 2020-03
+/// were being fetched while the day pass had not yet reached 2026. The day rung
+/// now runs over the WHOLE span first, and the minute rung starts only once a
+/// day pass finds nothing left to ask for. D-3000.
+///
+/// # Why the stamp carries both values
+///
+/// Either moving re-opens the day pass. A new finished day is a day bar
+/// nobody has asked for yet, and a masters re-parse can add an instrument whose
+/// whole day history is owed. Comparing the pair is two integer compares and
+/// reads no census; that cost is UNVERIFIED as a measurement and recorded in
+/// `docs/06-limits.md` (D-3000).
+pub type DayClear = Option<(Day, u64)>;
+
+/// The rung the next tick drives: the minute rung only when the day pass has
+/// been proven clear for exactly `now`, the day rung otherwise.
+///
+/// `now` is `None` when the clock cannot name yesterday; the day rung is the
+/// answer then, because it is the one the order puts first. Proven by
+/// `api::autopilot::tests::the_day_pass_runs_over_the_whole_span_before_any_minute`.
+fn rung_for(day_clear: DayClear, now: DayClear) -> pull::vendor::Granularity {
+    if day_clear.is_some() && day_clear == now {
+        pull::vendor::Granularity::Minute1
+    } else {
+        pull::vendor::Granularity::Day1
+    }
+}
+
+/// The day-clear stamp after a pass of `rung` that answered `owed`.
+///
+/// A day pass that found nothing owed proves the day rung clear for `now`. A
+/// day pass that found work leaves it unproven. A minute pass says nothing
+/// about the day rung and leaves the stamp as it was; [`rung_for`] still sends
+/// the next tick back to the day rung the moment `now` moves.
+fn after_pass(
+    rung: pull::vendor::Granularity,
+    owed: bool,
+    day_clear: DayClear,
+    now: DayClear,
+) -> DayClear {
+    if rung == pull::vendor::Granularity::Day1 {
+        if owed { None } else { now }
+    } else {
+        day_clear
+    }
+}
+
+/// What one [`round`] answered: how long to wait, and whether its rung still
+/// owes work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pass {
+    /// Seconds to wait before the next tick.
+    wait: u64,
+    /// Whether the rung still owes work: a unit was chosen, a stalled month is
+    /// being reconsidered, or the pass could not look (stood off, no clock).
+    /// Only a pass that looked and found nothing answers `false`.
+    owed: bool,
+}
+
+impl Pass {
+    /// A pass that could not decide, so its rung is still owed.
+    const fn owed(wait: u64) -> Self {
+        Self { wait, owed: true }
+    }
+
+    /// A pass whose survey chose no unit: owed, with no wait, only while it is
+    /// reconsidering a stalled month; otherwise clear, after the idle poll.
+    const fn surveyed(reconsidering: bool) -> Self {
+        Self {
+            wait: if reconsidering { 0 } else { IDLE_POLL_SECS },
+            owed: reconsidering,
+        }
+    }
 }
 
 /// Where one rung of one feed stands on the ladder while the other rung is
@@ -2596,7 +2660,7 @@ pub async fn fly(site: Loaded) {
     // literal `Timeframe::MINUTE_1` here would be a second answer to "where do
     // these bars go" beside `pull::ingest::Plan::timeframe`.
     //
-    // BOTH PULLED RUNGS, ALTERNATING — and this is the difference between an
+    // BOTH PULLED RUNGS, DAY THEN MINUTE — and this is the difference between an
     // autopilot that backfills and one that cannot start.
     //
     // It was `let granularity = Granularity::Minute1;`, one value, used by the
@@ -2613,12 +2677,13 @@ pub async fn fly(site: Loaded) {
     // rather than fetched. So a vendor is asked for two things and the store
     // builds the other seven.
     //
-    // Alternating rather than "day until complete, then minute" on purpose: the
-    // gate already refuses an out-of-order rung cheaply, so attempting both in
-    // turn is self-correcting, needs no completion predicate of its own, and
-    // cannot wedge on a day rung that will never finish because one instrument
-    // is delisted.
-    let mut next_rung = 0usize;
+    // DAY OVER THE WHOLE SPAN FIRST, THEN MINUTE — not alternating. The
+    // operator's rule of 4 Oct 2026 and why the alternation broke it are on
+    // [`DayClear`]. Stalls cannot wedge it: a day month that will not land is
+    // passed over after `MAX_MONTH_ATTEMPTS` and reconsidered a bounded number
+    // of times, after which the day pass finds nothing chosen and the minute
+    // rung starts. D-3000.
+    let mut day_clear: DayClear = None;
     let granularity = pull::vendor::Granularity::Day1;
     let Some(timeframe) = granularity.store_timeframe() else {
         site.autopilot.publish(|status| {
@@ -2663,12 +2728,13 @@ pub async fn fly(site: Loaded) {
             dwell_paused(&site.autopilot).await;
             continue;
         }
-        // WHICH RUNG THIS TICK IS FOR. Advanced before the call so a
-        // `continue` below cannot leave the same rung selected forever. Each
-        // feed keeps a frontier per rung (`Place`, D-0949), which `round`
-        // swaps in.
-        let rung = rung_for(next_rung);
-        next_rung = next_rung.wrapping_add(1);
+        // WHICH RUNG THIS TICK IS FOR: the day rung until a day pass proves
+        // it clear for this finished day and this masters parse, then the
+        // minute rung (`rung_for`, D-3000). Each feed keeps a frontier per
+        // rung (`Place`, D-0949), which `round` swaps in.
+        let now = yesterday_ist(std::time::SystemTime::now())
+            .map(|day| (day, site.universe().generation));
+        let rung = rung_for(day_clear, now);
         // THE SERIES IS PER RUNG. `tracked_series` answers "which
         // instrument-months does this timeframe still owe", and the day rung
         // and the minute rung owe different ones — sharing one list would have
@@ -2678,7 +2744,9 @@ pub async fn fly(site: Loaded) {
             continue;
         };
         let rung_series = cache.get(&site, rung_timeframe);
-        let waited = round(&site, &mut feeds, rung_series, rung).await;
+        let pass = round(&site, &mut feeds, rung_series, rung).await;
+        day_clear = after_pass(rung, pass.owed, day_clear, now);
+        let waited = pass.wait;
         // BETWEEN UNITS, ALWAYS. The sweep itself awaits on every request, so
         // this is belt and braces for the one path that might not — a tick that
         // decides there is nothing to do and loops.
@@ -3139,7 +3207,7 @@ async fn round(
     feeds: &mut [FeedState],
     series: &[Series],
     granularity: pull::vendor::Granularity,
-) -> u64 {
+) -> Pass {
     // THIS RUNG'S PLACE, NOT THE OTHER ONE'S. One swap of four fields per feed;
     // see `Place` for the months the shared frontier used to skip. D-0949.
     for state in feeds.iter_mut() {
@@ -3182,14 +3250,14 @@ async fn round(
         .as_ref()
         .is_some_and(crate::pullrun::Progress::running);
     if pressing {
-        return stand_off(site, "a hand-made pull is running");
+        return Pass::owed(stand_off(site, "a hand-made pull is running"));
     }
 
     let Some(_seats) = site.autopilot.take_every_seat() else {
-        return stand_off(site, "a hand-made pull holds the pull seat");
+        return Pass::owed(stand_off(site, "a hand-made pull holds the pull seat"));
     };
     let Some(yesterday) = yesterday_ist(std::time::SystemTime::now()) else {
-        return IDLE_POLL_SECS;
+        return Pass::owed(IDLE_POLL_SECS);
     };
     // ONE CENSUS READ PER PASS, not per cell. O(entries) once, against a pass
     // that takes minutes — the same bargain D-0039 struck for the site.
@@ -3267,11 +3335,15 @@ async fn round(
         // than a minute later. It cannot spin: `reconsider` stamps the stall it
         // moved, so the same month cannot be chosen again for
         // `STALL_RECHECK_SECS`, and every month's allowance is finite.
-        return if carry_on { 0 } else { IDLE_POLL_SECS };
+        //
+        // NOTHING CHOSEN AND NOTHING RECONSIDERED is the one answer that proves
+        // this rung owes nothing, and it is what lets the day pass hand over to
+        // the minute pass (`after_pass`, D-3000).
+        return Pass::surveyed(carry_on);
     };
 
     let Some(state) = feeds.get_mut(slot) else {
-        return IDLE_POLL_SECS;
+        return Pass::owed(IDLE_POLL_SECS);
     };
     let label = format!("{} · {}", state.feed.display(), unit.month);
     // THE WHOLE SPAN BEING AIMED AT — `docs/07-plan.md` R-2, recomputed rather
@@ -3316,7 +3388,7 @@ async fn round(
         status.journal_error = journal_error;
     });
 
-    settle(site, state, &out)
+    Pass::owed(settle(site, state, &out))
 }
 
 /// Act on what a tick did: move the frontier, publish the reason, and say how
@@ -5123,7 +5195,9 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
+            .await
+            .wait;
 
         // A transport-shaped refusal, so it backs off rather than halting.
         assert_eq!(waited, BACKOFF_FLOOR_SECS);
@@ -5195,7 +5269,9 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let _waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let _waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
+            .await
+            .wait;
 
         let json = site.autopilot.json();
         assert!(
@@ -5235,7 +5311,9 @@ mod tests {
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
+            .await
+            .wait;
         assert_eq!(waited, SEAT_WAIT_SECS, "it waits rather than spinning");
         let json = site.autopilot.json();
         assert!(json.contains("holds the pull seat"), "{json}");
@@ -5248,7 +5326,9 @@ mod tests {
 
         // AND THE SEAT COMES BACK. The next round proceeds normally.
         drop(held);
-        let after = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+        let after = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1)
+            .await
+            .wait;
         assert_ne!(
             after, SEAT_WAIT_SECS,
             "the standoff ended with the manual pull"
@@ -5588,25 +5668,66 @@ mod tests {
         );
     }
 
-    /// **THE TICKS ALTERNATE THE RUNGS, DAY FIRST, AND THE WRAP KEEPS THE
-    /// ALTERNATION.** A choice that always answered the day rung would starve
-    /// the minute rung — the one the engine sweeps — while every round still
-    /// ran. `usize::MAX` is odd and wraps to the even zero, so the two ticks
-    /// either side of the wrap still differ. D-1454.
+    /// **THE DAY PASS RUNS OVER THE WHOLE SPAN BEFORE ANY MINUTE.** The
+    /// operator's rule of 4 Oct 2026, replacing the tick-by-tick alternation
+    /// that fetched minute months while the day pass was still years short.
+    /// Walked as `fly` walks it: day while owed, minute once a day pass proves
+    /// the span clear, and back to day the moment a new finished day or a
+    /// masters re-parse moves `now`. D-3000.
     #[test]
-    fn the_rung_alternates_day_then_minute_across_the_wrap() {
+    fn the_day_pass_runs_over_the_whole_span_before_any_minute() {
         use pull::vendor::Granularity::{Day1, Minute1};
-        let ticks = [
-            0,
-            1,
-            2,
-            3,
-            usize::MAX - 1,
-            usize::MAX,
-            usize::MAX.wrapping_add(1),
-        ];
-        let rungs = ticks.map(rung_for);
-        assert_eq!(rungs, [Day1, Minute1, Day1, Minute1, Day1, Minute1, Day1]);
+        let day = |d: u8| Day::new(2026, 10, d).expect("a real date");
+        let at = Some((day(2), 7));
+
+        // NOTHING PROVEN YET: the day rung, however many ticks go by.
+        let mut clear: DayClear = None;
+        for _ in 0..3 {
+            let rung = rung_for(clear, at);
+            assert_eq!(rung, Day1, "the day rung comes first");
+            clear = after_pass(rung, true, clear, at);
+        }
+        // A DAY PASS THAT FOUND NOTHING OWED hands over to the minute rung.
+        clear = after_pass(Day1, false, clear, at);
+        assert_eq!(clear, at);
+        assert_eq!(rung_for(clear, at), Minute1);
+        // A MINUTE PASS, owed or not, says nothing about the day rung.
+        assert_eq!(after_pass(Minute1, true, clear, at), at);
+        assert_eq!(after_pass(Minute1, false, clear, at), at);
+        assert_eq!(after_pass(Minute1, false, None, at), None);
+        // A NEW FINISHED DAY re-opens the day pass…
+        assert_eq!(rung_for(clear, Some((day(3), 7))), Day1);
+        // …and so does a masters re-parse, which can add an instrument.
+        assert_eq!(rung_for(clear, Some((day(2), 8))), Day1);
+        // NO CLOCK is never a proof: the day rung, which the order puts first.
+        assert_eq!(rung_for(None, None), Day1);
+        assert_eq!(rung_for(at, None), Day1);
+        // A DAY PASS THAT FOUND WORK withdraws an earlier proof.
+        assert_eq!(after_pass(Day1, true, at, at), None);
+        // A survey that chose nothing is clear only when nothing is being
+        // reconsidered.
+        assert_eq!(
+            Pass::surveyed(true),
+            Pass {
+                wait: 0,
+                owed: true
+            }
+        );
+        assert_eq!(
+            Pass::surveyed(false),
+            Pass {
+                wait: IDLE_POLL_SECS,
+                owed: false
+            }
+        );
+        // The owed constructor never claims a clear rung.
+        assert_eq!(
+            Pass::owed(9),
+            Pass {
+                wait: 9,
+                owed: true
+            }
+        );
     }
 
     /// The autopilot asks for BOTH pulled rungs, not just the minute one.
@@ -5649,11 +5770,16 @@ mod tests {
             RUNGS.contains(&pull::vendor::Granularity::Minute1),
             "and the minute rung too — it is the one the engine sweeps"
         );
-        // `fly` reaches the table through `rung_for`, whose walk of `RUNGS` is
-        // pinned by `the_rung_alternates_day_then_minute_across_the_wrap`.
+        // `fly` chooses through `rung_for`, whose day-then-minute order is
+        // pinned by `the_day_pass_runs_over_the_whole_span_before_any_minute`,
+        // and feeds every pass's answer back through `after_pass`.
         assert!(
-            code.contains("rung_for(next_rung)"),
-            "`fly` chooses its rung from the table"
+            code.contains("rung_for(day_clear, now)"),
+            "`fly` chooses its rung from the day-clear proof"
+        );
+        assert!(
+            code.contains("after_pass(rung, pass.owed, day_clear, now)"),
+            "`fly` records what each pass proved about the day rung"
         );
         // BOTH REACH `round`, which is the only thing that pulls. Naming a rung
         // in a comment or a status string would satisfy the two assertions
@@ -5662,8 +5788,8 @@ mod tests {
             .find("round(&site")
             .expect("`fly` reaches the vendor through `round`");
         let chose = code
-            .find("next_rung")
-            .expect("the rung alternates rather than being fixed");
+            .find("rung_for(")
+            .expect("the rung is chosen rather than being fixed");
         assert!(
             chose < asked,
             "the rung is chosen BEFORE the round is run, so the choice is what \
@@ -6575,7 +6701,9 @@ mod tests {
             "a store halt arms a probe due immediately"
         );
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1)
+            .await
+            .wait;
         assert_eq!(
             waited, IDLE_POLL_SECS,
             "nothing was fetched: the axis is empty"
@@ -6823,7 +6951,9 @@ mod tests {
         let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
         let mut feeds = drivable(yesterday);
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1)
+            .await
+            .wait;
         assert_eq!(waited, IDLE_POLL_SECS, "nothing to carry on to");
 
         let (phase, detail) = site
@@ -6877,7 +7007,13 @@ mod tests {
             rung: pull::vendor::Granularity::Minute1,
         });
 
-        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        assert!(
+            pass.owed,
+            "a reconsidered month is still owed, so a day pass in this state keeps \
+             the minute rung waiting (D-3000)"
+        );
+        let waited = pass.wait;
         assert_eq!(
             waited, 0,
             "a reconsidered month is work, so the next pass is immediate rather than idle"
@@ -6902,7 +7038,13 @@ mod tests {
 
         // AND A SECOND ROUND DOES NOT ASK AGAIN, because the stall was stamped.
         feeds.first_mut().expect("a feed").frontier = frontier_before;
-        let again = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        let pass = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        assert!(
+            !pass.owed,
+            "nothing chosen and nothing reconsidered is the one answer that proves \
+             the rung clear (D-3000)"
+        );
+        let again = pass.wait;
         assert_eq!(
             again, IDLE_POLL_SECS,
             "the same month must not be reconsidered twice in one interval"

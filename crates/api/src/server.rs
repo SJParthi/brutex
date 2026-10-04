@@ -7858,7 +7858,10 @@ pub(crate) async fn broker_run(
     let mut vendor_down_streak = 0u32;
     // THE RUN'S CREDENTIAL MEMORY: what the last request carried and what is
     // known to be dead. See `credential_law::Watch`.
-    let mut watch = crate::credential_law::Watch::default();
+    //
+    // Shared by up to `BROKER_LANES` instruments on the wire at once, which is
+    // why it lives in `Lanes` (D-3002).
+    let mut lanes = Lanes::default();
     for (index, instrument) in targets.iter().enumerate() {
         // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
         // month is five to thirty-seven minutes on this store, and an operator
@@ -7890,8 +7893,11 @@ pub(crate) async fn broker_run(
                 since: std::time::Instant::now(),
             });
         });
-        // Whether the vendor rejected the credential on this instrument.
-        let rejected = match broker_window(asked, instrument, site, &mut watch).await {
+        // THE NEXT LANES, FETCHED TOGETHER when nothing fetched is waiting.
+        // Landing stays one instrument at a time and in target order below,
+        // so the store, the census and every per-instrument decision see
+        // exactly the sequence they always did. D-3002.
+        let rejected = match lanes.next(asked, &targets, index, site).await {
             Err(why) => {
                 // THE MARKER IS READ AND REMOVED HERE, so it never reaches an
                 // operator and never reaches the journal. One instrument that
@@ -7952,7 +7958,10 @@ pub(crate) async fn broker_run(
         };
         // `CLAUDE.md` §8: A REJECTED TOKEN IS RE-READ ONCE, HERE. See
         // `credential_halts`, which says what this loop used to do instead.
-        if credential_halts(&mut watch, site, asked.feed, rejected, &mut out, index).await {
+        //
+        // A rejection also drops the lanes fetched ahead; the function says
+        // why (D-3002).
+        if credential_halts(&mut lanes, (site, asked.feed), rejected, &mut out, index).await {
             break;
         }
         // THE BREAKER, AFTER BOTH ARMS SO EITHER CAN HAVE MOVED IT.
@@ -7965,6 +7974,10 @@ pub(crate) async fn broker_run(
             break;
         }
     }
+    // A STOP CAN LEAVE FETCHED LANES UNLANDED. They are asked again on the
+    // next run, because the resume point is the store's own; whether they
+    // reached the vendor is still part of what this run did.
+    out.touched_wire = out.touched_wire || lanes.reached_wire();
     // NOTHING IS ON THE WIRE ANY MORE. Left set, a finished run would keep
     // claiming to be fetching the last instrument it touched for as long as the
     // process lived.
@@ -7986,14 +7999,29 @@ pub(crate) async fn broker_run(
 /// that fails, or a configuration fault recorded by `broker_window` stops the
 /// run, and the stop names how many instruments were not asked. It is never a
 /// loop and never a mint. D-0948.
+///
+/// A rejection also drops every lane fetched ahead (`BROKER_LANES`). Those
+/// lanes carried the token just rejected; their answers are not landed and
+/// their instruments are asked again, one at a time, with whatever the re-read
+/// admits. Dropping them costs at most two requests, and landing them would
+/// file bars fetched under a verdict now in doubt. Every lane has finished by
+/// now, so the watch is taken back with `get_mut` and no lock. D-3002.
 async fn credential_halts(
-    watch: &mut crate::credential_law::Watch,
-    site: &Site,
-    feed: pull::vendor::Feed,
+    lanes: &mut Lanes,
+    (site, feed): (&Site, pull::vendor::Feed),
     rejected: bool,
     out: &mut BrokerRun,
     index: usize,
 ) -> bool {
+    if rejected {
+        out.touched_wire = out.touched_wire || lanes.reached_wire();
+        lanes.ahead.clear();
+        lanes.wide = false;
+    }
+    let watch = lanes
+        .watch
+        .get_mut()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if rejected {
         let _rotated_or_halted = watch.reread(&site.credentials, feed).await;
     }
@@ -10226,11 +10254,128 @@ pub(crate) async fn credentialed_source(
     Ok((source, vendor))
 }
 
+/// How many instruments one spot run keeps on the wire at once: **3**.
+///
+/// # Why the run was serial, and why that was slow rather than safe
+///
+/// `broker_run` awaited one instrument's whole fetch before asking for the
+/// next, so a feed's request rate was set by network latency, not by its
+/// budget. Zerodha's historical cap is 3 requests a second
+/// (`pull::rate::ZERODHA_PER_SECOND`); any round trip slower than a third of
+/// a second left part of it unused on every instrument, for every month of
+/// the backfill. D-3002.
+///
+/// # Why three, and what still holds the rate
+///
+/// Three is the strictest per-second cap of the REST feeds, so no feed ever
+/// has more instruments in flight than it may send in one second. The rate is
+/// still held by the feed's one shared governor (`await_budget` and the
+/// source's own admission), which every lane waits on; lanes add concurrency,
+/// never permits.
+///
+/// # What stays serial
+///
+/// Landing. Answers are filed one instrument at a time in target order, so the
+/// store, the census, the breaker and the credential check see the sequence
+/// they always did. And the credential: a run starts with ONE lane and widens
+/// only after the vendor answered without rejecting the token, and a rejection
+/// drops every lane fetched ahead and narrows back to one, so `CLAUDE.md` §8's
+/// "re-read once, never resend the dead value" costs at most two extra
+/// requests when a token dies mid-run.
+pub(crate) const BROKER_LANES: usize = 3;
+
+// `broker_run` joins exactly three `broker_lane` calls.
+const _: () = assert!(BROKER_LANES == 3);
+const _: () = assert!(BROKER_LANES == pull::rate::ZERODHA_PER_SECOND as usize);
+
+/// One lane of [`broker_run`]: the instrument's window, or nothing when the
+/// lane has no instrument because the list ran out.
+async fn broker_lane(
+    asked: &ingest::SpotRequest,
+    instrument: Option<&brutex_core::instrument::InstrumentKey>,
+    site: &Site,
+    watch: &std::sync::Mutex<crate::credential_law::Watch>,
+) -> Option<Result<BrokerWindow, String>> {
+    match instrument {
+        Some(instrument) => Some(broker_window(asked, instrument, site, watch).await),
+        None => None,
+    }
+}
+
+/// The lanes of one [`broker_run`]: the credential watch they share, the
+/// answers fetched ahead of landing, and whether the next fetch may be wide.
+#[derive(Default)]
+struct Lanes {
+    /// `CLAUDE.md` §8's run memory. Behind a mutex because each lane reads and
+    /// admits its own credential; the lock is held for one call and never
+    /// across an await. Every lane has finished before a result is acted on,
+    /// so [`credential_halts`] takes it back with `get_mut` and no lock.
+    watch: std::sync::Mutex<crate::credential_law::Watch>,
+    /// The instruments already fetched and not yet landed, in target order.
+    ahead: std::collections::VecDeque<Result<BrokerWindow, String>>,
+    /// Whether the last instrument acted on proved the credential live. A run
+    /// starts narrow, so one request learns that before three are sent.
+    wide: bool,
+}
+
+impl Lanes {
+    /// The answer for `targets[index]`: the next lane already fetched, or, when
+    /// none is waiting, the next `BROKER_LANES` instruments fetched together
+    /// (one while the credential is unproven). Landing stays one instrument at
+    /// a time and in target order, so the store, the census and every
+    /// per-instrument decision see exactly the sequence they always did.
+    /// D-3002.
+    async fn next(
+        &mut self,
+        asked: &ingest::SpotRequest,
+        targets: &[brutex_core::instrument::InstrumentKey],
+        index: usize,
+        site: &Site,
+    ) -> Result<BrokerWindow, String> {
+        if self.ahead.is_empty() {
+            let width = if self.wide { BROKER_LANES } else { 1 };
+            let mut next = targets.iter().skip(index).take(width);
+            let watch = &self.watch;
+            let (first, second, third) = tokio::join!(
+                broker_lane(asked, next.next(), site, watch),
+                broker_lane(asked, next.next(), site, watch),
+                broker_lane(asked, next.next(), site, watch),
+            );
+            self.ahead
+                .extend([first, second, third].into_iter().flatten());
+        }
+        let answer = self.ahead.pop_front().unwrap_or_else(|| {
+            Err(format!(
+                "instrument {} of {}: no lane answered for it",
+                index.saturating_add(1),
+                targets.len()
+            ))
+        });
+        // WIDE ONLY AFTER THE VENDOR ANSWERED: a refusal before the wire
+        // proved nothing about the token. A rejection narrows it again in
+        // `credential_halts`.
+        self.wide = answer
+            .as_ref()
+            .map_or_else(|why| read_markers(why).reached_wire, |_| true);
+        answer
+    }
+
+    /// Whether any lane fetched ahead reached the vendor: every answer that
+    /// landed bars did, and a refusal did when it carries the wire marker.
+    fn reached_wire(&self) -> bool {
+        self.ahead.iter().any(|fetched| {
+            fetched
+                .as_ref()
+                .map_or_else(|why| read_markers(why).reached_wire, |_| true)
+        })
+    }
+}
+
 async fn broker_window(
     asked: &ingest::SpotRequest,
     instrument: &brutex_core::instrument::InstrumentKey,
     site: &Site,
-    watch: &mut crate::credential_law::Watch,
+    watch: &std::sync::Mutex<crate::credential_law::Watch>,
 ) -> Result<BrokerWindow, String> {
     // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
     // THAT ANSWERS "IS THIS A BROKER".
@@ -10337,11 +10482,20 @@ async fn broker_window(
     let (source, vendor) = match site.credentials.source(feed).await {
         Ok(read) => read,
         Err(failed) => {
-            watch.unreadable(feed, &failed);
+            // THE LOCK IS TAKEN FOR ONE CALL AND DROPPED BEFORE ANY AWAIT, so
+            // concurrent lanes of one run share the watch and none of them can
+            // hold it across a socket (D-3002).
+            watch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unreadable(feed, &failed);
             return Err(failed.why);
         }
     };
-    watch.admit(feed, &source)?;
+    watch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(feed, &source)?;
     // AND IT ASKS THIS SITE'S GOVERNOR, not one of its own.
     //
     // `HttpSource::new` builds a private governor from the descriptor, which is

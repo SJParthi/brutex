@@ -1212,6 +1212,111 @@ fn module_paths(
     (seen, errs)
 }
 
+/// Does `src` carry a `#[test]` attribute, bare or by path (`#[x::test]`)?
+fn has_test_attr(src: &str) -> Result<bool, String> {
+    let t = lex(src)?.tokens;
+    Ok((0..t.len()).any(|i| {
+        if !is_punct(t.get(i), '#') || !is_punct(t.get(i + 1), '[') {
+            return false;
+        }
+        let mut k = i + 2;
+        let mut last = None;
+        while let Some(tok) = t.get(k) {
+            match &tok.tok {
+                Tok::Ident(s) => last = Some(s.as_str()),
+                Tok::Punct(':') => {}
+                Tok::Punct(']') => return last == Some("test"),
+                _ => return false,
+            }
+            k += 1;
+        }
+        false
+    }))
+}
+
+/// Does `src` define `fn main` at its top level, outside `#[cfg(test)]`?
+fn has_top_level_main(src: &str) -> Result<bool, String> {
+    let t = production_tokens(src)?;
+    let mut depth = 0i64;
+    for (i, tok) in t.iter().enumerate() {
+        match tok.tok {
+            Tok::Punct('{') => depth += 1,
+            Tok::Punct('}') => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && is_ident(Some(tok), "fn") && is_ident(t.get(i + 1), "main") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The native Rust roots under `web/` (P15-17, D-2324): every tracked
+/// `web/**.rs` that no other `web/` file mounts, by `#[path]`, `mod` or
+/// `include!` as `module_paths` resolves them, each with its kinds: `test`
+/// when the root or any file it mounts carries a `#[test]`, `main` when the
+/// root defines a top-level `fn main`, both joined by `,`, or `none`. No list
+/// is kept, so a new root is found the day it is tracked. A mount that does
+/// not resolve, or files that mount only each other, is an error, never a
+/// silently skipped file.
+fn web_roots(
+    tracked: &BTreeSet<String>,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> (Vec<(String, &'static str)>, Vec<String>) {
+    let exists = |p: &str| tracked.contains(p);
+    let web: Vec<&String> = tracked
+        .iter()
+        .filter(|f| f.starts_with("web/") && f.ends_with(".rs"))
+        .collect();
+    let mut errs = Vec::new();
+    let mut mounted = BTreeSet::new();
+    let mut closures = BTreeMap::new();
+    for f in &web {
+        let (seen, e) = module_paths(&[((*f).clone(), Vec::new())], read, &exists);
+        errs.extend(e);
+        let files: BTreeSet<String> = seen.into_iter().map(|(p, _)| p).collect();
+        mounted.extend(files.iter().filter(|p| p != f).cloned());
+        closures.insert((*f).clone(), files);
+    }
+    let mut roots = Vec::new();
+    for f in web.into_iter().filter(|f| !mounted.contains(*f)) {
+        let mut test = false;
+        for p in closures.get(f).into_iter().flatten() {
+            match read(p).map(|s| has_test_attr(&s)) {
+                Some(Ok(t)) => test |= t,
+                Some(Err(e)) => errs.push(format!("{p}: {e}")),
+                None => errs.push(format!("{p}: cannot be read")),
+            }
+        }
+        let main = match read(f).map(|s| has_top_level_main(&s)) {
+            Some(Ok(m)) => m,
+            Some(Err(e)) => {
+                errs.push(format!("{f}: {e}"));
+                false
+            }
+            None => false,
+        };
+        let kind = match (test, main) {
+            (true, true) => "test,main",
+            (true, false) => "test",
+            (false, true) => "main",
+            (false, false) => "none",
+        };
+        roots.push((f.clone(), kind));
+    }
+    // Files that mount each other in a cycle are all "mounted" and none is a
+    // root, so nothing would compile them: refused by name.
+    let reached: BTreeSet<&String> = roots
+        .iter()
+        .filter_map(|(r, _)| closures.get(r))
+        .flatten()
+        .collect();
+    for f in closures.keys().filter(|f| !reached.contains(f)) {
+        errs.push(format!("{f}: under web/ but reached from no root"));
+    }
+    (roots, errs)
+}
+
 // ------------------------------------------------- build scripts (2) --
 
 const PROCESS_MEMBERS_THAT_START_NOTHING: [&str; 6] = [
@@ -2600,6 +2705,84 @@ fn inline_programs(l: &str) -> Vec<(String, &'static str, Family)> {
 const AWK_RATCHET: &[(&str, usize)] = &[(".github/workflows/ci.yml", AWK_IN_CI)];
 const AWK_IN_CI: usize = 0;
 
+/// The value of every `shell` key on one logical workflow line (P15-07,
+/// D-2321): the key at the start of the line, after a `- ` list marker, or
+/// after a flow mapping's `{` or `,`, bare or quoted, then `:` and a space or
+/// the end of the line. The value runs to a ` #` comment or the end, so a
+/// flow mapping's closing brace stays in it and the value is refused: fail
+/// closed rather than parse flow YAML.
+fn shell_values(l: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for (at, _) in l.match_indices("shell") {
+        let (open, quote) = match l[..at].chars().next_back() {
+            Some(q @ ('"' | '\'')) => (&l[..at - 1], Some(q)),
+            _ => (&l[..at], None),
+        };
+        let pre = open.trim_end();
+        if !(pre.is_empty() || pre == "-" || pre.ends_with('{') || pre.ends_with(',')) {
+            continue;
+        }
+        let mut rest = &l[at + "shell".len()..];
+        if let Some(q) = quote {
+            let Some(r) = rest.strip_prefix(q) else {
+                continue;
+            };
+            rest = r;
+        }
+        let Some(value) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        if !(value.is_empty() || value.starts_with([' ', '\t'])) {
+            continue;
+        }
+        let value = value.find(" #").map_or(value, |c| &value[..c]);
+        out.push(value.trim());
+    }
+    out
+}
+
+/// Is a step's `shell:` value bash or sh, as GitHub runs them? `bash`, `sh`,
+/// or either followed only by `{0}`, `--noprofile`, `--norc`, a short-option
+/// cluster of `e o u x v`, and after an `o` cluster one `set -o` name. GitHub's
+/// own default, `bash --noprofile --norc -eo pipefail {0}`, passes; `perl
+/// {0}`, `node {0}`, `pwsh`, `bash -c ...` and `sh -s` do not.
+fn allowed_shell(value: &str) -> bool {
+    let v = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(value);
+    let mut words = v.split_whitespace();
+    if !matches!(words.next(), Some("bash" | "sh")) {
+        return false;
+    }
+    let mut wants_option_name = false;
+    for w in words {
+        if wants_option_name {
+            if !matches!(w, "pipefail" | "errexit" | "nounset" | "xtrace" | "noglob") {
+                return false;
+            }
+            wants_option_name = false;
+            continue;
+        }
+        if matches!(w, "{0}" | "--noprofile" | "--norc") {
+            continue;
+        }
+        let Some(cluster) = w.strip_prefix('-') else {
+            return false;
+        };
+        if cluster.is_empty()
+            || !cluster
+                .chars()
+                .all(|c| matches!(c, 'e' | 'o' | 'u' | 'x' | 'v'))
+        {
+            return false;
+        }
+        wants_option_name = cluster.ends_with('o');
+    }
+    !wants_option_name
+}
+
 /// Workflow-wide refusals. `continue-on-error` anywhere turns a red step
 /// into a green job. A pipe into `grep -q` under `pipefail` reads a match
 /// as a miss once the producer outruns one pipe buffer. An interpreter
@@ -2631,6 +2814,15 @@ fn workflow_findings(path: &str, src: &str) -> Vec<String> {
                 .starts_with(':')
         {
             out.push(format!("{path}:{n}: continue-on-error"));
+        }
+        // P15-07, D-2321: `shell: node {0}` makes the `run:` body itself
+        // the program, which no inline-flag rule below can see.
+        for v in shell_values(l) {
+            if !allowed_shell(v) {
+                out.push(format!(
+                    "{path}:{n}: `shell: {v}` runs a step's body with a program other than bash or sh"
+                ));
+            }
         }
         // `| grep ... -q` (any flag cluster carrying q) in one pipeline stage.
         for stage in l.split('|').skip(1) {
@@ -2899,7 +3091,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|web-roots|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -2933,6 +3125,26 @@ fn run(args: &[String]) -> Result<bool, String> {
                     println!("{line}");
                 }
                 clean &= found.is_empty();
+            }
+        }
+        "web-roots" => {
+            let listing = rest
+                .first()
+                .ok_or("web-roots needs a NUL-separated tracked listing")?;
+            let tracked = tracked_set(&read_file(listing)?);
+            let read = |p: &str| {
+                tracked
+                    .contains(p)
+                    .then(|| std::fs::read_to_string(p).ok())
+                    .flatten()
+            };
+            let (roots, errs) = web_roots(&tracked, &read);
+            for e in &errs {
+                println!("UNRESOLVED {e}");
+            }
+            clean &= errs.is_empty();
+            for (root, kind) in roots {
+                println!("{root}\t{kind}");
             }
         }
         "fns" => {
@@ -4106,6 +4318,117 @@ mod tests {
             "          sha=$(gh api x | \"$j\" field sha)\n",
         ] {
             assert!(workflow_findings("w", good).is_empty(), "refused: {good}");
+        }
+    }
+
+    #[test]
+    fn every_unmounted_rust_file_under_web_is_a_root_with_its_kind() {
+        // P15-17, D-2324. Gate 6d ran four named files; a new root, or one
+        // such as `probes/x.rs`, was compiled by nothing.
+        let files: BTreeMap<&str, &str> = [
+            ("Cargo.toml", ""),
+            ("crates/a/src/x.rs", "#[test] fn t() {}"),
+            (
+                "web/s/run.rs",
+                "#[path = \"run-tests.rs\"]\n#[cfg(test)]\nmod tests;\n#[path = \"../../crates/a/src/x.rs\"]\nmod x;\n",
+            ),
+            ("web/s/run-tests.rs", "#[test]\nfn t() {}\n"),
+            ("web/s/probes/lanes.rs", "fn main() { assert!(true); }\n"),
+            ("web/s/verify.rs", "#[cfg(test)]\nfn x() {}\nfn main() {}\n"),
+            (
+                "web/s/both.rs",
+                "fn main() {}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+            ),
+            ("web/s/lib.rs", "mod m { fn main() {} }\n#[cfg(test)]\nfn main() {}\n"),
+            ("web/s/tok.rs", "#[tokio::test]\nasync fn t() {}\n"),
+            (
+                "web/s/prose.rs",
+                "// #[path = \"run-tests.rs\"] mod t;\nconst S: &str = \"#[test]\";\nfn main() {}\n",
+            ),
+            ("web/c/a.rs", "#[path = \"b.rs\"]\nmod b;\n"),
+            ("web/c/b.rs", "#[path = \"a.rs\"]\nmod a;\n"),
+            ("web/m/x.rs", "#[path = \"gone.rs\"]\nmod g;\n"),
+            ("web/m/notes.md", "#[test]"),
+        ]
+        .into_iter()
+        .collect();
+        let tracked: BTreeSet<String> = files.keys().map(|k| (*k).to_owned()).collect();
+        let read = |p: &str| files.get(p).map(|s| (*s).to_owned());
+        let (roots, errs) = web_roots(&tracked, &read);
+        assert_eq!(
+            roots,
+            vec![
+                ("web/m/x.rs".to_owned(), "none"),
+                ("web/s/both.rs".to_owned(), "test,main"),
+                ("web/s/lib.rs".to_owned(), "none"),
+                ("web/s/probes/lanes.rs".to_owned(), "main"),
+                ("web/s/prose.rs".to_owned(), "main"),
+                ("web/s/run.rs".to_owned(), "test"),
+                ("web/s/tok.rs".to_owned(), "test"),
+                ("web/s/verify.rs".to_owned(), "main"),
+            ]
+        );
+        assert!(errs.iter().any(|e| e.contains("gone.rs")), "{errs:?}");
+        for f in ["web/c/a.rs", "web/c/b.rs"] {
+            let e = format!("{f}: under web/ but reached from no root");
+            assert!(errs.contains(&e), "{errs:?}");
+        }
+        assert_eq!(errs.len(), 3, "{errs:?}");
+    }
+
+    #[test]
+    fn a_step_shell_other_than_bash_or_sh_is_refused() {
+        // P15-07, D-2321. Each of these passed `workflow` before: `{0}` is
+        // neither an inline flag nor `-`, so the body ran unseen.
+        for bad in [
+            concat!(
+                "      - shell: py",
+                "thon {0}\n        run: |\n          import os\n"
+            ),
+            "      - shell: node {0}\n        run: console.log(1)\n",
+            "      - shell: perl {0}\n        run: print 1\n",
+            "        shell: pwsh\n",
+            "        shell: cmd\n",
+            "        shell: 'ruby {0}'\n",
+            "        \"shell\": \"node {0}\"\n",
+            "        shell : node {0}\n",
+            "      run:\n        shell: deno run {0}\n",
+            "    defaults: { run: { shell: node {0} } }\n",
+            "      - { name: x, shell: bash, run: y }\n",
+            "        shell: bash -c 'node {0}'\n",
+            "        shell: sh -s\n",
+            "        shell: bash -o\n",
+            "        shell: bash -o posix {0}\n",
+            "        shell: bash --rcfile x {0}\n",
+            "        shell: >\n",
+            "        shell: *anchor\n",
+            "        shell:\n",
+        ] {
+            assert!(
+                workflow_findings(".github/actions/a/action.yml", bad)
+                    .iter()
+                    .any(|f| f.contains("other than bash or sh")),
+                "passed: {bad}"
+            );
+        }
+        for good in [
+            "      - shell: bash\n",
+            "        shell: sh\n",
+            "        shell: bash {0}\n",
+            "        shell: \"sh {0}\"\n",
+            "        shell: bash --noprofile --norc -eo pipefail {0}\n",
+            "        shell: bash -e {0} # strict\n",
+            "        shell: 'bash'\n",
+            "          echo shell: in a run body is a word, not a key\n",
+            "          # shell: node {0} in prose\n",
+            "        myshell: node {0}\n",
+            "        shells: node\n",
+        ] {
+            assert!(
+                workflow_findings("w", good).is_empty(),
+                "refused: {good}: {:?}",
+                workflow_findings("w", good)
+            );
         }
     }
 

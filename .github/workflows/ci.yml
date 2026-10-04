@@ -3776,32 +3776,34 @@ jobs:
           # skipped BY NAME; docs/06-limits.md says so.
           #
           # D-2315: `gates_jobs gate-6d` finds exactly one rlib per linked
-          # crate in cargo's messages (refusing none or two), writes them as
-          # rustc `@file` arguments, and writes the api rlib's and the two
-          # wrapper sources' SHA-256, which the tests read through `env!`.
+          # crate in cargo's messages (refusing none or two) and writes the
+          # api rlib's and the two wrapper sources' SHA-256, which the tests
+          # read through `env!`.
+          #
+          # D-2324 (P15-17): the roots are not named here. `source_scan
+          # web-roots` lists every tracked web/**.rs that no other web/ file
+          # mounts (by `#[path]`, `mod` or `include!`), marked `test` when it
+          # or a file it mounts has a `#[test]`; gate-6d refuses an empty or
+          # unresolved list and writes one rustc `@file` per root. A root with
+          # tests is built with --test and run with the skips (its `main`, if
+          # any, is compiled and not run); a root with only `main` is built
+          # and run. `verify.rs`, the full local audit, is a test root.
           t="$RUNNER_TEMP/web-native"; mkdir -p "$t"
           cargo build -p api -p cli --lib --tests --locked --message-format=json > "$t/art.json"
-          "$RUNNER_TEMP/gates-jobs" gate-6d "$t/art.json" "$t"
+          rustc --edition=2024 -D warnings .github/source_scan.rs -o "$RUNNER_TEMP/source-scan"
+          git ls-files -z > "$t/tracked.z"
+          "$RUNNER_TEMP/source-scan" web-roots "$t/tracked.z" > "$t/roots"
+          "$RUNNER_TEMP/gates-jobs" gate-6d "$t/art.json" "$t" "$t/roots"
           read -r api_sha inspector_sha viewer_sha < "$t/sha.txt"
           export BRUTEX_INSPECTOR_API_SHA256="$api_sha" BRUTEX_VIEWER_API_SHA256="$api_sha"
           export BRUTEX_INSPECTOR_SOURCE_SHA256="$inspector_sha" BRUTEX_VIEWER_SOURCE_SHA256="$viewer_sha"
-          deps="dependency=target/debug/deps"
           skip="--skip vocabulary_comes_from_linked_rust_table_and_foreign_grid_refuses"
           skip="$skip --skip exact_saved_search_rejects_foreign_pin_through_existing_handler"
-          rustc --edition=2024 -D warnings web/sweep-readiness/verify.rs -o "$t/verify"
-          rustc --edition=2024 --test -D warnings web/sweep-readiness/frontend-publish.rs -o "$t/frontend-publish" -L "$deps" @"$t/externs"
-          rustc --edition=2024 --test -D warnings web/sweep-readiness/main-inspector.rs -o "$t/main-inspector" -L "$deps" @"$t/externs"
-          rustc --edition=2024 --test -D warnings web/sweep-readiness/deployment-preflight.rs -o "$t/deployment-preflight" -L "$deps" @"$t/externs"
-          rustc --edition=2024 --test -D warnings web/saved-backtest/viewer.rs -o "$t/viewer" -L "$deps" @"$t/externs"
+          xargs -I{} rustc @{} < "$t/build.list"
           # shellcheck disable=SC2086
-          (cd "$t" && ./frontend-publish $skip)
-          # shellcheck disable=SC2086
-          (cd "$t" && ./main-inspector $skip)
-          # shellcheck disable=SC2086
-          (cd "$t" && ./deployment-preflight $skip)
-          # shellcheck disable=SC2086
-          (cd "$t" && ./viewer $skip)
-          echo "OK — every native test under web/ but the two named above ran."
+          (cd "$t" && xargs -I{} env {} $skip < tests.list)
+          (cd "$t" && xargs -I{} env {} < mains.list)
+          echo "OK — every native root under web/ was built and run, but the two tests named above."
 
       - name: The browser crate actually builds for the browser
         run: |

@@ -1201,19 +1201,18 @@ fn holds_exactly(target: &Path, body: &[u8]) -> bool {
     }
     let mut reader = file.take(body.len() as u64);
     let mut chunk = [0_u8; 8_192];
-    let mut offset = 0_usize;
-    while offset < body.len() {
-        let want = chunk.len().min(body.len() - offset);
-        let Some(window) = chunk.get_mut(..want) else {
+    // `chunks` walks `body` itself, so there is no offset to advance and no
+    // loop bound a mutation could turn into a pass that never ends.
+    for expected in body.chunks(chunk.len()) {
+        let Some(window) = chunk.get_mut(..expected.len()) else {
             return false;
         };
         if reader.read_exact(window).is_err() {
             return false;
         }
-        if body.get(offset..offset + want) != Some(&*window) {
+        if *window != *expected {
             return false;
         }
-        offset += want;
     }
     true
 }
