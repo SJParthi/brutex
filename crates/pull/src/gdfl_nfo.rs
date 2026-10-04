@@ -70,9 +70,13 @@
 //! # Cost
 //!
 //! A day listing is O(entries) once per day; after it [`NfoDay::locate`] is
-//! one hash probe (expected O(1); its flatness against the listing size and
-//! against duplicates is measured by `attack_tests::dpn_12` and `dpn_15`,
-//! debug-profile tests, not by the bench gate). [`decode_ticker`] is O(ticker length),
+//! one hash probe (expected O(1); its flatness against duplicates is
+//! measured by `pull::gdfl_nfo::dpn_12_locate_does_not_grow_with_the_duplicates_a_day_holds`
+//! and against the listing size by
+//! `pull::gdfl_nfo::dpn_15_locate_per_probe_cost_over_listing_size` (both in
+//! `attack_tests`),
+//! both test-profile timings, not the bench gate; D-3166 records that the
+//! `C-GI-02` row this cited does not exist). [`decode_ticker`] is O(ticker length),
 //! bounded by the 64-byte cap it refuses past. [`decode`] is O(bytes).
 //! Fetching a file is O(its compressed and rebuilt bytes). The listing and
 //! the fetch are limits in `docs/06-limits.md`, not constant-time claims.

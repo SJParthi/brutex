@@ -698,7 +698,9 @@ fn reruns_and_mended_partial_days_converge_on_the_clean_store() {
         &[spot("RELIANCE", good), spot("SBIN", bad)],
     )
     .unwrap();
-    assert_eq!((partial.files, partial.files_refused), (2, 1));
+    // The refused file is counted as refused only, never also as read
+    // (D-3168; this line said (2, 1) and encoded the double count).
+    assert_eq!((partial.files, partial.files_refused), (1, 1));
     assert!(
         std::fs::read_to_string(journal_path(&mended))
             .unwrap()

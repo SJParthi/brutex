@@ -2196,7 +2196,14 @@ const AUDIT_LITERAL: &str = "-354 -7 repeats";
 //     is a time with the wrong separator; `_search` and `_` are the
 //     tails of banned-construct names a source-shape test splits so
 //     it does not trip gate 11 itself.
+//   ROUND 2 (gdfl_r2_attack_tests.rs). The `r2-*` words are scratch
+//     roots, as above. `195` `1260` `10500` `27000` `1927000` are
+//     strike texts of invented option names, `2012-` the expiry-year
+//     prefix a monthly name read as dated must carry, and `d` `inc`
+//     prefixes of journal verbs a torn line may stop at.
 const GDFL_LITERAL: &str = "
+    r2-era r2-filter-claim r2-filter-claim-store r2-fold-count r2-journal
+    r2-race r2-stocks r2-world 195 1260 10500 27000 1927000 2012- d inc
     indices stocks imports begin done late_rows late_unresolved max_back_s
     seconds days only missing filed journal calendar listing
     import-ambiguous import-both import-census import-cm-refusal

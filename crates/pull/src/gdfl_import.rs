@@ -17,7 +17,9 @@
 //! gate, the journal, the row rule, the placement of late rows, the fold and
 //! the write. Two sources and three kinds meet in [`drive`], so a bar from a
 //! zip and a bar from the tick store take byte for byte the same path to
-//! disk, and a run over either leaves the same store (`CM-GI-02`).
+//! disk, and a run over either leaves the same store
+//! (`tests::every_kind_lands_at_one_second_and_both_sources_leave_the_same_store`,
+//! and over random worlds DPT-13; the `CM-GI-02` this cited is no row).
 //!
 //! # The bar (D-2802, the agreed definition of 4 Oct 2026)
 //!
@@ -83,7 +85,8 @@
 //! constant-time claim; `docs/06-limits.md` states it. What IS constant per
 //! lookup is the stored result: a bar by index is one positional read
 //! (`store::file::BarFile::read_record`, C-28/C-29), a ticker in a listing is
-//! one slot index or one hash probe (C-GI-01/02).
+//! one slot index (CM-13) or one hash probe (`gdfl_nfo::NfoDay::locate`,
+//! DPN-04; the `C-GI-01/02` rows this cited do not exist, D-3166).
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
@@ -428,7 +431,8 @@ pub struct Report {
     pub days_refused: usize,
     /// Days a crashed or incomplete earlier run had begun, imported again.
     pub resumed: Vec<Day>,
-    /// Instrument files read.
+    /// Instrument files read and folded; a file the fold refuses is in
+    /// `files_refused` instead, never in both (D-3168).
     pub files: usize,
     /// Entries not wanted.
     pub files_skipped: usize,
@@ -533,6 +537,16 @@ pub fn journal_path(store_root: &Path) -> PathBuf {
 /// whole can end in it, because a key is a kind, a day and symbol names.
 const TORN: &str = " (torn)";
 
+/// Whether `fragment`, a line cut short by a crash, can be the start of a
+/// line the journal writes: a prefix of one of its three verbs and the space
+/// after it, or text that starts with one (D-3169). Anything else at the end
+/// of the file is not a torn journal line but a foreign one.
+fn torn_fragment(fragment: &str) -> bool {
+    ["begin ", "done ", "incomplete "]
+        .into_iter()
+        .any(|verb| verb.starts_with(fragment) || fragment.starts_with(verb))
+}
+
 /// The journal, read once per run: the keys done, and the keys begun and not
 /// finished.
 #[derive(Debug, Default)]
@@ -561,18 +575,26 @@ impl Journal {
             path,
             ..Self::default()
         };
-        let whole = text.rsplit_once('\n').map_or("", |(whole, _)| whole);
-        if !text.is_empty() && !text.ends_with('\n') {
-            // Closed with a mark, never a bare newline: a bare one made the
-            // torn fragment a whole line that the NEXT load refused as
-            // foreign, so one crash mid-write stopped every later run
-            // (D-3173).
-            journal.append(TORN)?;
+        let (whole, tail) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
+        let shown = journal.path.display().to_string();
+        let foreign = |line: &str| ImportRefusal::Journal {
+            why: format!("{shown}: not a journal line: {line:?}"),
+        };
+        // Every whole line is judged BEFORE anything is written, and a torn
+        // tail must be the start of a line the journal writes: a foreign file
+        // is refused on every run and never touched. Closing first let a
+        // one-line foreign file be refused once and then, its line now
+        // "torn", read as an empty journal by every later run (D-3169).
+        if !tail.is_empty() && !torn_fragment(tail) {
+            return Err(foreign(tail));
         }
-        for line in whole
-            .split('\n')
-            .filter(|line| !line.is_empty() && !line.ends_with(TORN))
-        {
+        for line in whole.split('\n').filter(|line| !line.is_empty()) {
+            if let Some(fragment) = line.strip_suffix(TORN) {
+                if torn_fragment(fragment) {
+                    continue;
+                }
+                return Err(foreign(line));
+            }
             let fields: Vec<&str> = line.split(' ').collect();
             match fields.as_slice() {
                 ["begin", kind, day, only] => {
@@ -586,12 +608,15 @@ impl Journal {
                 ["incomplete", kind, day, only, ..] => {
                     journal.open.remove(&format!("{kind} {day} {only}"));
                 }
-                _ => {
-                    return Err(ImportRefusal::Journal {
-                        why: format!("{}: not a journal line: {line:?}", journal.path.display()),
-                    });
-                }
+                _ => return Err(foreign(line)),
             }
+        }
+        if !tail.is_empty() {
+            // Closed with a mark, never a bare newline: a bare one made the
+            // torn fragment a whole line that the NEXT load refused as
+            // foreign, so one crash mid-write stopped every later run
+            // (D-3173).
+            journal.append(TORN)?;
         }
         Ok(journal)
     }
@@ -685,9 +710,10 @@ struct DayWork<'a> {
 }
 
 impl DayWork<'_> {
-    /// Converts and files one instrument file.
+    /// Converts and files one instrument file. A file the fold refuses is
+    /// counted as refused and only as refused, so every entry of a day is
+    /// exactly one file, skip or refusal (D-3168).
     fn file(&mut self, file: &TickFile) {
-        self.report.files += 1;
         let converted = match convert(self.run.kind, self.day, &file.ticks) {
             Ok(converted) => converted,
             Err(why) => {
@@ -697,6 +723,7 @@ impl DayWork<'_> {
                 return;
             }
         };
+        self.report.files += 1;
         let p = converted.placement;
         self.report.rows += p.rows;
         self.report.ltq_zero_dropped += p.ltq_zero_dropped;
@@ -1021,17 +1048,31 @@ pub fn run_nfo<S: NfoSource>(source: &S, run: &Run<'_>) -> Result<Report, Import
     drive(run, |day, sink| nfo_day(source, run, day, sink))
 }
 
-/// The longest F&O underlying `ticker` starts with, for a name that does not
-/// decode (D-3175): `NIFTYNXT50…` is `NIFTYNXT50`, never `NIFTY`. O(213) per
-/// undecodable name, on the refusal path only.
-fn underlying_prefix(ticker: &str) -> Option<&'static str> {
-    let mut best: Option<&'static str> = None;
-    for underlying in brutex_core::universe::FNO_UNDERLYINGS {
-        if ticker.starts_with(underlying) && best.is_none_or(|b| underlying.len() > b.len()) {
-            best = Some(underlying);
+/// The longest name of `names` that `ticker` starts with.
+fn longest_prefix<'a>(ticker: &str, names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let mut best: Option<&'a str> = None;
+    for name in names {
+        if ticker.starts_with(name) && best.is_none_or(|b| name.len() > b.len()) {
+            best = Some(name);
         }
     }
     best
+}
+
+/// Whether a filtered run wants a name that does not decode: when the
+/// longest underlying it starts with, among the F&O underlyings AND the
+/// filter's own names, is a filter name. `NIFTYNXT50…` is `NIFTYNXT50`'s,
+/// never `NIFTY`'s (D-3175); `TV18BRDCST…`, a share outside today's F&O
+/// list, is a `TV18BRDCST` filter's, which asked for it by name (D-3167).
+/// O(213 + filter names) per undecodable name, on the refusal path only.
+fn claims_undecodable(run: &Run<'_>, ticker: &str) -> bool {
+    let fno = longest_prefix(ticker, brutex_core::universe::FNO_UNDERLYINGS);
+    let asked = longest_prefix(ticker, run.only.iter().map(String::as_str));
+    match (asked, fno) {
+        (Some(asked), Some(fno)) => asked.len() >= fno.len(),
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// One options day: every option file whose underlying passes the filter.
@@ -1088,11 +1129,9 @@ fn nfo_day<S: NfoSource>(
             }
             Ok(decoded) => run.wants(decoded.underlying.as_str()),
             // A name that does not decode is refused when it could be wanted:
-            // by its WHOLE underlying, the longest F&O underlying it starts
-            // with, never by a filter name it merely starts with (D-3175).
-            Err(_) => {
-                run.only.is_empty() || underlying_prefix(ticker).is_some_and(|u| run.wants(u))
-            }
+            // by its WHOLE underlying, never by a filter name a longer F&O
+            // underlying outspells (D-3175, D-3167).
+            Err(_) => run.only.is_empty() || claims_undecodable(run, ticker),
         };
         if !wanted {
             read.skipped += 1;
@@ -1131,3 +1170,7 @@ mod tests;
 #[cfg(test)]
 #[path = "gdfl_seconds_attack_tests.rs"]
 mod attack_gdfl_seconds;
+
+#[cfg(test)]
+#[path = "gdfl_r2_attack_tests.rs"]
+mod r2_attack_tests;
