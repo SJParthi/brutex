@@ -1717,6 +1717,20 @@
       </div>
     {/if}
 
+    <!-- A FAILED JOURNAL APPEND IS A BAD-TONE BANNER AT THE TOP, NOT A LINE AT
+         THE FOOT OF A LIST (CE-78, D-1786). `journal_error` was read into
+         `journal_status` and shown only beside the failure list and the trail
+         note; the operator reading the beam was never told the durable record
+         had stopped being written. -->
+    {#if ap && ap.journal_status.state === 'failed'}
+      <div class="beam bad" role="alert">
+        <div>
+          <p class="claim">The journal is not being written.</p>
+          <p class="claim-sub">{journalBanner(ap.journal_status, ap.journal ?? JOURNAL)}</p>
+        </div>
+      </div>
+    {/if}
+
     <!-- ==============================================================
          THE DECK. Six readings, each carrying the source it came from.
          ============================================================== -->
@@ -1826,7 +1840,7 @@
         <div class="g-v" class:dn={Boolean(ap?.failures?.length)}>
           {#if ap}{@render N(ap.failures.length)}{:else}{@render N(
               null,
-              `/autopilot.json did not answer, so the failure list is unknown. The durable record is the journal at ${JOURNAL}`
+              `/autopilot.json did not answer, so the failure list is unknown, and so is whether the journal at ${JOURNAL} is being written`
             )}{/if}
         </div>
         <div class="g-n">
@@ -2136,8 +2150,9 @@
             <div class="void">
               <b>Unknown — and unknown is not zero.</b>
               The failure list lives in /autopilot.json, which did not
-              answer. The durable record is <code>{JOURNAL}</code>, rendered at
-              <a class="link" href="/audit">Audit</a>.
+              answer — and so does <code>journal_error</code>, so whether the
+              journal at <code>{JOURNAL}</code> (rendered at
+              <a class="link" href="/audit">Audit</a>) is being written is unknown too.
             </div>
           {:else if ap.failures.length === 0}
             <div class="void">

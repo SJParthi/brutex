@@ -6,7 +6,11 @@ import { mergePages, nextOrdinal, pageFor } from '../src/lib/audit-pages.js';
 
 const PER = 200;
 
-/** What the server returns for `page` when the journal holds `total`. */
+/**
+ * What the server returns for `page` when the journal holds `total`.
+ * @param {number} page
+ * @param {number} total
+ */
 function serve(page, total) {
   const end = Math.max(0, total - page * PER);
   const start = Math.max(0, end - PER);

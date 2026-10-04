@@ -91,6 +91,8 @@
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
   import { createCalendarLoader, emptyCalendar, foldMinuteOwed } from '$lib/calendar-owed.js';
+  import { emptyPilot, failedPilot, foldIngestStatus, pilotNotice } from '$lib/ingest-status.js';
+  import { feedMeter, landedOf } from '$lib/run-card.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -4551,35 +4553,40 @@
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
   /**
+   * THE FOLD IS `$lib/ingest-status.js` (CE-79, D-1787): a refused or failed
+   * read clears the flight and the halts rather than keeping the previous
+   * answer, the 503's `error` is named, and `surveyed` / `blocked_by` are
+   * carried so an empty list is never read as "nothing halted".
    * @type {{
    *   at: number,
    *   inFlight: PilotFlight | null,
    *   feeds: PilotFeed[],
    *   state: string,
+   *   surveyed: boolean | null,
+   *   blockedBy: string | null,
    *   error: string | null,
    *   busy: boolean
    * }}
    */
-  let pilot = $state({ at: 0, inFlight: null, feeds: [], state: '', error: null, busy: false });
+  let pilot = $state(emptyPilot());
   let pilotAsked = false;
+  const pilotSays = $derived(pilotNotice(pilot));
 
   async function readPilot() {
     if (pilot.busy) return;
     pilot = { ...pilot, busy: true, error: null };
     try {
       const r = await request('/ingest/status.json');
-      if (!r.ok) throw new Error(`/ingest/status.json answered HTTP ${r.status}`);
-      const j = await r.json();
-      pilot = {
-        at: Date.now(),
-        inFlight: j.in_flight ?? null,
-        feeds: Array.isArray(j.waiting_on) ? j.waiting_on : [],
-        state: String(j.state ?? ''),
-        error: null,
-        busy: false
-      };
+      /** @type {unknown} */
+      let body;
+      try {
+        body = await r.json();
+      } catch {
+        body = undefined;
+      }
+      pilot = foldIngestStatus(r.status, body, Date.now());
     } catch (why) {
-      pilot = { ...pilot, busy: false, error: String(why) };
+      pilot = failedPilot(`/ingest/status.json could not be read: ${why instanceof Error ? why.message : String(why)}`);
     }
   }
 
@@ -8672,9 +8679,11 @@
                  with nothing behind it in the other direction, and it is the
                  first thing an operator asks about. -->
             {#if runState && (runState.running || runState.passes > 0)}
+              <!-- NEVER A DELTA FROM A NULL OR A NEGATIVE ONE (CE-81): see `landedOf`. -->
+              {@const landed = landedOf(runState.rowsAtStart, runState.rowsNow)}
               <div class="runcard">
                 <div class="runtop">
-                  <span><b>{n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
+                  <span title={landed.why}>{#if landed.count === null}{landed.lead}{:else}<b>{n(landed.count)}</b>{/if} bar(s) {landed.kind === 'dropped' ? 'FEWER than at the start — the census total fell, so nothing is claimed as landed' : 'landed'}</span>
                   <span>pass <b>{n(runState.passes)}</b></span>
                   {#if runState.retries > 0}<span><b>{n(runState.retries)}</b> retried</span>{/if}
                   <span class="runwhere">{runState.running ? (runState.stopping ? 'stopping at the next leg' : 'running on the server') : 'finished'}</span>
@@ -8682,6 +8691,7 @@
                 <table class="runfeeds">
                   <tbody>
                     {#each runState.feeds ?? [] as f (f.vendor)}
+                      {@const meter = feedMeter(f)}
                       <tr>
                         <td class="rf-v">{feedName(f.vendor)}</td>
                         <!-- ══ THE FEED'S OWN PROGRESS, AS A LENGTH ══
@@ -8707,13 +8717,16 @@
                               aria-hidden="true"
                               ><i
                                 class="fill"
-                                class:up={f.finished || (f.legsDone ?? 0) >= (f.legs ?? 0)}
+                                class:up={meter.up}
+                                class:halt={meter.halted}
                                 style="width:{Math.min(100, ((f.legsDone ?? 0) / f.legs) * 100)}%"
                               ></i></i
                             >
                           {/if}
                         </td>
-                        <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
+                        <!-- `skipped` IS RENDERED NOW (CE-81). A halted feed finishes with
+                             `skipped = legs - legsDone`; '—' there read as done. -->
+                        <td class="rf-d">{#if meter.skipped > 0}<span class="rf-halt">halted · {n(meter.skipped)} leg(s) skipped</span>{:else}{f.finished ? '—' : (f.doing || 'waiting for its turn')}{/if}</td>
                         <!-- ══ THE VENDOR'S OWN WORDS, NOT A GUESS ABOUT THEM ══
                              This read `retrying after a failure` for EVERY
                              `lastError`, and threw the error itself away.
@@ -8945,6 +8958,16 @@
              The DOT carries that (tone + `live`), the timestamp carries when,
              and the word is drawn only when it is not `measured` — i.e. only
              when something is wrong and the reader must be told in words. -->
+        <!-- THE LADDER'S OWN STATE, WHEN IT CANNOT BE TRUSTED (CE-79). The
+             fail and retry verdicts below are read from /ingest/status.json;
+             a refused read or a survey that has not happened is said here,
+             in the server's words, rather than left as "no halt". -->
+        {#if pilotSays}
+          <p class="caution" class:loud={pilotSays.tone === 'bad'} role="alert">
+            <span class="tag {pilotSays.tone === 'bad' ? 'down' : 'warn'}">{pilotSays.head}</span>
+            <span class="msg">{pilotSays.text}</span>
+          </p>
+        {/if}
         <div class="prov" aria-live="polite" title={provenance.detail}>
           <i class="dot {provenance.tone}" class:live={provenance.live}></i>
           {#if provenance.tone !== 'up'}
@@ -11930,6 +11953,10 @@
   .cscroll td .meter .fill.up,
   td.rf-n .meter .fill.up {
     background: var(--up);
+  }
+  /* A HALTED FEED'S PARTIAL BAR IS NOT SUCCESS AND NOT MERELY PENDING (CE-81). */
+  td.rf-n .meter .fill.halt {
+    background: var(--down);
   }
   /* The cell that holds a fill is its own containing block — see the single
      `.cscroll td.num` rule further down, which now carries `position: relative`

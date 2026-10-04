@@ -82,6 +82,8 @@
   import { page as routePage } from '$app/state';
   import { feeds, selectFeed } from '$lib/feeds.svelte.js';
   import { readStoreCensus } from '$lib/store.svelte.js';
+  import { censusFailure } from '$lib/store-census.js';
+  import { refusalFrom } from '$lib/refusal.js';
   import { sweptSymbolOf } from '$lib/instrument.js';
   /* RENAMED ON IMPORT. This page's Run control owns a state object called
      `ask` — what the operator is asking the sweep for — and the fetch helper
@@ -1985,11 +1987,14 @@
       );
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
       if (!response.ok) {
+        // The body's reason is read, not dropped (CE-83, D-1789).
+        const refused = await refusalFrom('/logs.json', response);
+        if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
         publishLive(seq, run, {
           phase: 'failed',
           attempt,
           rungs: [],
-          why: `/logs.json answered ${response.status} for exact attempt ${attempt}.`
+          why: `${refused} — for exact attempt ${attempt}.`
         });
         return;
       }
@@ -3331,7 +3336,7 @@
         catalog = {
           phase: 'failed',
           why:
-            `/store.json answered ${response.status}, so this form cannot say what the store ` +
+            `${censusFailure(response)} — so this form cannot say what the store ` +
             `holds. The span and the instrument are two of the nine terms in a run's identity, ` +
             `so neither is defaulted — naming a run after a guess is the invention §3 rule 1 forbids.`,
           held: []

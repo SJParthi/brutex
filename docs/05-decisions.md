@@ -57974,3 +57974,30 @@ change.
 
 **Proof.** `cli::tests::the_calendar_gate_refuses_an_inconsistent_row_past_the_printed_top`
 fails on the previous gate. FB-15.
+
+### D-1786 — A degraded census is refused on every selected-feed page, and a failed journal append is a top-of-page alert — 2026-10-04
+
+Found by the audit helpers' crash pass 15 (`/mnt/project-files/zero-rounds/crash-edge-pass15.md`), the api-to-`web/` contract pass.
+
+- CE-77. `/store.json` answers 200 for a manifest whose newest generation failed its checksum, carrying the recovered older generation and the reason in `x-brutex-census-degraded` (`census.rs`, `VendorCensus::degraded`). Only the HEAD survey read that header. The selected-feed loader (`web/src/lib/store-census.js`) now refuses a non-empty `x-brutex-census-degraded`, on a 200 and on a 304 alike: the answer is `ok: false`, the rows are not parsed, it is never cached, and `censusFailure` names it as DEGRADED with the server's reason. `/db` and `/markets` already render `store.error`; `/terminal` did not and now draws the refusal above its grid; the `/backtest` form's catalogue failure names it. An empty or absent header is unchanged. No api change: the contract was right and the readers ignored it.
+- CE-78. `journal_error` was already read by P1-06-01 (D-2661), but the failure was shown only at the foot of the failure list and in the trail note. A failed append is now a bad-tone `role="alert"` banner under the beam, and the two sentences that called the journal "the durable record" when `/autopilot.json` had not answered at all now say that whether it is being written is unknown.
+
+### D-1787 — /ingest names a refused or unsurveyed ladder, the run card never shows a halted feed as success, and /gaps does not call a span whole over unread peers — 2026-10-04
+
+Found by crash pass 15.
+
+- CE-79. `/ingest/status.json` is folded by `web/src/lib/ingest-status.js`. A non-200 names the body's `error` (the poisoned-lock 503) through `refusalSentence`; a failed or refused read clears `inFlight` and `feeds` instead of keeping the previous answer, so the retry and fail verdicts are never decided from a stale one. A 200 without a boolean `surveyed` is a failure. `surveyed` and `blocked_by` are carried, and `pilotNotice` draws an alert beside the census table for a failed read or `surveyed: false`, in the server's words.
+- CE-81. `web/src/lib/run-card.js`. `landedOf` computes a delta only from two known non-negative totals: a `null` total reads "an unknown number of" (compatible with the nullable `rows_at_start` / `rows_now` coming from another branch), and a total that fell names the census drop rather than printing a negative landing. `feedMeter` draws a feed in the success colour only when every leg is done and none is skipped and the credential is not dead; a halted feed's bar is drawn in the down colour and its cell reads `halted · N leg(s) skipped`.
+- CE-80. `isWholeAudit` requires `calendar.unreadable` to be an explicit empty list; an absent or malformed list is unknown, never none. `/gaps` names every unreadable peer, and says so when the answer did not carry the list.
+
+### D-1788 — /mapping reads the masters status refusal and makes the restart flag unknown — 2026-10-04
+
+Found by crash pass 15.
+
+- CE-82. `readMastersCurrent` returned on a non-200 without reading the body, so the 503's `refusal` was never shown, the four-file table vanished with no reason, and `restartNeeded` kept an earlier answer; the catch did the same. Both paths now go through `mastersStatusRefused` (`web/src/lib/masters-status.js`): the list is cleared, `restartNeeded` becomes `null` (unknown, never a stale `true`), and the server's sentence is rendered as an alert with a line saying the restart question is unanswered.
+
+### D-1789 — Refusal bodies are read by one helper that knows all three keys on the wire — 2026-10-04
+
+Found by crash pass 15.
+
+- CE-83. `/store.json`, `/calendar.json`, `/logs.json` and `/indexmap.json` readers printed only the HTTP status. `web/src/lib/refusal.js` reads `error`, then `refused` (the unknown-feed answer `no_such_feed_json` gives six routes), then `refusal` (the masters routes), falls back to short plain text, and never throws; `refusalFrom` gives the route, the status and the reason, or says the route named none. The census loader also falls back to `x-brutex-census-note`, where an unreadable census puts its sentence beside an empty array. The `refused` key is left as it is on the api: renaming it would change six routes' contract to fix a reader, and the reader is now fixed.
