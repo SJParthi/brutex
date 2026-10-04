@@ -1668,7 +1668,7 @@ fn top_names_a_recorded_share_as_a_share_and_an_index_as_before() {
 }
 
 /// **`cli top` on a committed store reads the ledger twice and refuses damage
-/// in a row it does not name -- which is why no O(1) index replaces it.**
+/// in a row it does not name -- which is why no one-row index replaces it.**
 /// OS-7, D-2319.
 ///
 /// A sidecar holding the best row would answer from one read. Two facts,
