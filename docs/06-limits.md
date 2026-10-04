@@ -14475,3 +14475,23 @@ UNVERIFIED for the rest:
   above) rests on the audit's measurement (14.13x open cost for 10x rows,
   o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
   `Results::open`, so no tracked bench repeats it.
+
+## Two Fibonacci rungs can fire on one bar below an 11-paisa range — D-1861, 4 October 2026
+
+This is a limit on a stated property, not on a cost. On exact levels two rungs
+of one Fibonacci ladder never fire on one bar (`2 * TOL_FIB_MILLI <
+SMALLEST_LADDER_GAP`). Levels are whole paisa, so the property holds only from
+a range of `vocab::tolerance::RUNG_EXCLUSIVE_MIN_RANGE` = 11 paisa, which is
+proven at compile time. Below it two rungs that floor to one paisa fire
+together; measured on all four ladder families, at ranges 1-6 and 8 paisa. The
+realistic case is a gap leg of a few paisa on an index.
+
+The two previous-day ladders are two ladders on one range, and the bound never
+covered them. Positions 20 and 70, and 24 and 69, fire together at ranges 9 to
+902 paisa (bounded by 1,000), because their levels are 22 thousandths apart
+against bands summing to 20.
+
+Every such bit is true: the close is within the band of each level. Nothing
+prunes a Fibonacci pair, so the sweep enumerates each combination that fires.
+`indicators/tests/fib_rung_rounding.rs` and `runner/tests/fib_rung_sweep.rs`
+pin both facts.

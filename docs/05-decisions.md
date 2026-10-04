@@ -56702,3 +56702,42 @@ increasing fill bars, and that only a repeated signal stamp shares a bar.
 `vocab`'s `stale_claims` test `the_column_docs_state_the_exact_close_alignment_rule`
 fails if the retired sentences return or if `align` stops comparing for
 equality (AHB-01).
+
+### D-1861 — Fibonacci rung exclusivity is stated with its whole-paisa range floor; nothing prunes on it — 2026-10-04
+
+**What was wrong (h-eng-2).** `vocab::tolerance` asserted at compile time that
+two Fibonacci rungs never fire on the same bar, and `vocab::implication` called
+the rungs "mutually exclusive". The proof used exact numerators. Every ladder
+floors its level to a whole paisa, and at a range of at most 10 paisa the band
+`R/100` is zero paisa. So two rungs that floor to one paisa fire together on a
+close at that price: a 1-paisa gap leg fires six rungs at once.
+
+**Does anything rely on it? No, checked.** The only pair screen in the sweep is
+`vocab::implication::pair_is_informative`, called once in `engine`. It removes
+pivot-chain pairs only, and `positions_off_the_chain_are_never_pruned` already
+held every other pair open. No other code reads the property. So no sweep lost
+a combination, and no result changes.
+
+**The change.** The claim is corrected, not the evaluation. Suppressing the
+bits by a tie rule would set FALSE on a close that sits exactly on both levels,
+which is the hidden fallback `CLAUDE.md` §4 bans, and it would change results
+and `vocab_version` for no gain. `vocab::tolerance::RUNG_EXCLUSIVE_MIN_RANGE`
+(11 paisa) is new. It is derived from `SMALLEST_LADDER_GAP` and `TOL_FIB_MILLI`
+and its proof (`(g - 2t)·R > 999`) is checked at compile time, together with
+the check that it is the smallest range the proof covers. The module doc, the
+const-assert comment and the implication doc state the floor. They also state
+a fact the old text did not: the two previous-day ladders (down 23.6% against
+up 78.6%, and down 78.6% against up 23.6%) share a close up to 1,000 paisa.
+`docs/06-limits.md` records both. No bit, format, digest, evidence or vocabulary
+version changes; stored masks and run identities are unchanged.
+
+**What it proves (AHB-02).** A brute force over every ladder pair and range
+1..=20,000 paisa confirms the floor. An indicators test walks every range
+1..=2,000 paisa plus three near `i64::MAX / 8` on all four ladder families
+through their production doors. It pins co-firing at exactly 1-6 and 8 paisa,
+and the cross-ladder pairs and their ranges. Gap legs of 1, 5 and 10 paisa fire
+six, two and at most one rung. A runner test walks `engine::Ladder` over
+columns built from those legs and from previous-day ranges 9, 100 and 902. The
+result equals a brute-force enumeration of every subset with no screen, and
+the co-firing pairs are among the combinations found. With a Fibonacci pair
+injected into the screen, the runner test fails.
