@@ -37,3 +37,10 @@ hunter fixes D-2270..2279 (AHC-). Coordinator gave this thread D-2200..D-2299.
 3. Tell the PR #74 CI thread, fetch + merge its head, push once. Update /mnt/project-files/fix-board/status/attack-audit.tsv
    (id, state, commit, note) with commit hashes.
 4. Disk on the cloud box is ~25 GB: delete finished target dirs (t5 and t10m were deleted to recover).
+
+## PAUSE 2026-10-04 13:56 UTC (5-hour limit at 91%; resume ~17:03 UTC)
+All agents stopped, no cargo running, worktrees clean. Heads pushed: wip/audit-fixes-6 = bce683e (F6: D-1810..1812 done;
+was mid cli mutation, W2-cli5-4/W3-runner2-7 report not delivered), wip/audit-fixes-8b = 1aad6af (F8: 4 commits; rest of
+the documented-only list still to do), wip/audit-fixes-10 = 1da2630 (F10 3 fixes + h-pull-1 D-2270 + h-pull-2 D-2271;
+hunter fixes' mutation unfinished: one in-place mutant was reverted by hand). Restart: brief each fixer again from these
+heads with the same prompts (in the thread's transcript; rules in resume/audit-20261003/out/FIXRULES.md).
