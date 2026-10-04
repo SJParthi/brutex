@@ -400,6 +400,9 @@ pub struct Column {
 pub struct AnchoredColumn {
     column: Column,
     references: DailyReferenceCensus,
+    /// Bars folded through the evaluator on a withheld IST day and given no
+    /// row. Zero unless built by [`Self::build_required_withholding`].
+    withheld: u64,
 }
 
 /// A strict anchored column was asked to admit signal bars with no prior
@@ -424,7 +427,50 @@ impl AnchoredColumn {
         Self {
             column,
             references: evaluator.reference_census(),
+            withheld: 0,
         }
+    }
+
+    /// [`Self::build_required`] over a series some of whose IST days are
+    /// FOLDED and not SWEPT. p11num-1, D-1781.
+    ///
+    /// Every bar of `bars` is stepped through `evaluator` in order, so the
+    /// indicator state a later day starts from is the state the whole series
+    /// produced. A bar whose IST day is in `withheld_days` then gets no row,
+    /// no source, no acceptance verdict and no census entry: the returned
+    /// column is exactly the column of the slice with those days removed, as
+    /// [`Column::build_withholding`] documents, and its masks are the masks
+    /// of the whole fold.
+    ///
+    /// The daily-reference census DOES count a withheld day's bars, because
+    /// the evaluator consumed references for them; the admission refusal
+    /// below therefore also refuses a withheld bar that had no prior daily
+    /// record, since its state reached every later row.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::build_required`].
+    pub fn build_required_withholding(
+        bars: &[Candle],
+        evaluator: &mut AnchoredEvaluator<'_>,
+        withheld_days: &[i64],
+    ) -> Result<Self, MissingDailyReference> {
+        let mut next = *evaluator;
+        let (column, withheld) = Column::build_withholding_from(bars, &mut next, withheld_days);
+        let built = Self {
+            column,
+            references: next.reference_census(),
+            withheld,
+        }
+        .require_daily_reference()?;
+        *evaluator = next;
+        Ok(built)
+    }
+
+    /// Bars folded on a withheld day and given no row.
+    #[must_use]
+    pub const fn withheld_bars(&self) -> u64 {
+        self.withheld
     }
 
     /// Build and refuse the whole column if any accepted signal bar had no
@@ -545,8 +591,65 @@ impl Column {
         Self::build_from(bars, evaluator)
     }
 
+    /// Fold EVERY bar of `bars` through `evaluator`, and give a row only to
+    /// bars whose IST day is not in `withheld_days`. p11num-1, D-1781.
+    ///
+    /// # Why the day is folded and not cut
+    ///
+    /// Cutting a day out of the slice before the fold splices day D-1 onto
+    /// day D+1: every family that carries state across sessions — the EMAs,
+    /// ATR and `SuperTrend`, swings and structure — is then computed as if the
+    /// market had not traded on D, and every later swept row carries masks
+    /// no unspliced run would produce. MEASURED on the p11num-1 repro shape
+    /// (14 sessions of 375 bars, one interior minute missing on the eleventh):
+    /// the finding's walk differed on trend bits at 40 of the 1,125 bars after
+    /// the held day, and `tests/withheld_fold.rs`'s walk at 29.
+    ///
+    /// Here the fold is the whole series, exactly as [`Self::build`] folds
+    /// it; only the OUTPUT omits the withheld days. The returned column is
+    /// therefore indexed as if the caller had handed in the slice with those
+    /// days removed: [`Self::sources`], the acceptance bitmap, the census and
+    /// [`Self::first_swept`] all count kept bars only, so a caller that
+    /// executes on the kept slice reads every outcome off the right bar.
+    /// The second value is how many bars were folded and given no row.
+    ///
+    /// A withheld bar the evaluator refuses leaves its state unchanged, as
+    /// any refusal does, and is counted in that second value, not the
+    /// census: the census describes the kept slice.
+    ///
+    /// # Look-ahead
+    ///
+    /// None is added. Bars are still handed over one at a time in order, and
+    /// whether a row is EMITTED for a bar never changes what was folded
+    /// before it. Which days are withheld is the caller's input.
+    ///
+    /// # Cost
+    ///
+    /// One set probe more per bar than [`Self::build`] when `withheld_days`
+    /// is non-empty, and none when it is empty. **UNVERIFIED as a measured
+    /// bound**: no bench row times this door (`CLAUDE.md` §3 rule 6).
+    #[must_use]
+    pub fn build_withholding(
+        bars: &[Candle],
+        evaluator: &mut Evaluator,
+        withheld_days: &[i64],
+    ) -> (Self, u64) {
+        Self::build_withholding_from(bars, evaluator, withheld_days)
+    }
+
     /// Shared forward fold for regular and stored-daily-anchored evaluators.
     fn build_from<E: ColumnEvaluation>(bars: &[Candle], evaluator: &mut E) -> Self {
+        Self::build_withholding_from(bars, evaluator, &[]).0
+    }
+
+    /// The fold [`Self::build_withholding`] documents, for either evaluator.
+    fn build_withholding_from<E: ColumnEvaluation>(
+        bars: &[Candle],
+        evaluator: &mut E,
+        withheld_days: &[i64],
+    ) -> (Self, u64) {
+        let withheld_set: std::collections::HashSet<i64> = withheld_days.iter().copied().collect();
+        let mut withheld: usize = 0;
         let spec = evaluator.replay_spec();
         let mut bits = Vec::with_capacity(bars.len());
         let mut known = Vec::with_capacity(bars.len());
@@ -556,9 +659,19 @@ impl Column {
         let mut accepted: Vec<bool> = Vec::with_capacity(bars.len());
 
         for (index, bar) in bars.iter().enumerate() {
+            // FOLDED, NEVER SWEPT. The step happens first and unconditionally,
+            // so a withheld day moves the state every later row reads.
+            let stepped = evaluator.step_with_warmth(bar);
+            if !withheld_set.is_empty() && withheld_set.contains(&crate::ist_day(bar.ts_micros)) {
+                withheld = withheld.saturating_add(1);
+                continue;
+            }
+            // THE KEPT SLICE'S INDEX: this bar's position once every withheld
+            // bar before it is removed. Equal to `index` when none is.
+            let index = index.saturating_sub(withheld);
             census.offered = census.offered.saturating_add(1);
 
-            match evaluator.step_with_warmth(bar) {
+            match stepped {
                 Ok((mask, available, warm)) => {
                     accepted.push(true);
                     if warm {
@@ -582,7 +695,7 @@ impl Column {
             }
         }
 
-        Self {
+        let column = Self {
             bits,
             known,
             source,
@@ -600,7 +713,8 @@ impl Column {
             // source, so no two rows can name one index. Only reprojection can
             // put two signals on one execution bar.
             collided: 0,
-        }
+        };
+        (column, u64::try_from(withheld).unwrap_or(u64::MAX))
     }
 
     /// Fallibly duplicates this exact column without rebuilding evaluator

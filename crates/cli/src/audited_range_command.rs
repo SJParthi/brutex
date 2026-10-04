@@ -198,6 +198,8 @@ fn run(
         exact_minute: &exact_minute,
         signal_length_micros: signal_length,
         availability,
+        // The checksum-audited range applies no minute-gap rule.
+        withheld: None,
     };
     let column = prepare(request, &span.bars, replay, digest, commit, &guard)?;
     let horizon = crate::horizon_for(&span.bars, execution.is_some());

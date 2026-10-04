@@ -100,6 +100,8 @@ impl Inputs {
                 // This door applies no minute-gap rule and keeps its identity:
                 // D-0694 answered for the ordinary door alone.
                 minute_gaps: None,
+                // Nothing withheld, so nothing folded beyond `loaded.bars`.
+                folded: None,
             },
             guards: collector.guards,
             roles,

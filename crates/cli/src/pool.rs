@@ -894,16 +894,22 @@ fn price_all(
         )
     })?;
     let holed_days = crate::minute_gaps::days_with_interior_gaps(execution_slice);
+    // FOLDED WHOLE, SWEPT WITHOUT THE HOLED DAYS, as the screen does. D-1781.
+    let folded = span.bars.clone();
     if !holed_days.is_empty() {
         let (kept, _withheld) = crate::minute_gaps::withhold(&span.bars, &holed_days);
         span.bars = kept;
     }
-    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &span.bars)?;
+    let daily = stored::load_daily_context(root, vendor, underlying, (from, to), &folded)?;
     let exact_minute =
         stored::load_exact_minute_context(root, vendor, underlying, (from, to), &span.bars)?;
     let availability = stored::vwap_availability(&span.key);
-    let column = crate::stored_anchored_column(
-        &span.bars,
+    let column = crate::stored_anchored_column_withholding(
+        crate::Withholding {
+            folded: &folded,
+            days: &holed_days,
+            swept: &span.bars,
+        },
         &daily,
         &exact_minute,
         signal_length,
@@ -2807,7 +2813,7 @@ mod tests {
             "stored::load_daily_context(",
             "stored::load_exact_minute_context(",
             "stored::vwap_availability(",
-            "stored_anchored_column(",
+            "stored_anchored_column_withholding(",
             "horizon_for(",
         ];
         let pool = include_str!("pool.rs");
