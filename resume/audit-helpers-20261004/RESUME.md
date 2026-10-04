@@ -11,7 +11,7 @@ Audited head: final/all-fixes-zero **1f4de71** (merges zero/api-routes, zero/cli
 | Numeric/O(1) | 4 | 41: 14 fixed, 1 partial, 26 not fixed (pst-3, clib-1, clib-2 held for user) | p4num-1 low, p4num-2 low | numeric-pass4.md |
 
 All new findings were sent to the zero-findings thread (session_01GS9PBjP9nShhuEHrx1N2ia) on 2026-10-04.
-Crash/edge pass 6 (two new classes: refusal-turned-silent-skip, Rust JSON vs web validator drift) running at save time.
+Crash/edge pass 6 done: CE-47..49 medium (Rust JSON vs web validator drift, ran in Node), CE-50, CE-51 low; sent. Correction to pass 6: CE-42 is still NOT fixed (unpriced arm frontier.rs:3348-3352 uses Verdict::default()).
 
 ## Next
 Every angle found something new, so each runs another pass on the next zero staging head: re-verify open
