@@ -19608,6 +19608,40 @@ mod tests {
         );
     }
 
+    /// CE-53, D-2671: a weekly whose computed expiry is a Muhurat-only day is
+    /// now refused by `expiry_of`, and that refusal still does not remove WEEK
+    /// from the walk — only a withdrawn cadence does (CE-43).
+    #[test]
+    fn a_muhurat_week_contract_does_not_remove_its_cadence_from_the_walk() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        for (underlying, from, to) in [
+            ("NIFTY", "2021-11-01", "2021-11-30"),
+            ("BANKNIFTY", "2021-11-01", "2021-11-30"),
+            ("NIFTY", "2025-10-20", "2025-11-18"),
+        ] {
+            let asked = ingest::parse_fno(
+                &format!("underlying={underlying}&series=opt&vendor=dhan&from={from}&to={to}"),
+                today,
+            )
+            .expect("an expired-option window is readable");
+            let on = asked.window.from();
+            assert!(
+                pull::rolling::expiry_of(underlying, &dhan_rolling(), "WEEK", "1", on).is_err(),
+                "the premise: the near weekly from {from} lands on a Muhurat and is refused"
+            );
+            assert!(
+                cadence_has_contracts(&asked, &dhan_rolling(), "WEEK"),
+                "{underlying} {from}: a refused contract is not a withdrawn cadence"
+            );
+            assert!(cadence_has_contracts_on(
+                &asked,
+                &dhan_rolling(),
+                "WEEK",
+                on
+            ));
+        }
+    }
+
     /// CE-43, D-2650: one row that cannot be named ends its group; it does not
     /// discard the good rows before it, and the rows after it start a new group.
     #[test]

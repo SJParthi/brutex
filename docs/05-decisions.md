@@ -57664,3 +57664,10 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - Known limit: `ingest::keep_in_session` counts any verdict refusal as `BeforeWindow` (existing behaviour, unchanged here), so on that path an unmeasured-Muhurat bar is declined and counted under that reason rather than refused; `fetch::land` refuses it as `FetchError::TimestampRefused`.
 - Bars already dropped before this change are not recovered: the store is append-only. `docs/06-limits.md` §110 and the comment on the outage row in `indicators::evaluator` no longer say ingest drops the reopening correctly.
 - Proved by `pull::session::tests::the_ingest_verdict_keeps_exactly_what_the_calendar_owes_on_irregular_days` and `pull::session::tests::an_unmeasured_muhurat_minute_is_refused_by_name_not_dropped` (ZX-20).
+
+### D-2671 — An expiry must be a full regular session, not a Muhurat-only day — 2026-10-04
+
+- CE-53. CE-14's fix in `pull::rolling::expiry_of` (D-1769) refused only a `Closed` computed expiry, so a Muhurat-only holiday was accepted: NIFTY and BANKNIFTY weeklies from 2021-11-01 resolved to 2021-11-04 (`OpenLengthUnmeasured`) and NIFTY's weekly from 2025-10-20 to 2025-10-21 (`Open`, 13:45–14:44). Bars were filed under that key and priced to a 15:30 close.
+- `expiry_of` now accepts only a day `pull::calendar::kind_of` records as `Open(Session::full())`. A Muhurat-only or other irregular day is refused by name exactly as a closed day is, and for the same reason: the rule that moves an expiry off such a day is not charter-sourced, so no date is stepped to. The closed-day refusal keeps its own wording. A day outside the calendar's measured range still passes through, as `docs/06-limits.md` states.
+- `listing_of` is unchanged: a refused contract is not a withdrawn cadence (CE-43, D-2650), so the api's `cadence_has_contracts_on` still asks WEEK on those weeks.
+- Proved by `pull::rolling::tests::a_computed_expiry_on_a_muhurat_only_day_is_refused_like_a_closed_one` and `api::server::tests::a_muhurat_week_contract_does_not_remove_its_cadence_from_the_walk` (ZX-21).

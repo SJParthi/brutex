@@ -160,15 +160,31 @@ pub fn expiry_of(
     // back (`CLAUDE.md` §3 rule 1). A day past the calendar's last measured
     // day cannot be checked and is passed through; `docs/06-limits.md` names
     // that limit.
-    if matches!(
-        crate::calendar::kind_of(i64::from(settled.ordinal())),
-        crate::calendar::DayKind::Closed
-    ) {
-        return Err(RollingError::NoExpiry {
-            why: "the computed expiry falls on a day the exchange calendar marks closed, and the \
-                  rule that moves an expiry off a holiday is not charter-sourced, so no date is \
-                  guessed",
-        });
+    //
+    // AND A DAY OPEN ONLY FOR A MUHURAT HOUR IS NOT AN EXPIRY EITHER (CE-53,
+    // D-2671). Refusing only `Closed` accepted 2021-11-04 (a Muhurat of
+    // unmeasured length) and 2025-10-21 (13:45-14:44) as weekly expiries, and
+    // bars filed under that key were priced to a 15:30 close the day never
+    // had. An expiry must be a FULL regular session; anything short of one is
+    // refused the same way, for the same reason.
+    match crate::calendar::kind_of(i64::from(settled.ordinal())) {
+        crate::calendar::DayKind::Closed => {
+            return Err(RollingError::NoExpiry {
+                why: "the computed expiry falls on a day the exchange calendar marks closed, and \
+                      the rule that moves an expiry off a holiday is not charter-sourced, so no \
+                      date is guessed",
+            });
+        }
+        crate::calendar::DayKind::Open(session) if session == crate::calendar::Session::full() => {}
+        crate::calendar::DayKind::Open(_) | crate::calendar::DayKind::OpenLengthUnmeasured => {
+            return Err(RollingError::NoExpiry {
+                why: "the computed expiry falls on a day the exchange calendar records as \
+                      something other than a full regular session (a Muhurat hour or an \
+                      irregular session), and the rule that moves an expiry off such a day is \
+                      not charter-sourced, so no date is guessed",
+            });
+        }
+        crate::calendar::DayKind::Unmeasured => {}
     }
     brutex_core::instrument::Expiry::new(settled.year(), settled.month(), settled.day()).map_err(
         |_| RollingError::NoExpiry {
@@ -1527,6 +1543,52 @@ mod tests {
                 "WEEK",
                 "1",
                 Day::new(2024, 8, 21).expect("a day")
+            )
+            .is_ok()
+        );
+    }
+
+    /// CE-53, D-2671: an expiry must be a FULL regular session. A day that is
+    /// open only for a Muhurat hour is refused exactly as a closed day is,
+    /// never filed under that key and priced to a 15:30 close it never had.
+    /// NIFTY and BANKNIFTY weeklies from 2021-11-01 land on the 2021-11-04
+    /// Muhurat (`OpenLengthUnmeasured`); NIFTY's weekly from 2025-10-20 lands
+    /// on the 2025-10-21 Muhurat (`Open`, 13:45-14:44). The cadence stays
+    /// `Listed`: a refused contract is not a withdrawn cadence (CE-43).
+    #[test]
+    fn a_computed_expiry_on_a_muhurat_only_day_is_refused_like_a_closed_one() {
+        use crate::session::Day;
+        for (underlying, on) in [
+            ("NIFTY", Day::new(2021, 11, 1).expect("a real day")),
+            ("BANKNIFTY", Day::new(2021, 11, 1).expect("a real day")),
+            ("NIFTY", Day::new(2025, 10, 20).expect("a real day")),
+        ] {
+            let got = expiry_of(underlying, &spec(), "WEEK", "1", on);
+            assert!(
+                matches!(
+                    got,
+                    Err(RollingError::NoExpiry { why }) if why.contains("full regular session")
+                ),
+                "{underlying} {on:?}: {got:?}"
+            );
+            assert_eq!(
+                listing_of(underlying, &spec(), "WEEK", on),
+                Ok(Listing::Listed),
+                "{underlying} {on:?}"
+            );
+        }
+        // The closed-day refusal keeps its own words, and a full day resolves.
+        assert!(matches!(
+            expiry_of("NIFTY", &spec(), "WEEK", "1", Day::new(2024, 8, 14).expect("a day")),
+            Err(RollingError::NoExpiry { why }) if why.contains("marks closed")
+        ));
+        assert!(
+            expiry_of(
+                "NIFTY",
+                &spec(),
+                "WEEK",
+                "1",
+                Day::new(2021, 11, 8).expect("a day")
             )
             .is_ok()
         );

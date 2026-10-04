@@ -1446,6 +1446,15 @@ because that rule is not recorded in `docs/00-charter.md`. An expiry after
 2026-09-04 is outside the calendar's measured range and cannot be checked; it
 is passed through unchanged until the calendar is extended.
 
+**A day open only for a Muhurat hour is refused the same way (D-2671, CE-53).**
+Refusing only `Closed` accepted 2021-11-04 (a Muhurat of unmeasured length) and
+2025-10-21 (13:45–14:44) as weekly expiries, and their bars were filed under
+that key and priced to a 15:30 close. `expiry_of` now accepts only a day the
+calendar records as a full regular session, and refuses a Muhurat-only or other
+irregular day by name. `pull::rolling::listing_of` still reports such a week's
+cadence `Listed`, so the api's walk asks it and counts the refusal rather than
+dropping the cadence.
+
 **How often that bites is UNVERIFIED and is not estimated here.** It depends on
 the NSE holiday calendar, which this repository does not hold and which
 `docs/00-charter.md` records no source for; putting a number on it would be
