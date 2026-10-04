@@ -899,3 +899,34 @@ Narrative only. No row is added to the table above.
 - **rustonly2-5** (nested `.gitignore`/`.gitattributes`): fixed. D-2348.
 - **`.github/*.rs` without `#![forbid(unsafe_code)]`**: fixed, gate 16 layer
   1c. D-2349.
+
+### GDFL data-path attack, rounds 1 and 2 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above. Each finding was a test
+that failed on the unmodified code.
+
+- **Monthly names read as dated contracts** (148,716 of 1,026,720 synthetic
+  names misread): fixed by the census era rule. D-3160, D-3165, DPN-01, DPN-08.
+- **Second spellings of a strike**: fixed. D-3161, DPN-03.
+- **`locate` scanning its duplicates**: fixed, then made one probe. D-3162,
+  D-3166, DPN-04.
+- **Impossible dated expiry named the wrong refusal**: fixed. D-3164, DPN-06.
+- **Look-ahead in placement** and the 100k-file reference mismatch: fixed.
+  D-3170, DPT-01, DPT-02.
+- **Silent deferral, hostile filter names, torn journal lines, uncounted
+  capital-market twins, prefix-claimed undecodable names**: fixed. D-3171 to
+  D-3175, DPT-03 to DPT-07.
+- **Renamed contract keyed by its text**: fixed. D-3176, DPT-08.
+- **Scratch-directory collision**: hardened; the flake was not reproduced.
+  D-3177.
+- **Round 2: fold-refused file counted twice**: fixed. D-3168, DPT-12.
+- **Round 2: a filter outside today's F&O list lost its undecodable files**:
+  fixed. D-3167, DPT-14.
+- **Round 2: a one-line foreign journal accepted and written to**: fixed.
+  D-3169, DPT-15.
+- **Static gates 1d, 11, 19 and 23 refused the GDFL files**: fixed. D-3166,
+  D-3178, D-3179.
+- **Open.** D-2802 to D-2807 are cited in the GDFL code and head no entry in
+  `docs/05-decisions.md`. Whether the long-dated months 2022-06, 2023-06 and
+  2023-12 exist, and whether monthly names persist after the cutover, needs the
+  vendor's real zips.

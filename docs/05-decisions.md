@@ -59343,3 +59343,198 @@ bytes) to decode and rebuild. UNVERIFIED as measured times.
 
 **Proven by** CM-17 in `docs/04-invariants.md`. Every day file in the tests
 is built at run time from invented rows.
+
+### D-3160 — GDFL option names are read by the census's era rule — 2026-10-04
+
+**Finding.** The reader tried the dated form `DD MON YY STRIKE` first. A
+monthly-form name whose strike begins with two digits also reads as dated, so
+`ADANIENT18DEC195CE` on 2018-12-03 was filed as 2019-12-18 strike 5 with no
+refusal; 148,716 of 1,026,720 synthetic monthly-era names were misread.
+
+**Decision.** Before trade day 2019-02-01 only NIFTY and BANKNIFTY weeklies,
+from 2018-09-03, are dated; every other name is monthly. From 2019-02-01 every
+name is dated. Source: the census of the operator's GDFL options tree relayed
+2026-10-04 (20.9M names, none read two ways). An index name that reads both
+ways with both contracts alive is refused `FormsAmbiguous`. DPN-01, DPN-02.
+
+### D-3161 — One spelling per GDFL option strike — 2026-10-04
+
+**Finding.** `strike_paisa` admitted `0100`, `01`, `00.5`, `100.0` and
+`107.50`, so a second spelling filed silently under the canonical contract and
+widened the D-3160 misread surface.
+
+**Decision.** A whole part starting with `0` (other than `0`) and a fraction
+ending in `0` are refused. The census found neither form. Every accepted name
+re-encodes exactly. DPN-03.
+
+### D-3162 — `NfoDay::locate` stops scanning its duplicates — 2026-10-04
+
+**Finding.** `locate` scanned a `Vec` of every duplicated ticker of the day:
+a median of 57 ns with one duplicate became 89,714 ns with 100,000.
+
+**Decision.** The duplicates moved into a hash set. Superseded in shape by
+D-3166, which folds them into the one ticker map. DPN-04.
+
+### D-3163 — `gdfl_nfo::listing_in` borrows the year zip's `Arc` — 2026-10-04
+
+**Finding.** Clippy refused `listing_in(file: Arc<B>, ..)` as a needless pass
+by value, two lints in `gdfl_nfo_tests.rs`, and both NFO files carried 37
+rustfmt hunks.
+
+**Decision.** `listing_in` takes `&Arc<B>`; the files are clippy- and
+rustfmt-clean. No behaviour changed. DPN-05.
+
+### D-3164 — A dated-shape name with an impossible date is `ExpiryRefused` — 2026-10-04
+
+**Finding.** From the cutover, a dated-shape name whose date was a weekend,
+impossible or outside the window was reported `MonthlyExpiryUnstated`, naming
+a form the census says no longer exists.
+
+**Decision.** From 2019-02-01 such a name is refused `ExpiryRefused`. The
+census saw no weekend expiry, so it should never fire on real data; it stays
+loud. DPN-06, DPN-07.
+
+### D-3165 — Pre-cutover monthly-form names take their expiry from a sourced table — 2026-10-04
+
+**Finding.** Before 2019-02-01 a monthly-form name states no expiry day, and
+every one was refused `MonthlyExpiryUnstated` (D-2806).
+
+**Decision.** `gdfl_nfo::MONTHLY_EXPIRIES` lists 15 months: 2018-09-27,
+2018-10-25, 2018-11-29, 2018-12-27, 2019-01-31, 2019-02-28, 2019-03-28 and
+the long-dated index months 2019-06-27, 2019-09-26, 2019-12-26, 2020-06-25,
+2020-12-31, 2021-06-24, 2021-12-30, 2022-12-29. Sources: the census (1,218,362
+tickers, each month's expiry equal to the vendor's last trade day and its
+dated twin's date, 0 disagreements) and NSE's contract specification ("Last
+Thursday of the expiry month. If the last Thursday is a trading holiday, then
+the expiry day is the previous trading day."). A name traded after its month's
+day is `ExpiryRefused`; an unlisted month stays `MonthlyExpiryUnstated`; the
+D-3160 two-form refusal is unchanged. DPN-08.
+
+### D-3166 — `NfoDay` is one map sized from its source; gate 11 rule 3 — 2026-10-04
+
+**Finding.** `NfoDay::new` built an unsized `HashMap` and `HashSet`, which gate
+11 rule 3 refuses. The module docs cited cost rows C-GI-01, C-GI-02 and
+CM-GI-02 that exist nowhere.
+
+**Decision.** `NfoDay::new(day, entries)` sizes one
+`HashMap<Box<str>, Option<usize>>` from the listing; `None` marks a ticker
+listed twice, so `locate` is one probe whatever the day holds. The docs cite
+DPN-04, DPT-13, CM-13 and the tests that exist. No behaviour changed. DPN-04.
+
+### D-3167 — A filter claims the undecodable files of its own underlying — 2026-10-04
+
+**Finding.** D-3175 attributed an undecodable name to the longest F&O
+underlying it starts with. A filter naming an underlying outside the F&O list
+(`TV18BRDCST`) therefore never claimed its own undecodable files: a run counted
+(0 refused, 2 skipped) where (1, 1) was right.
+
+**Decision.** The longest prefix is taken over the F&O underlyings and the
+filter's names together; the file is wanted when that prefix is a filter name,
+or when no filter is set. DPT-14.
+
+### D-3168 — A file the fold refuses is counted once — 2026-10-04
+
+**Finding.** `DayWork::file` counted `files` before `convert` ran, so a file
+the fold refused was counted as both a file and a refusal and entries no longer
+equalled files plus skips plus refusals.
+
+**Decision.** `Report::files` counts a file only after it converts. DPT-12.
+
+### D-3169 — A foreign journal is refused on every run and never written — 2026-10-04
+
+**Finding.** A one-line journal with no newline ("hello world") was read as a
+torn tail, accepted as empty, and had ` (torn)` appended to it.
+
+**Decision.** A tail, or a whole line closed ` (torn)`, is skipped only when
+it is a prefix of a journal verb (`begin `, `done `, `incomplete `) or starts
+with one; anything else refuses the run as foreign. Every line is parsed before
+anything is written. DPT-15.
+
+### D-3170 — Placement takes the running maximum over every row — 2026-10-04
+
+**Finding.** A trade written after a row stamped later landed at its own
+earlier stamp: look-ahead (`CLAUDE.md` §3 rule 7).
+
+**Decision.** An untraded row's stamp is evidence of time. A kept row lands at
+the running maximum of every stamp before it, traded or not. DPT-01, DPT-02.
+
+### D-3171 — A filter name must be a symbol as the store files it — 2026-10-04
+
+**Finding.** `*`, spaces, commas, lower case and empty names keyed the journal
+as a filter another run shares.
+
+**Decision.** Such a name is refused `FilterName` before the journal is read
+or written. DPT-04.
+
+### D-3172 — A deferral states its size — 2026-10-04
+
+**Finding.** One forward-stamped row collapsed hours into one second with no
+recorded size.
+
+**Decision.** `Report::max_back_s` carries the run's largest back-step, each
+file with late rows logs at Warn, and the journal's `done` line carries `late`,
+`late_unresolved` and `max_back_s`. No bound refuses a file, because none is
+measured. DPT-03.
+
+### D-3173 — A torn journal line is closed with ` (torn)` — 2026-10-04
+
+**Finding.** One crash mid-write made every later run refuse the journal as
+foreign.
+
+**Decision.** A torn line is closed with ` (torn)`, never a bare newline, and
+skipped on every load. D-3169 narrows what may be skipped. DPT-05.
+
+### D-3174 — A second name for an offered ticker is a skip — 2026-10-04
+
+**Finding.** A capital-market day naming one ticker twice counted 5 of 6
+entries.
+
+**Decision.** The second name is counted as skipped, so files plus skips plus
+refusals equal the entries. DPT-06.
+
+### D-3175 — An undecodable name belongs to its whole underlying — 2026-10-04
+
+**Finding.** A `NIFTY` run claimed `NIFTYNXT50…` refusals by prefix.
+
+**Decision.** An undecodable name is wanted by the longest underlying it starts
+with, never by a shorter filter name. Widened by D-3167. DPT-07.
+
+### D-3176 — An option's series is keyed by its decoded contract — 2026-10-04
+
+**Finding.** The 2019-02-01 rename spelled one contract two ways
+(`ACC19FEB1260PE`, `ACC28FEB191260PE`).
+
+**Decision.** `nfo_day` hands the filing path the decoded `(underlying,
+Contract)`, never the ticker text, so both spellings file into one series. Two
+names of one contract on one day are both refused `TickerAmbiguous`. Those days
+precede the calendar's first measured day, so the join is proven at `nfo_day`.
+DPT-08, DPT-16.
+
+### D-3177 — GDFL test scratch directories are unique per call — 2026-10-04
+
+**Finding.** `scratch` named a directory by tag, pid and clock and accepted an
+existing one, so two tests could share a tree; the shape of a once-seen
+`NotFound`, not reproduced in 4,520 runs.
+
+**Decision.** The name carries a per-process sequence number and the leaf is
+made with `create_dir`, so a collision panics by name. Hardening. DPT-17.
+
+### D-3178 — `gdfl_import` passes gate 11 — 2026-10-04
+
+**Finding.** Gate 11 refused two unsized maps, a `sort_unstable` of the filter
+names and two `.contains(&key)` journal probes.
+
+**Decision.** The maps are sized from the listing, the filter key is a
+`BTreeSet` with byte-identical output, the probes take `&str`, and the two
+test files begin `#![cfg(test)]`. No behaviour changed.
+
+### D-3179 — The GDFL files pass the static gates — 2026-10-04
+
+**Finding.** Gate 1d refused undeclared segment-shaped literals in the GDFL
+tests, gate 19 a `failures.push(` with no emit or `note_` call above it, and
+gate 23 the measurement prints in two attack test files.
+
+**Decision.** The literals are declared as `GDFL_LITERAL` in
+`.github/gates_tree.rs`, `failed` is renamed `note_failure`, and the two
+files' `eprintln!` counts are declared in gate 23 as test-only measurements.
+No behaviour changed.
