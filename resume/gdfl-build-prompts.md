@@ -1,6 +1,6 @@
 # GDFL build: exact prompts, scripts and per-part state
 
-Generated 2026-10-04 13:42 UTC from the Mac resume kit. The scripts are JavaScript workflow scripts for Claude Code's Workflow tool. They are kept here as Markdown because this repository tracks no .js (CLAUDE.md section 2). To use them, copy each block back into a .js file on the Mac; they already exist on the Mac at the paths named.
+Generated 2026-10-04 18:47 UTC from the Mac resume kit. The scripts are JavaScript workflow scripts for Claude Code's Workflow tool. They are kept here as Markdown because this repository tracks no .js (CLAUDE.md section 2). To use them, copy each block back into a .js file on the Mac; they already exist on the Mac at the paths named.
 
 ## `state/resume-kit/scripts/build-wave1-continue.js`
 

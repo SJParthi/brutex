@@ -1,33 +1,37 @@
 # GDFL one-second engine build: resume state (Mac)
 
-Saved 2026-10-04 13:42 UTC by the GDFL build thread (new account, Mac, Remote Control) as the 5-hour limit neared 93%. Weekly 45%+. Supersedes the 3 Oct 20:10 save. No GDFL data rows are in this file or on any branch pushed. All four part branches stay LOCAL on the Mac (never pushed).
+Saved 2026-10-04 18:47 UTC by the GDFL build thread before the 5-hour limit pause (resume 22:03 UTC). No GDFL data rows in this file or in any pushed branch. Only origin/feat/gdfl-import (8e6b5219, code only, user said go ahead 18:12 UTC) is pushed; part branches stay local.
 
-## Heads at save time (worktrees under work-20260925/wt/G-<part>)
+## Heads (worktrees under work-20260925/wt/G-<part>)
 
 | Part | Branch | Head | Uncommitted files |
 |---|---|---|---|
-| census | feat/gdfl-census | 3593ca0d | 0 |
-| core-second | feat/gdfl-core-second | 0272901e | 0 |
-| store-grid | feat/gdfl-store-grid | b8ee88f9 | 0 |
-| gdfl-cm | feat/gdfl-cm-reader | 786e1122 | 5 |
+| census | feat/gdfl-census | 3593ca0d | 4 |
+| core-second | feat/gdfl-core-second | 47c794cf | 0 |
+| store-grid | feat/gdfl-store-grid | 94e5a960 | 0 |
+| gdfl-cm | feat/gdfl-cm-reader | e9c6388e | 0 |
+| import | feat/gdfl-import | 794bd68c | 0 |
+| dbspot | feat/db-spot | 97fa4c70 | 0 |
+| rate | feat/rate-tbill | 28a49141 | 0 |
 
-## Where it stands
+## Design as of 4-5 Oct (operator)
 
-- Round-3 reviews done, 9 of 9, with background Agent-tool workers (no Workflow run). Results: core-second clean except nits; store-grid 2 blocking (GS-01b shape test missed walks/defaults) + nits; gdfl-cm 2 gate failures (1d, 12), 1 should-fix, 1 surviving mutant (gdfl_cm.rs:906 && -> ||), nits; census repair r2 in progress. Repairs were committed on top (heads above); their full Definition-of-Done runs were still finishing.
-- Coverage scope decided by the thread (4 Oct): each part is held to 100% line+branch on its OWN diff (nightly llvm-cov --branch); pre-existing main debt belongs to PR #74.
-- New decision numbers for this thread: D-2800..D-2899. Taken: D-2800 (gdfl-cm reads the vendor zips; CmSource trait), D-2801 (tick-store CmSource, pure-Rust ruzstd), D-2802..D-2807 reserved for api/web wiring, D-2808 (per-second volume in SecondCell + grid record).
+- GDFL is 1-SECOND ONLY. No GDFL minutes; minutes come from Zerodha 1min, app derives higher rungs. Underlying drives entries; real fills/slippage/costs on OPTIONS' own 1s data (worst case next traded second, volume-gated; index spot no volume check).
+- Source: vendor zips or verified tick store (FORMAT.md v1) behind CmSource. CSV folders deleted.
+- Per option second: .bin 56 B (OHLC from LTQ>0 rows, volume = sum LTQ, OI) + .grk 80 B (spot same second, IV, greeks, rate, moneyness steps). Intrinsic/extrinsic on read.
+- Rate: RBI 91-day T-bill implicit cut-off yield, as-of latest auction <= trade day (user tapped "RBI T-bill"); branch feat/rate-tbill, D-2810.
+- Decisions: D-2800 zip source, D-2801 tick-store source, D-2802..2807 import/api wiring, D-2808 per-second volume, D-2809 fill rule (to write), D-2810 rate.
+- Store lookup by time is a bisection today: measured p99 104 us (1min month) / 562 us (1s month); by row p99 ~200 ns. Another thread is making time lookup direct.
 
-## Plan changes on 4 Oct (operator)
+## Name decoding (proven, state/name-census/)
 
-1. The extracted GDFL CSV folders are being deleted (proven byte-identical to the zips). The reader reads the vendor zip /Volumes/WD_BLACK/NSE (Stock+Indices)_01.09.2018 to 24.09.2026_Tick.zip directly (outer zip stores 4,209 day zips uncompressed; members are deflate), behind a CmSource trait. The census verb moves to the same source.
-2. Tick store (built by the WD Black thread): /Volumes/WD_BLACK/brutex/tickstore-data, spec FORMAT.md v1 (BRTXTS01). It is CmSource implementation 2 (prioritised), so the zips can later move to the cloud.
-3. GDFL must be viewable in the EXISTING Brutex app pages (no new pages). Wiring plan: work-20260925/state/design/gdfl-tick-view.md (no page shows ticks today; /db ATM/ITM/OTM lacks a spot source).
-4. Per-second OHLCV with volume (no-LTQ ticks dropped), traceable to source ticks on /db; fills worst-case from seconds, only with enough volume; signals on minutes; exits via exit grids. Fit note: work-20260925/state/design/gdfl-1s-operator-20261004.md (volume-less indices cannot satisfy a volume gate: refuse by name).
+Rule: from 2019-02-01 every name DD MON YY STRIKE; before, only NIFTY/BANKNIFTY weeklies dated, everything else YY MON STRIKE expiring last Thursday (previous trading day on a holiday). Over all 1,218,362 tickers: 0 refused, 0 two-way, 0 trade after decoded expiry, 887,302 last trade on expiry. Long-dated monthly contracts were renamed at the cutover (6,253 twins): key by contract, not ticker.
 
-## Next steps
+## Open work
 
-1. Finish each part's repair and its full Definition of Done; then round-4 review (3 lenses) of each new head; repeat until clean.
-2. gdfl-cm: zip source + CmSource, then tick-store source. census: read via CmSource, rerun and compare with run-b5ec8d7c. core-second + store-grid: add volume (D-2808).
-3. Squash-integrate the clean parts into feat/gdfl-1s from origin/main; prove with git log -p that no GDFL row is in any commit. Trial merges show only doc-tail conflicts on main; against origin/final/all-fixes real conflicts in store (file.rs, layout.rs, unit.rs vs store v3), core/pull vendor.rs, pull csv.rs, ci.yml, 07-plan.md: merge final/all-fixes into feat/gdfl-1s locally and resolve.
-4. Import into the existing pages per gdfl-tick-view.md; then code-only landing on PR #74 through its merge gate.
-5. Usage: checked every 15 min; pause Claude work at 5-hour 93%, save + stop at 98% or weekly 93%.
+1. Import (feat/gdfl-import): era-aware decoder diffed against appearances.tsv; 10^6 fuzz; 1s-build property tests; one-day real proof to state/import-scratch/PROOF.md; .grk pass after the rate lands; take attack-thread commits D-3160 tests, D-3161, D-3162 (origin/claude/attack-gdfl).
+2. census: round-4 repair (gate 11 count 5->4, signed-price cut-tail test, invented quote values, plan-row condition).
+3. store-grid, gdfl-cm: finish checks; round-4 reviews of core-second, store-grid, gdfl-cm.
+4. /db spot read (D-2807); RBI rate series (D-2810).
+5. Attack round over every year until a round finds zero; then squash-integrate into feat/gdfl-1s, prove no GDFL rows.
+6. Board: https://claude.ai/artifact/UsmiHfzRdNWgQeyQZnLULq (source in the session scratchpad; republish each milestone).
