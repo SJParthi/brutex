@@ -6219,6 +6219,8 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
     let horizon = horizon_for(&loaded.bars, execution.is_some());
     let rungs = grid_rungs(&loaded.bars);
     let derived_rules = Rules::derived(floors_measured_on(&loaded.bars, execution), horizon);
+    // BEFORE THE SWEEP: a TOP the frontier cannot serve is refused, not run. CE-19.
+    frontier::admit_top(derived_rules.top)?;
     let lens = runner::rank::Lens::Detectability;
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
@@ -6932,6 +6934,8 @@ fn audit_range_kernel(request: StoredRangeAuditRequest<'_>) -> Result<String, st
     // not re-read the process environment behind the CLI knob store.
     let rungs = grid_rungs(&span.bars);
     let rules = Rules::derived(floors_measured_on(&span.bars, execution), horizon);
+    // BEFORE THE SWEEP: a TOP the frontier cannot serve is refused, not run. CE-19.
+    frontier::admit_top(rules.top)?;
     let lens = runner::rank::Lens::Payoff;
     let validate = validate_from_env();
     let ladder = ladder_for(min_hits)?;
@@ -14209,6 +14213,9 @@ fn elite_descend_with_attempt(
     top: usize,
     attempt: Option<u64>,
 ) -> String {
+    if let Err(why) = frontier::admit_top(top) {
+        return format!("refused: {why}\n");
+    }
     let (from, to) = span;
     let Some(known) = EVERY_RUNG.iter().find(|r| **r == rung) else {
         return format!(
@@ -14576,6 +14583,9 @@ fn elite_descend_in_points_inner(
         return "refused: TOP must be 1 or more — a listing of zero rows is not \
                 a shorter answer, it is no answer.\n"
             .to_owned();
+    }
+    if let Err(why) = frontier::admit_top(top) {
+        return format!("refused: {why}\n");
     }
     let root = match store_root() {
         Ok(root) => root,
@@ -16038,6 +16048,7 @@ fn screen_range_kernel_cached(
     // of an `elite` descent arrives here, and is still refused here on every
     // step even when the span is already held. D-0685.
     recorded_budget_refusal()?;
+    frontier::admit_top(rules.top)?;
     let key = ScreenKey {
         root: root.clone(),
         vendor,
@@ -17167,6 +17178,10 @@ fn record_frontier(
     priced: &std::collections::HashMap<[u64; 6], (grid::Cell, Direction)>,
 ) -> Result<(String, u64), String> {
     let top = rules.top;
+    // THE WRITER NEVER WRITES PAST THE READER. Every entry point refuses such
+    // a TOP before its sweep; this is the boundary that makes it a property of
+    // the file rather than of each caller remembering. CE-19, D-1981.
+    frontier::admit_top(top)?;
     let kept = by_evidence.len().min(top);
     // RANKED THE WAY THE REPORT RANKS, not the way the sweep did.
     //

@@ -57301,3 +57301,10 @@ and Finalization V4 already cut a failed barrier (D-1900).
 - P3-01-04. The retry ladder can outlast the page's 90 s ceiling; the abort dropped the handler future, so files already landed stayed replaced while the per-source records and the reload never ran.
 - `refresh` now hands its whole work to `detached`, a `tokio::spawn` the handler only waits on, as `recovery::start` does. Every source is recorded and the universe re-parsed whether or not the page is still waiting. The `/mapping` page, on a timeout, says the refresh keeps running and where its outcome goes, and re-reads the on-disk table.
 - Proved by `api::mastersrun::tests::a_refresh_whose_caller_goes_away_still_runs_to_its_end` (ZW-06).
+
+### D-1980 — The lake pre-walks every parquet footer before `parquet` may parse it — 2026-10-04
+
+- CE-12 and CE-13: `parquet` 59.2 reserves a declared list length before reading one element, and rebuilds the schema tree recursively with no depth limit. A 21-byte file asked the allocator for 206 GB and a million one-child groups overflowed the stack; both abort the process, so `LakeError::FooterUnreadable` never returned.
+- `lake::footer::check` now runs in `LakeFile::from_bytes` after the magic checks and before `ParquetMetaDataReader`. It walks the compact-protocol footer with an explicit stack and refuses, as `FooterUnreadable` with a reason beginning "refused before parsing": a footer length that does not fit between the magics; a list, set, map or string whose declared length exceeds the unread footer bytes; a varint past ten bytes; an unknown thrift type; nesting past 32 frames; and a top-level schema list longer than 18 elements (the root plus the F&O shape's 17 columns, the widest the lake holds).
+- The bound is by bytes present, not a constant: after the walk every list `parquet` allocates holds at most (footer bytes) x (one element's in-memory size), and the footer sits inside a file already read whole. The schema cap is what bounds the recursion: at most 18 levels.
+- No lake file the crate could open before is refused: both lake shapes are under the cap, and a real footer nests about nine frames.

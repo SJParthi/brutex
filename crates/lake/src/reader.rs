@@ -136,6 +136,9 @@ impl LakeFile {
             return Err(LakeError::NotParquet { head, tail });
         }
 
+        // Before `parquet` sees the footer: it trusts declared list lengths
+        // and schema depth, and either can abort the process. CE-12, CE-13.
+        crate::footer::check(&raw)?;
         let bytes = Bytes::from(raw);
         let meta = ParquetMetaDataReader::new()
             .parse_and_finish(&bytes)

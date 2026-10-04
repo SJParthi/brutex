@@ -985,3 +985,28 @@ fn every_equity_charge_statement_is_the_audit_headers_own_and_names_no_rate() {
     assert!(names_a_rate("Selection V7"));
     assert!(!names_a_rate("(D-0509, D-0525, D-0681) Selection V6"));
 }
+
+/// CE-19, D-1981: a TOP above what `/frontier.json` and `/top` serve is
+/// refused at the writer, and nothing reaches the store.
+#[test]
+fn the_frontier_writer_refuses_a_top_the_api_cannot_serve() {
+    let dir = root();
+    let mut rules = Rules::elite(400, 25);
+    rules.top = crate::frontier::MAX_ROWS + 1;
+    let priced = std::collections::HashMap::with_capacity(1);
+    let refused = super::record_frontier(&dir, &id(), &[], rules, &priced);
+    let why = refused.expect_err("a TOP past the reader bound must be refused");
+    assert!(why.contains("TOP is 4097 and must be 1 to 4096"), "{why}");
+    assert!(!dir.exists(), "a refused TOP wrote under {}", dir.display());
+}
+
+/// CE-19, D-1981: the elite descent refuses the same TOP before it opens a
+/// store, a span or a rung.
+#[test]
+fn the_elite_descent_refuses_a_top_the_api_cannot_serve_before_any_read() {
+    let span = ((2024, 1), (2024, 1));
+    let said = crate::elite_descend("zerodha", "NIFTY", "no-such-rung", span.0, span.1, 0, 4_097);
+    assert!(said.contains("TOP is 4097 and must be 1 to 4096"), "{said}");
+    let said = crate::elite_descend_in_points("zerodha", "NIFTY", "1min", span.0, span.1, 1, 4_097);
+    assert!(said.contains("TOP is 4097 and must be 1 to 4096"), "{said}");
+}
