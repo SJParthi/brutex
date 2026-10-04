@@ -14781,7 +14781,8 @@ UNVERIFIED as measurements.
   and on `;`, `&&`, `||`, `|`, `$(`, a backtick and `<(`; quoting is not
   parsed. A program named by a variable (`p=node; $p -e x`), a name assembled
   from pieces, or a flag built at run time is not seen. A `gh --jq` or `jq`
-  operand passes only as a bare field path (`.sha`, `.a.b`).
+  operand is refused even as a bare field path (D-2320); `.github/gh_json.rs
+  field KEY` reads one top-level field instead.
 - **Gate 1g environment names (D-2346).** The refusals are line patterns: a
   variable-built name (`export "$n=..."`, `declare`, `printf -v`), any
   `GITHUB_PATH` write, and any `GITHUB_ENV` write other than the two literal

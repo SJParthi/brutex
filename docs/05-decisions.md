@@ -60257,3 +60257,29 @@ sides had fixed, and in one place where it undid lane 1's change.
 implementations of one fact drift. Reverting `prepare_span` to `price_all`'s
 body. That would leave `pool-oos` on the unprojected column and lose D-1576's
 shared sequence.
+
+### D-2320 — No workflow passes gh a jq expression, a bare field path included — 2026-10-04
+
+**Finding (Rust and O(1) sweep, recheck after the pause).** D-2343 moved every
+jq rule into `.github/gh_json.rs` but let a workflow keep `gh --jq` with a bare
+field path, and gate 0 exempted that form. Three remained:
+`main-check.yml` read `.sha`, and `auto-merge.yml` read `.behind_by` and
+`.state`. A path is still an expression in jq's language, evaluated by the jq
+engine built into gh, so CLAUDE.md section 2's one language held everywhere
+except those three operands.
+
+**Decision.** `gh_json` gains `field KEY`: one document, one top-level field,
+answered as a non-empty one-line string or a number and refused otherwise.
+The three workflows pipe into it. Gate 0 drops the field-path exemption for
+`gh --jq`, `-q` and `--template` operands and for a `jq` program operand, so
+the form cannot return.
+
+**What it changes.** Nothing a run decides: each field was already a scalar,
+and a missing one now stops the job instead of comparing an empty string.
+`gh_json` is built from main under `pull_request_target`, so the new workflow
+lines and the new subcommand take effect together once main carries both.
+
+**Proof.** `field_reads_one_string_or_number_and_refuses_everything_else` in
+`.github/gh_json.rs`; `every_widened_inline_program_form_is_refused` in
+`.github/source_scan.rs` now lists `--jq .sha`, `--jq '.behind_by'`, `-q
+.state` and `jq .sha f` as refusals. AFG-20.
