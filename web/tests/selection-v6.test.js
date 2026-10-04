@@ -5,8 +5,12 @@ import { fetchSelectionV6, selectionV6Query, RUNGS } from '../src/lib/selection-
 
 const EQUITIES =
   'Selection V6 holds the NIFTY and BANKNIFTY families only. No equity result may enter Selection V6 or execution authority until a charter-sourced equity charge stack exists (CLAUDE.md §1, D-0509, D-0681).';
-const h = (b) => b.repeat(32);
-/** @returns {any} */
+const h = (/** @type {string} */ b) => b.repeat(32);
+/**
+ * @param {number} rank
+ * @param {string} [family]
+ * @returns {any}
+ */
 function winner(rank, family = 'NIFTY') {
   return {
     rank, top_ten: rank < 10, family, direction: 'long', strategy: h('11'), disposition: h('22'),
@@ -17,7 +21,10 @@ function winner(rank, family = 'NIFTY') {
     pessimistic_profit: '-9223372036854775808', loss_ratio_ppm: null, reward_to_risk_ppm: '0'
   };
 }
-/** @returns {any} */
+/**
+ * @param {any[]} winners
+ * @returns {any}
+ */
 function record(winners) {
   return {
     identity: h('99'), rung_seconds: '300', horizon_bars: '15', population: h('44'),
@@ -29,7 +36,10 @@ function record(winners) {
     considered: '12', admitted: '11', refused: '1', unmeasured: '0', winner_count: winners.length, winners
   };
 }
-/** @returns {any} */
+/**
+ * @param {string | null} [family]
+ * @returns {any}
+ */
 function payload(family = null) {
   return {
     schema_version: 1, status: 'saved', authority: 'sealed-stored-selection-v6-record', root: '/s',
@@ -43,7 +53,7 @@ function payload(family = null) {
     )
   };
 }
-const reply = (body) => async () => ({ ok: true, json: async () => body });
+const reply = (/** @type {any} */ body) => async () => ({ ok: true, json: async () => body });
 
 test('the page reads every rung and keeps exact figures as strings', async () => {
   let url = '';
@@ -78,7 +88,7 @@ test('a server refusal is shown, and a payload this page cannot account for is r
     fetchSelectionV6(null, async () => ({ ok: false, status: 400, json: async () => ({ schema_version: 1, status: 'refused', rows: [], rungs: [], refusal: 'RELIANCE is a cash equity.' }) })),
     /HTTP 400\)\. RELIANCE is a cash equity\./
   );
-  for (const change of [
+  for (const change of /** @type {Array<(b: any) => void>} */ ([
     (b) => { b.rungs.pop(); },
     (b) => { b.equities = ''; },
     (b) => { b.status = 'absent'; },
@@ -88,7 +98,7 @@ test('a server refusal is shown, and a payload this page cannot account for is r
     (b) => { b.rungs[3].records[0].winners[0].score = 18446744073709551615; },
     (b) => { b.rungs[0].records = [record([])]; },
     (b) => { b.rungs[7].refusal = ''; }
-  ]) {
+  ])) {
     const body = payload();
     change(body);
     await assert.rejects(fetchSelectionV6(null, reply(body)));
