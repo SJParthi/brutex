@@ -254,7 +254,8 @@ impl Layout {
     /// # Errors
     ///
     /// [`FormatError::DegenerateLayout`] naming the field, for a retired or
-    /// zero version, a zero stride, a zero records-per-block (which would make
+    /// zero version, a zero stride or one wider than the header's `u16` stride
+    /// field, a zero records-per-block (which would make
     /// [`Layout::block_of`] a division fault), a slot count below 2 or above
     /// [`crate::format::MAX_SLOT_COUNT`], a block length that overflows `u64`,
     /// or a magic outside [`crate::format::MAGIC_FAMILY`].
@@ -653,6 +654,15 @@ const fn degenerate_field(
     }
     if record_stride.checked_mul(records_per_block).is_none() {
         return Some("block_len");
+    }
+    // The header stores the stride as a `u16` (`docs/02-store-format.md` §2,
+    // offset 10), and `Header::genesis_at` narrows it there. A wider stride
+    // would be truncated into a header that names a different geometry, so it
+    // is not one a file can have. `0xFFFF` is `u16::MAX`, spelled as a literal
+    // because a widening cast is not available in a `const fn` without a lint.
+    // crash-edge-pass20, D-1955.
+    if record_stride > 0xFFFF {
+        return Some("record_stride");
     }
     if !magic_is_family(magic) {
         return Some("magic");

@@ -1076,6 +1076,15 @@ fn a_degenerate_layout_is_refused_at_declaration() {
         bad("block_len"),
         "a block length that does not fit u64 is not a geometry",
     );
+    // The header's stride field is a u16: the widest stride it can carry is
+    // admitted and one byte more is refused, so a stride can never be
+    // truncated into a header that names another geometry. D-1955.
+    assert!(Layout::declare(3, MAGIC, 2, u64::from(u16::MAX), 73).is_ok());
+    assert_eq!(
+        Layout::declare(3, MAGIC, 2, u64::from(u16::MAX) + 1, 73),
+        bad("record_stride"),
+        "a stride the header's u16 field cannot hold is not a geometry",
+    );
     assert_eq!(
         Layout::declare(3, *b"NOTBRUTE", 2, 56, 73),
         bad("magic"),
