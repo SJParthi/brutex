@@ -51,6 +51,11 @@ impl Inputs {
 
 /// The support census uses the same admitted input policy as the real kernel.
 /// Its guards remain held by the rung caller until selection is published.
+///
+/// The NIFTY context it loads to count the signal bars is handed back as a
+/// [`SizedContextV1`], and the rung's NIFTY family commit prices over exactly
+/// that context instead of loading the same span a second time (W2-cli16-3,
+/// D-1836).
 pub(crate) fn size_sweeper(
     root: &std::path::Path,
     vendor: brutex_core::vendor::Vendor,
@@ -58,25 +63,20 @@ pub(crate) fn size_sweeper(
     rung: &str,
     bounds: super::StoredCandidatePreAdmissionBoundsV1,
     config: &StrictConfig,
-) -> Result<(runner::Sweeper, Arc<Inputs>), String> {
-    let root = AdmittedRootV1::admit(root)?;
-    let context = load(
-        StoredContextLoadSpecV1 {
-            vendor,
-            underlying: "NIFTY",
-            rung_name: rung,
-            from: request.from,
-            to: request.to,
-            signal_bound: bounds.signal_records,
-            minute_bound: bounds.minute_records,
-            daily_bound: bounds.daily_records,
-        },
-        &root,
+) -> Result<(runner::Sweeper, Arc<Inputs>, SizedContextV1), String> {
+    let sized = load_sized(
+        root,
+        vendor,
+        rung,
+        (request.from, request.to),
+        bounds,
         config,
     )?;
+    let context = &sized.context;
     let count = context.signal.bars.len();
     let inputs = context
         .strict
+        .clone()
         .ok_or("strict institutional sizing lost its input authority")?;
     inputs.require_current()?;
     let min_hits = crate::min_hits_for(count, request.support_ppm);
@@ -88,7 +88,117 @@ pub(crate) fn size_sweeper(
         min_hits,
         request.support_ppm,
     ));
-    Ok((sweeper, inputs))
+    Ok((sweeper, inputs, sized))
+}
+
+/// Admits `root` and loads the strict NIFTY span sizing counts, held as a
+/// [`SizedContextV1`] for the family commit that prices it (D-1836).
+pub(crate) fn load_sized(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    rung: &str,
+    (from, to): ((u16, u8), (u16, u8)),
+    bounds: super::StoredCandidatePreAdmissionBoundsV1,
+    config: &StrictConfig,
+) -> Result<SizedContextV1, String> {
+    let admitted = AdmittedRootV1::admit(root)?;
+    let context = load(
+        StoredContextLoadSpecV1 {
+            vendor,
+            underlying: SIZED_UNDERLYING,
+            rung_name: rung,
+            from,
+            to,
+            signal_bound: bounds.signal_records,
+            minute_bound: bounds.minute_records,
+            daily_bound: bounds.daily_records,
+        },
+        &admitted,
+        config,
+    )?;
+    Ok(SizedContextV1 {
+        root: admitted,
+        context,
+        vendor,
+        rung: rung.to_owned(),
+        from,
+        to,
+        bounds,
+        config: config.clone(),
+    })
+}
+
+/// The one family whose span sizing loads.
+pub(crate) const SIZED_UNDERLYING: &str = "NIFTY";
+
+/// The admitted root and strict NIFTY context sizing loaded, held so the
+/// rung's NIFTY family commit does not load the same span again (D-1836).
+///
+/// It is consumed by [`Self::into_matching`], which refuses a request that is
+/// not the exact load it was made for, so a held context can never price a
+/// different family, rung, span, ceiling or receipt policy.
+pub(crate) struct SizedContextV1 {
+    root: AdmittedRootV1,
+    context: BoundedStoredContextV1,
+    vendor: brutex_core::vendor::Vendor,
+    rung: String,
+    from: (u16, u8),
+    to: (u16, u8),
+    bounds: super::StoredCandidatePreAdmissionBoundsV1,
+    config: StrictConfig,
+}
+
+impl SizedContextV1 {
+    /// The held root and context, once `request` and `config` are proven to be
+    /// the exact load sizing made and its receipts are still current.
+    ///
+    /// # Errors
+    ///
+    /// Names the first term that differs, or the guard or root refusal.
+    pub(crate) fn into_matching(
+        self,
+        request: &super::StoredCandidatePreAdmissionRequestV1<'_>,
+        config: &StrictConfig,
+    ) -> Result<(AdmittedRootV1, BoundedStoredContextV1), String> {
+        let differs = if request.underlying != SIZED_UNDERLYING {
+            Some("underlying")
+        } else if request.vendor != self.vendor {
+            Some("vendor")
+        } else if request.rung_name != self.rung {
+            Some("rung")
+        } else if (request.from, request.to) != (self.from, self.to) {
+            Some("span")
+        } else if request.bounds != self.bounds {
+            Some("load ceilings")
+        } else if *config != self.config {
+            Some("strict receipt policy")
+        } else if std::fs::canonicalize(request.root).ok().as_deref() != Some(self.root.path()) {
+            Some("store root")
+        } else {
+            None
+        };
+        if let Some(term) = differs {
+            return Err(format!(
+                "the sized strict context cannot price this family: its {term} differs from the load sizing made. Nothing was computed"
+            ));
+        }
+        self.context.require_current()?;
+        self.root
+            .require_same("before pricing the sized strict context")?;
+        Ok((self.root, self.context))
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Strict span loads ([`load`]) on this thread (test-only probe, D-1836).
+    static LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Strict span loads made on the calling thread so far (test-only, D-1836).
+#[cfg(test)]
+pub(crate) fn loads_on_this_thread() -> u64 {
+    LOADS.with(std::cell::Cell::get)
 }
 
 pub(super) fn load(
@@ -96,6 +206,8 @@ pub(super) fn load(
     root: &AdmittedRootV1,
     config: &StrictConfig,
 ) -> Result<BoundedStoredContextV1, String> {
+    #[cfg(test)]
+    LOADS.with(|loads| loads.set(loads.get() + 1));
     root.require_same("before strict institutional source admission")?;
     let limits = [
         spec.signal_bound.max_records(),

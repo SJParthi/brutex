@@ -370,6 +370,101 @@ mod strict_v6_fixture_tests {
         .map_err(|why| why.to_string())
     }
 
+    /// **The NIFTY family prices over the context sizing loaded (W2-cli16-3,
+    /// D-1836).** `ledger-v6` loaded the NIFTY span under the strict receipts
+    /// to size each rung and loaded it again to commit the NIFTY family.
+    /// Counted: the reloading path takes two strict loads, the sized path one,
+    /// and both commit the same family. A sized context refuses a request it
+    /// was not loaded for, naming the term, before computing anything.
+    #[test]
+    fn strict_v6_sizing_context_prices_the_nifty_family_without_a_second_load()
+    -> Result<(), String> {
+        let fixture = StoredSuccessFixture::new()?;
+        let config = strict_fixture_config(&fixture)?;
+        let long = exit_policy(Side::Long)?;
+        let short = exit_policy(Side::Short)?;
+        let diagnostic = Sweeper::new(engine::Ladder::with_min_hits(1));
+        let support = maximum_fixture_singleton_support(&fixture_request(
+            &fixture.source,
+            "NIFTY",
+            &diagnostic,
+            &long,
+            &short,
+        )?)?;
+        let sweeper = Sweeper::new(engine::Ladder::with_min_hits(support));
+        let request = fixture_request(&fixture.source, "NIFTY", &sweeper, &long, &short)?;
+        let sized = || {
+            strict::load_sized(
+                request.root,
+                request.vendor,
+                request.rung_name,
+                (request.from, request.to),
+                request.bounds,
+                &config,
+            )
+        };
+        let before = strict::loads_on_this_thread();
+        drop(sized()?);
+        let reloaded = commit_family_with_inputs_v6(
+            request,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            Some(&config),
+            true,
+        )?;
+        let middle = strict::loads_on_this_thread();
+        let reused = commit_family_sized_v6(
+            request,
+            VerifiedBuildCommitV1(FIXTURE_COMMIT),
+            &|_, _, _| {},
+            &config,
+            sized()?,
+        )?;
+        let after = strict::loads_on_this_thread();
+        assert_eq!((middle - before, after - middle), (2, 1));
+        let (left, right) = (
+            reloaded.evaluated().ok_or("the fixture family is evaluated")?,
+            reused.evaluated().ok_or("the fixture family is evaluated")?,
+        );
+        assert_eq!(left.identities(), right.identities());
+        assert!(right.strict_inputs().is_some());
+
+        let banknifty = fixture_request(&fixture.source, "BANKNIFTY", &sweeper, &long, &short)?;
+        let mut other_rung = request;
+        other_rung.rung_name = "5min";
+        let mut other_span = request;
+        other_span.to = (other_span.to.0 + 1, other_span.to.1);
+        let mut other_bounds = request;
+        other_bounds.bounds.signal_records = StoredSpanLoadBoundV1::new(1)?;
+        let changed = crate::audited_range_command::StrictConfig::from_values(
+            Some(config.receipt_root().as_os_str().to_owned()),
+            Some((config.max_bytes() + 1).to_string().into()),
+            Some(config.max_records().to_string().into()),
+        )
+        .map_err(|why| why.to_string())?;
+        for (asked, policy, term) in [
+            (banknifty, &config, "underlying"),
+            (other_rung, &config, "rung"),
+            (other_span, &config, "span"),
+            (other_bounds, &config, "load ceilings"),
+            (request, &changed, "strict receipt policy"),
+        ] {
+            let held = strict::loads_on_this_thread();
+            let why = commit_family_sized_v6(
+                asked,
+                VerifiedBuildCommitV1(FIXTURE_COMMIT),
+                &|_, _, _| panic!("a refused sized context computes nothing"),
+                policy,
+                sized()?,
+            )
+            .err()
+            .ok_or("a foreign request must be refused")?;
+            assert!(why.contains(&format!("its {term} differs")), "{why}");
+            assert_eq!(strict::loads_on_this_thread() - held, 1, "only the sizing load");
+        }
+        Ok(())
+    }
+
     #[test]
     fn strict_v6_independent_role_caps_refuse_before_candidate_computation() -> Result<(), String> {
         let fixture = StoredSuccessFixture::new()?;

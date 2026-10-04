@@ -3036,6 +3036,41 @@ pub(crate) fn commit_strict_candidate_pre_admission_authority_v1(
     commit_family_with_inputs_v6(request, commit, &|_, _, _| {}, Some(config), true)
 }
 
+/// [`commit_strict_candidate_pre_admission_authority_v1`] over the NIFTY
+/// context sizing already loaded (W2-cli16-3, D-1836).
+///
+/// `ledger-v6` sizes each rung from the NIFTY signal span and then committed
+/// the NIFTY family, which loaded the identical span again under the same
+/// strict receipts. This prices over the held context instead; it refuses a
+/// request that is not the exact load sizing made.
+///
+/// # Errors
+///
+/// As [`commit_strict_candidate_pre_admission_authority_v1`], plus a request
+/// that differs from the sized load.
+pub(crate) fn commit_strict_candidate_pre_admission_authority_sized_v1(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    config: &crate::audited_range_command::StrictConfig,
+    sized: strict::SizedContextV1,
+) -> Result<family_v6::StoredFamilyV6, String> {
+    let commit = VerifiedBuildCommitV1::current()?;
+    commit_family_sized_v6(request, commit, &|_, _, _| {}, config, sized)
+}
+
+fn commit_family_sized_v6(
+    request: StoredCandidatePreAdmissionRequestV1<'_>,
+    verified_commit: VerifiedBuildCommitV1<'_>,
+    on_level: &dyn Fn(&engine::Frontier, usize, u64),
+    config: &crate::audited_range_command::StrictConfig,
+    sized: strict::SizedContextV1,
+) -> Result<family_v6::StoredFamilyV6, String> {
+    let (mut root, context) = sized.into_matching(&request, config)?;
+    root.strict.clone_from(&context.strict);
+    let attempt = strict::begin(&context, &request, verified_commit.0)?;
+    let result = commit_loaded_stored_v1(request, verified_commit, on_level, root, context, true);
+    strict::finish(attempt, result)
+}
+
 fn commit_stored_with_verified_build_v1(
     request: StoredCandidatePreAdmissionRequestV1<'_>,
     verified_commit: VerifiedBuildCommitV1<'_>,

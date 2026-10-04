@@ -14391,6 +14391,15 @@ new durable authority, and none exists.
   removed: carrying the loaded context from sizing into the family commit
   changes the guard lifetime of the strict inputs, which this change does not
   take on.
+  **Fixed by D-1836.** Sizing now hands its admitted root and strict NIFTY
+  context to the rung's NIFTY family commit
+  (`commit_strict_candidate_pre_admission_authority_sized_v1`), which prices
+  over it after proving the request is the exact load sizing made; the span
+  is loaded once per rung, not twice. The guard-lifetime objection did not
+  hold: `ledger_v6` already keeps the sizing guard (`sizing_inputs`) for the
+  whole rung. Counted, not timed: two strict loads before, one after
+  (`strict_v6_sizing_context_prices_the_nifty_family_without_a_second_load`).
+  The one remaining sizing load is the read the rung needs anyway.
 
 ## Stored completeness re-walks execution bars per cell — D-1636, 3 October 2026
 

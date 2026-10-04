@@ -61,9 +61,11 @@ use crate::population_observations_v1::ObservationAuthorityBoundsV2;
 use crate::population_statistics_v2::PopulationStatisticsProcedureV2;
 use crate::population_statistics_v3::PopulationStatisticsV3Bounds;
 use crate::population_v6::PopulationV6Bounds;
+use crate::step3_orchestrator::strict::SIZED_UNDERLYING;
 use crate::step3_orchestrator::{
     StoredCandidatePreAdmissionRequestV1, StoredPopulationV6RouteV1,
-    commit_stored_population_v6_route, commit_strict_candidate_pre_admission_authority_v1,
+    commit_stored_population_v6_route, commit_strict_candidate_pre_admission_authority_sized_v1,
+    commit_strict_candidate_pre_admission_authority_v1,
 };
 
 /// The two charter families, in the order every V6 successor requires them.
@@ -306,7 +308,7 @@ fn run_route(
 
     let mut committed = Vec::with_capacity(8);
     for (index, rung) in LEDGER_RUNGS.into_iter().enumerate() {
-        let (sweeper, sizing_inputs) = crate::step3_orchestrator::strict::size_sweeper(
+        let (sweeper, sizing_inputs, sized) = crate::step3_orchestrator::strict::size_sweeper(
             &source_root,
             vendor,
             request,
@@ -322,31 +324,39 @@ fn run_route(
         // The shared Candidate kernel keeps ordinary pricing semantics.
         // Strict identities additionally bind exact receipts and physical
         // limits; only repeated strict requests reuse the same authority.
+        // The NIFTY family prices over the context sizing loaded (D-1836); the
+        // other family loads its own.
+        let mut sized = Some(sized);
         let mut families = Vec::with_capacity(ROUTE_FAMILIES.len());
         for underlying in ROUTE_FAMILIES {
             sizing_inputs.require_current()?;
-            let committed_family = commit_strict_candidate_pre_admission_authority_v1(
-                StoredCandidatePreAdmissionRequestV1 {
-                    root: source_root.as_path(),
-                    vendor,
-                    underlying,
-                    rung_name: rung,
-                    from: request.from,
-                    to: request.to,
-                    sweeper: &sweeper,
-                    horizon: Horizon::DEFAULT,
-                    widths,
-                    // ABSENT, and this caller may not derive it --
-                    // `vwap::availability_of` reads the whole slice, which is
-                    // the look-ahead §3 rule 7 forbids.
-                    availability: Availability::Absent,
-                    thresholds: Thresholds::CLASSICAL,
-                    long_exit_policy: &long_exit,
-                    short_exit_policy: &short_exit,
-                    bounds,
-                },
-                &strict,
-            )
+            let family_request = StoredCandidatePreAdmissionRequestV1 {
+                root: source_root.as_path(),
+                vendor,
+                underlying,
+                rung_name: rung,
+                from: request.from,
+                to: request.to,
+                sweeper: &sweeper,
+                horizon: Horizon::DEFAULT,
+                widths,
+                // ABSENT, and this caller may not derive it --
+                // `vwap::availability_of` reads the whole slice, which is
+                // the look-ahead §3 rule 7 forbids.
+                availability: Availability::Absent,
+                thresholds: Thresholds::CLASSICAL,
+                long_exit_policy: &long_exit,
+                short_exit_policy: &short_exit,
+                bounds,
+            };
+            let committed_family = match sized.take_if(|_| underlying == SIZED_UNDERLYING) {
+                Some(sized) => commit_strict_candidate_pre_admission_authority_sized_v1(
+                    family_request,
+                    &strict,
+                    sized,
+                ),
+                None => commit_strict_candidate_pre_admission_authority_v1(family_request, &strict),
+            }
             .map_err(|why| {
                 let refusal = format!("v6 {rung} {underlying} refused: {why}");
                 crate::note(&family_refused_event(rung, underlying, &refusal));
