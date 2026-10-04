@@ -137,7 +137,7 @@
   import { decodeMaskWords } from '$lib/mask.js';
   import { impliedConditions } from '$lib/condition-groups.js';
   import { createRequestGate } from '$lib/request-gate.js';
-  import { liveAttemptKey, reduceLiveProgress } from '$lib/live-progress';
+  import { foldLiveProgress, liveAttemptKey } from '$lib/live-progress';
   import {
     TIME_GRAINS,
     equityMaxDrawdown,
@@ -1909,6 +1909,16 @@
   /** Latest-request-wins generation for the independent live-event stream. */
   let liveSeq = 0;
 
+  /**
+   * The fold carried between polls, for exactly one run key (P1-06-02,
+   * D-2662). `/logs.json?run=` holds the newest 200 events and a validated
+   * sweep emits about 36 a rung, so the start marker leaves the window near
+   * rung six; the fold needs it once, then continues from the last event it
+   * folded, and refuses if a window no longer reaches that event.
+   * @type {{ key: string, carry: import('$lib/live-progress').LiveCarry | null }}
+   */
+  let liveCarry = { key: '', carry: null };
+
   /** @param {any} run */
   function liveRunKey(run) {
     return JSON.stringify([
@@ -1984,7 +1994,10 @@
       }
       const body = await response.json();
       if (seq !== liveSeq || liveRunKey(sweep.run) !== liveRunKey(run)) return;
-      publishLive(seq, run, reduceLiveProgress(run, body));
+      const key = liveRunKey(run);
+      const step = foldLiveProgress(liveCarry.key === key ? liveCarry.carry : null, run, body);
+      liveCarry = { key, carry: step.carry };
+      publishLive(seq, run, step.progress);
     } catch (why) {
       publishLive(seq, run, {
         phase: 'failed',

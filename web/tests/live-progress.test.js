@@ -3,7 +3,7 @@ import test from 'node:test';
 
 // @ts-expect-error Node 24 strips this module's erasable TypeScript at runtime;
 // the app imports it through SvelteKit's resolver, which also admits `.ts`.
-import { liveAttemptKey, reduceLiveProgress } from '../src/lib/live-progress.ts';
+import { foldLiveProgress, liveAttemptKey, reduceLiveProgress } from '../src/lib/live-progress.ts';
 
 const RUN = Object.freeze({
   attempt: 701,
@@ -651,4 +651,68 @@ test('normalizing exact aliases leaves frozen wire input and its numeric compati
   assert.deepEqual({ run, body }, before);
   assert.equal(typeof body.records[0].run, 'number');
   assert.equal(body.records[0].run_key, key);
+});
+
+/** @param {string} rung */
+function validatedRung(rung) {
+  const out = [sweep(rung), entered(rung)];
+  for (let k = 1; k <= 10; k += 1) out.push(progress(rung, 25, Math.min(20, k * 2)));
+  out.push(priced(rung));
+  for (const stage of ['walk-forward', 'pbo', 'bootstrap']) {
+    out.push(validating(rung, stage));
+    out.push(event('validation stage finished', { rung, stage }));
+  }
+  // Sixteen fold events a rung: not folded, but they fill the window.
+  for (let k = 0; k < 16; k += 1) out.push(event('validation fold finished', { rung, fold: k }));
+  out.push(finished(rung));
+  return out;
+}
+
+test('a validated eight-rung sweep keeps its progress after the start marker leaves the window (P1-06-02)', () => {
+  const rungs = ['1min', '3min', '5min', '10min', '15min', '30min', '60min', '1day'];
+  const all = [marker()];
+  /** @type {any} */
+  let carry = null;
+  let staleFailed = false;
+  for (const rung of rungs) {
+    all.push(...validatedRung(rung));
+    // What `/logs.json?limit=200&run=` returns: the newest 200 of the attempt.
+    const window = newestFirst(all).slice(0, 200);
+    const body = envelope(window, { limit: 200 });
+    const holdsMarker = window.some((r) => r.message === 'sweep attempt started');
+    const alone = reduceLiveProgress(RUN, body);
+    if (!holdsMarker) {
+      assert.equal(alone.phase, 'failed', 'without a carry the missing marker is refused');
+      staleFailed = true;
+    }
+    const step = foldLiveProgress(carry, RUN, body);
+    assert.equal(step.progress.phase, 'ready', `${rung}: ${step.progress.why}`);
+    carry = step.carry;
+  }
+  assert.ok(staleFailed, 'the fixture must actually push the marker out of the window');
+  const last = foldLiveProgress(carry, RUN, envelope(newestFirst(all).slice(0, 200), { limit: 200 }));
+  assert.equal(last.progress.phase, 'ready');
+  assert.equal(last.progress.rungs.length, 8);
+  assert.ok(last.progress.rungs.every((r) => r.done && r.recorded), 'every rung finished');
+});
+
+test('a window that no longer reaches the last folded event is refused, not guessed (P1-06-02)', () => {
+  const all = [marker(), ...validatedRung('1min')];
+  const first = foldLiveProgress(null, RUN, envelope(newestFirst(all), { limit: 200 }));
+  assert.equal(first.progress.phase, 'ready');
+  for (const rung of ['3min', '5min', '10min', '15min', '30min', '60min']) all.push(...validatedRung(rung));
+  const jumped = foldLiveProgress(first.carry, RUN, envelope(newestFirst(all).slice(0, 200), { limit: 200 }));
+  assert.equal(jumped.progress.phase, 'failed');
+  assert.match(jumped.progress.why, /missed/);
+  assert.equal(jumped.carry, null, 'a refusal carries nothing forward');
+});
+
+test('a carry for another attempt does not stand in for this attempt\'s start marker', () => {
+  const all = [marker(), ...validatedRung('1min')];
+  const first = foldLiveProgress(null, RUN, envelope(newestFirst(all), { limit: 200 }));
+  const other = { ...first.carry, attempt: '999' };
+  const noMarker = newestFirst(all).slice(0, 10);
+  const answer = foldLiveProgress(other, RUN, envelope(noMarker, { limit: 200 }));
+  assert.equal(answer.progress.phase, 'failed');
+  assert.match(answer.progress.why, /start marker/);
 });
