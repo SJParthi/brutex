@@ -2,6 +2,10 @@
 //! containers, and files whose every value is made up at run time. No vendor
 //! row is quoted anywhere (the licence is UNVERIFIED; D-2800), and
 //! `gdfl_cm::tests::fixtures_are_built_not_pasted` walks this file too.
+#![expect(
+    clippy::expect_used,
+    reason = "a fixture that cannot be built is a test that cannot run; it panics by name"
+)]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
