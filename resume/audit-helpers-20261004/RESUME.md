@@ -109,3 +109,18 @@ Total new across rounds 1-10: 149. Round 10 = 5 medium, 20 low. CI tools list fo
 | Metrics | 14 | ranking and descriptive metrics | p14num-1 med (live "won %" inverted for sell rows, ran), p14num-2, p14num-3 low | numeric-pass14.md |
 | Docs | 14 | docs/02 store format + docs/01 vs code | P14-01 med (census header vendor bytes wrong, ran), P14-02 med (CRC sidecar layout undocumented), P14-03..06 low | tests-docs-security-pass14.md |
 Total new across rounds 1-11: 164. Round 11 = 3 medium, 12 low. Newly fixed: xcut-1, run1-3, P1-16-01/02/04..08, P1-14-02.
+
+## Round 12 (same head 1f4de71) — 3 of 4 passes done 2026-10-04 ~13:45 UTC; paused for the usage limit
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 17 | repair and recovery tools on damaged input | CE-88..90 low | crash-edge-pass17.md |
+| Concurrency | 15 | autopilot as a state machine | conc15-1 med (day rung idle marks feed complete and naps minute rung), conc15-2..6 low | conc-pass15.md |
+| Greeks | 15 | option pricing and greeks | p15num-1 med (zero dividend yield hard-coded though charter says UNVERIFIED; IVs biased, ran), p15num-2 low | numeric-pass15.md |
+| CI gates | 15 | do gates fail on violations | PENDING: agent was running at pause; report will land at /mnt/project-files/zero-rounds/tests-docs-security-pass15.md (IDs P15-01+) | — |
+Total new across rounds 1-12 so far: 175 (round 12 so far = 2 medium, 9 low). All handed to zero-findings session.
+
+### Resume here
+1. Read tests-docs-security-pass15.md if present; hand its findings to the zero-findings session, copy it here, add its rows.
+2. Check `git rev-parse --short origin/final/all-fixes-zero`; if it moved from 1f4de71, re-verify every open row on the new head first.
+3. Otherwise start round 13 on new themes (see the themes already covered in the report titles under /mnt/project-files/zero-rounds/). Stop an angle when a pass finds nothing new.
+Artifact: https://claude.ai/artifact/VPrgywStff6zaUpdpFMXQL (version 13 = through round 11; round 12 rows still to add).
