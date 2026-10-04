@@ -47,6 +47,15 @@
 //! truncates a damaged record.** `CLAUDE.md` §3 rule 8 and §4 — append-only,
 //! then degrade loudly and name the reason, or refuse.
 //!
+//! **The one truncation is of this call's own failed bytes (D-1854).** A
+//! `write_all` that fails part-way (ENOSPC, EIO) has put down part of a record
+//! that no one committed, and left there it would make every later append
+//! refuse the journal for good. So the writer cuts the file back to the length
+//! it measured under the same exclusive lock, before releasing it, and refuses
+//! naming the write error and the rollback. A record, whole or torn, that was
+//! there before the call is never touched; a process killed inside the write
+//! runs no rollback, and that tail is refused as above.
+//!
 //! # What is deliberately not here
 //!
 //! No rotation, no compaction, and no cap on the file. A pull is an operator
@@ -103,7 +112,7 @@
 //! an empty column that reads as compliance. §4 — never a fallback that hides
 //! a failure.
 
-use std::io::{Read as _, Seek as _, Write as _};
+use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -1240,15 +1249,12 @@ impl Journal {
     /// on the answer page — silently losing the record of a run that wrote
     /// 9.8 MB of bars is exactly the fallback `CLAUDE.md` §4 forbids.
     ///
-    /// # Two arms here are backstops and no test drives them
+    /// # One arm here is a backstop and no test drives it
     ///
-    /// `write_all` and `sync_all`. Reaching the first needs a full disk and
-    /// the second a failing `fsync`, and neither is a state a developer's disk
-    /// enters on request. The two arms that ARE reachable are covered — a file
-    /// where the directory has to be, and a path with no parent — and
-    /// `crates/store/src/file.rs` solved exactly this shape with a trait so
-    /// the arms can be injected. That is the available fix and it is not built
-    /// here. `CLAUDE.md` §3 rule 6: said, rather than left to be found.
+    /// `sync_all`: reaching it needs a failing `fsync`, which a developer's
+    /// disk does not enter on request. The failed `write_all` is driven, through
+    /// [`write_rolled_back`]'s injected write (D-1854). `CLAUDE.md` §3 rule 6:
+    /// said, rather than left to be found.
     ///
     /// # A refused unlock after the sync is not a failed append
     ///
@@ -1339,8 +1345,13 @@ impl Journal {
                 bytes / RECORD_LEN_U64,
             ));
         }
-        file.write_all(&record.image())
-            .map_err(|e| named("cannot append the record", &e))?;
+        write_rolled_back(
+            &mut file,
+            &self.path,
+            bytes,
+            &record.image(),
+            std::io::Write::write_all,
+        )?;
         file.sync_all()
             .map_err(|e| named("the record was written and not synced", &e))?;
         // THE RECORD IS DURABLE FROM HERE, SO NOTHING BELOW MAY REFUSE THE
@@ -1440,6 +1451,33 @@ impl Journal {
         out.reverse();
         Ok(out)
     }
+}
+
+/// Writes `image` at the end of a journal that held exactly `at` bytes under
+/// the exclusive append lock, and on a failed or short write truncates the
+/// file back to `at` before the lock is released (D-1854). Only bytes this
+/// call wrote are removed; when the truncation also fails both errors are
+/// named and the next append refuses the torn tail.
+fn write_rolled_back(
+    file: &mut std::fs::File,
+    path: &Path,
+    at: u64,
+    image: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let Err(e) = write(file, image) else {
+        return Ok(());
+    };
+    Err(match file.set_len(at) {
+        Ok(()) => format!(
+            "{}: cannot append the record — {e}; its partial bytes were truncated back to {at} bytes, so every whole record before it stays readable",
+            path.display()
+        ),
+        Err(and) => format!(
+            "{}: cannot append the record — {e}; truncating its partial bytes back to {at} bytes also failed: {and}; the journal may now end torn and the next append refuses it",
+            path.display()
+        ),
+    })
 }
 
 /// A run that is **not on the record at all**, said somewhere that is not the
@@ -1715,6 +1753,7 @@ mod tests {
     use super::*;
     use pull::ingest::Failure;
     use pull::session::Day;
+    use std::io::Write as _;
 
     fn d(y: u16, m: u8, day: u8) -> Day {
         Day::new(y, m, day).expect("a real date")
@@ -2423,6 +2462,71 @@ mod tests {
         // And a caller asking for more than the ceiling gets the ceiling.
         let all = journal.page(records, 0, u64::MAX).expect("capped");
         assert_eq!(all.len(), 40, "40 records, capped at {MAX_PAGE_RECORDS}");
+    }
+
+    /// AHA-09 (h-cli-4, D-1854). A failed or short record write is truncated
+    /// back to the length measured under the lock, so the journal is never
+    /// left torn by its own writer and the next append lands whole; a failed
+    /// truncation names both errors and changes nothing else.
+    #[test]
+    fn a_failed_record_write_is_truncated_back_and_the_next_append_lands() {
+        let root = scratch("audit-rollback");
+        let journal = Journal::at(&root);
+        let record = Record::refused(Scope::Spot, Outcome::Stored, at(1), "whole", "");
+        journal.append(&record).expect("appends");
+        let before = std::fs::read(&journal.path).expect("reads");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal.path)
+            .expect("opens");
+        let refusal =
+            write_rolled_back(&mut file, &journal.path, 256, &record.image(), |f, raw| {
+                f.write_all(raw.get(..100).expect("partial"))?;
+                Err(std::io::Error::other("injected short write"))
+            })
+            .expect_err("a short write refuses");
+        assert!(
+            refusal.contains("injected short write")
+                && refusal.contains("truncated back to 256 bytes"),
+            "{refusal}"
+        );
+        drop(file);
+        assert_eq!(std::fs::read(&journal.path).expect("reads"), before);
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 1,
+                bytes: 256,
+                torn: None,
+            }
+        );
+        journal
+            .append(&record)
+            .expect("the next append lands whole");
+        assert_eq!(
+            journal.look(),
+            Log::Held {
+                records: 2,
+                bytes: 512,
+                torn: None,
+            }
+        );
+
+        let grown = std::fs::read(&journal.path).expect("reads");
+        let mut read_only = std::fs::File::open(&journal.path).expect("opens read-only");
+        let refusal = write_rolled_back(
+            &mut read_only,
+            &journal.path,
+            512,
+            &record.image(),
+            std::io::Write::write_all,
+        )
+        .expect_err("a read-only handle refuses");
+        assert!(
+            refusal.contains("truncating its partial bytes back to 512 bytes also failed"),
+            "{refusal}"
+        );
+        assert_eq!(std::fs::read(&journal.path).expect("reads"), grown);
     }
 
     #[test]

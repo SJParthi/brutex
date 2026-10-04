@@ -2471,6 +2471,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.lock".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.ovl.crc".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk.crc".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.tix".to_owned(),
         ],
     );
 
@@ -2479,8 +2480,9 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // advisory lock" needs a name that cannot drift from the file it guards.
     assert_eq!(FileKind::Lock.extension(), ".lock");
     // Each of the three record families has an independent integrity file;
-    // the existing month lock still serializes their writers.
-    assert_eq!(FileKind::ALL.len(), 7);
+    // the existing month lock still serializes their writers. The eighth is
+    // the bar file's time index (D-2329), which is not a record stream.
+    assert_eq!(FileKind::ALL.len(), 8);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);

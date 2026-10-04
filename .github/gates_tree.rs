@@ -1666,7 +1666,7 @@ const TELEMETRY_FIELD: &str = "
     field file kept loaded max rotated vendors
     asked blank byte_len chars duplicate fault
     about census rows_read slices
-    not-base32 too-long hmac-refused
+    not-base32 too-long hmac-refused trailing-bits
     at
     unreadable_volume unreadable_oi
     timeframe
@@ -1694,6 +1694,8 @@ const TELEMETRY_FIELD: &str = "
 //     that gate 11 names in this file became a refusal: it says the
 //     BUILD is wrong, not the operator's secret, which is why it is a
 //     separate word rather than folded into one of the other three.
+//   trailing-bits               — `totp.rs`: a secret whose bits do not
+//     end on a whole byte (h-pull-2, D-2271). A failure, not a place.
 //   file loaded vendors         — `config.rs`, reporting that the
 //     untracked local configuration was read and how many vendors it
 //     named. The count, never the contents.
@@ -2013,6 +2015,10 @@ const ROLLING_SCAFFOLD: &str = "contractpath bin call put 9223372036854775807";
 //     for the duplicated census-lock descriptor it arranges: a second
 //     reference to the lock's open file description, the model of a
 //     spawned child's copy (D-0693).
+//   lock-transient census-stamp  scratch roots in `ingest.rs` (D-2766):
+//     the first arranges a transient or out-of-space failure on the
+//     census lock, the second an in-place append whose final stamp must
+//     move past its own writes. Named for the fault, not a place.
 //   interleaved                  a word asserted to appear IN a refusal
 //     sentence, so the message keeps naming the condition it refused.
 //   feed                         a scratch subdirectory in
@@ -2031,7 +2037,7 @@ const ROLLING_SCAFFOLD: &str = "contractpath bin call put 9223372036854775807";
 // has the same shape as a path segment whatever it means.
 const PULL_FIXTURE: &str = "
     dir-is-a-file lock-is-a-dir census-lock-dup interleaved
-    feed t z zzz
+    feed t z zzz lock-transient census-stamp
 ";
 
 // SIXTY-SEVEN MORE, IN FOUR GROUPS, ALL OF THEM ACCUMULATED WHILE THIS

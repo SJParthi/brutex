@@ -61977,6 +61977,199 @@ flips one byte in the last row, which is never the best, `top` refuses with
 `record 7 does not match its seal`. That is the refusal a one-row answer would
 lose. Counted, not timed.
 
+### D-1860 — The column docs state the exact-close alignment rule — 2026-10-04
+
+**What was wrong (h-eng-1).** Three doc blocks in `indicators::column` (the
+`Sourced` type doc, the duplicate guard and the fill-bar note in `reproject`,
+and the doc of `two_signals_resolving_to_one_fill_bar_produce_one_row`) still
+said `align::onto_execution` returns "the first execution bar stamped at or
+after" a signal's close. They said an execution hole therefore maps two
+signals to one bar, cited an `align` test asserting `[Some(10), Some(10)]`, and
+gave a measured 1.32% hole rate as the reason collisions happen. D-0401
+replaced that rule: a signal maps only to the bar stamped exactly at its close
+instant on the same IST day, and is `None` otherwise. No such `align` test
+exists.
+
+**The change.** The four comments now state the exact-close rule: a hole drops
+a signal, and a collision through `align` needs duplicate or overlapping
+signal stamps. The `collided` guard stays, as defence for any direct caller of
+the public `reproject` door. No code path, output or version changes.
+
+**What it proves.** `runner::align::tests::an_execution_hole_drops_a_signal_and_never_collides_two`
+shows a one-bar hole under 2-minute signals gives one `None` and strictly
+increasing fill bars, and that only a repeated signal stamp shares a bar.
+`vocab`'s `stale_claims` test `the_column_docs_state_the_exact_close_alignment_rule`
+fails if the retired sentences return or if `align` stops comparing for
+equality (AHB-01).
+
+### D-1861 — Fibonacci rung exclusivity is stated with its whole-paisa range floor; nothing prunes on it — 2026-10-04
+
+**What was wrong (h-eng-2).** `vocab::tolerance` asserted at compile time that
+two Fibonacci rungs never fire on the same bar, and `vocab::implication` called
+the rungs "mutually exclusive". The proof used exact numerators. Every ladder
+floors its level to a whole paisa, and at a range of at most 10 paisa the band
+`R/100` is zero paisa. So two rungs that floor to one paisa fire together on a
+close at that price: a 1-paisa gap leg fires six rungs at once.
+
+**Does anything rely on it? No, checked.** The only pair screen in the sweep is
+`vocab::implication::pair_is_informative`, called once in `engine`. It removes
+pivot-chain pairs only, and `positions_off_the_chain_are_never_pruned` already
+held every other pair open. No other code reads the property. So no sweep lost
+a combination, and no result changes.
+
+**The change.** The claim is corrected, not the evaluation. Suppressing the
+bits by a tie rule would set FALSE on a close that sits exactly on both levels,
+which is the hidden fallback `CLAUDE.md` §4 bans, and it would change results
+and `vocab_version` for no gain. `vocab::tolerance::RUNG_EXCLUSIVE_MIN_RANGE`
+(11 paisa) is new. It is derived from `SMALLEST_LADDER_GAP` and `TOL_FIB_MILLI`
+and its proof (`(g - 2t)·R > 999`) is checked at compile time, together with
+the check that it is the smallest range the proof covers. The module doc, the
+const-assert comment and the implication doc state the floor. They also state
+a fact the old text did not: the two previous-day ladders (down 23.6% against
+up 78.6%, and down 78.6% against up 23.6%) share a close up to 1,000 paisa.
+`docs/06-limits.md` records both. No bit, format, digest, evidence or vocabulary
+version changes; stored masks and run identities are unchanged.
+
+**What it proves (AHB-02).** A brute force over every ladder pair and range
+1..=20,000 paisa confirms the floor. An indicators test walks every range
+1..=2,000 paisa plus three near `i64::MAX / 8` on all four ladder families
+through their production doors. It pins co-firing at exactly 1-6 and 8 paisa,
+and the cross-ladder pairs and their ranges. Gap legs of 1, 5 and 10 paisa fire
+six, two and at most one rung. A runner test walks `engine::Ladder` over
+columns built from those legs and from previous-day ranges 9, 100 and 902. The
+result equals a brute-force enumeration of every subset with no screen, and
+the co-firing pairs are among the combinations found. With a Fibonacci pair
+injected into the screen, the runner test fails.
+
+### D-1854 — Every remaining append writer rolls a failed write back — 2026-10-04
+
+**What was wrong (h-cli-4).** D-1850 gave sixteen `cli` ledgers the D-1622
+rollback. The same `seek(End) + write_all` shape, with no truncation after a
+failed or short write, remained in seven writers. Each of them refuses a torn
+file when it next opens or appends, so one ENOSPC or EIO wedged it for good:
+
+- `cli::anchored_search_lineage_v2` and `_v3`: `append_raw`. They also wrote a
+  pair's two members as two appends, so a failed second write left a lone
+  first member, which every open refuses as a partial trailing pair.
+- `cli::population_observations_v1`: V1 and V2 Data and Completion appends,
+  and both file headers.
+- `cli::sweep_evidence`: depth rows, lifecycle and journal events, file
+  headers and the ranking were fixed first by lane 1-b's D-1741 (one
+  `append_rolled_back` per append, the ranking as one write), which
+  `final/all-fixes` carries; when this fix was merged onto it, D-1741's code
+  was kept for those and only the attempt reservation, which D-1741 left as a
+  bare `write_all`, takes this decision's rule.
+- `cli::operation_audit`: the invocation index and each invocation file.
+- `api::audit`: the pull audit journal.
+- `api::recovery_journal`: single appends and seed batches. Its own test
+  pinned the wedge: after a short write, reopen refused.
+
+**The change.** Each writer now records its end and truncates back to it when
+a write fails, naming the write error and the rollback; when the truncation
+also fails both errors are named and the torn tail stays loud. The `cli`
+writers go through `cli::append_rollback`, which gains `append_all`: a
+multi-write body (the ranking) that rolls back whole on any I/O or encoding
+error. A lineage pair is one append. A failed sweep reservation also removes
+its file: it was created by `create_new` in the same call, so "no file" is the
+state before the attempt. The observation ledgers refresh their snapshot after
+a rollback that held, so the same handle can append again, as D-1850 did for
+Selection. The recovery journal still poisons its handle. A failed sync after
+a whole write is still never rolled back: that record is whole, and each
+ledger's exact-retry rule continues it. Only bytes the failing call itself
+wrote are ever removed, under the writer's lock. Stored bytes of a successful
+append, formats, digests and versions are unchanged. The added cost is one
+`seek`/`fstat` per append and one `set_len` on failure only.
+
+**Dead code, said with evidence.** Lineage V2 and V3 have no production
+caller: `lib.rs` declares them with `allow(dead_code)` / `expect(dead_code)`
+outside tests, and no other source names them. So no stored V2 or V3 file can
+exist from this binary. They are fixed anyway rather than deleted, because
+they are readers of a stored format.
+
+**Not this shape.** `telemetry::sink` appends newline-terminated lines, not
+fixed-stride records, and already terminates a line its own write tore, so a
+reader skips it. `api::backtest`'s `SeekFrom::End` measures a length for a
+read. The remaining `append(true)` and `SeekFrom::End` hits are in test code
+or already roll back (Global Replay, Admission V3/V4, Selection V5,
+institutional statistics, frontier, trades, results, result set, population,
+candidate universe, Base Evidence V2, execution capability and disposition V2,
+stored-data completeness, Search Lineage V4).
+
+**What it proves.** AHA-05 to AHA-10. Each writer has a fault-injection test
+through its own write path. The test injects a short write (or a failure that
+wrote nothing), requires the file to be byte-identical (or, for a cut
+Completion, to hold only the whole Data), and requires the next append to
+land whole. The recovery-journal test now requires the reopened crash image
+to hold the old prefix.
+
+### D-2270 — The lake reader reads the converted type as well as the logical type — 2026-10-04
+
+**What was wrong (h-pull-1).** D-1528 refused a `timestamp` leaf whose
+LOGICAL type is not UTC microseconds. A legacy writer (parquet-mr, older
+pyarrow) declares the unit with the CONVERTED type alone, and `parquet` 59.2
+keeps the two apart on read (`schema/types.rs` 1346-1349): it never turns a
+converted type into a logical type. So a leaf carrying only
+`TIMESTAMP_MILLIS` reached the check as "no logical type", was accepted, and
+its milliseconds decoded as microseconds: every stamp 1000x too small, in
+January 1970, with no refusal. The integer columns (`volume`,
+`open_interest`, `greeks_provenance_id`) had no annotation check at all: an
+unsigned 64-bit annotation reads a value past `i64::MAX` as negative, and a
+DECIMAL, DATE, TIME or TIMESTAMP annotation is another quantity under the
+right name.
+
+**The change.** `lake::schema::detect` reads `converted_type()` beside the
+logical type. A `timestamp` leaf is accepted only with converted type `NONE`
+or `TIMESTAMP_MICROS` (the legacy spelling of UTC microseconds) on top of
+D-1528's logical rule; anything else is `LakeError::UnsupportedTimestamp`,
+naming the converted type. An integer column is accepted only with no
+logical type or a signed `Integer`, and converted type `NONE` or a signed
+`INT_*`; anything else is the new `LakeError::UnsupportedIntegerAnnotation`,
+naming the column and both annotations. Each refusal also writes one
+`note_shape` line, once per file. Double columns are unchanged: `parquet`
+refuses every converted type on a DOUBLE when it builds the schema, and the
+only logical types it lets annotate one (`Unknown` and an unrecognised one)
+change no decode.
+
+**Disagreeing annotations and INT96.** A logical type and a converted type
+that disagree (logical MICROS UTC, converted MILLIS) are refused by `parquet`
+itself when it builds the schema, so the file never opens; the test pins that.
+Were that to change, the converted check here still refuses anything but
+`NONE` or `TIMESTAMP_MICROS`. INT96, the other physical encoding of a
+timestamp, is not INT64 and was already `ColumnTypeMismatch`; now pinned.
+
+**What changes.** A file that opened before and is now refused is one that
+was being misread. A file with no annotation, or with the annotations a
+current writer emits for UTC microseconds and signed integers, opens exactly
+as before and decodes to the same bars. Whether the real lake declares any
+legacy converted type is UNVERIFIED in this tree; the ignored real-lake scan
+`no_real_lake_file_triggers_either_defect` is where it would show. O(1) per
+file: two more reads of a schema leaf per column, over a fixed 7 or 17
+columns.
+
+**What it proves.** AHC-01.
+
+### D-2271 — The TOTP base32 decoder refuses bits that do not end on a whole byte — 2026-10-04
+
+**What was wrong (h-pull-2).** `pull::totp::decode_alphabet` dropped the bits
+left over after the last whole byte. So it accepted lengths RFC 4648 base32
+cannot produce (1, 3 or 6 characters past a group of 8) and non-zero bits past
+the last byte. `GEZDGNBV`, `GEZDGNBVA` and `GEZDGNBV7` decoded to one key and
+minted one code: an extra or mis-keyed last character produced a
+valid-looking code from a secret that was wrong, which the vendor then
+rejects with nothing here to say why. D-1373 closed this class for `=` and
+left this door open.
+
+**The change.** After the loop, five or more leftover bits (a whole spare
+character) or any non-zero leftover bit is the new
+`TotpError::TrailingBits { data_chars }`, a count and never a value. Its
+message says which of the two it was, and the telemetry fault word is
+`trailing-bits`, declared in CI gate 1d. A single character is now this
+refusal rather than `Empty`. Separators and a tail of `=` are still skipped
+and do not count. A secret that decoded before and still decodes yields the
+same key; only secrets that were being misread are refused. O(1): one compare
+and one mask after a loop bounded by `MAX_SECRET_LEN`.
+
+**What it proves.** AHC-02.
 ### D-2103 — The ledgers size support on the rows NIFTY's Candidate column sweeps — 2026-10-04
 
 **Finding.** D-2101 left this open. `ledger-all` (`ledger_all::build_sweepers`)
@@ -62570,6 +62763,14 @@ fix is kept in each place; nothing either side proved is dropped.
 - **Leg forms.** `/pull/run` refuses a repeated key in a leg payload (h-api-2,
   D-1512) through the middleware's own bounded `form_key_verdict` (P5-05,
   D-2659), before D-1765's envelope check.
+- **Second merge (PR 74 at `25bc8aa0`).** Observation authority appends keep
+  D-1854's `append_synced` (write rollback, snapshot refresh, injectable write)
+  and take D-1900's barrier rollback through `fixed_tail::sync_or_roll_back`,
+  so a failed sync is cut back too and the handle refreshed. The sweep-status
+  reader keeps CE-11's `newest_sweep_marker` (D-1914) beside D-2764's
+  `uncertain_observation` and `unterminated` marker. The indicators column
+  comments take D-1860's wording, which states D-0401's exact aligner as
+  D-1966 did.
 - **Gate tools.** PR 74 moved most gate steps into `.github/gates_*.rs`
   (D-2311 to D-2314). The shell-side hardening zero-work had added to those
   steps (D-2660, D-2667, D-2673, D-1930 to D-1933) is re-applied in the Rust
@@ -62619,3 +62820,252 @@ Proved by GPORT-10, GPORT-11 and GPORT-15.
 - Gate 14 layer 2c (P1-08-02, D-2660). The step runs `source_scan bench-keys` over every crate manifest, and the gate refuses each finding (`bench = false`, `required-features`, an inline bench array) and a failed or empty scan.
 
 Proved by GPORT-09 and GPORT-12.
+### D-2329 — Bar lookup by time reads a per-month `.tix` index: one entry, not a bisection — 2026-10-04
+
+**Finding.** `BarFile::first_at_or_after`, the time-to-row lookup behind
+`/bars.json`'s day window and `append`'s re-offer check, was the D-1434
+bisection: up to `ceil(log2(n_valid + 1))` record reads, fourteen at a
+one-minute session month and twenty-two at a full one-second month, each able
+to pay a cold block verify. `CLAUDE.md` §3 rule 4 names bar lookup as a
+constant-cost operation. Measured on the base commit (`x86_64` shared host,
+release, 200,000 lookups, reopened handle): p50 28.8 µs and p99 52.9 µs at a
+11,625-bar one-minute month, p50 51.6 µs and p99 89.0 µs at a 517,500-bar
+one-second month, against 3.6 to 3.9 µs for a random-row `read_record`.
+
+**Decision.** A new sibling file per bar month, `<yyyy-mm>.tix`, version 1
+(`docs/02-store-format.md` §8.1). A 64-byte checksummed header records the
+slot geometry: one slot per timeframe on the D-0915 admission grid, IST days
+for the daily rung. Then one 16-byte entry per 64 slots holds a 64-bit
+occupancy word, the count of bars before the entry, and a CRC-32C bound to
+the entry's position. A lookup answers from the bar header outside the bars'
+span, and otherwise reads one entry and takes a popcount; the daily rung adds
+at most one bar read. The bar format, its versions and the `.crc` are
+unchanged.
+
+* **Written by the writer, on every append**, at step 3b: after the block
+  checksums and before the header slot, so a committed bar is never missing
+  from the index. A crash between leaves entries ahead of the commit; readers
+  never consult them, and the next append masks and overwrites them.
+* **Old months are not mutated.** A read handle with no usable `.tix` uses the
+  bisection — the D-1434 code, unchanged — and writes one `store.tix` warning
+  naming why (`CLAUDE.md` §4: degrade loudly, name the reason).
+  `BarFile::time_lookup` reports the path. The writer door
+  (`BarFile::open_or_create`) rebuilds a missing or unconfirmable index from
+  the committed bars, once, logged as `store.tix` info. That open is the
+  explicit migration path. When the bars cannot be indexed, the writer removes
+  any `.tix` and the month keeps working as before, bisecting loudly.
+* **Not chosen:** keeping the bisection behind a cache (still log-many reads
+  cold); interpolation search (not constant on gapped data); a per-slot `u32`
+  table (10.7 MB for a one-second month against 0.67 MB here); building on a
+  READ open (a read door must never write; D-1432's `open_existing`).
+
+**What it changes.** Every bar month written through `BarFile::append` gains
+a `.tix` beside it, so catalog censuses count one more `other_kind` sibling
+per month (`store::fifo` now expects three). On every month whose records are
+the bytes that were committed, every answer equals the bisection's. They can
+differ only on a month whose records are NOT those bytes: the zero-extent case
+`crates/api/src/server.rs` describes, where a header names records whose
+extent reads back as zeros. There the index answers from the stamps the writer
+committed, and the bisection answered from the zeros. Both answers are
+positions, and `/bars.json` filters the rows it then reads. A REBUILD reads the
+records and refuses to index such a month, so it stays on the bisection.
+
+**Proof.** `store::time_index::every_lookup_reads_at_most_one_entry_and_one_bar`
+(read counts, 0 to 2,678,400 bars).
+`store::tix::the_index_answers_every_timestamp_exactly_as_the_bisection_does`
+(answers against the bisection on real files).
+`store::tix::every_way_an_index_can_be_wrong_is_named_and_the_answer_still_comes_back`
+and `store::tix::a_month_without_an_index_bisects_and_a_writer_open_builds_one_once`
+(the loud fallback and the rebuild).
+`store::tix::an_index_left_ahead_of_the_commit_is_masked_and_then_overwritten`
+(crash ordering). `store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call`
+(both `store.tix` lines). Gate 8 rows C-TIX-01 and C-TIX-02. Measured after,
+same host and file: p50 322 ns and p99 520 ns (one-minute), p50 362 ns and
+p99 603 ns (one-second). `docs/06-limits.md` D-2329 section. AFG-28.
+
+### D-2330 — A second daily bar in one IST day is admitted, and its month keeps no time index — 2026-10-04
+
+**Finding.** D-2329's index holds at most one bar per slot. Every intraday
+rung keeps that already: an admitted intraday stamp is a grid point (D-0915),
+so two strictly increasing stamps are two slots. The daily rung admits any
+whole second, so it accepts two bars on one IST day, for example one at
+midnight and one at the close. No index of one bar per slot can hold that
+month. A first draft refused such a batch as a new `StoreError::SharedSlot`.
+That narrowed what the writer admits, and `cli`'s
+`stored::tests::typed_daily_and_minute_context_doors_keep_the_header_bound_protective`,
+which seeds four daily bars a minute apart on one day, failed on it. A
+lookup index has no business changing which bars a month may hold
+(`CLAUDE.md` §3 rule 5).
+
+**Decision.** Admission is unchanged. When `BarFile::append` finds a bar in
+the slot of the bar before it, within the batch or after the last committed
+bar, it retires the index before writing anything. The handle switches to the
+bisection with the `store.tix` warning naming the reason, the `.tix` is
+removed, and the directory is synced. The append then runs exactly as it did
+before D-2329. Every later reader finds no `.tix` and warns. Every later writer
+open retries the rebuild, meets the same bar, removes the `.tix` it opened,
+and warns again. The month is never served by an index that
+does not describe it. One bar per IST day, the normal daily month, keeps its
+index. The alternative, a one-second slot for the daily rung, would make
+every daily month O(1) at the cost of an index of up to 670 KB for about 22
+bars. It was not taken. A daily month of one bar per session keeps its index, and
+only a month that departs from that pays the bisection. `docs/06-limits.md`
+states that cost.
+
+**Proof.** `store::tix::a_second_daily_bar_on_one_ist_day_is_admitted_and_the_month_stops_being_indexed`
+(after a commit and within one batch, writer, reopened writer and reader
+lookups against expected rows, the next IST day's midnight kept indexed),
+and the `cli` test above passing unchanged. AFG-29.
+
+### D-2760 — A pull run's edits are addressed to its own claim of the run slot — 2026-10-04
+
+**Finding (conc:runs-1).** `pullrun::conduct_with` publishes its summary,
+which frees `site.run`, and only then drops its `Finisher` and its ticker
+handle. `Finisher::drop` checked only `finished.is_none()`, so a press (or a
+recovery) admitted in that gap had its fresh claim stamped "ended abnormally",
+which freed the slot for a third run over the same store. `ticker.abort()`
+does not stop a poll already inside `rows_now`, so that poll could also write
+after the summary, into the next run.
+
+**Decision.** `pullrun::Progress` carries a `generation`, taken from one
+process-wide counter by `Progress::claimed()` (0 is the never-claimed
+`Default`). `pull_run` passes the generation it installed to `conduct`, and
+every edit a run makes (`with_progress`, `halted_feeds`, `stopping`, the
+`Finisher`, the ticker, `note_dead_chain`, `note_leg_failure`) lands only on
+the document with that generation. A run whose slot holds another claim, or
+none, reads itself as stopped. The conductor awaits the aborted ticker before
+the final write. Operator routes (`/pull/run/stop`) and the recovery driver
+still edit whatever the slot holds.
+
+**Proof.** `a_finisher_dropped_after_the_next_claim_leaves_that_run_running`
+and `edits_from_an_ended_run_never_land_on_the_next_claim` in
+`crates/api/src/pullrun.rs`. FB-61.
+
+### D-2761 — A recovery retry takes its feed seat before it reserves an attempt — 2026-10-04
+
+**Finding (conc:recovery-1, widened by recauto-1).** `recovery::retry_day`
+made an `InFlight` attempt durable in the shared `attempts.bin` and only then
+called `server::recovery_spot`, whose first line took the feed seat. A seat
+held by an autopilot tick, a hand `/pull/spot` or an F&O walk refused with no
+request sent, and the attempt stayed charged; three such refusals exhausted
+the day for good, since shared budgets are never refunded.
+
+**Decision.** `retry_day` checks the unit's body and takes the feed seat
+before `reserve`/`append_attempt`, and hands the held seat to
+`recovery_spot`, which no longer takes its own. A busy seat refuses with
+"no attempt was reserved and this day's retry budget is unchanged". Waiting
+for the seat (recauto-1's bounded retry) is not added here: the run still ends
+BLOCKED, but it no longer costs budget.
+
+**Proof.** `a_held_feed_seat_refuses_retry_day_without_charging_its_budget`
+in `crates/api/src/recovery.rs`. FB-62.
+
+### D-2762 — The first recovery activation stages its pointer before `active.bin` exists — 2026-10-04
+
+**Finding (conc:recovery-2).** `recovery::seeded` opened `active.bin` with
+`Journal::open` (create) before appending the activation pointer. A crash, or
+a failed append or sync, between the two left a 0-byte `active.bin`, which
+`active_history` refuses, so every later start, successor preparation and boot
+resume refused until someone deleted the file by hand.
+
+**Decision.** On the first activation (no `active.bin`) the pointer journal is
+created as `active.bin.first`, the pointer is appended and synced, and the file
+is hard-linked to `active.bin` (which refuses rather than replaces a name that
+appeared meanwhile), the staging name removed and the directory synced.
+`active.bin` therefore either does not exist or holds a pointer. A staging file
+left by a crash was never linked, never stood for an activation, and is
+removed by the next first activation. Later activations open the existing
+`active.bin` without creating it. An empty `active.bin` already on disk from
+an older build is still refused, as before.
+
+**Proof.** `a_first_activation_that_fails_before_its_pointer_leaves_no_empty_pointer_file`
+in `crates/api/src/recovery.rs`, using a test-only failure point placed after
+the pointer journal opens and before the append. FB-63.
+
+### D-2763 — A refused candidate trade page evicts its cached reader — 2026-10-04
+
+**Finding (conc:apicache-1).** `/candidate-trades.json` caches one
+`TradeReader`, keyed by content only (model, root, identity, attempt, catalog
+digest, candidate key). The reader also pins its trade file's filesystem
+generation, so a byte-identical file relinked, restored or `chmod`ed made every
+`page` refuse, and the slot was never evicted: that candidate refused until a
+restart, while the refusal said to reopen.
+
+**Decision.** `trade_page` keeps its slot and delegates to `page_through`,
+which empties the slot when `page` fails. The failing request is still
+refused; the next one cold-opens and re-verifies every row and the seal, as
+every sibling cache already does.
+
+**Proof.** `a_trade_reader_whose_file_generation_moved_is_evicted_by_its_refusal`
+in `crates/api/src/candidatejson.rs`. FB-64.
+
+### D-2764 — A lease holder admits past a CLI sweep that died without its terminal marker — 2026-10-04
+
+**Finding (conc:sweep-1).** A CLI sweep stopped by Ctrl-C, a kill, an OOM or
+a panic leaves `command started` as the newest `cli.lifecycle` marker. That
+reads as `running` and then `unknown`, never `launch_clear`, so every browser
+launch was refused and the status poll said admission unavailable, even though
+the store's execution lease the refusal protects was free.
+
+**Decision.** `cli::run_durable` takes the store's execution lease before it
+begins its durable invocation and releases it only after that invocation's
+terminal is written; the kernel releases the flock when its holder dies. So a
+caller that HOLDS the lease (`claim_execution`, or the status poll's `probe`)
+admits when the newest marker is a named sweep's `command started` whose run
+id is in the durable namespace (above `operation_audit::ID_BASE`) and
+`operation_audit::read` of this store finds that id as a CLI invocation of the
+same command. Everything else still refuses: legacy run ids, an id this store
+does not hold, a different origin or command, an audit read that fails, and
+damaged telemetry. Nothing is rewritten: the status document still reports
+what the log shows, no terminal is written into the dead invocation, and the
+poll's `admission.why` names the invocation it found ended. No telemetry site
+was added.
+
+**Proof.** `a_cli_sweep_that_died_without_its_terminal_does_not_block_a_lease_holder`
+in `crates/api/src/sweeprun_admission_tests.rs`; the legacy-id case stays
+covered by `active_and_stale_unfinished_external_sweeps_block_even_when_the_lease_is_free`.
+FB-65.
+
+### D-2765 — The census lock refuses every open failure while its directory stands — 2026-10-04
+
+**Finding (conc:pull2-1).** `CensusLock::take` refused only `PermissionDenied`,
+`IsADirectory` and a non-regular entry at the lock's name. Any other open
+failure on a regular lock file (EMFILE, ENFILE, ENOMEM), or a failure to create
+a missing one (ENOSPC on exhausted inodes), returned a guard holding nothing,
+and the run did its census read-modify-write unserialised. The install does
+not fail on those causes, so concurrent installs could lose census rows.
+
+**Decision.** The open-failure arms move to `CensusLock::unopened`. After the
+existing refusals, a failure defers to the install only when the directory
+that holds the census is not there to hold it (absent, a file in its place, or
+a name past the host's limit: `NotFound`, `NotADirectory`, `InvalidFilename`),
+because the install then fails on that same cause. When the directory stands,
+or cannot be measured for another reason, the run refuses, naming the lock
+path and the host's error.
+
+**Proof.** `a_transient_or_space_failure_on_the_lock_refuses_while_the_directory_stands`
+in `crates/pull/src/ingest.rs`, which drives `unopened` with
+`ErrorKind::StorageFull` and `ErrorKind::OutOfMemory` (a test cannot make the
+host return them on demand); the deferral boundary stays covered by
+`a_broken_directory_defers_because_the_install_fails_on_the_same_cause` and
+`a_census_that_cannot_be_measured_stops_the_run`. FB-66.
+
+### D-2766 — An in-place census append moves the manifest's mtime after its bytes land — 2026-10-04
+
+**Finding (conc:census-1).** `write_appends` rewrites a header slot in place.
+An in-place buffered write updates the inode's times before it copies the
+bytes, and the api's census reader takes no lock, so a stamp taken during the
+copy could key the pre-append (or a torn, "degraded") census under the final
+stamp. Nothing moved the times again, so `census_now` served it until the next
+manifest write.
+
+**Decision.** After the last slot is durable, `write_appends` sets the
+manifest's modification time once more, to the later of now and one
+nanosecond past the time the writes left. Any stamp taken during the writes
+then differs from the final one, and the next request reads again. A failure
+to set it is returned like any other append failure. The whole-image install
+is unchanged: its rename publishes an inode whose bytes were complete first.
+
+**Proof.** `an_in_place_append_moves_the_census_stamp_past_its_own_writes` in
+`crates/pull/src/ingest.rs`, whose hook stamps the file after the last slot is
+durable and before the time is moved. FB-67.

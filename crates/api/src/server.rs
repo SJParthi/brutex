@@ -2468,8 +2468,10 @@ async fn bars_json(
     // an endpoint `/db` calls once per instrument-month.
     //
     // Bars in a file are strictly increasing by timestamp — the writer refuses
-    // otherwise — so the start of the window is addressable by bisection in
-    // `log2(n_valid)` reads. At 8,250 bars that is fourteen instead of 8,250.
+    // otherwise — so the start of the window is addressable. Through the
+    // month's `.tix` time index that is one 16-byte entry read (D-2329); a
+    // month with no usable index falls back, loudly, to the D-1434 bisection
+    // in `log2(n_valid)` reads — fourteen at 8,250 bars instead of 8,250.
     //
     // The END is still found by reading forward and stopping, rather than by a
     // second bisection: the rows have to be read to be returned, so a second
@@ -2514,8 +2516,8 @@ async fn bars_json(
     // month for day 1, half of it on average. An adversarial pass measured it:
     // 8,250 records read to return 375 on the first day, unchanged from before.
     //
-    // A second bisection is the same fourteen reads and it bounds what the first
-    // one only started. Same failure rule as the start: a bisection that cannot
+    // A second lookup is one more entry read (fourteen record reads on the
+    // bisection path) and it bounds what the first one only started. Same failure rule as the start: a bisection that cannot
     // answer leaves the bound where it was, because the window is an optional
     // narrowing and `bars_array` filters correctly either way.
     let ends = to_micros
@@ -8232,14 +8234,15 @@ async fn reread_wire(
 /// Exact recovery unit, using the existing mapping, credential, rate-limit,
 /// source-write and derivation path. The typed result precedes HTML rendering.
 /// A failed audit append is a failure, even when source bars already landed.
+///
+/// The caller takes `asked.feed`'s seat BEFORE it reserves a retry and hands
+/// it in, so a busy seat refuses before any budget is charged. D-2761.
 pub(crate) async fn recovery_spot(
     site: &Site,
     asked: &ingest::SpotRequest,
+    seat: crate::autopilot::Seat<'_>,
 ) -> Result<BrokerRun, String> {
-    let _seat = site
-        .autopilot
-        .take_seat(asked.feed)
-        .ok_or_else(|| "the selected feed already has an active pull".to_owned())?;
+    let _seat = seat;
     let now = std::time::SystemTime::now();
     let run = broker_run(asked, site, &census::read_all(&site.store_root)).await;
     let journal = site.journal();
@@ -11311,7 +11314,7 @@ pub(crate) async fn pull_run(
         }
     };
 
-    {
+    let run = {
         let mut held = site
             .run
             .lock()
@@ -11324,11 +11327,14 @@ pub(crate) async fn pull_run(
             );
         }
         // CLAIMED HERE, UNDER THE SAME TAKE THAT CHECKED IT.
-        *held = Some(crate::pullrun::Progress::claimed());
-    }
+        let claimed = crate::pullrun::Progress::claimed();
+        let run = claimed.generation;
+        *held = Some(claimed);
+        run
+    };
 
     let legs_asked = legs.len();
-    let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), legs));
+    let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), run, legs));
     (
         axum::http::StatusCode::ACCEPTED,
         json_headers(),

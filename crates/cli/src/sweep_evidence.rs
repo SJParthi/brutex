@@ -1112,9 +1112,18 @@ fn reserve_start(root: &Path, evidence: Evidence) -> Result<(), String> {
     let mut raw = [0_u8; 16 + EVENT_BYTES];
     raw[..16].copy_from_slice(&EVENT_HEADER);
     raw[16..].copy_from_slice(&event_bytes(evidence)?);
-    file.write_all(&raw)
-        .and_then(|()| barrier(&file, &path))
-        .map_err(io_error)
+    // A FAILED RESERVATION LEAVES NO FILE (h-cli-4, D-1854). The file is this
+    // token's own and was created just above, so the state before the attempt
+    // is "no file": a failed or short write is rolled back and the file
+    // removed, rather than left torn for `require_start` to refuse.
+    if let Err(why) = append_rolled_back(&mut file, &path, &raw) {
+        drop(file);
+        return Err(match fs::remove_file(&path) {
+            Ok(()) => format!("{why}; the reservation file was removed"),
+            Err(and) => format!("{why}; removing the reservation file also failed: {and}"),
+        });
+    }
+    Ok(())
 }
 
 fn require_start(root: &Path, evidence: Evidence, max_bytes: u64) -> Result<(), String> {

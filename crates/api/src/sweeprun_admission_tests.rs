@@ -125,3 +125,75 @@ fn corrupt_telemetry_and_unavailable_store_admission_never_enable_run() {
     drop(sink);
     std::fs::remove_dir_all(root).expect("private fixture cleanup");
 }
+
+/// **A KILLED CLI SWEEP DOES NOT REFUSE EVERY LATER LAUNCH.** D-2764, sweep-1.
+///
+/// The CLI's durable invocation is begun and then abandoned with no terminal,
+/// which is what Ctrl-C, a kill or an OOM leaves: `command started` is the
+/// newest marker and nothing ends it. Before D-2764 that refused every browser
+/// launch (and reported admission unavailable) even with the store's lease
+/// free, which is the proof no cooperating sweep is alive. The boundaries stay
+/// refused: a marker whose invocation this store's audit does not hold, and a
+/// marker naming a different command than the invocation recorded.
+#[test]
+fn a_cli_sweep_that_died_without_its_terminal_does_not_block_a_lease_holder() {
+    let (root, sink) = fixture("sweep-admission-abandoned");
+    let attempt =
+        cli::operation_audit::begin(&root, cli::operation_audit::Origin::Cli, "range-all")
+            .expect("private durable invocation");
+    let id = attempt.id();
+    // THE PROCESS DIES HERE: no `Drop`, so no terminal record is written.
+    std::mem::forget(attempt);
+    let started = |run: u64, command: &str| {
+        let _ = sink.emit_for_run(
+            run,
+            &telemetry::Event::info("cli.lifecycle", "command started")
+                .with("command", command)
+                .with("phase", "running"),
+        );
+    };
+
+    // NOT IN THIS STORE'S AUDIT: refused, lease or no lease.
+    started(id + 1, "range-all");
+    let lease = cli::execution_lease::Lease::acquire(&root).expect("free lease");
+    let unknown = observe_elsewhere(&root.join("logs"), i64::MAX);
+    assert!(!unknown.launch_clear);
+    assert!(admit_external(&root, &unknown).is_err());
+    drop(lease);
+    assert_eq!(observed(&root, i64::MAX)["admission"]["available"], false);
+
+    // A DIFFERENT COMMAND WORD than the invocation recorded: refused.
+    started(id, "sweep-stored");
+    let lease = cli::execution_lease::Lease::acquire(&root).expect("free lease");
+    let other = observe_elsewhere(&root.join("logs"), i64::MAX);
+    assert!(admit_external(&root, &other).is_err());
+    drop(lease);
+
+    // THE DEAD INVOCATION ITSELF, fresh and stale alike: admitted while the
+    // lease is held, and the status still reports what the log shows.
+    started(id, "range-all");
+    for now in [0, i64::MAX] {
+        let lease = cli::execution_lease::Lease::acquire(&root).expect("free lease");
+        let dead = observe_elsewhere(&root.join("logs"), now);
+        assert!(!dead.launch_clear, "the log itself is not rewritten");
+        admit_external(&root, &dead).expect("the free lease proves it is not running");
+        drop(lease);
+        let status = observed(&root, now);
+        assert_eq!(status["admission"]["available"], true, "{status}");
+        assert_ne!(status["running"]["status"], "completed", "{status}");
+        assert!(
+            status["admission"]["why"]
+                .as_str()
+                .is_some_and(|why| why.contains(&id.to_string())),
+            "the admission names the invocation it found ended: {status}"
+        );
+    }
+    assert!(
+        cli::operation_audit::read(&root, id)
+            .expect("audit")
+            .is_some_and(|record| !record.phase.terminal()),
+        "no terminal was invented for the dead invocation"
+    );
+    drop(sink);
+    std::fs::remove_dir_all(root).expect("private fixture cleanup");
+}

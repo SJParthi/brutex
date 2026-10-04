@@ -2682,6 +2682,22 @@ mod tests {
         prefix_matches_fold(&rounding, 3, &[0, 1, 2], "a fold that rounds");
     }
 
+    /// `ExactPrefix::sum` re-checks the bound for the draw it is given: a draw
+    /// exactly at the limit is summed, one index past it is refused, though
+    /// the series itself was admitted at the limit.
+    #[test]
+    fn the_prefix_sum_refuses_a_draw_past_the_exact_bound() {
+        let mut series = vec![0_i64; 8];
+        if let Some(first) = series.first_mut() {
+            *first = 1_i64 << 50;
+        }
+        let prefix = super::ExactPrefix::new(&series, 8).expect("8 x 2^50 is the limit itself");
+        let at_limit = super::Resample::of(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(prefix.sum(&at_limit), Some(1_i64 << 50));
+        let past = super::Resample::of(&[0, 1, 2, 3, 4, 5, 6, 7, 1]);
+        assert_eq!(prefix.sum(&past), None);
+    }
+
     /// OE-1 / D-2316: the prefix path reads one term per run, not one per
     /// period, both for one draw and across a whole Romano--Wolf stepdown, and
     /// the fold it keeps for an inexact series reads every period.
