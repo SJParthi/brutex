@@ -1833,17 +1833,22 @@ mod tests {
     /// to invent.
     #[test]
     fn a_single_period_carries_no_evidence_rather_than_certainty() {
+        // D-2622: a block longer than the series is refused (D-1990), so the
+        // default block of 10 gives a single period NO verdict at all, and the
+        // structural guard is reached at the longest block one period admits.
         for magnitude in [1_i64, 7, 500, 1_000_000] {
             let one = vec![vec![magnitude]];
+            assert!(reality_check(&one, 1_000, 3, DEFAULT_BLOCK).is_none());
+            assert!(spa(&one, 1_000, 3, DEFAULT_BLOCK).is_none());
 
-            let rc = reality_check(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            let rc = reality_check(&one, 1_000, 3, 1).expect("a verdict");
             same(rc.p_value, 1.0, "one period cannot be resampled");
             assert!(
                 !rc.clears(),
                 "Reality Check cleared a single period of {magnitude} paisa"
             );
 
-            let v = spa(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            let v = spa(&one, 1_000, 3, 1).expect("a verdict");
             same(v.p_value, 1.0, "one period cannot be resampled");
             assert!(
                 !v.clears(),
@@ -1856,9 +1861,11 @@ mod tests {
         // threshold — asserting otherwise would smuggle in the number this crate
         // declined to invent.
         let two = vec![vec![10_i64, 20]];
-        let v = spa(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        assert!(spa(&two, 1_000, 3, DEFAULT_BLOCK).is_none(), "D-2622");
+        let v = spa(&two, 1_000, 3, 2).expect("a verdict");
+        assert_eq!(v.periods, 2);
         assert!(
-            v.p_value <= 1.0,
+            v.p_value < 1.0,
             "two periods still produce a computed p-value, not the guard's 1.0"
         );
     }
@@ -1878,7 +1885,14 @@ mod tests {
     fn a_verdict_reports_the_sample_size_it_had_and_what_that_is_worth() {
         for periods in [2_usize, 3, 5, 10, 30, 100, 400] {
             let set = vec![noise(periods, 4), noise(periods, 5)];
-            let v = spa(&set, 200, 6, DEFAULT_BLOCK).expect("a verdict");
+            // D-2622: below the default block the sample has no verdict at
+            // that block, and is measured at the longest block it admits.
+            assert_eq!(
+                spa(&set, 200, 6, DEFAULT_BLOCK).is_some(),
+                periods >= DEFAULT_BLOCK,
+                "{periods} periods"
+            );
+            let v = spa(&set, 200, 6, DEFAULT_BLOCK.min(periods)).expect("a verdict");
             assert_eq!(v.periods, periods, "the sample size travels with it");
             assert!(
                 v.calibration().contains("period"),
@@ -2212,14 +2226,9 @@ mod tests {
 
     #[test]
     fn romano_wolf_receipt_distinguishes_complete_non_rejection_from_absence() {
-        let complete = romano_wolf_receipt(
-            &[vec![-1, 1, -1, 1], vec![1, -1, 1, -1]],
-            20,
-            7,
-            DEFAULT_BLOCK,
-            50_000,
-        )
-        .expect("an aligned family with real draws has a receipt");
+        let complete =
+            romano_wolf_receipt(&[vec![-1, 1, -1, 1], vec![1, -1, 1, -1]], 20, 7, 4, 50_000)
+                .expect("an aligned family with real draws has a receipt");
         assert!(complete.rejected().is_empty());
         assert_eq!(complete.is_rejected(0), Some(false));
         assert_eq!(complete.is_rejected(1), Some(false));
@@ -2234,6 +2243,18 @@ mod tests {
         );
         assert!(romano_wolf_receipt(&[vec![1, 2]], 0, 7, DEFAULT_BLOCK, 50_000).is_none());
         assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, 0, 50_000).is_none());
+        // D-2622: the default block over four periods is refused, never a
+        // complete non-rejection (p4num-1's "named 0").
+        assert!(
+            romano_wolf_receipt(
+                &[vec![-1, 1, -1, 1], vec![1, -1, 1, -1]],
+                20,
+                7,
+                DEFAULT_BLOCK,
+                50_000
+            )
+            .is_none()
+        );
         assert!(romano_wolf_receipt(&[vec![1, 2]], 20, 7, DEFAULT_BLOCK, 1_000_001).is_none());
     }
 
@@ -2259,7 +2280,11 @@ mod tests {
         // Dropping a strategy on an uncomputable gate would make the test more
         // powerful on exactly the samples that justify it least.
         let set = vec![vec![10_i64, 20, 30], vec![-5_i64, -5, -5]];
-        let v = spa(&set, 50, 9, DEFAULT_BLOCK).expect("three periods still yield a verdict");
+        assert!(
+            spa(&set, 50, 9, DEFAULT_BLOCK).is_none(),
+            "D-2622: block 10 over 3 periods"
+        );
+        let v = spa(&set, 50, 9, 3).expect("three periods still yield a verdict");
         assert_eq!(v.strategies, 2);
         assert!(
             v.statistic.is_finite(),
@@ -2302,7 +2327,9 @@ mod tests {
     #[test]
     fn two_periods_are_tested_by_the_reality_check_rather_than_refused() {
         let two = vec![vec![10_i64, 20]];
-        let rc = reality_check(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        // D-2622: refused at the default block, computed at a block of two.
+        assert!(reality_check(&two, 1_000, 3, DEFAULT_BLOCK).is_none());
+        let rc = reality_check(&two, 1_000, 3, 2).expect("a verdict");
         assert_eq!(rc.periods, 2);
         same(rc.p_value, 1.0 / 1_001.0, "no draw can beat sqrt(2) * 15");
         assert!(rc.clears(), "the floor 1/1001 clears 5%");

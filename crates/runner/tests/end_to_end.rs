@@ -200,13 +200,27 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         folds.folds.iter().map(|f| f.out_of_sample.worst).collect(),
         vec![0; folds.folds.len()],
     ];
-    let rc = bootstrap::reality_check(&series, 200, 7, bootstrap::DEFAULT_BLOCK);
-    let spa = bootstrap::spa(&series, 200, 7, bootstrap::DEFAULT_BLOCK);
+    // D-2622: a block longer than the series is refused (D-1990), so the
+    // default block answers only a series of at least that many folds, and
+    // the stage is exercised at the longest block this one admits.
+    let periods = folds.folds.len();
+    assert!(periods > 0, "the walk-forward produced folds");
+    assert_eq!(
+        bootstrap::reality_check(&series, 200, 7, bootstrap::DEFAULT_BLOCK).is_some(),
+        periods >= bootstrap::DEFAULT_BLOCK,
+        "{periods} folds at the default block"
+    );
+    let block = bootstrap::DEFAULT_BLOCK.min(periods);
+    let rc = bootstrap::reality_check(&series, 200, 7, block);
+    let spa = bootstrap::spa(&series, 200, 7, block);
     assert!(
         rc.is_some() && spa.is_some(),
         "aligned series must produce verdicts"
     );
-    let named = bootstrap::romano_wolf(&series, 200, 7, bootstrap::DEFAULT_BLOCK, 50_000);
+    let named = bootstrap::romano_wolf_receipt(&series, 200, 7, block, 50_000)
+        .expect("an aligned family at an admitted block has a stepdown")
+        .rejected()
+        .to_vec();
     assert!(
         named.len() <= series.len(),
         "the stepdown cannot reject more strategies than exist"
@@ -221,7 +235,7 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
         Some(&exits),
         Some(&folds),
         Some(&overfit),
-        Some((rc.as_ref(), spa.as_ref(), named.len())),
+        Some((rc.as_ref(), spa.as_ref(), Some(named.len()))),
         6,
     );
     for section in [

@@ -3403,7 +3403,8 @@ fn validate_wilson_projection_v2(
     reason = "bit-exact reproduction of the upstream Wilson statistic and its comparison-only ppm projection"
 )]
 fn canonical_wilson_projection_v2(wins: u64, trades: u64) -> (u64, u64) {
-    let value = if trades == 0 {
+    // pst-4, D-2602: zero wins is exactly 0.0, matching Statistics V2/V3.
+    let value = if trades == 0 || wins == 0 {
         0.0
     } else {
         const Z: f64 = 1.959_964;

@@ -4910,7 +4910,10 @@ fn realised(
             },
             _,
         ) if anchor > 0 => {
-            let give_back = paisa_of(ppm, fills.anchor);
+            // A TRAIL IS A STOP: rested at the ceiling distance its trigger
+            // fires at, so a bar printing the trail price exactly fires it
+            // (run2-1, D-2605).
+            let give_back = paisa_ceil_of(ppm, fills.anchor);
             let resting = match side {
                 Side::Long => anchor.saturating_sub(give_back),
                 Side::Short => anchor.saturating_add(give_back),
@@ -5290,6 +5293,20 @@ fn paisa_of(ppm: Ppm, price: i64) -> i64 {
     i64::try_from(scaled).unwrap_or(i64::MAX)
 }
 
+/// [`paisa_of`] rounded UP: the smallest whole paisa move whose ppm of
+/// `price` reaches `ppm`, which is exactly the move the crossing test needs to
+/// fire (run2-1, D-2605). Used for the stop and trail distances only.
+fn paisa_ceil_of(ppm: Ppm, price: i64) -> i64 {
+    let product = i128::from(ppm).saturating_mul(i128::from(price));
+    let floor = product / 1_000_000;
+    let ceil = if product % 1_000_000 > 0 {
+        floor.saturating_add(1)
+    } else {
+        floor
+    };
+    i64::try_from(ceil).unwrap_or(i64::MAX)
+}
+
 /// The two entry prices one reading needs.
 ///
 /// # Why a level cannot be scaled against the price that filled
@@ -5339,8 +5356,20 @@ struct Priced {
 }
 
 /// Where the resting order sat, as a PRICE, against the crossing anchor.
+///
+/// A STOP sits at the CEILING distance and a target at the floor (run2-1,
+/// D-2605). The crossing test fires a rung when `move >= ceil(ppm x anchor /
+/// 1e6)` (`excursion::ppm_of` floors the ratio, so `ppm_of(move) >= ppm` is
+/// exactly that), so a stop placed at the floor distance rested one paisa
+/// inside the price that triggers it: a bar printing the stop price exactly
+/// did not stop out. At the ceiling the order and its trigger are one price,
+/// and a touch fires. A target is a limit order, for which a touch that does
+/// not fill is the conservative reading, so it keeps the floor.
 fn level_price(level: Level, anchor: i64, side: Side) -> i64 {
-    let distance = paisa_of(level.ppm, anchor);
+    let distance = match level.kind {
+        Resting::Stop => paisa_ceil_of(level.ppm, anchor),
+        Resting::Target => paisa_of(level.ppm, anchor),
+    };
     match (level.kind, side) {
         (Resting::Stop, Side::Long) | (Resting::Target, Side::Short) => {
             anchor.saturating_sub(distance)
@@ -7690,7 +7719,11 @@ mod tests {
             // adverse reading rounded UP (p3floor-2, D-1769), on top of
             // D-1545's rendering; was 3_310_703_317_024_171_291 here and
             // 5_087_617_185_273_455_494 on staging alone. Counts unchanged.
-            10_616_736_728_369_623_410,
+            //
+            // RE-TAKEN for D-2605 (run2-1): a resting stop and a trail give-back
+            // now take the CEILING paisa, so a level moves out by at most one
+            // paisa; counts unchanged. Was 10_616_736_728_369_623_410.
+            8_101_217_916_793_208_101,
             "every cell of both grids, byte for byte"
         );
     }
@@ -8463,6 +8496,60 @@ mod tests {
         assert_eq!(
             replay.cell, None,
             "the local fold cannot price the corrupt holder or promote the blocked successor"
+        );
+    }
+
+    /// run2-1, D-2605: a stop rests at exactly the price its trigger fires at.
+    /// The crossing test fires when `move * 1e6 >= ppm * anchor`, so the stop
+    /// distance must be the SMALLEST such move: a bar printing the stop price
+    /// exactly then stops out. The old floor distance sat one paisa inside it
+    /// (the audit's own case: 87 ppm of 2,502,006 is 217.67, stop at 218 not
+    /// 217). A target keeps the floor, the conservative reading of a limit.
+    #[test]
+    fn a_stop_rests_at_the_price_that_triggers_it() {
+        let fires = |distance: i64, ppm: i64, anchor: i64| {
+            i128::from(distance) * 1_000_000 >= i128::from(ppm) * i128::from(anchor)
+        };
+        for (ppm, anchor) in [
+            (87, 2_502_006),
+            (1, 1),
+            (40_000, 100_000),
+            (333, 1_234_567),
+            (999_999, 7),
+        ] {
+            for side in [Side::Long, Side::Short] {
+                let stop = super::Level {
+                    kind: super::Resting::Stop,
+                    ppm,
+                };
+                let resting = super::level_price(stop, anchor, side);
+                let distance = (resting - anchor).abs();
+                assert!(fires(distance, ppm, anchor), "{ppm} {anchor} {side:?}");
+                assert!(
+                    !fires(distance - 1, ppm, anchor),
+                    "{ppm} {anchor} {side:?}: one paisa nearer must not fire"
+                );
+                assert_eq!(super::paisa_ceil_of(ppm, anchor), distance);
+            }
+            let target = super::Level {
+                kind: super::Resting::Target,
+                ppm,
+            };
+            assert_eq!(
+                super::level_price(target, anchor, Side::Long) - anchor,
+                super::paisa_of(ppm, anchor)
+            );
+        }
+        assert_eq!(
+            super::level_price(
+                super::Level {
+                    kind: super::Resting::Stop,
+                    ppm: 87
+                },
+                2_502_006,
+                Side::Long
+            ),
+            2_502_006 - 218
         );
     }
 

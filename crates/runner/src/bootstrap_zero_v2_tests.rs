@@ -454,6 +454,14 @@ fn one_walk_reproduces_all_three_separate_calls_byte_for_byte() {
         for (draws, seed, block) in [(1, 0, 1), (19, 11, 2), (101, 3, 7)] {
             let shared = evaluate_with_family_tests(&returns, draws, seed, block, BOUNDS);
             assert_eq!(shared, separately(&returns, draws, seed, block, BOUNDS));
+            // D-2622: a block longer than the series is refused by the one
+            // walk and by every separate call alike, never answered.
+            if block > item(&returns, 0).len() {
+                assert!(shared.is_err(), "block {block} over a short family");
+                assert!(white_reality_check_receipt_v1(&returns, draws, seed, block).is_none());
+                assert!(spa_receipt_v1(&returns, draws, seed, block).is_none());
+                continue;
+            }
             let shared = shared.unwrap();
             assert_eq!(
                 shared.romano_wolf(),

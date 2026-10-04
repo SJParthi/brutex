@@ -68,7 +68,7 @@ impl StrategyDigest {
 }
 
 /// One strategy participating in the global-position portfolio.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Constituent {
     /// One-based rank supplied by the caller; a lower number acts first.
     pub priority: u16,

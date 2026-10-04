@@ -2457,13 +2457,21 @@ impl ResolvedExitGridV1 {
                     crate::grid::merit(cell),
                 )
             }),
-            ExitGridSelectorV1::OperatorRule => admitted.max_by_key(|cell| {
-                (
-                    cell.reward_to_risk_bp(),
-                    cell.pessimistic,
-                    crate::grid::merit(cell),
-                )
-            }),
+            // run2-2, D-2606: the guard `Grid::by_reward_to_risk` already has.
+            // `reward_to_risk_bp` is `i64::MAX` for any cell that never lost,
+            // a winless all-flat cell included, so a cell with no winner is
+            // not a measured risk-reward and is never selected by this rule,
+            // and ties at the ceiling break on sample size before money.
+            ExitGridSelectorV1::OperatorRule => {
+                admitted.filter(|cell| cell.wins > 0).max_by_key(|cell| {
+                    (
+                        cell.reward_to_risk_bp(),
+                        cell.trades,
+                        cell.pessimistic,
+                        crate::grid::merit(cell),
+                    )
+                })
+            }
         };
         Ok(selected.map(|cell| self.seal_selection(evaluated, cell)))
     }
@@ -7323,6 +7331,77 @@ mod tests {
         clippy::too_many_lines,
         reason = "one capability test mutates completeness, admission, ladder, coordinate and resolution authority around the same evaluated grid"
     )]
+    fn operator_rule_never_selects_a_winless_cell_at_the_ratio_ceiling() {
+        // run2-2, D-2606: every cell but one is winless and exactly flat, so
+        // its `reward_to_risk_bp` is `i64::MAX`. The one measured cell (smallest
+        // win 300 against a worst loss 100, ratio 300) must be selected.
+        let mut cfg = policy();
+        cfg.max_ambiguous_bars = 0;
+        cfg.max_gap_fills = 0;
+        cfg.selector = ExitGridSelectorV1::OperatorRule;
+        let input = bars(100);
+        let resolved = cfg
+            .resolve(&nifty(), &input)
+            .unwrap_or_else(|_| unreachable_resolved());
+        let ladders = resolved.ladders().unwrap_or_else(|_| ResolvedLaddersV1 {
+            stops: Ladder::new(vec![1]).unwrap_or_default(),
+            targets: Ladder::new(vec![1]).unwrap_or_default(),
+            trails: Ladder::new(vec![1]).unwrap_or_default(),
+        });
+        let mut cells = Vec::new();
+        assert!(resolved.visit_coordinates(|chosen| {
+            cells.push(Cell {
+                stop: chosen.stop,
+                target: chosen.target,
+                tsl: chosen.tsl,
+                ttp: chosen.ttp,
+                trades: 10,
+                ..Cell::default()
+            });
+            true
+        }));
+        let admitted: Vec<usize> = (0..cells.len())
+            .filter(|&at| cells.get(at).is_some_and(|cell| resolved.admits(cell)))
+            .collect();
+        assert!(admitted.len() >= 2, "the fixture admits several cells");
+        let measured_at = admitted.last().copied().unwrap_or_default();
+        if let Some(slot) = cells.get_mut(measured_at) {
+            slot.wins = 4;
+            slot.min_win = 300;
+            slot.worst_trade = -100;
+            slot.pessimistic = 50;
+        }
+        let measured = cells.get(measured_at).copied().unwrap_or_default();
+        assert_eq!(measured.reward_to_risk_bp(), 300);
+        let evaluated = resolved.evaluate_training_grid(
+            &input,
+            &test_column(&input),
+            &ConditionMask::ZERO,
+            Horizon::DEFAULT,
+            resolved.side(),
+        );
+        assert!(evaluated.is_ok());
+        let Some(mut evaluated) = evaluated.ok() else {
+            return;
+        };
+        evaluated.grid = Grid {
+            cells,
+            signals: 10,
+            stops: ladders.stops,
+            targets: ladders.targets,
+            trails: ladders.trails,
+            refused_paths: 0,
+            refused_levels: None,
+        };
+        assert_eq!(
+            resolved
+                .select(&evaluated)
+                .map(|selected| selected.map(|value| *value.training_cell())),
+            Ok(Some(measured))
+        );
+    }
+
+    #[test]
     fn exact_ladders_and_quality_limits_drive_selection_without_oos_derivation() {
         let mut cfg = policy();
         cfg.max_ambiguous_bars = 0;
