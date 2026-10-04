@@ -56677,6 +56677,289 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+### D-1509 — Gate 8 proves it refuses a planted O(n) before it measures — 2026-10-03
+
+**What was observed.** The batch-1 audit marked `gate8` PARTIAL: production
+functions are timed (D-0924, C-BC-01..03, D-1436), but Gate 8 was only
+`cargo bench --workspace --locked`, and nothing in `ci.yml` or any
+`benches/ratio.rs` showed that a bench FAILS when an O(n) cost is planted. A
+ratio check that had rotted into a pass (a ceiling raised, a breach no longer
+turned into an exit code, a filler the scan stops on) would stay green.
+
+**The decision.** Gate 8 runs a self-test before the real measurement, in the
+shape Gate 18's D-1119 self-test already uses. It inserts one line at the top of
+the real benched function `core::vendor::decode_master_row`, ahead of its width
+gate, that folds every byte of `trading_symbol`; runs
+`cargo bench --locked -p core --bench ratio`; restores the file with
+`git checkout` and refuses if it is not restored; and fails the gate unless the
+bench exited non-zero AND printed the `C-09 decode, field 4 MiB` row as
+`BREACH`. A non-zero exit for any other reason (a compile error, a C-10 or C-09b
+breach alone) is not counted as a catch.
+
+**Measured, this machine, 2026-10-03.** Planted: `C-09 decode, field 4 MiB`
+172,342 ps -> 112,556,294 ps, ratio 653.098x, BREACH, exit 1, gate step passes.
+Unplanted: the same row 0.121x ok. With the planted line replaced by an inert
+comment the self-test fails the gate ("was NOT refused (exit 0)").
+
+**Not changed.** The self-test proves the refusal for one bench, `crates/core`,
+whose binary builds in seconds; the other twelve benches share the same
+`ratio`/`exit(1)` shape but are not each re-planted, which would double Gate 8's
+cost. AGC-01.
+
+### D-1510 — A request body has ten seconds from its head, and a late one is answered `408` and closed — 2026-10-03
+
+**What was observed (probeapi-1 remainder).** D-1200 gave the HEAD a deadline
+and nothing else: once a head's blank line arrived, a client that promised a
+`Content-Length` and dripped the body held its connection for as long as it
+liked. The audit held one for about 25 s, and 256 of them fill
+`MAX_CONNECTIONS`, which is the descriptor-exhaustion shape D-1200 closed for
+heads. `docs/06-limits.md` stated the gap ("The head deadline covers the HEAD,
+not the body").
+
+**The change.** `serve_limited` wraps every router in `body_deadline`, a
+middleware that gives a request with a body `BODY_READ_TIMEOUT` (10 s, the same
+as `HEAD_READ_TIMEOUT`) from the moment its head was delivered. The body is
+wrapped in `DeadlineBody`: bytes that have arrived are always delivered, and
+only a reader that must WAIT for owed bytes past the deadline gets a
+`TimedOut` error, which also sets a flag. Whatever the handler then answered
+is replaced by `408 Request Timeout` with `Connection: close` and the sentence
+`REFUSED: the request body did not arrive in time; this connection is closed.`
+A request with no body, a handler that already has its whole body, and one
+that never reads its body are never cut by it. `ConnectionLimits` carries
+`body_read_timeout`, and `api` names `http-body` (already locked at 1.1.0
+under `axum` and `hyper`) for the `Frame` type the wrapper returns.
+
+**Tests.** `api::server::head_deadline_tests::a_dripped_body_is_refused_with_408_at_the_deadline`,
+`a_silent_or_stalled_chunked_body_is_refused_with_408`,
+`a_body_completed_before_the_deadline_is_served`,
+`a_slow_handler_with_its_body_or_none_read_is_not_cut`,
+`a_crowd_of_body_drippers_cannot_starve_a_real_request` and
+`the_served_body_deadline_matches_the_head_deadline`. AGC-02.
+
+### D-1511 — h-api-1 is closed by D-1580, and F7's copy of the fix is not landed — 2026-10-04
+
+**What was observed (h-api-1).** `HeadDeadline::observe` read the first `\n\n`
+before any request line as a finished head and stopped the clock, so a client
+that opened with `\r\n\r\n` held its slot for ever.
+
+**Resolution.** The same finding reached `final/all-fixes` first as
+attacksweep-1, D-1580, which skips CR and LF before the first request-line byte
+exactly as this fix did. When audit fixer 7 was merged onto that head the two
+were the same change, so D-1580's code and its tests
+(`api::server::head_deadline_tests::leading_blank_lines_do_not_stop_the_head_deadline`,
+`api::server::head_deadline_tests::blank_line_holders_cannot_starve_a_real_request`,
+AFD-01, AFD-02) are kept and F7's duplicate code was dropped. F7's test
+`api::server::head_deadline_tests::leading_blank_lines_do_not_stop_the_head_clock`
+is kept beside them, because it sends the one case they do not: blank lines
+followed by a PARTIAL head, which must still be answered `408` at the deadline.
+AGC-03. Nothing is left open.
+
+### D-1512 — A pull-run leg whose payload names a single-value field twice refuses the run — 2026-10-04
+
+**What was observed (h-api-2).** A POST form read with `server::param` answers
+the FIRST match, so `vendor=dhan&vendor=bogus` was a Dhan request with the
+second value never read. D-1587's `one_value_per_form_field` middleware now
+refuses that on every form route, before the handler runs, and is what
+`final/all-fixes` carries; F7's `FormBody` extractor for the same rule was
+dropped at merge as a duplicate.
+
+**What D-1587 does not reach.** A `/pull/run` or `/pull/recovery` leg carries
+its own percent-encoded form as one field's value, and `pullrun::request_leg`
+hands that decoded payload straight to `pull_spot` or `pull_fno`, past the
+middleware. So `leg=...from=x%26from=y...` still answered over the first
+window with the second never read.
+
+**The change.** `pullrun::legs_from` runs `server::repeated_form_key` (D-1587's
+own rule, now `pub(crate)`) over each decoded payload and refuses the whole run,
+naming the key, before any leg starts. `member` and `leg` repeat as lists, as
+they do at the outer body. One pass and one set insert per field, over a body
+already bounded by the route's `DefaultBodyLimit`.
+
+**Test.** `api::pullrun::tests::a_leg_whose_payload_repeats_a_single_value_field_refuses_the_run`.
+AGC-04.
+
+### D-1513 — h-api-3 is closed by D-1583 and D-1552, and F7's power-of-two counter is not landed — 2026-10-04
+
+**What was observed (h-api-3).** `logs::note_request` wrote one `Warn` line per
+4xx with no limit, so a page looping refused requests could roll the 64 MiB
+window away.
+
+**Resolution.** `final/all-fixes` carries D-1583 (cross-site failed-request
+lines rationed per window, with a counted summary) and D-1552 (a separate
+same-origin ration, also counted). Both bound the lines AND say how many were
+held back, which F7's power-of-two counter also did, but they keep a per-window
+path sample where the counter kept only every 2^n-th path, and they do not let
+one origin class spend the other's lines. F7's counter was dropped at merge;
+D-1583's and D-1552's tests (`api::logs::tests::a_flood_of_failed_requests_writes_a_bounded_number_of_lines`,
+`api::logs::tests::a_same_origin_flood_is_bounded_and_counted_separately_from_cross_site`,
+AFD-06, AFF-03) are the proof. Nothing is left open.
+
+### D-1514 — A level exit before a hole is priced on the shipping path, under grid cost model V2 — 2026-10-03
+
+**What was observed (lookahead, the excursion half).** D-1183 made
+`grid::blocks_without_pricing` un-price a variant only for a refused bar at or
+before its own exit, and said in its own text that the look-ahead was "still
+live one step upstream": `trade::walk_core` marked a whole path
+`priceable: false` whenever `SliceFacts::path_accepts(entry, time_exit)`
+failed, and every grid built its candidates from that walk with
+`block_only: !path.priceable`. So a refused record or a missing minute AFTER a
+stop, target or trail had closed the position removed that trade from every
+cell and held the next signal to the time exit: a bar after the exit decided
+whether the exit counted, which `CLAUDE.md` §3 rule 7 forbids. D-1191 recorded
+where each path's holes are and used neither.
+
+**The change.**
+
+- `trade::Occupancy` gains `priceable_before_hole`, set only on a path refused
+  by `path_accepts` whose entry is priceable both ways, and
+  `Occupancy::hole_offset`, the earlier of `first_refused` and `first_missing`
+  as an offset from the entry. Every other unpriceable path (a missing horizon
+  bar, a slice cut before its square-off, an unpriceable exit record) is
+  unchanged and block-only, because nothing before a hole made it so.
+- `grid::Candidate` carries `hole`; such a path is not block-only.
+  `Candidate::refused_at(exit_offset)` is the one rule: block-only, a refused
+  crossing at or before the exit, or the located hole at or before the exit.
+  The located hole is what covers a missing minute, which the crossing table
+  cannot see. A refused variant still blocks to the time exit.
+- `grid::pessimistic_offset` is the one definition of a variant's exit offset,
+  read by `one_variant` and by the V1 replay. The replay
+  (`replay_candidate_path_v1`) used "block-only or any refused crossing", a
+  count, while the cell compared the hole with the exit; it now asks the same
+  `refused_at`, so the replay prices exactly what the cell prices. A refused
+  replay path on a holed candidate keeps its old label (`BlockOnly`, or
+  `BlockOnlyAndCrossingRefused` when the hole is a refused record).
+- `refused_paths` counts the same paths as before: `Candidate::unmeasured`
+  includes a located hole.
+
+**Which results change, and the new version.** Wherever a walk path holds a
+refused record or a missing minute strictly after some variant's level exit,
+that variant's cell gains the trade (money, counts, MAE, drawdown, rows) and
+may admit a later signal that the old time-exit block refused; its time-exit
+variant, and any variant exiting at or after the hole, is unchanged. That
+reaches every grid door (`evaluate*`, `with_levels`, `per_trade`,
+`materialize_*`, the resolved-policy and expression grids, walk-forward
+scoring through `validate`) and the V1 replay universe, its candidate paths
+and every digest sealed over them (global replay V1, V2 and V3). On a slice
+with no hole on any held path, every cell and replay path is byte-identical.
+The time-exit walk (`trade::walk*`), `outcome::forward` and the engine's sweep
+are not changed. Because cell money changed, the grid is a new cost model:
+`exit_grid_policy::printed_ohlcv_cost_model_id_v2` is what this build
+implements and every production policy now names; the V1 identity's value is
+unchanged and is refused by name, `ExitGridErrorV1::SupersededCostModelIdV1`,
+by resolution and by both resolved grids' runtime integrity checks, and by
+`cli::execution_capability`'s three cost-model checks through
+`implemented_cost_model`. The policy digest hashes the id, and
+`exact_execution_law_digest_v1` hashes the implemented id, so every
+`ExitGridPolicyV1` digest, resolved-grid digest, execution parameter id and
+execution-law digest computed by this build differs from one computed before
+it, on clean data too, and a stored artefact carrying the V1 model is refused
+rather than replayed under arithmetic that did not produce it.
+
+**Tests.** `runner::hole_after_exit::a_refused_record_after_a_stop_leaves_the_stop_priced`
+and `a_missing_minute_after_a_stop_leaves_the_stop_priced` damage the bar after
+a stop on a generated sawtooth slice and require the stop's row unchanged,
+every row that closed before the hole unchanged, and no time exit across the
+hole; both fail with the walk's flag forced off.
+`a_refused_stop_bar_is_never_priced` keeps the hole ON the exit refused.
+`runner::grid::tests::a_walk_built_stop_before_a_hole_is_priced_by_the_cell_and_the_replay_alike`
+fails with the old replay test. `runner::trade::tests::a_path_held_only_by_a_hole_says_where_it_can_still_be_priced`,
+`hole_offset_is_the_earlier_hole_and_only_on_a_path_priced_before_it`,
+`a_holed_path_whose_entry_cannot_be_filled_stays_block_only` and
+`runner::exit_grid_policy::tests::a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name`.
+`runner::research_family_readiness::legacy_resolution_identity_matches_the_recorded_pre_extraction_library`
+keeps its four digests captured from the earlier runner as the V1 record,
+pins the four V2 digests from this build (labelled as not an independent
+capture), requires each to differ from its V1 record, and requires a V1
+policy over the same bars to be refused by name.
+`cli::ledger_all::exit_policy_tests::every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk`
+keeps its two independently captured two-rung CLI policy digests as the V1
+record, requires the same policy rebuilt under V1 to still hash to them,
+requires the CLI wiring to equal that reconstruction under V2 field for
+field, and pins the two V2 digests from this build (labelled as not an
+independent capture).
+`runner::grid::tests::unmeasured_and_refused_at_answer_each_cause_on_its_own`
+drives each of `unmeasured`'s three causes alone and places a located hole
+and a refused crossing on either side of the exit; an unlocated refusal
+count, which production never builds (`crossings_with` locates every hole
+it counts), is made by a test-only constructor and keeps the conservative
+answer.
+`runner::exit_grid_policy::tests::a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime`
+reseals a resolution under V1 with a digest that reconciles and requires the
+runtime integrity check to refuse it by name.
+`cli::execution_capability::tests::every_cost_model_check_refuses_the_superseded_v1_model_by_name`
+covers the parameter, stored-scalar and law-digest checks. AGC-06, AGC-07.
+
+### D-1515 — Landing is checked by commit, and the one piece a branch-name landing dropped is landed — 2026-10-03
+
+**What was observed (GAP17-33).** The audit found that the fix pieces were
+landed by branch NAME: every piece branch conflicted with `fix/c2-final` and
+with the others, and "landing by branch name can silently carry nothing". Its
+rule: a group counts as landed only when every commit it names is an ancestor
+of the branch it landed on, or, for a squash, when the tree it produced is
+that branch's tree. A verifier marked it NOT-FIXED because no such check had
+been run, and could not see `fix/c2-final`.
+
+**The check, run on 2026-10-03 against `331b05c6` (the base of this branch).**
+
+- `origin/fix/c2-final` (tip `5de02e06`) is not an ancestor, because it
+  landed as the squash `2c209309` (#19). Its tree, `967a04a2`, is byte for byte
+  the tree of `2c209309`, and `2c209309` is an ancestor of `331b05c6`: landed.
+- The lookahead piece never had its own branch on `origin`; its cadence half
+  is `c0fc71cd` (D-1410), an ancestor. Its excursion half is D-1514.
+- Every `origin/fix/c4-*` branch is an ancestor except `fix/c4-store-02`
+  (`8afa25b1`, D-0978 and D-0979 on that branch), which lane 4 dropped as "a
+  duplicate of PR #26" by name. Its first half is a duplicate: D-0980 gives
+  `checksum_audit` the per-architecture `crate::open_flags::O_NOFOLLOW`. Its
+  second half, W3-store1-9, was NOT: `header.rs`'s `committed` still assigned
+  `refusal = refused` on every candidate, so when both header slots decoded
+  and both failed `validate`, the OLDER slot's reason was reported, while
+  `Header::read_region` documents the newest. Neither D-0978 nor D-0979 is in
+  this ledger.
+- Three more `origin` branches carry a decision this ledger does not hold:
+  `fix/cloud-GAP13-15` (`ed77b732`, D-0964), `fix/cloud-GAP4-46` (`5811ab25`,
+  D-0963) and `fix/cloud-W2-cli8-9` (`e6530c67`, D-0968). Their findings are
+  open audit items owned by other fixers; they are named here and not landed.
+
+**The change.** W3-store1-9 is landed from `8afa25b1` unchanged in substance:
+`committed` keeps the FIRST refusal (candidates arrive newest first) and falls
+back to `NoValidHeader` only when no slot decoded. It renumbers the citation
+to this entry. Landing from now on is verified by commit ancestry, or by tree
+equality for a squash, never by branch name.
+
+**Test.** `store::fault::when_both_slots_decode_and_fail_the_newest_slots_refusal_is_reported`
+writes two decoding slots that fail for different reasons, in both
+assignments, and requires the newer slot's refusal; on `331b05c6` it gets the
+older one. AGC-08.
+
+### D-1516 — docs-web-01's four findings are named beside the fixes that closed them — 2026-10-03
+
+**What was observed.** The batch-1 verifier marked docs-web-01 PARTIAL: "Only 3
+finding ids are named for 4 claimed findings ... I cannot identify the 4th".
+D-0790, D-0791 and D-0792 name no finding id at all; the ids are only in the
+commit messages on `fix/c4-docs-web`, and `4e50c0ae` names the fourth:
+"ET-bars-candles-store-6, -11, -13". So the fourth is ET-bars-candles-store-11,
+and it was fixed, by D-0790, in the same commit as the other two store
+findings; it was never named in a tracked file.
+
+**The four, re-checked against this tree.**
+
+| Finding | Fixed by | Proven by |
+|---|---|---|
+| ET-bars-candles-store-6 and -11 | D-0790 | C4-DOCS-WEB-01, -03, -07, -08 |
+| ET-bars-candles-store-13 | D-0790, D-0792 | C4-DOCS-WEB-02, C4-DOCS-WEB-09 |
+| ET-vocabulary-conditions-bits-4 | D-0791 | C4-DOCS-WEB-04 to C4-DOCS-WEB-06 |
+
+`4e50c0ae` names -6 and -11 together for the sentences D-0790 lists besides
+the header one: §4's read-only mapping (and `header.rs`'s heading saying the
+same), §6's citation of C-07 for per-read verification (C-07 seals a block in
+memory and reads no file), and the claim in `read_record`'s doc and
+`docs/06-limits.md` that no bench times a syscall while C-28 and C-29 time
+`read_record`, one `pread`. Which of the two ids named which sentence is not
+recorded anywhere this repository can read, so it is not assigned here; both
+are closed by the same rows. `2bfff4eb` (D-0792) names -13 as "the half
+D-0790 left standing". `store::docs` (the eight tests behind C4-DOCS-WEB-01 to -03 and -07
+to -09) and `vocab::table`'s four (C4-DOCS-WEB-04 to -06) pass on this tree.
+No code or document sentence changes; this entry is the missing name.
 
 ### D-1463 — The staging observer's strict JSON reader decodes `arbitrary_precision` numbers instead of treating them as objects — 2026-10-04
 
@@ -56708,6 +56991,183 @@ limit; one extra key read per object.
 `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers`
 pins the digits of `100.12499999999999999`, refuses `-1e999` and `1E+309`, and
 refuses a token map with extra fields or non-number digits.
+### D-1643 — Global Replay V4 enforces each stream's frozen exit-quality ceilings, as V1 did — 2026-10-03
+
+**What was wrong (GAP15-19).** Global Replay V1 summed the ambiguous bars and
+gap fills of every trade the global scheduler admitted for a stream and
+refused the replay when either sum passed the frozen exit policy's
+`max_ambiguous_bars` / `max_gap_fills`. V4 checked each row only
+(`ambiguous_bars() > 1 || gap_fills() > 1`) and kept no sum, so a replay could
+publish a stream with more ambiguous or gap-filled trades than the policy it
+was selected under allows. D-1638 stated the gap and left it open for this
+decision.
+
+**The rule chosen.** V1's: the replay refuses, naming the stream, its sums and
+its ceilings. Rejecting only later trades of the stream was the alternative
+D-1638 named; it was not chosen because the shared scheduler has already
+given the trade global occupancy when its quality is known, so dropping it
+afterwards would leave occupancy and money disagreeing — the same reason V1
+refused.
+
+**The change.**
+
+- `runner::exit_grid_policy::GlobalReplayWitnessUniverseV1` carries the two
+  ceilings, taken from the same resolved grid's policy that replays the
+  universe, with accessors, and seals them: the witness seal domain is now
+  `global-replay-witness-universe.v2`. That seal is in memory only, never
+  persisted, so no stored byte changes with it.
+- `cli::global_replay_v4` keeps one `StreamQuality` per stream, indexed by
+  the stream number every `Attempt` already carries. `account_decision`
+  adds each admitted priceable trade in O(1) with checked arithmetic and
+  refuses past either ceiling. Blocked trades and admitted price-refused
+  holds add nothing, as in V1.
+- The plan identity domain is `brutex-global-replay-v4-plan-v2`. The plan
+  identity names the durable `sweep_evidence` attempt, so an attempt run
+  under the old rule and one run under this rule never share an identity
+  while possibly ending differently.
+
+**Which results change.** A replay in which some stream's admitted trades sum
+past either frozen ceiling, which published before, now refuses with no
+publication. Every replay that does not reach a ceiling publishes the same
+bytes as before: the header, roster, witness, candidate, decision, VIX and
+completion records, the economic `replay_id` and the `publication_id` are all
+unchanged, because the ceilings gate the replay and are not written into it.
+A V4 publication already on disk is never read without recomputation (the
+store only verifies a fresh commit's own bytes), so a file published under
+the old rule is not reinterpreted; rerunning it either reproduces it or
+refuses. Global Replay V3 still checks per row only; it has no caller
+(`expect(dead_code)`) and is not a production path.
+
+**What it proves.** AGA-01, AGA-02 in `docs/04-invariants.md`:
+`cli::global_replay_v4::tests::admitted_quality_is_summed_per_stream_and_refused_past_its_frozen_ceilings`,
+`cli::global_replay_v4::tests::admitted_quality_counts_refuse_on_overflow_instead_of_wrapping`
+and the extended
+`runner::exit_grid_policy::tests::global_replay_witness_mints_every_identity_at_the_authenticated_replay_door`.
+The stored-origin test now schedules under the real ceilings its witness was
+sealed with.
+
+### D-1644 — Base Evidence V3 rounds its four max-gated rates up, and Runner gates the losing rate exactly from its counts — 2026-10-04
+
+**What was wrong (GAP15-17).** D-1640 stated it and left it open: Base
+Evidence V2 projected `ambiguous_fill_rate_ppm`, `gap_affected_rate_ppm`,
+`session_concentration_ppm` and `largest_trade_profit_share_ppm` by floor,
+Runner projected `losing_trade_rate_ppm` by its canonical floor, and every
+one is gated `value > ceiling`. An exact rate strictly between a ceiling and
+the next ppm floored onto the ceiling and passed: one in three trades is
+333,333.33 ppm, floors to 333,333 and was admitted under a 333,333 ceiling,
+and from Admission V4 that candidate reached Selection V6.
+
+**The rule chosen.** A max gate compares the exact rate. For the four Base
+rates the projection is the ceiling `⌈part × 1,000,000 / total⌉` (in `u128`,
+refusing what does not fit `u64`): `⌈x⌉ > c` holds for an integer `c`
+exactly when `x > c`, and an exact rate on the ceiling is not rounded past
+it. The losing rate keeps its canonical floor, because Runner validates that
+floor against the trade counts and every Admission V1/V2/V3 byte carries it;
+`AdmissionPolicyV1::evaluate` instead gates it as
+`losses × 1,000,000 > ceiling × trades` in `u128` (no overflow is
+possible), which validated evidence always allows because a measured rate is
+refused without both counts and a nonzero total. The min-gated win rate is
+already exact under a floor (`⌊x⌋ ≥ c` iff `x ≥ c`), and the Statistics
+probabilities already refuse a floor that hides a ceiling
+(`floor_hidden_ceiling_v3`).
+
+**A new format, never a reinterpretation.** The Base Evidence record is laid
+out as before but is format 3: magic `BTX-BASE-EV-V3`, version 3, and new
+record-seal, evidence-id, policy and ordered-records domains. The ledger's
+record, completion and completion-record magics, its header, completion-id,
+completion-seal and pair domains, and its three file names
+(`base-evidence-{records,completions}-v3.bin`, `base-evidence-write-v3.lock`)
+all move. The Candidate-row and TradeRows digests keep their V2 domains:
+they identify the inputs, which this does not change. A V2 record is refused
+by name before its seal is checked, and a ledger root that still holds
+either V2 file — present, a dangling link, or unprobeable — is refused by
+name on both the write and the read open, before any V3 file is created
+beside it, so a Population chain recorded against V2 evidence cannot carry
+on as if its Base evidence had never been written. Selection V6 and every
+caller reach Base Evidence only through this one module, so they read and
+write V3 with no other change. The Rust type names keep their `V2` suffix;
+they name the module family, not the format.
+
+**Which results change.**
+
+- Every Base Evidence `evidence_id`, base-policy digest, ordered-record
+  digest, completion id and NIFTY/BANKNIFTY pair id, so every identity
+  downstream that embeds one (Admission V4 decisions, Finalization V4,
+  Population V6, Execution V4, Selection V6) differs from a V2-era run on
+  the same inputs. No V2 ledger is opened; rerun the chain in a fresh root.
+- The four Base rates rise by one ppm whenever the division is inexact, so
+  the Admission evidence bytes and digests carrying them change, and a
+  candidate whose exact rate lies strictly in `(ceiling, ceiling + 1 ppm)`
+  now fails `AmbiguousFills`, `GapAffected`, `SessionConcentration` or
+  `LargestTradeProfitShare` where it passed; it leaves Admission V4 and
+  therefore Selection V6.
+- In every Runner admission evaluation (V1, V2, V3; every caller), a
+  candidate whose `losses / trades` lies strictly in that interval now fails
+  `LosingTradeRate`. No evidence byte changes for it. A stored V1/V2/V3
+  decision sealed under the old rule with such a rate now refuses on decode
+  with `VerdictMismatch`, loudly; every other stored decision decodes
+  byte-for-byte as before.
+
+**Not changed here.** `boolean_admission_v1`, `index_stop_qualification_metrics`
+and `institutional_evidence` floor their own ambiguous and gap rates (and the
+latter two the concentration and profit-share rates) into the same four
+fields. Those are separately versioned producers outside this finding's Base
+Evidence → Admission V4 → Selection V6 chain; the losing-rate half reaches
+them through Runner, the other four do not, and each needs its own version.
+
+**What it proves.** AGA-03 to AGA-05 in `docs/04-invariants.md`.
+
+### D-1645 — `elite` takes the ranking lens on the command line — 2026-10-04
+
+**What was wrong (cli half of AC-whp-tb-2).** `Lens::Asymmetry` is the only
+lens that ranks by the operator's own rule, the smallest win against the
+largest loss, and no command could choose it: `elite` built `Payoff` as a
+constant and every other production lens is a fixed constant too. D-1498
+fixed Runner's half and left this open. `cli`'s identity test also compared
+only two lenses, so mapping `Asymmetry` onto another lens's term would have
+passed.
+
+**The change.** `cli elite … MAX_POINTS TOP [LENS]` takes an optional
+eleventh word: `payoff`, `asymmetry`, `path` or `detectability`. Anything
+else is refused by name before a number or the store is read; it is never
+read as the default. Absent keeps `Payoff`, so every existing invocation is
+the same run with the same identity. The lens is threaded through
+`elite_descend_in_points_inner` and `elite_descend_with_attempt` into every
+descent step's `Policy` and the validated re-run, and the run identity
+already carries it (`policy_of` term 1: 0, 1, 2, 3). The public library
+entries and the browser's attempt entry keep `Payoff`.
+
+**Which results change.** None unless a LENS word is given. A run naming a
+lens other than `payoff` ranks by it and records under that lens's identity.
+
+**What it proves.** AGA-06.
+
+### D-1646 — The thin-sample note prints the fold count the walk-forward uses, and runner's manifest stops claiming a charge — 2026-10-04
+
+**What was wrong (cli half of ET-strategies-trades-ranking-costs-7).**
+`cli::sample_warning` printed `walk-forward folds 5` from
+`WALK_FORWARD_SPLITS` and divided by it, while every walk-forward splits by
+`walk_forward_splits(bars)` — two to twenty, derived from the bar count — so
+a thin 12-session audit that ran two folds said five. Four cost comments
+still sized the validation stack by that constant. `crates/runner/Cargo.toml`
+said `trade` charges through `costs::trip::price`; nothing in `runner` calls
+it, and every figure is gross of every charge. Its `worst_case_fills`
+sentence had already been corrected by D-1498, and no `cli` source names
+`worst_case_fills`.
+
+**The change.** `WALK_FORWARD_SPLITS` is removed. `sample_warning` takes the
+fold count, its caller passes `walk_forward_splits(bars.len())`, and the
+per-fold test window is `sessions / (folds + 1)`, the anchored shape
+`walk_forward_splits` documents. The cost comments name the derived count.
+The manifest's fill-model paragraph names `fills_at` in `trade` and `grid`
+and says nothing charges.
+
+**Which results change.** The `SAMPLE` note of a below-50-session audit: the
+fold count and per-fold day estimate it prints. No identity, digest or
+selection moves.
+
+**What it proves.** AGA-07.
+
 
 ### D-1464 — Gate 18 survivors on PR #74 killed ahead of CI, and the telemetry lock refusal loses its unreachable arm — 2026-10-04
 

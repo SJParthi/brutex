@@ -7783,6 +7783,40 @@ jobs:
           # Each harness is `harness = false`: it prints every number it took
           # and exits non-zero on a breach. See docs/04-invariants.md C-01,
           # C-07 through C-10 for the ratios and the ceiling.
+          #
+          # SELF-TEST FIRST, D-1509. Nothing showed this gate FAILS when an
+          # O(n) cost is planted, so a bench whose ratio check had rotted into
+          # a pass would have stayed green. Plant one into the real benched
+          # function: a full scan of `trading_symbol` at the top of
+          # `decode_master_row`, ahead of its width gate, so C-09's 4 MiB row
+          # pays 4 MiB. The core bench must exit non-zero AND name C-09 as the
+          # breach (a compile error must not count as a catch); the file is
+          # restored and the tree must be clean before the real run.
+          probe=crates/core/src/vendor.rs
+          at=$(grep -n '^pub fn decode_master_row(' "$probe" | cut -d: -f1)
+          [ -n "$at" ] || { echo "GATE 8 SELF-TEST: no decode_master_row in $probe"; exit 1; }
+          sed -i "${at}a\\    core::hint::black_box(row.trading_symbol.bytes().fold(0_u8, u8::wrapping_add));" "$probe"
+          # No `set +e`: gate 14 refuses any bench run after one, because the
+          # real run below must stay blocking. The status is caught in an `if`.
+          if cargo bench --locked -p core --bench ratio > /tmp/gate8-probe.log 2>&1; then
+            probe_status=0
+          else
+            probe_status=$?
+          fi
+          git checkout -- "$probe"
+          git diff --quiet -- "$probe" || { echo "GATE 8 SELF-TEST did not restore $probe"; exit 1; }
+          caught=no
+          if [ "$probe_status" -ne 0 ] && grep -q 'C-09 decode, field 4 MiB .*BREACH' /tmp/gate8-probe.log; then
+            caught=yes
+          fi
+          if [ "$caught" != yes ]; then
+            cat /tmp/gate8-probe.log
+            echo "GATE 8 SELF-TEST: a planted O(n) in decode_master_row was NOT refused"
+            echo "(exit $probe_status). The ratio check cannot see a data-dependent cost."
+            exit 1
+          fi
+          echo "self-test: the planted O(n) was refused:"
+          grep 'BREACH' /tmp/gate8-probe.log
           cargo bench --workspace --locked
 
   web:

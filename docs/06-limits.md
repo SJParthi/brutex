@@ -12359,6 +12359,10 @@ not:
 
 ## Runner lane-2b follow-ups — D-1183 onward, 2 October 2026
 
+- **Closed by D-1514; kept as the record of what was.** A hole after a level
+  exit no longer blocks the path: the walk marks such a path
+  `priceable_before_hole` and the grid prices any exit strictly before the
+  hole. The bullet below described the state before D-1514.
 - **A hole after a level exit still blocks the path in the walk (D-1183).** The
   grid now prices a variant whose exit precedes `first_refused`. But
   `trade::walk_core` marks a whole path block-only when `path_accepts(entry,
@@ -12408,6 +12412,8 @@ not:
   and execution column) per disposition. That rebuild is O(signal bars +
   execution bars) per selected candidate. It is left because hoisting it would
   change the durable fold records each witness writes. Not timed.
+- **Hole locations are used since D-1514.** The bullet below is the state
+  D-1191 left; `Occupancy::hole_offset` now feeds the grid.
 - **Hole locations are recorded, not used (D-1191).** This narrows the D-1183
   bullet above. Each `Occupancy` now carries its path's first refused record
   and first missing minute, read in O(1) from two per-slice tables. Those
@@ -12446,10 +12452,14 @@ not:
 
 ## Slow clients, the connection cap and gap-address refusal — D-1200, 2 October 2026
 
-- **The head deadline covers the HEAD, not the body.** Once a request's blank
-  line has arrived, no deadline runs until the response is written. A client
-  that sends a complete head and then a body one byte at a time is bounded
-  only by `DefaultBodyLimit` (size, not time) and by the connection cap.
+- **The head deadline covers the HEAD; the body has its own since D-1510.**
+  This bullet said a body dripped one byte at a time was bounded only by
+  `DefaultBodyLimit` (size, not time) and the connection cap. `serve_limited`
+  now gives every request body `BODY_READ_TIMEOUT` (10 s) from the moment its
+  head was delivered, absolute rather than idle, and answers `408` with
+  `Connection: close` when a reader had to wait past it. It runs only while a
+  reader is waiting for owed bytes: a handler that has its whole body, or
+  reads none, is never cut by it. See the D-1510 section below.
 - **The cap queues, it does not refuse.** With `MAX_CONNECTIONS` (256) slots
   held, `accept` waits and the kernel backlog holds new connections. A local
   client that opens partial connections faster than the deadline frees them
@@ -14386,12 +14396,13 @@ witness as well; §169 states it.
 
 ## Global Replay V3/V4 exit quality is checked per row only; evidence cells re-derive the population — D-1638, 3 October 2026
 
-- **No aggregate quality ceiling (GAP15-19).** Global Replay V1 refused when
-  a stream's admitted ambiguous bars or gap fills, summed, passed its frozen
-  exit policy's `max_ambiguous_bars` / `max_gap_fills`. V3 and V4 refuse a
-  single row with more than one of either and keep no sum, so a stream can
-  admit many one-ambiguity trades past its policy's total. This is a missing
-  rule, not a cost; D-1638 says why it is not restored here.
+- **No aggregate quality ceiling (GAP15-19) — restored in V4 by D-1643.**
+  Global Replay V1 refused when a stream's admitted ambiguous bars or gap
+  fills, summed, passed its frozen exit policy's `max_ambiguous_bars` /
+  `max_gap_fills`. V4 now does the same: the Runner witness carries the sealed
+  ceilings and each admitted priceable trade adds to its stream's sums in
+  O(1). V3 still checks per row only; it has no caller (`expect(dead_code)`)
+  and is not a production path.
 - **Evidence cell projection is O(E) (W2-cli7-0).** With a `Measured`
   population authority, `complete_population_values` calls
   `derive_population_id_v1` per cell, which hashes the one-minute execution
@@ -14475,3 +14486,28 @@ UNVERIFIED for the rest:
   above) rests on the audit's measurement (14.13x open cost for 10x rows,
   o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
   `Results::open`, so no tracked bench repeats it.
+## Audit fixer 7: body deadline, pull-run leg repeats, holes after an exit — D-1510 onward, 3 October 2026
+
+- **Body deadline (D-1510).** `BODY_READ_TIMEOUT` is 10 s from the moment
+  `body_deadline` sees the head, absolute, not an idle timer. Each poll of a
+  request body is one poll of the inner body, plus one poll of a pinned
+  `tokio::time::Sleep` only when the inner body is pending: O(1) per frame.
+  The `408` replaces whatever the handler answered once a reader waited past
+  the deadline. A body whose bytes all arrived in time but which a handler
+  reads only after the deadline is still delivered, because arrived bytes are
+  returned before the alarm is asked. Not timed: no bench row covers it.
+- **Repeated fields in a pull-run leg (D-1512).** `pullrun::legs_from` runs
+  `server::repeated_form_key` over each decoded leg payload: one pass and one
+  `HashSet` insert per field, O(fields), over a body the route's
+  `DefaultBodyLimit` has already capped. Not timed. D-1511 and D-1513 add no
+  cost here: their findings are closed by D-1580, D-1583 and D-1552, whose own
+  bounds stand above.
+- **Holes after a level exit (D-1514).** `Occupancy` grows by one `bool`;
+  the walk spends one `entry_is_priceable` check per holed path; the grid one
+  O(1) comparison per variant and path. The replay now computes the variant's
+  pessimistic exit offset once per candidate (O(1)) to classify it. Not timed.
+  **What it does not price:** a level exit AT or after the first hole, a path
+  whose horizon bar is missing, a slice cut before its square-off, and an
+  exit record that cannot be priced; each still blocks to its time exit, the
+  conservative extent, because nothing before a hole was what made them
+  unpriceable.

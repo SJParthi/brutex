@@ -6459,7 +6459,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, RungPlanV1,
-        printed_ohlcv_cost_model_id_v1,
+        printed_ohlcv_cost_model_id_v2,
     };
     use runner::identity::ReferenceIntegrity;
 
@@ -7009,7 +7009,7 @@ mod tests {
         let orphan_root = test_dir();
         append_and_reopen_base_evidence_v2(orphan_root.path(), bounds, &candidate, &base)
             .expect("fixture Base commit succeeds");
-        let completion_path = orphan_root.path().join("base-evidence-completions-v2.bin");
+        let completion_path = orphan_root.path().join("base-evidence-completions-v3.bin");
         OpenOptions::new()
             .write(true)
             .open(&completion_path)
@@ -7029,7 +7029,7 @@ mod tests {
             .expect("foreign-orphan fixture commits");
         OpenOptions::new()
             .write(true)
-            .open(foreign_root.path().join("base-evidence-completions-v2.bin"))
+            .open(foreign_root.path().join("base-evidence-completions-v3.bin"))
             .expect("completion opens")
             .set_len(64)
             .expect("completion is removed after records");
@@ -7050,7 +7050,7 @@ mod tests {
         let swap_root = test_dir();
         append_and_reopen_base_evidence_v2(swap_root.path(), bounds, &candidate, &base)
             .expect("swap fixture commits");
-        let record_path = swap_root.path().join("base-evidence-records-v2.bin");
+        let record_path = swap_root.path().join("base-evidence-records-v3.bin");
         let raw = std::fs::read(&record_path).expect("record file reads");
         let mut swapped = raw.clone();
         swapped[64..1_088].copy_from_slice(&raw[1_088..2_112]);
@@ -7067,7 +7067,7 @@ mod tests {
         let corrupt_root = test_dir();
         append_and_reopen_base_evidence_v2(corrupt_root.path(), bounds, &candidate, &base)
             .expect("corruption fixture commits");
-        let corrupt_path = corrupt_root.path().join("base-evidence-records-v2.bin");
+        let corrupt_path = corrupt_root.path().join("base-evidence-records-v3.bin");
         let mut corrupt = OpenOptions::new()
             .read(true)
             .write(true)
@@ -7097,7 +7097,7 @@ mod tests {
             .expect("pre-change Candidate completion exists");
         OpenOptions::new()
             .append(true)
-            .open(stale_root.path().join("base-evidence-records-v2.bin"))
+            .open(stale_root.path().join("base-evidence-records-v3.bin"))
             .expect("record path opens independently")
             .write_all(&[0])
             .expect("record generation changes");
@@ -7121,10 +7121,10 @@ mod tests {
             .expect("replacement fixture commits");
         let mut replacement_reader = BaseEvidenceLedgerReaderV2::open(replaced_root.path(), bounds)
             .expect("reader opens before named path replacement");
-        let path = replaced_root.path().join("base-evidence-records-v2.bin");
+        let path = replaced_root.path().join("base-evidence-records-v3.bin");
         let displaced = replaced_root
             .path()
-            .join("base-evidence-records-v2.displaced");
+            .join("base-evidence-records-v3.displaced");
         std::fs::rename(&path, &displaced).expect("opened inode is displaced");
         std::fs::copy(&displaced, &path).expect("same bytes appear at a new inode");
         let replacement_refusal = replacement_reader
@@ -7190,11 +7190,11 @@ mod tests {
             &nifty_base,
         )
         .expect("reserved-byte fixture commits");
-        let completion_path = reserve_root.path().join("base-evidence-completions-v2.bin");
+        let completion_path = reserve_root.path().join("base-evidence-completions-v3.bin");
         let mut completion = std::fs::read(&completion_path).expect("completion bytes read");
         completion[64 + 464] = 1;
         let seal = digest_domain(
-            b"brutex-base-evidence-v2-completion-seal\0",
+            b"brutex-base-evidence-v3-completion-seal\0",
             &completion[64..64 + 480],
         );
         completion[64 + 480..64 + 512].copy_from_slice(&seal);
@@ -7479,7 +7479,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 1).expect("one broad exact ratio interval"),
             1_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,
