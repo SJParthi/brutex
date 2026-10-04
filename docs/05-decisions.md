@@ -57842,3 +57842,82 @@ sealed row that fails still refuses the envelope. ZB-10.
 
 - FB-01, found by the Fix Board thread (its branch `fixboard/zero-p5`, b83845d1). `BlockExtremes::of` stopped doubling when the next span exceeded the length of the level below, which is shorter than the block count by `2^(k-1) - 1`, so it built one level too few on many slice lengths. A backward query whose middle run needed the missing level got `None` from `over`, and `forward` recorded no excursion where a scan has one: a silent loss on the D-1572 path.
 - The loop now compares the next span with the block count. `runner::outcome::window_tests::a_backward_query_spanning_most_of_the_slice_is_answered` checks every slice from 3 to 40 blocks against a full scan, and `forward_builds_no_per_bar_power_of_two_table` now also asserts one level per power of two up to the block count. ZX-15.
+
+### D-2730 — The backtest per-period holding chart measures each bucket from the previous bucket's close, keyed with the year — 2026-10-04
+
+**What was observed.** CE-70 (crash-edge pass 12). `holdPeriods` on
+`/backtest`'s Performance tab set each bucket to its own last close minus its
+own FIRST BAR's close. That dropped the move of each bucket's first bar and
+every gap between buckets (overnight, a weekend), so the buckets did not sum to
+the holding P&L the caption names, and on a `1day` series every daily bucket
+held one bar and read 0. The daily and weekly keys were `d/m` with no year, so
+on a 1,000-bar daily window the same calendar day of different years folded
+into one bucket carrying a year-over-year change.
+
+**The decision.** The arithmetic moves to `web/src/lib/hold-series.js`. Each
+bucket is `last close - previous bucket's last close`; the first bucket is
+measured from its first bar's open, the earliest price the window holds, so the
+buckets sum exactly to `last close - first open`. Daily and weekly keys are the
+IST `YYYY-MM-DD` (`istDay`; weekly is the IST Monday). Quarterly and yearly
+keys already carried the year and are unchanged.
+
+**Proof.** `web/tests/hold-series.test.js`: *a daily bucket on a 1day series is
+that day's close-to-close move, not zero*; *the same day of two different years
+is two buckets, keyed with the year*; *the gap between buckets is counted, so
+the buckets sum to the holding P&L*; *the weekly key is the IST Monday, with its
+year, across a year boundary*. Each fails on the previous arithmetic.
+
+### D-2731 — The per-bar return histogram uses `basisPoints`, the engine's half-away-from-zero rule — 2026-10-04
+
+**What was observed.** CE-73. `/backtest`'s per-bar return histogram rounded
+`((c - o) / o) * 10_000` with `Math.round`, which rounds a half toward
++Infinity: +312.5 bp became 313 and -312.5 bp became -312, and -0.5 bp became
+`-0`, which `r < 0` does not count as a loser. `lib/bps.js` was written to
+remove exactly that rule (it matches `api::server::basis_points`).
+
+**The decision.** Each return is `basisPoints(o, c)`. A bar whose scaled move
+leaves the safe-integer range (`null`, the engine's overflow) is left out and
+COUNTED, and the chart says how many. The average loss and gain lines round
+their means half away from zero for the same reason.
+
+**Proof.** `web/tests/hold-series.test.js`: *a mirror-image gain and loss land
+in mirror-image bins (half away from zero)*; *a sub-half-bp loss is a loser,
+never a -0 counted as flat*; *a bar whose scaled move overflows is left out and
+counted*.
+
+### D-2732 — `/ingest` reads the exchange calendar through a ticket, and clears it on every feed change — 2026-10-04
+
+**What was observed.** CE-71. `loadCalendar` on `/ingest` had no request
+token. Switching feed A to B while A's `/calendar.json` was in flight let A's
+slower answer replace B's calendar, and A's calendar stood under B (and under
+"no feed") until something answered. That calendar is the denominator for the
+"NSE holiday" marks, the month span and every owed-minute count in the coverage
+meter. Every other per-feed loader on these pages was already ticketed.
+
+**The decision.** `createCalendarLoader` in `web/src/lib/calendar-owed.js`
+runs the read through `createPageRequests`: a feed change revokes the read in
+flight, clears the calendar to "not loaded" at once (or to "no feed is
+selected"), and applies an answer only while its ticket is current, which
+holds even when the transport ignores the abort.
+
+**Proof.** `web/tests/calendar-loader.test.js`: *a slower answer for the
+previous feed never replaces the current feed's calendar*; *a feed change
+clears the calendar to "not loaded" at once, and no feed says so*.
+
+### D-2733 — Four render sites name the locale and the zone instead of inheriting the browser's — 2026-10-04
+
+**What was observed.** CE-72. `/mapping` rendered a master file's modification
+time with a bare `toLocaleString()` (the host's zone, unlabelled) and two byte
+counts in the host's digit grouping; `/backtest`'s rung progress table rendered
+four counts the same way, against `lib/money.js`'s "pinned, never inherited".
+
+**The decision.** The counts use `group` (`en-IN`), and the timestamp uses
+`stampLabel` with `IST` beside it, as `/markets` does. No source under
+`web/src` may call `toLocaleString`, `toLocaleDateString` or
+`toLocaleTimeString` with no argument. `InvocationAudit.svelte`'s
+`toLocaleTimeString('en-IN')` pins the locale but not the zone; it stamps the
+browser's own read time, the finding records it as cosmetic, and it is left
+unchanged.
+
+**Proof.** `web/tests/pinned-locale.test.js`: *no source formats in the host
+browser's locale or zone*; *the four CE-72 sites use the pinned formatters*.

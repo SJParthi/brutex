@@ -90,7 +90,7 @@
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
-  import { foldMinuteOwed, withheldDays } from '$lib/calendar-owed.js';
+  import { createCalendarLoader, emptyCalendar, foldMinuteOwed } from '$lib/calendar-owed.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1028,107 +1028,28 @@
   /**
    * The exchange calendar, as the store knows it.
    *
-   * @type {{
-   *   first: string, last: string,
-   *   owed: Map<string, number|null>,
-   *   indexOwed: Map<string, number|null>,
-   *   withheld: Set<string>, withheldMonths: Set<string>,
-   *   from: string[], clashes: number, why: string
-   * }}
+   * @type {import('$lib/calendar-owed.js').Calendar}
    */
-  let calendar = $state({
-    first: '',
-    last: '',
-    owed: new Map(),
-    indexOwed: new Map(),
-    withheld: new Set(),
-    withheldMonths: new Set(),
-    from: [],
-    clashes: 0,
-    why: ''
-  });
+  let calendar = $state(emptyCalendar(''));
 
-  /** An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date here. */
-  /** @param {number} day */
-  function isoOfEpochDay(day) {
-    return new Date(day * 86_400_000).toISOString().slice(0, 10);
-  }
-
-  /** @param {string|null} feed */
-  async function loadCalendar(feed) {
-    if (!feed) return;
-    try {
-      const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
-        cache: 'no-store'
-      });
-      if (!response.ok) {
-        calendar = {
-          first: '',
-          last: '',
-          owed: new Map(),
-          indexOwed: new Map(),
-          withheld: new Set(),
-          withheldMonths: new Set(),
-          from: [],
-          clashes: 0,
-          why: `/calendar.json answered ${response.status}`
-        };
-        return;
-      }
-      const body = await response.json();
-      /** @type {Map<string, number|null>} */
-      const owed = new Map();
-      /** @type {Map<string, number|null>} */
-      const indexOwed = new Map();
-      for (const entry of body?.days ?? []) {
-        const day = isoOfEpochDay(entry.day);
-        owed.set(day, entry.owed ?? null);
-        // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
-        // carry the index-specific field and therefore cannot prove a common
-        // index denominator on the systems-outage day. Falling back to `owed`
-        // would silently restore the false 166-hole claim D-0420 refuses.
-        indexOwed.set(day, entry.indexOwed ?? null);
-      }
-      // A DAY ABSENT FROM `days` IS A HOLIDAY ONLY IF IT IS NOT WITHHELD. The
-      // server names, in `withheld`, every stretch whose daily rung it did not
-      // read or could not trust (R9-api-law-0, D-1443); this page used to read
-      // those days as "NSE holiday", which is the unmeasured dressed as a
-      // fact. A malformed list throws into the catch below and the whole
-      // calendar degrades loudly, rather than its days becoming holidays.
-      // D-1507.
-      const withheld = withheldDays(body?.withheld, isoOfEpochDay);
-      calendar = {
-        first: owed.size ? isoOfEpochDay(body.firstDay) : '',
-        last: owed.size ? isoOfEpochDay(body.lastDay) : '',
-        owed,
-        indexOwed,
-        withheld: withheld.days,
-        withheldMonths: withheld.months,
-        from: body?.derivedFrom ?? [],
-        clashes: (body?.disagreements ?? []).length,
-        why: owed.size ? '' : 'the store holds no bars for this feed'
-      };
-    } catch (error) {
-      calendar = {
-        first: '',
-        last: '',
-        owed: new Map(),
-        indexOwed: new Map(),
-        withheld: new Set(),
-        withheldMonths: new Set(),
-        from: [],
-        clashes: 0,
-        why:
-          error instanceof Error
-            ? `the calendar request failed (${error.message})`
-            : 'the calendar request failed'
-      };
+  // THE READ IS TICKETED (CE-71, D-2732). It had no request token: a slower
+  // answer for the previous feed replaced the current feed's calendar, and the
+  // previous calendar stood under the new feed (or under no feed) while nothing
+  // had answered. `createCalendarLoader` clears to "not loaded" on every feed
+  // change and lands an answer only while its ticket is current.
+  const calendarRequests = createPageRequests();
+  const calendarLoader = createCalendarLoader({
+    request,
+    requests: calendarRequests,
+    apply: (next) => {
+      calendar = next;
     }
-  }
+  });
+  onDestroy(() => calendarRequests.dispose());
 
   $effect(() => {
     const feed = feeds.active;
-    untrack(() => loadCalendar(feed));
+    untrack(() => void calendarLoader.load(feed));
   });
 
   const DAYNAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
