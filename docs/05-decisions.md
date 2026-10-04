@@ -54760,3 +54760,29 @@ entries and the browser's attempt entry keep `Payoff`.
 lens other than `payoff` ranks by it and records under that lens's identity.
 
 **What it proves.** AGA-06.
+
+### D-1646 — The thin-sample note prints the fold count the walk-forward uses, and runner's manifest stops claiming a charge — 2026-10-04
+
+**What was wrong (cli half of ET-strategies-trades-ranking-costs-7).**
+`cli::sample_warning` printed `walk-forward folds 5` from
+`WALK_FORWARD_SPLITS` and divided by it, while every walk-forward splits by
+`walk_forward_splits(bars)` — two to twenty, derived from the bar count — so
+a thin 12-session audit that ran two folds said five. Four cost comments
+still sized the validation stack by that constant. `crates/runner/Cargo.toml`
+said `trade` charges through `costs::trip::price`; nothing in `runner` calls
+it, and every figure is gross of every charge. Its `worst_case_fills`
+sentence had already been corrected by D-1498, and no `cli` source names
+`worst_case_fills`.
+
+**The change.** `WALK_FORWARD_SPLITS` is removed. `sample_warning` takes the
+fold count, its caller passes `walk_forward_splits(bars.len())`, and the
+per-fold test window is `sessions / (folds + 1)`, the anchored shape
+`walk_forward_splits` documents. The cost comments name the derived count.
+The manifest's fill-model paragraph names `fills_at` in `trade` and `grid`
+and says nothing charges.
+
+**Which results change.** The `SAMPLE` note of a below-50-session audit: the
+fold count and per-fold day estimate it prints. No identity, digest or
+selection moves.
+
+**What it proves.** AGA-07.
