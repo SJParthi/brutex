@@ -188,6 +188,27 @@ pub const STRIDE_BYTES: usize = 280;
 
 const _: () = assert!(STRIDE_BYTES as u64 == STRIDE);
 
+/// The most frontier rows one run may write: the number `api` verifies and
+/// serves for one run (`api::detail::MAX_RESULT_ROWS`, which asserts it equals
+/// this). A `TOP` above it wrote rows `/frontier.json` and `/top` then refused
+/// whole, so it is refused before the run instead. CE-19, D-1981.
+pub const MAX_ROWS: usize = 4_096;
+
+/// Refuses a `TOP` the frontier cannot carry to a reader.
+///
+/// # Errors
+///
+/// Names the requested count and [`MAX_ROWS`] when `top` is zero or above it.
+pub fn admit_top(top: usize) -> Result<(), String> {
+    if top == 0 || top > MAX_ROWS {
+        return Err(format!(
+            "TOP is {top} and must be 1 to {MAX_ROWS}, the most frontier rows one run \
+             can serve; nothing was swept"
+        ));
+    }
+    Ok(())
+}
+
 /// Bytes of `blake3` kept as the seal.
 ///
 /// Eight, matching the results ledger. The seal answers *were these bytes
@@ -1974,6 +1995,19 @@ mod tests {
     /// This is the test that would have caught it. `record_frontier` writes the
     /// top `top` by ranking lens and consults no rule at all, so nothing between
     /// the sweep and the browser ever asked whether the best row was any good.
+    /// CE-19, D-1981: the writer's TOP bound is the reader's row bound,
+    /// admitted at it and refused one past it.
+    #[test]
+    fn a_top_is_admitted_up_to_the_reader_bound_and_refused_past_it() {
+        assert_eq!(super::MAX_ROWS, 4_096);
+        assert_eq!(super::admit_top(1), Ok(()));
+        assert_eq!(super::admit_top(super::MAX_ROWS), Ok(()));
+        for bad in [0, super::MAX_ROWS + 1, usize::MAX] {
+            let why = super::admit_top(bad).expect_err("outside the bound");
+            assert!(why.contains(&format!("TOP is {bad}")), "{why}");
+        }
+    }
+
     #[test]
     fn the_top_ranked_row_fails_the_operators_rules() {
         let v = measured_rank_one().verdict(&crate::Rules::operator());

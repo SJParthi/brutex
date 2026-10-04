@@ -16,6 +16,9 @@ pub const MAX_CONCURRENT: usize = 4;
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum verified rows belonging to one run that a request will hold.
 pub const MAX_RESULT_ROWS: u64 = 4_096;
+// The frontier writer refuses a TOP above this same count before a run, so a
+// run never commits frontier rows this reader then refuses whole. CE-19, D-1981.
+const _: () = assert!(cli::frontier::MAX_ROWS as u64 == MAX_RESULT_ROWS);
 /// Maximum rows rendered in one response page.
 pub const MAX_PAGE_ROWS: u64 = 256;
 /// Maximum zero-based page accepted at the HTTP boundary.
