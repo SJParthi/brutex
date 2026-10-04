@@ -7499,7 +7499,9 @@ None of those operations becomes O(1) because cell ownership is now indexed.
 Candidate-adjusted Romano--Wolf probabilities and the named full-family
 maximum/intersection probability now have an in-memory exact-count authority.
 For S candidates, N periods and B draws it costs O(S·N + S log S + B·N +
-B·S·N) time and O(B·N + B + S) temporary space; only candidate lookup after
+B·S·R) time for R runs per draw where every series' fold is provably exact,
+O(B·S·N) worst case otherwise, and O(S·N + B·R + B + S) temporary space
+(§146, D-2316); only candidate lookup after
 construction is O(1). The production complete-family constructor, durable raw
 full-precision statistics record and institutional-evidence wiring remain
 absent. A generic p-value from a procedure other than this named Romano--Wolf
@@ -7684,11 +7686,32 @@ D-0462 and SC-01 preserve that boundary.
 
 ### §146 — exact institutional family statistics are bounded durable evidence, not constant-time admission
 
-For S strategies, N observations and B stationary-bootstrap draws, the shared
-Romano--Wolf construction costs O(S·N + S log S + B·N + B·S·N) time and
-O(B·N + B + S) temporary space. Candidate lookup from an already completed
+For S strategies, N observations, B stationary-bootstrap draws and R
+contiguous runs per draw (R ≈ N/`block` expected, R ≤ N always), the shared
+Romano--Wolf construction costs O(S·N + S log S + B·N + B·S·R) time and
+O(S·N + B·R + B + S) temporary space. Candidate lookup from an already completed
 receipt is positional O(1), but producing the family is not. No measured result
 supports an O(1) sweep, bootstrap, end-to-end latency or memory claim.
+
+**The B·S·R term is conditional, and the condition is exactness (D-2316).**
+Every resampled mean in `runner::bootstrap` — White, SPA, both receipts,
+Romano--Wolf and `family_tests_v1` — is read from one integer prefix row per
+series over the draw's runs, O(R) per strategy per draw, only where that is
+provably the f64 fold's own value: every `|v| ≤ 2^53` and
+`N × max|v| ≤ 2^53`, checked in `u128`. A series outside that bound (for
+example one holding values near `i64::MAX`) keeps the former O(N) fold for that
+series — the same bits, more slowly — so the worst case is still
+O(S·N + B·N + B·S·N). Nothing is refused or approximated on either path; the
+slow path is a cost, not a hidden failure.
+
+Memory: one `N + 1` `i64` prefix row per exact series (O(S·N), the size of the
+input family), plus each held draw's runs at two words per run. Romano--Wolf
+now holds every draw as runs rather than as N indices: O(B·R) words, at most
+2·B·N for `block = 1` and about 2·B·N/`block` at the expected block length.
+The draw loops of White, SPA and both receipts hold one index buffer and one
+run buffer; `family_tests_v1` holds one run buffer per running task. None of
+this is measured by a bench; `the_prefix_path_reads_one_term_per_run_not_per_period`
+counts terms read rather than timing them.
 
 Opening either Institutional Statistics V1 file decodes, seals and indexes its
 bounded fixed-record history. Generation validation hashes both complete files
@@ -7740,8 +7763,10 @@ O(S plus bounded file history). None is whole-operation O(1).
 Population Statistics V2 is intentionally the full uncapped NIFTY+BANKNIFTY
 family for one rung. With S hypotheses, N aligned periods, F walk-forward folds
 and B bootstrap draws, raw evidence alone is O(S·N + F·S) durable data. The
-current adjusted Romano--Wolf construction remains O(S·N + S log S + B·N +
-B·S·N) time and O(B·N + B + S) temporary space; White, SPA, PBO, hashing,
+current adjusted Romano--Wolf construction is O(S·N + S log S + B·N +
+B·S·R) time for R runs per draw where every series' fold is provably exact,
+O(B·S·N) worst case otherwise, and O(S·N + B·R + B + S) temporary space
+(§146, D-2316); White, SPA, PBO, hashing,
 locking and `sync_all` add their own input- and system-dependent cost. Explicit
 open/build bounds are refusal ceilings, never a hidden depth, truncation or
 sampling policy.
@@ -7779,8 +7804,10 @@ keep the legacy `>=` tie rule; a strict comparison would be another procedure
 version rather than a codec fix.
 
 For B bootstrap draws, N aligned periods and S candidates, both constructors
-remain O(B·N·S) time and use input-dependent memory for family summaries and
-one resample index vector. The complete input already occupies O(S·N). Copying
+are O(S·N + B·N + B·S·R) time for R runs per draw where every series' fold is
+provably exact and O(B·N·S) worst case otherwise (§146, D-2316), and use
+input-dependent memory for family summaries, one prefix row per exact series,
+one resample index vector and its runs. The complete input already occupies O(S·N). Copying
 one completed count, digest or bit pattern is O(1); constructing the receipt is
 not. Four focused tests, 31 bootstrap regressions and strict Runner Clippy use
 controlled inputs. They do not prove an uncapped stored family, durable
@@ -9581,15 +9608,15 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   were measured on `pool` only, with a stamped build of D-0696's fifth
   correction. Each such refusal is the command's own and forges no completed
   run. `pool_arm`'s one caller is `dispatch`'s `pool` arm, a typed argument.
-  `cli::swept_rung` has eleven call sites (this said eight until D-0696's
-  sixth correction). One is in `pool.rs`, in `pool::run`. The `pool` verb
+  `cli::swept_rung` has twelve call sites (this said eight until D-0696's
+  sixth correction, and eleven until D-2302 counted `pool_oos::run`). One is in `pool.rs`, in `pool::run`. The `pool` verb
   reaches it only through `pool_arm`, which hands `pool::pool` a rung only
   after finding it among `EVERY_RUNG`'s entries, and `swept_rung` accepts
-  every one of those, so the verb never reaches that refusal. The other ten
+  every one of those, so the verb never reaches that refusal. The other eleven
   are `sweep_audited_stored`, `sweep_stored_inner`, `auto_stored_inner`,
   `audit_stored_inner`, `audit_range_inner` and `screen_range_inner` in
   `lib.rs`, and one each in `audited_stored.rs`, `audited_range.rs`,
-  `expression.rs` and `expression_search.rs`. Each of those takes the rung it
+  `expression.rs`, `expression_search.rs` and `pool_oos.rs`. Each of those takes the rung it
   checks as a parameter or a field of one, except `sweep_audited_stored`,
   which takes it from the `sweep-audited-stored` command's own argument
   list; the chains above them were not all followed to their end. `batch.rs`
@@ -11187,7 +11214,10 @@ day. That loop is unchanged. Not timed.
 
 `romano_wolf` and `romano_wolf_receipt` walk the canonical order once:
 O(S·B·N + S·B + S log S) time for S strategies, B draws and N periods,
-and O(B·N + B + S) space. The `S·B` term is one `select_nth_unstable_by` per
+and O(B·N + B + S) space. (Superseded in its S·B·N term by D-2316: the
+resampled means are now O(S·B·R) for R runs per draw where every series' fold
+is provably exact, O(S·B·N) worst case otherwise, with O(S·N + B·R) space;
+§146 states the condition.) The `S·B` term is one `select_nth_unstable_by` per
 suffix, whose documentation in the pinned toolchain says its fallback
 "guarantees linear runtime for all inputs". The former loop was O(R·B·S·N) over R
 rounds and this file did not say so. None of these is measured by a bench;
@@ -11287,7 +11317,9 @@ prefix-count vectors. The cost is paid once per `SliceFacts::of`,
 `SessionBounds::of` or `trade::forced_exits` call, so once per slice, never
 per candidate. Every lookup afterwards (`SliceFacts::step_at`) is one
 bounds-checked read. A constant-per-bar running median would need a bounded
-alphabet of step values, and the slice does not guarantee one. **UNVERIFIED as
+alphabet of step values, and the slice does not guarantee one. Both heaps are
+sized once to `ceil(n / 2)` before the bar loop (D-2308), so no push inside it
+reallocates. **UNVERIFIED as
 a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 ## A following append verifies the old tail block before re-sealing it — D-0910, 2 October 2026
 
@@ -11495,8 +11527,11 @@ and `final_selection`, whose chains sat inside older `allow_scan` counts):
   complete minute context: O(M), once per attestation, beside an O(M) pass
   over the same slice (sections 134 and 142).
 - `runner::signal_candle_stop` finds an evaluation's first daily period:
-  O(days) per evaluation, beside an O(days) filter over the same periods and
-  the evaluation's walk of every signal bar.
+  one read of a per-day table since D-2307, which also gives the window's
+  first and last signal row, so an evaluation walks only the rows and periods
+  inside its days (it walked every period twice and every signal row before).
+  The tables cost O(span days + rows) once at preparation and one `usize` per
+  span day each.
 - `runner::validate` re-checks an argmax four times: O(retained placements)
   once per fold, beside a `.max()` over the same slice.
 - `cli::final_selection` finds the best traded row: O(priced rows) once per
@@ -11818,7 +11853,7 @@ rule 6); every bound is read from the source.
   `/boolean-statistics.json`, `/boolean-admission.json`,
   `/boolean-qualification.json`, `/boolean-qualified-search.json`,
   `/boolean-campaign.json`, `/boolean-qualified-campaign.json`,
-  `/boolean-oos.json`, `/expression-search.json`, `/engine/top.json` and
+  `/boolean-oos.json`, `/selection-v6.json`, `/expression-search.json`, `/engine/top.json` and
   `/live.json`, several of them polled by the console, so the journal grows
   while the operator only watches.
 - **The code work per request is fixed; the filesystem's is not.** `begin`
@@ -12610,6 +12645,19 @@ not:
   `append`, `append_exact` and the read-side `refresh` alike, and only on the
   growth branch. A handle's own appends and the unchanged-length branch stay
   O(1) plus the appended bytes. This is D-0936's accepted cost, extended.
+- **Which lock the api's held results handles pay that re-hash under
+  (D-2309).** `api::detail::Cached` (`TRADES`, `FRONTIER`, the parent and
+  ledger caches, `topjson`'s `SELECTION`) held its one process-global slot
+  mutex across the cold `open` and across `refresh`, so the growth re-hash
+  above, and any O(history) cold open, made every other request for that
+  cache wait while holding a blocking permit. The slot lock is now held only
+  for an O(1) look, install or clear. **What stays:** `refresh` and the
+  handler's work run under the HANDLE's own mutex, so requests for one
+  handle still take the O(indexed bytes) growth branch one at a time -- a
+  waiter is then served the refreshed handle rather than paying the re-hash
+  again beside it. Two requests that both find no usable handle each run the
+  cold open, O(history) bounded by `MAX_SCAN_BYTES`, and the later install
+  wins. Neither is timed.
 - **Reconciliation order (D-1565).** `admission_store::reconcile_all` and
   `population::reconcile_receipts{,_v3,_v4}` sort their entries by identity
   before walking them: O(n log n) once per cold open, where the open was
@@ -12893,6 +12941,13 @@ site below was opened and read against that test, and not one of the
     whose running maxima, selection scratch and per-rank bars are
     the same studentized statistics; lane 4's own tree measured 51
     against its allowance of 48. No price is among them.
+  runner/bootstrap.rs 51 -> 52 (D-2316). `mean_at`'s three lines
+    (signature, fold, division) became `resampled_mean`'s four: the
+    same signature, fold and division plus `exact as f64`, the one
+    conversion of the exact integer prefix-run sum, which is the
+    fold's own value whenever the prefix path is taken. A resampled
+    mean of returns is a statistic with no paisa representation; the
+    returns themselves stay `i64` and are summed as `i64`.
   cli/institutional_evidence.rs 7 -> 8 -- GAP5-54 (D-0930) replaced
     `probability_ppm`, two lines that took `ceil(p * PPM)` in `f64`,
     with `bootstrap_fraction`, three lines that recover the exact
@@ -13970,6 +14025,10 @@ remove at a cost worth paying, so none was rewritten.
     fixed `RESEARCH_FAMILY_BYTES_V1` record.
   telemetry/record.rs -- `Record::field`, at most `MAX_FIELDS`
     (twelve), enforced by `Record::decode`.
+  telemetry/sink.rs -- `Config::refusal` finds the first per-target
+    level prefix longer than `MAX_TARGET_BYTES`, over at most
+    `MAX_TARGET_LEVELS` (eight) overrides, the count the line before it
+    refuses past; once per configuration, never per event (D-2373).
   vocab/expression.rs -- REMOVED (o1engine-24): a name token now
     resolves through `vocab::table::index_of`, a compile-time hash
     index, so the row-order scan of `table::TABLE` is gone and the
@@ -13998,16 +14057,15 @@ remove at a cost worth paying, so none was rewritten.
 
   DATA-SIZED, AT A PREPARATION OR VALIDATION BOUNDARY
   cli/candidate_universe.rs, cli/pre_admission_data.rs,
-    runner/signal_candle_stop.rs 1 of 2 -- locate the execution
+    runner/signal_candle_stop.rs 1 -- locate the execution
     slice's first bar in the complete minute context. O(M) in that
     context, once per attestation, beside an O(M) ordering or hash
     pass over the same slice; the cost docs/06-limits.md sections
     134 and 142 record. A binary search would be cheaper and rule 1
     bans it.
-  runner/signal_candle_stop.rs 1 of 2 -- the first daily period at
-    or after `first_day`, O(days) once per evaluation. The `filter`
-    on the next statement walks the same periods and the evaluation
-    then walks every signal bar, so the search adds no order.
+  runner/signal_candle_stop.rs -- REMOVED (D-2307): the first daily
+    period of an evaluation is one read of a per-day table built at
+    preparation, so the count is 1.
   runner/validate.rs 4 -- the argmax re-checks (the two rows above
     plus `anchored` V4's and `choice_matches_visible_v2`'s), each over
     one fold's retained placements, each beside a `.max()` over the
@@ -14270,10 +14328,16 @@ bounds are all nonzero.
 - **Gate 10, bare proof names (D-1606).** Only names with three or more
   underscores, in the cell before a status glyph, are read. A shorter name,
   or one in prose, is still checked by nothing.
-- **Gate 0 `spawns` (D-1603).** Reads only a string literal passed straight
-  to `Command::new`. A program held in a variable (`api`'s browser opener,
-  D-1202) or built at run time is not seen, and `sh`/`bash` are not shadowed
-  on gate 1e's PATH because the `git` the tests spawn may start a shell.
+- **Gate 0 `spawns` (D-1603, narrowed by D-2344).** A program held in a
+  variable is now resolved one step in the same file (the nearest `let` that
+  binds it, or the body of the `fn` it calls) and must name only
+  `current_exe`, a `CARGO_BIN_EXE_*` path or a listed program; anything it
+  cannot resolve is refused. A value threaded through two functions, a field,
+  or another file is not followed, and is refused rather than read. `sh` and
+  `bash` are now shadowed on gate 1e's PATH: git starts a shell by the absolute
+  path it was built with, and `core`'s `findings` and `store`'s
+  `cited_commits` tests ran on 2026-10-04 with both stubbed and invoked
+  neither.
 - **The `.github/*.rs` gate tools (D-1600).** Gate 6c holds them to rustfmt
   and clippy `-D warnings`; no coverage or mutation measure applies to them.
 - **Twelve `#[ignore]`d tests never run in CI, by design (D-1613,
@@ -14377,7 +14441,8 @@ pass over the bars at a once-per-report boundary, O(bars).
 - **The request-minute coverage audit's output is not capped (W1-pull3-4,
   D-1493).** `pull::ingest::request_minutes::audit` walks the rows once and
   each civil day once: O(rows + days + gaps). Each gap is one `String`, one
-  `Failure` and one `pull.request_minutes` telemetry event. Gaps alternate
+  `Failure` and one `pull.request_minutes` telemetry event (exactly one since
+  D-2371; a duplicate `pull.file` event was removed). Gaps alternate
   with held minutes, so a day yields at most about half its scheduled
   minutes (188 for a 375-minute session), and a window of D sessions at most
   about 188·D. A cap was rejected because it would hide which minutes are
@@ -14594,6 +14659,127 @@ UNVERIFIED for the rest:
   above) rests on the audit's measurement (14.13x open cost for 10x rows,
   o1surface2-4). `crates/cli/benches/ratio.rs` deliberately does not time
   `Results::open`, so no tracked bench repeats it.
+
+## `pool-oos` judging and the Selection V6 display read — D-1576, D-1578, 4 October 2026
+
+Let I be the surface's instruments, U the discovered union, B a span's bars,
+N the later IST sessions and D the bootstrap draws (`bootstrap_draws(N)`, at
+most 100,000).
+
+- **`pool-oos` judging.** Each span costs I × U walks of O(B) each, plus one
+  Romano-Wolf stepdown and one Reality Check of O(D × U × N) each. Neither
+  is a §3 rule-4 primitive. Nothing here is measured: UNVERIFIED. Fills are
+  on the signal rung's bars, as the audit stack's bootstrap family's are, so
+  on a rung above one minute they are coarser than the exit grid's minute
+  replay. One later span is one draw. Multiplicity across separate
+  `pool-oos` invocations is not controlled (gaps-12).
+- **`pool-oos` memory (D-2300).** The spans are streamed: each lane prepares
+  one span, walks every union candidate over it, and drops its bars and
+  column before the next, so at most one span per running Rayon lane is
+  held. What outlives a lane is O(U) tallies per span and one 24-byte
+  booking per later trade. The training span keeps no series. The one dense
+  structure is the later matrix, U × N `i64`, reserved fallibly: a family
+  too large to hold is refused by name, never aborted. Each instrument's
+  training span is still prepared twice, once by pass 1's screen
+  (`one_rung`) and once here, a constant factor of two on that half's
+  preparation, not a change of class. UNVERIFIED as a measured bound.
+- **`pool` and `pool-oos` union (D-2301).** The results ledger and receipt
+  sidecar are opened once per union, O(history) once; each instrument then
+  costs one hash probe in each and its own frontier rows. Before D-2301
+  every instrument cold-opened both, O(I × history).
+- **`/selection-v6.json`.** Paged since D-2303: each request reads at most
+  `PAGE_BLOCKS` (8) blocks of 16 KiB per rung, from block `from`, one seek
+  away, and names each file's block count from its length. Each block read is
+  hashed twice (identity and seal) and decoded once: O(page) per request, at
+  most 64 blocks over the eight rungs, whatever the files hold. Duplicate
+  identities are refused within a page; the commit door refuses them across
+  the whole file before appending. UNVERIFIED as a measured bound.
+- **`cli top` and `cli results` (OS-7, formerly W2-cli8-5; D-2310).** Still
+  O(runs) per call, now in ONE read of each row. `newest_complete` and
+  `results_at` used to cold-open `runs.bin` (a pass that reads, seals and
+  decodes every row for the identity index) and then read every row again
+  through `Results::read`; they now fold the open's own pass through
+  `Results::open_read_visiting`, and the listing holds its newest 40 matching
+  rows rather than all of them. The pass that remains is not avoidable on
+  this format: `top` names the best complete row across every row and
+  `results` prints the matching count and that same winner, and the version-3
+  ledger is a fixed-stride array with no stored aggregate, so neither answer
+  sits at a computable offset. Persisting one would be a new store format
+  version (§3 rule 8), not made here. The open also builds an O(runs)
+  identity index that refuses a duplicate run, kept. Counted (one open, one
+  read per row), not timed: UNVERIFIED as a measured bound.
+
+## Rust and O(1) sweep, data side — D-2370 onward, 4 October 2026
+
+What these fixes left non-constant, named. None of it is timed by a bench:
+UNVERIFIED as measurements.
+
+- **Request-minute gaps (D-2371).** Still O(rows + days + gaps) and uncapped,
+  as D-1493 states above, and now exactly one telemetry event per gap. Until
+  D-2371 it was two (a `pull.file` "not filed" event as well).
+- **Minute completeness (D-2370).** `complete_minutes_with_calendar` is
+  O(buckets + minutes) with one calendar and venue-session lookup per observed
+  IST day; a day the venue refuses costs one diagnostic, not two per bucket.
+- **Store-writing doors (D-2372).** `pull::ingest::from_rows` is
+  O(rows + log n_valid + blocks touched): `keep_in_session` walks every row,
+  then each `BarFile::append` bisects what is stored (at most
+  `ceil(log2(n_valid + 1))` record reads, D-1434), verifies the old tail block
+  (D-0910) and re-reads every touched block to seal it. `write_overlay` and
+  `write_greeks` are O(log n_valid + rows + blocks touched).
+- **Sealing (D-2376).** Allocation-free now, and still one `pread` of up to
+  4,088 bytes, one CRC-32C and one 4-byte sidecar write per touched block, plus
+  one `fsync` of the sidecar per append: O(blocks touched).
+- **Master landing (D-2374).** Comparing against the held master is one
+  `fstat`, and only on an equal length a read of `body.len()` bytes (at most
+  `MAX_BODY_BYTES`, 256 MiB) in 8 KiB chunks: O(body) when the length matches,
+  O(1) otherwise. An unchanged master costs an mtime set and two `fsync`s
+  instead of a full write.
+- **Lake open (D-2375).** Still O(file bytes), now bounded by
+  `MAX_LAKE_BYTES` = 64 MiB, a ceiling DERIVED from the format (one-minute,
+  17-column, 31-day month ≈ 6.8 MB plain), not sourced and not measured.
+- **Telemetry level lookup (D-2373).** At most 8 prefixes of at most 48 bytes
+  each per event that clears the fast floor: constant.
+
+## Language-purity gate limits after the RO sweep — D-2340..D-2350, 4 October 2026
+
+- **Inline awk in `ci.yml` (D-2342).** Gate 0 now refuses an `awk` program
+  operand, but 71 inline awk programs remain in `ci.yml`, all in gates that
+  pre-date the scanner. They are a pinned ratchet, not an exemption: the
+  scanner's `AWK_IN_CI` must EQUAL the count, so a new program anywhere is
+  refused and a removed one forces the pin down. Moving each into a
+  `.github/*.rs` tool is the remaining work; until then section 2 holds for
+  every other file and is bounded, not met, in this one.
+- **What Gate 0 reads as a command (D-2342).** Words are split on whitespace
+  and on `;`, `&&`, `||`, `|`, `$(`, a backtick and `<(`; quoting is not
+  parsed. A program named by a variable (`p=node; $p -e x`), a name assembled
+  from pieces, or a flag built at run time is not seen. A `gh --jq` or `jq`
+  operand passes only as a bare field path (`.sha`, `.a.b`).
+- **Gate 1g environment names (D-2346).** The refusals are line patterns: a
+  variable-built name (`export "$n=..."`, `declare`, `printf -v`), any
+  `GITHUB_PATH` write, and any `GITHUB_ENV` write other than the two literal
+  `printf 'SOURCE_SCAN=%s\n'` and `'CARGO_TARGET_DIR=%s\n'` lines. A name
+  assembled across lines, or written through a file descriptor other than
+  `>> "$GITHUB_ENV"`, is not modelled.
+- **`cfg` evaluation (D-2340).** CI compiles x86-64 Linux with `test` and
+  `debug_assertions` each on or off; a `cfg` on a module, an inner `#![cfg]`
+  or an `include!` is evaluated over those four configurations. `feature`,
+  `doc`, `miri` and any name or key not listed in `cfg_pred` are refused
+  rather than guessed, so a future `#[cfg(feature = ..)] mod` needs that
+  function taught first.
+- **Workflow `run:` lines (D-2341).** Built tools are read from `run:` block
+  and single-line bodies, with heredoc bodies skipped by their terminator
+  word. A `<<` inside a quoted string can open a heredoc that never closes,
+  which hides later lines: the tool then reads as unbuilt and gate 1 refuses
+  it as an orphan, which fails closed.
+- **Build scripts (D-2347).** Gate 2 reads the production tokens of every
+  file a build script compiles. A directive whose value comes from a
+  format argument (`rustc-env=BRUTEX_COMMIT={commit}`) is checked by its
+  literal prefix only; the value is `build_provenance`'s 40-hex commit or
+  empty.
+- **Gate 1e on a worktree without `web/` (D-2345).** Not run locally for the
+  change that introduced it: this machine is shared and the full workspace
+  build and test is CI's job. What was run locally is recorded in D-2345.
+
 ## Audit fixer 7: body deadline, pull-run leg repeats, holes after an exit — D-1510 onward, 3 October 2026
 
 - **Body deadline (D-1510).** `BODY_READ_TIMEOUT` is 10 s from the moment

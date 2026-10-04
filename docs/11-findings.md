@@ -809,3 +809,93 @@ is unchanged.
   for the superseded Step-3 V1-V4 modules or a place for Benjamini-Hochberg,
   the V1 walk-forward overfit rate, the V3 walk-forward door or the V2/V3
   admission projections in the live chain (D-1568, D-1544 stand).
+
+### Audit 2026-10-03, fix worker 9 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **gaps-5** (out of sample and multiple comparisons across the pool): fixed by
+  the new verb `pool-oos`. D-1576, AFF-60.
+- **gaps-11** (discovery to qualification handoff): fixed. `pool-oos` writes
+  its held candidates as the catalog the qualification verbs read. D-1577,
+  AFF-61.
+- **gaps-10** (no API or page for Selection V6): fixed by
+  `/selection-v6.json` and `/selection`. Equities are refused with the
+  `CLAUDE.md` §1 sentence. D-1578, AFF-62.
+
+### Rust and O(1) sweep, 2026-10-04 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **OS-1, OS-2, OS-3** (`pool-oos` memory, training matrix, serial walks):
+  fixed. D-2300, AFG-01.
+- **OS-4** (`pool`'s union reopened the parent ledger per instrument): fixed.
+  D-2301, AFG-02.
+- **`cli::swept_rung` call-site count** made stale by D-1576: corrected.
+  D-2302.
+- **OS-5** (`/selection-v6.json` read every block and refused past 64): fixed by
+  paging. D-2303, AFG-03.
+- **OE-5** (sweep depth counted every level): fixed, O(1). D-2304, AFG-04.
+- **OE-2** (a fresh index vector per bootstrap draw): fixed, one buffer per
+  test. D-2305, AFG-05.
+- **OS-8** (recovery cloned a scope's windows per pending item): fixed.
+  D-2306.
+- **OE-3** (a day-window evaluation walked every signal row and period):
+  fixed by a per-day table, digest pinned to the old walk. D-2307, AFG-06.
+- **OE-4** (median heaps grew by doubling in the bar loop): fixed. D-2308.
+- **Owner-blocked, named and not guessed:** gaps-6 (split-adjustment
+  threshold needs a corporate-action source), gaps-7 (survivorship needs a
+  historical F&O membership source), gaps-8 (a fact only the owner has),
+  hunt-costs-5 and hunt-runner-5 (charter sources missing; D-1549 stands),
+  hunt-ci-1 (a branch-protection setting only the repository owner can
+  change), testgaps-7 (operator data not in the repository), and gaps-1 and
+  gaps-3 (no decision names where the unwired modules belong; D-1568 and
+  D-1544 stand).
+
+### Rust and O(1) sweep, data side — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above. Found by an auditor at
+`560ce8c`; each verified against the code before it was fixed.
+
+- **OD-1** (`pull::fold`, two diagnostics per bucket on a refused venue day,
+  inflating `cli::fold_audit`'s `withheld`): fixed. One line per day, one
+  session lookup per day. D-2370, AFG-70.
+- **OD-2** (two telemetry events per request-minute gap): fixed. One event,
+  at `Error`, naming the instrument. D-2371, AFG-71.
+- **OD-3** (store-writing doors claimed O(1)): fixed in the documentation;
+  the cost is `O(rows + log n_valid + blocks touched)`, UNVERIFIED as a
+  measurement. D-2372, AFG-72.
+- **OD-4** (unbounded per-target level prefix): fixed. Refused past 48 bytes.
+  D-2373, AFG-73.
+- **OD-5** (masters read in full to compare, rewritten when unchanged): fixed.
+  Length first, bounded chunked compare, mtime touch instead of a rewrite.
+  D-2374, AFG-74.
+- **OD-6** (lake file read with no cap): fixed. 64 MiB, derived rather than
+  sourced, refused before the read. D-2375, AFG-75.
+- **OD-7** (a heap allocation per sealed block per append): fixed. One stack
+  buffer; sidecar bytes proved unchanged. D-2376, AFG-76.
+
+### Language-purity gate sweep (sweep/gates-ro) — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above.
+
+- **RO-1** (a `cfg`-dead `mod` counted compiled): fixed. D-2340, AFG-40.
+- **RO-2** (any line mentioning rustc built a tool) and **RO-3** (Gate 0 read
+  workflows only): fixed. D-2341, AFG-41.
+- **RO-4** (inline programs past the first flag, other interpreters, awk,
+  jq): fixed; 71 inline awk programs in `ci.yml` are an exact pinned ratchet,
+  not yet moved into Rust. D-2342, AFG-42.
+- **RO-5** (spawns by variable, unlisted programs, `.github/*.rs`, no shell
+  stubs): fixed. D-2344, AFG-44.
+- **RO-6** (gate 1e did not move the front end aside): fixed in the gate;
+  the full run is CI's. D-2345.
+- **RO-7** (gate 1g's rustdoc, runtool and variable-built doors): fixed.
+  D-2346.
+- **RO-8** (split literals, CARGO_HOME, writes in build scripts): fixed.
+  D-2347, AFG-45.
+- **RO-9** (banned lists): fixed. D-2350, AFG-46.
+- **RO-10** (inline jq in auto-merge and main re-check): fixed by
+  `.github/gh_json.rs`. D-2343, AFG-43.
+- **rustonly2-5** (nested `.gitignore`/`.gitattributes`): fixed. D-2348.
+- **`.github/*.rs` without `#![forbid(unsafe_code)]`**: fixed, gate 16 layer
+  1c. D-2349.

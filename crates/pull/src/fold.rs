@@ -870,6 +870,13 @@ pub fn complete_minutes_with_calendar(
     let mut previous_end: Option<i64> = None;
     let mut previous_day: Option<i64> = None;
     let mut previous_tail: Option<(i64, i64)> = None;
+    // ONE CALENDAR AND SESSION LOOKUP PER DAY, NOT PER BUCKET (OD-1, D-2370).
+    // `(calendar, session)` of the day the previous bucket fell on; a bucket of
+    // the same day reuses it instead of re-deriving the venue's dated hours.
+    let mut day_state = (
+        crate::calendar::DayKind::Unmeasured,
+        crate::calendar::DayKind::Unmeasured,
+    );
     for bar in candidates {
         let start = bar.ts_micros;
         let end = start
@@ -877,15 +884,11 @@ pub fn complete_minutes_with_calendar(
             .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
         let (day, midnight) = ist_day_of(start)?;
         let new_day = previous_day != Some(day);
-        let calendar = runtime.kind_of(day);
+        if new_day {
+            day_state = day_session(day, venue, cash_schedule, runtime, &mut diagnostics);
+        }
+        let (calendar, session) = day_state;
         let exceptional = matches!(calendar, crate::calendar::DayKind::Open(s) if s != crate::calendar::Session::full());
-        let session = match minute_session(day, calendar, venue, cash_schedule) {
-            Ok(session) => session,
-            Err(why) => {
-                diagnostics.push(format!("bucket {start}: {why}; withheld"));
-                crate::calendar::DayKind::Unmeasured
-            }
-        };
         // Flush only the last observed day's scheduled tail before resetting.
         // No candidate exists for an entirely absent closing bucket, and no
         // timetable or request coverage is inferred for intervening days.
@@ -1009,12 +1012,43 @@ fn day_note(
     }
 }
 
-/// Whether [`day_note`] already named every bucket of this day.
+/// Whether [`day_note`] or [`day_session`] already named every bucket of this
+/// day. `Unmeasured` is reached here only when [`minute_session`] refused a
+/// calendar-open day (OD-1, D-2370): a day the calendar itself leaves
+/// unmeasured is skipped before this test.
 const fn day_is_withheld(session: crate::calendar::DayKind) -> bool {
     matches!(
         session,
-        crate::calendar::DayKind::OpenLengthUnmeasured | crate::calendar::DayKind::Closed
+        crate::calendar::DayKind::OpenLengthUnmeasured
+            | crate::calendar::DayKind::Closed
+            | crate::calendar::DayKind::Unmeasured
     )
+}
+
+/// The calendar kind and venue session of one IST day, looked up once for the
+/// day rather than once for each of its buckets (OD-1, D-2370). A day the venue
+/// cannot attest — NSE cash on or after 2026-08-03 with no dated eligibility
+/// schedule, or a schedule missing that day — is named in ONE line and its
+/// session is `Unmeasured`, which [`day_is_withheld`] withholds with no
+/// per-bucket line. Before D-2370 every bucket of such a day pushed two lines
+/// and re-derived the venue's hours, and `cli::fold_audit` counted `withheld`
+/// from that inflated total.
+fn day_session(
+    day: i64,
+    venue: crate::vendor::Venue,
+    cash_schedule: Option<&crate::cash_auction::Schedule>,
+    runtime: crate::calendar::Runtime<'_>,
+    diagnostics: &mut Vec<String>,
+) -> (crate::calendar::DayKind, crate::calendar::DayKind) {
+    let calendar = runtime.kind_of(day);
+    let session = match minute_session(day, calendar, venue, cash_schedule) {
+        Ok(session) => session,
+        Err(why) => {
+            diagnostics.push(format!("day {day}: {why}; derived buckets withheld"));
+            crate::calendar::DayKind::Unmeasured
+        }
+    };
+    (calendar, session)
 }
 
 fn session_minutes(session: crate::calendar::DayKind) -> i64 {

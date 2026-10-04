@@ -4373,6 +4373,38 @@ mod tests {
         }
     }
 
+    /// **AN EXPONENT MAY MOVE THE POINT EXACTLY `MAX_PRICE_TEXT` PLACES PAST
+    /// THE DIGITS, AND NOT ONE MORE (Gate 18, D-1464).**
+    ///
+    /// `number_text` refuses a point more than the bound outside the digits,
+    /// on either side, so an exponent like `1e999999999` can never ask it for
+    /// a billion zeros. Each edge is pinned here: the bound itself is shifted
+    /// exactly, one past it is `None`. Every mutant of that one comparison
+    /// line survived the price tests, which never reach either edge.
+    #[test]
+    fn an_exponent_shifts_the_point_up_to_the_bound_and_refuses_one_past_it() {
+        let bound = i64::try_from(brutex_core::price::MAX_PRICE_TEXT).expect("small");
+        let text =
+            |sent: String| number_text(&sent.parse::<serde_json::Number>().expect("a JSON number"));
+        let width = usize::try_from(bound).expect("small");
+        // "1e{k}": one digit, so the point sits at 1 + k.
+        assert_eq!(
+            text(format!("1e{}", -bound - 1)),
+            Some(format!("0.{}1", "0".repeat(width))),
+            "the point exactly the bound left of the digits"
+        );
+        assert_eq!(text(format!("1e{}", -bound - 2)), None, "one further left");
+        assert_eq!(
+            text(format!("-1e{bound}")),
+            Some(format!("-1{}", "0".repeat(width))),
+            "the point exactly the bound right of the digits"
+        );
+        assert_eq!(text(format!("1e{}", bound + 1)), None, "one further right");
+        let huge = "9".repeat(9);
+        assert_eq!(text(format!("1e{huge}")), None, "an exponent far right");
+        assert_eq!(text(format!("1e-{huge}")), None, "an exponent far left");
+    }
+
     /// **THE FOUR VALUES THAT COST FORTY-TWO RUNS**, each landing on the
     /// exchange's own price.
     ///

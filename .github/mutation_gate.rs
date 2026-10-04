@@ -2,6 +2,8 @@
 //! This CI-only executable has no dependencies and is built directly by rustc.
 //! It never excludes a mutation or credits a timeout as a caught mutation.
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;

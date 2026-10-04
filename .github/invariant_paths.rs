@@ -1,6 +1,8 @@
 //! Checks the document's named tests against their explicitly recorded files.
 //! The source declaration index is supplied by Gate 10's existing scanner.
 
+#![forbid(unsafe_code)]
+
 use std::collections::HashSet;
 use std::process::ExitCode;
 

@@ -137,16 +137,16 @@ fn tail_rule_bp(rules: crate::Rules) -> i64 {
 }
 
 /// One instrument's pass-1 outcome: the run `range-rung` would have made.
-struct Screened {
-    symbol: String,
-    outcome: Result<crate::results::Record, String>,
+pub(crate) struct Screened {
+    pub(crate) symbol: String,
+    pub(crate) outcome: Result<crate::results::Record, String>,
 }
 
 /// One `(combination, side)` the union holds, in first-seen order.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct Candidate {
-    words: [u64; 6],
-    direction: Direction,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Candidate {
+    pub(crate) words: [u64; 6],
+    pub(crate) direction: Direction,
 }
 
 /// What one candidate did on one instrument: the cell the screen would have
@@ -431,7 +431,7 @@ fn run_under(
 /// banner (D-0696).
 /// A surface with only misfiled holdings refuses with these blocks before
 /// the opening is built. A store with no such holdings remains a page.
-fn head_under(
+pub(crate) fn head_under(
     root: &std::path::Path,
     vendor_word: &str,
     rung: &str,
@@ -514,7 +514,7 @@ fn not_walked(out: &mut String, unoffered: &str) {
 
 /// `usize` as the `u64` a telemetry field takes, saturating rather than
 /// wrapping on a platform where that could differ.
-fn count(n: usize) -> u64 {
+pub(crate) fn count(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
 
@@ -541,7 +541,7 @@ fn count(n: usize) -> u64 {
 /// mark of how far the instrument ran, so this names every instrument with
 /// its own reason, claims nothing about what ran, and ends with `unread`,
 /// the head's two blocks.
-fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
+pub(crate) fn at_least_one_screened(screened: &[Screened], unread: &str) -> Result<(), String> {
     if screened.is_empty() || screened.iter().any(|s| s.outcome.is_ok()) {
         return Ok(());
     }
@@ -724,7 +724,7 @@ fn opening(
     out
 }
 
-fn render_per_symbol(out: &mut String, screened: &[Screened]) {
+pub(crate) fn render_per_symbol(out: &mut String, screened: &[Screened]) {
     use crate::columns::{left, right};
     let _ = writeln!(out, "\n  PASS 1 -- PER SYMBOL, each on its own bars");
     // SORTED BY THE MONEY, not by name: the smallest drawdown first, then the
@@ -819,7 +819,9 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
 /// `result_set::committed_receipt`, which opens the results ledger and the
 /// receipt sidecar afresh and indexes both in full: O(L + R) per call, so this
 /// loop was O(I × (L + R)) while the module header said nothing here scanned
-/// the store (W2-cli9-0, D-1703). The parents are now admitted ONCE, through
+/// the store (W2-cli9-0, D-1703; the base fixed it too, sweep audit OS-4,
+/// D-2301, and the base's code is the one kept, D-2105). The parents are now
+/// admitted ONCE, through
 /// [`crate::result_set::CommittedParents`], and each instrument's receipt is
 /// one expected-O(1) probe of that snapshot followed by
 /// `Frontier::of_run_against_receipt`, which applies the same commit and
@@ -830,26 +832,36 @@ fn render_per_symbol(out: &mut String, screened: &[Screened]) {
 /// instrument, plus one `HashSet` insert per row. The single admission is
 /// proved by `crate::pool::tests::the_union_admits_the_parent_ledger_once_not_once_per_instrument`
 /// (invariant L1A-05); the per-row terms are UNVERIFIED by any bench.
-fn union_of(
+pub(crate) fn union_of(
     root: &std::path::Path,
     screened: &[Screened],
 ) -> (Vec<Candidate>, Vec<(String, String)>) {
     let mut seen: HashSet<Candidate> = HashSet::new();
     let mut union: Vec<Candidate> = Vec::new();
     let mut unread: Vec<(String, String)> = Vec::new();
-    let opened = Frontier::open_read(root)
-        .map_err(|why| format!("frontier not opened: {why}"))
-        .and_then(|frontier| {
-            crate::result_set::CommittedParents::open_read_bounded(root, u64::MAX)
-                .map(|parents| (frontier, parents))
-                .map_err(|why| format!("committed parents not read: {why}"))
-        });
-    let (mut frontier, mut parents) = match opened {
-        Ok(both) => both,
+    let mut frontier = match Frontier::open_read(root) {
+        Ok(f) => f,
         Err(why) => {
             for s in screened {
                 if s.outcome.is_ok() {
-                    unread.push((s.symbol.clone(), why.clone()));
+                    unread.push((s.symbol.clone(), format!("frontier not opened: {why}")));
+                }
+            }
+            return (union, unread);
+        }
+    };
+    // THE PARENTS ARE OPENED ONCE. `Frontier::of_run` on a read-only handle
+    // cold-opens the results ledger and the receipt sidecar on every call --
+    // O(history) each -- so a pool over 210 instruments paid that 210 times.
+    // One snapshot here makes each instrument one hash probe in each parent
+    // plus its own rows (sweep audit OS-4, D-2301). The proof is the same
+    // committed-receipt gate the API's detail readers use.
+    let mut parents = match crate::result_set::CommittedParents::open_read_bounded(root, u64::MAX) {
+        Ok(parents) => parents,
+        Err(why) => {
+            for s in screened {
+                if s.outcome.is_ok() {
+                    unread.push((s.symbol.clone(), format!("parent ledger not opened: {why}")));
                 }
             }
             return (union, unread);
@@ -859,13 +871,14 @@ fn union_of(
         let Ok(record) = &s.outcome else {
             continue;
         };
-        let read = parents.committed(&record.identity).and_then(|committed| {
-            frontier.of_run_against_receipt(
-                &record.identity,
-                committed.map(|committed| committed.receipt),
-            )
-        });
-        match read {
+        let receipt = match parents.committed(&record.identity) {
+            Ok(committed) => committed.map(|committed| committed.receipt),
+            Err(why) => {
+                unread.push((s.symbol.clone(), why));
+                continue;
+            }
+        };
+        match frontier.of_run_against_receipt(&record.identity, receipt) {
             Ok((rows, damage)) => {
                 if let Some(why) = damage {
                     unread.push((s.symbol.clone(), why));
@@ -943,6 +956,72 @@ fn price_all(
     to: (u16, u8),
     union: &[Candidate],
 ) -> Result<Vec<Priced>, String> {
+    let PreparedSpan {
+        bars,
+        column,
+        horizon,
+        rules,
+    } = prepare_span(root, vendor, underlying, rung, from, to)?;
+    let bars = bars.as_slice();
+    let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
+    let stop_rungs = crate::stop_ladder_ppm(bars, hold);
+    let levels = grid::Levels {
+        rungs: crate::grid_rungs(bars),
+        step_ppm: Some(crate::grid_step_ppm(bars, hold)),
+        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
+        ratios: true,
+        stops_ppm: &stop_rungs,
+    };
+    let facts = runner::trade::SliceFacts::of(bars, &column);
+    Ok(union
+        .iter()
+        .map(|candidate| {
+            let mask = vocab::ConditionMask::from_words(candidate.words);
+            let side = match candidate.direction {
+                Direction::Long => runner::excursion::Side::Long,
+                Direction::Short => runner::excursion::Side::Short,
+            };
+            let g = grid::evaluate_over(bars, &column, &mask, horizon, side, levels, &facts);
+            crate::shown_cell(&g, rules)
+                .map(|(cell, _admitted)| cell)
+                .filter(|cell| cell.trades > 0)
+        })
+        .collect())
+}
+
+/// One instrument's span over one month range, prepared exactly as the screen
+/// prepares one and projected onto the series its trades fill on: the 1-minute
+/// execution bars at a coarser rung, the signal bars themselves at 1min.
+///
+/// Lifted out of [`price_all`] so `pool-oos` prepares its training and later
+/// spans through the same sequence, rather than a second copy of it that could
+/// drift (D-1576). Pass 2 already priced on the execution series and `pool-oos`
+/// walked the signal bars, which is the drift D-1576 was written against; the
+/// projection lives here so both read it (D-2105).
+/// `the_pool_prepares_projects_and_prices_in_order_inside_price_all` pins the
+/// sequence.
+pub(crate) struct PreparedSpan {
+    /// The bars trades fill on, after interior-gap days are withheld.
+    pub(crate) bars: Vec<indicators::Candle>,
+    /// One condition row per bar of [`Self::bars`], projected from the signal
+    /// column.
+    pub(crate) column: indicators::column::Column,
+    /// The holding period, in execution bars, these bars imply.
+    pub(crate) horizon: runner::outcome::Horizon,
+    /// The floors, measured on the series positions fill on.
+    pub(crate) rules: crate::Rules,
+}
+
+/// [`PreparedSpan`] for one instrument, rung and month range, or the reason it
+/// could not be prepared. Nothing is substituted for a refused step.
+pub(crate) fn prepare_span(
+    root: &std::path::Path,
+    vendor: brutex_core::vendor::Vendor,
+    underlying: &str,
+    rung: &'static str,
+    from: (u16, u8),
+    to: (u16, u8),
+) -> Result<PreparedSpan, String> {
     let native = rung == crate::EXECUTION_RUNG;
     let mut span = stored::load_span(root, vendor, underlying, rung, from, to)?;
     let signal_length = stored::rung_length_micros(rung)?;
@@ -1000,34 +1079,16 @@ fn price_all(
     // reading, the floors from the series positions fill on.
     let horizon = crate::horizon_for(&span.bars, execution.is_some());
     let rules = crate::Rules::derived(crate::floors_measured_on(&span.bars, execution), horizon);
-    let (trade_bars, trade_column, _note) =
-        crate::project_onto_execution(&span.bars, &column, execution, native, horizon)
-            .map_err(|why| format!("pass 2 could not project onto the execution series: {why}"))?;
-    let bars = trade_bars.as_slice();
-    let hold = usize::try_from(horizon.as_bars()).unwrap_or(usize::MAX);
-    let stop_rungs = crate::stop_ladder_ppm(bars, hold);
-    let levels = grid::Levels {
-        rungs: crate::grid_rungs(bars),
-        step_ppm: Some(crate::grid_step_ppm(bars, hold)),
-        forced: (rules.max_mae_ppm > 0).then_some(rules.max_mae_ppm),
-        ratios: true,
-        stops_ppm: &stop_rungs,
-    };
-    let facts = runner::trade::SliceFacts::of(bars, &trade_column);
-    Ok(union
-        .iter()
-        .map(|candidate| {
-            let mask = vocab::ConditionMask::from_words(candidate.words);
-            let side = match candidate.direction {
-                Direction::Long => runner::excursion::Side::Long,
-                Direction::Short => runner::excursion::Side::Short,
-            };
-            let g = grid::evaluate_over(bars, &trade_column, &mask, horizon, side, levels, &facts);
-            crate::shown_cell(&g, rules)
-                .map(|(cell, _admitted)| cell)
-                .filter(|cell| cell.trades > 0)
-        })
-        .collect())
+    let (bars, column, _note) = crate::project_onto_execution(
+        &span.bars, &column, execution, native, horizon,
+    )
+    .map_err(|why| format!("the span could not be projected onto the execution series: {why}"))?;
+    Ok(PreparedSpan {
+        bars,
+        column,
+        horizon,
+        rules,
+    })
 }
 
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
@@ -1259,7 +1320,7 @@ fn ratio_cell(bp: i128) -> String {
 }
 
 /// The six mask words as hex, so a row can be matched to a frontier row.
-fn mask_hex(words: [u64; 6]) -> String {
+pub(crate) fn mask_hex(words: [u64; 6]) -> String {
     let mut out = String::with_capacity(6 * 17);
     for (i, w) in words.iter().enumerate() {
         if i > 0 {
@@ -2811,8 +2872,8 @@ mod tests {
         }
     }
 
-    /// **`price_all` prepares, projects and prices in order, inside its own
-    /// body.** W2-cli9-4, D-1702.
+    /// **`prepare_span` prepares and projects in order, and `price_all` prices
+    /// only what it returns.** W2-cli9-4, D-1702, D-2105.
     ///
     /// This was `the_pool_prepares_a_span_exactly_as_the_screen_does`, and it
     /// proved less than its name: both searches were unbounded `find`s, so
@@ -2821,12 +2882,13 @@ mod tests {
     /// on text outside what it pinned. The equivalence it claimed is now
     /// proved by behaviour, in
     /// `the_pool_prices_a_span_exactly_where_the_audit_path_does`. What stays
-    /// here is the order of `price_all`'s own steps, each searched only within
-    /// `price_all`'s body, ending in the projection and the pricing over the
-    /// projected column.
+    /// here is the order of the steps, each searched only within its own
+    /// function's body: preparation and projection in `prepare_span`, which
+    /// `pool-oos` shares since D-1576, and pricing over the projected column in
+    /// `price_all`.
     #[test]
     fn the_pool_prepares_projects_and_prices_in_order_inside_price_all() {
-        const SEQUENCE: [&str; 12] = [
+        const PREPARE: [&str; 10] = [
             "stored::load_span(",
             "stored::rung_length_micros(",
             "validate_one_minute_execution(",
@@ -2836,31 +2898,48 @@ mod tests {
             "crate::StoredPreparationBuild { rung, commit: None }",
             "horizon_for(",
             "floors_measured_on(",
-            "project_onto_execution(",
-            "SliceFacts::of(bars, &trade_column)",
-            "evaluate_over(bars, &trade_column,",
+            "project_onto_execution(&span.bars, &column,",
+        ];
+        const PRICE: [&str; 3] = [
+            "prepare_span(root, vendor, underlying, rung, from, to)?",
+            "SliceFacts::of(bars, &column)",
+            "evaluate_over(bars, &column,",
         ];
         let pool = include_str!("pool.rs");
-        let from = pool.find("\nfn price_all(").expect("the pool prices");
-        let body = pool
-            .get(from..)
-            .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
-            .expect("price_all's body");
-        let mut last = 0;
-        for step in SEQUENCE {
-            let at = body
-                .get(last..)
-                .and_then(|rest| rest.find(step))
-                .map(|i| i + last);
-            assert!(
-                at.is_some(),
-                "`{step}` must appear in price_all's body after the previous step"
-            );
-            last = at.expect("asserted above");
+        let body_of = |head: &str| {
+            let from = pool.find(head).expect("the function exists");
+            pool.get(from..)
+                .and_then(|rest| rest.find("\n}\n").and_then(|to| rest.get(..to)))
+                .expect("its body")
+        };
+        for (head, sequence) in [
+            ("\npub(crate) fn prepare_span(", &PREPARE[..]),
+            ("\nfn price_all(", &PRICE[..]),
+        ] {
+            let body = body_of(head);
+            let mut last = 0;
+            for step in sequence {
+                let at = body
+                    .get(last..)
+                    .and_then(|rest| rest.find(step))
+                    .map(|i| i + last);
+                assert!(
+                    at.is_some(),
+                    "`{step}` must appear in `{head}`'s body after the previous step"
+                );
+                last = at.expect("asserted above");
+            }
         }
+        let prepare = body_of("\npub(crate) fn prepare_span(");
+        let projected = prepare
+            .find("let (bars, column, _note) =")
+            .expect("the projection rebinds the bars and the column");
+        let returned = prepare
+            .find("Ok(PreparedSpan {")
+            .expect("the span is returned");
         assert!(
-            !body.contains("evaluate_over(bars, &column,"),
-            "pass 2 must never price the unprojected signal column"
+            projected < returned,
+            "a prepared span must carry the projected series, never the signal column"
         );
     }
 
@@ -3206,9 +3285,9 @@ mod tests {
             })
             .collect();
         screened.insert(2, refused_row("REFUSEDSYM"));
-        let before = crate::results::opens_on_this_thread();
+        crate::results::OPENS.with(|n| n.set(0));
         let (union, unread) = super::union_of(&root, &screened);
-        let opens = crate::results::opens_on_this_thread() - before;
+        let opens = crate::results::OPENS.with(std::cell::Cell::get);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(opens, 1, "one ledger index build for five instruments");
         assert!(unread.is_empty(), "{unread:?}");
@@ -3289,7 +3368,7 @@ mod tests {
         assert!(union.is_empty());
         assert_eq!(unread.len(), 1, "{unread:?}");
         let (_, why) = unread.first().expect("one named instrument");
-        assert!(why.starts_with("committed parents not read:"), "{unread:?}");
+        assert!(why.starts_with("parent ledger not opened:"), "{unread:?}");
     }
 
     /// The cell the AUDIT PATH would price for `mask` and `side` on

@@ -1981,6 +1981,8 @@ impl BarFile {
     /// by the file. A batch landing wholly inside one block seals one block; the
     /// re-read is that block's covered bytes, which is at most one block. There
     /// is no walk of the file and no read of a block this append did not reach.
+    /// It allocates nothing: every block is re-read into one 4,088-byte stack
+    /// buffer (OD-7, D-2376), where it used to be one heap `Vec` per block.
     ///
     /// # Errors
     ///
@@ -2014,6 +2016,14 @@ impl BarFile {
             .unwrap_or_else(PoisonError::into_inner)
             .block = NO_BLOCK;
 
+        // ONE STACK BUFFER FOR EVERY BLOCK THIS APPEND SEALS (OD-7, D-2376).
+        // This was a zeroed heap vector per block inside the loop: one allocation per
+        // sealed block per append, on the write path. Every geometry's block
+        // fits `MAX_BLOCK_LEN` (the `const` assertion above it), so the covered
+        // range goes into this array through `slice_of`, which refuses a span
+        // past it by name rather than truncating. The bytes read and the CRC
+        // sealed are unchanged; only where they are held moved.
+        let mut room = [0u8; MAX_BLOCK_LEN];
         for block in first..last {
             // BLOCK FIRST, COUNTER SECOND — and `block::seal` below takes them
             // the OTHER WAY ROUND. Two adjacent `u64`s in each signature, so a
@@ -2032,15 +2042,10 @@ impl BarFile {
                 self.layout.covered_byte_range(block, n_valid),
                 &self.bars_path,
             )?;
-            let span =
-                usize::try_from(end.saturating_sub(start)).map_err(|_| StoreError::Format {
-                    path: self.bars_path.clone(),
-                    source: FormatError::OffsetOverflow,
-                })?;
-            let mut bytes = vec![0u8; span];
-            read_fully(&self.bars, &self.bars_path, start, &mut bytes)?;
+            let bytes = slice_of(&mut room, end.saturating_sub(start), block, &self.bars_path)?;
+            read_fully(&self.bars, &self.bars_path, start, bytes)?;
             let sum = refused(
-                crate::block::seal(self.layout, n_valid, block, &bytes),
+                crate::block::seal(self.layout, n_valid, block, bytes),
                 &self.bars_path,
             )?;
             // FOUR BYTES AT `block * 4`. The sidecar is addressed by arithmetic
