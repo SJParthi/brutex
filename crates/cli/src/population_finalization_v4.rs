@@ -2715,13 +2715,14 @@ fn read_record_at(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Finalization V4 record";
+
 fn append_raw(
     file: &mut File,
     raw: &[u8; RECORD_BYTES],
 ) -> Result<(), PopulationFinalizationV4Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Finalization V4 record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root(
@@ -3244,6 +3245,40 @@ mod tests {
                 .expect("reuse Finalization V4");
         assert!(matches!(&reused, PopulationFinalizationV4Commit::Reused(_)));
         assert_eq!(reused.into_authority().structural_receipt(), receipt);
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let admission_root = TestRoot::new("rollback-admission");
+        let finalization_root = TestRoot::new("rollback-finalization");
+        let mut source = admission(
+            admission_root.path(),
+            AdmissionV4FamilyTerminal::Evaluated,
+            AdmissionV4FamilyTerminal::NaturallyExtinct,
+            44,
+        );
+        let prepared =
+            prepare_population_finalization_v4(&mut source).expect("prepare Finalization");
+        let records = encoded_block(&prepared, 0).expect("encode Finalization block");
+        write_prefix(finalization_root.path(), &records, 2);
+        crate::append_rollback::tests::inject_short_write(
+            &finalization_root.path().join(DATA_FILE),
+            APPEND_LABEL,
+            RECORD_BYTES,
+        );
+        let committed =
+            commit_population_finalization_v4(finalization_root.path(), bounds(), source)
+                .expect("the next append completes the exact prefix after the rollback");
+        assert!(matches!(
+            committed,
+            PopulationFinalizationV4Commit::Written(_)
+        ));
+        assert_eq!(
+            std::fs::metadata(finalization_root.path().join(DATA_FILE))
+                .expect("stat completed Finalization data")
+                .len(),
+            HEADER_BYTES as u64 + 6 * RECORD_BYTES as u64
+        );
     }
 
     #[test]

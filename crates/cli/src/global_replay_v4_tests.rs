@@ -538,3 +538,34 @@ fn genuine_stored_oos_witness_reaches_private_projection_and_chronological_sched
     })
     .expect("real stored-origin OOS capability");
 }
+
+/// GAP15-18, D-1637: the candidate budget leaves room for the VIX row every
+/// admitted priceable decision writes, so the pre-replay check is sufficient.
+#[test]
+fn the_candidate_budget_reserves_three_records_per_candidate() {
+    for (records, selected) in [
+        (10_u64, 0_u64),
+        (13, 0),
+        (1_024, 0),
+        (1_024, 200),
+        (u64::MAX, 200),
+        (u64::MAX, u64::MAX - 10),
+    ] {
+        let budget = candidate_budget(records, selected).expect("room for the roster");
+        let worst = budget
+            .checked_mul(RECORDS_PER_CANDIDATE)
+            .and_then(|rows| rows.checked_add(selected + 10))
+            .expect("worst case fits u64");
+        assert!(worst <= records, "{records} records, {selected} selected");
+        assert!(
+            worst
+                .checked_add(RECORDS_PER_CANDIDATE)
+                .is_none_or(|next| next > records),
+            "the budget is the largest that fits"
+        );
+    }
+    assert_eq!(candidate_budget(1_024, 0), Ok(338));
+    assert!(candidate_budget(9, 0).is_err());
+    assert!(candidate_budget(209, 200).is_err());
+    assert!(candidate_budget(u64::MAX, u64::MAX).is_err());
+}

@@ -1523,9 +1523,14 @@ mod tests {
             absorb(&mut digest, [truth, known]);
         }
         assert!(gap_known > 0, "the gap family was never available");
+        // RE-TAKEN for D-1542 and D-1543, which change the trend averages'
+        // seed and five candlestick predicates on every bar; the digest covers
+        // all 384 positions, so it moved. The gap family's own count, 4,092,
+        // did not, and `complete_sessions_emit_exactly_what_the_three_bar_fold_emitted`
+        // above still pins the gap family alone. Was 8_217_985_476_958_011_973.
         assert_eq!(
             (digest, gap_known),
-            (8_217_985_476_958_011_973, 4_092),
+            (9_976_369_688_448_099_888, 4_092),
             "complete sessions no longer emit what the three-bar fold emitted"
         );
     }

@@ -16,7 +16,7 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
-use store::open_flags::{O_NOFOLLOW, O_NONBLOCK};
+use store::open_flags::{O_NOFOLLOW, O_NOFOLLOW_NONBLOCK, O_NONBLOCK};
 
 /// The x86_64-only no-follow bit, built so this file does not spell it.
 const X86_BIT: u64 = 1 << 17;
@@ -47,6 +47,17 @@ fn aarch64_linux_nofollow_is_not_the_x86_bit() {
 fn macos_values_are_the_sdk_ones() {
     assert_eq!(O_NOFOLLOW, 0x0100);
     assert_eq!(O_NONBLOCK, 0x0004);
+}
+
+/// The combined literal is exactly the union of the two per-target flags, and
+/// the two share no bit -- which is why it is a literal: over disjoint bits `|`
+/// and `^` agree, so an `O_NOFOLLOW | O_NONBLOCK` expression carried an
+/// equivalent mutant no test could kill (D-0192).
+#[test]
+fn the_combined_flag_is_the_disjoint_union_of_the_two() {
+    assert_eq!(O_NOFOLLOW & O_NONBLOCK, 0, "the two flags share a bit");
+    assert_eq!(O_NOFOLLOW_NONBLOCK, O_NOFOLLOW | O_NONBLOCK);
+    assert_eq!(O_NOFOLLOW_NONBLOCK & !(O_NOFOLLOW | O_NONBLOCK), 0);
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

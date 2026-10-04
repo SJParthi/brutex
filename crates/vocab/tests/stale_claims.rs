@@ -299,7 +299,7 @@ fn every_test_a_corrected_row_cites_exists() {
     }
 }
 
-/// UC-6, AC-gates-o1-4, AC-whp-tb-6, AC-whp-tb-7, ET-o1-proof-coverage-8,
+/// UC-6, AC-gates-o1-4 (its `grid_entered_event` half too, D-1486), AC-whp-tb-6, AC-whp-tb-7, ET-o1-proof-coverage-8,
 /// ET-strategies-trades-ranking-costs-9, R9-csr-o1-0: the false sentences, as
 /// they were written, do not come back.
 #[test]
@@ -316,6 +316,10 @@ fn the_corrected_sentences_do_not_return() {
         (
             "crates/cli/src/lib.rs",
             "this crate holds no loop over bars and none over candidates",
+        ),
+        (
+            "crates/cli/src/lib.rs",
+            "holding no loop over bars and none over candidates",
         ),
         (
             "docs/06-limits.md",

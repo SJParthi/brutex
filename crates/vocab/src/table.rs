@@ -1641,64 +1641,43 @@ const fn home(hash: u64) -> usize {
     (hash & (NAME_SLOTS as u64 - 1)) as usize
 }
 
-/// Byte equality usable in a `const` context.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "every index is bounded by its loop condition, and this is \
-              evaluated at compile time, where an out-of-range index is a \
-              build error rather than a runtime panic"
-)]
-const fn same(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 /// Every row's name, open-addressed by FNV-1a with linear probing; each
 /// occupied slot holds `row + 1`, and `0` is empty. Built at compile time.
 /// A name held by two rows keeps the lower row, which is what a scan of
-/// [`TABLE`] in row order finds first.
+/// [`TABLE`] in row order finds first: rows are inserted in row order, so the
+/// lower one takes the earlier slot on the shared probe and [`index_of`] stops
+/// there. No comparison is needed to get that, and none is made -- a
+/// duplicate-name branch here compared nothing any table could observe, and
+/// Gate 18 found its `held - 1` to `held / 1` mutant surviving.
+static NAME_INDEX: [u16; NAME_SLOTS] = name_index(&TABLE);
+
+/// [`NAME_INDEX`] over any `table`, so the duplicate-name rule above is tested
+/// on a table that has a duplicate, which [`TABLE`] does not.
 #[expect(
     clippy::indexing_slicing,
     reason = "every index is bounded by its loop condition, and this is \
               evaluated at compile time, where an out-of-range index is a \
               build error rather than a runtime panic"
 )]
-static NAME_INDEX: [u16; NAME_SLOTS] = {
+const fn name_index(table: &[BitDef]) -> [u16; NAME_SLOTS] {
     let mut slots = [0_u16; NAME_SLOTS];
     let mut row = 0;
-    while row < COUNT {
-        let name = TABLE[row].name.as_bytes();
-        let mut at = home(fnv1a(name));
-        loop {
-            let held = slots[at] as usize;
-            if held == 0 {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "COUNT is far below u16::MAX"
-                )]
-                {
-                    slots[at] = (row + 1) as u16;
-                }
-                break;
-            }
-            if same(TABLE[held - 1].name.as_bytes(), name) {
-                break;
-            }
+    while row < table.len() {
+        let mut at = home(fnv1a(table[row].name.as_bytes()));
+        while slots[at] != 0 {
             at = (at + 1) & (NAME_SLOTS - 1);
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "COUNT is far below u16::MAX"
+        )]
+        {
+            slots[at] = (row + 1) as u16;
         }
         row += 1;
     }
     slots
-};
+}
 
 /// The position whose name is `name`, tombstone or not.
 ///
@@ -1902,6 +1881,29 @@ mod tests {
     /// padded name, a decimal, and tokens one byte and 4 KiB past the longest
     /// name. Measured probe lengths are pinned: the worst hit and the worst
     /// miss over every slot a token can hash to.
+    /// **A name held by two rows resolves to the lower row.** [`TABLE`] has
+    /// no duplicate, so this builds [`name_index`] over a table that does:
+    /// rows 0 and 2 share a name and row 1 sits between them. Walking the
+    /// shared probe from the name's home, the first slot naming it holds row
+    /// 0, and row 2 is still indexed further along, so no row is lost.
+    #[test]
+    #[expect(clippy::indexing_slicing, reason = "slots are masked into range")]
+    fn a_name_held_by_two_rows_resolves_to_the_lower_row() {
+        let table = [plain(0, "twice"), plain(1, "between"), plain(2, "twice")];
+        let slots = name_index(&table);
+        assert_eq!(slots.iter().filter(|&&slot| slot != 0).count(), 3);
+        let mut at = home(fnv1a(b"twice"));
+        let mut rows = Vec::new();
+        while slots[at] != 0 {
+            let row = usize::from(slots[at] - 1);
+            if table[row].name == "twice" {
+                rows.push(row);
+            }
+            at = (at + 1) & (NAME_SLOTS - 1);
+        }
+        assert_eq!(rows, [0, 2]);
+    }
+
     #[test]
     fn every_name_is_found_by_its_index_and_no_other_token_is() {
         let mut worst_hit = 0;

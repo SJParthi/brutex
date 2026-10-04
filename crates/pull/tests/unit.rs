@@ -8141,3 +8141,58 @@ fn the_governor_clock_is_monotonic() {
         last = now;
     }
 }
+
+/// **AND IT MOVES.** A clock that never steps back is satisfied by a constant;
+/// the governor needs one that advances by the time that actually passed, or
+/// every reservation is made at one frozen instant. Bracketed by an
+/// [`std::time::Instant`] measurement, the reading's advance is at least the
+/// measured interval, less one microsecond for each reading's truncation.
+#[test]
+fn the_governor_clock_advances_by_the_time_that_passed() {
+    let before = pull::rate::monotonic_micros();
+    let measured = std::time::Instant::now();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let elapsed = u64::try_from(measured.elapsed().as_micros()).expect("a few milliseconds");
+    let after = pull::rate::monotonic_micros();
+    assert!(elapsed >= 3_000, "slept {elapsed} us");
+    let advanced = after.checked_sub(before).expect("never steps back");
+    assert!(
+        advanced.saturating_add(1) >= elapsed,
+        "clock advanced {advanced} us across a measured {elapsed} us ({before} -> {after})"
+    );
+}
+
+/// **No manifest doc calls a hash probe a worst-case constant.** v4-1, D-1488.
+///
+/// `Manifest::entry`, `Manifest::closes` and `Manifest::record` are each one
+/// probe or insert into a `HashMap`, which is expected O(1) and not an
+/// adversarial worst-case bound (`CLAUDE.md` §3 rule 4). Four doc sentences
+/// said "O(1) worst case"; api's `merge.rs` had the same claim and
+/// `no_comment_claims_a_worst_case_constant_probe` removed it there. This reads
+/// the source, flattened, so a re-wrapped copy is caught as well. It reads
+/// text and times nothing: the probe's cost is **UNVERIFIED as a measurement**
+/// here, and C-12 in `crates/pull/benches/ratio.rs` is what measures it.
+#[test]
+fn no_manifest_doc_claims_a_worst_case_constant_probe() {
+    let source = include_str!("../src/manifest.rs")
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let source = source.replace("/// ", "").replace("//! ", "");
+    for claim in ["o(1) worst case", "lookup — o(1) worst"] {
+        assert!(
+            !source.contains(claim),
+            "manifest.rs claims {claim:?} again"
+        );
+    }
+    for kept in [
+        "lookup — expected o(1).",
+        "**expected o(1)**, the same bound",
+    ] {
+        assert!(
+            source.contains(kept),
+            "the expected-cost statement {kept:?} is kept"
+        );
+    }
+}

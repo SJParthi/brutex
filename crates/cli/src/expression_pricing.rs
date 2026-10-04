@@ -121,6 +121,9 @@ pub(crate) struct Prepared {
     pub plan: Plan,
     pub execution_note: String,
     facts: SliceFacts,
+    /// `runner::identity::data_digest(&bars)`, once. `Prepared` is only ever
+    /// lent immutably to the search, so the bars cannot change under it.
+    execution_digest: [u8; 32],
 }
 impl Prepared {
     pub(crate) fn new(
@@ -130,12 +133,14 @@ impl Prepared {
         execution_note: String,
     ) -> Self {
         let facts = SliceFacts::of(&bars, &column);
+        let execution_digest = runner::identity::data_digest(&bars);
         Self {
             bars,
             column,
             plan,
             execution_note,
             facts,
+            execution_digest,
         }
     }
     pub(crate) fn capture(
@@ -144,8 +149,14 @@ impl Prepared {
         attempt: &crate::sweep_evidence::Attempt,
         expression: &Expression,
     ) -> Result<(), String> {
-        let capture =
-            Capture::begin_expression(root, attempt, &self.bars, &self.column, expression)?;
+        let capture = Capture::begin_expression_with_digest(
+            root,
+            attempt,
+            &self.bars,
+            &self.column,
+            expression,
+            self.execution_digest,
+        )?;
         let tier = capture.tier(self.plan.tier())?;
         let mask = expression.referenced();
         for direction in [costs::fill::Direction::Long, costs::fill::Direction::Short] {

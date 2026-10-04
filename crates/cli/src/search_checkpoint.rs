@@ -94,6 +94,7 @@ impl Snapshot {
         if !matches!(
             format,
             "and-checkpoint-v1"
+                | "and-checkpoint-v2"
                 | "expression-search-v1"
                 | "boolean-campaign-v1"
                 | "boolean-grammar-v1"
@@ -314,6 +315,8 @@ fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
     let temporary = directory.join("complete.tmp");
     let written = (|| {
         let mut marker = File::create_new(&temporary)?;
+        #[cfg(test)]
+        tests::marker_created(directory.parent().unwrap_or(directory));
         marker.write_all(&seal)?;
         marker.sync_all()?;
         #[cfg(test)]

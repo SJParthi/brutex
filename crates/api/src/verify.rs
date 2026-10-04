@@ -30,10 +30,14 @@
 //!
 //! # Cost
 //!
-//! O(1) per entry — one open, one header read, two record reads at computed
-//! offsets, none of which grows with the size of the file or the store. Walking
-//! every entry is inherent: you cannot verify a store you do not look at. The
-//! per-operation bound `CLAUDE.md` §3 rule 4 fixes is the one this holds.
+//! Per held entry, one open, one header read and two record reads at computed
+//! offsets, none of which grows with the size of the file. Before that,
+//! `Manifest::newest` walks the census's whole append log once to find the
+//! newest write of each key: O(log length). So one scrub is O(log length +
+//! E_v) with E_v file opens, and it runs on the request's own task, blocking
+//! that runtime worker for the whole walk (`docs/06-limits.md`, W1-api5-7 and
+//! D-1501). This said "O(1) per entry" and named no log walk until D-1501
+//! (W1-api6-0).
 //!
 //! **UNVERIFIED as a measurement.** The bound is argued from the
 //! shape of the code and no bench in this workspace times it.
@@ -65,7 +69,10 @@ pub struct Report {
     pub vendor: Option<Vendor>,
     /// Every finding, counted.
     pub tally: Tally,
-    /// The first [`MAX_NAMED`] disagreements, in the order the census holds them.
+    /// The first [`MAX_NAMED`] entries that did not agree, newest write first:
+    /// `Manifest::newest` walks the census's append log backward, so this is
+    /// the reverse of append order. It said "in the order the census holds
+    /// them" until D-1501 (c4a-9).
     pub named: Vec<String>,
     /// Disagreements past [`MAX_NAMED`] that this answer does not quote.
     pub undrawn: u64,
@@ -106,12 +113,31 @@ impl Report {
                 t.seen()
             );
         }
+        // A MONTH A WRITER HELD WAS NOT CHECKED, AND IS NOT A DISAGREEMENT
+        // (W1-api6-7, D-1501). It used to be counted as unreadable and fall into
+        // the sentence below, which tells the operator the disk disagrees.
+        let busy = if t.busy == 0 {
+            String::new()
+        } else {
+            format!(
+                " {} more were held by a writer and not checked; scrub again once \
+                 the pull finishes.",
+                t.busy
+            )
+        };
+        if t.disagreed() == 0 {
+            return format!(
+                "not verified — {} of {} entry(s) agree and none disagrees.{busy}",
+                t.agreed,
+                t.seen()
+            );
+        }
         format!(
             "{} of {} entry(s) disagree with the files they describe — {} missing, \
              {} with a different bar count, {} holding other bars, {} unreadable. \
              The counter is what every page and the ladder gate answer from, so \
-             these month(s) read as held while the disk says otherwise.",
-            t.seen() - t.agreed,
+             these month(s) read as held while the disk says otherwise.{busy}",
+            t.disagreed(),
             t.seen(),
             t.missing,
             t.rows,
@@ -133,7 +159,10 @@ impl Report {
 ///
 /// # Cost
 ///
-/// O(1) per entry. Nothing is sorted and nothing is read whole.
+/// O(log length) to walk the census's append log once, then one open, one
+/// header read and two record reads per held entry. Nothing is sorted; the log
+/// is read whole. This said "O(1) per entry ... nothing is read whole" until
+/// D-1501 (W1-api6-0).
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -282,5 +311,34 @@ mod tests {
             "the sentence must name the consequence: {}",
             bad.say()
         );
+    }
+
+    /// **A MONTH A WRITER HELD IS NOT A DISAGREEMENT (W1-api6-7, D-1501).**
+    ///
+    /// Only busy months: not verified, and the sentence says none disagrees
+    /// rather than "the disk says otherwise". Busy beside a real disagreement:
+    /// the disagreement count excludes the busy one and both are named.
+    #[test]
+    fn a_busy_month_is_not_verified_and_is_not_called_a_disagreement() {
+        let busy = Finding::Busy {
+            path: "/x".to_owned(),
+        };
+        let mut only = Report::default();
+        only.tally.count(&Finding::Agrees);
+        only.tally.count(&busy);
+        assert!(!only.verified(), "a month not checked is not verified");
+        let said = only.say();
+        assert!(said.starts_with("not verified — 1 of 2"), "{said}");
+        assert!(said.contains("none disagrees"), "{said}");
+        assert!(said.contains("1 more were held by a writer"), "{said}");
+        assert!(!said.contains("disk says otherwise"), "{said}");
+
+        let mut both = only;
+        both.tally.count(&Finding::Missing {
+            path: "/y".to_owned(),
+        });
+        let said = both.say();
+        assert!(said.starts_with("1 of 3 entry(s) disagree"), "{said}");
+        assert!(said.contains("1 more were held by a writer"), "{said}");
     }
 }

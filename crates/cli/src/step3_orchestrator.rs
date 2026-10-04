@@ -137,7 +137,8 @@ pub struct StoredCandidatePreAdmissionBoundsV1 {
 ///
 /// The request contains no raw market bytes, digest, calendar receipt, source
 /// commit, depth, fallback or pre-resolved result. `underlying` is validated by
-/// the canonical stored loader against the two-instrument sweep surface, and
+/// the canonical stored loader against the NSE sweep surface `CLAUDE.md` §1
+/// names (the two spot indices and the F&O cash equities), and
 /// `rung_name` is resolved by the existing stored timeframe authority.
 #[derive(Clone, Copy)]
 pub struct StoredCandidatePreAdmissionRequestV1<'a> {
@@ -3448,8 +3449,12 @@ fn requested_execution_range(
         if day < first_day {
             continue;
         }
+        // NOT `break`: the pass keeps checking order to the last bar. With a
+        // `break` the check stopped at the first bar past `last_day`, so
+        // `[100, 103, 101]` over `100..=102` silently returned day 100 alone
+        // and the comment above was false (D-1626). Still one pass, O(bars).
         if day > last_day {
-            break;
+            continue;
         }
         if first.is_none() {
             first = Some(index);
@@ -5375,16 +5380,51 @@ mod tests {
             CommittedStoredObservationStatisticsV2::statistics_commit;
         let projection: ProjectionAccessor =
             CommittedStoredObservationStatisticsV2::projection_source;
-        std::hint::black_box((
-            entry,
-            nifty,
-            banknifty,
-            base_evidence,
-            observations,
-            observation,
-            statistics,
-            projection,
-        ));
+        // The coercions above prove the signatures and that the accessors
+        // retain the sources. Privacy is a property of the declarations, so it
+        // is asserted on the source text: every one of them is `pub(crate)`,
+        // none is `pub` (GAP14-66, D-1627 — this test used to assert nothing).
+        let source = include_str!("step3_orchestrator.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or_default();
+        for declaration in [
+            "struct CommittedStoredObservationStatisticsV2 {",
+            "fn commit_stored_observation_statistics_v2(",
+            "const fn nifty_source(&self)",
+            "const fn banknifty_source(&self)",
+            "const fn base_evidence(&self)",
+            "const fn observations(&self) -> &PairedCandidateObservationsV1",
+            "const fn observation_commit(&self)",
+            "const fn statistics_commit(&self)",
+            "const fn projection_source(&self)",
+        ] {
+            assert_eq!(
+                production
+                    .matches(&format!("pub(crate) {declaration}"))
+                    .count(),
+                1,
+                "{declaration} must be declared exactly once as pub(crate)"
+            );
+            assert_eq!(
+                production.matches(&format!("pub {declaration}")).count(),
+                0,
+                "{declaration} must not be public"
+            );
+        }
+        let retained = [
+            entry as usize,
+            nifty as usize,
+            banknifty as usize,
+            base_evidence as usize,
+            observations as usize,
+            observation as usize,
+            statistics as usize,
+            projection as usize,
+        ];
+        assert!(retained.iter().all(|address| *address != 0));
+        assert_ne!(nifty as usize, banknifty as usize);
     }
 
     #[test]
@@ -6454,6 +6494,25 @@ mod tests {
             requested_execution_subspan(&reordered, 100, 102),
             Err(why) if why.contains("not monotonically ordered")
         ));
+
+        // c4b-4, D-1626: disorder AFTER the first bar past the span is still
+        // refused, rather than silently cutting the span short.
+        let past_then_inside = [candle(100, 555), candle(103, 555), candle(101, 555)];
+        assert!(matches!(
+            requested_execution_subspan(&past_then_inside, 100, 102),
+            Err(why) if why.contains("not monotonically ordered")
+        ));
+        let late_disorder = [candle(100, 555), candle(105, 555), candle(104, 555)];
+        assert!(matches!(
+            requested_execution_subspan(&late_disorder, 100, 102),
+            Err(why) if why.contains("not monotonically ordered")
+        ));
+        // Ordered bars past the span are still excluded.
+        let ordered_tail = [candle(100, 555), candle(101, 555), candle(103, 555)];
+        assert_eq!(
+            requested_execution_subspan(&ordered_tail, 100, 102).map(<[_]>::len),
+            Ok(2)
+        );
     }
 
     #[test]

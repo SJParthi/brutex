@@ -3599,10 +3599,11 @@ fn read_record(
     PreAdmissionDataV1::decode(&raw)
 }
 
+/// Label every V1 append names, and its rollback test injects with.
+const APPEND_LABEL: &str = "pre-admission record";
+
 fn append_record(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PreAdmissionDataRefusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append pre-admission record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 /// Every pre-admission lock and data open: never waits on a FIFO and admits
@@ -3871,13 +3872,14 @@ fn read_record_v2(
     PreAdmissionDataV2::decode(&raw)
 }
 
+/// Label every V2 append names, and its rollback test injects with.
+const APPEND_LABEL_V2: &str = "pre-admission V2 record";
+
 fn append_record_v2(
     file: &mut File,
     raw: &[u8; RECORD_BYTES_V2],
 ) -> Result<(), PreAdmissionDataRefusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append pre-admission V2 record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL_V2)
 }
 
 fn file_generation_v2(
@@ -4658,6 +4660,75 @@ mod tests {
             must(reopened.page(0, 1), "completed pair reads")?.rows(),
             &[value]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_v1_or_v2_append_truncates_back_and_the_ledger_stays_open() -> TestResult {
+        let root = test_dir()?;
+        let configured = bounds(4)?;
+        drop(must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "headers initialize",
+        )?);
+        let data_path = root.path().join(DATA_FILE);
+        crate::append_rollback::tests::inject_short_write(&data_path, APPEND_LABEL, RECORD_BYTES);
+        let value = fixture(32)?.with_sequence(0);
+        let mut file = must(open_file(&data_path, true, false), "data file reopens")?;
+        let data_record = must(value.record(RecordKindV1::Data), "orphan Data encodes")?;
+        must(append_record(&mut file, &data_record), "orphan Data writes")?;
+        drop(file);
+        crate::append_rollback::tests::inject_short_write(&data_path, APPEND_LABEL, RECORD_BYTES);
+        let mut reopened = must(
+            PreAdmissionDataLedgerV1::open(root.path(), configured),
+            "the rolled-back orphan is recoverable",
+        )?;
+        assert!(matches!(
+            must(
+                reopened.append_complete(&value),
+                "the next append completes the orphan after the rollback",
+            )?,
+            PreAdmissionProductionCommitV1::Written(_)
+        ));
+
+        let root_v2 = test_dir()?;
+        let configured_v2 = bounds_v2(4)?;
+        drop(must(
+            PreAdmissionDataLedgerV2::open(root_v2.path(), configured_v2),
+            "V2 headers initialize",
+        )?);
+        let data_path_v2 = root_v2.path().join(DATA_FILE_V2);
+        crate::append_rollback::tests::inject_short_write(
+            &data_path_v2,
+            APPEND_LABEL_V2,
+            RECORD_BYTES_V2,
+        );
+        let orphan = zero_fixture_v2(185)?.with_sequence(0);
+        let mut file = must(open_file(&data_path_v2, true, false), "V2 file reopens")?;
+        must(
+            append_record_v2(
+                &mut file,
+                &must(orphan.record(RecordKindV2::Data), "V2 orphan encodes")?,
+            ),
+            "V2 orphan appends",
+        )?;
+        drop(file);
+        crate::append_rollback::tests::inject_short_write(
+            &data_path_v2,
+            APPEND_LABEL_V2,
+            RECORD_BYTES_V2,
+        );
+        let mut orphan_ledger = must(
+            PreAdmissionDataLedgerV2::open(root_v2.path(), configured_v2),
+            "the rolled-back V2 orphan is recoverable",
+        )?;
+        assert!(matches!(
+            must(
+                orphan_ledger.append_complete(&orphan),
+                "the next V2 append completes the orphan after the rollback",
+            )?,
+            PreAdmissionProductionCommitV2::Written(_)
+        ));
         Ok(())
     }
 

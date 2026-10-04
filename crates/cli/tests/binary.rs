@@ -280,3 +280,29 @@ fn a_non_utf8_argument_is_refused_by_name_not_a_panic() {
         "the refusal is in the log:\n{logged}"
     );
 }
+
+/// **A closed stdout is said on stderr, never a panic.** v53-2, D-1484.
+///
+/// `cli sweep 6 100 | true` exited 101 with a panic backtrace. The pipe's
+/// read end is closed BEFORE the child starts, so the first write fails with
+/// EPIPE every time rather than when a race happens to lose.
+#[test]
+fn a_closed_stdout_is_said_on_stderr_and_never_panics() {
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let out = command("closed-stdout")
+        .args(["sweep", "6", "200"])
+        .stdout(writer)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(i32::from(cli::OK)),
+        "a reader that closed the pipe leaves the run's own code:\n{said}"
+    );
+    assert!(!said.contains("panicked"), "{said}");
+    assert!(said.contains("stdout is not writable"), "{said}");
+    assert!(said.contains("closed the pipe"), "{said}");
+}

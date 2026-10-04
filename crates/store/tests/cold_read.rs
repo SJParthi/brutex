@@ -94,6 +94,8 @@ impl Scratch {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let _ignored = fs::remove_dir_all(&root);
+        // The store root exists: the writer no longer creates one (D-1522).
+        fs::create_dir_all(&root).expect("a scratch store root");
         Self(root)
     }
 

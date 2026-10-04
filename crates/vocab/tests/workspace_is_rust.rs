@@ -310,8 +310,8 @@ fn declared_native_reached(lock_text: &str) -> Result<Vec<&'static Declared>, St
         .collect())
 }
 
-/// FNV-1a over every package's name AND its dependency list, sorted by name and
-/// version, with separators so `ab`+`c` and `a`+`bc` cannot collide.
+/// FNV-1a over every package's name, version AND dependency list, sorted by
+/// name and version, with separators so `ab`+`c` and `a`+`bc` cannot collide.
 /// Hand-rolled because this crate takes no dependencies.
 ///
 /// The edges are in it because the name set alone missed the one change that
@@ -329,6 +329,9 @@ fn fingerprint(pkgs: &[LockPackage]) -> u64 {
     };
     for p in rows {
         eat(p.name.as_bytes(), 0x1f);
+        // D-1611: the version is hashed, not only sorted on, so a version-only
+        // change moves the pin (audit-20261003 rustonly2-6).
+        eat(p.version.as_bytes(), 0x1c);
         for d in &p.deps {
             eat(d.as_bytes(), 0x1e);
         }
@@ -546,10 +549,14 @@ fn the_dependency_set_has_not_moved_without_review() {
     // name unchanged -- left it green (UC-7, UC-13). The fingerprint now covers
     // every package's dependency list too. `Cargo.lock` is byte-identical to
     // the commit before, so there is no new package to scan. D-1435.
+    // 0xA685_8949_AA8A_D9CE -> 0xFDB9_D257_60EF_53D3 IS THE VERSION BEING HASHED
+    // (D-1611), NOT A LOCK CHANGE: a version-only bump used to leave the pin
+    // equal. `Cargo.lock` is byte-identical to the commit before, the count is
+    // still 192, so there is no new package to scan.
     assert_eq!(
-        h, 0xA685_8949_AA8A_D9CE,
-        "the dependency SET or GRAPH changed — a package was added, removed or \
-         renamed, or a `dependencies` list in Cargo.lock moved (a feature flip \
+        h, 0xFDB9_D257_60EF_53D3,
+        "the dependency SET or GRAPH changed — a package was added, removed, \
+         renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \
          Scan the new set for .c/.cc/.h/.S/.asm and build.rs, update DECLARED if \
          anything ships non-Rust source, then re-pin this fingerprint. Do not \
@@ -729,4 +736,26 @@ fn the_reachability_walk_skips_only_the_named_edges_and_refuses_a_dangling_one()
 
     assert!(parse_lock("").is_empty());
     assert!(names_reached("").is_empty());
+}
+
+/// **A version-only change moves the fingerprint** (audit-20261003 rustonly2-6,
+/// D-1611). The fingerprint hashed each package's name and dependency list
+/// and used the version only to sort, so `ring 0.17.14` becoming `0.17.99`
+/// left it equal: a new release of a crate that starts vendoring C under the
+/// same name was invisible to the pin.
+#[test]
+fn a_version_only_bump_changes_the_fingerprint() {
+    let before = synthetic(APP_REACHES_RING_THROUGH_RUSTLS);
+    let after = before.replace(
+        "name = \"cc\"\nversion = \"1.2.0\"",
+        "name = \"cc\"\nversion = \"1.2.99\"",
+    );
+    assert_ne!(after, before);
+    let set = |t: &str| -> BTreeSet<String> { parse_lock(t).into_iter().map(|p| p.name).collect() };
+    assert_eq!(set(&after), set(&before), "the name set is unchanged");
+    assert_ne!(
+        fingerprint(&parse_lock(&after)),
+        fingerprint(&parse_lock(&before)),
+        "a version-only change must move the fingerprint"
+    );
 }

@@ -951,7 +951,73 @@ pub fn decode_body(
     listing: crate::vendor::Listing,
 ) -> Result<RawWindow, FetchError> {
     let root = parse_answer(body).map_err(|why| not_json(&why))?;
+    // A KEY REPEATED INSIDE ONE OBJECT IS TWO ANSWERS IN ONE BODY
+    // (attackdata-3, D-1531). `serde_json` keeps the last and says nothing, so
+    // `"open":[100],"open":[200]` decoded as an open of 200. `container`
+    // already refuses two objects' fields mixed; this is the same case inside
+    // one object, and it is refused by name.
+    if let Some(key) = repeated_key(body) {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "the vendor's answer repeats the key {key:?} inside one object, \
+                 so it carries two values for one field; refused rather than \
+                 silently keeping the last"
+            ),
+        });
+    }
     decode_value(&root, spec, listing)
+}
+
+/// The first key that appears twice in one JSON object of `body`, decoded.
+///
+/// Run only over a body `serde_json` has already parsed, so every string is
+/// well formed and balanced. One pass over the bytes: a `{` opens a key set, a
+/// `[` opens a level with none, and a string followed by `:` is a key, decoded
+/// by `serde_json` so an escaped spelling of a held key is the same key. The
+/// cost is linear in the body, which the parse above already paid; the sets
+/// hold at most every key of the body once.
+fn repeated_key(body: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    let mut open: Vec<Option<std::collections::HashSet<String>>> = Vec::new();
+    let mut at = 0usize;
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b'{' => open.push(Some(std::collections::HashSet::new())),
+            b'[' => open.push(None),
+            b'}' | b']' => {
+                open.pop();
+            }
+            b'"' => {
+                let mut end = at.saturating_add(1);
+                while let Some(&inner) = bytes.get(end) {
+                    match inner {
+                        b'\\' => end = end.saturating_add(2),
+                        b'"' => break,
+                        _ => end = end.saturating_add(1),
+                    }
+                }
+                let after = bytes
+                    .get(end.saturating_add(1)..)
+                    .unwrap_or_default()
+                    .iter()
+                    .copied()
+                    .find(|b| !b.is_ascii_whitespace());
+                if after == Some(b':')
+                    && let Some(Some(keys)) = open.last_mut()
+                    && let Some(key) = body
+                        .get(at..=end)
+                        .and_then(|token| serde_json::from_str::<String>(token).ok())
+                    && !keys.insert(key.clone())
+                {
+                    return Some(key);
+                }
+                at = end;
+            }
+            _ => {}
+        }
+        at = at.saturating_add(1);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1205,6 +1271,8 @@ fn decode_objects(
     };
 
     let mut null_bars = 0usize;
+    let mut negative = 0usize;
+    let mut interest = 0usize;
     for (i, item) in items.iter().enumerate() {
         // A field missing from ONE object is refused naming both the field and
         // which bar it was, because "the vendor sent 400 bars and one of them
@@ -1243,6 +1311,22 @@ fn decode_objects(
         {
             null_bars += 1;
             continue;
+        }
+        // THE SAME COUNT RULE AS THE COLUMNAR SHAPE (c4a-1, c4a-2, D-1490).
+        match count_verdict(
+            item.get(f.volume),
+            f.open_interest.and_then(|name| item.get(name)),
+            listing,
+        ) {
+            CountVerdict::Keep => {}
+            CountVerdict::NegativeVolume => {
+                negative = negative.saturating_add(1);
+                continue;
+            }
+            CountVerdict::NegativeInterest => {
+                interest = interest.saturating_add(1);
+                continue;
+            }
         }
         arrays
             .open
@@ -1291,6 +1375,9 @@ fn decode_objects(
         );
     }
 
+    note_negative_volume_bars(negative, items.len());
+    note_negative_interest_bars(interest, items.len());
+
     // THE THIRD DOOR GETS THE RULE AT THE SAME TIME AS THE FIRST. Three
     // separate rules in this decoder reached two of the three shapes and missed
     // the same one; this one is applied at every `RawWindow::decode` in the
@@ -1317,8 +1404,11 @@ pub const DECODED_PRICE_SCALE: PriceScale = PriceScale::Paisa;
 /// The second scaled before rounding — `24500.75 × 100` — which is *arithmetically*
 /// right and still wrong for this repository: `clippy::float_arithmetic` is
 /// denied workspace-wide, precisely so that `CLAUDE.md` §7's "never a float"
-/// cannot be walked back one expression at a time. The lint was correct. There
-/// is no float in a price here, not even briefly.
+/// cannot be walked back one expression at a time. The lint was correct. No
+/// float ARITHMETIC touches a price here. The wire number is still parsed by
+/// `serde_json` into an `f64` before `Display` renders it back to text, so the
+/// text read below is exact only when that parse is: D-1494 and
+/// `docs/06-limits.md` state when (GAP16-24).
 ///
 /// # What it does instead
 ///
@@ -1402,8 +1492,12 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
         PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
-        // Rupees: the text is the truth, and `core`'s half-up reader owns the
-        // rule. NOT `csv::paisa`, which refuses past two decimals — see the
+        // Rupees: `core`'s half-up reader owns the rule, applied to serde's
+        // re-rendering of the number — NOT the vendor's own text. Past ~17
+        // significant digits the f64 has already rounded and the snap can
+        // land one paisa from the vendor's text (audit-20261003 attackdata-4;
+        // a 2M-case differential found no realistic price affected). Stated
+        // in `docs/06-limits.md`. NOT `csv::paisa`, which refuses past two decimals — see the
         // header on `prices` for why that refusal was wrong and what it cost.
         //
         // STILL NO FLOAT. `serde_json` renders the number back to its shortest
@@ -1773,68 +1867,19 @@ fn kept_rows(
             keep.push(false);
             continue;
         }
-        // A NEGATIVE VOLUME SKIPS ITS ROW RATHER THAN REFUSING THE WINDOW.
-        //
-        // The sign is read here, off the JSON, because `one_volume` can only
-        // answer with an `Err` and an `Err` in a column `map` refuses all of it.
-        // That is what the measured `-125` on `ADANIENT` cost: one row killed a
-        // 90-day window, the window's failure ended the backfill at request 1
-        // of 21, and losing 1-minute lost all eight intraday rungs with it,
-        // because 2/3/5/10/15/30/60 are rolled up locally from it.
-        //
-        // **The refusal was right about the value and wrong about its reach.**
-        // A volume counts shares traded and a negative one is not a quantity —
-        // D-0323 stands. What changes is the granularity: a skipped ROW is a
-        // legal gap in an append-only month, because bars need only be strictly
-        // increasing; a skipped CHUNK is not, because `Header::advance` refuses
-        // any batch beginning at or before what is committed, which is why the
-        // chunk loop's suffix discard must stay exactly as it is.
-        //
-        // AN INDEX IS NOT FILTERED HERE and that is P-60, not an oversight.
-        // Its volume column has no referent at all — measured across 6,493
-        // stored BANKNIFTY minute bars, the only distinct value is `0` — so
-        // `one_volume` records the zero the column always is and counts it. An
-        // equity's negative means shares DID trade and the decoder is reading
-        // the wrong column, so its row carries no usable quantity and goes.
-        let quantity_is_impossible = listing != crate::vendor::Listing::Index
-            && volume.get(i).is_some_and(|v| {
-                v.as_i64().is_some_and(|n| n < 0) || v.as_f64().is_some_and(|n| n < 0.0)
-            });
-        // AND AN OPEN INTEREST THAT IS NOT A COUNT EITHER.
-        //
-        // An open interest is contracts outstanding: never negative, exactly as
-        // a volume is never negative. D-0323 gave the volume its guard and left
-        // this field one column over with none, so `open_interest: -5` decoded,
-        // landed, and died a crate later at `survey` as `ImpossibleCount` —
-        // against a batch index that names no vendor row.
-        //
-        // **`i64::MIN` IS EXEMPT AND MUST STAY EXEMPT.** §7 spends that value on
-        // "the vendor sent no open interest", so a vendor sending it literally
-        // is a SENTINEL COLLISION, not a bad count — `one_number` refuses it by
-        // name, loudly, and skipping the row here would swallow the one case
-        // that needs to be shouted about.
-        //
-        // THE `match` IS NOT A STYLE CHOICE. Written as
-        // `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)` the sentinel
-        // falls straight through: `as_i64()` answers `Some(i64::MIN)`, the
-        // predicate correctly says "not impossible", and the fallback then asks
-        // `as_f64()`, which answers `-9.22e18` and says "negative" — so the row
-        // is skipped and the loud refusal never fires. An existing test caught
-        // exactly that. The integer spelling, when there IS one, is the whole
-        // answer; `as_f64` is only for a value that is not an integer at all.
-        let interest_is_impossible =
-            open_interest_column
-                .get(i)
-                .is_some_and(|v| match v.as_i64() {
-                    Some(n) => n < 0 && n != i64::MIN,
-                    None => v.as_f64().is_some_and(|n| n < 0.0),
-                });
-        if quantity_is_impossible {
-            negative = negative.saturating_add(1);
-        } else if interest_is_impossible {
-            interest = interest.saturating_add(1);
+        // ONE RULE FOR ALL THREE SHAPES (c4a-1, c4a-2, D-1490). The reasons
+        // live on [`count_verdict`], which every decode door calls.
+        match count_verdict(volume.get(i), open_interest_column.get(i), listing) {
+            CountVerdict::Keep => keep.push(true),
+            CountVerdict::NegativeVolume => {
+                negative = negative.saturating_add(1);
+                keep.push(false);
+            }
+            CountVerdict::NegativeInterest => {
+                interest = interest.saturating_add(1);
+                keep.push(false);
+            }
         }
-        keep.push(!quantity_is_impossible && !interest_is_impossible);
     }
     Ok(Kept {
         keep,
@@ -1842,6 +1887,97 @@ fn kept_rows(
         negative_volume: negative,
         negative_open_interest: interest,
     })
+}
+
+/// What a traded row's two counts say about whether it is a bar at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CountVerdict {
+    /// Both counts can be stored.
+    Keep,
+    /// The volume is negative on a listing whose volume is a quantity.
+    NegativeVolume,
+    /// The open interest is negative and is not the `i64::MIN` sentinel.
+    NegativeInterest,
+}
+
+/// The one count rule every decode shape applies to a traded row.
+///
+/// **It was one door's rule and the other two refused or kept the same
+/// value (c4a-1, c4a-2, D-1490).** [`kept_rows`] skipped a row whose volume or
+/// open interest was negative. [`decode_positional`] — Zerodha and Groww —
+/// refused the WHOLE window over a negative equity volume and kept a negative
+/// open interest; [`decode_objects`] did the same. Same vendor fault, opposite
+/// outcome, decided by the response shape alone. All three now ask this one
+/// function, before any column is pushed, and count what it skips for the
+/// per-window events.
+///
+/// A `None` cell is not judged here: a missing or short column is the shape
+/// error the callers already name.
+fn count_verdict(
+    volume: Option<&serde_json::Value>,
+    open_interest: Option<&serde_json::Value>,
+    listing: crate::vendor::Listing,
+) -> CountVerdict {
+    // A NEGATIVE VOLUME SKIPS ITS ROW RATHER THAN REFUSING THE WINDOW.
+    //
+    // The sign is read here, off the JSON, because `one_volume` can only
+    // answer with an `Err` and an `Err` in a column `map` refuses all of it.
+    // That is what the measured `-125` on `ADANIENT` cost: one row killed a
+    // 90-day window, the window's failure ended the backfill at request 1
+    // of 21, and losing 1-minute lost all eight intraday rungs with it,
+    // because 2/3/5/10/15/30/60 are rolled up locally from it.
+    //
+    // **The refusal was right about the value and wrong about its reach.**
+    // A volume counts shares traded and a negative one is not a quantity —
+    // D-0323 stands. What changes is the granularity: a skipped ROW is a
+    // legal gap in an append-only month, because bars need only be strictly
+    // increasing; a skipped CHUNK is not, because `Header::advance` refuses
+    // any batch beginning at or before what is committed, which is why the
+    // chunk loop's suffix discard must stay exactly as it is.
+    //
+    // AN INDEX IS NOT FILTERED HERE and that is P-60, not an oversight.
+    // Its volume column has no referent at all — measured across 6,493
+    // stored BANKNIFTY minute bars, the only distinct value is `0` — so
+    // `one_volume` records the zero the column always is and counts it. An
+    // equity's negative means shares DID trade and the decoder is reading
+    // the wrong column, so its row carries no usable quantity and goes.
+    let quantity_is_impossible = listing != crate::vendor::Listing::Index
+        && volume.is_some_and(|v| {
+            v.as_i64().is_some_and(|n| n < 0) || v.as_f64().is_some_and(|n| n < 0.0)
+        });
+    // AND AN OPEN INTEREST THAT IS NOT A COUNT EITHER.
+    //
+    // An open interest is contracts outstanding: never negative, exactly as
+    // a volume is never negative. D-0323 gave the volume its guard and left
+    // this field one column over with none, so `open_interest: -5` decoded,
+    // landed, and died a crate later at `survey` as `ImpossibleCount` —
+    // against a batch index that names no vendor row.
+    //
+    // **`i64::MIN` IS EXEMPT AND MUST STAY EXEMPT.** §7 spends that value on
+    // "the vendor sent no open interest", so a vendor sending it literally
+    // is a SENTINEL COLLISION, not a bad count — `one_number` refuses it by
+    // name, loudly, and skipping the row here would swallow the one case
+    // that needs to be shouted about.
+    //
+    // THE `match` IS NOT A STYLE CHOICE. Written as
+    // `as_i64().is_some_and(..).unwrap_or_else(|| as_f64()..)` the sentinel
+    // falls straight through: `as_i64()` answers `Some(i64::MIN)`, the
+    // predicate correctly says "not impossible", and the fallback then asks
+    // `as_f64()`, which answers `-9.22e18` and says "negative" — so the row
+    // is skipped and the loud refusal never fires. An existing test caught
+    // exactly that. The integer spelling, when there IS one, is the whole
+    // answer; `as_f64` is only for a value that is not an integer at all.
+    let interest_is_impossible = open_interest.is_some_and(|v| match v.as_i64() {
+        Some(n) => n < 0 && n != i64::MIN,
+        None => v.as_f64().is_some_and(|n| n < 0.0),
+    });
+    if quantity_is_impossible {
+        CountVerdict::NegativeVolume
+    } else if interest_is_impossible {
+        CountVerdict::NegativeInterest
+    } else {
+        CountVerdict::Keep
+    }
 }
 
 /// What [`kept_rows`] decided, and what it had to skip to decide it.
@@ -3189,6 +3325,8 @@ fn decode_positional(
     };
 
     let mut null_bars = 0usize;
+    let mut negative = 0usize;
+    let mut interest = 0usize;
     for (i, row) in rows.iter().enumerate() {
         let cells = row.as_array().ok_or_else(|| FetchError::TransportFailed {
             detail: format!("bar {i} is {row}, and this vendor sends one ARRAY per bar"),
@@ -3232,6 +3370,21 @@ fn decode_positional(
         if (1..=4).any(|at| cell(at).is_ok_and(serde_json::Value::is_null)) {
             null_bars += 1;
             continue;
+        }
+        // THE SAME COUNT RULE AS THE COLUMNAR SHAPE: a negative volume on a
+        // traded listing, or a negative open interest other than the sentinel,
+        // skips this row and is counted, instead of refusing the window or
+        // landing (c4a-1, c4a-2, D-1490).
+        match count_verdict(cells.get(5), cells.get(6), listing) {
+            CountVerdict::Keep => {}
+            CountVerdict::NegativeVolume => {
+                negative = negative.saturating_add(1);
+                continue;
+            }
+            CountVerdict::NegativeInterest => {
+                interest = interest.saturating_add(1);
+                continue;
+            }
         }
         arrays
             .timestamp
@@ -3303,6 +3456,8 @@ fn decode_positional(
         );
     }
 
+    note_negative_volume_bars(negative, rows.len());
+    note_negative_interest_bars(interest, rows.len());
     // AND THE SECOND DOOR. See the note on the object shape's call.
     note_impossible_bars(drop_impossible_bars(&mut arrays), rows.len());
     RawWindow::decode(&arrays)
@@ -4006,6 +4161,54 @@ mod tests {
     /// `CLAUDE.md` §7 puts the tick grid at two decimals and the single snap at
     /// the write boundary. Rounding to whole rupees is a snap at the wrong
     /// granularity, in the wrong place.
+    /// audit-20261003 attackdata-3 (D-1531). A vendor answer that repeats a
+    /// key inside one object is refused, not silently resolved to the last
+    /// value. It is two answers in one body, the case `container` already
+    /// refuses across objects; `serde_json`'s map kept the second array and
+    /// decoded `"open":[100],"open":[200]` as an open of 200.
+    #[test]
+    fn an_answer_repeating_a_key_in_one_object_is_refused() {
+        let body = r#"{"open":[100],"open":[200],"high":[200],"low":[100],
+            "close":[150],"volume":[1],"timestamp":[1751337900]}"#;
+        let refused = decode_body(
+            body,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        );
+        let Err(FetchError::TransportFailed { detail }) = refused else {
+            panic!("a repeated key must be refused: {refused:?}");
+        };
+        assert!(
+            detail.contains("repeats") && detail.contains("open"),
+            "the refusal names the repeated key: {detail}"
+        );
+
+        // The same key spelled with an escape is the same key.
+        let escaped = r#"{"open":[100],"op\u0065n":[200],"high":[200],"low":[100],
+            "close":[150],"volume":[1],"timestamp":[1751337900]}"#;
+        assert!(
+            decode_body(
+                escaped,
+                &spec(PriceScale::Rupees),
+                crate::vendor::Listing::Equity
+            )
+            .is_err(),
+            "an escaped spelling of a held key is a repeat"
+        );
+
+        // One key per object, and a string VALUE equal to a key, are not
+        // repeats.
+        let clean = r#"{"open":[100],"high":[200],"low":[100],"close":[150],
+            "volume":[1],"timestamp":[1751337900],"symbol":{"code":"open","p":"code"}}"#;
+        let window = decode_body(
+            clean,
+            &spec(PriceScale::Rupees),
+            crate::vendor::Listing::Equity,
+        )
+        .expect("one key per object decodes");
+        assert_eq!(window.rows.len(), 1);
+    }
+
     #[test]
     fn a_fractional_rupee_price_keeps_its_paise() {
         let body = r#"{
@@ -4404,6 +4607,164 @@ mod tests {
         let window = decode_body(objects, &spec_objects, crate::vendor::Listing::Equity)
             .expect("the object shape skips a null row");
         assert_eq!(window.rows.len(), 1, "array of objects");
+    }
+
+    /// **THE JSON PARSE IS EXACT FOR A VENDOR'S PRICE TEXT, AND NOT PAST 15
+    /// SIGNIFICANT DIGITS (GAP16-24, D-1494).**
+    ///
+    /// `serde_json` holds a number as an `f64` and `one_price` reads back its
+    /// shortest round-tripping text. For every text below — all three-decimal
+    /// values in two ranges and all four-decimal ones around a measured Dhan
+    /// float — that round trip yields the same paisa as reading the vendor's
+    /// text directly, so there is one rounding, not two. Past fifteen
+    /// significant digits it is not exact, and the extreme is asserted so the
+    /// limit cannot be forgotten: the largest `i64` paisa price, read as text,
+    /// fits, and through the JSON parse it does not.
+    #[test]
+    fn the_json_parse_is_exact_for_price_text_up_to_fifteen_digits() {
+        let direct = |text: &str| {
+            brutex_core::price::Paisa::from_rupee_text_half_up(text)
+                .map(brutex_core::price::Paisa::raw)
+        };
+        let through_json = |text: &str| {
+            let value: serde_json::Value = serde_json::from_str(text).expect("a JSON number");
+            let number = value.as_number().expect("a number").to_string();
+            brutex_core::price::Paisa::from_rupee_text_half_up(&number)
+                .map(brutex_core::price::Paisa::raw)
+        };
+        let mut checked = 0u32;
+        for (whole, decimals) in [(0..40, 3u32), (24_000..24_100, 3), (35_922..35_924, 4)] {
+            let steps = 10_i64.pow(decimals);
+            for w in whole {
+                for f in 0..steps {
+                    let text = format!("{w}.{f:0width$}", width = decimals as usize);
+                    assert_eq!(through_json(&text), direct(&text), "{text}");
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 40_000 + 100_000 + 20_000);
+        let widest = "92233720368547758.07";
+        assert_eq!(direct(widest), Ok(i64::MAX));
+        assert_ne!(
+            through_json(widest),
+            direct(widest),
+            "past fifteen significant digits the f64 parse is a second rounding"
+        );
+    }
+
+    /// **ALL THREE SHAPES APPLY ONE COUNT RULE (c4a-1, c4a-2, D-1490).**
+    ///
+    /// The positional shape (Zerodha, Groww) refused the whole window over one
+    /// negative equity volume, and kept a negative open interest, while the
+    /// columnar shape skipped both rows. The same two faults, at the extremes
+    /// `-1` and `i64::MIN + 1`, now skip one row in every shape; the good row
+    /// survives with its own counts; an index's negative volume is still the
+    /// zero its column always is; and the `i64::MIN` open-interest sentinel is
+    /// still refused rather than skipped.
+    #[test]
+    fn all_three_decode_shapes_skip_a_negative_count_alike() {
+        let positional = HttpSpec {
+            response: ResponseShape::PositionalRows {
+                envelope: None,
+                array: "candles",
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let objects = HttpSpec {
+            response: ResponseShape::ArrayOfObjects { envelope: None },
+            fields: FieldNames {
+                open_interest: Some("open_interest"),
+                ..spec(PriceScale::Rupees).fields
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let columnar = HttpSpec {
+            fields: FieldNames {
+                open_interest: Some("open_interest"),
+                ..spec(PriceScale::Rupees).fields
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let shapes = |volume: &str, interest: &str| {
+            [
+                (
+                    "the positional shape",
+                    format!(
+                        "{{\"candles\":[[1751337900,100.00,100.00,100.00,100.00,9,41],\
+                          [1751337960,100.00,100.00,100.00,100.00,{volume},{interest}]]}}"
+                    ),
+                    positional,
+                ),
+                (
+                    "the object shape",
+                    format!(
+                        "[{{\"open\":100.00,\"high\":100.00,\"low\":100.00,\"close\":100.00,\
+                           \"volume\":9,\"timestamp\":1751337900,\"open_interest\":41}},\
+                          {{\"open\":100.00,\"high\":100.00,\"low\":100.00,\"close\":100.00,\
+                           \"volume\":{volume},\"timestamp\":1751337960,\"open_interest\":{interest}}}]"
+                    ),
+                    objects,
+                ),
+                (
+                    "the columnar shape",
+                    format!(
+                        "{{\"open\":[100.00,100.00],\"high\":[100.00,100.00],\
+                           \"low\":[100.00,100.00],\"close\":[100.00,100.00],\
+                           \"volume\":[9,{volume}],\"timestamp\":[1751337900,1751337960],\
+                           \"open_interest\":[41,{interest}]}}"
+                    ),
+                    columnar,
+                ),
+            ]
+        };
+        let worst = (i64::MIN + 1).to_string();
+        let seven = 7.to_string();
+        let seven = seven.as_str();
+        for (volume, interest) in [
+            ("-1", seven),
+            (worst.as_str(), seven),
+            ("-0.5", seven),
+            (seven, "-1"),
+            (seven, worst.as_str()),
+            (seven, "-5.0"),
+        ] {
+            for (name, body, shape) in shapes(volume, interest) {
+                let window = decode_body(&body, &shape, crate::vendor::Listing::Derivative)
+                    .unwrap_or_else(|why| {
+                        panic!("{name} ({volume}, {interest}): one row goes, not the window: {why}")
+                    });
+                assert_eq!(window.rows.len(), 1, "{name} ({volume}, {interest})");
+                assert_eq!(window.rows[0].volume, 9, "{name}: the good row stayed");
+                assert_eq!(
+                    window.rows[0].open_interest,
+                    Some(41),
+                    "{name}: with its own open interest"
+                );
+            }
+        }
+        // AN INDEX'S NEGATIVE VOLUME IS STILL ITS ZERO, IN EVERY SHAPE.
+        for (name, body, shape) in shapes("-125", seven) {
+            let window = decode_body(&body, &shape, crate::vendor::Listing::Index)
+                .unwrap_or_else(|why| panic!("{name}: an index keeps the row: {why}"));
+            assert_eq!(window.rows.len(), 2, "{name}: both rows kept");
+            assert_eq!(window.rows[1].volume, 0, "{name}: recorded as zero");
+        }
+        // AND THE SENTINEL IS STILL REFUSED BY NAME, IN EVERY SHAPE.
+        for (name, body, shape) in shapes(seven, &i64::MIN.to_string()) {
+            let why = decode_body(&body, &shape, crate::vendor::Listing::Derivative)
+                .expect_err("the sentinel is refused, not skipped");
+            assert!(
+                format!("{why}").contains("open_interest"),
+                "{name}: the refusal names the column: {why}"
+            );
+        }
+        // ZERO IS NOT NEGATIVE ON EITHER COUNT.
+        for (name, body, shape) in shapes("0", "0") {
+            let window = decode_body(&body, &shape, crate::vendor::Listing::Equity)
+                .unwrap_or_else(|why| panic!("{name}: zero is a reading: {why}"));
+            assert_eq!(window.rows.len(), 2, "{name}: zero keeps its row");
+        }
     }
 
     /// **A ROW WHOSE FOUR PRICES CANNOT BE A BAR IS DROPPED, AND THE WINDOW

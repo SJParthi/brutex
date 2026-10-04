@@ -32,7 +32,8 @@
 //! Strikes arrive in **rupees** and are stored in **paisa**. `27000` in the
 //! master is `2_700_000` here. One missed multiplication makes every strike
 //! wrong by a factor of a hundred, so the conversion goes through
-//! [`Paisa::from_rupees_half_up`] like every other price.
+//! [`Paisa::from_rupee_text_half_up`], from the master's own text, as `pull`'s
+//! vendor prices do (D-1494).
 
 use crate::error::InstrumentError;
 use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};

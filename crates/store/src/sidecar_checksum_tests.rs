@@ -159,8 +159,9 @@ fn a_replay_cannot_drop_more_old_rows_than_the_file_actually_holds() {
         let before = fs::read(&physical).expect("held bytes");
         assert!(matches!(
             file.append(&rows[..6]),
-            Err(StoreError::Format {
-                source: FormatError::TimestampsOutOfOrder { .. },
+            Err(StoreError::OverlapDisagrees {
+                at: 0,
+                conflict: crate::file::Conflict::NotHeld,
                 ..
             })
         ));

@@ -40,11 +40,11 @@
 
 #![expect(
     dead_code,
-    reason = "Execution V4 remains crate-private until Selection V6 consumes its source-retaining production capability"
+    reason = "Selection V6 consumes Execution V4 on the production path; some source-retaining items are still reached only from tests"
 )]
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -4928,10 +4928,11 @@ fn read_fixed_at<const N: usize>(
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Execution V4 fixed record";
+
 fn append_raw(file: &mut File, raw: &[u8]) -> Result<(), ExecutionV4Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Execution V4 fixed record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn bounded_vec<T>(count: u64, max: u64, name: &str) -> Result<Vec<T>, ExecutionV4Refusal> {
@@ -5302,6 +5303,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+    use std::io::Write as _;
 
     static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
@@ -6466,6 +6468,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() {
+        let prepared = prepared(80);
+        let root = TestRoot::new("append-rollback");
+        append_exact_prefix(&root.path, &prepared, 2, 0, 0);
+        for (name, width) in [
+            (PARAMETER_FILE, EXECUTION_V4_PARAMETER_BYTES),
+            (PERCENTILE_FILE, EXECUTION_V4_PERCENTILE_BYTES),
+            (DISPOSITION_FILE, EXECUTION_V4_DISPOSITION_BYTES),
+            (COMPLETION_FILE, EXECUTION_V4_COMPLETION_BYTES),
+        ] {
+            crate::append_rollback::tests::inject_short_write(
+                &root.path.join(name),
+                APPEND_LABEL,
+                width,
+            );
+        }
+        let committed = commit_prepared_for_test(&root.path, bounds(), &prepared)
+            .expect("the next append continues the exact prefix after the rollback");
+        assert!(committed.was_written());
+        assert_eq!(
+            committed.authority().structural_receipt().population_id(),
+            prepared.population_id
+        );
+        drop(committed);
+        ExecutionV4Ledger::open_read(&root.path, bounds()).expect("the ledger stays readable");
     }
 
     #[test]

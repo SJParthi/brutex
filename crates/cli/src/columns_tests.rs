@@ -200,7 +200,7 @@ fn the_consistency_table_keeps_extreme_shares_and_the_worst_day_apart() {
         hits: 1,
         edge: Edge::default(),
     };
-    let row = |share: i64, worst: i64, years: usize, rank: usize| crate::Screened {
+    let row = |share: i64, worst: i128, years: usize, rank: usize| crate::Screened {
         side: costs::fill::Direction::Long,
         scored: &scored,
         rank,
@@ -215,8 +215,8 @@ fn the_consistency_table_keeps_extreme_shares_and_the_worst_day_apart() {
         steady: true,
     };
     let rows = [
-        row(i64::MIN, i64::MIN, usize::MAX, usize::MAX),
-        row(i64::MAX, i64::MAX, 1, 2),
+        row(i64::MIN, i128::from(i64::MIN), usize::MAX, usize::MAX),
+        row(i64::MAX, i128::from(i64::MAX), 1, 2),
         row(10_000, -1, 1, 3),
     ];
     let mut text = String::new();
@@ -243,6 +243,40 @@ fn the_descent_table_keeps_extreme_figures_apart_and_under_their_headers() {
     );
     let (header, rows) = table(&text, "support", 3);
     under(header, &rows, &[L, R, R, R, R, R, R, R, R]);
+}
+
+/// v4-3, D-1487: the `descend` progress line on stderr has no header to sit
+/// under (it is printed as each step lands), so what it must keep is apart:
+/// every figure its own word, at every extreme, and a refusal never touching
+/// its support.
+#[test]
+fn the_descent_progress_line_keeps_extreme_figures_apart() {
+    for (support, record) in [
+        (u64::MAX, extreme_record(i64::MIN, u64::MAX)),
+        (1_000, extreme_record(i64::MAX, 0)),
+        (10, extreme_record(0, 1)),
+    ] {
+        let line = crate::descent_line(support, Ok(record));
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let wanted = [
+            format!("{support}ppm"),
+            record.min_hits.to_string(),
+            record.combinations.to_string(),
+            record.depth.to_string(),
+            if record.halted == 0 { "yes" } else { "NO" }.to_owned(),
+            record.trades.to_string(),
+            record.winner_mae.to_string(),
+            record.all_mae.to_string(),
+            record.pessimistic.to_string(),
+        ];
+        assert_eq!(words, wanted, "every figure is its own word: {line:?}");
+    }
+    let refused = crate::descent_line(u64::MAX, Err("no bars\nsecond line".to_owned()));
+    assert_eq!(
+        refused,
+        format!("  {}ppm REFUSED: no bars", u64::MAX),
+        "a 23-character support does not touch its refusal"
+    );
 }
 
 #[test]

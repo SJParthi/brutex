@@ -297,7 +297,7 @@ fn options() -> OpenOptions {
     let mut options = OpenOptions::new();
     // Same supported native platforms as the immutable store readers. Refuse
     // final-component symlinks and avoid blocking on an unexpected FIFO.
-    options.custom_flags(store::open_flags::O_NOFOLLOW | store::open_flags::O_NONBLOCK);
+    options.custom_flags(store::open_flags::O_NOFOLLOW_NONBLOCK);
     options
 }
 

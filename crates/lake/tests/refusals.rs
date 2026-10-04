@@ -1434,3 +1434,81 @@ fn values_the_reader_does_not_judge_decode_as_written() {
     let reader = include_str!("../src/reader.rs");
     assert!(reader.contains("/// # What is NOT checked"));
 }
+
+/// One cash file whose `timestamp` leaf declares `logical`, three rows.
+fn cash_file_with_timestamp(logical: Option<&parquet::basic::LogicalType>) -> Vec<u8> {
+    let mut fields: Vec<Arc<Type>> = Vec::new();
+    for (name, ty) in CASH {
+        let mut leaf = Type::primitive_type_builder(name, ty).with_repetition(Repetition::OPTIONAL);
+        if name == "timestamp" {
+            leaf = leaf.with_logical_type(logical.cloned());
+        }
+        fields.push(Arc::new(leaf.build().expect("leaf")));
+    }
+    let schema = Arc::new(
+        Type::group_type_builder("schema")
+            .with_fields(fields)
+            .build()
+            .expect("schema"),
+    );
+    let props = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .build(),
+    );
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+        let mut group = writer.next_row_group().expect("row group");
+        while let Some(mut column) = group.next_column().expect("column") {
+            match column.untyped() {
+                ColumnWriter::Int64ColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1_i64, 2, 3], Some(&[1, 1, 1]), None)
+                        .expect("i64");
+                }
+                ColumnWriter::DoubleColumnWriter(typed) => {
+                    typed
+                        .write_batch(&[1.0_f64, 2.0, 3.0], Some(&[1, 1, 1]), None)
+                        .expect("f64");
+                }
+                _ => panic!("the cash layout has no other physical type"),
+            }
+            column.close().expect("close column");
+        }
+        group.close().expect("close row group");
+        writer.close().expect("close writer");
+    }
+    out
+}
+
+/// audit-20261003 hunt-store-5 (D-1528). The `timestamp` leaf's LOGICAL type
+/// was never checked, so a NANOS or MILLIS timestamp, or a MICROS one that is
+/// not adjusted to UTC (a wall clock), decoded silently as "microseconds since
+/// the epoch, UTC": off by ×1000, ÷1000 or +5h30. Each is now refused by name
+/// at the schema gate. An undeclared INT64 and a UTC MICROS timestamp still
+/// open.
+#[test]
+fn a_timestamp_in_another_unit_or_not_in_utc_is_refused_by_name() {
+    use parquet::basic::{LogicalType, TimeUnit};
+    let stamp = |unit, utc| Some(LogicalType::timestamp(utc, unit));
+    for (logical, said) in [
+        (stamp(TimeUnit::NANOS, true), "NANOS"),
+        (stamp(TimeUnit::MILLIS, true), "MILLIS"),
+        (stamp(TimeUnit::MICROS, false), "not adjusted to UTC"),
+    ] {
+        match LakeFile::from_bytes(cash_file_with_timestamp(logical.as_ref())) {
+            Err(LakeError::UnsupportedTimestamp { declared }) => {
+                assert!(declared.contains(said), "{said}: {declared}");
+            }
+            Err(other) => panic!("{said}: refused as the wrong thing: {other:?}"),
+            Ok(_) => panic!("{said}: a timestamp this reader would misread was opened"),
+        }
+    }
+    for clean in [None, stamp(TimeUnit::MICROS, true)] {
+        assert!(
+            LakeFile::from_bytes(cash_file_with_timestamp(clean.as_ref())).is_ok(),
+            "{clean:?} is what this reader decodes"
+        );
+    }
+}

@@ -6,10 +6,15 @@
 //! float price is how a rounding difference becomes a divergent result set six
 //! months later, and integers are exact, comparable, hashable and free.
 //!
-//! A float appears in exactly one place — the vendor sends rupees as a
-//! floating-point number, so the conversion has to accept one. That conversion
-//! is [`Paisa::from_rupees_half_up`], it happens once at the ingest boundary,
-//! and it is the only function in this crate that touches an `f64`.
+//! Two conversions take rupees to paisa, and both snap half-up once.
+//! [`Paisa::from_rupee_text_half_up`] reads decimal TEXT and is what `pull`
+//! uses for every vendor price: a JSON number is rendered back to its shortest
+//! round-tripping text and that text is read digit by digit. (The JSON parser
+//! itself does hold the number as an `f64` first; `docs/06-limits.md` D-1494
+//! states when that is exact.) [`Paisa::from_rupees_half_up`] takes an `f64`
+//! and is the only function in this crate that does; its one non-test caller is
+//! `lake`'s bar reader. This said the `f64` conversion was the one ingest
+//! conversion until D-1494 corrected it (GAP16-28).
 
 use crate::error::PriceError;
 

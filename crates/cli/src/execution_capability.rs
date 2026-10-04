@@ -527,6 +527,20 @@ impl ExecutionStrategyCapabilityV1 {
         row: &PopulationRowV1,
     ) -> Result<(), ExecutionCapabilityRefusal> {
         parameters.validate()?;
+        self.require_binding_of_validated(parameters, row)
+    }
+
+    /// [`Self::require_binding`] for parameters the caller has already
+    /// validated and holds immutably. `ExecutionParametersV1::validate`
+    /// rehashes the side policy's percentile atoms (O(A)), so calling it per
+    /// population row made preparation O(R·A) against the documented O(R + A)
+    /// (W2-cli3-5, D-1641). `from_population_v4` validates both sides once in
+    /// `validate_population_parameter_pair` before the row loop.
+    fn require_binding_of_validated(
+        &self,
+        parameters: &ExecutionParametersV1,
+        row: &PopulationRowV1,
+    ) -> Result<(), ExecutionCapabilityRefusal> {
         require_row_matches(parameters, row)?;
         if self.parameter_id != parameters.parameter_id
             || self.population_id != row.population_id
@@ -1246,7 +1260,7 @@ fn validate_population_capabilities(
                     short_parameters
                 }
             };
-            capability.require_binding(parameters_for_row, &row)?;
+            capability.require_binding_of_validated(parameters_for_row, &row)?;
             if capability.row_sequence != row.sequence {
                 return Err("execution capability block is reordered".to_owned());
             }
@@ -3497,6 +3511,33 @@ fn forced_stop_from_parts(tag: u8, ppm: i64) -> Result<ForcedStopV1, ExecutionCa
     reason = "the same exception every test module in this workspace takes: a test that cannot panic cannot fail"
 )]
 mod tests {
+
+    /// W2-cli3-5, D-1641: the per-row binding check does not re-validate the
+    /// side parameters; they are validated once before the row loop.
+    #[test]
+    fn population_rows_bind_without_revalidating_parameters_per_row() {
+        let source = include_str!("execution_capability.rs");
+        let production = source.split("\nmod tests {").next().expect("production");
+        let start = production
+            .find("fn validate_population_capabilities(")
+            .expect("row loop");
+        let body = production.get(start..).expect("body");
+        let body = body.get(..body.find("\n}\n").expect("end")).expect("body");
+        assert!(body.contains("require_binding_of_validated(parameters_for_row, &row)"));
+        assert!(!body.contains(".require_binding("));
+        assert!(!body.contains(".validate()"));
+        let pair = production
+            .find("fn from_population_v4(")
+            .expect("preparation");
+        let preparation = production.get(pair..).expect("preparation body");
+        let check = preparation
+            .find("validate_population_parameter_pair(")
+            .expect("parameters validated");
+        let rows = preparation
+            .find("validate_population_capabilities(")
+            .expect("rows checked");
+        assert!(check < rows, "parameters are validated before the row loop");
+    }
     use super::*;
 
     /// **Every selector round-trips, and the numbers never move — D-0594.**

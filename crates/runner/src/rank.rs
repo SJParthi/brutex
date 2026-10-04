@@ -973,7 +973,9 @@ mod tests {
     }
 
     /// Feeding levels as the engine retires them is the same EDGE cut as
-    /// ranking a retained sweep afterwards, under both public lenses.
+    /// ranking a retained sweep afterwards, under every lens. `Lens::Path` and
+    /// `Lens::Asymmetry` were missing from this loop (AC-whp-tb-2, D-1498), so
+    /// their incremental paths were never compared with their retained ones.
     #[test]
     fn an_incremental_ranker_matches_the_retained_ranker_under_both_lenses() {
         let bars = synthetic::sessions(8);
@@ -982,7 +984,12 @@ mod tests {
         let column = Column::build(&bars, &mut evaluator());
         let f = forward(&bars, &column, Horizon::DEFAULT);
 
-        for lens in [Lens::Detectability, Lens::Payoff] {
+        for lens in [
+            Lens::Detectability,
+            Lens::Payoff,
+            Lens::Path,
+            Lens::Asymmetry,
+        ] {
             for keep in [0_usize, 25] {
                 let expected = rank_by(&out.sweep, &column, &f, keep, lens);
                 let mut incremental = Accumulator::new(keep, lens);

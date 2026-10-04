@@ -93,7 +93,7 @@ Restated here so the plan can be checked against it rather than against memory.
 | R-1 | Spot, **every instrument**, bounded at ~800 — 750 NIFTY Total Market + ~35 NSE indices | `catalog::tracked`, and `/instruments.json` shares that exact predicate |
 | R-2 | **2020-01-01 → yesterday**, never today | `finished_day_only` in `broker_window`, HTTP path only |
 | R-3 | Day-level first, then one-minute | Selectable and landing under `1day/` — D-0055. Open only for Groww, whose daily interval word is unrecorded; see §4 item 4a |
-| R-4 | F&O: **NIFTY only** as the first step | Not yet — **OPEN** |
+| R-4 | F&O: **NIFTY only** as the first step | Pull exists: `POST /pull/fno` is routed (`crates/api/src/server.rs`, `pull_fno`). Contracts are stored, never swept (CLAUDE.md §1). Re-stated 2026-10-03, D-1614 |
 | R-5 | TrueData / GDFL are **F&O CSVs from a folder**: no market hours, no rate limit, no token | `Transport::LocalArchive`, and every vendor rule keys off the transport |
 | R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
 | R-7 | **N feeds** appear everywhere with no edit | True of routing, the picker, budgets and `/feeds.json`. **Not** true of the descriptor table — see §5 for the measured number |
@@ -428,7 +428,7 @@ Step 1 is where honesty is required, and it is the part with no code yet.
 | Question | Answer | Status |
 |---|---|---|
 | Which instruments? | The tracked universe, ~800 | ✅ `catalog::tracked` |
-| Which days? | Trading days between the instrument's floor and yesterday | ❌ **no trading calendar in this build** |
+| Which days? | Trading days between the instrument's floor and yesterday | ⚠️ `pull::calendar::kind_of` and `expected_bars` exist and are the canonical IST session authority (CLAUDE.md §5); the paragraph below predates them (D-1614) |
 | How many bars in a day? | 375 at one-minute, 09:15–15:29 inclusive (CAS, from 2026-08-03) | ⚠️ constant exists; holidays do not |
 | When does an instrument's history start? | Per feed, per RUNG, and per instrument. Groww's day rung from 2020 and its one-minute rung a rolling 3 months; Dhan a **rolling** ~5 years that moves daily | ⚠️ per-feed and per-rung floors are recorded and emitted — `pull::vendor::Descriptor::history`, `/feeds.json`, D-0113. **Per INSTRUMENT is still nowhere**: a scrip listed in 2024 has no bars in 2021 and nothing here knows that |
 
@@ -478,7 +478,7 @@ Enumerated because a 22,400-request run (daily) and a 129,600-request run
 | 8 | Bars outside the window | Dropped and counted by reason | ✅ |
 | 9 | Vendor restates history | Refused, not swallowed | ✅ |
 | 10 | Disk full | Returned, never signalled | ✅ |
-| 11 | **Token expires mid-run** | 401 for every later request; no re-read | ❌ **certain to fire** — daily reset 06:00 IST, and no 22,400-request run fits in one window |
+| 11 | **Token expires mid-run** | The pull re-reads the credential through `credential_law::Watch::reread` on the production path (`crates/api/src/server.rs`), and a re-read that returns the same dead value halts loudly (CLAUDE.md §8, D-0948) | ✅ re-read; this row said "no re-read" until D-1614 |
 | 12 | Network timeout or reset | Chunk errors, whole member fails, remaining chunks abandoned | ❌ retry with backoff |
 | 13 | Vendor 5xx | Same | ❌ same path |
 | 14 | One instrument fails | No loop yet; when there is one it must not abort the other 799 | ❌ per-instrument isolation |
@@ -495,6 +495,12 @@ one 24-hour token. It is a hard stop today.
 ---
 
 ## 11. Step 3 authority closure — measured through 2026-09-01
+
+**Status note, 2026-10-03 (D-1614, audit-20261003 gaps-13).** The rows below
+are the 2026-09-01 measurement. Since then `cli` dispatches `ledger-v6` and
+`ledger-v6-replay` (`crates/cli/src/lib.rs`, `crates/cli/src/ledger_v6.rs`),
+so the Selection V6 / Global Replay V4 path has a CLI caller; a row below that
+says no CLI caller exists describes that date, not the current tree.
 
 This section records the current drill-down work and does not rewrite the older
 pull plan above. The last complete locked workspace test/doctest measurement —

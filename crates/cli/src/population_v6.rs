@@ -19,7 +19,7 @@
 
 #![expect(
     dead_code,
-    reason = "Population V6 source retention and fixed receipt-last codec await their all-rung production caller"
+    reason = "the all-rung production caller exists (`ledger_v6::commit_stored_population_v6_route`); some source-retention and codec items are still reached only from tests"
 )]
 
 use std::collections::{HashMap, HashSet};
@@ -2441,10 +2441,11 @@ fn read_record_at(file: &mut File, index: u64) -> Result<[u8; RECORD_BYTES], Pop
     Ok(raw)
 }
 
+/// Label every append to this ledger names, and its rollback test injects with.
+const APPEND_LABEL: &str = "Population V6 record";
+
 fn append_raw(file: &mut File, raw: &[u8; RECORD_BYTES]) -> Result<(), PopulationV6Refusal> {
-    file.seek(SeekFrom::End(0))
-        .and_then(|_| file.write_all(raw))
-        .map_err(|why| format!("cannot append Population V6 record: {why}"))
+    crate::append_rollback::append(file, raw, APPEND_LABEL)
 }
 
 fn open_root(root: &Path) -> Result<(PathBuf, File, PlatformIdentity), PopulationV6Refusal> {
@@ -3624,6 +3625,42 @@ mod tests {
                     .expect_err("corrupt Runner decision must refuse")
                     .contains("Runner arithmetic")
             );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_failed_append_truncates_back_and_the_ledger_stays_open() -> Result<(), String> {
+        with_evaluated_prepared(|_source, prepared, root| {
+            let records = encoded_block(&prepared, 0, bounds())?;
+            let rollback_root = root.join("append-rollback");
+            std::fs::create_dir(&rollback_root)
+                .map_err(|why| format!("cannot create rollback root: {why}"))?;
+            drop(PopulationV6Ledger::open_write(&rollback_root, bounds())?);
+            let data_path = rollback_root.join(DATA_FILE);
+            crate::append_rollback::tests::inject_short_write(
+                &data_path,
+                APPEND_LABEL,
+                RECORD_BYTES,
+            );
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&data_path)
+                .map_err(|why| format!("cannot open rollback file: {why}"))?;
+            file.write_all(&records[0])
+                .and_then(|()| file.sync_all())
+                .map_err(|why| format!("cannot write rollback prefix: {why}"))?;
+            drop(file);
+            crate::append_rollback::tests::inject_short_write(
+                &data_path,
+                APPEND_LABEL,
+                RECORD_BYTES,
+            );
+            let mut writer = PopulationV6Ledger::open_write(&rollback_root, bounds())?;
+            let (written, receipt) = writer.append(&prepared)?;
+            assert!(written);
+            drop(writer);
+            PopulationV6Ledger::open_read(&rollback_root, bounds())?.read_complete(receipt)?;
             Ok(())
         })
     }

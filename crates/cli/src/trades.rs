@@ -53,11 +53,18 @@
 //! | append a run's trades | O(rows) | one seek to the end, one write |
 //! | find a run's trades | **O(1)** | one hash probe into the block index |
 //! | read one row | **O(1)** | seek to `HEADER + index * STRIDE` |
-//! | open | O(rows) | one pass to rebuild the index, once per process |
+//! | open | O(rows) | one pass to rebuild the index, on every open |
 //!
 //! The open-time pass is the only non-constant term and it is the same one
 //! `results` and `frontier` pay, for the same reason: an index that is not on
 //! disk must be rebuilt from what is.
+//!
+//! **It is paid per open, not once per process.** This table said "once per
+//! process", and the writer is not held for a process: `ensure_trade_rows`
+//! opens it for every recorded run (and reopens it to verify), so recording a
+//! run costs O(H + T) for H rows every earlier run recorded plus the run's own
+//! T, and N recorded runs cost Θ(N·H) cumulatively. The writer open has no byte
+//! ceiling. `docs/06-limits.md` (D-1634).
 //!
 //! A read-only [`Trades::of_run`] also opens/indexes `runs.bin` and
 //! `detail-sets.bin` to prove the parent and exact cardinality. A fresh HTTP
@@ -201,7 +208,7 @@ impl Row {
     #[allow(
         clippy::indexing_slicing,
         reason = "every write is at a compile-time offset into an array whose \
-                  length is asserted above; `PAYLOAD_BYTES` is checked to be 96 \
+                  length is asserted above; `PAYLOAD_BYTES` is checked to be 128 \
                   and the writes below sum to exactly that."
     )]
     pub fn to_bytes(&self) -> [u8; STRIDE_BYTES] {
@@ -2206,9 +2213,14 @@ pub struct Bucket {
     /// And at the WORST fill — never more than [`Self::wins`].
     pub worst_wins: u64,
     /// Total paisa per unit at the best fill.
-    pub best_paisa: i64,
-    /// Total paisa per unit at the worst fill.
-    pub worst_paisa: i64,
+    ///
+    /// `i128`, not `i64`: an `i64` total was `saturating_add`ed, so a sum past
+    /// `i64::MAX` was served clamped as if it were the real total — the hidden
+    /// fallback `CLAUDE.md` §4 bans. Every `i64` addend fits, and `2^64` of them
+    /// cannot reach `i128::MAX`, so this total is exact for any slice (D-1625).
+    pub best_paisa: i128,
+    /// Total paisa per unit at the worst fill. `i128` for the same reason.
+    pub worst_paisa: i128,
     /// The single best round trip in this bucket, at the worst fill.
     pub largest_win: i64,
     /// The single worst round trip in this bucket, at the worst fill.
@@ -2230,8 +2242,10 @@ impl Bucket {
         if row.worst > 0 {
             self.worst_wins = self.worst_wins.saturating_add(1);
         }
-        self.best_paisa = self.best_paisa.saturating_add(row.best);
-        self.worst_paisa = self.worst_paisa.saturating_add(row.worst);
+        // Exact: at most `usize::MAX` addends each within `i64`, whose sum
+        // magnitude is below `2^127`, so the saturation is unreachable (D-1625).
+        self.best_paisa = self.best_paisa.saturating_add(i128::from(row.best));
+        self.worst_paisa = self.worst_paisa.saturating_add(i128::from(row.worst));
         // SEEDED FROM THE FIRST TRADE, not from zero. A bucket whose every trade
         // lost would report a `largest_win` of 0 if this started at zero, and
         // zero is a better result than every trade it actually holds -- the
@@ -2284,7 +2298,9 @@ pub enum Period {
     /// [`Self::Day`] says *which dates*, and with eighty-one months of data that
     /// is 1,700 rows nobody can read. Seven rows can be read at a glance.
     Weekday,
-    /// Minutes from midnight IST, rounded down to the clock hour.
+    /// The IST clock hour the trade entered in, `0..=23`. (This said "minutes
+    /// from midnight IST, rounded down to the clock hour", which the key never
+    /// was; the web reader expects `0..=23`. D-1624.)
     ///
     /// Epoch microseconds are the storage representation, not the trading
     /// calendar. Applying the shared IST offset here keeps hour, weekday and
@@ -2499,6 +2515,35 @@ mod period_tests {
         assert_eq!(got[0].worst_wins, 1, "only one survives the worst fill");
         assert_eq!(got[0].best_paisa, 400);
         assert_eq!(got[0].worst_paisa, -800);
+    }
+
+    /// c4b-6, D-1625: totals past `i64` are exact, never clamped.
+    #[test]
+    fn bucket_totals_past_i64_are_exact_not_clamped() {
+        let rows = [
+            trade(MONDAY, i64::MAX, i64::MIN),
+            trade(MONDAY, i64::MAX, i64::MIN),
+            trade(MONDAY, i64::MAX, i64::MIN),
+        ];
+        let got = of(&rows, Period::Day);
+        assert_eq!(got[0].best_paisa, 3 * i128::from(i64::MAX));
+        assert_eq!(got[0].worst_paisa, 3 * i128::from(i64::MIN));
+    }
+
+    /// c4b-3, D-1624: the Hour key is the IST clock hour, `0..=23`.
+    #[test]
+    fn the_hour_key_is_the_ist_clock_hour() {
+        // 2024-01-15 03:50 UTC is 09:20 IST.
+        let nine_twenty_ist = 1_705_290_600_000_000;
+        assert_eq!(Period::Hour.bucket(nine_twenty_ist), 9);
+        assert_eq!(
+            Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000 - 1),
+            9
+        );
+        assert_eq!(
+            Period::Hour.bucket(nine_twenty_ist + 40 * 60 * 1_000_000),
+            10
+        );
     }
 
     /// The extremes are seeded from the first trade, not from zero.

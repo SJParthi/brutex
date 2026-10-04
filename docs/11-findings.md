@@ -662,3 +662,109 @@ the failure at the fixture root, separate from the deliberately injected
 journal-publication collision. The test-only fixture now uses a checked
 monotonic suffix with its PID/timestamp. Preserve the failed baseline and
 diagnostic replay; they are not counted as caught production mutants.
+
+### Audit fixes of 2026-10-03, worker w1 — D-1520..D-1539
+
+| Finding | Resolution and evidence boundary |
+|---|---|
+| audit-20261003 attackdata-1: a month with committed records and a truncated header region was re-initialised | Refused when the `.crc` sidecar is non-empty (D-1520, AFA-01). |
+| audit-20261003 hunt-store-2: a torn genesis slot was refused for ever | Repaired when nothing is committed and the region holds only what a torn genesis leaves (D-1521, AFA-02). |
+| audit-20261003 hunt-store-3, hunt-store-4: the writer created a missing store root and did not flush created directories | Root refused; each created directory's parent fsynced (D-1522, AFA-03). |
+| audit-20261003 hunt-store-1: the bar door accepted an overlay or greeks geometry at a bar name | Bar table is `Layout::V2` alone (D-1523, AFA-04). |
+| audit-20261003 attackdata-2: duplicate check by float equality; insane greeks admitted | Byte equality; greeks domain enforced (D-1524, AFA-05). |
+| audit-20261003 attackdata-7: a disagreeing overlap was reported as a format error | `OverlapDisagrees` with the conflict (D-1525, AFA-06). |
+| audit-20261003 hunt-store-7: four permission tests were vacuous as root | Run where permission bits bind (D-1526, AFA-07). |
+| audit-20261003 o1store2-1, o1store2-2, o1store2-3, hunt-store-6: store docs disagreed with the code | Corrected (D-1527, AFA-08). |
+| audit-20261003 attackdata-8: a cleared checksum flag disables verification | Not fixed: needs a new format version. Stated limit (D-1528). |
+| audit-20261003 hunt-store-5: lake never checked the timestamp's unit or UTC flag | Refused by name (D-1528, AFA-20). |
+| audit-20261003 attackdata-4: JSON rupee price snapped from the f64 re-rendering | Not fixed; stated limit, comment corrected (`docs/06-limits.md`). |
+| audit-20261003 hunt-pull-1: derivatives audit ignored the venue's 15:40 close | Venue-dated classification (D-1529, AFA-09). |
+| audit-20261003 hunt-pull-2: rolling rupee price snapped to zero | Refused (D-1530, AFA-10). |
+| audit-20261003 attackdata-3: repeated JSON key kept the last value silently | Refused by name (D-1531, AFA-11). |
+| audit-20261003 attackdata-5: negative volume netted; bucket wider than a day admitted | Both refused (D-1532, AFA-12). |
+| audit-20261003 attackdata-6: `sessions_between` left out a Muhurat of unmeasured length | Counted as a session (D-1532, AFA-12). |
+| audit-20261003 hunt-pull-3: exceptional session named once per bucket | Once per day (D-1533, AFA-13). |
+| audit-20261003 errpaths-1: half-set AWS env silently fell back to `[default]`; `AWS_PROFILE` ignored | Refused; profile honoured. AWS behaviour UNVERIFIED against the charter (D-1534, AFA-14). |
+| audit-20261003 hunt-costs-1: straddling trip priced at the entry day's regime, under-charging the sell tax | Per-leg regime (D-1535, AFA-15). |
+| audit-20261003 hunt-costs-6: stale costs docs and a wrong D-number | Corrected (D-1535). |
+| audit-20261003 hunt-costs-5: no charter source for any cost rate | UNVERIFIED, not invented (D-1535, `docs/06-limits.md`). |
+| audit-20261003 hunt-costs-2: restart re-reserved a logged run id | Seeded above the block's largest run; one-block limit stated (D-1536, AFA-16). |
+| audit-20261003 hunt-costs-3: two sinks on one directory | Cross-process `flock`, second refused (D-1537, AFA-17). |
+| audit-20261003 hunt-costs-4: future time floor carried silently | Named and counted (D-1538, AFA-18). |
+| audit-20261003 attacksweep-2: unterminated fragment fused onto the next `Written` event | Closed before the next event (D-1539, AFA-19). |
+### audit-20261003 `crates/cli` fixes (worker w3) — 2026-10-03
+
+| Finding | Resolution and evidence boundary |
+|---|---|
+| audit-20261003 hunt-cli-a-1, hunt-cli-a-2: a held `runs.bin` or `detail-sets.bin` writer absorbed only the tail after a peer rewrote an indexed row and appended | D-1560: growth re-hashes the indexed prefix and refuses a rewrite. AFC-01 to AFC-05; the rewrite tests failed before the change. |
+| audit-20261003 hunt-cli-a-3: a cold open of `runs.bin` indexed two sealed rows of one identity | D-1560: refused by name. AFC-03. |
+| audit-20261003 errpaths-2 (and errpaths-6): `Path::exists` decided absence in `committed_receipt` and six Step-3 stages | D-1561: `symlink_metadata`, `NotFound` only. AFC-06, AFC-07. |
+| audit-20261003 hunt-cli-b-1: an exhausted expression search appended a checkpoint per rerun | D-1562. AFC-08. |
+| KNOWN GAP11-0 and W2-cli13-5: torn completion marker; no `DIRECTORY_LIMIT` check in `publish_inner` | D-1563: staged marker renamed into place; limit refused before reserving. AFC-09, AFC-10. |
+| audit-20261003 hunt-conc-1 (KNOWN GAP13-13): `sweep-all` attempt tokens and ledger rows followed thread timing | D-1564: windowed four-phase walk, serial in walk order. AFC-12. `range-all`, `pool` and the Boolean pools (hunt-conc-2) are stated as completion-ordered in `docs/06-limits.md`, not changed. |
+| audit-20261003 hunt-conc-3: refusal text depended on `HashMap` order | D-1565. AFC-13, AFC-14. |
+| audit-20261003 hunt-conc-4, hunt-cli-b-2, hunt-cli-b-4, hunt-cli-a-6 | D-1566. AFC-11, AFC-15; the doc corrections carry no test. |
+| audit-20261003 o1surface2-1, o1surface2-4 (KNOWN W2-cli8-4) | D-1567: bounds stated, not removed. |
+| audit-20261003 gaps-1: Step-3 V1-V4 modules unwired from any command | D-1568: recorded, nothing deleted. |
+### audit-20261003 — crates/api and web/ findings fixed on audit-fix/w4 — 2026-10-03
+
+| Finding | Resolution |
+|---|---|
+| audit-20261003 attacksweep-1 — leading `\r\n\r\n` stopped the head deadline | D-1580; blank lines before a request line are skipped and the deadline keeps running |
+| audit-20261003 hunt-api-1 — a closed tab cancelled a hand pull half-way | D-1581; the route runs its pull on a spawned task |
+| audit-20261003 hunt-api-2 — Ctrl-C could not end the process during a sweep | D-1582; bounded shutdown wait that names abandoned engine tasks |
+| audit-20261003 hunt-api-3 — a flood of 4xx rotated the retained log away | D-1583; failed-request lines rationed per window, held-back count logged |
+| audit-20261003 hunt-api-4 — one retired symbol blocked every recovery plan | D-1584; stored attempts filtered by plan scope before being judged |
+| audit-20261003 webcontract-1 — `/vocab.json` lacked the `commit_digest` the page reads | D-1586; the API sends it |
+| audit-20261003 attacksweep-3 / hunt-api-5 — repeated POST body keys read first-match | D-1587; refused 400, list fields excepted |
+| audit-20261003 webcontract-2 / webcontract-3 — unescaped innerHTML, ignored reload outcome, stale footer | D-1585 |
+| audit-20261003 webcontract-5 — no cache header on hashed bundle files | D-1591 |
+| audit-20261003 o1surface2-2 / o1surface2-3 — tick read every manifest twice; landing on a Tokio worker | D-1588, D-1589 |
+| audit-20261003 hunt-api-6 — browser-launch child left a zombie | D-1590 |
+### Audit 20261003 — CI, gate and test-gap fixes (worker w5)
+
+| Finding (audit-20261003) | Resolution |
+|---|---|
+| hunt-ci-1 PR can weaken its own gates and auto-merge | D-1604: CODEOWNERS; auto-merge (now `pull_request_target`, main's copy) arms a gate or law change only on a code owner's approval of head. Branch-protection code-owner review is an owner setting, not made here |
+| hunt-ci-2 main never re-checked after bot merges | D-1605: hourly `main-check.yml` dispatches CI on an unverified main head |
+| hunt-ci-3 `step-runs` passes `\|\| true` and dead branches | D-1601, AFE-01 |
+| hunt-ci-4 nothing guards `ci-ok` | D-1601, AFE-02: `source_scan aggregator` in Gate 0 |
+| hunt-ci-5 gate tools outside fmt/clippy | D-1600: nine clippy errors fixed, Gate 6c |
+| hunt-ci-6 Gate 27 blind to digit prefixes | D-1608 |
+| hunt-ci-7 W4 pipefail and silent zero | D-1609 |
+| hunt-ci-8 / hunt-ci-9 stop messages, stacked-PR choice | D-1604 |
+| hunt-ci-10..13 coverage name, stale pin comment, token scope, Gate 5 forms | D-1610 |
+| rustonly2-1 / -3 / -4 orphan roots, indirect build-script spawns, shells from crate code | D-1603, AFE-03, AFE-05, AFE-06 |
+| rustonly2-2 inline interpreter forms | D-1602, AFE-04 |
+| rustonly2-6 version-only lock change | D-1611, AFE-10 |
+| rustonly2-7 Gate 1g environment doors | D-1612 |
+| rustonly2-9 stale §96 | D-1614 |
+| testgaps-1..5 Gate 10 token shapes, four phantom citations | D-1606, AFE-07..09 |
+| testgaps-6 web/ native tests never run | D-1607, Gate 6d |
+| testgaps-7 / -8 ignored and macOS-only tests | D-1613, documented |
+| testgaps-10 two assertion-free tests | D-1614, AFE-11 |
+| testgaps-11..13, gaps-13 stale limits and plan rows | D-1614 |
+### Audit 2026-10-03, fix worker 2 — dispositions — 2026-10-03
+
+Narrative only. No row is added to the table above, so its disposition tally
+is unchanged.
+
+- **gaps-6** (corporate actions): measured by a probe. A split inflates no
+  trade, since every trade is intraday, but it distorts about seventy-nine
+  conditions on and after the split session and mixes two price scales in
+  paisa totals. The largest overnight move is now named on six stored stock
+  doors, with no threshold. A refusing detector remains UNVERIFIED for want
+  of a sourced threshold. D-1540, AFB-01.
+- **hunt-runner-1**: fixed. D-1541, AFB-02.
+- **hunt-indicators-1**: fixed. D-1542, AFB-03.
+- **hunt-indicators-2** and **hunt-indicators-3**: fixed. D-1543, AFB-04.
+- **gaps-3**: recorded as unwired and pinned by a source test. D-1544, AFB-05.
+- **errpaths-3**: fixed. D-1545, AFB-06.
+- **errpaths-4**: partial. A checked constructor exists, and the public
+  fields stay for the tested degradation path. D-1546, AFB-07.
+- **errpaths-9** (`fold_rungs`): fixed. D-1547, AFB-08.
+- **hunt-runner-2**: fixed. D-1548, AFB-09.
+- **hunt-runner-5**: documented, not changed. D-1549.
+- **o1eng2-1**: documented in `docs/06-limits.md`. D-1550.
+- **hunt-runner-4**, **o1eng2-2**, **o1eng2-3** and **o1eng2-4**: stale text
+  corrected (see D-1550).

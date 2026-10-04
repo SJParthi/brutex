@@ -106,8 +106,17 @@ fn a_link_back_to_an_ancestor_is_one_linked_entry() {
     assert_eq!(out.held.len(), 1);
 }
 
+/// Re-run where the mode bits bind: as root `read_dir` of a mode-000
+/// directory succeeds and the premise fails (audit-root, D-1485, D-0995).
 #[test]
 fn a_locked_directory_is_one_unreadable_entry() {
+    crate::support::where_permission_binds(
+        "catalog::catalog_tests::a_locked_directory_is_one_unreadable_entry",
+        a_locked_directory_is_one_unreadable_entry_body,
+    );
+}
+
+fn a_locked_directory_is_one_unreadable_entry_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("locked");
     put(&root, "groww/NSE/INDEX/NIFTY/1min/2026-08.bin");
@@ -170,8 +179,17 @@ fn a_non_utf8_component_is_counted_and_never_dropped() {
     );
 }
 
+/// Re-run where the mode bits bind: as root a mode-000 root is still
+/// searchable and the `os error 13` arm never runs (audit-root, D-1485).
 #[test]
 fn only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused() {
+    crate::support::where_permission_binds(
+        "catalog::catalog_tests::only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused",
+        only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused_body,
+    );
+}
+
+fn only_an_absent_bars_is_the_empty_store_and_every_other_non_directory_is_refused_body() {
     use std::os::unix::fs::PermissionsExt;
     let root = scratch("probe");
     let bars = root.join("bars");

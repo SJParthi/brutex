@@ -15,14 +15,14 @@
 //! masks, exits or digests.
 //!
 //! This is intentionally version-neutral because terminal-aware Selection may
-//! produce zero through twenty-five winners per rung.  A future Global Replay
-//! V4 coordinator must preflight its actual opaque Selection V6 winner set
-//! before invoking this mint; this module does not reinstate V3's fixed 8x25
-//! assumption.
+//! produce zero through twenty-five winners per rung.  The Global Replay V4
+//! coordinator (`ledger_v6`, through `commit_stored_global_replay_v4`)
+//! preflights its actual opaque Selection V6 winner set before invoking this
+//! mint; this module does not reinstate V3's fixed 8x25 assumption.
 
 #![allow(
     dead_code,
-    reason = "the stored OOS capability is the agreed Step-3 seam for the pending Selection V6 / Global Replay V4 coordinator"
+    reason = "the Selection V6 / Global Replay V4 coordinator calls this capability on the production path; some items are still reached only from tests"
 )]
 
 use std::ops::Range;

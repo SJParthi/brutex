@@ -1,0 +1,54 @@
+name: Main re-check
+
+# MAIN IS VERIFIED AFTER EVERY MERGE, NOT ONLY ON MONDAYS (D-1605,
+# audit-20261003 hunt-ci-2).
+#
+# auto-merge.yml arms the merge with GITHUB_TOKEN, so GitHub performs it as
+# that token, and GitHub creates no workflow run for an event the token
+# caused: ci.yml's `push: branches: [main]` never fired for a bot merge. The
+# last push run on main was 2026-09-23; five merges after it were never
+# re-verified, and the weekly schedule was the only post-merge signal.
+#
+# workflow_dispatch IS the documented exception: a dispatch made with
+# GITHUB_TOKEN does start a run. So once an hour this job reads main's head
+# and, when no push, dispatch or scheduled CI run exists for that exact sha,
+# dispatches ci.yml on main. No secret is needed and nothing runs twice for
+# one sha. HONEST LIMIT: a failed run on main is red on main's commit and in
+# the Actions tab; nothing here notifies anyone.
+
+on:
+  schedule:
+    # Minute 41, not on the hour: cron runs on the hour queue longest.
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: main-check
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch CI on an unverified main
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Run CI on main's head unless a run on it already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/${REPO}/commits/main" --jq .sha)
+          [ -n "$sha" ] || { echo "main's head could not be read."; exit 1; }
+          n=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&head_sha=${sha}" \
+                --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch" or .event == "schedule")] | length')
+          echo "main is at ${sha}; CI runs on main for it: ${n}"
+          if [ "$n" -gt 0 ]; then
+            echo "Already verified, or being verified. Nothing to do."
+            exit 0
+          fi
+          gh workflow run ci.yml --repo "$REPO" --ref main
+          echo "Dispatched CI on main at ${sha}."

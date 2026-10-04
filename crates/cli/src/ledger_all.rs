@@ -954,7 +954,7 @@ fn run_chain(request: &LedgerAllRequest<'_>, out: &mut String) -> Result<usize, 
 /// Refuses if the retained topology stops authenticating mid-visit -- the rows
 /// are read under the same reauthentication every other stage uses, so a
 /// partially-read set is a refusal rather than a short table.
-fn render_winners(
+pub(crate) fn render_winners(
     out: &mut String,
     selection: crate::all_rung_selection_v5::CommittedStoredAllRungSelectionV5,
 ) -> Result<(), String> {

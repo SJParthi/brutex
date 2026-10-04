@@ -262,16 +262,25 @@ pub enum Reread {
 /// * `sent_with`: the fingerprint of the credential the last request carried.
 ///   That is the value a rejection rejected, and the re-read is compared with
 ///   it.
-/// * `dead`: a fingerprint the vendor rejected and a later read replaced. If a
-///   later read hands that value back, for example because a rotation was
-///   undone, it is refused before a socket is opened. Sending a credential
-///   already known to be dead is the request this module exists to stop.
+/// * `dead`: EVERY fingerprint the vendor rejected and a later read replaced,
+///   in this run. If a later read hands any of them back, for example because
+///   a rotation was undone, it is refused before a socket is opened -- by
+///   [`Self::admit`] on the spot loop and by [`Self::reread`] itself on the F&O
+///   walks, which send a rotated source without admitting it. Sending a
+///   credential already known to be dead is the request this module exists to
+///   stop. It held ONE fingerprint and only `admit` read it, so on a walk the
+///   sequence A rejected, B read, B rejected, A read sent A again (v3a-1,
+///   D-1482). A list, not a set: the print has a constant-time `PartialEq` and
+///   deliberately no `Hash`, so a membership test is a walk over the dead
+///   values, O(d) where d is the number of rotations this run has seen, each
+///   bought by one vendor rejection. **UNVERIFIED as a measurement**:
+///   no test times it; `docs/06-limits.md` names it.
 /// * `stop`: the verdict, once there is one. Every loop checks it after each
 ///   instrument or cell and breaks.
 #[derive(Debug, Default)]
 pub struct Watch {
     sent_with: Option<CredentialPrint>,
-    dead: Option<CredentialPrint>,
+    dead: Vec<CredentialPrint>,
     stop: Option<(CredentialStop, String)>,
 }
 
@@ -294,7 +303,7 @@ impl Watch {
     /// carries a value this run knows to be dead.
     pub fn admit(&mut self, feed: pull::vendor::Feed, source: &HttpSource) -> Result<(), String> {
         let print = source.credential_print();
-        if self.dead == Some(print) {
+        if self.is_dead(print) {
             let why = format!(
                 "{}: a credential read returned the access-token the vendor already rejected \
                  in this run, so it was not sent. {}",
@@ -306,6 +315,12 @@ impl Watch {
         }
         self.sent_with = Some(print);
         Ok(())
+    }
+
+    /// Whether the vendor already rejected `print` in this run. O(d), see the
+    /// type's docs.
+    fn is_dead(&self, print: CredentialPrint) -> bool {
+        self.dead.contains(&print)
     }
 
     /// Notes a credential read that produced nothing.
@@ -338,6 +353,8 @@ impl Watch {
     /// * the re-read fails: the run halts with that reason;
     /// * the re-read returns the rejected value: the run halts, because the
     ///   token is dead and this repository cannot replace it;
+    /// * the re-read returns a value the vendor rejected EARLIER in this run:
+    ///   the run halts the same way, because that token is dead too (v3a-1);
     /// * the re-read returns a different value: the rejected print is
     ///   remembered as dead and the new source is handed back.
     pub async fn reread(&mut self, credentials: &Credentials, feed: pull::vendor::Feed) -> Reread {
@@ -359,6 +376,24 @@ impl Watch {
             Ok((source, _)) => {
                 let fresh = source.credential_print();
                 let rotated = rejected != Some(fresh);
+                if rotated && self.is_dead(fresh) {
+                    note(
+                        feed,
+                        "re-read returned a value the vendor already rejected in this run; \
+                         the pull halted",
+                        Some(false),
+                    );
+                    return self.halt(
+                        CredentialStop::SameValue,
+                        format!(
+                            "{}: the vendor rejected the access-token and the one re-read \
+                             returned a value the vendor already rejected in this run, \
+                             compared by fingerprint, so it was not sent. {}",
+                            feed.display(),
+                            NEVER_MINTS
+                        ),
+                    );
+                }
                 note(
                     feed,
                     if rotated {
@@ -369,7 +404,11 @@ impl Watch {
                     Some(rotated),
                 );
                 if rotated {
-                    self.dead = rejected;
+                    if let Some(rejected) = rejected
+                        && !self.is_dead(rejected)
+                    {
+                        self.dead.push(rejected);
+                    }
                     self.sent_with = Some(fresh);
                     return Reread::Rotated(Box::new(source));
                 }

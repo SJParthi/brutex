@@ -745,3 +745,47 @@ fn three_geometries_are_told_apart_by_magic_stride_and_version() {
     assert_eq!(GREEK_STRIDE * GREEK_RECORDS_PER_BLOCK, 4_080);
     const { assert!(GREEK_STRIDE * (GREEK_RECORDS_PER_BLOCK + 1) > 4_096) }
 }
+
+/// attackdata-2 (D-1524). A greeks row outside the domain the pricer itself
+/// accepts never reaches the disk: `greeks` refuses a spot or a volatility that
+/// is not positive (`NotPositive`), so a stored row carrying one was not
+/// produced by it and is refused at the write boundary like a non-finite one.
+#[test]
+fn a_greek_outside_the_pricers_domain_is_refused_at_the_write_boundary() {
+    use store::format::{Greek, Row};
+
+    let sane = Greek {
+        ts_micros: 1,
+        spot: 2_500_000,
+        volatility: 0.14,
+        delta: 0.5,
+        gamma: 0.0001,
+        vega: 1.0,
+        theta: -1.0,
+        rho: 0.1,
+        rate: 0.0655,
+        provenance: 0,
+    };
+    assert!(sane.is_sane(), "an ordinary row must pass");
+    for outside in [
+        Greek { spot: -5, ..sane },
+        Greek { spot: 0, ..sane },
+        Greek {
+            volatility: 0.0,
+            ..sane
+        },
+        Greek {
+            volatility: -0.0,
+            ..sane
+        },
+        Greek {
+            volatility: -0.25,
+            ..sane
+        },
+    ] {
+        assert!(
+            !outside.is_sane(),
+            "a row outside the pricer's domain passed the write gate: {outside:?}"
+        );
+    }
+}

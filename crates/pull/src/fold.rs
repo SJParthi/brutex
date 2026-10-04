@@ -99,14 +99,25 @@ impl Bucket {
     /// One trading day. Wide enough that a whole session lands in one bucket.
     pub const DAY: Self = Self(86_400);
 
-    /// A bucket of `secs` seconds, or [`None`] for zero.
+    /// A bucket of `secs` seconds, or [`None`] for zero or for a width wider
+    /// than one day.
     ///
     /// Zero is refused rather than clamped: a zero-width bucket would divide by
     /// zero, and a bucket silently widened to one second is a different answer
     /// to the question that was asked.
+    ///
+    /// **Wider than [`Self::DAY`] is refused too** (audit-20261003
+    /// attackdata-5, D-1532). Such a bucket folds two trading days into one
+    /// bar, no store rung is wider than a day, and a `u32::MAX` width stamped a
+    /// 2024 snapshot at 1969-12-31. Every width from one second to one day is
+    /// still accepted, which is what folding from snapshots promises.
     #[must_use]
     pub const fn of_secs(secs: u32) -> Option<Self> {
-        if secs == 0 { None } else { Some(Self(secs)) }
+        if secs == 0 || secs > Self::DAY.0 {
+            None
+        } else {
+            Some(Self(secs))
+        }
     }
 
     /// The width in seconds.
@@ -272,6 +283,13 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     let mut previous: Option<i64> = None;
 
     for (i, snap) in snapshots.iter().enumerate() {
+        // A NEGATIVE COUNT IS REFUSED BEFORE IT CAN BE NETTED. D-1532.
+        if snap.volume < 0 {
+            return Err(FoldError::NegativeVolume {
+                at: i,
+                volume: snap.volume,
+            });
+        }
         if let Some(prev) = previous
             && snap.ts_micros < prev
         {
@@ -431,6 +449,19 @@ pub enum FoldError {
         /// The start of the bucket it was being added to.
         bucket: i64,
     },
+    /// A snapshot whose volume is below zero. audit-20261003 attackdata-5,
+    /// D-1532.
+    ///
+    /// The sum was checked for overflow and not for sign, so a negative
+    /// snapshot was netted into a plausible positive bucket (10 + -7 = 3) that
+    /// then passed the store's count gate, which sees only the sum. A count of
+    /// trades cannot be negative; refused here, where the row is still named.
+    NegativeVolume {
+        /// Zero-based position of the snapshot.
+        at: usize,
+        /// Its volume as offered.
+        volume: i64,
+    },
     /// A snapshot's timestamp precedes the one before it.
     ///
     /// Refused rather than sorted. Rows sharing a second carry no tiebreaker,
@@ -479,6 +510,12 @@ impl core::fmt::Display for FoldError {
                 "snapshot {at} takes the volume of the bucket at {bucket} past \
                  what an i64 can hold. Refused rather than saturated: a capped \
                  sum is a wrong volume filed as a measured one."
+            ),
+            Self::NegativeVolume { at, volume } => write!(
+                f,
+                "snapshot {at} carries a negative volume of {volume}. A count of \
+                 trades cannot be below zero, and summed into its bucket it \
+                 would hide as a smaller plausible volume."
             ),
             Self::OutOfOrder {
                 at,
@@ -839,6 +876,7 @@ pub fn complete_minutes_with_calendar(
             .checked_add(i64::from(bucket.secs()) * 1_000_000)
             .ok_or(FoldError::AnchorOverflow { ts_micros: start })?;
         let (day, midnight) = ist_day_of(start)?;
+        let new_day = previous_day != Some(day);
         let calendar = runtime.kind_of(day);
         let exceptional = matches!(calendar, crate::calendar::DayKind::Open(s) if s != crate::calendar::Session::full());
         let session = match minute_session(day, calendar, venue, cash_schedule) {
@@ -920,8 +958,14 @@ pub fn complete_minutes_with_calendar(
         if calendar == crate::calendar::DayKind::Unmeasured {
             continue;
         }
+        // AN EXCEPTIONAL SESSION IS NAMED ONCE PER DAY TOO (hunt-pull-3,
+        // D-1533), for o1api-44's reason above: every bucket of it is withheld
+        // for the same sentence, and one line per bucket was one `pull.derive`
+        // warning and one refusal clause per bucket.
         if exceptional {
-            diagnostics.push(format!("bucket {start}: exceptional session {session:?} withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
+            if new_day {
+                diagnostics.push(format!("day {day}: exceptional session {session:?}: every derived bucket of it withheld; fixed stored grid cannot attest session alignment; versioned store architecture required"));
+            }
         } else if valid && expected > 0 && i128::from(count) == expected {
             complete.push(bar);
         } else if !day_is_withheld(session) {

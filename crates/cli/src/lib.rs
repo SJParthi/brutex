@@ -52,6 +52,8 @@ compile_error!(
     "cli: O_NOFOLLOW is verified only for Linux x86_64 and aarch64; add this architecture to store::open_flags (D-0980)"
 );
 
+/// The one append-with-rollback every fixed-stride ledger appends through (D-1850).
+mod append_rollback;
 #[cfg(test)]
 mod audit_publication_tests;
 /// Strict checksum-admitted historical range execution shared by CLI and API.
@@ -1891,8 +1893,9 @@ fn stored_month_arm(
 /// # Why it takes no UNDERLYING
 ///
 /// Every other stored command takes one, because it sweeps one instrument. This
-/// chain does not: `CLAUDE.md` §1 names two instruments as the engine surface
-/// and the Population V5 pipeline commits BOTH per rung, pairing them as one
+/// chain does not: it is built for the two spot indices of `CLAUDE.md` §1
+/// (whose surface also holds the F&O cash equities, which this chain does not
+/// sweep) and the Population V5 pipeline commits BOTH per rung, pairing them as one
 /// cross-sectional statistic. The pair is structural all the way down --
 /// `CandidateFamilyPairV1 { nifty, banknifty }` -- so there is no argument an
 /// operator could pass to ask for one of them, and offering one would be a
@@ -3172,6 +3175,60 @@ pub(crate) fn note(event: &telemetry::Event<'_>) {
     let _ = telemetry::emit(event);
 }
 
+/// Writes the binary's whole output to `out`, and returns the exit code the
+/// run earns once that write is known (v53-2, D-1484).
+///
+/// `main` printed with `println!` and `print!`, which PANIC on a closed
+/// stdout: `cli sweep 6 100 | true` exited 101 with a backtrace after the
+/// work was done, and a `> report.txt` on a full disk did the same. The shape
+/// is `api`'s `say_line` (probeapi-7, D-1202): written with `write_all`, never
+/// a panic, and a failure SAID on `fallback` with one `cli.output` event.
+///
+/// The code depends on why. A closed pipe (`BrokenPipe`) is a reader that
+/// stopped reading -- `| head` is the ordinary case -- so the computed code
+/// stands, as it does for any Unix filter. Any other error means the report
+/// was meant to land and did not, so a run that would have exited [`OK`]
+/// exits [`FAILED`]: zero would say "everything went as asked" over a report
+/// nobody has. A run that already earned a non-zero code keeps it. If
+/// `fallback` is gone too there is nobody left to tell; the event remains.
+pub fn deliver(
+    code: u8,
+    text: &str,
+    out: &mut impl std::io::Write,
+    fallback: &mut impl std::io::Write,
+) -> u8 {
+    let Err(why) = out.write_all(text.as_bytes()).and_then(|()| out.flush()) else {
+        return code;
+    };
+    let closed = why.kind() == std::io::ErrorKind::BrokenPipe;
+    let earned = if closed || code != OK { code } else { FAILED };
+    let said = why.to_string();
+    note(
+        &telemetry::Event::new(
+            telemetry::Level::Warn,
+            "cli.output",
+            "stdout is not writable; the report was not shown whole",
+        )
+        .with("why", telemetry::Value::Str(&said))
+        .with(
+            "bytes",
+            telemetry::Value::Uint(u64::try_from(text.len()).unwrap_or(u64::MAX)),
+        )
+        .with("exit", telemetry::Value::Uint(u64::from(earned))),
+    );
+    let _told = writeln!(
+        fallback,
+        "stdout is not writable ({why}); the report ({} bytes) was not shown whole. {}",
+        text.len(),
+        if closed {
+            "The reader closed the pipe, so the run's own exit code stands."
+        } else {
+            "The report was meant to land and did not, so this is not a clean exit."
+        }
+    );
+    earned
+}
+
 /// Emits one structural event under an exact browser-attempt key when one was
 /// supplied, without changing the process-wide telemetry run held by unrelated
 /// work. Terminal runs have no browser attempt and keep the ordinary path.
@@ -3643,6 +3700,7 @@ fn stored_month_kernel(
     // gross of every charge, and corporate actions unchecked. An index's is
     // unchanged. D-0694.
     let mut out = stored_provenance_of(&loaded.key);
+    out.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     let _ = writeln!(
         out,
         "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
@@ -4073,6 +4131,7 @@ fn auto_stored_kernel(
     ))?;
 
     let mut out = stored_provenance_of(&span.key);
+    out.push_str(&stored::overnight_note(&span.key, &span.bars));
     // THE BUDGET THE ANSWER WAS FOUND UNDER, because the answer is meaningless
     // without it. This command's usage tells the operator to run it before
     // `range-all`, so its threshold is read as "what this machine can afford" --
@@ -5447,12 +5506,12 @@ const FOLD_RUNGS_PER_TRAINING: u64 = 2;
 /// was collapsing the stop ladder to one rung — but that clamp was also the
 /// only thing bounding `cap / step_points` above. And `screen` was
 /// parallelised, so `available_parallelism` of these grids are live at once.
-/// The candidate ceiling covers none of it: [`derived_ceiling`] counts APRIORI
+/// The candidate ceiling covers none of it: [`ceiling_from_env`] counts APRIORI
 /// candidates, and an exit grid is transient per-candidate work it never sees.
 ///
 /// # Derived, not typed
 ///
-/// [`derived_ceiling`] already answers *"how many 146-byte records fit in this
+/// [`ceiling_from_env`] already answers *"how many 146-byte records fit in this
 /// machine's share"* — scaled by core count and divided among concurrent rungs
 /// by `SharedBy`. A `Cell` is about the same width, and a grid is TRANSIENT
 /// where a candidate is RETAINED, so a grid gets a small fraction of that: one
@@ -5460,8 +5519,17 @@ const FOLD_RUNGS_PER_TRAINING: u64 = 2;
 ///
 /// On the reference machine that is roughly nine thousand cells per candidate,
 /// solving to seven or eight rungs — the range the old constant already sat in,
-/// now reached by arithmetic rather than by a number that happened to hold. A
-/// larger machine earns more; a smaller one is protected.
+/// now reached by arithmetic rather than by a number that happened to hold.
+///
+/// **The core count cancels, so every machine gets the same budget.** This
+/// sentence used to say "a larger machine earns more; a smaller one is
+/// protected", and the arithmetic does neither: [`whole_machine_ceiling`]
+/// multiplies by `available_parallelism` and the division by `threads` below
+/// divides by the same figure, so the budget is
+/// `DEFAULT_CEILING / REFERENCE_CORES / GRID_SHARE` (9,362 cells, seven rungs)
+/// on one core and on 128 alike, up to integer rounding. That is the
+/// reproducible outcome: the grid rung count, which selects the winning cell,
+/// does not depend on the machine. audit-20261003 hunt-conc-4, D-1566.
 ///
 /// Solved by walking upward rather than inverting a quintic: the answer is
 /// small, the walk is bounded, and `variants` is a `const fn` of a few
@@ -6263,6 +6331,9 @@ fn audit_stored_kernel(request: StoredSweepRequest<'_>) -> Result<String, stored
         loaded.bars.len(),
         commit,
     );
+    // D-1540: the month banner names the largest overnight move of a stock's
+    // bars, where `month_banner` itself sees only their count.
+    header.push_str(&stored::overnight_note(&loaded.key, &loaded.bars));
     header.push_str(&daily_reference_note(&daily, &exact_minute));
     let bars = u64::try_from(loaded.bars.len()).unwrap_or(u64::MAX);
     // THE FLOORS ARE MEASURED OFF THESE BARS, not frozen into a `const`.
@@ -6480,6 +6551,7 @@ fn span_banner(
     commit: &str,
 ) -> String {
     let mut header = stored_provenance(underlying);
+    header.push_str(&stored::overnight_note(&span.key, &span.bars));
     let _ = writeln!(
         header,
         "feed {} · {underlying} · {} · {}-{:02}..{}-{:02} · {} of {} months · {} bars · built at {commit}",
@@ -7393,9 +7465,13 @@ fn grouped(n: u64) -> String {
 /// The conversion happens HERE, at the render boundary, and nowhere else — the
 /// same rule the tick grid follows. Integer arithmetic throughout: the rupees
 /// and the paise are separated by division and remainder, never by a float.
-fn rupees(paisa: i64) -> String {
+///
+/// Takes any integer up to `i128`, because a pooled or per-period money total is
+/// summed exactly in `i128` rather than clamped in `i64` (D-1852).
+fn rupees(paisa: impl Into<i128>) -> String {
+    let paisa: i128 = paisa.into();
     let negative = paisa < 0;
-    // `unsigned_abs` and not `abs`: `i64::MIN` has no positive counterpart, and
+    // `unsigned_abs` and not `abs`: `i128::MIN` has no positive counterpart, and
     // it is exactly the value `saturating_add` produces for a variant that lost
     // without bound. A sort that panicked on the worst possible result would be
     // the report killing the process over the answer.
@@ -10470,7 +10546,19 @@ fn cap_within_budget(sampled: usize, elapsed_nanos: u128, budget_ms: u64, offere
 /// `validate: false` and only the rung that lands is re-run with the stack. This
 /// gives the same choice to the command an operator reaches for first.
 fn validate_from_env() -> bool {
-    validates(crate::knobs::var("BRUTEX_VALIDATE").as_deref())
+    let raw = crate::knobs::var("BRUTEX_VALIDATE");
+    // A VALUE THAT IS NEITHER `0` NOR `1` IS NAMED, NOT ONLY OUTVOTED. It still
+    // leaves validation ON -- the safe direction `validates` documents -- but
+    // `false`, `off` or `no` used to mean ON in silence, so an operator who
+    // asked for less got more with nothing saying why. Recorded here it reaches
+    // the `!! KNOB REFUSED` block like every other unusable knob.
+    // audit-20261003 hunt-cli-b-4, D-1566.
+    if let Some(value) = raw.as_deref()
+        && !matches!(value.trim(), "0" | "1")
+    {
+        crate::knobs::refuse_value("BRUTEX_VALIDATE", value);
+    }
+    validates(raw.as_deref())
 }
 
 /// The rule itself, over the raw value, so it can be tested without touching the
@@ -12001,7 +12089,9 @@ struct Consistency {
     /// every year can still have a day that took a quarter of the account, and
     /// the yearly view cannot show it. A day is the smallest unit an intraday
     /// operator carries risk across.
-    worst_day: i64,
+    ///
+    /// `i128`: a period's net is summed exactly, never clamped (D-1852).
+    worst_day: i128,
     /// Periods counted at the coarsest grain, so a share can be read against a
     /// denominator. `10_000` of one year is not the same evidence as `10_000` of
     /// seven, and a share alone cannot tell them apart.
@@ -12074,7 +12164,7 @@ fn consistency_of(
     }
     // Sized from the ladder, so a new grain cannot be silently discarded.
     let mut shares_bp = [0_i64; crate::stability::GRAINS.len()];
-    let mut worst_day = 0_i64;
+    let mut worst_day = 0_i128;
     let mut years = 0_usize;
     for (slot, grain) in crate::stability::GRAINS.iter().enumerate() {
         let measured = crate::stability::at(&rows, *grain);
@@ -12546,7 +12636,7 @@ fn screen<'a>(
         let (weakest, worst_period) = r.consistency.as_ref().map_or(
             // The unmeasured floor: worse than any real grain share and any
             // real period, so measured rows always sort ahead.
-            (i64::MIN, i64::MIN),
+            (i64::MIN, i128::MIN),
             calendar_terms,
         );
         core::cmp::Reverse((
@@ -12754,7 +12844,7 @@ const fn money_key(cell: &grid::Cell) -> core::cmp::Reverse<(i64, i64, i64)> {
 /// Both terms are carried RAW because the caller wraps the key in `Reverse`:
 /// the tuple sorts descending, so a larger term ranks higher, and for both a
 /// grain share and a period's net "larger" already means "better".
-fn calendar_terms(c: &Consistency) -> (i64, i64) {
+fn calendar_terms(c: &Consistency) -> (i64, i128) {
     (c.weakest_bp(), c.worst_day)
 }
 
@@ -15097,16 +15187,26 @@ fn descent_table(out: &mut String, steps: Vec<(u64, Result<crate::results::Recor
     }
 }
 
-/// One completed or refused support step in the legacy descent table.
+/// One completed or refused support step, as the `descend` progress line on
+/// stderr announces it the moment it lands.
+///
+/// ONE LITERAL SPACE BETWEEN EVERY FIELD (v4-3, D-1487). The fields were
+/// adjacent width specifiers, the shape D-1420 removed from the stdout tables:
+/// `min_hits` at `u64::MAX` (20 digits) in a 10-wide field, or `pessimistic`
+/// at `i64::MIN` (20 characters), ran into the field beside it and read as
+/// one number. The progress line is printed row by row as each step finishes,
+/// so no later row's width is known and [`crate::columns`] cannot lay it out
+/// jointly; a literal separator keeps any two figures apart whatever their
+/// width. The stdout report is [`descent_table`], laid out with `columns`.
 fn descent_line(support: u64, row: Result<crate::results::Record, String>) -> String {
     match row {
         Err(why) => format!(
-            "  {:<10}REFUSED: {}",
+            "  {:<10} REFUSED: {}",
             format!("{support}ppm"),
             why.lines().next().unwrap_or(&why)
         ),
         Ok(record) => format!(
-            "  {:<10}{:>10}{:>14}{:>7}{:>10}{:>9}{:>12}{:>12}{:>14}",
+            "  {:<10} {:>10} {:>14} {:>7} {:>10} {:>9} {:>12} {:>12} {:>14}",
             format!("{support}ppm"),
             record.min_hits,
             record.combinations,
@@ -16846,7 +16946,7 @@ static LEDGER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 ///
 /// # The defect this closes, and it is why a run "ran out of budget"
 ///
-/// [`derived_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
+/// [`whole_machine_ceiling`] answers *"how many candidates fit in THIS MACHINE'S
 /// memory"* — `engine::DEFAULT_CEILING` at roughly 146 bytes each is about
 /// **19.6 GB**, and its own doc says that is *"a fact about ONE machine"*. It is
 /// therefore a budget for the machine, not for a caller.
@@ -17019,7 +17119,7 @@ impl Drop for SharedBy {
 ///
 /// # It is at module scope because TWO functions need it
 ///
-/// It was declared inside [`derived_ceiling`], which is why [`shared_out`] could
+/// It was declared inside `derived_ceiling` (since removed), which is why [`shared_out`] could
 /// not apply the same floor and why the sharing division existed on one ceiling
 /// path and not the other. A constant only one function can see is a constant
 /// the other function will re-derive differently.
@@ -17052,7 +17152,7 @@ const REFERENCE_CORES: usize = 14;
 
 /// This machine's whole candidate budget, BEFORE any sharing.
 ///
-/// Split out from [`derived_ceiling`] so [`ceiling_asked`] can name the same
+/// Split out from `derived_ceiling` (since removed) so [`ceiling_asked`] can name the same
 /// figure without the process-global division -- the identity must describe the
 /// search and not the scheduling.
 ///
@@ -18756,8 +18856,17 @@ fn signal_spacing_minutes(bars: &[indicators::Candle]) -> u32 {
 ///
 /// The gate silences `vocab engine indicators runner` because those hold the
 /// innermost loops, and its own remedy prescribes the shape: *"plain integer
-/// counters … emitted ONCE at a structural boundary"*. This is `cli`, called
-/// once per rung, holding no loop over bars and none over candidates.
+/// counters … emitted ONCE at a structural boundary"*. This event is that
+/// boundary: it is built once per rung, before the grid starts. The path it
+/// marks is NOT loop-free, and this sentence said it was until D-1486
+/// (AC-gates-o1-4): right after it, `SliceFacts::of` walks every bar of the
+/// slice, and `screen_cascade` walks every candidate (`screen`'s
+/// `by_evidence.par_iter()`), pricing each one with `grid::evaluate_over`
+/// over the bars. Those loops emit nothing per iteration; their only event is
+/// [`note_grid_progress`], one in every `stride` candidates. `cli` is not on
+/// gate 17's silenced list, so the gate does not refuse them; it is the
+/// boundary discipline, not an absence of loops, that keeps this crate's
+/// events affordable.
 fn grid_entered_event(
     recording: Option<Recording<'_>>,
     bars: usize,
@@ -18868,11 +18977,11 @@ impl<'a> GridProgress<'a> {
 ///
 /// # Gate 17, and a correction to what the sibling doc claims
 ///
-/// [`grid_entered_event`] says this path is *"`cli`, called once per rung,
-/// holding no loop over bars and none over candidates."* The first half is
-/// true and the second is not: `screen` runs `by_evidence.par_iter()` over
-/// every candidate and calls `grid::evaluate_over` inside it. That loop is the
-/// phase being timed here.
+/// [`grid_entered_event`]'s doc said this path was called once per rung and
+/// looped over neither bars nor candidates. The first half is true and the
+/// second was not: `screen` runs `by_evidence.par_iter()` over every candidate
+/// and calls `grid::evaluate_over` inside it. That loop is the phase being
+/// timed here. D-1486 corrected the sibling doc.
 ///
 /// It is still `cli`, which is not on gate 17's silenced list, and the cost is
 /// one relaxed `fetch_add` per candidate — the counter is O(1) and the emit
@@ -23738,6 +23847,33 @@ mod tests {
         );
     }
 
+    /// h-cli-3, D-1852: `rupees` renders every integer up to `i128` exactly,
+    /// zero without a sign, and the `i128` totals a pooled or per-period sum
+    /// can now reach, including `i128::MIN`, without a panic or a clamp.
+    #[test]
+    fn rupees_render_zero_unsigned_and_every_i128_exactly() {
+        assert_eq!(super::rupees(0_i64), "\u{20b9}0.00");
+        assert_eq!(super::rupees(-1_i64), "-\u{20b9}0.01");
+        assert_eq!(super::rupees(1_i64), "\u{20b9}0.01");
+        assert_eq!(super::rupees(12_345_678_i64), "\u{20b9}1,23,456.78");
+        assert_eq!(
+            super::rupees(i64::MIN),
+            "-\u{20b9}92,23,37,20,36,85,47,758.08"
+        );
+        assert_eq!(
+            super::rupees(3 * i128::from(i64::MIN)),
+            "-\u{20b9}2,76,70,11,61,10,56,43,274.24"
+        );
+        assert_eq!(
+            super::rupees(i128::MIN),
+            "-\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.28"
+        );
+        assert_eq!(
+            super::rupees(i128::MAX),
+            "\u{20b9}17,01,41,18,34,60,46,92,31,73,16,87,30,37,15,88,41,057.27"
+        );
+    }
+
     /// THE WORST DAY RANKS A SMALLER LOSS HIGHER, WHICH IS WHAT THE RULE SAYS.
     ///
     /// `calendar_terms` feeds a key the caller wraps in `Reverse`, so the tuple
@@ -23758,7 +23894,7 @@ mod tests {
     /// catch it.
     #[test]
     fn a_row_that_never_lost_a_day_outranks_one_that_lost_heavily() {
-        let row = |worst_day: i64| Consistency {
+        let row = |worst_day: i128| Consistency {
             shares_bp: [5_000; crate::stability::GRAINS.len()],
             worst_day,
             years: 6,
@@ -23926,6 +24062,26 @@ mod tests {
         ] {
             assert_eq!(validates(raw), want, "{why}");
         }
+    }
+
+    /// audit-20261003 hunt-cli-b-4: a `BRUTEX_VALIDATE` value other than `0`
+    /// or `1` still leaves validation ON, and the run now SAYS so through the
+    /// `!! KNOB REFUSED` block, instead of reading `false` as `1` in silence.
+    #[test]
+    fn an_unexpected_validate_value_stays_on_and_is_named_as_refused() {
+        let _knobs = crate::knobs::serially();
+        for (raw, refused) in [("false", true), ("off", true), ("1", false), (" 0 ", false)] {
+            crate::knobs::clear_all();
+            crate::knobs::set("BRUTEX_VALIDATE", raw);
+            assert_eq!(super::validate_from_env(), raw.trim() != "0", "{raw:?}");
+            let block = crate::knobs::refused().unwrap_or_default();
+            assert_eq!(
+                block.contains("BRUTEX_VALIDATE"),
+                refused,
+                "{raw:?}: {block}"
+            );
+        }
+        crate::knobs::clear_all();
     }
 
     /// AND THE SEARCH ACTUALLY FINISHES, ON A COLUMN WITH BARS TO SWEEP.

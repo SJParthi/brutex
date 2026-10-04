@@ -15,33 +15,29 @@ pub(crate) fn with_warmed_store<R>(run: impl FnOnce(&std::path::Path) -> R) -> R
     run(&fixture.root)
 }
 
-/// A warmed store holding every one of `symbols`, each month written exactly
-/// as [`Fixture::warmed_for`] writes it for one symbol. D-1701.
+/// One root holding the warmed May 2025 fixture for every symbol in `symbols`,
+/// each month written exactly as [`Fixture::warmed_for`] writes it for one
+/// symbol, so a whole-store walk offers several sweepable months at once. The
+/// first symbol's fixture owns (and removes) the root; the others only write
+/// into it. No symbol is the plain warmed NIFTY store. One helper serves
+/// D-1564's and D-1701's order tests (D-1708).
 pub(crate) fn with_warmed_store_of<R>(
     symbols: &[&'static str],
     run: impl FnOnce(&std::path::Path) -> R,
 ) -> R {
-    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
-        fs::create_dir_all(to).expect("copy target");
-        for entry in fs::read_dir(from).expect("copy source") {
-            let entry = entry.expect("entry");
-            let target = to.join(entry.file_name());
-            if entry.file_type().expect("type").is_dir() {
-                copy_tree(&entry.path(), &target);
-            } else {
-                fs::copy(entry.path(), target).expect("copy");
-            }
-        }
-    }
     let Some((&first, rest)) = symbols.split_first() else {
         return with_warmed_store(run);
     };
-    let fixture = Fixture::warmed_for(first);
+    let owner = Fixture::warmed_for(first);
     for &symbol in rest {
-        let other = Fixture::warmed_for(symbol);
-        copy_tree(&other.root.join("bars"), &fixture.root.join("bars"));
+        let other = std::mem::ManuallyDrop::new(Fixture {
+            root: owner.root.clone(),
+            symbol,
+        });
+        other.seed();
+        other.warm();
     }
-    run(&fixture.root)
+    run(&owner.root)
 }
 
 /// A warmed NIFTY store whose one-minute series stops `cut` minutes early on
@@ -98,40 +94,48 @@ impl Fixture {
         ));
         fs::create_dir(&root).expect("scratch");
         let fixture = Self { root, symbol };
+        fixture.seed();
+        fixture
+    }
+    /// Writes the two seed sessions of April and May 2025.
+    fn seed(&self) {
         for (month, day) in [(4, 30), (5, 2)] {
             let rows = generated_session(month, day);
             assert!(!rows.is_empty());
-            fixture.write(month, Timeframe::MINUTE_1, &rows);
-            fixture.write(month, Timeframe::DAY_1, &rows[..1]);
+            self.write(month, Timeframe::MINUTE_1, &rows);
+            self.write(month, Timeframe::DAY_1, &rows[..1]);
             if month == 5 {
-                fixture.write(
+                self.write(
                     month,
                     Timeframe::MINUTE_5,
                     &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
                 );
             }
         }
-        fixture
     }
     fn warmed() -> Self {
         Self::warmed_for("NIFTY")
     }
     fn warmed_for(symbol: &'static str) -> Self {
         let fixture = Self::for_symbol(symbol);
+        fixture.warm();
+        fixture
+    }
+    /// Appends the warmed sessions of May 2025 to this fixture's months.
+    fn warm(&self) {
         for day in 5..=13 {
             let rows = generated_session(5, day);
             if rows.is_empty() {
                 continue;
             }
-            fixture.write(5, Timeframe::MINUTE_1, &rows);
-            fixture.write(5, Timeframe::DAY_1, &rows[..1]);
-            fixture.write(
+            self.write(5, Timeframe::MINUTE_1, &rows);
+            self.write(5, Timeframe::DAY_1, &rows[..1]);
+            self.write(
                 5,
                 Timeframe::MINUTE_5,
                 &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
             );
         }
-        fixture
     }
     fn path(&self, month: u8, timeframe: Timeframe) -> PathBuf {
         let key = stored::swept_index(self.symbol).expect("key");
@@ -2672,4 +2676,87 @@ fn sessions_missing_their_closing_minutes_are_withheld_up_front() {
         1,
         "every holed day was withheld before the first build"
     );
+}
+
+/// A RELIANCE (or index) May whose every price halves from 2025-05-09 on:
+/// an unadjusted 1:2 split, written at all three rungs `warmed_for` writes.
+fn split_on_the_ninth(symbol: &'static str) -> Fixture {
+    let fixture = Fixture::for_symbol(symbol);
+    for day in 5..=13 {
+        let mut rows = generated_session(5, day);
+        if rows.is_empty() {
+            continue;
+        }
+        if day >= 9 {
+            for row in &mut rows {
+                row.open /= 2;
+                row.high /= 2;
+                row.low /= 2;
+                row.close /= 2;
+            }
+        }
+        fixture.write(5, Timeframe::MINUTE_1, &rows);
+        fixture.write(5, Timeframe::DAY_1, &rows[..1]);
+        fixture.write(
+            5,
+            Timeframe::MINUTE_5,
+            &rows.iter().step_by(5).copied().collect::<Vec<_>>(),
+        );
+    }
+    fixture
+}
+
+/// **A stock's stored report names its largest overnight move by date and
+/// size, and an index's never does.** gaps-6, D-1540.
+///
+/// D-0694 says corporate actions are unchecked; nothing told the reader WHERE
+/// to look. Over a month with an unadjusted 1:2 split on 2025-05-09 (close
+/// 1010.00, next open 500.00), every single-instrument stored door that holds
+/// the bars names that session and the -50.49% move, with no threshold
+/// claimed. The same bars as NIFTY carry no such line: an index never splits.
+#[test]
+fn every_stored_stock_report_names_its_largest_overnight_move() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    crate::knobs::set("BRUTEX_CEILING", "256");
+    for (symbol, stock) in [("RELIANCE", true), ("NIFTY", false)] {
+        let fixture = split_on_the_ninth(symbol);
+        let audited = Inputs::load(fixture.request("5min")).expect("audited generated inputs");
+        let reports = [
+            ("sweep-stored", fixture.sweep("5min")),
+            (
+                "sweep-audited-stored",
+                crate::stored_month_kernel(
+                    fixture.month_request("5min"),
+                    audited.data(),
+                    Some(&audited),
+                ),
+            ),
+            ("audit-stored", fixture.audit("5min")),
+            ("audit-range", fixture.audit_range("5min", (2025, 5))),
+            ("screen", fixture.screen("5min", 1_000_000)),
+            ("auto-stored", fixture.auto("5min")),
+        ];
+        for (door, report) in reports {
+            let report = report.expect(door);
+            let flat = report.split_whitespace().collect::<Vec<_>>().join(" ");
+            let named = "LARGEST OVERNIGHT MOVE IN THESE BARS: -50.49% into the 2025-05-09 \
+                         session (close 1010.00 to open 500.00). NO THRESHOLD";
+            assert_eq!(flat.contains(named), stock, "{symbol} {door}:\n{report}");
+            assert_eq!(
+                report.contains("LARGEST OVERNIGHT MOVE"),
+                stock,
+                "{symbol} {door}:\n{report}"
+            );
+            if stock {
+                assert!(
+                    report.find(runner::audit::CORPORATE_ACTIONS_UNCHECKED)
+                        < report.find("LARGEST OVERNIGHT MOVE"),
+                    "{door}: the measurement follows the statement it qualifies:\n{report}"
+                );
+                assert!(!crate::carries_refusal(&report), "{door}:\n{report}");
+            }
+        }
+    }
+    crate::knobs::clear_all();
 }

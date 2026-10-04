@@ -665,7 +665,13 @@ fn every_emit_in_this_crate_reaches_the_log_through_its_production_call() {
     let handed: Vec<Handed> = SITES
         .iter()
         .enumerate()
-        .map(|(ordinal, site)| (site.drive)(&root.join(format!("site-{ordinal}"))))
+        .map(|(ordinal, site)| {
+            // The store root exists before the writer runs: the writer no
+            // longer creates a missing root (D-1522).
+            let site_root = root.join(format!("site-{ordinal}"));
+            std::fs::create_dir_all(&site_root).expect("a scratch store root");
+            (site.drive)(&site_root)
+        })
         .collect();
 
     let found = telemetry::tail(&dir, sink.keep_files(), &telemetry::Query::last(64));

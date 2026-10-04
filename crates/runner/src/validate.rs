@@ -1724,13 +1724,34 @@ impl FoldRungs<'_> {
 ///
 /// A zero is refused rather than obeyed: a ladder with no rungs prices only the
 /// no-exit baseline, which would silently turn every walk-forward fold into a
-/// buy-and-hold test.
-#[must_use]
-pub fn fold_rungs() -> usize {
-    std::env::var_os("BRUTEX_GRID_RUNGS")
-        .and_then(|raw| raw.to_string_lossy().trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_RUNGS)
+/// buy-and-hold test. So is anything that is not a whole number. Until D-1547
+/// both fell back to [`DEFAULT_RUNGS`] with no word, which is the fallback
+/// `CLAUDE.md` §4 bans; [`walk_forward_shaped`] now records the refusal in
+/// [`Validated::refused`] and runs no fold.
+///
+/// No ceiling is applied here: the machine-safe clamp is `cli`'s, on the
+/// explicit doors, and this legacy door has no binary caller.
+///
+/// # Errors
+///
+/// The refusal, naming the variable and the value it held.
+pub fn fold_rungs() -> Result<usize, String> {
+    fold_rungs_from(std::env::var_os("BRUTEX_GRID_RUNGS").as_deref())
+}
+
+/// [`fold_rungs`] over a value already read: `None` when the variable is unset.
+fn fold_rungs_from(raw: Option<&std::ffi::OsStr>) -> Result<usize, String> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_RUNGS);
+    };
+    let text = raw.to_string_lossy();
+    match text.trim().parse::<usize>() {
+        Ok(rungs) if rungs > 0 => Ok(rungs),
+        _ => Err(format!(
+            "BRUTEX_GRID_RUNGS is {text:?}; it must be a whole number of rungs \
+             above zero, so the walk-forward was not run on a ladder nobody asked for"
+        )),
+    }
 }
 
 /// The excursion side matching a fill direction.
@@ -2000,7 +2021,15 @@ pub fn walk_forward_shaped(
     // LEGACY DOOR: resolve the process environment once, before any fold or
     // candidate lane starts. Operator-facing callers should resolve through
     // their own knob store and use `walk_forward_shaped_with_rungs` instead.
-    let rungs = fold_rungs();
+    let rungs = match fold_rungs() {
+        Ok(rungs) => rungs,
+        Err(why) => {
+            return Validated {
+                refused: Some(why),
+                ..Validated::default()
+            };
+        }
+    };
     walk_forward_shaped_with_rungs(
         bars,
         horizon,
@@ -2231,6 +2260,10 @@ pub fn walk_forward_projected_prepared_anchored_admission_v2(
 /// Refuses zero resolved rungs, malformed input/build paths, empty folds,
 /// incomplete candidate families, missing chosen outcomes, overflow, or any
 /// private provenance mismatch.
+///
+/// **No production caller (D-1544).** No `cli` verb or `api` route reaches it;
+/// only this module's tests call it. `docs/07-plan.md` names no surface for it,
+/// so wiring it would be a design this crate does not have.
 pub fn walk_forward_projected_prepared_anchored_search_v3(
     signal: &[Candle],
     execution: ExecutionSeries<'_>,
@@ -4733,7 +4766,7 @@ fn walk_forward_core(
         // that is trivial beside the pricing it compares.
         //
         // DETERMINISM (CLAUDE.md S3 rule 5) IS HELD BY SHAPE, the same argument
-        // `rank::walk` and `batch::sweep_under` already make: rayon's INDEXED
+        // `rank::offer_part` and `cli::batch::sweep_under` already make: rayon's INDEXED
         // `collect` preserves order, so `scored` is the identical sequence
         // whatever order the threads finish in. `best` is then chosen by
         // scanning that ordered vector with the same strict `>` the sequential
@@ -5217,6 +5250,25 @@ fn restricted(column: &Column, from: usize) -> Column {
     reason = "the exception every test module in this workspace takes."
 )]
 pub(crate) mod tests {
+
+    /// A MALFORMED OR ZERO `BRUTEX_GRID_RUNGS` IS REFUSED BY NAME, NOT REPLACED.
+    /// D-1547 (audit-20261003 errpaths-9).
+    ///
+    /// The doc above `fold_rungs` says a zero is refused rather than obeyed;
+    /// the code fell back to `DEFAULT_RUNGS` for a zero, for garbage and for a
+    /// negative, so the walk priced a ladder nobody asked for and said nothing.
+    #[test]
+    fn a_malformed_or_zero_rung_count_is_refused_and_unset_is_the_default() {
+        use std::ffi::OsStr;
+        assert_eq!(super::fold_rungs_from(None), Ok(DEFAULT_RUNGS));
+        assert_eq!(super::fold_rungs_from(Some(OsStr::new(" 6 "))), Ok(6));
+        for bad in ["0", "", "four", "-3", "4.5"] {
+            let refused = super::fold_rungs_from(Some(OsStr::new(bad)));
+            let why = refused.expect_err(bad);
+            assert!(why.contains("BRUTEX_GRID_RUNGS"), "{bad:?}: {why}");
+        }
+    }
+
     use super::{
         AnchoredAdmissionValidationRefusalV2, AnchoredAdmissionValidationV2,
         AnchoredSearchValidationV3, DEFAULT_RUNGS, ExecutionSeries, FoldRungs,
