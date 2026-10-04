@@ -68,3 +68,8 @@ Artifacts.
 - The CI run on c97ff00 was started by that push and has not been checked. FIRST ACTION: list its jobs and fix anything red, root cause and one validated push. Then work the Gate 18 mutation shards, which have never run on this content. c97ff00 adds new mutation targets in api, cli, store, pull and runner.
 - The audit-fix thread said one more "features" batch (gaps-5, gaps-10, gaps-11) is still to come. Coordinate so it lands in one push.
 - This thread has no unpushed work, no agents and no timers. Next D-number: D-1463.
+
+## 2026-10-04 07:45 UTC (new account, project thread "PR #74 CI")
+- Run 1265 (37180670656) on c97ff00 failed only Gate 6d: two web/ native tests in `deployment-preflight-tests.rs`. Cause: D-1570's workspace `arbitrary_precision` reaches web/*.rs through Gate 6d's shared serde_json rlib; `files::json` decoded `0.125` as an object and accepted `1e999`.
+- Fixed in **73441e5** (D-1463): `visit_map` decodes serde_json's number-token map into its digits, refuses nonfinite/forged numbers; new test `report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers` + invariant row. Reproduced 3 failures on the old reader, 0 after; all four Gate 6d binaries and 29 static gates green locally.
+- Next: watch the run on 73441e5 (Gate 8, coverage, Gate 18 shards). Next D-number: D-1464.
