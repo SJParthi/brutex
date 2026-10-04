@@ -395,13 +395,19 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
     // same answer it gives a chunk that is genuinely finished.
     let sound = multi_page_cash_file(ROWS, 200);
     let full = footer_chunk_len(&sound, OI);
-    for pages in [1_i64, 2, 4, 8, 12] {
+    // COUNTED (P1-14-07): every iteration could `continue` -- a helper whose
+    // page-header read stopped matching the writer's layout answers `None` for
+    // every cut -- and the half below would be green having run nothing.
+    let mut boundary_cases = 0_usize;
+    let cuts = [1_i64, 2, 4, 8, 12];
+    for pages in cuts {
         let Some(len) = exact_page_prefix(&sound, OI, pages) else {
             continue;
         };
         if len >= full {
             continue;
         }
+        boundary_cases += 1;
         let cut = patch_footer(&sound, |meta| {
             meta.row_groups[0].columns[OI]
                 .meta_data
@@ -435,6 +441,12 @@ fn a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls(
             }
         }
     }
+    assert_eq!(
+        boundary_cases,
+        cuts.len(),
+        "every exact page-boundary cut must reach `read_row_group`; the fixture \
+         holds more pages than the largest cut"
+    );
 
     assert!(
         fabricated.is_empty(),

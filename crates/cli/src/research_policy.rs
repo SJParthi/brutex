@@ -754,9 +754,17 @@ mod tests {
         let scratch = crate::search_checkpoint::tests::Scratch::new()?;
         let path = scratch.0.join("profile.toml");
         std::fs::write(&path, PROFILE)?;
+        // P1-11-02: the path comes from `module_path!()` and the child's own
+        // `1 passed` line is required, so a child that ran nothing fails.
+        let test = concat!(
+            module_path!(),
+            "::selected_runtime_profile_reaches_v6_preflight_and_preserves_override_refusals"
+        );
+        let test = test.split_once("::").map_or(test, |(_, path)| path);
         let output = std::process::Command::new(std::env::current_exe()?)
-            .args(["--exact", "research_policy::tests::selected_runtime_profile_reaches_v6_preflight_and_preserves_override_refusals", "--nocapture"])
-            .env(CHILD, "1").env(SETTING, &path)
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, "1")
+            .env(SETTING, &path)
             .env_remove("BRUTEX_CHECKSUM_RECEIPTS")
             .env_remove("BRUTEX_CHECKSUM_MAX_BYTES")
             .env_remove("BRUTEX_CHECKSUM_MAX_RECORDS")
@@ -766,6 +774,10 @@ mod tests {
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "the child must run exactly this one test"
         );
         Ok(())
     }

@@ -458,9 +458,16 @@ fn hmac(key: &[u8], data: &str) -> Vec<u8> {
 /// for the next, and one derived for `ap-south-1` cannot sign for anywhere else
 /// — which is why a leaked signature is worth so much less than a leaked secret.
 fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
+    signing_key_for(secret, date, region, SERVICE)
+}
+
+/// [`signing_key`] for a named service. Split out so the derivation can be
+/// checked against the vector AWS publishes, which is for service `iam`; this
+/// module only ever signs for [`SERVICE`].
+fn signing_key_for(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
     let k_date = hmac(format!("AWS4{secret}").as_bytes(), date);
     let k_region = hmac(&k_date, region);
-    let k_service = hmac(&k_region, SERVICE);
+    let k_service = hmac(&k_region, service);
     hmac(&k_service, "aws4_request")
 }
 
@@ -1063,10 +1070,32 @@ mod tests {
     /// endpoint, where it reads as a credentials problem.
     #[test]
     fn the_signing_key_matches_the_published_derivation() {
+        // THE PUBLISHED VECTOR, COMPARED (P1-14-01). This test said it checked
+        // AWS's derivation and asserted only length, determinism and
+        // inequality, which every HMAC chain satisfies: `AWS{secret}` for
+        // `AWS4{secret}`, a renamed `aws4_request` or reordered links all
+        // passed. AWS's "derive a signing key" example is for service `iam`
+        // with this secret, date and region, and its documented key is the
+        // hex below.
+        assert_eq!(
+            hex(&signing_key_for(
+                EXAMPLE_SECRET,
+                "20150830",
+                "us-east-1",
+                "iam"
+            )),
+            "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9",
+            "AWS's published signing key for its own worked example"
+        );
         let key = signing_key(EXAMPLE_SECRET, "20150830", "us-east-1");
-        // AWS's own worked example for service `iam`; this module signs for
-        // `ssm`, so the chain is re-derived here with the same first three
-        // links and asserted to be 32 bytes of HMAC-SHA256 output.
+        // The same chain for `ssm`, the one service this module signs for,
+        // computed outside this crate (an HMAC-SHA256 chain in another tool)
+        // from the same four links.
+        assert_eq!(
+            hex(&key),
+            "1b014a52e2c4682dbb4f9c057f77de175576bae388238bec84a63594a1c63358",
+            "the published chain with service `ssm`"
+        );
         assert_eq!(key.len(), 32, "HMAC-SHA256 is 32 bytes");
         // Deterministic: the same inputs give the same key, every time.
         assert_eq!(key, signing_key(EXAMPLE_SECRET, "20150830", "us-east-1"));
@@ -1205,6 +1234,17 @@ mod tests {
             session_token: None,
         };
         let header = signable.authorization(&identity()).expect("signs");
+        // THE WHOLE HEADER, PINNED (P1-14-01). The value was computed outside
+        // this crate by an independent `SigV4` implementation following AWS's
+        // specification (canonical request, string to sign, four-link key) for
+        // exactly these inputs, so a reordered string-to-sign or a changed
+        // chain fails here rather than against a live endpoint.
+        assert_eq!(
+            header,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/ap-south-1/ssm/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-date;x-amz-target, \
+             Signature=75a1dae843ac5a003e5a5e6e6cd8a3df0742ea7d527203b07a96e1024149233d"
+        );
         assert!(header.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/"));
         assert!(header.contains("/ap-south-1/ssm/aws4_request"));
         assert!(header.contains("SignedHeaders=content-type;host;x-amz-date;x-amz-target"));

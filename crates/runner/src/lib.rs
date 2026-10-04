@@ -1589,24 +1589,56 @@ mod tests {
 
     #[test]
     fn a_refused_bar_is_named_and_changes_no_mask() {
-        let mut bars = synthetic::sessions(8);
-        let last = bars.last().copied().expect("the run is not empty");
+        // MID-STREAM, AND THE MASKS ARE COMPARED (P1-13-02). The refused bar
+        // was appended after every real bar and only `census.swept` was
+        // compared, so a refusal that folded the bar into evaluator state
+        // before refusing it had no later bar to show the damage on. It now
+        // sits inside session seven, after the 1,876-bar warm-up, and every mask of the
+        // column -- and every frequent combination -- must equal the clean
+        // run's.
+        let clean_bars = synthetic::sessions(8);
+        let at = 6 * 375 + 100;
+        let before = clean_bars
+            .get(at - 1)
+            .copied()
+            .expect("the run is long enough");
+        let mut bars = clean_bars.clone();
         // high < low: a market can print a zero range, never a negative one.
-        bars.push(candle(
-            last.ts_micros + 60_000_000,
-            last.close,
-            last.close - 10,
-            last.close + 10,
-            last.close,
-        ));
+        // Its prices sit far from the session's, so folding it would move a
+        // range, an average or a level.
+        bars.insert(
+            at,
+            candle(
+                before.ts_micros + 30_000_000,
+                before.close * 2,
+                before.close / 2,
+                before.close * 3,
+                before.close * 2,
+            ),
+        );
         let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
 
         assert_eq!(out.census.high_below_low, 1);
         assert_eq!(out.census.refused(), 1);
         assert!(out.census.reconciles());
-        // The column is exactly what the clean run produced.
-        let clean = Sweeper::new(bounded()).run(&synthetic::sessions(8), &mut evaluator());
+        let clean = Sweeper::new(bounded()).run(&clean_bars, &mut evaluator());
         assert_eq!(out.census.swept, clean.census.swept);
+        assert!(
+            clean.first_swept.is_some_and(|first| first < at),
+            "the refused bar must sit after warm-up, where a later mask can show it"
+        );
+
+        let refused = indicators::column::Column::build(&bars, &mut evaluator());
+        let unrefused = indicators::column::Column::build(&clean_bars, &mut evaluator());
+        assert!(!unrefused.bits().is_empty(), "the clean column sweeps");
+        assert_eq!(
+            refused.bits(),
+            unrefused.bits(),
+            "every mask after the refusal is the one the clean run produced"
+        );
+        let left: Vec<_> = out.sweep.all_frequent().copied().collect();
+        let right: Vec<_> = clean.sweep.all_frequent().copied().collect();
+        assert_eq!(left, right, "and so is every frequent combination");
     }
 
     #[test]

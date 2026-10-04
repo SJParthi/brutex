@@ -6938,7 +6938,26 @@ mod tests {
         assert_ne!(first.candidate_semantic_id(), [0; 32]);
         assert_ne!(first.candidate_row_digest(), [0; 32]);
         assert_ne!(first.trade_rows_digest(), [0; 32]);
-        let _ = first.admission_values();
+        // THE PROJECTION'S ADMISSION VALUES ARE THE SEALED RECORD'S (P1-10-04).
+        // This was `let _ = first.admission_values();`, the only call to the
+        // projection's accessor in the workspace, so a decode that filled the
+        // values from the wrong fields or the wrong record was never seen.
+        let sealed = base
+            .records()
+            .first()
+            .copied()
+            .expect("the fixture seals one record per candidate row")
+            .admission_values()
+            .expect("the fixture's Base record projects");
+        assert_eq!(first.admission_values(), &sealed);
+        assert!(
+            matches!(
+                first.admission_values().support_hits,
+                runner::admission::ObservedU64V1::Measured(hits) if hits > 0
+            ),
+            "the decoded support is a measured, non-zero count, so the equality \
+             above compares values and not two defaults"
+        );
         assert!(matches!(
             reader.record(&audit, audit.record_count()),
             Err(BaseEvidenceLedgerRefusalV2::BoundExceeded {

@@ -25724,7 +25724,9 @@ mod tests {
     /// The list exists so a wrong-arity refusal can tell a real command from a
     /// typo, and a list that drifts from the dispatch would make that refusal
     /// lie in the other direction. Every entry must appear in the usage as its
-    /// own `cli <word>` line, and every such line must be in the list.
+    /// own `cli <word>` line, every such line must be in the list, and the set
+    /// of first words the `match` in `dispatch` answers to, read from that
+    /// function's code, must equal the list.
     #[test]
     fn every_command_is_listed_in_both_places() {
         for word in COMMANDS {
@@ -25752,6 +25754,42 @@ mod tests {
         assert!(
             COMMANDS.windows(2).all(|w| w.first() < w.last()),
             "kept sorted so a new command is added in one obvious place"
+        );
+
+        // AND THE DISPATCH ITSELF (P1-11-01). The two halves above read only
+        // `COMMANDS` and `USAGE`, so a deleted `match` arm with its list entry
+        // and usage line left behind passed, and the binary then told the
+        // operator "`X` is a command, but not with N arguments" about a word it
+        // could no longer run. The set of words the `match` in `dispatch`
+        // answers to is read from the function's own code -- bounded at its
+        // closing brace, comment lines dropped -- and must equal the list.
+        let source = include_str!("lib.rs");
+        let (_, rest) = source
+            .split_once("\nfn dispatch(")
+            .expect("the dispatch function exists");
+        let body = rest
+            .split_once("\n}\n")
+            .expect("the dispatch function has a closing brace")
+            .0;
+        let code = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut dispatched = std::collections::BTreeSet::new();
+        for piece in code.split('[').skip(1) {
+            if let Some((word, _)) = piece
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|literal| literal.split_once('"'))
+            {
+                dispatched.insert(word);
+            }
+        }
+        let listed: std::collections::BTreeSet<&str> = COMMANDS.into_iter().collect();
+        assert_eq!(
+            dispatched, listed,
+            "the words `dispatch` matches and the words COMMANDS lists must be one set"
         );
     }
 

@@ -867,10 +867,13 @@ jobs:
           # changing them to something invented would delete that proof.
           # CLAUDE.md §8 names ap-south-1 as the region this repository reads
           # from; us-east-1 appears nowhere but inside those vectors.
+          # `iam` is the service AWS's published signing-key example is derived
+          # for; ssm.rs pins that vector through `signing_key_for` and never
+          # signs a request for it (P1-14-01, D-1920).
           aws_sigv4='
           ssm aws4_request authorization content-type host
           x-amz-date x-amz-target x-amz-security-token
-          us-east-1 20150830 20150831
+          us-east-1 20150830 20150831 iam
           '
 
           # ---- group 14: the AWS shared-credentials file format. These are the

@@ -101,21 +101,34 @@ mod tests {
                 .success(),
             "the supported Unix test host must create its FIFO fixture"
         );
+        // THE CHILD MUST PROVE IT RAN (P1-11-02): `--exact` on a name that
+        // matches nothing exits zero, so the path comes from `module_path!()`
+        // and the child's own `1 passed` line is required.
+        let test = concat!(
+            module_path!(),
+            "::fifo_without_a_writer_refuses_and_the_probe_cannot_hang"
+        );
+        let test = test.split_once("::").map_or(test, |(_, path)| path);
         let mut child = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "readonly_file::tests::fifo_without_a_writer_refuses_and_the_probe_cannot_hang",
-            ])
+            .args(["--exact", test])
             .env(CHILD, &path)
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
         let started = std::time::Instant::now();
         loop {
             if let Some(status) = child.try_wait()? {
+                let mut stdout = String::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    std::io::Read::read_to_string(&mut pipe, &mut stdout)?;
+                }
                 assert!(
                     status.success(),
-                    "nonblocking FIFO child must refuse normally"
+                    "nonblocking FIFO child must refuse normally: {stdout}"
+                );
+                assert!(
+                    stdout.contains("test result: ok. 1 passed;"),
+                    "the child must run exactly this one test:\n{stdout}"
                 );
                 break;
             }

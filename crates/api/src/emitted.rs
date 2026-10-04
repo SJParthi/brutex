@@ -1628,7 +1628,10 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // 19 -> 20 at D-0948: `pull.credential re-read returned the SAME value`,
     // driven and read back by `server::credential_law_tests::
     // a_rejected_token_whose_re_read_is_unchanged_halts_the_spot_run_with_no_further_request`.
-    const REACHED_IN_SERVER_TESTS: usize = 20;
+    // 20 -> 21 at D-1920 (P1-17-02): `api.serve the serve lock is held but
+    // could not be stamped`, driven through `note_unstamped_lock` and read back
+    // by `server::tests::a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`.
+    const REACHED_IN_SERVER_TESTS: usize = 21;
     // Both production recovery boundaries are emitted and read back through
     // this installed sink by recovery::tests::
     // recovery_boundary_events_are_read_back_from_the_installed_sink.
@@ -1704,19 +1707,20 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// own tests cover the landing and the transport pairing against a
     /// recording transport, which is the half that has no network in it.
     ///
-    /// AND ONE MORE, added with D-1481 (v3b-2): `api.serve the serve lock is
-    /// held but could not be stamped`. It fires only when writing the stamp
-    /// into a lock file this process holds fails while emptying that same file
-    /// succeeds — a disk that fills between two calls on one descriptor. No
-    /// fixture produces that split: `/dev/full` fails both, which is the
-    /// refusal arm `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
-    /// drives end to end, and the decision between the two arms is driven
-    /// directly through `stamp_outcome` with the host's own errors.
+    /// ONE THAT LEFT THIS LIST, added with D-1481 (v3b-2) and moved to
+    /// `REACHED_IN_SERVER_TESTS` by P1-17-02 (D-1920): `api.serve the serve
+    /// lock is held but could not be stamped`. It fires only when writing the
+    /// stamp fails while emptying the same file succeeds, a split no fixture
+    /// produces on one descriptor. The report step now lives in
+    /// `note_unstamped_lock`, which
+    /// `a_serve_lock_stamp_that_fails_is_cleared_or_refused_never_left_stale`
+    /// calls directly with the warning `stamp_outcome` produced, and reads the
+    /// event back.
     ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, the three named before it and the eight
+    /// `pull.fno discovery refused`, the three named before it and the seven
     /// named here, which are the sites no test in this binary can drive.
-    const UNREACHABLE: usize = 9;
+    const UNREACHABLE: usize = 8;
     // COUNTED FROM THE SOURCE, not declared. An additional emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of

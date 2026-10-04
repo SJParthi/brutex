@@ -618,14 +618,29 @@ fn strict_invalid_runtime_settings_refuse_before_real_source_admission_or_prepar
         assert!(!fixture.root.join("checksum-receipts-v1").exists());
         return;
     }
+    // THE CHILD MUST PROVE IT RAN (P1-10-02). `--exact` on a name that matches
+    // nothing prints `0 passed` and exits zero, so a status check alone passes
+    // on a child that tested nothing. The path is built from `module_path!()`,
+    // so moving the `#[path]` mount cannot strand the literal, and the child's
+    // own `1 passed` line is required.
+    let test = concat!(
+        module_path!(),
+        "::strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation"
+    );
+    let test = test.split_once("::").map_or(test, |(_, path)| path);
     for (name, raw) in cases {
-        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args(["--exact", "audited_stored::range::tests::strict_invalid_runtime_settings_refuse_before_real_source_admission_or_preparation", "--test-threads=1"])
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", test, "--test-threads=1"])
             .env(CHILD, name)
             .env(name, raw)
-            .status()
+            .output()
             .expect("isolated malformed environment child");
-        assert!(status.success(), "{name}");
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        assert!(child.status.success(), "{name}: {stdout}");
+        assert!(
+            stdout.contains("test result: ok. 1 passed;"),
+            "{name}: the child must run exactly this one test:\n{stdout}"
+        );
     }
 }
 

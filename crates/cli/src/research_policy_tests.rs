@@ -297,12 +297,19 @@ fn isolated_process_precedence_preserves_owner_selected_path_and_refusals()
         "invalid-file",
     ] {
         std::fs::write(&path, PROFILE)?;
+        // P1-11-02: the path comes from `module_path!()` and the child's own
+        // `1 passed` line is required, so a child that ran nothing fails.
+        let test = concat!(
+            module_path!(),
+            "::isolated_process_precedence_preserves_owner_selected_path_and_refusals"
+        );
+        let test = test.split_once("::").map_or(test, |(_, path)| path);
         let mut command = std::process::Command::new(std::env::current_exe()?);
-        command.args([
-            "--exact",
-            "research_policy::adversarial_tests::isolated_process_precedence_preserves_owner_selected_path_and_refusals",
-            "--nocapture",
-        ]).env(CHILD, mode).env(FIXTURE, &path).env_remove(SETTING);
+        command
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, mode)
+            .env(FIXTURE, &path)
+            .env_remove(SETTING);
         for field in Field::ALL {
             command.env_remove(format!(
                 "BRUTEX_ADMIT_{}",
@@ -331,6 +338,10 @@ fn isolated_process_precedence_preserves_owner_selected_path_and_refusals()
             "mode {mode}: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed;"),
+            "mode {mode}: the child must run exactly this one test"
         );
     }
     Ok(())
