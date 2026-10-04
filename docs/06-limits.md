@@ -14813,3 +14813,20 @@ per-candidate primitive from `CLAUDE.md` §3 rule 4.
   per-request bound below the ledger would need a secondary index, which this
   append-only, path-is-the-index file does not keep. UNVERIFIED as a
   measurement: no bench times either read.
+
+## Gate 10 and 12 proof-token limits — D-2100, 4 October 2026
+
+- **Middle segments are a set, not a path (D-2100).** Gate 10's middle check
+  and Gate 12's resolver accept a token when every module segment is one of
+  the declaring file's module names: its path components, its `#[path]`
+  mountings, its inline `mod m {` declarations, or `bench` for a `benches/`
+  file. Neither checks the ORDER or NESTING of those segments, so
+  `store::checksum_tests::file::read` resolves where `store::file::checksum_tests::read`
+  does, and an inline module is credited to the whole file rather than to the
+  braces that contain the test. A segment no module of that file carries is
+  refused, which is the defect the check exists for.
+- **Cost.** Gate 12 resolves each distinct token once (2,939 resolutions on
+  4 October 2026) and each claim block then reads the resolution table and the
+  `proving` table once per token, O(table) per lookup in `awk`. Measured: the
+  gate ran in 3 min 8 s against 4 min 0 s before on the same machine; not a
+  bound.

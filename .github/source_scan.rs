@@ -731,6 +731,20 @@ fn fn_names(src: &str) -> Result<Vec<(usize, String)>, String> {
         .collect())
 }
 
+/// Every inline module a file declares, `mod name {`, by line and name. A
+/// module declared `mod name;` lives in its own file and is named by that
+/// file's path or by the MODULES table, so only the braced form is listed.
+/// Gate 10 reads these so a crate-first proof's middle segments can be
+/// checked against the module that declares its test (D-2100).
+fn inline_mods(src: &str) -> Result<Vec<(usize, String)>, String> {
+    let tokens = lex(src)?.tokens;
+    Ok(tokens
+        .windows(3)
+        .filter(|w| is_ident(Some(&w[0]), "mod") && is_punct(Some(&w[2]), '{'))
+        .filter_map(|w| ident(&w[1]).map(|n| (w[0].line, n.to_owned())))
+        .collect())
+}
+
 /// Every string literal in a file, test code included, by line and DECODED value:
 /// escapes resolved, raw and byte strings read as what they hold, and each
 /// `concat!` reported once more as the one literal the compiler sees. A literal in
@@ -2279,7 +2293,7 @@ fn content_findings(path: &str, bytes: &[u8]) -> Vec<String> {
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
+        "usage: source_scan <code|code-prod|browser|build|unsafe|spawns|strings|fns|inline-mods|modules|paths|paths-prod|closure|orphans|toml|deps|step-runs|aggregator|workflow> ARGS"
     );
     ExitCode::from(2)
 }
@@ -2319,6 +2333,13 @@ fn run(args: &[String]) -> Result<bool, String> {
             for f in rest {
                 for (line, name) in fn_names(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
                     println!("{f}:{line}:{name}");
+                }
+            }
+        }
+        "inline-mods" => {
+            for f in rest {
+                for (_, name) in inline_mods(&read_file(f)?).map_err(|e| format!("{f}: {e}"))? {
+                    println!("{f}\t{name}");
                 }
             }
         }
@@ -2927,6 +2948,20 @@ mod tests {
         let src = "/// and `fn constraint` used to live here\nfn real() {}\nconst S: &str = \"fn phantom\";\n    pub(crate) fn r#match() {}\n/* fn hidden() */\nfn(u8) -> u8;\n";
         let got = fn_names(src).unwrap();
         assert_eq!(got, [(2, "real".to_owned()), (4, "match".to_owned())]);
+    }
+
+    #[test]
+    fn only_a_braced_mod_is_an_inline_module() {
+        let src = "mod on_disk;\n#[cfg(test)]\nmod tests {\n    mod inner_tests {}\n}\n// mod commented {\nconst S: &str = \"mod quoted {\";\npub(crate) mod r#type { }\n";
+        let got = inline_mods(src).unwrap();
+        assert_eq!(
+            got,
+            [
+                (3, "tests".to_owned()),
+                (4, "inner_tests".to_owned()),
+                (8, "type".to_owned())
+            ]
+        );
     }
 
     #[test]

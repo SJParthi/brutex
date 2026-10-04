@@ -58206,3 +58206,68 @@ chunks" bullet already replaces, and "Plain `descend` (D-1567)", which the
 **Rejected.** `ordered::map` with `SharedBy::these(8)` for `range-all`: the
 identity divergence above. `ordered::map` without the division: eight times
 the machine's ceiling. Keeping both shapes: two writers of one ordering rule.
+
+### D-2100 — Gates 10 and 12 read a proof token's every segment, at any length — 2026-10-04
+
+**What was wrong.** The lane 1-b audit noted "gates 10 and 12 read only
+3-segment test paths" and left it open. Read from the workflow at this commit:
+
+- Gate 10's shell table checks a crate-first token by its first and last
+  segments only (`${t%%::*}`, `${t##*::}`). A middle segment was never read,
+  so `store::file::x_tests::name` passed on any `name` in `store`.
+- Gate 12 rule 1 matched `\b[a-z_]+::[a-z_]+::[a-z_0-9]+\b`. It never saw a
+  two-segment token. It cut a four-segment one to its first three segments
+  and looked up the wrong function. A digit in either of the first two
+  segments (`v2_tests`) split the token.
+- Gate 12 rule 3 matched exactly three backticked segments. Of the 3,108
+  rows in `docs/04-invariants.md`, 382 with a row id carry no
+  three-segment token, so no claim citing them could be proven through
+  them.
+
+**Decision.**
+
+- `source_scan inline-mods` lists every braced `mod name {` by file.
+- `invariant_paths.rs` gains two modes:
+  - `--middles` lists every crate-first token of the document whose middle
+    segments name no module of a file of that crate declaring its test. Gate
+    10 refuses a listed token inside its row loop, so the allowlist (P-03,
+    X-13) applies to it exactly as it applies to the crate-and-name check.
+  - `--resolve` maps each token of two or more segments to the `crate fn`
+    pairs it names. Gate 12 resolves every token of every claim block and
+    every invariant row once. Rules 1 and 3 then accept a token when one of
+    its pairs is in `proving`.
+
+**What the check found.** Five rows named a module their test is not in,
+and each is corrected:
+
+- V-02 named `indicators::barrier::no_lookahead`. The test is top-level in
+  `tests/invariants.rs`, so it is now `indicators::invariants::no_lookahead`.
+- MR-35 named a test function as if it were a module. The test is in
+  `server.rs`'s `universe_route_tests`.
+- RV-02 named `execution_disposition_v2::tests`. The module is `v2_tests`.
+- Two rows named `boolean_search_launch::sizing`. That file is mounted as
+  `boolean_search_command::launch::sizing`.
+
+Gate 10 now reads 2,395 checked tokens with 0 missing. Gate 12 still proves
+all 464 cost claims:
+
+- 101 by test (98 before)
+- 17 by row (18)
+- 23 by path (25)
+- 321 UNVERIFIED (unchanged)
+- 2 allowed (unchanged)
+
+No claim lost its proof.
+
+**Limits.** The segments are matched as a set: their order and nesting are
+not checked, and an inline module is credited to its whole file. Both are
+stated in `docs/06-limits.md`.
+
+**Rejected.**
+
+- Widening only the shell regex and keeping `${first} ${last}`. That
+  would accept any segments in between, which is the defect.
+- Requiring the exact module path. Inline modules and Cargo target names
+  (`bench`) are not in the declaration table. Exactness would refuse rows
+  that are right without the scanner growing a full module tree, and that
+  is not built here.

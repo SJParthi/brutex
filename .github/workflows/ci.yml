@@ -5053,6 +5053,17 @@ jobs:
           fi
           rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
           "$work/invariant-paths" "$f" "$path_fns" "$work/modules"
+          # D-2100: the crate-and-name check below reads no middle segment, so
+          # `store::file::x_tests::name` passed on any `name` in `store`. The
+          # inline `mod m {` table and the tool's `--middles` mode list every
+          # crate-first token whose middle segments name no module of the file
+          # that declares its test; the row loop refuses those it checks.
+          if ! xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"; then
+            echo "GATE 10 COULD NOT LIST INLINE MODULES."
+            exit 1
+          fi
+          [ -s "$work/inline" ] || { echo "GATE 10 READ NO INLINE MODULE."; exit 1; }
+          "$work/invariant-paths" --middles "$f" "$path_fns" "$work/modules" "$work/inline" > "$work/middles"
 
           rows=0; checked=0; missing=0; pending=0; exempt=0
           while IFS= read -r line; do
@@ -5083,6 +5094,9 @@ jobs:
               checked=$((checked + 1))
               if ! grep -qxF "${c} ${fn}" "$fns"; then
                 printf 'INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: %s (%s)\n' "$t" "$id"
+                missing=$((missing + 1))
+              elif grep -qxF "$t" "$work/middles"; then
+                printf 'INVARIANT NAMES A MODULE ITS TEST IS NOT IN: %s (%s)\n' "$t" "$id"
                 missing=$((missing + 1))
               fi
             done
@@ -6224,6 +6238,51 @@ jobs:
           # the tree as committed, so widening the list here takes a live red to
           # green rather than pre-empting a hypothetical one.
 
+          # EVERY `::` TOKEN IS READ WHOLE, AT ANY LENGTH (D-2100). Rules 1 and
+          # 3 below matched exactly `a::b::c`: a two-segment proof such as
+          # `runner::every_set_bit_is_named_...` was never seen, a four-segment
+          # one was cut to its first three segments and looked up as the wrong
+          # function, and a digit in a module segment (`v2_tests`) split the
+          # token. Each token is now resolved once, whole, by
+          # `invariant_paths.rs --resolve` against the scanner's declaration,
+          # module-mounting and inline-module tables: a crate-first token must
+          # name its crate and a file answering to every middle segment, a
+          # module-first one a file answering to every segment but the last.
+          # The table maps each token to the `crate fn` pairs it names, and
+          # `proving` still decides whether that pair is a test or a bench.
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          git ls-files -z -- 'crates/*.rs' > "$work/sources.z"
+          if ! xargs -0 -r "$scan" fns < "$work/sources.z" > "$work/fn-lines"; then
+            echo "GATE 12 COULD NOT LEX A SOURCE FILE."
+            exit 1
+          fi
+          sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' "$work/fn-lines" > "$work/path-fns"
+          git ls-files -z > "$work/tracked.z"
+          if ! "$scan" modules "$work/tracked.z" > "$work/modules"; then
+            echo "GATE 12 COULD NOT RESOLVE THE MODULE TREE."
+            exit 1
+          fi
+          if ! xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"; then
+            echo "GATE 12 COULD NOT LIST INLINE MODULES."
+            exit 1
+          fi
+          rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
+          { cut -f4- "$blocks"; grep -E '^\|' "$inv" || true; } \
+            | { grep -oE '\b[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*)+\b' || true; } \
+            | sort -u \
+            | "$work/invariant-paths" --resolve "$work/path-fns" "$work/modules" "$work/inline" \
+            > "$work/resolved"
+          [ -s "$work/resolved" ] || { echo "GATE 12 RESOLVED NO PROOF TOKEN."; exit 1; }
+          echo "  $(awk 'END{print NR}' "$work/resolved") (token, crate fn) resolution(s)"
+
+          # Echoes `found` when any `crate fn` the token names is a test or a
+          # bench, and nothing otherwise.
+          proven_token() {
+            awk -F'\t' -v T="$1" '
+              NR == FNR { if ($1 == T) want[$2] = 1; next }
+              ($0 in want) { print "found"; exit }' "$work/resolved" "$proving"
+          }
+
           refused="$work/refused"; : > "$refused"
           claimed=0; by_test=0; by_path=0; by_row=0; by_unverified=0
 
@@ -6234,8 +6293,8 @@ jobs:
           prove() {
             text="$1"
             for t in $( { printf '%s' "$text" \
-                          | grep -oE '\b[a-z_]+::[a-z_]+::[a-z_0-9]+\b' || true; } ); do
-              if grep -qxF "${t%%::*} ${t##*::}" "$proving"; then echo test; return 0; fi
+                          | grep -oE '\b[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*)+\b' || true; } ); do
+              if [ -n "$(proven_token "$t")" ]; then echo test; return 0; fi
             done
             for p in $( { printf '%s' "$text" \
                           | grep -oE 'crates/[A-Za-z0-9_./-]*/(tests|benches)/[A-Za-z0-9_.-]+\.rs' \
@@ -6267,8 +6326,8 @@ jobs:
               row=$( { grep -E "^\| *${r} *\|" "$inv" || true; } | head -1)
               [ -n "$row" ] || continue
               for t in $( { printf '%s' "$row" \
-                            | grep -oE '`[a-z_]+::[a-z_]+::[a-z_0-9]+`' | tr -d '`' || true; } ); do
-                if grep -qxF "${t%%::*} ${t##*::}" "$proving"; then echo row; return 0; fi
+                            | grep -oE '`[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*)+`' | tr -d '`' || true; } ); do
+                if [ -n "$(proven_token "$t")" ]; then echo row; return 0; fi
               done
             done
             return 0
