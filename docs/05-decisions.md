@@ -57636,3 +57636,15 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 
 - P4-01 (medium; gate 10 red at 1f4de71) and P4-02, from the tests/docs/security helper's pass 4. RS-03 cited `a_torn_prepared_tail_blocks_every_later_commit`, renamed by D-1901 when the writer began cutting a torn detail tail; PS-02 cited `exact_trailing_prefix_retry_completes_and_foreign_retry_refuses`, split by D-1905; AFD-15 cited a `/masters` page test renamed by D-1760..1764.
 - Each row now cites the live test, and the RS-03 and PS-02 TEXT says what those tests prove: a torn prepared-detail tail is cut and the exact preparation resumes (ZL-04), and a foreign receipt-less orphan is scratch the next writer cuts (ZL-09, ZL-10). The old text still said "refuse" and "never truncated", contradicting ZL-04, ZL-09 and ZL-10.
+
+### D-2655 — A completion clock before 1970 refuses the run instead of stamping 0 — 2026-10-04
+
+- CE-50. `record_run`'s comment said a pre-1970 clock "is recorded as the negative it is rather than clamped"; the code clamped it to 0 with no word, and an overflow to `i64::MAX`. A negative stamp is not an option either, because the browser refuses a negative `finished_micros`, so one such row would blank the ledger page.
+- `cli::finished_micros_at` refuses both cases by name ("the system clock reads ... BEFORE 1970-01-01 ... was not recorded; correct the clock and rerun"). The run is not recorded; rerunning after the clock is fixed records the same identity.
+- Proved by `cli::tests::a_completion_stamp_before_the_epoch_is_refused_not_clamped` (ZX-06).
+
+### D-2656 — Every live-progress event carries the run's span and an attempt — 2026-10-04
+
+- CE-49. `note_grid_progress` sent only `feed` and `underlying`, never the span or an `attempt`, and `web/src/lib/live-progress.ts` refuses the whole fold for a live event without an exact attempt, so live progress was refused the moment pricing began, another run's progress line included. The grid-entered, grid-finished and validation-stage events took their attempt only from a browser-started run, so a terminal sweep's events carried none; the rung events already fell back to `binding_attempt`.
+- `cli::with_live_context` adds feed, underlying, the four span fields and the attempt (browser attempt, else `binding_attempt`) to all four builders, written once. `grid_progress_event` is split from its emitter so its shape is asserted with the others; it carries 10 of telemetry's 12 fields.
+- Proved by `cli::tests::every_live_boundary_carries_the_exact_question_inside_the_field_ceiling` (now including the progress line) and `cli::tests::a_live_event_without_a_browser_attempt_still_carries_one_when_a_sink_runs` (ZX-07).
