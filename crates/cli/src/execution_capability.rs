@@ -3634,6 +3634,77 @@ mod tests {
         value
     }
 
+    /// The execution law digest exactly as `exact_execution_law_digest_v1`
+    /// composes it, under a NAMED cost model, so the test can say which model
+    /// the shipped digest binds.
+    fn law_digest_under(cost_model: [u8; 32]) -> [u8; 32] {
+        let mut hasher = Hasher::new();
+        hasher.update(EXECUTION_LAW_DOMAIN);
+        hasher.update(&[ENTRY_POLICY_TAG]);
+        hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
+        hasher.update(&[FORCED_EXIT_POLICY_TAG]);
+        hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
+        hasher.update(&cost_model);
+        hasher.finalize()
+    }
+
+    /// D-1514: each of the three cost-model checks here refuses the superseded
+    /// V1 model by name and an unknown one generically, and the execution law
+    /// digest binds V2 rather than V1.
+    #[test]
+    fn every_cost_model_check_refuses_the_superseded_v1_model_by_name() {
+        use runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1 as v1;
+        let shipped = exact_execution_law_digest_v1();
+        assert_eq!(shipped, law_digest_under(printed_ohlcv_cost_model_id_v2()));
+        assert_ne!(shipped, law_digest_under(v1()));
+
+        let valid = parameters(TradeDirectionV1::Long, 3);
+        let scalar = ParameterScalarV1::from_parameters(&valid).expect("V2 scalar");
+        assert_eq!(scalar.validate_shape(), Ok(()));
+        for (model, needle) in [
+            (v1(), "SupersededCostModelIdV1"),
+            ([8; 32], "UnsupportedCostModelId"),
+        ] {
+            let mut old = valid.clone();
+            old.policy = ExitGridPolicyV1::new(
+                valid.policy.execution_resolution(),
+                valid.policy.range_resolution(),
+                valid.policy.side(),
+                valid.policy.rungs().clone(),
+                valid.policy.ratios(),
+                valid.policy.max_cells(),
+                valid.policy.selector(),
+                model,
+                valid.policy.forced_stop(),
+                valid.policy.max_ambiguous_bars(),
+                valid.policy.max_gap_fills(),
+            )
+            .expect("a policy may NAME any model; resolution decides");
+            let refused = old.validate().expect_err("parameters refuse the model");
+            assert!(
+                refused.starts_with("execution parameter cost model is unsupported")
+                    && refused.contains(needle),
+                "{refused}"
+            );
+            let mut stored = scalar.clone();
+            stored.cost_model_id = model;
+            let refused = stored
+                .validate_shape()
+                .expect_err("a stored record refuses it");
+            assert!(
+                refused.starts_with("execution parameter fill/cost model is unsupported")
+                    && refused.contains(needle),
+                "{refused}"
+            );
+        }
+        let mut old_law = scalar;
+        old_law.execution_law_digest = law_digest_under(v1());
+        assert_eq!(
+            old_law.validate_shape(),
+            Err("execution parameter next-minute/15:10 law digest differs".to_owned())
+        );
+    }
+
     fn root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "brutex-execution-capability-{tag}-{}-{:?}",

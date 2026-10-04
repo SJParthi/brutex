@@ -7452,6 +7452,82 @@ mod tests {
         );
     }
 
+    /// D-1514. `unmeasured` is the `refused_paths` count and is true for each
+    /// of its three causes alone and false for none; `refused_at` places each
+    /// located hole against the exit (at or before refuses, strictly after
+    /// prices), and an unlocated refusal count keeps the conservative answer.
+    #[test]
+    fn unmeasured_and_refused_at_answer_each_cause_on_its_own() {
+        let bars = vec![
+            candle(0, 2_500_000, 2_500_100, 2_499_900, 2_500_000),
+            candle(1, 2_500_000, 2_500_100, 2_450_000, 2_460_000),
+            candle(2, 2_460_000, 2_460_100, 2_459_900, 2_460_000),
+            candle(3, 2_460_000, 2_460_100, 2_459_900, 2_460_000),
+        ];
+        let stops = probe_ladder(&[10_000]);
+        let wide = probe_ladder(&[900_000]);
+        let ladders = Ladders {
+            stops: &stops,
+            targets: &wide,
+            trails: &wide,
+        };
+        let (entry_pess, entry_opt) = super::entry_fills(&bars, 0, Side::Long);
+        let make = |accepted: &[bool], block_only: bool, hole: Option<usize>| super::Candidate {
+            signal: 0,
+            entry: 0,
+            time_exit: 3,
+            block_only,
+            hole,
+            cross: crossings_checked(&bars, 0, 3, entry_opt, Side::Long, ladders, accepted),
+            entry_pess,
+            entry_opt,
+        };
+        let all = [true; 4];
+        let clean = make(&all, false, None);
+        assert_eq!(clean.cross.refused(), 0);
+        assert!(!clean.unmeasured());
+        assert!((0..=3).all(|exit| !clean.refused_at(exit)));
+
+        let block = make(&all, true, None);
+        assert!(block.unmeasured(), "block-only alone");
+        assert!((0..=3).all(|exit| block.refused_at(exit)));
+
+        let holed = make(&all, false, Some(2));
+        assert!(holed.unmeasured(), "a located hole alone");
+        assert!(!holed.refused_at(1), "an exit strictly before the hole");
+        assert!(holed.refused_at(2), "the hole's own bar");
+        assert!(holed.refused_at(3));
+
+        let crossing = make(&[true, true, true, false], false, None);
+        assert_eq!(crossing.cross.refused(), 1);
+        assert_eq!(crossing.cross.first_refused(), Some(3));
+        assert!(crossing.unmeasured(), "a refused crossing alone");
+        assert!(!crossing.refused_at(2));
+        assert!(crossing.refused_at(3));
+
+        let mut unlocated = make(&all, false, None);
+        unlocated.cross = unlocated.cross.clone().with_unlocated_refusals(1);
+        assert!(unlocated.unmeasured());
+        assert!(
+            unlocated.refused_at(0),
+            "a count with no location cannot be placed before any exit"
+        );
+    }
+
+    /// Generated sessions with a seven-bar sawtooth laid over them, so a
+    /// tight stop closes well inside its hold (D-1514's walk-built probe).
+    fn sawtooth_sessions(days: i64) -> Vec<indicators::Candle> {
+        let mut bars = crate::synthetic::sessions(days);
+        for (index, bar) in bars.iter_mut().enumerate() {
+            let shift = (i64::try_from(index % 7).expect("small") - 3).saturating_mul(400);
+            bar.open = bar.open.saturating_add(shift);
+            bar.high = bar.high.saturating_add(shift);
+            bar.low = bar.low.saturating_add(shift);
+            bar.close = bar.close.saturating_add(shift);
+        }
+        bars
+    }
+
     /// D-1514. On a WALK-BUILT path (the shipping path, not a hand-made
     /// candidate), a stop that closed before a hole is priced by the cell AND
     /// by the V1 replay, at the same exit, while the time-exit variant of the
@@ -7460,14 +7536,7 @@ mod tests {
     /// minute the crossing table cannot see.
     #[test]
     fn a_walk_built_stop_before_a_hole_is_priced_by_the_cell_and_the_replay_alike() {
-        let mut clean = crate::synthetic::sessions(8);
-        for (index, bar) in clean.iter_mut().enumerate() {
-            let shift = (i64::try_from(index % 7).expect("small") - 3).saturating_mul(400);
-            bar.open = bar.open.saturating_add(shift);
-            bar.high = bar.high.saturating_add(shift);
-            bar.low = bar.low.saturating_add(shift);
-            bar.close = bar.close.saturating_add(shift);
-        }
+        let clean = sawtooth_sessions(8);
         let stops = probe_ladder(&[300]);
         let wide = probe_ladder(&[900_000]);
         let ladders = Ladders {

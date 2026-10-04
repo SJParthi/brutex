@@ -54815,7 +54815,24 @@ fails with the old replay test. `runner::trade::tests::a_path_held_only_by_a_hol
 keeps its four digests captured from the earlier runner as the V1 record,
 pins the four V2 digests from this build (labelled as not an independent
 capture), requires each to differ from its V1 record, and requires a V1
-policy over the same bars to be refused by name. AGC-06, AGC-07.
+policy over the same bars to be refused by name.
+`cli::ledger_all::exit_policy_tests::every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk`
+keeps its two independently captured two-rung CLI policy digests as the V1
+record, requires the same policy rebuilt under V1 to still hash to them,
+requires the CLI wiring to equal that reconstruction under V2 field for
+field, and pins the two V2 digests from this build (labelled as not an
+independent capture).
+`runner::grid::tests::unmeasured_and_refused_at_answer_each_cause_on_its_own`
+drives each of `unmeasured`'s three causes alone and places a located hole
+and a refused crossing on either side of the exit; an unlocated refusal
+count, which production never builds (`crossings_with` locates every hole
+it counts), is made by a test-only constructor and keeps the conservative
+answer.
+`runner::exit_grid_policy::tests::a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime`
+reseals a resolution under V1 with a digest that reconciles and requires the
+runtime integrity check to refuse it by name.
+`cli::execution_capability::tests::every_cost_model_check_refuses_the_superseded_v1_model_by_name`
+covers the parameter, stored-scalar and law-digest checks. AGC-06, AGC-07.
 
 ### D-1515 — Landing is checked by commit, and the one piece a branch-name landing dropped is landed — 2026-10-03
 

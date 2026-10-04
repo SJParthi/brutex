@@ -4803,6 +4803,37 @@ mod tests {
         }
     }
 
+    /// D-1514. A resolution sealed under the superseded V1 cost model, with a
+    /// digest that reconciles, is still refused by the runtime integrity check
+    /// every resolved-grid door runs first, by name; an unknown model is the
+    /// generic refusal, and a broken seal is reported before either.
+    #[test]
+    fn a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime() {
+        let input = bars(100);
+        let current = policy().resolve(&nifty(), &input).expect("V2 resolves");
+        assert_eq!(current.require_runtime_integrity(), Ok(()));
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut sealed = current.clone();
+            sealed.policy.cost_model_id = id;
+            sealed.policy_digest = sealed.policy.digest();
+            sealed.digest = digest_resolved(&sealed);
+            assert!(sealed.digest_is_valid(), "the seal itself reconciles");
+            assert_eq!(sealed.require_runtime_integrity(), Err(refusal));
+            let mut broken = sealed;
+            broken.digest = [0; 32];
+            assert_eq!(
+                broken.require_runtime_integrity(),
+                Err(ExitGridErrorV1::ResolutionDigestMismatch)
+            );
+        }
+    }
+
     #[test]
     fn only_the_two_nse_spot_indices_resolve() {
         let input = bars(100);

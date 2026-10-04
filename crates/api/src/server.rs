@@ -16945,7 +16945,7 @@ impl http_body::Body for DeadlineBody {
                 }
                 Poll::Pending
             }
-            ready => ready,
+            ready @ Poll::Ready(_) => ready,
         }
     }
 
@@ -17884,12 +17884,10 @@ mod head_deadline_tests {
     #[tokio::test]
     async fn the_deadline_body_reports_the_inner_bodys_hint_and_end() {
         use http_body::Body as _;
-        let wrap = |inner: axum::body::Body| {
-            super::DeadlineBody {
-                inner,
-                alarm: Box::pin(tokio::time::sleep(T)),
-                expired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
+        let wrap = |inner: axum::body::Body| super::DeadlineBody {
+            inner,
+            alarm: Box::pin(tokio::time::sleep(T)),
+            expired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let some = wrap(axum::body::Body::from("abcde"));
         assert_eq!(some.size_hint().exact(), Some(5));
@@ -31333,7 +31331,9 @@ mod tests {
             assert!(flood.contains("404 Not Found"), "{flood}");
         }
         let flood = crate::emitted::landed(from, "api.request", "served");
-        let written: Vec<u64> = flood
+        // `landed` reads the tail newest first; order by sequence so the
+        // assertion is about the order the lines were written in.
+        let mut written: Vec<(u64, u64)> = flood
             .iter()
             .filter(|record| {
                 record
@@ -31343,11 +31343,14 @@ mod tests {
             })
             .map(|record| {
                 assert_eq!(record.level, telemetry::Level::Warn, "{record:?}");
-                (2..=7)
+                let seen = (2..=7)
                     .find(|n| crate::emitted::counts(record, "seen", *n))
-                    .expect("every written 4xx line carries its running count")
+                    .expect("every written 4xx line carries its running count");
+                (record.seq, seen)
             })
             .collect();
+        written.sort_unstable();
+        let written: Vec<u64> = written.into_iter().map(|(_, seen)| seen).collect();
         assert_eq!(written, [2, 4], "only the powers of two are written");
 
         // THE QUERY STRING IS NEVER ON THE LINE. `note_request` logs the path

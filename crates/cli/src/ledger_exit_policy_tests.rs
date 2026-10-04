@@ -31,6 +31,37 @@ fn original_five(side: Side) -> Result<ExitGridPolicyV1, String> {
     .map_err(debug)
 }
 
+// Independent two-rung reconstruction under a named cost model.
+fn two_rungs(side: Side, cost_model: [u8; 32]) -> Result<ExitGridPolicyV1, String> {
+    let ladder = [1, 2]
+        .into_iter()
+        .map(|step| RationalPercentileV1::new(step, 2).map_err(debug))
+        .collect::<Result<Vec<_>, _>>()?;
+    ExitGridPolicyV1::new(
+        ExecutionResolutionV1::OneMinuteOhlcv,
+        RangeResolutionV1::PpmCeiling,
+        side,
+        RungPlanV1::new(ladder.clone(), ladder.clone(), ladder, 2).map_err(debug)?,
+        RatioLimitsV1::new(300, i64::MAX, u64::MAX).map_err(debug)?,
+        16_384,
+        ExitGridSelectorV1::GuaranteedFloor,
+        cost_model,
+        ForcedStopV1::Disabled,
+        u64::MAX,
+        u64::MAX,
+    )
+    .map_err(debug)
+}
+
+const V2_LONG_TWO_RUNGS: [u8; 32] = [
+    0x59, 0xfd, 0xb2, 0xdd, 0x27, 0x7d, 0xce, 0xe1, 0x5c, 0xea, 0xa0, 0xb9, 0x8e, 0xa4, 0x73, 0x3b,
+    0x3d, 0x43, 0x0d, 0xde, 0x10, 0xe5, 0x5d, 0xa4, 0x16, 0xad, 0x5f, 0x58, 0x6a, 0x8f, 0xa9, 0x79,
+];
+const V2_SHORT_TWO_RUNGS: [u8; 32] = [
+    0x36, 0xfe, 0xc7, 0x22, 0xf3, 0x33, 0x8c, 0x60, 0x6a, 0x39, 0x9e, 0x7a, 0x96, 0x02, 0xcd, 0x20,
+    0xe5, 0x83, 0x62, 0xd9, 0xa3, 0x91, 0xf1, 0x52, 0x9f, 0x00, 0x00, 0x5a, 0x97, 0x36, 0x51, 0xa6,
+];
+
 #[test]
 fn absent_and_explicit_five_preserve_original_policy_and_digest() -> Result<(), String> {
     for side in [Side::Long, Side::Short] {
@@ -93,7 +124,11 @@ fn every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk() ->
             if count == 2 {
                 // Independently constructed public-policy source-only census,
                 // before this shared CLI wiring change; no outcome-derived cap.
-                let expected_digest = match side {
+                // These are the cost-model V1 bytes, kept as the record: the
+                // same two-rung policy rebuilt here under V1 must still hash
+                // to them, so the reconstruction is proven to be the policy
+                // they were captured from (D-1514).
+                let v1_record = match side {
                     Side::Long => [
                         0xf8, 0x78, 0x98, 0xd8, 0xff, 0xc2, 0xe4, 0x1c, 0xb7, 0x7e, 0xea, 0x60,
                         0x43, 0xff, 0xb0, 0x09, 0x29, 0xde, 0x70, 0x6e, 0x8a, 0xfa, 0x92, 0xb6,
@@ -105,7 +140,24 @@ fn every_admitted_runtime_resolution_binds_exact_axes_without_changing_risk() ->
                         0x95, 0xbc, 0x14, 0x67, 0x37, 0xfa, 0x94, 0xd7,
                     ],
                 };
-                assert_eq!(policy.digest(), expected_digest);
+                let v2 = two_rungs(side, printed_ohlcv_cost_model_id_v2())?;
+                let v1 = two_rungs(
+                    side,
+                    runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1(),
+                )?;
+                assert_eq!(v1.digest(), v1_record);
+                // The CLI wiring is the independent V2 reconstruction exactly,
+                // and the cost model is the only field that moved the digest.
+                assert_eq!(policy, v2);
+                assert_eq!(policy.digest(), v2.digest());
+                assert_ne!(policy.digest(), v1_record);
+                // Captured from this build after D-1514 (not an independent
+                // capture); pins that the V2 identity does not drift.
+                let v2_capture = match side {
+                    Side::Long => V2_LONG_TWO_RUNGS,
+                    Side::Short => V2_SHORT_TWO_RUNGS,
+                };
+                assert_eq!(policy.digest(), v2_capture);
             }
             assert!(
                 digests.insert(policy.digest()),
