@@ -57681,3 +57681,27 @@ rule). `append_rollback`'s module doc no longer says a failed-barrier orphan is
 safe to leave in place.
 
 **Evidence.** ZK-03.
+
+### D-2556 — Execution V3 and Selection V5 discard a foreign receipt-less tail; Selection V5 cuts a failed barrier — 2026-10-04
+
+**The findings.** pop2-4 and ledgerall-1 at the two `ledger-all` writers D-1905
+did not reach: Execution V3 ("orphan tail is not an exact retry prefix") and
+Selection V5 ("orphan tail is not the exact canonical retry prefix") refused
+every later block on the rung because of a receipt-less tail of another
+identity, and since the identity carries the commit and the data digest, a
+rebuild or new data made that permanent. ledgers-2 at Selection V5: its row and
+Completion barriers were bare `sync_data` calls, and the exact retry re-synced
+its own prefix in place.
+
+**The decision.** The D-1905 rule: under the append lock, a receipt-less tail
+that is not this exact retry is cut back to where it began with
+`fixed_tail::discard_orphan` (a `cli.ledger` warn event names it), in every one
+of Execution V3's three record files; the writer then appends its own block.
+An exact prefix of Execution V3 still resumes: its blocks already went through
+`fixed_tail::append_block` (D-1900), so no failed-barrier bytes can be in it.
+Selection V5's own exact prefix is cut and rewritten whole, its barriers go
+through `fixed_tail::sync_or_roll_back`, and its reuse refuses a path whose
+barrier failed in this process.
+
+**Evidence.** ZK-04. The two former tests that asserted the refusal now assert
+the commit; each failed on the previous code by construction.

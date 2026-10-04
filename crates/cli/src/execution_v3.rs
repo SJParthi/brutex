@@ -2220,7 +2220,7 @@ impl ExecutionV3Ledger {
         if let Some(existing) = self.receipts.get(&prepared.population_id).copied() {
             return self.reuse_existing(prepared, existing);
         }
-        let trailing = self.trailing.clone().unwrap_or(TrailingExecutionV3 {
+        let mut trailing = self.trailing.clone().unwrap_or(TrailingExecutionV3 {
             first_parameter_record: self.parameter_records,
             first_percentile_record: self.percentile_records,
             first_disposition_record: self.disposition_records,
@@ -2228,7 +2228,21 @@ impl ExecutionV3Ledger {
             percentiles: Vec::new(),
             dispositions: Vec::new(),
         });
-        Self::require_exact_prefix(prepared, &trailing)?;
+        if let Err(foreign) = Self::require_exact_prefix(prepared, &trailing) {
+            // A RECEIPT-LESS TAIL THAT IS NOT THIS EXACT RETRY IS SCRATCH
+            // (pop2-4, ledgerall-1, D-2556): no Completion acknowledged it,
+            // and refusing every other block because of it wedged the rung
+            // once a rebuild or new data changed the identity.
+            self.discard_trailing(&trailing, &foreign)?;
+            trailing = TrailingExecutionV3 {
+                first_parameter_record: self.parameter_records,
+                first_percentile_record: self.percentile_records,
+                first_disposition_record: self.disposition_records,
+                parameters: Vec::new(),
+                percentiles: Vec::new(),
+                dispositions: Vec::new(),
+            };
+        }
         self.require_append_bound(prepared, &trailing)?;
 
         self.append_parameter_suffix(prepared, trailing.parameters.len())?;
@@ -2313,6 +2327,38 @@ impl ExecutionV3Ledger {
         sync_directory(&self.root_file, &self.root)?;
         self.require_unchanged()?;
         Ok(ExecutionV3StructuralCommit::Reused(existing))
+    }
+
+    /// Cuts each of the three record files back to where `trailing` began,
+    /// under the append lock, with a `cli.ledger` warn event per file cut.
+    fn discard_trailing(
+        &mut self,
+        trailing: &TrailingExecutionV3,
+        why: &str,
+    ) -> Result<(), ExecutionV3Refusal> {
+        for (held, first) in [
+            (&mut self.parameters, trailing.first_parameter_record),
+            (&mut self.percentiles, trailing.first_percentile_record),
+            (&mut self.dispositions, trailing.first_disposition_record),
+        ] {
+            let at = first
+                .checked_mul(held.stride as u64)
+                .ok_or_else(|| format!("Execution V3 {} offset overflowed", held.name))?;
+            if held.generation.len > at {
+                crate::fixed_tail::discard_orphan(
+                    &held.file,
+                    &held.path,
+                    at,
+                    &format!("an Execution V3 block that is not this exact retry ({why})"),
+                )?;
+                held.refresh()?;
+            }
+        }
+        self.parameter_records = self.parameters.record_count()?;
+        self.percentile_records = self.percentiles.record_count()?;
+        self.disposition_records = self.dispositions.record_count()?;
+        self.trailing = None;
+        Ok(())
     }
 
     fn require_exact_prefix(
@@ -5470,23 +5516,25 @@ mod tests {
         ExecutionV3Ledger::open_read(&root.path, bounds()).expect("the ledger stays readable");
     }
 
+    /// pop2-4 / ledgerall-1, D-2556: a receipt-less prefix of ANOTHER block
+    /// was never acknowledged, so the writer discards it and commits its own;
+    /// a reader still refuses an out-of-order orphan.
     #[test]
-    fn foreign_or_out_of_order_orphans_are_refused_without_overwrite() {
+    fn a_foreign_orphan_is_discarded_and_an_out_of_order_one_refuses_a_reader() {
         let expected = prepared(50);
         let foreign = prepared(60);
         let foreign_root = TestRoot::new("foreign-prefix");
         append_exact_prefix(&foreign_root.path, &foreign, 1, 0, 0);
-        let before = std::fs::read(foreign_root.path.join(PARAMETER_FILE))
-            .expect("read foreign prefix before");
-        assert!(
-            commit_prepared_for_test(&foreign_root.path, bounds(), &expected).is_err(),
-            "foreign valid prefix must not be overwritten"
-        );
+        let committed = commit_prepared_for_test(&foreign_root.path, bounds(), &expected)
+            .expect("a foreign receipt-less prefix is scratch");
+        assert!(committed.was_written());
         assert_eq!(
-            std::fs::read(foreign_root.path.join(PARAMETER_FILE))
-                .expect("read foreign prefix after"),
-            before
+            committed.authority().structural_receipt().population_id(),
+            expected.population_id
         );
+        drop(committed);
+        ExecutionV3Ledger::open_read(&foreign_root.path, bounds())
+            .expect("the ledger reads with the foreign prefix gone");
 
         let out_of_order = TestRoot::new("out-of-order");
         drop(
