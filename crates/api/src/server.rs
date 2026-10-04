@@ -3514,6 +3514,13 @@ pub type CensusCache = std::sync::Mutex<
 #[path = "store_wire.rs"]
 mod store_wire;
 
+#[path = "spot.rs"]
+pub mod spot;
+
+#[cfg(test)]
+#[path = "spot_route_tests.rs"]
+mod spot_route_tests;
+
 #[cfg(test)]
 #[path = "serve_edge_tests.rs"]
 mod serve_edge_tests;
@@ -16366,6 +16373,10 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         // month wants; the second is what a grid over a store wants, and asking
         // the first for the second is the 2,187-request storm it replaces.
         .route("/bars/window.json", axum::routing::get(bars_window_json))
+        // THE UNDERLYING'S CLOSE AT AN OPTION BAR'S OWN INSTANT, for `/db`'s
+        // moneyness, intrinsic and extrinsic. Exact stamp or a named absence;
+        // never a nearest bar. D-2807.
+        .route("/spot.json", axum::routing::get(spot::spot_json))
         .route("/store.json", axum::routing::get(store_json))
         // THE ONLY ROUTE THAT OPENS A BAR FILE TO CHECK THE COUNTER.
         .route("/verify.json", axum::routing::get(verify_json))

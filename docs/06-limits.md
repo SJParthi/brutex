@@ -14725,3 +14725,36 @@ UNVERIFIED as measurements.
   exit record that cannot be priced; each still blocks to its time exit, the
   conservative extent, because nothing before a hole was what made them
   unpriceable.
+
+## `/spot.json`: an option bar's spot is a bisection, not O(1) — D-2807, 4 October 2026
+
+- **What the lookup costs.** Each instant is one `BarFile::first_at_or_after`
+  bisection in the underlying's month file — at most `ceil(log2(n_valid + 1))`
+  record reads, the bound `store::file` already proves — plus at most two
+  record reads to confirm the hit or bracket the miss. That is
+  `O(log n_valid)` per instant, **not O(1)**: the store is addressed by row
+  index, a month file is sparse in time, and nothing on disk maps a timestamp
+  to a row. With `n_valid` bounded by the month's geometry it is at most 14
+  probes at `1min` (31 × 375 = 11,625 bars) and 20 at `1s` (31 × 22,500 =
+  697,500). An O(1) path would need a dense time-to-row sidecar, a store
+  format change this decision does not make. The file is opened once per
+  request; a request carries at most 400 instants (the 8 KiB request target),
+  and `/db` asks only for the option rows on the visible page, so the work per
+  page is bounded by the page size (at most 1,000 rows) and not by the store.
+- **Measured ad hoc, not gated.** No bench gate row covers an api lookup
+  (`crates/api/benches/ratio.rs` times page renders; the store bench times
+  `read_record`, not `first_at_or_after`). A throwaway test (not committed)
+  timed `spot::close_at` over 20,000 random instants, half hits and half
+  misses, on generated full months in the test profile, on this shared machine
+  while other builds ran: `1min` (11,625 bars) p50 20.5 µs, p99 47.7 µs, max
+  56.6 ms; `1s` (697,500 bars) p50 38.5 µs, p99 139.4 µs, max 92.2 ms. The
+  maxima are single outliers on a loaded machine (cold block verify and
+  scheduling), not a bound. A cold device is UNVERIFIED.
+- **What it does not do.** No nearest or previous close is ever returned; a
+  bar absent at the exact instant is `no_spot_bar`. A file whose stamps around
+  the instant are not strictly increasing (the zero-filled extent `store::file`
+  documents) answers `spot_order_broken` rather than scanning. Rungs are counted
+  over the strikes the STORE lists for that expiry, so a strike the exchange
+  listed and the store does not hold shifts every rung beyond it by one. The
+  month-level ladder control on `/db` stays unanchored. Moneyness, intrinsic and extrinsic do not
+  sort: spot exists only for the rows on the page.

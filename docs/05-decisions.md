@@ -58425,3 +58425,55 @@ with its frontier in two ledger opens and `2 * rows + 1` row reads. After it
 flips one byte in the last row, which is never the best, `top` refuses with
 `record 7 does not match its seal`. That is the refusal a one-row answer would
 lose. Counted, not timed.
+
+### D-2807 — `/db` reads each option bar's spot from the underlying's stored close at the same instant — 2026-10-04
+
+**Supersedes D-0067 on one point only.** D-0067 put the month's two closes in
+the census so `/store.json` carries a percentage without reading bars, and
+`/db` cited it for reading no price at all: its moneyness, intrinsic and
+extrinsic columns said "no source" (`NO_SPOT`) on every feed. Everything else
+D-0067 decided stands; this entry changes only whether `/db` may read a spot.
+
+**Decision.** For each option bar on the visible page, spot is the
+underlying's stored bar close at **exactly the option bar's own timestamp**, on
+the same feed, the same rung and the same month file. The underlying is
+`<EXCH>/INDEX/<symbol>` when the symbol is one of
+`core::universe::FNO_INDEX_UNDERLYINGS` (index options) and `<EXCH>/CASH/<symbol>`
+otherwise (stock options, whose underlying is the share, `CLAUDE.md` §1,
+D-0682). It is served by one new read-only route,
+`GET /spot.json?feed&exchange&symbol&timeframe&month&t=<UTC s>,…` (at most 400
+instants, the 8 KiB request-target bound; `timeframe` has no default), in
+`crates/api/src/spot.rs`. Each instant answers `{t, close, why}` with exactly
+one of `close` (paisa) or `why`: `no_spot_bar` (file held, the records either
+side bracket `t`), `no_spot_file` (month not held), `spot_unreadable` (206, the
+store's fault named in `faults`), `spot_order_broken` (the stamps around `t`
+are not strictly increasing, the zero-filled extent `store::file` documents).
+**No nearest, earlier or later close is ever substituted.** No look-ahead: the
+close returned completes at the same instant the option bar does.
+
+**Why a new route and not `/bars/window.json`.** The window route addresses
+by row OFFSET, and a month file is sparse in time, so the underlying's offset
+for an option's timestamp is not known to the page; reading the underlying's
+whole day or month to find one figure per row is O(bars) per row, which is
+the trade D-0067 refused. `/spot.json` does one bisection per instant inside
+one file. It is not O(1): see `docs/06-limits.md` (D-2807 row).
+
+**Moneyness, intrinsic, extrinsic** are computed in the page
+(`web/src/lib/moneyness.js`) in integer paisa. Rungs count the strikes the
+store lists for that underlying and expiry (the census keys), with the existing
+`rungOf` naming: ATM is the listed strike nearest spot (the lower of two
+equidistant), ITM-k / OTM+k are k listed strikes away. No strike step is typed:
+the only step used is the smallest gap between listed strikes, and only to
+refuse a rung (`spot_outside_chain`) when spot lies more than half that gap
+beyond the chain's ends; one listed strike names no rung (`one_strike_listed`).
+Intrinsic is `max(0, spot − strike)` for CE and `max(0, strike − spot)` for
+PE; extrinsic is the bar's close less intrinsic, not clipped (a close below
+intrinsic shows negative). The three columns appear only when the selection
+holds options, and do not sort (spot exists for the page's rows only).
+
+**Not changed.** The month-level moneyness ladder on the Contract strip stays
+unanchored: it filters instrument-months, which have no single spot. Greeks and
+IV stay "no source" (no sourced rate). No store format, census or write path
+changes; the feed is any feed, not GDFL alone.
+
+**Proof.** DBS-01..DBS-05 in `docs/04-invariants.md`.
