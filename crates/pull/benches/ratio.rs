@@ -650,6 +650,7 @@ fn second_month(root: &std::path::Path, n: u32) -> store::file::BarFile {
         file: store::path::FileKind::Bars,
     })
     .unwrap_or_else(|_| refuse("a path"));
+    std::fs::create_dir_all(root).unwrap_or_else(|_| refuse("a scratch root"));
     let mut file = store::file::BarFile::open_or_create(root, path, 7)
         .unwrap_or_else(|_| refuse("a bar file"));
     // 2026-08-03 09:15:00 IST, then one bar a second.
