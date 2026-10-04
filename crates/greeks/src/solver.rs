@@ -267,16 +267,11 @@ impl Contract {
         market_price: f64,
         kind: OptionKind,
     ) -> Result<ImpliedVolatility, GreeksError> {
+        // The bounds are `screen_premium`'s, so the vendor path in `pull`
+        // refuses at the same bits (D-3117).
+        self.screen_premium(market_price, kind)?;
         let checked = self.check()?;
         let price = finite(market_price, "market_price")?;
-
-        let (intrinsic, maximum) = checked.no_arbitrage_bounds(kind);
-        if price <= intrinsic {
-            return Err(GreeksError::PriceBelowIntrinsic { price, intrinsic });
-        }
-        if price >= maximum {
-            return Err(GreeksError::PriceAboveMaximum { price, maximum });
-        }
 
         let lowest = checked.greeks(MIN_VOLATILITY, kind);
         let highest = checked.greeks(MAX_VOLATILITY, kind);

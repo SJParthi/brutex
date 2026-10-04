@@ -60283,3 +60283,231 @@ lines and the new subcommand take effect together once main carries both.
 `.github/gh_json.rs`; `every_widened_inline_program_form_is_refused` in
 `.github/source_scan.rs` now lists `--jq .sha`, `--jq '.behind_by'`, `-q
 .state` and `jq .sha f` as refusals. AFG-20.
+
+### D-3100 — An on-grid strike at any level is placed, and a ladder too fine for f64 is refused by name — 2026-10-04
+
+**Finding (data-path attack, round 1).** `Moneyness::from_ladder` compared
+the step count against a fixed 1e-6. The count carries the rounding of the
+strike, the at-the-money level and their difference, about one ulp of the
+larger operand over the interval. At level 1e9 and interval 0.03, 19,200 of
+40,001 strikes built as `atm + k*interval` were refused as `OffGrid`. At
+level 1e12 and interval 1e-3 it answered ATM although no rung can be told
+from its neighbour there.
+
+**Decision.** The tolerance is `max(STEP_TOLERANCE, REPRESENTATION_ULPS *
+EPSILON * max(strike, atm) / interval)`, exactly 1e-6 at ordinary levels.
+Above `MAX_LEVEL_TO_INTERVAL` (about 2.8e14) the ladder is refused as
+`OutOfRange { field: "level_to_interval" }`. DPG-01, DPG-02.
+
+### D-3101 — The implied-volatility uncertainty floors at the subnormal gap — 2026-10-04
+
+**Finding.** `uncertainty` was `price_scale * EPSILON / vega`. Below
+`f64::MIN_POSITIVE` doubles are spaced 2^-1074 apart, so at S = K =
+`MIN_POSITIVE` the solver reported 1.55e-10 while its answer was off by 8.6e-9.
+
+**Decision.** The numerator is `max(scale * EPSILON, 2^-1074)` (`SUBNORMAL_GAP`).
+Identical at every normal scale; neither term can be NaN. DPG-03.
+
+### D-3110 — A stamp with two different spot closes answers nothing — 2026-10-04
+
+**Finding.** `SpotBook::of` let the later bar at a repeated stamp replace the
+earlier, so an option was priced against whichever close arrived last.
+
+**Decision.** A stamp whose bars disagree is dropped and counted
+(`ambiguous()`); `at` answers `None` and `lookup` refuses `SpotAmbiguous`. An
+exact repeat still answers. The unit test that pinned last-wins was changed.
+DPP-01.
+
+### D-3111 — price_all keeps one sentence per kind of refusal — 2026-10-04
+
+**Finding.** Refusal sentences were deduplicated whole, and each carried the
+row's numbers, so five premiums below intrinsic filled every kept slot and a
+different reason later in the run was counted but never named.
+
+**Decision.** Rows are grouped by the error arm (and wrapped arm and field);
+the first sentence of each group is kept verbatim. Counts unchanged. DPP-02.
+
+### D-3112 — chain::iso_expiry requires ASCII digits — 2026-10-04
+
+**Finding.** `"2024-+1-25"` read as 2024-01-25, because `str::parse` accepts a
+leading `+`.
+
+**Decision.** Every byte other than positions 4 and 7 must be a digit. DPP-03.
+
+### D-3114 — The vendor-volatility path refuses a premium below intrinsic as the solver does — 2026-10-04
+
+**Finding.** A quote priced with a vendor's volatility never read its premium,
+so a premium at or below the discounted intrinsic value was priced while the
+solved path refused the same quote.
+
+**Decision.** The vendor path refuses it with the solver's arm and numbers.
+DPP-04.
+
+### D-3115 — A contract name on another exchange than the ask is refused — 2026-10-04
+
+**Finding.** `read_contract` ignored the exchange token and `chain::month`
+compared only the underlying, so `BSE-NIFTY-...` answering an NSE ask would be
+filed as NSE NIFTY.
+
+**Decision.** The exchange token is compared with the ask and a mismatch is
+refused by name. DPP-05.
+
+### D-3116 — The chain deduplicates by decoded contract, not by spelling — 2026-10-04
+
+**Finding.** Two spellings of one contract (`04JAN24` and `04Jan24`, `77.5`
+and `77.50`) would be filed twice.
+
+**Decision.** The second spelling of a contract already filed is not filed and
+is named. DPP-06.
+
+### D-3117 — The vendor path and the solver share one premium screen — 2026-10-04
+
+**Finding.** D-3114 copied the intrinsic bound into `pull`, a second authority
+for one fact, and the vendor path still priced a premium at or above the
+no-arbitrage maximum (a call worth the spot) that the solver refuses.
+
+**Decision.** `greeks::Contract::screen_premium` is the solver's own screen
+(finite price, below-intrinsic, above-maximum), public; the solver calls it
+and the vendor path calls it. The copy in `pull` is deleted. DPP-07.
+
+### D-3120 — A month the store refuses does not uncount the months already written — 2026-10-04
+
+**Finding.** A multi-month batch whose later month the store refused returned
+through `?`, dropping the census rows of months already appended and fsynced:
+bars on disk with no census row.
+
+**Decision.** The refused month is named in `failures`; every other month is
+written and counted on its own. DPI-01.
+
+### D-3121 — A stamp the calendar cannot place is refused, not called "before the window" — 2026-10-04
+
+**Finding.** `from_rows` counted an unplaceable timestamp (`i64::MAX`, a day
+with unverified venue hours) as `BeforeWindow`: a named reason, and the wrong
+one.
+
+**Decision.** The batch is refused with the stamp and the calendar's words,
+the same rule `fetch::land` applies. DPI-02.
+
+### D-3122 — Candles the decoder skips stay on the receipt — 2026-10-04
+
+**Finding.** The Kite decoders skip a candle with a null price, a negative
+volume, a negative open interest or impossible OHLC, warn, and forget it.
+`RawWindow` carried only survivors, so `Ingested::balances` held while a
+candle the vendor sent was nowhere on the receipt. Only the minute audit for
+index and cash would notice; a day pull or a contract pull would not.
+
+**Decision.** `fetch::DecodeSkips` counts each reason, travels in
+`RawWindow::skipped`, is summed into `Ingested::decoder_skips` and is part of
+the balance. The telemetry warning stays. DPI-03.
+
+### D-3130 — A fold width must divide a day — 2026-10-04
+
+**Finding.** The intraday grid is counted from 09:15 IST on 1970-01-01, so it
+lands on a later day's 09:15 only when the width divides 86,400. A 420 s
+bucket on 2025-07-01 opened at 09:11 holding three minutes.
+
+**Decision.** `Bucket::of_secs` refuses a width that does not divide 86,400.
+Every `Timeframe::KNOWN` width still builds. `anchor.rs` pinned width 7; it now
+pins 50. DPF-01, DPF-02.
+
+### D-3131 — fold_from_bars refuses a repeated or off-grid source bar — 2026-10-04
+
+**Finding.** `fold_from_bars` handed bars to `fold`, which merges rows sharing
+a bucket. A bar repeated at its own width had its volume counted twice, and a
+bar off the source grid went silently into whichever bucket held its stamp.
+
+**Decision.** Refused as `RepeatedBar` and `OffSourceGrid`, one O(1) check per
+bar. `complete_minutes_with_calendar` keeps withholding only the affected
+bucket. DPF-03.
+
+### D-3132 — A day is folded only from a source grid that lands on midnight — 2026-10-04
+
+**Finding.** At 2, 10, 30 and 60 minutes IST midnight falls inside a source
+bar (the 60 m bar stamped 23:15 covers 00:00-00:15), yet 60 m to day was
+accepted.
+
+**Decision.** Refused as `GridMisaligned`; a day from 1, 3, 5 or 15 minutes is
+still allowed. DPF-04.
+
+### D-3140 — An append refuses when the header's last stamp is not its last record's — 2026-10-04
+
+**Finding.** `append` decides that a batch FOLLOWS the month from the header's
+`last_ts_micros` alone. A header slot with a good checksum and a wrong range
+admitted a bar stamped behind held records: a month of minutes 0..=9 whose
+slot said minute 0 accepted minute 6 at index 10, leaving the file out of
+order and every later bisection answering a neighbour.
+
+**Decision.** Before that branch writes, one positional read of record
+`n_valid - 1` must carry the header's stamp, or the append is refused as
+`FormatError::LastStampDisagrees`. O(1) per append. DPS-01.
+
+### D-3150 — A non-positive strike has no contract segment — 2026-10-04
+
+**Finding.** `Contract::of` rendered `2025-09-30-0-CE` and `...--500-PE`, and
+`read_contract` filed `NSE-NIFTY-04Jan24-0-CE` as a real contract.
+
+**Decision.** `render` returns `None` for a strike at or below zero. DPD-01.
+
+### D-3151 — Contract text has exactly one spelling — 2026-10-04
+
+**Finding.** `Contract::parse` checked only the allowed characters, so `FUT`,
+24 `A`s, `2025-9-30-FUT`, `2025-02-30-FUT` and leading-zero strikes parsed,
+each a second store directory for one series.
+
+**Decision.** `parse` decodes, renders again, and accepts only a byte-equal
+round trip. DPD-02.
+
+### D-3152 — The test-instrument marker is matched in any case — 2026-10-04
+
+**Finding.** `NSETEST` was matched case-sensitively before the symbol was
+uppercased, so `031nsetest` was kept as `031NSETEST`.
+
+**Decision.** The marker match ignores ASCII case. DPD-03.
+
+### D-3153 — The Zerodha index alias does not depend on case — 2026-10-04
+
+**Finding.** `Nifty 50` missed the alias and was kept as a second index
+`NIFTY50`.
+
+**Decision.** The name is uppercased before the alias lookup. DPD-04.
+
+### D-3155 — read_contract's expiry token is a fixed byte pattern — 2026-10-04
+
+**Finding.** The token check used `str::parse`, which accepts `+`, so
+`+4Jan24` and `Jan+4` matched.
+
+**Decision.** A fixed byte-pattern match with every digit checked. DPD-05.
+
+### D-3156 — read_contract's underlying must already be a valid symbol — 2026-10-04
+
+**Finding.** The underlying was checked only for emptiness: a 1,000-byte,
+lowercase or spaced underlying was read and copied out.
+
+**Decision.** It must be a valid uppercase symbol as written. DPD-06.
+
+### D-3157 — A leading-zero strike is a second spelling and is refused — 2026-10-04
+
+**Finding.** `019200` and `00.05` named the same contract as `19200` and
+`0.05`, and the chain deduplicated by name.
+
+**Decision.** Refused. DPD-07.
+
+### D-3158 — A drifted NSE index document is refused, not partly skipped — 2026-10-04
+
+**Finding.** `masters::nse_index_csv` skipped a category value that was not a
+list and an element that was not a string, counting nothing, while its doc
+said it refused them.
+
+**Decision.** Either refuses the whole document naming the category and the
+kind of value; the landed catalogue stays byte-identical. Refusal over a count
+because no caller reads a count. DPD-08.
+
+### D-3113 — An expiry on a non-trading day stays accepted until a sourced rule exists — 2026-10-04
+
+**Finding.** `Venue::hours_on` is a table of hours by date, not a trading
+calendar, so a Saturday expiry gets a 15:40 close and two extra days of tenor.
+
+**Decision.** Not changed. Refusing needs a charter-sourced trading calendar;
+NSE has held Saturday special sessions, and `calendar::kind_of`'s Closed is
+observed, not proven. Pinned in `dpp_tenor_edges` so a change is visible.
+UNVERIFIED until a source is recorded.

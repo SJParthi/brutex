@@ -788,6 +788,43 @@ fn dpp_vendor_and_solved_paths_agree_on_the_intrinsic_floor() {
     );
 }
 
+/// D-3117: a premium at or above the no-arbitrage maximum (a call worth the
+/// spot, a put worth the discounted strike) is refused by the vendor path with
+/// the solver's own arm. Before D-3117 the vendor path priced it.
+#[test]
+fn dpp_vendor_and_solved_paths_agree_on_the_ceiling() {
+    let base = atm_call();
+    let mut refused = 0_u32;
+    for side in [OptionSide::Call, OptionSide::Put] {
+        for over in [0_i64, 1, 100, 1_000_000] {
+            let ceiling = match side {
+                OptionSide::Call => base.spot,
+                OptionSide::Put => base.strike,
+            };
+            let q = Quote {
+                premium: ceiling + over,
+                side,
+                ..base
+            };
+            let s = solve_iv(q, rate(), YearBasis::Calendar365);
+            let v = price(q, Some(0.15), rate(), YearBasis::Calendar365);
+            let s_above = matches!(
+                s,
+                Err(PricingError::Model(GreeksError::PriceAboveMaximum { .. }))
+            );
+            let v_above = matches!(
+                v,
+                Err(PricingError::Model(GreeksError::PriceAboveMaximum { .. }))
+            );
+            assert_eq!(s_above, v_above, "{q:?}: solved {s:?} vendor {v:?}");
+            if v_above {
+                refused += 1;
+            }
+        }
+    }
+    assert!(refused >= 7, "the ceiling was reached {refused} times");
+}
+
 /// An empty run is an empty, balanced answer.
 #[test]
 fn dpp_price_all_on_nothing() {

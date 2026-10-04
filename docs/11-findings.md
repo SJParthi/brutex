@@ -899,3 +899,32 @@ Narrative only. No row is added to the table above.
 - **rustonly2-5** (nested `.gitignore`/`.gitattributes`): fixed. D-2348.
 - **`.github/*.rs` without `#![forbid(unsafe_code)]`**: fixed, gate 16 layer
   1c. D-2349.
+
+### Data-path attack, round 1 — dispositions — 2026-10-04
+
+Narrative only. No row is added to the table above. Each finding was shown by
+a test failing on the unmodified code before it was fixed; the tests are the
+`attack_*` files named in `docs/04-invariants.md` rows DPG, DPP, DPI, DPF,
+DPS and DPD.
+
+- **Greeks:** on-grid strikes refused at huge level/interval ratios (D-3100);
+  IV uncertainty understated at subnormal scale (D-3101). Fixed.
+- **Pricing and spot match:** two spot closes at one stamp resolved by arrival
+  order (D-3110); one refusal class hid another (D-3111); a signed expiry
+  field read as a date (D-3112); the vendor-volatility path priced premiums
+  the solver refuses (D-3114, D-3117); exchange token ignored (D-3115); one
+  contract filed under two spellings (D-3116). Fixed. A Saturday expiry is
+  accepted until a sourced trading calendar exists (D-3113): open, UNVERIFIED.
+- **Zerodha ingest:** a refused month uncounted the months already written
+  (D-3120); an unplaceable stamp filed as "before the window" (D-3121);
+  decoder-skipped candles missing from a balanced receipt (D-3122). Fixed.
+- **Timeframe fold:** widths not dividing a day opened before 09:15 (D-3130);
+  repeated and off-grid source bars merged silently (D-3131); a day folded
+  from a grid that straddles midnight (D-3132). Fixed.
+- **Store:** a header whose last stamp disagreed with its last record steered
+  an out-of-order append (D-3140). Fixed. Lookup by time remains a bisection,
+  owned by the O(1) sweep.
+- **Name and price decoders:** non-positive strikes rendered (D-3150); contract
+  text with several spellings (D-3151, D-3155, D-3157); case-sensitive marker
+  and alias (D-3152, D-3153); unchecked underlying (D-3156); a drifted index
+  document partly skipped (D-3158). Fixed.
