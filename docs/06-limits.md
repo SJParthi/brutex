@@ -10971,6 +10971,16 @@ Counted, not timed: 98 closed masks attested 196 times before and twice after
 per-call callers reconstruct one selected stream each (`reconstruct_selected`,
 Global Replay V1/V2), where each stream also replays its own OOS slice.
 
+**Fixed for those callers too (D-1838, W3-runner2-2).** Global Replay V1 and
+V2 now price every stream through one `TrainingAttestationsV1`, which attests
+each distinct resolution, borrowed series, column and horizon once. Counted,
+not timed: 25 long and 25 short streams over one slice attested 50 times
+before and twice after
+(`a_replay_attests_each_shared_training_slice_once`). What a stream still
+pays is its own grid evaluation and its own OOS replay, which are its run's
+work, not the slice's. No production caller of the per-call door remains in
+either replay.
+
 ## The stationary bootstrap's block ceiling is arithmetic, not statistical — D-0742, 30 September 2026
 
 The continuation draw is `1_000_000_u64.saturating_sub(1_000_000 / block as u64)`

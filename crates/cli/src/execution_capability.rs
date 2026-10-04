@@ -485,17 +485,22 @@ impl ExecutionStrategyCapabilityV1 {
 
     /// Reconstructs and re-authorizes the exact selected exit.
     ///
+    /// The TRAINING slice is attested through `attestations`, so a replay
+    /// whose streams share one resolution, series and column attests it once
+    /// rather than once per stream (W3-runner2-2, D-1838).
+    ///
     /// # Errors
     ///
     /// Refuses every changed parameter, row, column, run, training series,
     /// complete grid, coordinate or final opaque selection digest.
-    pub fn reconstruct_selected(
+    pub fn reconstruct_selected<'w>(
         &self,
         parameters: &ExecutionParametersV1,
         row: PopulationRowV1,
-        series: ExecutionSeriesV1<'_>,
-        column: &Column,
+        series: ExecutionSeriesV1<'w>,
+        column: &'w Column,
         run: ExecutionRunV1,
+        attestations: &mut TrainingAttestationsV1<'w>,
     ) -> Result<(ResolvedExitGridV1, SelectedExitV1), ExecutionCapabilityRefusal> {
         self.validate()?;
         self.require_binding(parameters, &row)?;
@@ -504,8 +509,8 @@ impl ExecutionStrategyCapabilityV1 {
             return Err("training execution run differs from row capability".to_owned());
         }
         let resolved = parameters.reconstruct_grid(series)?;
-        let evaluated = resolved
-            .evaluate_training_grid_attested(series, column, parameters.horizon, run)
+        let evaluated = attestations
+            .evaluate(&resolved, series, column, parameters.horizon, run)
             .map_err(|why| format!("complete training grid could not be evaluated: {why:?}"))?;
         let validated = resolved
             .validate_evaluation(&evaluated)
@@ -3499,6 +3504,103 @@ fn forced_stop_from_parts(tag: u8, ppm: i64) -> Result<ForcedStopV1, ExecutionCa
         (1, value) if value > 0 => Ok(ForcedStopV1::IncludeExactObserved(value)),
         (2, value) if value > 0 => Ok(ForcedStopV1::RequireExactObserved(value)),
         _ => Err(format!("forced-stop tag/value {tag}/{ppm} is noncanonical")),
+    }
+}
+
+/// The identity of one TRAINING attestation: the resolution that minted it
+/// and the exact borrowed series, column and horizon it read. Every
+/// reference term is keyed by address and length, so two keys are equal only
+/// when they name the very same borrowed bytes; equal CONTENT at another
+/// address attests again rather than being trusted by value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AttestationKeyV1 {
+    resolution: [u8; 32],
+    instrument: usize,
+    feed: (usize, usize),
+    commit: (usize, usize),
+    calendar: [u8; 32],
+    bars: (usize, usize),
+    column: usize,
+    horizon: u32,
+}
+
+impl AttestationKeyV1 {
+    fn of(
+        resolved: &ResolvedExitGridV1,
+        series: ExecutionSeriesV1<'_>,
+        column: &Column,
+        horizon: Horizon,
+    ) -> Self {
+        let bars = series.bars();
+        Self {
+            resolution: resolved.digest(),
+            instrument: std::ptr::from_ref(series.instrument()).addr(),
+            feed: (series.feed().as_ptr().addr(), series.feed().len()),
+            commit: (series.commit().as_ptr().addr(), series.commit().len()),
+            calendar: series.calendar_digest(),
+            bars: (bars.as_ptr().addr(), bars.len()),
+            column: std::ptr::from_ref(column).addr(),
+            horizon: horizon.as_bars(),
+        }
+    }
+}
+
+/// One TRAINING attestation per resolution, series, column and horizon a
+/// replay sees (W3-runner2-2, D-1838).
+///
+/// Global Replay V1 and V2 reconstruct up to 200 streams, and each stream
+/// re-attested its TRAINING slice through `evaluate_training_grid_attested`:
+/// a BLAKE3 pass over every bar, a column validation and a slice-facts build,
+/// O(E) per stream, even when several streams share one population side and
+/// so one resolution and one borrowed slice. This cache attests each distinct
+/// key once and prices every stream through `evaluate_with_attested`; a hit
+/// is one hash-map probe, expected O(1). The per-stream grid evaluation it
+/// leaves is that stream's own run and is not shared. Proof:
+/// `cli::execution_disposition_v2::a_replay_attests_each_shared_training_slice_once`.
+#[derive(Debug, Default)]
+pub struct TrainingAttestationsV1<'w> {
+    by_key: HashMap<AttestationKeyV1, runner::exit_grid_policy::AttestedTrainingV1<'w>>,
+}
+
+impl<'w> TrainingAttestationsV1<'w> {
+    /// An empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Distinct TRAINING slices attested so far.
+    #[must_use]
+    pub fn attested(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// Prices `run`'s complete TRAINING grid, attesting the slice only when
+    /// this exact key has not been attested before. The answer equals
+    /// `evaluate_training_grid_attested`'s, field for field.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal `attest_training` or `evaluate_with_attested` makes.
+    pub fn evaluate(
+        &mut self,
+        resolved: &ResolvedExitGridV1,
+        series: ExecutionSeriesV1<'w>,
+        column: &'w Column,
+        horizon: Horizon,
+        run: ExecutionRunV1,
+    ) -> Result<
+        runner::exit_grid_policy::EvaluatedExitGridV1,
+        runner::exit_grid_policy::ExitGridErrorV1,
+    > {
+        let key = AttestationKeyV1::of(resolved, series, column, horizon);
+        let attested = match self.by_key.entry(key) {
+            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(resolved.attest_training(series, column, horizon)?)
+            }
+        };
+        resolved.evaluate_with_attested(attested, run)
     }
 }
 
