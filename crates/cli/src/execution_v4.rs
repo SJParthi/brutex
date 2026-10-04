@@ -798,7 +798,7 @@ impl ExecutionV4DispositionRecord {
             ("Population V6 Candidate row", self.population_row_id),
             ("Candidate semantic identity", self.candidate_semantic_id),
             ("Candidate base row", self.candidate_base_row_id),
-            ("Base Evidence V2 row", self.base_evidence_id),
+            ("Base Evidence row", self.base_evidence_id),
             ("Admission V4 decision", self.admission_decision_id),
             (
                 "Finalization V4 Family row",

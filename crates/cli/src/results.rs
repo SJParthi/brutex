@@ -237,6 +237,7 @@ fn seal_matches_v2(raw: &[u8; STRIDE_BYTES_V2]) -> bool {
 /// and `open`'s identity pass skips it -- a damaged record still occupies its
 /// stride and the records after it are still addressable.
 fn read_at(file: &mut File, at: u64, version: u32) -> Result<([u8; STRIDE_BYTES], bool), Refusal> {
+    count_row_read();
     if version == VERSION {
         let mut raw = [0_u8; STRIDE_BYTES];
         file.seek(SeekFrom::Start(at))
@@ -727,23 +728,36 @@ fn write_fresh_header(file: &mut File, path: &Path) -> Result<(), Refusal> {
 /// guard's explicit unlock, never by closing a descriptor: a duplicate left in
 /// a child another thread spawned would otherwise keep it (D-0693).
 fn open_result_file(path: &Path, writable: bool) -> Result<(File, Option<Flock<File>>), Refusal> {
-    let file = OpenOptions::new()
+    let mut options = OpenOptions::new();
+    options
         .read(true)
         .write(writable)
         .create(writable)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| {
-            if why.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "{} does not exist yet. No run has been recorded — this \
+        .truncate(false);
+    // THE READ DOOR NEVER WAITS AND READS ONLY A REGULAR FILE (D-1743). A FIFO
+    // here blocked every read-only open, the HTTP detail path included. The
+    // write door opens read-write, which never waits on a FIFO, and it keeps
+    // reaching `write_fresh_header`'s specific refusal for a path that does
+    // not keep what it is given, such as a link to /dev/null.
+    let opened = if writable {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .custom_flags(store::open_flags::O_NONBLOCK)
+            .open(path)
+    } else {
+        crate::readonly_file::regular(&mut options, path)
+    };
+    let file = opened.map_err(|why| {
+        if why.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "{} does not exist yet. No run has been recorded — this \
                      is not an error, and nothing was created.",
-                    path.display()
-                )
-            } else {
-                format!("{} could not be opened: {why}", path.display())
-            }
-        })?;
+                path.display()
+            )
+        } else {
+            format!("{} could not be opened: {why}", path.display())
+        }
+    })?;
     // Initial header validation, indexing and its generation snapshot are one
     // read transaction. Cooperative appenders must not change the length in
     // between those steps; a writer also owns fresh-header creation exclusively.
@@ -837,7 +851,36 @@ impl Results {
     /// An absent file, named as an absence rather than as a failure, plus every
     /// refusal [`Self::open`] makes about a file that exists.
     pub fn open_read(root: &Path) -> Result<Self, Refusal> {
-        Self::open_with(root, false, None)
+        Self::open_with(root, false, None, None)
+    }
+
+    /// [`Self::open_read`], handing every row to `visit` from the open's own
+    /// pass, in append order, as [`Self::read`] would return it.
+    ///
+    /// # Why the open lends its pass rather than a caller walking `read`
+    ///
+    /// The open already reads, seals and decodes every row to build its
+    /// identity index. `cli top` and `cli results` then walked the ledger a
+    /// second time through [`Self::read`] -- per row a lock, an unlock, a seek,
+    /// a read and the same seal hash again -- so each call read every row twice
+    /// (OS-7, W2-cli8-5, D-2310). A visitor sees each row exactly once, from the
+    /// bytes the identity pass already holds, under the one shared validation
+    /// lock, so the rows it sees are the snapshot the open indexed.
+    ///
+    /// A sealed row arrives as `Ok`; a damaged one arrives as the exact refusal
+    /// [`Self::read`] makes for that ordinal, and the pass continues, so a
+    /// caller chooses which damaged row it names exactly as its old read order
+    /// did. Every refusal of the open itself still wins over anything `visit`
+    /// was shown: the caller discards its fold when this returns `Err`.
+    ///
+    /// # Errors
+    ///
+    /// Every refusal [`Self::open_read`] makes.
+    pub(crate) fn open_read_visiting(
+        root: &Path,
+        visit: &mut dyn FnMut(u64, Result<Record, Refusal>),
+    ) -> Result<Self, Refusal> {
+        Self::open_with(root, false, None, Some(visit))
     }
 
     /// Opens for reading only when the ledger fits an explicit byte ceiling.
@@ -851,7 +894,7 @@ impl Results {
     /// Every refusal from [`Self::open_read`], plus a file larger than
     /// `max_bytes`.  An over-limit file is not partially indexed.
     pub fn open_read_bounded(root: &Path, max_bytes: u64) -> Result<Self, Refusal> {
-        Self::open_with(root, false, Some(max_bytes))
+        Self::open_with(root, false, Some(max_bytes), None)
     }
 
     /// Opens, or creates, the results file beneath `root`.
@@ -862,7 +905,7 @@ impl Results {
     /// version this build does not know. Each refuses rather than being
     /// repaired: a file that is not this one must not be appended to.
     pub fn open(root: &Path) -> Result<Self, Refusal> {
-        Self::open_with(root, true, None)
+        Self::open_with(root, true, None, None)
     }
 
     /// Both openers, because the header, version and scan logic is one hundred
@@ -877,7 +920,13 @@ impl Results {
                   (D-0693), and splitting the scan from its lock would put the \
                   refusal paths in one function and the release in another"
     )]
-    fn open_with(root: &Path, writable: bool, max_bytes: Option<u64>) -> Result<Self, Refusal> {
+    fn open_with(
+        root: &Path,
+        writable: bool,
+        max_bytes: Option<u64>,
+        mut visit: Option<&mut dyn FnMut(u64, Result<Record, Refusal>)>,
+    ) -> Result<Self, Refusal> {
+        count_open();
         let dir = root.join("results");
         if writable {
             std::fs::create_dir_all(&dir)
@@ -1043,11 +1092,18 @@ impl Results {
             // receipt manifest beside it refuses the same condition. A rerun
             // is refused at append; a ledger that already holds one is named
             // here. audit-20261003 hunt-cli-a-3, D-1560.
-            if sealed {
-                let identity = Record::from_bytes(&raw).identity;
-                if let Some(first) = seen.insert(identity, at) {
-                    return Err(duplicate_identity(&path, &identity, first, at));
-                }
+            //
+            // Decoded ONCE: the identity comes from the same record a visitor
+            // is lent, so `open_read_visiting` adds no decode and no read.
+            let record = sealed.then(|| Record::from_bytes(&raw));
+            if let Some(record) = &record
+                && let Some(first) = seen.insert(record.identity, at)
+            {
+                return Err(duplicate_identity(&path, &record.identity, first, at));
+            }
+            if let Some(visit) = visit.as_mut() {
+                let index = at.saturating_sub(HEADER) / stride;
+                visit(index, record.ok_or_else(|| unsealed(index)));
             }
             at = at.saturating_add(stride);
         }
@@ -1533,33 +1589,43 @@ impl Results {
         let at = HEADER.saturating_add(index.saturating_mul(self.stride()));
         let version = self.version;
         let (raw, sealed) = read_at(&mut self.file, at, version)?;
-        // THE SEAL IS CHECKED HERE, NOT AT OPEN, AND THAT IS THE POINT.
+        // THE SEAL IS REFUSED HERE, NOT AT OPEN, AND THAT IS THE POINT.
         //
-        // Checking every record at open would make opening O(runs) in HASHING
-        // rather than only in the identity pass, and would refuse a whole ledger
-        // because one record in the middle went bad. Checking at read refuses
-        // exactly the record that is unreadable and leaves every other one
-        // available — which is what an operator needs when a disk has damaged
-        // one row out of thousands.
+        // The open's identity pass does hash every seal (`read_at` returns it,
+        // so a damaged row is not indexed), which makes opening O(runs) in
+        // hashing -- measured by D-2310's row-read counter, not argued. What it
+        // does NOT do is refuse the whole ledger because one record in the
+        // middle went bad. Refusing at read names exactly the record that is
+        // unreadable and leaves every other one available — which is what an
+        // operator needs when a disk has damaged one row out of thousands.
         //
         // `from_bytes` is infallible by construction: every byte pattern is a
         // legal value of its type, so a damaged record PARSES and renders as
         // data. The seal is the only thing standing between that and a number
         // an operator would act on.
         if !sealed {
-            return Err(format!(
-                "record {index} does not match its seal: the eight bytes written \
-                 with it do not describe the {PAYLOAD_BYTES} bytes now on disk. \
-                 The record was damaged after it was written -- an interrupted \
-                 write that stopped on a stride boundary, a bad sector, or \
-                 something that is not this program writing to this file. It is \
-                 NOT repaired and NOT skipped silently, because every byte \
-                 pattern here parses into a legal record and would render as a \
-                 run that never happened."
-            ));
+            return Err(unsealed(index));
         }
         Ok(Record::from_bytes(&raw))
     }
+}
+
+/// The refusal for row `index` whose seal does not match its payload.
+///
+/// One function because two paths make it -- [`Results::read`] and the rows
+/// [`Results::open_read_visiting`] lends -- and a caller moved from one to the
+/// other must refuse a damaged row in exactly the words it did before.
+fn unsealed(index: u64) -> Refusal {
+    format!(
+        "record {index} does not match its seal: the eight bytes written \
+         with it do not describe the {PAYLOAD_BYTES} bytes now on disk. \
+         The record was damaged after it was written -- an interrupted \
+         write that stopped on a stride boundary, a bad sector, or \
+         something that is not this program writing to this file. It is \
+         NOT repaired and NOT skipped silently, because every byte \
+         pattern here parses into a legal record and would render as a \
+         run that never happened."
+    )
 }
 
 #[cfg(test)]
@@ -2887,3 +2953,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&r);
     }
 }
+
+#[cfg(test)]
+std::thread_local! {
+    /// Results-ledger opens on this thread, so a test can prove a caller opens
+    /// the ledger once rather than once per instrument (D-2301).
+    pub(crate) static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Ledger rows read from disk on this thread -- every `read_at`, whether
+    /// the open's identity pass or a [`Results::read`] made it -- so a test can
+    /// prove a caller reads each row once and not once more per call (D-2310).
+    pub(crate) static ROW_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one ledger open in a test build.
+///
+/// # Why the counters are bumped through functions defined down here
+///
+/// `the_ledger_is_fsynced_and_never_merely_flushed` reads this file's shipping
+/// half as everything before the FIRST `#[cfg(test)]`. D-2301 put that
+/// attribute inside `open_with`, above `append_locked` and `confirm_durable`,
+/// so the guard saw one `sync_all` of three and failed on the base tree. Found
+/// while adding `ROW_READS` (D-2310); both bumps now live below the line.
+#[cfg(test)]
+fn count_open() {
+    OPENS.with(|n| n.set(n.get().saturating_add(1)));
+}
+
+/// Nothing in a shipping build.
+#[cfg(not(test))]
+const fn count_open() {}
+
+/// Counts one row read in a test build. See [`count_open`] for where it lives.
+#[cfg(test)]
+fn count_row_read() {
+    ROW_READS.with(|n| n.set(n.get().saturating_add(1)));
+}
+
+/// Nothing in a shipping build.
+#[cfg(not(test))]
+const fn count_row_read() {}

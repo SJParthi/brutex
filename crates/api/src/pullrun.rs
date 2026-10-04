@@ -514,7 +514,26 @@ pub fn legs_from(body: &str) -> Result<Vec<Leg>, Refusal> {
         {
             return Err(Refusal::Malformed(decoded));
         }
+        // A LEG'S PAYLOAD IS A FORM TOO, and it reaches `pull_spot` and
+        // `pull_fno` without passing the `one_value_per_form_field` middleware, so a repeated
+        // single-value field inside it is refused here, before any leg runs
+        // (h-api-2, D-1512), with the middleware's own bound on distinct keys
+        // (P5-05, D-2659).
         let body = percent_decode(payload);
+        match crate::server::form_key_verdict(&body) {
+            Some(crate::server::FormKeys::Repeated(key)) => {
+                return Err(Refusal::Malformed(format!(
+                    "{decoded} (its form names {key:?} more than once)"
+                )));
+            }
+            Some(crate::server::FormKeys::TooMany) => {
+                return Err(Refusal::Malformed(format!(
+                    "{decoded} (its form names more than {} distinct fields)",
+                    crate::server::MAX_DISTINCT_FORM_KEYS
+                )));
+            }
+            None => {}
+        }
         if let Some(why) = envelope_disagreement(route, vendor, dir, &body) {
             return Err(Refusal::Disagrees { leg: decoded, why });
         }
@@ -1449,6 +1468,43 @@ mod tests {
         assert_eq!(legs[0].vendor, "dhan");
         assert_eq!(legs[0].dir, "1day");
         assert_eq!(legs[0].label, "Spot · 1 day");
+    }
+
+    /// h-api-2, D-1512: a leg's payload is a form that reaches `pull_spot` and
+    /// `pull_fno` without the D-1587 middleware, so a repeated single-value field in
+    /// it refuses the WHOLE run, naming the key, while a repeated `member` in
+    /// the same payload is a list and passes.
+    #[test]
+    fn a_leg_whose_payload_repeats_a_single_value_field_refuses_the_run() {
+        let good = field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "ok",
+            "member=A&member=B&from=x",
+        );
+        let twice = field(
+            "/pull/spot",
+            "dhan",
+            "1day",
+            "bad",
+            "from=x&vendor=a&from=y",
+        );
+        assert_eq!(legs_from(&good).expect("a list is not a repeat").len(), 1);
+        match legs_from(&format!("{good}&{twice}")) {
+            Err(Refusal::Malformed(why)) => {
+                assert!(
+                    why.ends_with("(its form names \"from\" more than once)"),
+                    "{why}"
+                );
+                assert!(
+                    Refusal::Malformed(why)
+                        .why()
+                        .contains("NOTHING was started")
+                );
+            }
+            other => panic!("a repeated payload field must refuse the run: {other:?}"),
+        }
     }
 
     /// Several legs, and the order they were sent in is the order they arrive.

@@ -239,7 +239,11 @@ impl<'a> Loader<'a> {
             Some(span)
         };
         let daily = stored::daily_context_from_span(daily.finish()?, &signal.bars)?;
-        let exact_minute = stored::exact_minute_context_from_span(minute.finish()?, &signal.bars)?;
+        let exact_minute = stored::exact_minute_context_from_span(
+            minute.finish()?,
+            &signal.bars,
+            self.request.store_root,
+        )?;
         Ok(RangeData {
             signal,
             execution,

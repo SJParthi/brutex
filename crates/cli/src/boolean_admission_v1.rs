@@ -22,7 +22,7 @@ pub(crate) mod qualification;
 #[path = "boolean_admission_reader.rs"]
 pub(crate) mod reader;
 use crate::candidate_universe::population_base_evidence_v2::{
-    measured_ceiling_rate, measured_rate, ratio_observed, return_drawdown,
+    measured_max_rate, measured_rate, ratio_observed, return_drawdown,
 };
 use crate::sweep_evidence::{Completion, Operation};
 
@@ -193,7 +193,7 @@ pub(super) fn base_values(row: &BooleanCoordinateV1) -> Result<AdmissionEvidence
     let details = crate::institutional_evidence::reconcile_trade_rows(cell, row.trades())?;
     let rate = |part, total, name| measured_rate(part, total, name).map_err(display);
     // A rate a MAXIMUM gates rounds UP (p2bool-1, D-1990).
-    let ceiling = |part, total, name| measured_ceiling_rate(part, total, name).map_err(display);
+    let ceiling = |part, total, name| measured_max_rate(part, total, name).map_err(display);
     let ratio = |part, total, name| ratio_observed(part, total, name).map_err(display);
     let measured = |value| {
         if cell.trades > 0 {

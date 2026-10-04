@@ -482,6 +482,18 @@ pub struct Crossings {
 /// A rung that the path never reached.
 pub const NEVER: usize = usize::MAX;
 
+/// Test-only: a refusal COUNT with no location. `crossings_with` locates every
+/// hole it counts, so production never builds this; it exists so the grid's
+/// conservative answer for an unlocated count is exercised rather than assumed.
+#[cfg(test)]
+impl Crossings {
+    pub(crate) fn with_unlocated_refusals(mut self, refused: usize) -> Self {
+        self.refused = refused;
+        self.first_refused = None;
+        self
+    }
+}
+
 impl Crossings {
     /// Every table sized to its ladder, every rung uncrossed.
     ///

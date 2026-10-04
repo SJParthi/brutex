@@ -43,7 +43,7 @@ use runner::excursion::Side;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExecutionRunV1, ExecutionSeriesV1, ExitGridPolicyV1, ExitGridSelectorV1,
     ForcedStopV1, RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, ResolvedExitGridV1,
-    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v1,
+    RungPlanV1, SelectedExitV1, printed_ohlcv_cost_model_id_v2,
 };
 use runner::grid::{Chosen, Ttp};
 use runner::identity::Params;
@@ -150,7 +150,7 @@ pub fn exact_execution_law_digest_v1() -> [u8; 32] {
     hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
     hasher.update(&[FORCED_EXIT_POLICY_TAG]);
     hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
-    hasher.update(&printed_ohlcv_cost_model_id_v1());
+    hasher.update(&printed_ohlcv_cost_model_id_v2());
     hasher.finalize()
 }
 
@@ -216,11 +216,10 @@ impl ExecutionParametersV1 {
         if resolved.policy().execution_resolution() != ExecutionResolutionV1::OneMinuteOhlcv {
             return Err("execution capability requires exact one-minute OHLCV policy".to_owned());
         }
-        if resolved.policy().cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(
-                "execution capability requires the implemented printed-OHLCV model".to_owned(),
-            );
-        }
+        runner::exit_grid_policy::implemented_cost_model(resolved.policy().cost_model_id())
+            .map_err(|why| {
+                format!("execution capability requires the implemented printed-OHLCV model: {why}")
+            })?;
         let mut parameters = Self {
             parameter_id: [0; 32],
             population_id: population_v4.population_id(),
@@ -374,9 +373,8 @@ impl ExecutionParametersV1 {
         if self.policy.side() != side_of_direction(self.direction) {
             return Err("execution parameter direction and policy side differ".to_owned());
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err("execution parameter cost model is unsupported".to_owned());
-        }
+        runner::exit_grid_policy::implemented_cost_model(self.policy.cost_model_id())
+            .map_err(|why| format!("execution parameter cost model is unsupported: {why}"))?;
         if self.training_bars == 0 || self.training_first_ts_micros > self.training_last_ts_micros {
             return Err("execution parameter training geometry is invalid".to_owned());
         }
@@ -3249,9 +3247,8 @@ impl ParameterScalarV1 {
         if self.execution_resolution != ExecutionResolutionV1::OneMinuteOhlcv {
             return Err("execution parameter resolution is not one-minute OHLCV".to_owned());
         }
-        if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
-            return Err("execution parameter fill/cost model is unsupported".to_owned());
-        }
+        runner::exit_grid_policy::implemented_cost_model(self.cost_model_id)
+            .map_err(|why| format!("execution parameter fill/cost model is unsupported: {why}"))?;
         if self.execution_law_digest != exact_execution_law_digest_v1() {
             return Err("execution parameter next-minute/15:10 law digest differs".to_owned());
         }
@@ -3636,7 +3633,7 @@ mod tests {
             RatioLimitsV1::new(100, 500, 10_000).expect("test ratio limits"),
             1_000_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             0,
             0,
@@ -3701,6 +3698,77 @@ mod tests {
         assert!(retired_parameter_stride(640, EXECUTION_PERCENTILE_STRIDE).is_none());
         assert!(retired_parameter_stride(641, EXECUTION_PARAMETER_STRIDE).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The execution law digest exactly as `exact_execution_law_digest_v1`
+    /// composes it, under a NAMED cost model, so the test can say which model
+    /// the shipped digest binds.
+    fn law_digest_under(cost_model: [u8; 32]) -> [u8; 32] {
+        let mut hasher = Hasher::new();
+        hasher.update(EXECUTION_LAW_DOMAIN);
+        hasher.update(&[ENTRY_POLICY_TAG]);
+        hasher.update(&ENTRY_DELAY_MINUTES.to_le_bytes());
+        hasher.update(&[FORCED_EXIT_POLICY_TAG]);
+        hasher.update(&FORCED_EXIT_IST_MINUTE.to_le_bytes());
+        hasher.update(&cost_model);
+        hasher.finalize()
+    }
+
+    /// D-1514: each of the three cost-model checks here refuses the superseded
+    /// V1 model by name and an unknown one generically, and the execution law
+    /// digest binds V2 rather than V1.
+    #[test]
+    fn every_cost_model_check_refuses_the_superseded_v1_model_by_name() {
+        use runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1 as v1;
+        let shipped = exact_execution_law_digest_v1();
+        assert_eq!(shipped, law_digest_under(printed_ohlcv_cost_model_id_v2()));
+        assert_ne!(shipped, law_digest_under(v1()));
+
+        let valid = parameters(TradeDirectionV1::Long, 3);
+        let scalar = ParameterScalarV1::from_parameters(&valid).expect("V2 scalar");
+        assert_eq!(scalar.validate_shape(), Ok(()));
+        for (model, needle) in [
+            (v1(), "SupersededCostModelIdV1"),
+            ([8; 32], "UnsupportedCostModelId"),
+        ] {
+            let mut old = valid.clone();
+            old.policy = ExitGridPolicyV1::new(
+                valid.policy.execution_resolution(),
+                valid.policy.range_resolution(),
+                valid.policy.side(),
+                valid.policy.rungs().clone(),
+                valid.policy.ratios(),
+                valid.policy.max_cells(),
+                valid.policy.selector(),
+                model,
+                valid.policy.forced_stop(),
+                valid.policy.max_ambiguous_bars(),
+                valid.policy.max_gap_fills(),
+            )
+            .expect("a policy may NAME any model; resolution decides");
+            let refused = old.validate().expect_err("parameters refuse the model");
+            assert!(
+                refused.starts_with("execution parameter cost model is unsupported")
+                    && refused.contains(needle),
+                "{refused}"
+            );
+            let mut stored = scalar.clone();
+            stored.cost_model_id = model;
+            let refused = stored
+                .validate_shape()
+                .expect_err("a stored record refuses it");
+            assert!(
+                refused.starts_with("execution parameter fill/cost model is unsupported")
+                    && refused.contains(needle),
+                "{refused}"
+            );
+        }
+        let mut old_law = scalar;
+        old_law.execution_law_digest = law_digest_under(v1());
+        assert_eq!(
+            old_law.validate_shape(),
+            Err("execution parameter next-minute/15:10 law digest differs".to_owned())
+        );
     }
 
     fn root(tag: &str) -> PathBuf {

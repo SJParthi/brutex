@@ -379,7 +379,7 @@ fn a_stock_ranking_states_corporate_actions_inside_its_findings_block() {
 fn the_ordinary_stored_sweep_withholds_in_the_screens_order() {
     const SEQUENCE: [&str; 5] = [
         "validate_one_minute_execution(",
-        "minute_gaps::days_with_interior_gaps(",
+        "minute_gaps::days_with_minute_holes(",
         "minute_gaps::withhold(",
         "stored::load_daily_context(",
         "stored::load_exact_minute_context(",

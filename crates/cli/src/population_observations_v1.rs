@@ -2218,6 +2218,15 @@ impl ObservationAuthorityLedgerV1 {
 
     /// Returns one cached audit only after detecting any stale same-length edit.
     ///
+    /// # Complexity
+    ///
+    /// Each lookup reads the whole bounded authority file into memory and
+    /// hashes it, so it is O(B) time and O(B) transient memory in file bytes
+    /// B; only the identity-map probe that follows is average O(1). The
+    /// content hash is kept deliberately: it is what refuses a same-length
+    /// edit a metadata generation cannot see (W2-cli11-3, D-1681). Invariant
+    /// LBE-06; UNVERIFIED as a measured time.
+    ///
     /// # Errors
     ///
     /// Refuses any file mutation or bounded read failure since open.
@@ -3440,6 +3449,15 @@ impl ObservationAuthorityLedgerV2 {
     }
 
     /// Returns one cached audit only after detecting stale or replaced bytes.
+    ///
+    /// # Complexity
+    ///
+    /// Each lookup reads the whole bounded authority file into memory and
+    /// hashes it, so it is O(B) time and O(B) transient memory in file bytes
+    /// B; only the identity-map probe that follows is average O(1). The
+    /// content hash is kept deliberately: it is what refuses a same-length
+    /// edit a metadata generation cannot see (W2-cli11-3, D-1681). Invariant
+    /// LBE-06; UNVERIFIED as a measured time.
     ///
     /// # Errors
     ///

@@ -4,6 +4,8 @@
 //!
 //! [`LakeFile::open`] reads the whole file and parses its thrift footer. That
 //! is O(file bytes) and it is not pretended otherwise anywhere in this crate.
+//! The file bytes are bounded: a file past [`MAX_LAKE_BYTES`] is refused from
+//! its metadata before it is read (OD-6, D-2375).
 //! [`LakeFile::read_row_group`] decompresses every page of every column in the
 //! group, which is O(bytes in the group). Both are real work paid once.
 //! [`crate::batch::Batch::row`] is the operation that carries a bound, and its
@@ -40,6 +42,22 @@ const MAGIC: [u8; 4] = *b"PAR1";
 /// `PAR1` + a four-byte footer length + `PAR1`.
 const MIN_FILE: usize = 12;
 
+/// The largest lake file [`LakeFile::open`] reads into memory: 64 MiB (OD-6,
+/// D-2375).
+///
+/// **DERIVED, NOT MEASURED, and no document sources a lake file size.** The
+/// largest file measured is "a few megabytes" (this module's header, D-0776's
+/// finding). A lake file is one contract, one timeframe, one month, and the
+/// finest timeframe the lake holds is one minute, so the widest file is the
+/// 17-column F&O layout at every minute of a 31-day month: 31 x 1,440 =
+/// 44,640 rows x 17 columns x (8 value bytes + 1 definition-level byte, plain,
+/// uncompressed) = 6,829,920 bytes before page headers and footer. 64 MiB is
+/// about ten times that, and it is also `page::MAX_PAGE_BYTES`, the largest
+/// single page this reader will materialise, so one file never costs more
+/// memory than one page is already allowed to. A file past it is refused by
+/// name, [`LakeError::TooLarge`], before a byte of it is read.
+pub const MAX_LAKE_BYTES: u64 = 64 << 20;
+
 /// An opened lake Parquet file.
 pub struct LakeFile {
     bytes: Bytes,
@@ -67,6 +85,40 @@ impl core::fmt::Debug for LakeFile {
     }
 }
 
+/// One lake file's bytes, refused past `cap` before they are read (OD-6,
+/// D-2375). The pattern is `pull::archive::read_bounded`'s (D-1362): the
+/// length is checked from the open handle's metadata first, and the read is
+/// then capped one byte past the bound, so a file that grows between the check
+/// and the read is caught too. Until D-2375 this was `fs::read`, which reads
+/// whatever the path holds.
+fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, LakeError> {
+    use std::io::Read as _;
+    let io = |e: std::io::Error| LakeError::Io {
+        reason: e.to_string(),
+    };
+    let file = fs::File::open(path).map_err(io)?;
+    let declared = file.metadata().map_err(io)?.len();
+    if declared > cap {
+        return Err(LakeError::TooLarge {
+            bytes: declared,
+            cap,
+        });
+    }
+    // A capacity hint only: `declared` is at most `cap`, which fits a `usize`
+    // on every target this builds for, and a zero hint costs reallocations,
+    // never a wrong answer.
+    let mut raw = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let read = file
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut raw)
+        .map_err(io)?;
+    let read = read as u64;
+    if read > cap {
+        return Err(LakeError::TooLarge { bytes: read, cap });
+    }
+    Ok(raw)
+}
+
 impl LakeFile {
     /// Opens a lake file, refusing anything that is not one.
     ///
@@ -78,6 +130,8 @@ impl LakeFile {
     /// # Errors
     ///
     /// * [`LakeError::Io`] if the file cannot be read.
+    /// * [`LakeError::TooLarge`] if it is past [`MAX_LAKE_BYTES`], before it
+    ///   is read.
     /// * [`LakeError::Truncated`] if it is shorter than a Parquet file can be.
     /// * [`LakeError::NotParquet`] if either magic is missing.
     /// * [`LakeError::FooterUnreadable`] if the footer will not parse.
@@ -85,11 +139,16 @@ impl LakeFile {
     ///   [`LakeError::ColumnTypeMismatch`] if the columns are not one of the
     ///   two shapes the lake contains.
     pub fn open(path: &Path) -> Result<Self, LakeError> {
-        let raw = fs::read(path).map_err(|e| LakeError::Io {
-            reason: e.to_string(),
-        })?;
-        let bytes = raw.len();
-        let opened = Self::from_bytes(raw);
+        Self::open_capped(path, MAX_LAKE_BYTES)
+    }
+
+    /// [`LakeFile::open`] with the ceiling as a parameter, so a test can stand
+    /// a file of exactly the bound beside one a byte longer without a 64 MiB
+    /// write; `open` passes [`MAX_LAKE_BYTES`] and nothing else does.
+    fn open_capped(path: &Path, cap: u64) -> Result<Self, LakeError> {
+        let read = read_bounded(path, cap);
+        let bytes = read.as_ref().map_or(0, Vec::len);
+        let opened = read.and_then(Self::from_bytes);
         // ONE LINE PER FILE. Never per row, and never per row group here —
         // a parquet row group holds tens of thousands of rows and this lake
         // holds millions, so a finer event would roll a run out of the 64 MiB
@@ -112,7 +171,8 @@ impl LakeFile {
         opened
     }
 
-    /// Same as [`LakeFile::open`], for bytes already in hand.
+    /// Same as [`LakeFile::open`], for bytes already in hand. The caller holds
+    /// them already, so [`MAX_LAKE_BYTES`] is not applied here.
     ///
     /// # Errors
     ///
@@ -809,6 +869,57 @@ fn unwrap_present(v: Option<f64>, column: &'static str, row: usize) -> Result<f6
 )]
 mod tests {
     use super::*;
+
+    /// **A LAKE FILE PAST THE CEILING IS REFUSED BEFORE IT IS READ.** OD-6,
+    /// D-2375, invariant AFG-75.
+    ///
+    /// `LakeFile::open` was `fs::read` with no bound, so any path, however
+    /// large, was read in full before the magic check could refuse it. A
+    /// sparse file one byte past [`MAX_LAKE_BYTES`] costs no disk and is
+    /// refused from its metadata through the public `open`; at a small cap, a
+    /// file of exactly the cap is read (and then refused as not Parquet, which
+    /// proves it was read) while one byte more is refused as too large.
+    #[test]
+    fn a_lake_file_past_the_ceiling_is_refused_before_it_is_read() {
+        let dir = std::env::temp_dir().join(format!("brutex-lake-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+
+        let huge = dir.join("huge.parquet");
+        std::fs::File::create(&huge)
+            .and_then(|file| file.set_len(MAX_LAKE_BYTES + 1))
+            .expect("a sparse file one byte past the ceiling");
+        match LakeFile::open(&huge) {
+            Err(LakeError::TooLarge { bytes, cap }) => {
+                assert_eq!((bytes, cap), (MAX_LAKE_BYTES + 1, MAX_LAKE_BYTES));
+            }
+            other => panic!("expected TooLarge, got {:?}", other.err()),
+        }
+        let said = LakeError::TooLarge {
+            bytes: MAX_LAKE_BYTES + 1,
+            cap: MAX_LAKE_BYTES,
+        }
+        .to_string();
+        assert!(said.contains(&MAX_LAKE_BYTES.to_string()), "{said}");
+
+        let at = dir.join("at.parquet");
+        std::fs::write(&at, [0_u8; 16]).expect("sixteen bytes");
+        assert!(
+            matches!(
+                LakeFile::open_capped(&at, 16),
+                Err(LakeError::NotParquet { .. })
+            ),
+            "a file of exactly the cap is read"
+        );
+        assert!(
+            matches!(
+                LakeFile::open_capped(&at, 15),
+                Err(LakeError::TooLarge { bytes: 16, cap: 15 })
+            ),
+            "one byte past the cap is refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     use std::io::Cursor;
     use std::sync::Arc;

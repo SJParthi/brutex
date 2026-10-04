@@ -124,6 +124,8 @@ pub mod cash_session_cache;
 pub mod chain;
 pub mod config;
 pub mod csv;
+/// The pulled day bar, checked against the days its minute bars fold to.
+pub mod daycheck;
 /// DhanHQ v2's TWO error vocabularies -- one vendor's row in `refusal`.
 ///
 /// `DH-902` "not subscribed" and `DH-901` "token expired" both arrive as

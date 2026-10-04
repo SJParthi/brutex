@@ -35,16 +35,21 @@ jobs:
     name: Dispatch CI on an unverified main
     runs-on: ubuntu-24.04
     steps:
+      # D-2343: the run-counting rule is Rust, not an inline query program.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { ref: main, persist-credentials: false }
+      - name: Build the GitHub JSON reader from main
+        run: rustc --edition=2024 -D warnings .github/gh_json.rs -o "$RUNNER_TEMP/gh-json"
       - name: Run CI on main's head unless a run on it already exists
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          sha=$(gh api "repos/${REPO}/commits/main" --jq .sha)
+          sha=$(gh api "repos/${REPO}/commits/main" | "$RUNNER_TEMP/gh-json" field sha)
           [ -n "$sha" ] || { echo "main's head could not be read."; exit 1; }
           n=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?branch=main&head_sha=${sha}" \
-                --jq '[.workflow_runs[] | select(.event == "push" or .event == "workflow_dispatch" or .event == "schedule")] | length')
+                | "$RUNNER_TEMP/gh-json" ci-run-count)
           echo "main is at ${sha}; CI runs on main for it: ${n}"
           if [ "$n" -gt 0 ]; then
             echo "Already verified, or being verified. Nothing to do."

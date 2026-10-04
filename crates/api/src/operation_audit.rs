@@ -56,7 +56,7 @@ fn read_failure(why: &str, busy: bool) -> Response {
 /// cross-site refusal and every `api` test still passed. The length is in the
 /// type: removing an entry without changing the count does not compile.
 /// D-1445.
-pub(crate) const AUDITED: [&str; 21] = [
+pub(crate) const AUDITED: [&str; 22] = [
     "/backtest/run",
     "/backtest/descend",
     "/engine/command",
@@ -75,6 +75,7 @@ pub(crate) const AUDITED: [&str; 21] = [
     "/boolean-campaign.json",
     "/boolean-qualified-campaign.json",
     "/boolean-oos.json",
+    "/selection-v6.json",
     "/expression-search.json",
     "/engine/top.json",
     "/live.json",
@@ -82,7 +83,7 @@ pub(crate) const AUDITED: [&str; 21] = [
 
 /// The [`AUDITED`] entry equal to `path`, or `None`.
 ///
-/// At most 21 whole-string comparisons, a bound fixed by the type of
+/// At most 22 whole-string comparisons, a bound fixed by the type of
 /// [`AUDITED`] and independent of the request; proven by
 /// `crate::operation_audit::tests::every_registered_route_is_audited_or_exempt_by_name`.
 pub(crate) fn audited_route(path: &str) -> Option<&'static str> {

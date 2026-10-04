@@ -100,6 +100,9 @@ rayon    = "1"
 tracing  = "0.1"
 tokio    = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time", "net", "sync"] }
 axum     = "0.8"
+# D-1510: already in the graph under axum and hyper at the locked 1.1.0; named
+# so `api` can wrap a request body in a deadline, which needs its `Frame` type.
+http-body = "1"
 rustls-graviola = "0.4"
 # `gzip` IS FOR ONE ENDPOINT AND IT IS NOT OPTIONAL FOR IT. Zerodha's
 # instrument dump is documented as "a gzipped CSV dump"; without transparent

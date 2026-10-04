@@ -50,6 +50,44 @@ fn barrier(
     file.sync_all()
 }
 
+/// Every evidence row write in this module passes here, so a test can make it
+/// write a prefix and then fail exactly as a full filesystem does.
+fn write_rows(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(result) = tests::write_rows(file, bytes) {
+        return result;
+    }
+    file.write_all(bytes)
+}
+
+/// Append `bytes` at the end of `file`, measured under the caller's held
+/// lock, and make them durable; return the offset they start at.
+///
+/// A write that fails part-way (a full filesystem extends the file and then
+/// errors) or a barrier that fails leaves bytes that are not a whole row. Left
+/// behind they make `shape` refuse the file -- for the shared journal and
+/// start index, every later attempt in the store. They are truncated back to
+/// that measured end, which removes only this call's bytes, and the refusal
+/// says whether the rollback held (the D-0426 wording, D-1741).
+fn append_rolled_back(file: &mut File, path: &Path, bytes: &[u8]) -> Result<u64, String> {
+    let end = file.seek(SeekFrom::End(0)).map_err(io_error)?;
+    write_rows(file, bytes)
+        .and_then(|()| barrier(file, path))
+        .map_err(|why| {
+            io_error(match file.set_len(end).and_then(|()| file.sync_all()) {
+                Ok(()) => format!(
+                    "{} could not be appended: {why}. The partial write was rolled back to byte {end}, so every older whole row remains readable",
+                    path.display()
+                ),
+                Err(and) => format!(
+                    "{} could not be appended: {why}. Rolling the partial write back to byte {end} ALSO failed: {and}. The file may now end mid-row and is refused until its tail is repaired",
+                    path.display()
+                ),
+            })
+        })?;
+    Ok(end)
+}
+
 /// The computation this attempt actually performs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
@@ -1191,9 +1229,11 @@ fn shape<const N: usize>(
     create: bool,
 ) -> Result<u64, String> {
     let mut len = file.metadata().map_err(io_error)?.len();
-    // An EMPTY file names nothing: it is what a refused first append leaves
-    // once its rollback cut header and rows together (D-1900, cli2-1), so a
-    // reader counts it as no rows, exactly as it counts an absent file.
+    // AN EMPTY FILE HOLDS NO ROWS, exactly like an absent one (D-1741). It is
+    // what `open_append` leaves before its first write and what a refused
+    // first append leaves once its rollback cut header and rows together
+    // (D-1900, cli2-1); reading it as torn would turn one refused append into
+    // a refusal of every later read of that identity.
     if len == 0 && !create {
         return Ok(0);
     }
@@ -1206,9 +1246,7 @@ fn shape<const N: usize>(
                 .map_err(|why| why.to_string())?
                 .to_le_bytes(),
         );
-        file.write_all(&header)
-            .and_then(|()| barrier(file, path))
-            .map_err(io_error)?;
+        append_rolled_back(file, path, &header)?;
         if let Some(parent) = path.parent() {
             flush_directory(parent)?;
         }

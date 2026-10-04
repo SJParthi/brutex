@@ -707,6 +707,42 @@ pub fn overlay_exact_minute_gapfib(
     )
 }
 
+/// The exact one-minute open stamp whose minute must carry the close of the signal
+/// bar opening at `signal_ts_micros`: the bar's last minute, clamped onto `close`
+/// (that IST day's session-close minute-of-day, when the caller's calendar knows it)
+/// whenever the close is at or after the bar's own open (D-0943).
+///
+/// This is the rule [`overlay_exact_minute_gapfib`] and
+/// [`overlay_exact_minute_orb_and_gapfib`] join on, made public so a caller that
+/// must withhold days BEFORE the join asks the identical question rather than a
+/// second copy of it (W2-cli9-3, D-1662). Only the bar's own day is consulted, so a
+/// later day cannot move the answer. Saturates at both `i64` edges, which
+/// `crate::anchored::tests::the_exact_closing_minute_is_the_overlays_target_at_every_edge`
+/// pins.
+#[must_use]
+pub fn exact_closing_minute(
+    signal_ts_micros: i64,
+    signal_length_micros: i64,
+    close: Option<u16>,
+) -> i64 {
+    let demanded = signal_ts_micros
+        .saturating_add(signal_length_micros)
+        .saturating_sub(MINUTE_MICROS);
+    // THE CALLER'S SESSION CLOSE FOR THIS DAY, AND NOTHING READ FROM THE SLICE.
+    // Only the bar's own day is asked about, so no other day's minutes -- later ones
+    // included -- can move this target (GAP12-7, GAP4-47). `filter` is the causality
+    // half: a close BEFORE the bucket opens is never its target, so such a bucket
+    // keeps `demanded` and refuses. `min` means the clamp can only pull a target
+    // that runs past the close back onto it, never push one later (GAP12-5). D-0943.
+    close
+        .map(|close| {
+            ist_day_start_micros(crate::ist_day(signal_ts_micros))
+                .saturating_add(i64::from(close).saturating_mul(MINUTE_MICROS))
+        })
+        .filter(|close| *close >= signal_ts_micros)
+        .map_or(demanded, |close| demanded.min(close))
+}
+
 /// UNVERIFIED performance: no named cost test or measured latency bound is established here.
 /// Replace ORB positions 86..=105 and `GapFib` positions 132..=142 from real
 /// one-minute evidence, preserving all other signal-family truth and availability.
@@ -822,23 +858,11 @@ fn overlay_exact_minute(
     let mut cursor = 0_usize;
     for (source, signal_bar) in signal.iter().enumerate() {
         let signal_day = crate::ist_day(signal_bar.ts_micros);
-        let demanded = signal_bar
-            .ts_micros
-            .saturating_add(signal_length_micros)
-            .saturating_sub(MINUTE_MICROS);
-        // THE CALLER'S SESSION CLOSE FOR THIS DAY, AND NOTHING READ FROM THE SLICE.
-        // Only `signal_day` is asked about, so no other day's minutes -- later ones
-        // included -- can move this target (GAP12-7, GAP4-47). `filter` is the causality
-        // half: a close BEFORE the bucket opens is never its target, so such a bucket
-        // keeps `demanded` and refuses. `min` means the clamp can only pull a target
-        // that runs past the close back onto it, never push one later (GAP12-5). D-0943.
-        let expected = session_close(signal_day)
-            .map(|close| {
-                ist_day_start_micros(signal_day)
-                    .saturating_add(i64::from(close).saturating_mul(MINUTE_MICROS))
-            })
-            .filter(|close| *close >= signal_bar.ts_micros)
-            .map_or(demanded, |close| demanded.min(close));
+        let expected = exact_closing_minute(
+            signal_bar.ts_micros,
+            signal_length_micros,
+            session_close(signal_day),
+        );
         while exact_minute
             .get(cursor)
             .is_some_and(|minute| minute.ts_micros < expected)
@@ -905,6 +929,39 @@ mod tests {
     const DAY_MICROS: i64 = 86_400 * 1_000_000;
     const MINUTE_MICROS: i64 = 60 * 1_000_000;
     const OPEN_IST_MINUTE: i64 = 9 * 60 + 15;
+
+    /// `exact_closing_minute` is the overlay's own target rule, at every edge the
+    /// stored-span census relies on (D-1662): a full bucket keeps its last minute,
+    /// a day-final short bucket is clamped onto the close, an unknown close keeps
+    /// the formula, a close before the bucket opens never pulls it earlier, and
+    /// both `i64` edges saturate.
+    #[test]
+    fn the_exact_closing_minute_is_the_overlays_target_at_every_edge() {
+        let day = 20_000_i64;
+        let at = |minute: i64| day * DAY_MICROS - crate::IST_OFFSET_MICROS + minute * MINUTE_MICROS;
+        let five = 5 * MINUTE_MICROS;
+        let hour = 60 * MINUTE_MICROS;
+        // 15:25 five-minute bucket: its last minute is 15:29, clamp or not.
+        assert_eq!(exact_closing_minute(at(925), five, Some(929)), at(929));
+        assert_eq!(exact_closing_minute(at(925), five, None), at(929));
+        // 15:15 hour bucket: 16:14 by formula, the session's 15:29 by the clamp.
+        assert_eq!(exact_closing_minute(at(915), hour, Some(929)), at(929));
+        assert_eq!(exact_closing_minute(at(915), hour, None), at(974));
+        // A full bucket inside the session is untouched by the clamp.
+        assert_eq!(exact_closing_minute(at(555), five, Some(929)), at(559));
+        // The close at the bucket's own open still clamps; one before it does not.
+        assert_eq!(exact_closing_minute(at(929), five, Some(929)), at(929));
+        assert_eq!(exact_closing_minute(at(930), five, Some(929)), at(934));
+        // Saturating at both ends rather than wrapping onto a real minute.
+        assert_eq!(
+            exact_closing_minute(i64::MAX, five, None),
+            i64::MAX - MINUTE_MICROS
+        );
+        assert_eq!(
+            exact_closing_minute(i64::MIN, five, None),
+            i64::MIN + 4 * MINUTE_MICROS
+        );
+    }
 
     /// The fixture sessions' close: every fixture day is a regular 09:15-15:29 session.
     #[allow(

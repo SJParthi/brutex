@@ -55,15 +55,28 @@ pub(crate) use ledger::{
 pub(crate) const BASE_EVIDENCE_RECORD_BYTES_V2: usize = 1_024;
 
 const PAYLOAD_BYTES: usize = BASE_EVIDENCE_RECORD_BYTES_V2 - 32;
-const VERSION: u32 = 2;
+/// Record format version 3 (D-1644). Version 2 projected the four
+/// policy-max-gated base rates by floor, so an exact rate just above a
+/// `max_*` ceiling floored onto it and was admitted (GAP15-17). Version 3
+/// projects those four by ceiling. The bytes of a record are laid out as in
+/// version 2; the magic, version and every format domain below move, so no
+/// V2 record, identity or ledger can be read as V3. A V2 record is refused by
+/// name ([`V2_MAGIC`]). The Rust names in this module keep their `V2` suffix:
+/// they name the module family, not the format it writes.
+const VERSION: u32 = 3;
 const PPM: u64 = 1_000_000;
-const MAGIC: [u8; 16] = *b"BTX-BASE-EV-V2\0\0";
-const RECORD_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v2-record-seal\0";
-const EVIDENCE_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-id\0";
-const POLICY_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-policy\0";
+const MAGIC: [u8; 16] = *b"BTX-BASE-EV-V3\0\0";
+/// The retired version-2 record magic, kept only to refuse it by name.
+const V2_MAGIC: [u8; 16] = *b"BTX-BASE-EV-V2\0\0";
+const RECORD_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v3-record-seal\0";
+const EVIDENCE_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-id\0";
+const POLICY_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-policy\0";
+// The Candidate-row and TradeRow digests identify this format's INPUTS, which
+// version 3 does not change: they keep their version-2 domains so every
+// Population row's Candidate-row identity is unchanged.
 const CANDIDATE_ROW_DOMAIN: &[u8] = b"brutex-base-evidence-v2-candidate-row\0";
 const TRADE_ROWS_DOMAIN: &[u8] = b"brutex-base-evidence-v2-trade-rows\0";
-const ORDERED_RECORDS_DOMAIN: &[u8] = b"brutex-base-evidence-v2-ordered-records\0";
+const ORDERED_RECORDS_DOMAIN: &[u8] = b"brutex-base-evidence-v3-ordered-records\0";
 const GRAIN_COUNT: usize = 7;
 
 const _: () = assert!(PAYLOAD_BYTES + 32 == BASE_EVIDENCE_RECORD_BYTES_V2);
@@ -99,7 +112,7 @@ impl core::fmt::Display for BaseEvidenceRefusalV2 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidBound(name) => {
-                write!(formatter, "Base Evidence V2 {name} bound is invalid")
+                write!(formatter, "Base Evidence V3 {name} bound is invalid")
             }
             Self::BoundExceeded {
                 resource,
@@ -107,18 +120,18 @@ impl core::fmt::Display for BaseEvidenceRefusalV2 {
                 maximum,
             } => write!(
                 formatter,
-                "Base Evidence V2 {resource} count {actual} exceeds explicit maximum {maximum}"
+                "Base Evidence V3 {resource} count {actual} exceeds explicit maximum {maximum}"
             ),
             Self::ZeroIdentity(name) => {
-                write!(formatter, "Base Evidence V2 {name} identity is zero")
+                write!(formatter, "Base Evidence V3 {name} identity is zero")
             }
-            Self::Reconciliation(why) => write!(formatter, "Base Evidence V2 refused: {why}"),
-            Self::Codec(why) => write!(formatter, "Base Evidence V2 codec refused: {why}"),
+            Self::Reconciliation(why) => write!(formatter, "Base Evidence V3 refused: {why}"),
+            Self::Codec(why) => write!(formatter, "Base Evidence V3 codec refused: {why}"),
             Self::Arithmetic(name) => {
-                write!(formatter, "Base Evidence V2 {name} arithmetic overflowed")
+                write!(formatter, "Base Evidence V3 {name} arithmetic overflowed")
             }
             Self::Allocation(why) => {
-                write!(formatter, "Base Evidence V2 allocation refused: {why}")
+                write!(formatter, "Base Evidence V3 allocation refused: {why}")
             }
         }
     }
@@ -568,18 +581,20 @@ impl BaseEvidenceRecordV2 {
             fwer_p_value_ppm: ObservedU64V1::Unmeasured,
             spa_p_value_ppm: ObservedU64V1::Unmeasured,
             decided_folds: ObservedU64V1::Unmeasured,
-            // The next four are gated by a MAXIMUM, so they round UP: a floor put a
-            // true 200,000.5 ppm share on a 200,000 cap and passed it (p2bool-1,
-            // D-1990). `losing_trade_rate_ppm` stays the canonical floor the
-            // runner reconciles; the runner's gate reads its exact counts (run3-1).
-            ambiguous_fill_rate_ppm: measured_ceiling_rate(
+            // The four rates a policy gates from above round UP (D-1644): a
+            // `value > ceiling` test on a ceiling projection holds exactly when
+            // the exact rate is above the ceiling, where a floor let a rate in
+            // (ceiling, ceiling + 1) ppm through (GAP15-17). The losing rate
+            // stays the canonical floor Runner validates against its counts;
+            // Runner compares that ceiling exactly from the counts.
+            ambiguous_fill_rate_ppm: measured_max_rate(
                 a.ambiguous_bars,
                 a.trades,
                 "ambiguous fill rate",
             )?,
-            gap_affected_rate_ppm: measured_ceiling_rate(a.gapped, a.trades, "gap affected rate")?,
+            gap_affected_rate_ppm: measured_max_rate(a.gapped, a.trades, "gap affected rate")?,
             session_concentration_ppm: if row_values_measured {
-                ObservedU64V1::Measured(ceiling_rate_ppm(
+                ObservedU64V1::Measured(max_rate_ppm(
                     a.max_session_trades,
                     a.trades,
                     "session concentration",
@@ -588,7 +603,7 @@ impl BaseEvidenceRecordV2 {
                 ObservedU64V1::Unmeasured
             },
             largest_trade_profit_share_ppm: if a.gross_win > 0 {
-                ObservedU64V1::Measured(ceiling_rate_ppm(
+                ObservedU64V1::Measured(max_rate_ppm(
                     best_trade,
                     gross_win,
                     "largest trade profit share",
@@ -687,6 +702,15 @@ impl BaseEvidenceRecordV2 {
             )));
         }
         let (payload, seal) = record.split_at(PAYLOAD_BYTES);
+        // Named before the seal: a V2 record is sealed under its own domain, so
+        // the V3 seal check would refuse it without saying why.
+        if payload.get(..16) == Some(V2_MAGIC.as_slice()) {
+            return Err(BaseEvidenceRefusalV2::Codec(
+                "Base Evidence V2 record refused by name: V2 floored its max-gated rates \
+                 (GAP15-17, D-1644); this build reads and writes Base Evidence V3 only"
+                    .to_owned(),
+            ));
+        }
         if seal != digest_domain(RECORD_SEAL_DOMAIN, payload) {
             return Err(BaseEvidenceRefusalV2::Codec(
                 "record seal does not match payload".to_owned(),
@@ -1585,9 +1609,8 @@ pub(crate) fn measured_rate(
     }
 }
 
-/// `measured_rate` rounded UP, for a rate a MAXIMUM gates (p2bool-1, D-1990).
-/// A minimum-gated rate keeps `measured_rate`'s floor, which is its safe side.
-pub(crate) fn measured_ceiling_rate(
+/// A rate a policy gates from above, projected by ceiling (D-1644).
+pub(crate) fn measured_max_rate(
     part: u64,
     total: u64,
     name: &'static str,
@@ -1595,22 +1618,25 @@ pub(crate) fn measured_ceiling_rate(
     if total == 0 {
         Ok(ObservedU64V1::Unmeasured)
     } else {
-        Ok(ObservedU64V1::Measured(ceiling_rate_ppm(
-            part, total, name,
-        )?))
+        Ok(ObservedU64V1::Measured(max_rate_ppm(part, total, name)?))
     }
 }
 
-fn ceiling_rate_ppm(
-    part: u64,
-    total: u64,
-    name: &'static str,
-) -> Result<u64, BaseEvidenceRefusalV2> {
-    let scaled = u128::from(part) * u128::from(PPM);
-    let quotient = (total != 0)
-        .then(|| scaled.div_ceil(u128::from(total)))
+/// `ceil(part * 1_000_000 / total)` in `u128`, so `ceiling < result` holds
+/// exactly when `part / total > ceiling / 1_000_000`. D-1644.
+fn max_rate_ppm(part: u64, total: u64, name: &'static str) -> Result<u64, BaseEvidenceRefusalV2> {
+    let denominator = u128::from(total);
+    let scaled = u128::from(part)
+        .checked_mul(u128::from(PPM))
         .ok_or(BaseEvidenceRefusalV2::Arithmetic(name))?;
-    u64::try_from(quotient).map_err(|_| BaseEvidenceRefusalV2::Arithmetic(name))
+    let quotient = scaled
+        .checked_div(denominator)
+        .ok_or(BaseEvidenceRefusalV2::Arithmetic(name))?;
+    let remainder = scaled
+        .checked_rem(denominator)
+        .ok_or(BaseEvidenceRefusalV2::Arithmetic(name))?;
+    let rounded = quotient + u128::from(remainder != 0);
+    u64::try_from(rounded).map_err(|_| BaseEvidenceRefusalV2::Arithmetic(name))
 }
 
 fn rate_ppm(part: u64, total: u64, name: &'static str) -> Result<u64, BaseEvidenceRefusalV2> {
@@ -1904,15 +1930,15 @@ mod tests {
             ObservedU64V1::Measured(333_333)
         );
         assert_eq!(
-            measured_ceiling_rate(1, 0, "none"),
+            measured_max_rate(1, 0, "none"),
             Ok(ObservedU64V1::Unmeasured)
         );
         assert!(matches!(
-            ceiling_rate_ppm(1, 0, "zero"),
+            max_rate_ppm(1, 0, "zero"),
             Err(BaseEvidenceRefusalV2::Arithmetic("zero"))
         ));
         assert!(matches!(
-            ceiling_rate_ppm(u64::MAX, 1, "too wide"),
+            max_rate_ppm(u64::MAX, 1, "too wide"),
             Err(BaseEvidenceRefusalV2::Arithmetic("too wide"))
         ));
     }
@@ -2173,5 +2199,226 @@ mod tests {
             ),
             Err(BaseEvidenceRefusalV2::Reconciliation(_))
         ));
+    }
+
+    /// D-1644: every refusal names the format this build writes.
+    #[test]
+    fn every_base_evidence_refusal_names_format_v3() {
+        for (refusal, text) in [
+            (
+                BaseEvidenceRefusalV2::InvalidBound("x"),
+                "Base Evidence V3 x bound is invalid",
+            ),
+            (
+                BaseEvidenceRefusalV2::BoundExceeded {
+                    resource: "r",
+                    actual: 2,
+                    maximum: 1,
+                },
+                "Base Evidence V3 r count 2 exceeds explicit maximum 1",
+            ),
+            (
+                BaseEvidenceRefusalV2::ZeroIdentity("z"),
+                "Base Evidence V3 z identity is zero",
+            ),
+            (
+                BaseEvidenceRefusalV2::Reconciliation("w".to_owned()),
+                "Base Evidence V3 refused: w",
+            ),
+            (
+                BaseEvidenceRefusalV2::Codec("c".to_owned()),
+                "Base Evidence V3 codec refused: c",
+            ),
+            (
+                BaseEvidenceRefusalV2::Arithmetic("a"),
+                "Base Evidence V3 a arithmetic overflowed",
+            ),
+            (
+                BaseEvidenceRefusalV2::Allocation("m".to_owned()),
+                "Base Evidence V3 allocation refused: m",
+            ),
+        ] {
+            assert_eq!(refusal.to_string(), text);
+        }
+    }
+
+    fn ceiling_policy(ceiling: u64) -> runner::admission::AdmissionPolicyV1 {
+        // Permissive everywhere except the four max-gated base rates and the
+        // losing rate, which all sit on `ceiling`.
+        runner::admission::AdmissionPolicyV1::new(runner::admission::AdmissionPolicyDraftV1 {
+            min_support_hits: Some(1),
+            min_independent_sessions: Some(1),
+            min_trades: Some(1),
+            max_mae_paisa: Some(u64::MAX),
+            min_worst_reward_risk_ppm: Some(0),
+            min_win_rate_ppm: Some(0),
+            min_wilson_win_rate_ppm: Some(0),
+            min_return_drawdown_ppm: Some(0),
+            min_weakest_period_return_paisa: Some(i64::MIN),
+            max_pbo_ppm: Some(PPM),
+            max_fwer_p_value_ppm: Some(PPM),
+            max_spa_p_value_ppm: Some(PPM),
+            min_decided_folds: Some(2),
+            max_ambiguous_fill_rate_ppm: Some(ceiling),
+            max_gap_affected_rate_ppm: Some(ceiling),
+            max_session_concentration_ppm: Some(ceiling),
+            max_largest_trade_profit_share_ppm: Some(ceiling),
+            max_drawdown_paisa: Some(u64::MAX),
+            max_worst_trade_loss_paisa: Some(u64::MAX),
+            max_losing_trade_rate_ppm: Some(ceiling),
+            max_losing_trades: Some(u64::MAX),
+            min_pessimistic_profit_paisa: Some(i64::MIN),
+            min_winning_trades: Some(0),
+            min_average_win_paisa: Some(0),
+            max_average_loss_paisa: Some(u64::MAX),
+            min_profit_factor_ppm: Some(0),
+            max_consecutive_losing_streak: Some(u64::MAX),
+            min_consecutive_winning_streak: Some(0),
+            min_bootstrap_draws: Some(1),
+            min_bootstrap_strategies: Some(1),
+            min_bootstrap_periods: Some(1),
+            min_pbo_contributing_folds: Some(1),
+            max_pbo_unrankable_folds: Some(u64::MAX),
+            min_profitable_oos_folds: Some(1),
+            min_oos_pessimistic_return_paisa: Some(i64::MIN),
+            max_white_reality_p_value_ppm: Some(PPM),
+            require_white_reality_rejection: Some(true),
+            max_romano_wolf_p_value_ppm: Some(PPM),
+            require_romano_wolf_rejection: Some(true),
+        })
+        .expect("valid ceiling policy")
+    }
+
+    /// GAP15-17, D-1644: every rate a policy gates from above is projected so
+    /// `value > ceiling` holds exactly when the exact rate is above the
+    /// ceiling. One in three is 333,333.33 ppm: V2's floor put it on a 333,333
+    /// ceiling and admitted it; V3 fails all five gates, and still admits at
+    /// 333,334.
+    #[test]
+    fn a_max_gated_rate_just_above_its_ceiling_fails_and_one_at_it_passes() {
+        use runner::admission::{AdmissionEvidenceV1, AdmissionReasonV1};
+        let mut third = record();
+        let a = &mut third.draft.aggregates;
+        a.trades = 3;
+        a.wins = 2;
+        a.losses = 1;
+        a.ambiguous_bars = 1;
+        a.gapped = 1;
+        a.max_session_trades = 1;
+        a.best_trade = 1;
+        a.gross_win = 3;
+        a.min_win = 1;
+        let values = third.admission_values().expect("one-in-three projection");
+        for rate in [
+            values.ambiguous_fill_rate_ppm,
+            values.gap_affected_rate_ppm,
+            values.session_concentration_ppm,
+            values.largest_trade_profit_share_ppm,
+        ] {
+            assert_eq!(rate, ObservedU64V1::Measured(333_334), "ceiling projection");
+        }
+        // The losing and win rates stay the canonical floor Runner validates.
+        assert_eq!(
+            values.losing_trade_rate_ppm,
+            ObservedU64V1::Measured(333_333)
+        );
+        assert_eq!(values.win_rate_ppm, ObservedU64V1::Measured(666_666));
+        let evidence = AdmissionEvidenceV1::new(values).expect("canonical V3 evidence");
+        let failed = ceiling_policy(333_333).evaluate(&evidence).failed();
+        for reason in [
+            AdmissionReasonV1::AmbiguousFills,
+            AdmissionReasonV1::GapAffected,
+            AdmissionReasonV1::SessionConcentration,
+            AdmissionReasonV1::LargestTradeProfitShare,
+            AdmissionReasonV1::LosingTradeRate,
+        ] {
+            assert!(failed.contains(reason), "{reason:?} must fail just above");
+        }
+        assert!(
+            ceiling_policy(333_334)
+                .evaluate(&evidence)
+                .failed()
+                .is_empty(),
+            "every gate passes once the ceiling is above the exact rate"
+        );
+        // An exact rate on the ceiling is not rounded past it.
+        let values = record().admission_values().expect("exact halves");
+        let evidence = AdmissionEvidenceV1::new(values).expect("canonical evidence");
+        let failed = ceiling_policy(500_000).evaluate(&evidence).failed();
+        assert!(!failed.contains(AdmissionReasonV1::AmbiguousFills));
+        assert!(!failed.contains(AdmissionReasonV1::SessionConcentration));
+        assert!(!failed.contains(AdmissionReasonV1::LosingTradeRate));
+    }
+
+    #[test]
+    fn the_max_rate_projection_rounds_up_exactly_and_refuses_what_cannot_fit() {
+        for (part, total, ceiling, floor) in [
+            (1, 3, 333_334, 333_333),
+            (2, 3, 666_667, 666_666),
+            (1, 2, 500_000, 500_000),
+            (0, 7, 0, 0),
+            (1, u64::MAX, 1, 0),
+            (u64::MAX, u64::MAX, PPM, PPM),
+            (u64::MAX - 1, u64::MAX, PPM, PPM - 1),
+        ] {
+            assert_eq!(
+                max_rate_ppm(part, total, "probe"),
+                Ok(ceiling),
+                "{part}/{total}"
+            );
+            assert_eq!(rate_ppm(part, total, "probe"), Ok(floor), "{part}/{total}");
+            assert_eq!(
+                measured_max_rate(part, total, "probe"),
+                Ok(ObservedU64V1::Measured(ceiling))
+            );
+        }
+        assert_eq!(
+            measured_max_rate(1, 0, "probe"),
+            Ok(ObservedU64V1::Unmeasured)
+        );
+        assert_eq!(
+            max_rate_ppm(1, 0, "zero"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("zero"))
+        );
+        assert_eq!(
+            max_rate_ppm(u64::MAX, 1, "wide"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("wide"))
+        );
+        assert_eq!(
+            max_rate_ppm(u64::MAX / PPM + 1, 1, "wide"),
+            Err(BaseEvidenceRefusalV2::Arithmetic("wide"))
+        );
+        assert_eq!(
+            max_rate_ppm(u64::MAX / PPM, 1, "fits"),
+            Ok(u64::MAX / PPM * PPM)
+        );
+    }
+
+    /// D-1644: a version-2 record is refused by name, before its seal is
+    /// checked under the version-3 domain, and the V3 codec round-trips.
+    #[test]
+    fn a_base_evidence_v2_record_is_refused_by_name() {
+        let bytes = record().encode().expect("V3 record");
+        assert_eq!(&bytes[..16], b"BTX-BASE-EV-V3\0\0");
+        assert_eq!(&bytes[16..20], &3_u32.to_le_bytes());
+        assert_eq!(
+            BaseEvidenceRecordV2::decode(&bytes).map(|decoded| decoded.evidence_id),
+            Ok(record().evidence_id)
+        );
+        let mut v2 = bytes;
+        v2[..16].copy_from_slice(&V2_MAGIC);
+        let refused = BaseEvidenceRecordV2::decode(&v2).expect_err("V2 refused");
+        assert!(
+            refused
+                .to_string()
+                .contains("Base Evidence V2 record refused by name"),
+            "{refused}"
+        );
+        v2[0] ^= 1;
+        let unnamed = BaseEvidenceRecordV2::decode(&v2).expect_err("foreign refused");
+        assert!(
+            !unnamed.to_string().contains("refused by name"),
+            "{unnamed}"
+        );
     }
 }

@@ -145,6 +145,15 @@
     // beside it and NO page -- so nothing on the server can shadow this path
     // and a click, a reload and a bookmark all render the same application.
     { href: '/backtest', label: 'Backtest' },
+    // THE COMMITTED SELECTION V6 WINNERS. `ledger-v6` wrote them and only its
+    // own terminal text showed them (audit-20261003 gaps-10, D-1578). NO
+    // `reload`: `src/routes/selection/` IS a Svelte route and the server
+    // registers only `/selection-v6.json` beside it, as `/backtest` above.
+    {
+      href: '/selection',
+      label: 'Selection',
+      why: 'The per-rung Top-25 ledger-v6 committed to Selection V6, read from each sealed block. Index families only; no equity enters Selection V6.'
+    },
     // THE TERMINAL, AND IT SHIPPED UNREACHABLE -- THE DEFECT THE ENTRY BELOW
     // IS A 26-LINE ESSAY ABOUT, REPEATED IMMEDIATELY UNDERNEATH IT.
     //

@@ -408,3 +408,145 @@ fn public_listing_obeys_the_configured_owned_root() -> Result<(), Box<dyn std::e
     );
     fixture.unchanged(&before)
 }
+
+/// Ninety rows across two feeds, three instruments, halted and unpriced rows.
+fn mixed_ledger() -> Vec<Record> {
+    (1_u8..=90)
+        .map(|id| {
+            let mut record = row(id, i64::from(id % 7) * 100 - 300, u64::from(id % 4));
+            if id % 11 == 0 {
+                record.halted = 1;
+            }
+            if id % 5 == 0 {
+                record.feed = field("groww");
+            }
+            if id % 3 == 0 {
+                record.underlying = field("BANKNIFTY");
+            }
+            if id % 13 == 0 {
+                record.underlying = field("RELIANCE");
+            }
+            record
+        })
+        .collect()
+}
+
+const FILTERS: [(Option<&str>, Option<&str>); 6] = [
+    (None, None),
+    (Some("zerodha"), None),
+    (None, Some("NIFTY")),
+    (Some("zerodha"), Some("NIFTY")),
+    (Some("groww"), Some("RELIANCE")),
+    (Some("unmatched"), None),
+];
+
+fn counted<T>(call: impl FnOnce() -> T) -> (T, u64, u64) {
+    crate::results::OPENS.with(|n| n.set(0));
+    crate::results::ROW_READS.with(|n| n.set(0));
+    let out = call();
+    (
+        out,
+        crate::results::OPENS.with(std::cell::Cell::get),
+        crate::results::ROW_READS.with(std::cell::Cell::get),
+    )
+}
+
+/// **`cli top` and `cli results` open the ledger once and read each row once.**
+/// OS-7, W2-cli8-5, D-2310.
+///
+/// Both opened the ledger -- whose identity pass reads every row -- and then
+/// read every row again through `Results::read`: two reads per row per call.
+/// Counted on a 90-row ledger, every filter, intact and with two damaged rows:
+/// exactly one open and exactly 90 row reads, where the old walk made 180.
+#[test]
+fn top_and_results_read_each_row_once_in_one_open() -> Result<(), Box<dyn std::error::Error>> {
+    let records = mixed_ledger();
+    let rows = u64::try_from(records.len())?;
+    let fixture = Fixture::new(&records)?;
+    let intact = fixture.bytes()?;
+    let mut damaged = intact.clone();
+    for index in [10_usize, 50] {
+        *damaged
+            .get_mut(crate::results::HEADER_BYTES + index * crate::results::STRIDE_BYTES + 40)
+            .ok_or("the row exists")? ^= 1;
+    }
+    for bytes in [&intact, &damaged] {
+        std::fs::write(Results::path(&fixture.0), bytes)?;
+        for (feed, underlying) in FILTERS {
+            let (listing, opens, reads) =
+                counted(|| crate::results_at(&fixture.0, feed, underlying));
+            assert_eq!((opens, reads), (1, rows), "{listing}");
+            let (top, opens, reads) = counted(|| crate::top_at(&fixture.0, feed, underlying));
+            assert_eq!((opens, reads), (1, rows), "{top}");
+        }
+    }
+    // THE SAME DAMAGED ROW IS NAMED AS BEFORE: the newest-first listing met
+    // row 50 first, the forward top met row 10 first.
+    let listing = crate::results_at(&fixture.0, None, None);
+    assert!(
+        listing.starts_with("refused: record 50 does not match its seal"),
+        "{listing}"
+    );
+    let top = crate::top_at(&fixture.0, None, None);
+    assert!(
+        top.starts_with("refused: record 10 does not match its seal"),
+        "{top}"
+    );
+    fixture.unchanged(&damaged)
+}
+
+/// **The one-pass listing prints what the two-pass one printed.** D-2310.
+///
+/// The reference below is the walk that was removed: every row read back
+/// through `Results::read`, newest first, held whole, the best chosen over the
+/// whole slice. The table, the counts, the omitted-row line, the winner and its
+/// quality block must come out of the fold byte for byte.
+#[test]
+fn the_one_pass_listing_matches_the_removed_newest_first_walk()
+-> Result<(), Box<dyn std::error::Error>> {
+    let records = mixed_ledger();
+    let fixture = Fixture::new(&records)?;
+    let mut store = Results::open_read(&fixture.0)?;
+    let count = store.len()?;
+    for (feed, underlying) in FILTERS {
+        let mut reference = Vec::new();
+        for back in 1..=count {
+            let record = store.read(count - back)?;
+            if feed.is_none_or(|f| crate::results::read_field(&record.feed) == f)
+                && underlying.is_none_or(|u| crate::results::read_field(&record.underlying) == u)
+            {
+                reference.push(record);
+            }
+        }
+        let best = reference
+            .iter()
+            .rev()
+            .filter(|r| r.has_complete_trade_total())
+            .max_by_key(|r| r.pessimistic);
+        let listing = crate::results_at(&fixture.0, feed, underlying);
+        let mut table = String::new();
+        crate::results_table(&mut table, &reference);
+        assert!(
+            listing.contains(&format!(
+                "  matching                                {}\n\n{}{table}",
+                reference.len(),
+                crate::listing_equity_note(&reference, best)
+            )),
+            "{listing}"
+        );
+        let hidden = reference.len().saturating_sub(40);
+        assert_eq!(
+            listing.contains(&format!("  ... {hidden} further row(s) NOT SHOWN.")),
+            hidden > 0,
+            "{listing}"
+        );
+        let mut tail = format!("\n{}", crate::best_complete_line(best));
+        if let Some(best) = best {
+            tail.push_str(&crate::quality_block(best));
+            let top = crate::top_at(&fixture.0, feed, underlying);
+            assert!(top.contains(&best.identity_hex()), "{top}");
+        }
+        assert!(listing.ends_with(&tail), "{listing}");
+    }
+    Ok(())
+}

@@ -229,11 +229,29 @@ pub async fn logs_json(
         );
     };
     let asked = asked(uri.query().unwrap_or(""));
-    (
-        axum::http::StatusCode::OK,
-        json,
-        json_over(&dir, second.as_deref(), &asked, sink_health().as_ref()),
-    )
+    let health = sink_health();
+    // OFF THE ASYNC WORKERS, AND ADMITTED. `json_over` walks up to two
+    // `SCAN_BYTES` halves and decodes every line it reads, and it ran inline
+    // on a Tokio worker with nothing capping how many did so at once -- while
+    // the backtest page polls this route every two seconds per running sweep
+    // with a `run=` filter one half can never match, so that half is read to
+    // its cap on every poll. It now runs in `detail`'s log-read pool, and a
+    // full pool is a named 429, never a queue. log-3, P1-04-02, D-2327.
+    match crate::detail::run_log_read(move || {
+        json_over(&dir, second.as_deref(), &asked, health.as_ref())
+    })
+    .await
+    {
+        Ok(body) => (axum::http::StatusCode::OK, json, body),
+        Err(why) => {
+            let (status, body) = crate::detail::admission_refused(
+                "log read",
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+                &why,
+            );
+            (status, json, body)
+        }
+    }
 }
 
 /// The JSON body, over a directory a caller names.
@@ -583,9 +601,11 @@ fn sink_json(health: Option<&telemetry::Health>) -> String {
 }
 
 /// `GET /logs` — the same tail, as a page.
-pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
+pub async fn logs_page(
+    uri: axum::http::Uri,
+) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let raw = uri.query().unwrap_or("");
-    let asked = asked(raw);
+    let asked = std::sync::Arc::new(asked(raw));
     // THE SECOND HALF IS RESOLVED FROM THE STORE, exactly as `logs_json` does
     // it. Bound to a local rather than written inline so the `Option<PathBuf>`
     // it borrows from plainly outlives the call -- and named `cli_dir` rather
@@ -616,19 +636,43 @@ pub async fn logs_page(uri: axum::http::Uri) -> axum::response::Html<String> {
         (None, None) => (None, None),
     };
     let Some(dir) = first else {
-        return axum::response::Html(page_shell(
-            &asked,
-            "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
-             process and no store log directory could be resolved, so there is \
-             nothing to read. The server names the reason on stdout at startup.</p>",
-        ));
+        return (
+            axum::http::StatusCode::OK,
+            axum::response::Html(page_shell(
+                &asked,
+                "<p class=\"halt\"><b>No log</b>Logging is not installed in this \
+                 process and no store log directory could be resolved, so there is \
+                 nothing to read. The server names the reason on stdout at startup.</p>",
+            )),
+        );
     };
-    axum::response::Html(page_over(
-        &dir,
-        second.as_deref(),
-        &asked,
-        sink_health().as_ref(),
-    ))
+    let health = sink_health();
+    let inside = std::sync::Arc::clone(&asked);
+    // OFF THE ASYNC WORKERS, AND ADMITTED, for the reason `logs_json` gives:
+    // the page runs the same two-half walk. A full pool is a 429 page that
+    // says so in words, with the form still on it. log-3, P1-04-02, D-2327.
+    match crate::detail::run_log_read(move || {
+        page_over(&dir, second.as_deref(), &inside, health.as_ref())
+    })
+    .await
+    {
+        Ok(page) => (axum::http::StatusCode::OK, axum::response::Html(page)),
+        Err(why) => {
+            let (status, _json) = crate::detail::admission_refused(
+                "log read",
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+                &why,
+            );
+            let halt = format!(
+                "<p class=\"halt\"><b>Not admitted</b>This log read was refused \
+                 before it ran ({}): at most {} log reads run at once, off the \
+                 async workers. Nothing below was read; reload to retry.</p>",
+                render::escape(&format!("{why:?}")),
+                crate::detail::MAX_LOG_READ_CONCURRENT,
+            );
+            (status, axum::response::Html(page_shell(&asked, &halt)))
+        }
+    }
 }
 
 /// The page body, over the directories a caller names — split for the reason
@@ -2654,6 +2698,8 @@ mod tests {
     /// an owner for its process global.
     #[tokio::test]
     async fn the_handlers_answer_over_the_installed_sink_and_carry_their_content_type() {
+        // Not while a test holds every log-read slot: that test expects 429s.
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let sink = crate::emitted::sink();
         assert!(
             sink.emit(
@@ -2689,7 +2735,9 @@ mod tests {
         let uri: axum::http::Uri = "/logs?limit=50&target=api.handler&level=error"
             .parse()
             .expect("a legal uri");
-        let page = logs_page(uri).await.0;
+        let (status, page) = logs_page(uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        let page = page.0;
         assert!(page.contains("handler-probe-marker"), "{page}");
         assert!(
             page.contains("<title>brutex · logs</title>"),
@@ -2709,6 +2757,7 @@ mod tests {
     /// `asked`, never through the door an operator's browser knocks on.
     #[tokio::test]
     async fn a_mangled_query_string_still_gets_an_answer_from_the_handler() {
+        let _apart = crate::detail::apart_from_slot_owners().await;
         let _sink = crate::emitted::sink();
         let uri: axum::http::Uri = "/logs.json?limit=-9999999&level=NOPE&target="
             .parse()
@@ -2725,7 +2774,7 @@ mod tests {
         );
 
         let uri: axum::http::Uri = "/logs?limit=99999999".parse().expect("a legal uri");
-        let page = logs_page(uri).await.0;
+        let page = logs_page(uri).await.1.0;
         assert!(
             page.contains(&format!("value=\"{PAGE_LIMIT}\"")),
             "a limit past the page ceiling is clamped to it, and the form shows \
@@ -2855,5 +2904,49 @@ mod tests {
             page_shell(&asked(""), "").contains(r#"name="run" value=""#),
             "and is empty when every run is shown"
         );
+    }
+
+    /// **THE LOG ROUTES ARE ADMITTED, AND A FULL POOL IS A NAMED REFUSAL.**
+    /// log-3, P1-04-02, D-2327. Both handlers ran their two-half walk inline
+    /// on a Tokio worker with no admission, so they answered 200 whatever else
+    /// was walking. With every log-read slot held, each now answers 429 and
+    /// says which pool refused it and its bound, before reading a byte; with
+    /// the slots released, the same requests are answered again. A 429 can only
+    /// come from `crate::detail::run_log_read`, so this also proves both
+    /// handlers go through it.
+    #[tokio::test]
+    async fn the_log_routes_refuse_by_name_when_every_log_read_slot_is_held() {
+        let _sink = crate::emitted::sink();
+        let apart = crate::detail::apart_from_slot_owners().await;
+        let held = crate::detail::take_every_log_read_slot(&apart);
+        assert_eq!(held.len(), 4, "this test owns every log-read slot");
+
+        let uri: axum::http::Uri = "/logs.json?limit=5".parse().expect("a legal uri");
+        let (status, headers, body) = logs_json(uri).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        assert!(
+            body.contains("log read not admitted (Saturated): at most 4"),
+            "{body}"
+        );
+        assert!(!body.contains("records"), "nothing was read: {body}");
+
+        let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
+        let (status, page) = logs_page(uri).await;
+        assert_eq!(status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(page.0.contains("<b>Not admitted</b>"), "{}", page.0);
+        assert!(page.0.contains("Saturated"), "{}", page.0);
+        assert!(page.0.contains("at most 4 log reads"), "{}", page.0);
+        assert!(
+            page.0.contains("<title>brutex · logs</title>"),
+            "the refusal is a whole page with its form"
+        );
+
+        drop(held);
+        let uri: axum::http::Uri = "/logs.json?limit=5".parse().expect("a legal uri");
+        let (status, _headers, body) = logs_json(uri).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let uri: axum::http::Uri = "/logs?limit=5".parse().expect("a legal uri");
+        assert_eq!(logs_page(uri).await.0, axum::http::StatusCode::OK);
     }
 }

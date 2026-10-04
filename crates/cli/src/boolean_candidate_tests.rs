@@ -3,7 +3,7 @@
 use super::*;
 use runner::exit_grid_policy::{
     ExecutionResolutionV1, ExitGridSelectorV1, ForcedStopV1, RangeResolutionV1, RatioLimitsV1,
-    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v1,
+    RationalPercentileV1, RungPlanV1, printed_ohlcv_cost_model_id_v2,
 };
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -198,7 +198,7 @@ pub(crate) fn policy(side: Side) -> Result<ExitGridPolicyV1, String> {
         RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
         32,
         ExitGridSelectorV1::PessimisticTotal,
-        printed_ohlcv_cost_model_id_v1(),
+        printed_ohlcv_cost_model_id_v2(),
         ForcedStopV1::Disabled,
         u64::MAX,
         u64::MAX,

@@ -136,7 +136,7 @@ fn refuse(name: &str, raw: &str) {
 ///
 /// `u64` because this is also the reader for counts whose domain really is
 /// `u64`, such as a millisecond budget. Machine-sized counts go through
-/// [`count_usize`] so a value that parses as `u64` but cannot fit this target is
+/// [`count_usize_within`] so a value that parses as `u64` but cannot fit this target is
 /// recorded rather than disappearing at a later conversion.
 #[must_use]
 pub(crate) fn count(name: &str) -> Option<u64> {
@@ -152,18 +152,13 @@ pub(crate) fn count(name: &str) -> Option<u64> {
     }
 }
 
-/// A positive, machine-sized count, with representation failures recorded.
+/// A positive, machine-sized count, with representation failures recorded,
+/// refusing anything above `ceiling`.
 ///
 /// Parsing in the target type matters on a 32-bit target: `u64::MAX` is a valid
 /// [`count`] but cannot be a `Vec` bound or an iterator count there. Letting each
 /// caller append `.and_then(usize::try_from(..).ok())` would reintroduce the
 /// exact silent fallback this module exists to expose, one step after parsing.
-#[must_use]
-pub(crate) fn count_usize(name: &str) -> Option<usize> {
-    count_usize_within(name, usize::MAX)
-}
-
-/// [`count_usize`], refusing anything above `ceiling`.
 ///
 /// **An unbounded count is a way to kill the process from a text box.** Three
 /// knobs reach a `with_capacity` before a single bar is scored -- the priced
@@ -448,7 +443,7 @@ fn render(mut pairs: Vec<(&str, &str)>) -> String {
 mod tests {
     use super::serially;
     use super::{
-        clear_all, count, count_usize, describe, refuse_value, refused, render, resolve, set,
+        clear_all, count, count_usize_within, describe, refuse_value, refused, render, resolve, set,
         set_here, var,
     };
 
@@ -713,7 +708,7 @@ mod tests {
         let too_large = "999999999999999999999999999999999999999";
         set(name, too_large);
 
-        assert_eq!(count_usize(name), None, "the count cannot be represented");
+        assert_eq!(count_usize_within(name, usize::MAX), None, "the count cannot be represented");
         let block = refused().expect("the failed count must be reportable");
         assert!(
             block.contains(name) && block.contains(too_large),
@@ -723,7 +718,7 @@ mod tests {
         clear_all();
         set(name, "42");
         assert_eq!(
-            count_usize(name),
+            count_usize_within(name, usize::MAX),
             Some(42),
             "a representable count is taken"
         );

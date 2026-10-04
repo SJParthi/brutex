@@ -19,8 +19,14 @@ use std::path::{Path, PathBuf};
 use crate::execution_v4::CommittedStoredExecutionV4;
 use runner::topn::{RankedCandidate, RankingPolicyV1};
 
+#[path = "selection_v6_read.rs"]
+mod read;
 #[path = "selection_v6_source.rs"]
 mod source;
+pub use read::{
+    SELECTION_V6_EQUITY_REFUSAL, StoredSelectionV6Family, StoredSelectionV6Record,
+    StoredSelectionV6Rung, StoredSelectionV6Winner, read_stored_selection_v6, selection_v6_family,
+};
 use source::{Prepared, Winner};
 
 pub(crate) const SELECTION_V6_BLOCK_BYTES: usize = 16_384;

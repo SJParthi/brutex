@@ -1,4 +1,7 @@
-//! Durable receipt-last authority for same-pass Base Evidence V2.
+//! Durable receipt-last authority for same-pass Base Evidence, format V3.
+//!
+//! Format V3 (D-1644) moves every magic, domain and file name from V2: a V2
+//! ledger's files stay where they are, untouched and never opened as V3.
 //!
 //! Records are the fixed 1,024-byte Phase-A records.  A separate fixed
 //! completion is appended only after the contiguous record block is synced.
@@ -34,19 +37,26 @@ const COMPLETION_BYTES: usize = 512;
 const COMPLETION_PAYLOAD_BYTES: usize = COMPLETION_BYTES - 32;
 const COMPLETION_BYTES_U64: u64 = 512;
 const RECORD_BYTES_U64: u64 = 1_024;
-const HEADER_VERSION: u32 = 2;
+const HEADER_VERSION: u32 = 3;
 const RECORD_KIND: u32 = 1;
 const COMPLETION_KIND: u32 = 2;
-const RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-ROW-V2\0";
-const COMPLETION_MAGIC: [u8; 16] = *b"BTX-BASE-CMP-V2\0";
-const COMPLETION_RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-DONEV2\0";
-const HEADER_DOMAIN: &[u8] = b"brutex-base-evidence-v2-ledger-header\0";
-const COMPLETION_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-completion-id\0";
-const COMPLETION_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v2-completion-seal\0";
-const PAIR_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v2-nifty-banknifty-pair\0";
-const RECORD_FILE: &str = "base-evidence-records-v2.bin";
-const COMPLETION_FILE: &str = "base-evidence-completions-v2.bin";
-const LOCK_FILE: &str = "base-evidence-write-v2.lock";
+const RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-ROW-V3\0";
+const COMPLETION_MAGIC: [u8; 16] = *b"BTX-BASE-CMP-V3\0";
+const COMPLETION_RECORD_MAGIC: [u8; 16] = *b"BTX-BASE-DONEV3\0";
+const HEADER_DOMAIN: &[u8] = b"brutex-base-evidence-v3-ledger-header\0";
+const COMPLETION_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-completion-id\0";
+const COMPLETION_SEAL_DOMAIN: &[u8] = b"brutex-base-evidence-v3-completion-seal\0";
+const PAIR_ID_DOMAIN: &[u8] = b"brutex-base-evidence-v3-nifty-banknifty-pair\0";
+const RECORD_FILE: &str = "base-evidence-records-v3.bin";
+const COMPLETION_FILE: &str = "base-evidence-completions-v3.bin";
+const LOCK_FILE: &str = "base-evidence-write-v3.lock";
+/// The retired format-2 file names, kept only so a root that still holds a V2
+/// ledger is refused by name rather than opened beside it as if empty
+/// (D-1644). A V2 ledger floored its max-gated rates (GAP15-17).
+const RETIRED_V2_FILES: [&str; 2] = [
+    "base-evidence-records-v2.bin",
+    "base-evidence-completions-v2.bin",
+];
 
 const _: () = assert!(BASE_EVIDENCE_RECORD_BYTES_V2 == 1_024);
 const _: () = assert!(COMPLETION_PAYLOAD_BYTES + 32 == COMPLETION_BYTES);
@@ -879,6 +889,7 @@ impl LedgerV2 {
         writable: bool,
     ) -> Result<Self, BaseEvidenceLedgerRefusalV2> {
         let root = admit_root(root)?;
+        refuse_retired_v2_ledger(&root)?;
         let root_file =
             File::open(&root).map_err(|why| io_error("hold Base ledger root", &root, &why))?;
         if !root_file
@@ -1719,6 +1730,30 @@ fn verify_header(
     Ok(())
 }
 
+/// Refuses a root that still holds a format-2 Base Evidence ledger (D-1644).
+///
+/// Anything but a clean "not found" refuses: a file that exists, a dangling
+/// link, or a probe that cannot answer. Opening V3 beside an unread V2 ledger
+/// would let a Population chain recorded against V2 evidence continue as
+/// though its Base evidence had never been written.
+fn refuse_retired_v2_ledger(root: &Path) -> Result<(), BaseEvidenceLedgerRefusalV2> {
+    for name in RETIRED_V2_FILES {
+        let path = root.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(BaseEvidenceLedgerRefusalV2::Reconciliation(format!(
+                    "Base Evidence V2 ledger file {} refused by name: V2 floored its \
+                     max-gated rates (GAP15-17, D-1644); this build writes Base Evidence \
+                     V3 only, so rerun the Population chain in a root without V2 files",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn admit_root(root: &Path) -> Result<PathBuf, BaseEvidenceLedgerRefusalV2> {
     let metadata = std::fs::metadata(root).map_err(|why| {
         BaseEvidenceLedgerRefusalV2::Io(format!(
@@ -2205,6 +2240,50 @@ mod projection_tests {
             .require_unchanged()
             .expect_err("same pathname at another inode must not retain authority");
         assert!(refused.to_string().contains("no longer names"));
+    }
+
+    /// D-1644: a root still holding either format-2 file is refused by name on
+    /// both open paths, before any V3 file is created beside it; a dangling
+    /// link counts as present. The V3 names never collide with the V2 ones.
+    #[test]
+    fn a_root_holding_a_v2_ledger_file_is_refused_by_name_before_v3_opens() {
+        let bounds = BaseEvidenceLedgerBoundsV2::new(4, 4).expect("fixture bounds are nonzero");
+        for name in RETIRED_V2_FILES {
+            assert_ne!(name, RECORD_FILE);
+            assert_ne!(name, COMPLETION_FILE);
+            for dangling in [false, true] {
+                let root = TestRoot::new();
+                let retired = root.ledger().join(name);
+                if dangling {
+                    std::os::unix::fs::symlink(root.parent.join("absent"), &retired)
+                        .expect("dangling V2 link is created");
+                } else {
+                    std::fs::write(&retired, b"v2").expect("V2 file is planted");
+                }
+                for writable in [true, false] {
+                    let refused = LedgerV2::open_inner(root.ledger(), bounds, writable)
+                        .err()
+                        .expect("a V2 ledger root is refused");
+                    let text = refused.to_string();
+                    assert!(text.contains("refused by name"), "{text}");
+                    assert!(text.contains(name), "{text}");
+                    assert!(text.contains("D-1644"), "{text}");
+                }
+                assert!(!root.ledger().join(RECORD_FILE).exists());
+                assert!(!root.ledger().join(LOCK_FILE).exists());
+            }
+        }
+        let clean = TestRoot::new();
+        drop(LedgerV2::open(clean.ledger(), bounds).expect("a root without V2 files opens"));
+        drop(LedgerV2::open_read(clean.ledger(), bounds).expect("and reads"));
+        assert_eq!(
+            (RECORD_FILE, COMPLETION_FILE, LOCK_FILE),
+            (
+                "base-evidence-records-v3.bin",
+                "base-evidence-completions-v3.bin",
+                "base-evidence-write-v3.lock"
+            )
+        );
     }
 
     struct TestRoot {

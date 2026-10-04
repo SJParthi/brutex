@@ -570,7 +570,7 @@ mod tests {
         let walk = walk.split_once("\n}\n").expect("discover_through ends").0;
         for step in [
             "fs::read_dir(directory)",
-            "if index == DIRECTORY_LIMIT {",
+            "if index == directory_limit() {",
             "fs::symlink_metadata(entry.path().join(\"complete\"))",
         ] {
             assert!(walk.contains(step), "discover_through does {step}");

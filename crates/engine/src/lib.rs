@@ -702,12 +702,16 @@ impl Sweep {
     /// The depth the ladder reached before a level came back empty.
     ///
     /// Zero when no single condition met `min_hits`.
+    ///
+    /// **O(1), not a count over the levels.** The walk continues only while
+    /// the current level is non-empty, so an empty level can only be the last
+    /// one recorded: the depth is the level count, less one when the last
+    /// level is the empty one that ended the walk (Rust and O(1) sweep OE-5,
+    /// D-2304, AFG-04).
     #[must_use]
     pub fn depth(&self) -> usize {
-        self.levels
-            .iter()
-            .filter(|l| !l.frequent.is_empty())
-            .count()
+        let ended_empty = self.levels.last().is_some_and(|l| l.frequent.is_empty());
+        self.levels.len().saturating_sub(usize::from(ended_empty))
     }
 
     /// Every frequent combination found at every level.
@@ -4771,6 +4775,34 @@ mod tests {
         assert_eq!(s.depth(), 2, "the ladder should die at k=3");
         assert_eq!(s.levels.len(), 3, "the empty level is recorded, not hidden");
         assert!(s.levels.last().is_some_and(|l| l.frequent.is_empty()));
+    }
+
+    /// **`depth` is O(1) and agrees with counting the non-empty levels.** Rust
+    /// and O(1) sweep OE-5, D-2304, AFG-04.
+    ///
+    /// Only the level that ended the walk can be empty, so the depth is the
+    /// level count less that one. The count over every level is kept here as
+    /// the oracle: on an extinct walk, on a walk with nothing frequent at k=1,
+    /// and on walks of depth 1 to 6, both readings and the streamed sink agree.
+    #[test]
+    fn depth_is_the_level_count_less_the_empty_last_level() {
+        let oracle = |s: &Sweep| s.levels.iter().filter(|l| !l.frequent.is_empty()).count();
+        let none = Ladder::with_min_hits(9).walk(&bars(&[&[0], &[1]]), &[0, 1]);
+        assert_eq!((none.depth(), oracle(&none)), (0, 0));
+        for width in 1_u32..=6 {
+            let deep: Vec<u32> = (0..width).collect();
+            let s = Ladder::with_min_hits(2).walk(&bars(&[&deep, &deep, &[]]), &deep);
+            assert_eq!(s.depth(), oracle(&s), "width {width}");
+            assert_eq!(s.depth(), usize::try_from(width).unwrap_or(0));
+            assert!(
+                s.levels
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .all(|l| !l.frequent.is_empty()),
+                "only the last level can be empty"
+            );
+        }
     }
 
     /// The emitted order is canonical MASK order, and it is not support order.

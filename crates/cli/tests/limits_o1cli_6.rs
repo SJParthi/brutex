@@ -65,7 +65,14 @@ fn the_screens_two_full_sorts_are_stated_and_the_full_order_still_read() {
         );
     }
     assert!(LIB.contains("const SCREEN_CAP_CEILING: usize = 10_000_000;"));
-    let screen = body("\nfn screen<'a>(");
+    // D-1734 split `screen` into `price_grids`, `tier_rows` and
+    // `finish_screen`; the two sorts live in the last, which every screen
+    // (and every finished tier of the walk) runs once.
+    assert!(
+        body("\nfn screen<'a>(").contains("finish_screen(rows,"),
+        "`screen` finishes through `finish_screen`"
+    );
+    let screen = body("\nfn finish_screen<'a>(");
     assert_eq!(
         screen.matches("rows.sort_by_key(").count(),
         2,

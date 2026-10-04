@@ -318,7 +318,7 @@ mod tests {
             RatioLimitsV1::new(1, 1_000_000, 1).map_err(display)?,
             32,
             selector,
-            runner::exit_grid_policy::printed_ohlcv_cost_model_id_v1(),
+            runner::exit_grid_policy::printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::IncludeExactObserved(7),
             5,
             6,

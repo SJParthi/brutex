@@ -78,6 +78,20 @@ pub enum LakeError {
         minimum: usize,
     },
 
+    /// The file is larger than this reader will read into memory.
+    ///
+    /// [`crate::reader::LakeFile::open`] reads the whole file, so its size is
+    /// checked from metadata BEFORE the read and the read is then capped one
+    /// byte past the bound (OD-6, D-2375). Refused by name rather than read in
+    /// full: an unbounded `fs::read` of a wrong path is a memory cost no
+    /// footer check can take back.
+    TooLarge {
+        /// How many bytes the file holds, or how many the capped read saw.
+        bytes: u64,
+        /// The ceiling, [`crate::reader::MAX_LAKE_BYTES`].
+        cap: u64,
+    },
+
     /// The thrift footer would not parse.
     FooterUnreadable {
         /// What the metadata parser said.
@@ -349,6 +363,10 @@ impl fmt::Display for LakeError {
             Self::Truncated { len, minimum } => write!(
                 f,
                 "truncated parquet file: {len} bytes, the minimum is {minimum}"
+            ),
+            Self::TooLarge { bytes, cap } => write!(
+                f,
+                "lake file is {bytes} bytes, past the {cap}-byte ceiling this reader will read into memory; refused before reading it"
             ),
             Self::FooterUnreadable { reason } => {
                 write!(f, "parquet footer would not parse: {reason}")

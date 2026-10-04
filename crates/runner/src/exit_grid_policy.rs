@@ -56,16 +56,54 @@ const DAY_MICROS: i64 = 24 * 60 * ONE_MINUTE_MICROS;
 #[cfg(test)]
 const REGULAR_OPEN_IST_MINUTE: i64 = 9 * 60 + 15;
 
-/// Identity of the fill/cost behavior implemented by the current grid engine.
+/// Identity of the fill/cost behavior the grid engine implemented until
+/// D-1514. **Superseded and refused by name**: [`implemented_cost_model`]
+/// answers [`ExitGridErrorV1::SupersededCostModelIdV1`] for it.
 ///
 /// It means printed one-minute OHLC bounds, pessimistic adverse printed
 /// extremes, optimistic printed opens, level fills capped by opening gaps, and
-/// no invented outside-bar tick. V1 resolution refuses any other ID because
-/// merely hashing an arbitrary label would not prove which arithmetic produced
-/// the cell money.
+/// no invented outside-bar tick -- and, as the walk then built its paths, a
+/// hole (a refused record or a missing minute) ANYWHERE on a path up to its
+/// time exit un-priced every level exit on it, including one that closed the
+/// position before the hole. Its value is unchanged and never will be: it
+/// names the money every policy carrying it was resolved and priced with.
 #[must_use]
 pub fn printed_ohlcv_cost_model_id_v1() -> [u8; 32] {
     hash(b"brutex.runner.grid.printed-ohlcv-fill.v1.open-gap-before-retrace")
+}
+
+/// Identity of the fill/cost behavior implemented by the current grid engine.
+///
+/// Everything [`printed_ohlcv_cost_model_id_v1`] means, except the hole rule:
+/// a level exit strictly before a path's first hole is priced, and only a
+/// variant whose exit is at or after the hole is un-priced and blocks to the
+/// time exit (D-1514). That changes cell money wherever such a path exists, so
+/// it is a new identity rather than the old one re-meant. Resolution refuses
+/// any other ID because merely hashing an arbitrary label would not prove which
+/// arithmetic produced the cell money.
+#[must_use]
+pub fn printed_ohlcv_cost_model_id_v2() -> [u8; 32] {
+    hash(b"brutex.runner.grid.printed-ohlcv-fill.v2.open-gap-before-retrace.priced-before-hole")
+}
+
+/// `Ok` only for the cost model this build implements,
+/// [`printed_ohlcv_cost_model_id_v2`]. The superseded
+/// [`printed_ohlcv_cost_model_id_v1`] is refused by its own name, so a policy
+/// resolved before D-1514 says why it cannot be replayed rather than reading
+/// as an unknown label; anything else is [`ExitGridErrorV1::UnsupportedCostModelId`].
+///
+/// # Errors
+///
+/// [`ExitGridErrorV1::SupersededCostModelIdV1`] or
+/// [`ExitGridErrorV1::UnsupportedCostModelId`].
+pub fn implemented_cost_model(id: [u8; 32]) -> Result<(), ExitGridErrorV1> {
+    if id == printed_ohlcv_cost_model_id_v2() {
+        Ok(())
+    } else if id == printed_ohlcv_cost_model_id_v1() {
+        Err(ExitGridErrorV1::SupersededCostModelIdV1)
+    } else {
+        Err(ExitGridErrorV1::UnsupportedCostModelId)
+    }
 }
 
 /// Canonical identity of every field in one [`InstrumentKey`].
@@ -1049,9 +1087,7 @@ impl ExitGridPolicyV1 {
         &self,
         training_execution_1m: &[Candle],
     ) -> Result<ResolvedGridLevelsV1, ExitGridErrorV1> {
-        if self.cost_model_id != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        implemented_cost_model(self.cost_model_id)?;
         if let ExecutionResolutionV1::UnsupportedSeconds(seconds) = self.execution_resolution {
             return Err(ExitGridErrorV1::UnsupportedExecutionResolution(seconds));
         }
@@ -1905,11 +1941,32 @@ pub struct GlobalReplayWitnessUniverseV1 {
     feed: Vendor,
     direction: CostDirection,
     first_oos: usize,
+    max_ambiguous_bars: u64,
+    max_gap_fills: u64,
     digest: [u8; 32],
     universe: ReplayedCandidateUniverseV1,
 }
 
 impl GlobalReplayWitnessUniverseV1 {
+    /// The frozen exit policy's ceiling on ambiguous one-minute bars, summed
+    /// over every trade of this stream the global scheduler admits.
+    ///
+    /// Captured from the same resolved grid that replayed the universe and
+    /// sealed by [`Self::require_integrity`], so a caller cannot widen it.
+    /// GAP15-19, D-1643.
+    #[must_use]
+    pub const fn max_ambiguous_bars(&self) -> u64 {
+        self.max_ambiguous_bars
+    }
+
+    /// The frozen exit policy's ceiling on level exits filled through an
+    /// opening gap, summed over the stream's globally admitted trades.
+    /// GAP15-19, D-1643.
+    #[must_use]
+    pub const fn max_gap_fills(&self) -> u64 {
+        self.max_gap_fills
+    }
+
     /// Exact swept spot index whose OOS bytes were replayed.
     #[must_use]
     pub const fn instrument(&self) -> InstrumentKey {
@@ -1972,6 +2029,7 @@ impl GlobalReplayWitnessUniverseV1 {
             self.feed,
             self.direction,
             self.first_oos,
+            [self.max_ambiguous_bars, self.max_gap_fills],
             &self.universe,
         );
         if self.digest == expected {
@@ -2927,13 +2985,26 @@ impl ResolvedExitGridV1 {
         let universe = self.replay_selected_universe(oos, column, selected, oos_run)?;
         universe.require_integrity()?;
         let instrument = *series.instrument();
-        let digest =
-            digest_global_replay_witness(&instrument, feed, direction, first_oos, &universe);
+        let ceilings = [
+            self.policy.max_ambiguous_bars(),
+            self.policy.max_gap_fills(),
+        ];
+        let digest = digest_global_replay_witness(
+            &instrument,
+            feed,
+            direction,
+            first_oos,
+            ceilings,
+            &universe,
+        );
+        let [max_ambiguous_bars, max_gap_fills] = ceilings;
         let witness = GlobalReplayWitnessUniverseV1 {
             instrument,
             feed,
             direction,
             first_oos,
+            max_ambiguous_bars,
+            max_gap_fills,
             digest,
             universe,
         };
@@ -2945,9 +3016,7 @@ impl ResolvedExitGridV1 {
         if !self.digest_is_valid() {
             return Err(ExitGridErrorV1::ResolutionDigestMismatch);
         }
-        if self.policy.cost_model_id() != printed_ohlcv_cost_model_id_v1() {
-            return Err(ExitGridErrorV1::UnsupportedCostModelId);
-        }
+        implemented_cost_model(self.policy.cost_model_id())?;
         Ok(())
     }
 
@@ -3094,6 +3163,11 @@ pub enum ExitGridErrorV1 {
     RunIdentityMismatch(&'static str),
     /// V1 grid arithmetic implements a different cost/fill model ID.
     UnsupportedCostModelId,
+    /// The policy names [`printed_ohlcv_cost_model_id_v1`], the model under
+    /// which a hole after a level exit un-priced that exit. This build prices
+    /// it (D-1514), so the policy must be resolved again under
+    /// [`printed_ohlcv_cost_model_id_v2`]; its old cells are not this build's.
+    SupersededCostModelIdV1,
     /// An exact forced stop was zero or negative.
     InvalidForcedStop(Ppm),
     /// The instrument is storable but outside the two-index sweep surface.
@@ -3964,10 +4038,13 @@ fn digest_global_replay_witness(
     feed: Vendor,
     direction: CostDirection,
     first_oos: usize,
+    quality_ceilings: [u64; 2],
     universe: &ReplayedCandidateUniverseV1,
 ) -> [u8; 32] {
+    // An in-memory seal only, never persisted: the domain moves with the
+    // sealed fields. v2 adds the frozen quality ceilings (D-1643).
     let mut h = Hasher::new();
-    h.update(b"brutex.runner.global-replay-witness-universe.v1\0");
+    h.update(b"brutex.runner.global-replay-witness-universe.v2\0");
     h.update(&instrument_digest_v1(instrument));
     put_bytes(&mut h, feed.as_str().as_bytes());
     h.update(&[match direction {
@@ -3975,6 +4052,9 @@ fn digest_global_replay_witness(
         CostDirection::Short => 2,
     }]);
     put_usize(&mut h, first_oos);
+    for ceiling in quality_ceilings {
+        h.update(&ceiling.to_le_bytes());
+    }
     h.update(&universe.run_id.bytes());
     h.update(&universe.selected_digest);
     h.update(&universe.digest);
@@ -4506,7 +4586,7 @@ mod tests {
             ratios,
             10_000,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             3,
             2,
@@ -4536,7 +4616,7 @@ mod tests {
             },
             max_cells: 1,
             selector: ExitGridSelectorV1::PessimisticTotal,
-            cost_model_id: printed_ohlcv_cost_model_id_v1(),
+            cost_model_id: printed_ohlcv_cost_model_id_v2(),
             forced_stop: ForcedStopV1::Disabled,
             max_ambiguous_bars: 0,
             max_gap_fills: 0,
@@ -4720,6 +4800,77 @@ mod tests {
             assert_ne!(
                 instrument_digest_v1(&baseline_option),
                 instrument_digest_v1(&changed_option)
+            );
+        }
+    }
+
+    /// D-1514. The grid this build implements is cost model V2. A policy that
+    /// names V1, under which a hole after a level exit un-priced that exit, is
+    /// refused by that name before any level is resolved; an unknown label is
+    /// the generic refusal, and V2 resolves.
+    #[test]
+    fn a_policy_naming_the_superseded_v1_cost_model_is_refused_by_name() {
+        assert_ne!(
+            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2()
+        );
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v2()),
+            Ok(())
+        );
+        assert_eq!(
+            implemented_cost_model(printed_ohlcv_cost_model_id_v1()),
+            Err(ExitGridErrorV1::SupersededCostModelIdV1)
+        );
+        assert_eq!(
+            implemented_cost_model([8; 32]),
+            Err(ExitGridErrorV1::UnsupportedCostModelId)
+        );
+        let input = bars(100);
+        assert!(policy().resolve(&nifty(), &input).is_ok());
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut old = policy();
+            old.cost_model_id = id;
+            assert_eq!(
+                old.resolve(&nifty(), &input).map(|r| r.family()),
+                Err(refusal)
+            );
+        }
+    }
+
+    /// D-1514. A resolution sealed under the superseded V1 cost model, with a
+    /// digest that reconciles, is still refused by the runtime integrity check
+    /// every resolved-grid door runs first, by name; an unknown model is the
+    /// generic refusal, and a broken seal is reported before either.
+    #[test]
+    fn a_resolved_grid_sealed_under_the_v1_cost_model_is_refused_at_runtime() {
+        let input = bars(100);
+        let current = policy().resolve(&nifty(), &input).expect("V2 resolves");
+        assert_eq!(current.require_runtime_integrity(), Ok(()));
+        for (id, refusal) in [
+            (
+                printed_ohlcv_cost_model_id_v1(),
+                ExitGridErrorV1::SupersededCostModelIdV1,
+            ),
+            ([8; 32], ExitGridErrorV1::UnsupportedCostModelId),
+        ] {
+            let mut sealed = current.clone();
+            sealed.policy.cost_model_id = id;
+            sealed.policy_digest = sealed.policy.digest();
+            sealed.digest = digest_resolved(&sealed);
+            assert!(sealed.digest_is_valid(), "the seal itself reconciles");
+            assert_eq!(sealed.require_runtime_integrity(), Err(refusal));
+            let mut broken = sealed;
+            broken.digest = [0; 32];
+            assert_eq!(
+                broken.require_runtime_integrity(),
+                Err(ExitGridErrorV1::ResolutionDigestMismatch)
             );
         }
     }
@@ -7222,6 +7373,32 @@ mod tests {
         );
     }
 
+    /// D-1643: the frozen quality ceilings travel with the witness, from the
+    /// same resolved policy (3 and 2 in this fixture), and are sealed.
+    fn witness_seals_its_frozen_quality_ceilings(
+        torn: &mut GlobalReplayWitnessUniverseV1,
+        policy: [u64; 2],
+    ) {
+        assert_eq!(torn.max_ambiguous_bars(), 3);
+        assert_eq!(torn.max_gap_fills(), 2);
+        assert_eq!([torn.max_ambiguous_bars(), torn.max_gap_fills()], policy);
+        for widen in [0, 1] {
+            if widen == 0 {
+                torn.max_ambiguous_bars = u64::MAX;
+            } else {
+                torn.max_gap_fills = u64::MAX;
+            }
+            assert_eq!(
+                torn.require_integrity(),
+                Err(ExitGridErrorV1::ReplayEvidenceDigestMismatch),
+                "a widened quality ceiling breaks the opaque successor seal"
+            );
+            torn.max_ambiguous_bars = 3;
+            torn.max_gap_fills = 2;
+            assert_eq!(torn.require_integrity(), Ok(()));
+        }
+    }
+
     #[test]
     fn global_replay_witness_mints_every_identity_at_the_authenticated_replay_door() {
         let training = crate::synthetic::sessions(6);
@@ -7280,8 +7457,14 @@ mod tests {
         assert_eq!(witness.selected_exit_digest(), selected.selection_digest);
         assert!(!witness.candidates().is_empty());
         assert_ne!(witness.universe_digest(), [0; 32]);
-
         let mut torn = witness;
+        witness_seals_its_frozen_quality_ceilings(
+            &mut torn,
+            [
+                resolved.policy().max_ambiguous_bars(),
+                resolved.policy().max_gap_fills(),
+            ],
+        );
         torn.first_oos = 1;
         assert_eq!(
             torn.require_integrity(),

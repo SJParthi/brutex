@@ -520,15 +520,11 @@ static SITES: &[Site] = &[
         ),
         drive: |scratch| drive_bad_candles(scratch, true),
     },
+    // The `pull.file` "not filed" row `request_minutes.rs` had here is gone
+    // with its emit: that was the second event for one gap (OD-2, D-2371). The
+    // row below is the one event, now at `Error`.
     Site {
-        at: "request_minutes.rs incomplete coverage refusal",
-        target: "pull.file",
-        message: "not filed",
-        says: ("stage", Says::Holds("minute coverage")),
-        drive: drive_request_minutes,
-    },
-    Site {
-        at: "crates/pull/src/ingest.rs — from_window request coverage warning",
+        at: "crates/pull/src/ingest.rs — from_window request coverage gap",
         target: "pull.request_minutes",
         message: "request minute coverage incomplete",
         says: ("reason", Says::Holds("375 missing scheduled minutes")),

@@ -3779,7 +3779,7 @@ mod tests {
     use runner::exit_grid_policy::{
         ExecutionResolutionV1, ExitGridPolicyV1, ExitGridSelectorV1, ForcedStopV1,
         RangeResolutionV1, RatioLimitsV1, RationalPercentileV1, ResolvedExitGridV1, RungPlanV1,
-        SelectedExitV1, printed_ohlcv_cost_model_id_v1,
+        SelectedExitV1, printed_ohlcv_cost_model_id_v2,
     };
     use runner::grid::Chosen;
     use runner::identity::{Direction as RunDirection, Params, Run, data_digest};
@@ -3874,7 +3874,7 @@ mod tests {
             RatioLimitsV1::new(1, 10_000, 4).expect("broad exact ratio interval"),
             16,
             ExitGridSelectorV1::GuaranteedFloor,
-            printed_ohlcv_cost_model_id_v1(),
+            printed_ohlcv_cost_model_id_v2(),
             ForcedStopV1::Disabled,
             u64::MAX,
             u64::MAX,

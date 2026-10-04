@@ -149,12 +149,8 @@ fn the_results_listing_keeps_full_text_fields_and_extreme_figures_apart() {
 fn the_screen_table_keeps_extreme_cells_apart_and_under_their_headers() {
     use runner::outcome::Edge;
     use runner::rank::Scored;
-    #[expect(
-        clippy::default_trait_access,
-        reason = "the named mask type belongs to runner's private dependency graph"
-    )]
     let mut scored = Scored {
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 1,
         edge: Edge::default(),
     };
@@ -200,12 +196,8 @@ fn the_screen_table_keeps_extreme_cells_apart_and_under_their_headers() {
 fn the_consistency_table_keeps_extreme_shares_and_the_worst_day_apart() {
     use runner::outcome::Edge;
     use runner::rank::Scored;
-    #[expect(
-        clippy::default_trait_access,
-        reason = "the named mask type belongs to runner's private dependency graph"
-    )]
     let scored = Scored {
-        mask: Default::default(),
+        mask: vocab::ConditionMask::default(),
         hits: 1,
         edge: Edge::default(),
     };

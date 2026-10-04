@@ -8020,7 +8020,10 @@ pub(crate) async fn broker_run(
     let mut vendor_down_streak = 0u32;
     // THE RUN'S CREDENTIAL MEMORY: what the last request carried and what is
     // known to be dead. See `credential_law::Watch`.
-    let mut watch = crate::credential_law::Watch::default();
+    //
+    // Shared by up to `BROKER_LANES` instruments on the wire at once, which is
+    // why it lives in `Lanes` (D-3002).
+    let mut lanes = Lanes::default();
     for (index, instrument) in targets.iter().enumerate() {
         // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
         // month is five to thirty-seven minutes on this store, and an operator
@@ -8052,8 +8055,11 @@ pub(crate) async fn broker_run(
                 since: std::time::Instant::now(),
             });
         });
-        // Whether the vendor rejected the credential on this instrument.
-        let rejected = match broker_window(asked, instrument, site, &mut watch).await {
+        // THE NEXT LANES, FETCHED TOGETHER when nothing fetched is waiting.
+        // Landing stays one instrument at a time and in target order below,
+        // so the store, the census and every per-instrument decision see
+        // exactly the sequence they always did. D-3002.
+        let rejected = match lanes.next(asked, &targets, index, site).await {
             Err(why) => {
                 // THE MARKER IS READ AND REMOVED HERE, so it never reaches an
                 // operator and never reaches the journal. One instrument that
@@ -8114,7 +8120,10 @@ pub(crate) async fn broker_run(
         };
         // `CLAUDE.md` §8: A REJECTED TOKEN IS RE-READ ONCE, HERE. See
         // `credential_halts`, which says what this loop used to do instead.
-        if credential_halts(&mut watch, site, asked.feed, rejected, &mut out, index).await {
+        //
+        // A rejection also drops the lanes fetched ahead; the function says
+        // why (D-3002).
+        if credential_halts(&mut lanes, (site, asked.feed), rejected, &mut out, index).await {
             break;
         }
         // THE BREAKER, AFTER BOTH ARMS SO EITHER CAN HAVE MOVED IT.
@@ -8127,6 +8136,10 @@ pub(crate) async fn broker_run(
             break;
         }
     }
+    // A STOP CAN LEAVE FETCHED LANES UNLANDED. They are asked again on the
+    // next run, because the resume point is the store's own; whether they
+    // reached the vendor is still part of what this run did.
+    out.touched_wire = out.touched_wire || lanes.reached_wire();
     // NOTHING IS ON THE WIRE ANY MORE. Left set, a finished run would keep
     // claiming to be fetching the last instrument it touched for as long as the
     // process lived.
@@ -8148,14 +8161,29 @@ pub(crate) async fn broker_run(
 /// that fails, or a configuration fault recorded by `broker_window` stops the
 /// run, and the stop names how many instruments were not asked. It is never a
 /// loop and never a mint. D-0948.
+///
+/// A rejection also drops every lane fetched ahead (`BROKER_LANES`). Those
+/// lanes carried the token just rejected; their answers are not landed and
+/// their instruments are asked again, one at a time, with whatever the re-read
+/// admits. Dropping them costs at most two requests, and landing them would
+/// file bars fetched under a verdict now in doubt. Every lane has finished by
+/// now, so the watch is taken back with `get_mut` and no lock. D-3002.
 async fn credential_halts(
-    watch: &mut crate::credential_law::Watch,
-    site: &Site,
-    feed: pull::vendor::Feed,
+    lanes: &mut Lanes,
+    (site, feed): (&Site, pull::vendor::Feed),
     rejected: bool,
     out: &mut BrokerRun,
     index: usize,
 ) -> bool {
+    if rejected {
+        out.touched_wire = out.touched_wire || lanes.reached_wire();
+        lanes.ahead.clear();
+        lanes.wide = false;
+    }
+    let watch = lanes
+        .watch
+        .get_mut()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if rejected {
         let _rotated_or_halted = watch.reread(&site.credentials, feed).await;
     }
@@ -10437,11 +10465,128 @@ pub(crate) async fn credentialed_source(
     Ok((source, vendor))
 }
 
+/// How many instruments one spot run keeps on the wire at once: **3**.
+///
+/// # Why the run was serial, and why that was slow rather than safe
+///
+/// `broker_run` awaited one instrument's whole fetch before asking for the
+/// next, so a feed's request rate was set by network latency, not by its
+/// budget. Zerodha's historical cap is 3 requests a second
+/// (`pull::rate::ZERODHA_PER_SECOND`); any round trip slower than a third of
+/// a second left part of it unused on every instrument, for every month of
+/// the backfill. D-3002.
+///
+/// # Why three, and what still holds the rate
+///
+/// Three is the strictest per-second cap of the REST feeds, so no feed ever
+/// has more instruments in flight than it may send in one second. The rate is
+/// still held by the feed's one shared governor (`await_budget` and the
+/// source's own admission), which every lane waits on; lanes add concurrency,
+/// never permits.
+///
+/// # What stays serial
+///
+/// Landing. Answers are filed one instrument at a time in target order, so the
+/// store, the census, the breaker and the credential check see the sequence
+/// they always did. And the credential: a run starts with ONE lane and widens
+/// only after the vendor answered without rejecting the token, and a rejection
+/// drops every lane fetched ahead and narrows back to one, so `CLAUDE.md` §8's
+/// "re-read once, never resend the dead value" costs at most two extra
+/// requests when a token dies mid-run.
+pub(crate) const BROKER_LANES: usize = 3;
+
+// `broker_run` joins exactly three `broker_lane` calls.
+const _: () = assert!(BROKER_LANES == 3);
+const _: () = assert!(BROKER_LANES == pull::rate::ZERODHA_PER_SECOND as usize);
+
+/// One lane of [`broker_run`]: the instrument's window, or nothing when the
+/// lane has no instrument because the list ran out.
+async fn broker_lane(
+    asked: &ingest::SpotRequest,
+    instrument: Option<&brutex_core::instrument::InstrumentKey>,
+    site: &Site,
+    watch: &std::sync::Mutex<crate::credential_law::Watch>,
+) -> Option<Result<BrokerWindow, String>> {
+    match instrument {
+        Some(instrument) => Some(broker_window(asked, instrument, site, watch).await),
+        None => None,
+    }
+}
+
+/// The lanes of one [`broker_run`]: the credential watch they share, the
+/// answers fetched ahead of landing, and whether the next fetch may be wide.
+#[derive(Default)]
+struct Lanes {
+    /// `CLAUDE.md` §8's run memory. Behind a mutex because each lane reads and
+    /// admits its own credential; the lock is held for one call and never
+    /// across an await. Every lane has finished before a result is acted on,
+    /// so [`credential_halts`] takes it back with `get_mut` and no lock.
+    watch: std::sync::Mutex<crate::credential_law::Watch>,
+    /// The instruments already fetched and not yet landed, in target order.
+    ahead: std::collections::VecDeque<Result<BrokerWindow, String>>,
+    /// Whether the last instrument acted on proved the credential live. A run
+    /// starts narrow, so one request learns that before three are sent.
+    wide: bool,
+}
+
+impl Lanes {
+    /// The answer for `targets[index]`: the next lane already fetched, or, when
+    /// none is waiting, the next `BROKER_LANES` instruments fetched together
+    /// (one while the credential is unproven). Landing stays one instrument at
+    /// a time and in target order, so the store, the census and every
+    /// per-instrument decision see exactly the sequence they always did.
+    /// D-3002.
+    async fn next(
+        &mut self,
+        asked: &ingest::SpotRequest,
+        targets: &[brutex_core::instrument::InstrumentKey],
+        index: usize,
+        site: &Site,
+    ) -> Result<BrokerWindow, String> {
+        if self.ahead.is_empty() {
+            let width = if self.wide { BROKER_LANES } else { 1 };
+            let mut next = targets.iter().skip(index).take(width);
+            let watch = &self.watch;
+            let (first, second, third) = tokio::join!(
+                broker_lane(asked, next.next(), site, watch),
+                broker_lane(asked, next.next(), site, watch),
+                broker_lane(asked, next.next(), site, watch),
+            );
+            self.ahead
+                .extend([first, second, third].into_iter().flatten());
+        }
+        let answer = self.ahead.pop_front().unwrap_or_else(|| {
+            Err(format!(
+                "instrument {} of {}: no lane answered for it",
+                index.saturating_add(1),
+                targets.len()
+            ))
+        });
+        // WIDE ONLY AFTER THE VENDOR ANSWERED: a refusal before the wire
+        // proved nothing about the token. A rejection narrows it again in
+        // `credential_halts`.
+        self.wide = answer
+            .as_ref()
+            .map_or_else(|why| read_markers(why).reached_wire, |_| true);
+        answer
+    }
+
+    /// Whether any lane fetched ahead reached the vendor: every answer that
+    /// landed bars did, and a refusal did when it carries the wire marker.
+    fn reached_wire(&self) -> bool {
+        self.ahead.iter().any(|fetched| {
+            fetched
+                .as_ref()
+                .map_or_else(|why| read_markers(why).reached_wire, |_| true)
+        })
+    }
+}
+
 async fn broker_window(
     asked: &ingest::SpotRequest,
     instrument: &brutex_core::instrument::InstrumentKey,
     site: &Site,
-    watch: &mut crate::credential_law::Watch,
+    watch: &std::sync::Mutex<crate::credential_law::Watch>,
 ) -> Result<BrokerWindow, String> {
     // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
     // THAT ANSWERS "IS THIS A BROKER".
@@ -10548,11 +10693,20 @@ async fn broker_window(
     let (source, vendor) = match site.credentials.source(feed).await {
         Ok(read) => read,
         Err(failed) => {
-            watch.unreadable(feed, &failed);
+            // THE LOCK IS TAKEN FOR ONE CALL AND DROPPED BEFORE ANY AWAIT, so
+            // concurrent lanes of one run share the watch and none of them can
+            // hold it across a socket (D-3002).
+            watch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unreadable(feed, &failed);
             return Err(failed.why);
         }
     };
-    watch.admit(feed, &source)?;
+    watch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .admit(feed, &source)?;
     // AND IT ASKS THIS SITE'S GOVERNOR, not one of its own.
     //
     // `HttpSource::new` builds a private governor from the descriptor, which is
@@ -16474,11 +16628,11 @@ const MULTI_VALUED_FORM_FIELDS: [&str; 2] = ["member", "leg"];
 /// bound is what keeps the duplicate check's memory independent of the body:
 /// the set was reserved at one entry per `&` before a key was read, so a
 /// 27 MB body of bare `&` allocated about 570 MB (P5-05, D-2659).
-const MAX_DISTINCT_FORM_KEYS: usize = 256;
+pub(crate) const MAX_DISTINCT_FORM_KEYS: usize = 256;
 
 /// What [`form_key_verdict`] found wrong with a form body.
 #[derive(Debug, PartialEq, Eq)]
-enum FormKeys<'a> {
+pub(crate) enum FormKeys<'a> {
     /// This key appears twice and is not a list field.
     Repeated(&'a str),
     /// More than [`MAX_DISTINCT_FORM_KEYS`] distinct single-valued keys.
@@ -16491,7 +16645,7 @@ enum FormKeys<'a> {
 /// Memory is at most [`MAX_DISTINCT_FORM_KEYS`] set entries, reserved once,
 /// whatever the body holds; empty pairs (`&&`) are skipped without a probe.
 /// Proven by `api::server::tests::a_form_body_past_the_distinct_key_bound_is_refused`.
-fn form_key_verdict(body: &str) -> Option<FormKeys<'_>> {
+pub(crate) fn form_key_verdict(body: &str) -> Option<FormKeys<'_>> {
     let mut seen = std::collections::HashSet::with_capacity(MAX_DISTINCT_FORM_KEYS);
     for key in body
         .split('&')
@@ -16913,6 +17067,13 @@ fn route_table(assets: std::sync::Arc<assets::Assets>) -> axum::Router<Loaded> {
         .route(
             "/boolean-oos.json",
             axum::routing::get(crate::booleanoosjson::later_json),
+        )
+        // THE SELECTION V6 RECORDS `ledger-v6` COMMITS. Until D-1578 they were
+        // printed once by the verb and read by nothing: no route, no page.
+        // Index families only; an equity selector is refused (CLAUDE.md §1).
+        .route(
+            "/selection-v6.json",
+            axum::routing::get(crate::selectionv6json::selection_v6_json),
         )
         // WHAT IS RUNNING RIGHT NOW. `/frontier.json` above serves a FINISHED
         // run and shows the PREVIOUS one for however long this one takes;
@@ -17349,6 +17510,22 @@ fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str)
 /// write. It is a third of hyper's documented default for the same knob.
 pub const HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long one request's BODY has to arrive once its head has.
+///
+/// # Why the head deadline was not enough (probeapi-1 remainder, D-1510)
+///
+/// [`HEAD_READ_TIMEOUT`] stops at the head's blank line. A client that then
+/// promised a `Content-Length` and dripped the body held its connection for as
+/// long as it liked: the audit held one for about 25 s, and 256 of them fill
+/// [`MAX_CONNECTIONS`]. This is the same rule for the body: an absolute
+/// deadline from the moment the head is delivered, not an idle timer, answered
+/// `408 Request Timeout` with `Connection: close`.
+///
+/// It runs only while a body is still OWED and something is reading it, so a
+/// slow handler that has its whole body, or reads none, is never cut by it.
+/// The same ten seconds as the head, for the same reason.
+pub const BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How many connections this server holds open at once.
 ///
 /// Above it, `accept` waits for a slot instead of taking another descriptor;
@@ -17362,6 +17539,8 @@ pub const MAX_CONNECTIONS: usize = 256;
 pub struct ConnectionLimits {
     /// See [`HEAD_READ_TIMEOUT`].
     pub head_read_timeout: std::time::Duration,
+    /// See [`BODY_READ_TIMEOUT`].
+    pub body_read_timeout: std::time::Duration,
     /// See [`MAX_CONNECTIONS`]. Zero is read as one: a server that can never
     /// accept is a hang, not a limit.
     pub max_connections: usize,
@@ -17371,8 +17550,123 @@ impl ConnectionLimits {
     /// What the operator's server runs with.
     pub const SERVED: Self = Self {
         head_read_timeout: HEAD_READ_TIMEOUT,
+        body_read_timeout: BODY_READ_TIMEOUT,
         max_connections: MAX_CONNECTIONS,
     };
+}
+
+/// What a client whose body did not arrive in time is told before its socket
+/// closes. Its head was parsed, so this is an ordinary response hyper writes.
+const BODY_TIMEOUT_REPLY: &str =
+    "REFUSED: the request body did not arrive in time; this connection is closed.";
+
+/// A request body that must finish arriving by a deadline (D-1510).
+///
+/// The clock is the one [`body_deadline`] started when the head was delivered.
+/// Each poll is O(1): one poll of the inner body, and one of the alarm only
+/// when the inner body is pending. Read off the code, UNVERIFIED as a
+/// measurement, and stated in `docs/06-limits.md` (D-1510).
+struct DeadlineBody {
+    inner: axum::body::Body,
+    alarm: std::pin::Pin<Box<tokio::time::Sleep>>,
+    /// Set once, when the deadline passes with the body still owed; read by
+    /// [`body_deadline`] after the handler answers.
+    expired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl DeadlineBody {
+    fn expire(&self) -> axum::Error {
+        self.expired
+            .store(true, std::sync::atomic::Ordering::Release);
+        axum::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the request body did not arrive before the body-read deadline",
+        ))
+    }
+}
+
+impl http_body::Body for DeadlineBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        // Bytes that already arrived are always delivered; the deadline is
+        // asked only when the reader must WAIT for more. It is absolute, like
+        // the head's, so a body dripped one byte at a time is cut at the same
+        // moment as one that sent nothing.
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Pending => {
+                if this.alarm.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Some(Err(this.expire())));
+                }
+                Poll::Pending
+            }
+            ready @ Poll::Ready(_) => ready,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+/// Gives a request's body [`ConnectionLimits::body_read_timeout`] from the
+/// moment its head is delivered, and answers `408` with `Connection: close`
+/// when a reader found it late (probeapi-1 remainder, D-1510).
+///
+/// A request with no body passes straight through. A handler that never reads
+/// its body is never cut: nothing polls it, and hyper closes the read side of
+/// a connection whose body was left unread once the response is written.
+async fn body_deadline(
+    axum::extract::State(timeout): axum::extract::State<std::time::Duration>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    use http_body::Body as _;
+    if request.body().is_end_stream() {
+        return next.run(request).await;
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    let expired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (parts, inner) = request.into_parts();
+    let body = DeadlineBody {
+        inner,
+        alarm: Box::pin(tokio::time::sleep_until(deadline)),
+        expired: std::sync::Arc::clone(&expired),
+    };
+    let answered = next
+        .run(axum::extract::Request::from_parts(
+            parts,
+            axum::body::Body::new(body),
+        ))
+        .await;
+    if expired.load(std::sync::atomic::Ordering::Acquire) {
+        // Whatever the handler made of a body that failed to arrive is
+        // replaced: the request was never delivered, and the reason is time.
+        return (
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            [
+                (axum::http::header::CONNECTION, "close"),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                ),
+            ],
+            BODY_TIMEOUT_REPLY,
+        )
+            .into_response();
+    }
+    answered
 }
 
 /// The live-connection count and the wake-up a closing connection sends.
@@ -17724,6 +18018,10 @@ pub async fn serve_limited(
         }),
         head_read_timeout: limits.head_read_timeout,
     };
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        limits.body_read_timeout,
+        body_deadline,
+    ));
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             // The signal's own error is not actionable: a failed ctrl-c
@@ -17770,6 +18068,18 @@ mod head_deadline_tests {
                     "slow"
                 }),
             )
+            .route(
+                "/echo",
+                axum::routing::post(|body: axum::body::Bytes| async move { body }),
+            )
+            .route(
+                "/echo-slow",
+                axum::routing::post(move |body: axum::body::Bytes| async move {
+                    tokio::time::sleep(slow).await;
+                    body
+                }),
+            )
+            .route("/ignore", axum::routing::post(|| async { "ignored" }))
     }
 
     /// A server on an ephemeral port, and the sender that stops it.
@@ -17792,6 +18102,7 @@ mod head_deadline_tests {
     fn limits(cap: usize) -> ConnectionLimits {
         ConnectionLimits {
             head_read_timeout: T,
+            body_read_timeout: T,
             max_connections: cap,
         }
     }
@@ -17993,6 +18304,52 @@ mod head_deadline_tests {
         let _ = stop.send(());
     }
 
+    /// h-api-1, D-1511 (closed by D-1580): BLANK LINES BEFORE THE REQUEST LINE
+    /// DO NOT END THE HEAD. hyper skips them, so a client opening with
+    /// `\r\n\r\n` (or bare `\n\n`) and then a PARTIAL head is still owed its
+    /// head, and is answered `408` and closed at the deadline: the case
+    /// [`leading_blank_lines_do_not_stop_the_head_deadline`] does not send. A
+    /// real request after leading blank lines is still served.
+    #[tokio::test]
+    async fn leading_blank_lines_do_not_stop_the_head_clock() {
+        let (addr, stop) = start(limits(8)).await;
+        for lead in ["\r\n\r\n", "\n\n", "\r\n\r\n\r\n\n"] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let began = Instant::now();
+            client
+                .write_all(format!("{lead}GET /ok HTTP/1.1\r\nHost: x\r\n").as_bytes())
+                .await
+                .unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            let took = began.elapsed();
+            assert!(closed, "{lead:?}: still open after {took:?}");
+            assert!(said.starts_with("HTTP/1.1 408"), "{lead:?}: {said:?}");
+            assert!(took >= T_SLACK, "{lead:?}: cut early at {took:?}");
+            assert!(took < T * 4, "{lead:?}: cut late at {took:?}");
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(
+                    format!("{lead}GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(
+                closed && said.starts_with("HTTP/1.1 200 OK"),
+                "{lead:?}: {said:?}"
+            );
+        }
+        // Only blank lines, then silence: no request was sent, so no reply.
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"\r\n\r\n").await.unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed, "a socket that sent only blank lines was held");
+        assert_eq!(said, "");
+        let _ = stop.send(());
+    }
+
     /// A client that connects and says nothing is closed silently — it sent
     /// no request, so no response is invented for it.
     #[tokio::test]
@@ -18180,6 +18537,190 @@ mod head_deadline_tests {
         assert!(closed && said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
         drop(holders);
         let _ = stop.send(());
+    }
+
+    /// D-1510: A BODY DRIPPED AFTER A PROMPT HEAD IS CUT. The head arrives at
+    /// once, so the head deadline is satisfied; the body is promised as 64
+    /// bytes and dripped one byte per quarter-deadline. It is answered `408`
+    /// with `Connection: close` and closed, at the deadline measured from the
+    /// head, not before it and not long after. Before D-1510 it was held for as
+    /// long as the client kept dripping.
+    #[tokio::test]
+    async fn a_dripped_body_is_refused_with_408_at_the_deadline() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 64\r\n\r\n")
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let mut cut = false;
+        for _ in 0..64 {
+            if client.write_all(b"a").await.is_err() {
+                cut = true;
+                break;
+            }
+            tokio::time::sleep(T / 4).await;
+            if began.elapsed() > T * 3 {
+                break;
+            }
+        }
+        let (said, closed) = drain(&mut client, T * 4).await;
+        assert!(cut || closed, "a dripping body outlived the deadline");
+        assert!(said.starts_with("HTTP/1.1 408 Request Timeout"), "{said:?}");
+        assert!(said.contains("connection: close"), "{said:?}");
+        assert!(
+            said.ends_with(
+                "REFUSED: the request body did not arrive in time; this connection is closed."
+            ),
+            "{said:?}"
+        );
+        let took = began.elapsed();
+        assert!(took >= T_SLACK, "cut early at {took:?}");
+        assert!(took < T * 8, "cut late at {took:?}");
+        let _ = stop.send(());
+    }
+
+    /// A body promised and never sent at all is cut the same way, and so is a
+    /// chunked body that sends one chunk and goes quiet.
+    #[tokio::test]
+    async fn a_silent_or_stalled_chunked_body_is_refused_with_408() {
+        let (addr, stop) = start(limits(8)).await;
+        for head in [
+            "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n",
+            "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n",
+        ] {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(head.as_bytes()).await.unwrap();
+            let began = Instant::now();
+            let (said, closed) = drain(&mut client, T * 10).await;
+            let took = began.elapsed();
+            assert!(closed, "{head:?}: still open after {took:?}");
+            assert!(said.starts_with("HTTP/1.1 408"), "{head:?}: {said:?}");
+            assert!(took >= T_SLACK, "{head:?}: cut early at {took:?}");
+            assert!(took < T * 4, "{head:?}: cut late at {took:?}");
+        }
+        let _ = stop.send(());
+    }
+
+    /// The boundary from the inside: a body finished half a deadline after its
+    /// head, plain and chunked, is served and echoed, and the kept-alive
+    /// connection answers a second request.
+    #[tokio::test]
+    async fn a_body_completed_before_the_deadline_is_served() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n\r\nabc")
+            .await
+            .unwrap();
+        tokio::time::sleep(T / 2).await;
+        client.write_all(b"def").await.unwrap();
+        let first = one_response(&mut client, "abcdef").await;
+        assert!(first.starts_with("HTTP/1.1 200 OK"), "{first:?}");
+        client
+            .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nxy\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(T / 2).await;
+        client.write_all(b"1\r\nz\r\n0\r\n\r\n").await.unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("xyz"), "{said:?}");
+        let _ = stop.send(());
+    }
+
+    /// The body deadline is for the BODY. A handler that has its whole body
+    /// and then takes three deadlines to answer is not cut, and neither is one
+    /// that never reads the body it was sent.
+    #[tokio::test]
+    async fn a_slow_handler_with_its_body_or_none_read_is_not_cut() {
+        let (addr, stop) = start(limits(8)).await;
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /echo-slow HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody")
+            .await
+            .unwrap();
+        let began = Instant::now();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("body"), "{said:?}");
+        assert!(began.elapsed() >= T * 2 + T_SLACK);
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"POST /ignore HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbo")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut client, T * 10).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(said.ends_with("ignored"), "{said:?}");
+        let _ = stop.send(());
+    }
+
+    /// THE AUDIT'S SHAPE: a crowd of body drippers filling the cap cannot
+    /// starve a real request. Each wave is cut at the body deadline and its
+    /// slot given back.
+    #[tokio::test]
+    async fn a_crowd_of_body_drippers_cannot_starve_a_real_request() {
+        let (addr, stop) = start(limits(4)).await;
+        let mut crowd = Vec::new();
+        for _ in 0..8 {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client
+                .write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\na")
+                .await
+                .unwrap();
+            crowd.push(client);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let began = Instant::now();
+        let mut real = TcpStream::connect(addr).await.unwrap();
+        real.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let (said, closed) = drain(&mut real, T * 20).await;
+        assert!(closed);
+        assert!(said.starts_with("HTTP/1.1 200 OK"), "{said:?}");
+        assert!(began.elapsed() >= T, "the cap did not hold");
+        for mut client in crowd {
+            let (said, closed) = drain(&mut client, T * 10).await;
+            assert!(closed && said.starts_with("HTTP/1.1 408"), "{said:?}");
+        }
+        let _ = stop.send(());
+    }
+
+    /// The wrapper is transparent about what the inner body already knows: its
+    /// length hint and whether it has ended, so `DefaultBodyLimit` still
+    /// refuses a declared over-long body from its hint and an empty body is
+    /// not waited on (D-1510).
+    #[tokio::test]
+    async fn the_deadline_body_reports_the_inner_bodys_hint_and_end() {
+        use http_body::Body as _;
+        let wrap = |inner: axum::body::Body| super::DeadlineBody {
+            inner,
+            alarm: Box::pin(tokio::time::sleep(T)),
+            expired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let some = wrap(axum::body::Body::from("abcde"));
+        assert_eq!(some.size_hint().exact(), Some(5));
+        assert!(!some.is_end_stream());
+        let none = wrap(axum::body::Body::empty());
+        assert_eq!(none.size_hint().exact(), Some(0));
+        assert!(none.is_end_stream());
+    }
+
+    /// The served limits carry the body deadline, and it equals the head's.
+    #[test]
+    fn the_served_body_deadline_matches_the_head_deadline() {
+        assert_eq!(
+            ConnectionLimits::SERVED.body_read_timeout,
+            super::BODY_READ_TIMEOUT
+        );
+        assert_eq!(super::BODY_READ_TIMEOUT, HEAD_READ_TIMEOUT);
     }
 
     /// A cap of zero is read as one, not as a server that never accepts.

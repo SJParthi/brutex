@@ -114,7 +114,8 @@ const DECLARED: &[Declared] = &[
 /// this list, gate 13's and `deny.toml`'s and holds them together. It lives in
 /// `core` because gate 22 clause D refuses a sweep crate's compile-time include of
 /// the workflow file. Every name here answered 200 from
-/// `https://crates.io/api/v1/crates/<name>` on that date.
+/// `https://crates.io/api/v1/crates/<name>` on that date, except the two
+/// D-2350 family entries the comment beside them names.
 ///
 /// Every entry is matched with its family -- the name itself, or the name
 /// followed by `-` or `_` and more -- exactly as gate 13 matches it.
@@ -149,6 +150,31 @@ const FORBIDDEN: &[&str] = &[
     "rutie",
     "ext-php-rs",
     "openssl-sys",
+    // D-2350 (RO-9): WebAssembly runtimes and further embedded interpreters.
+    // `extendr` and `perl-sys` answered 404 on 2026-10-04 and are kept for
+    // their families; every other name below answered 200.
+    "wasmtime",
+    "wasmer",
+    "wasmi",
+    concat!("rust", "py", "thon"),
+    "deno_runtime",
+    "quick-js",
+    "rb-sys",
+    "extendr",
+    "extendr-api",
+    "extendr-engine",
+    "jlrs",
+    "starlark",
+    "rune",
+    "gluon",
+    "mun",
+    "koto",
+    "steel-core",
+    "piccolo",
+    "libR-sys",
+    "perl-sys",
+    "libperl-sys",
+    "tcl",
 ];
 
 /// An edge `Cargo.lock` records that a normal build on this host does not
@@ -553,8 +579,13 @@ fn the_dependency_set_has_not_moved_without_review() {
     // (D-1611), NOT A LOCK CHANGE: a version-only bump used to leave the pin
     // equal. `Cargo.lock` is byte-identical to the commit before, the count is
     // still 192, so there is no new package to scan.
+    // 0xFDB9_D257_60EF_53D3 -> 0xAAD0_3620_6F60_10EA IS ONE NEW ARROW, NOT A NEW
+    // PACKAGE (D-1510): `api` names `http-body` 1.1.0 directly to wrap a request
+    // body in its deadline. The package was already in the lock under `axum` and
+    // `hyper`, the count is still 192, and its registry source was scanned: only
+    // `.rs`, `.md`, `.toml`, the lock and LICENSE, and no `build.rs`.
     assert_eq!(
-        h, 0xFDB9_D257_60EF_53D3,
+        h, 0xAAD0_3620_6F60_10EA,
         "the dependency SET or GRAPH changed — a package was added, removed, \
          renamed or re-versioned, or a `dependencies` list in Cargo.lock moved (a feature flip \
          that turns an optional native crate on shows up only there). \

@@ -113,6 +113,7 @@ pub(crate) mod recovery;
 pub(crate) mod recovery_control;
 pub(crate) mod recovery_journal;
 pub mod render;
+pub mod selectionv6json;
 pub mod server;
 pub mod sweepevidence;
 /// A SWEEP STARTED FROM THE BROWSER -- the half of the console that was

@@ -163,7 +163,7 @@ fn the_tail_is_flat_in_the_size_of_the_file_too() -> bool {
             sink.emit(&Event::info("bench", "one timed event"))
         });
         drop(sink);
-        let _ignored = std::fs::remove_dir_all(&dir);
+        drop(dir);
         d.at(990)
     };
     let small = at(SMALL, "p99-small");
@@ -308,8 +308,28 @@ fn refuse(what: &str) -> ! {
     std::process::exit(1)
 }
 
+/// A scratch directory that is removed when it goes out of scope.
+///
+/// `loaded` used to hand back a bare `PathBuf`, and only one of its callers
+/// removed it, so every bench run left about 60 MB of preloaded sinks in the
+/// temp directory; repeated runs filled the disk (D-2331).
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ignored = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A sink over a fresh directory, with `preload` events already written.
-fn loaded(name: &str, preload: u32) -> (Sink, PathBuf) {
+fn loaded(name: &str, preload: u32) -> (Sink, Scratch) {
     let dir = scratch(name);
     let config = Config::new(dir.clone()).with_max_file_bytes(NO_ROTATION);
     let Ok(sink) = Sink::open(&config) else {
@@ -321,7 +341,7 @@ fn loaded(name: &str, preload: u32) -> (Sink, PathBuf) {
             refuse("a preloaded event was not written");
         }
     }
-    (sink, dir)
+    (sink, Scratch(dir))
 }
 
 /// The per-emit floor: a filtered event on the same sink.

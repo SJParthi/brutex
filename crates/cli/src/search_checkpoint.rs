@@ -13,6 +13,17 @@ const MAGIC: &[u8; 8] = b"BTXCHK01";
 const HEADER: usize = 64;
 pub(crate) const DIRECTORY_LIMIT: usize = 1_000_000;
 
+/// The namespace entry ceiling discovery admits: `DIRECTORY_LIMIT`, except
+/// that a test on its own thread may lower it so the limit is reachable with
+/// real directories rather than a million of them.
+fn directory_limit() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = tests::LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    DIRECTORY_LIMIT
+}
+
 /// An exclusively owned search checkpoint namespace.
 ///
 /// Every advisory lock this type takes is released by an explicit unlock,
@@ -28,6 +39,10 @@ pub(crate) struct Journal {
     latest: Option<u64>,
     interrupted: u64,
     acknowledged: u64,
+    /// Namespace entries (owner.lock plus every reservation) counted by the
+    /// opening discovery and advanced by each reservation this writer makes,
+    /// so a publication can refuse before discovery would.
+    entries: usize,
     poisoned: bool,
 }
 
@@ -116,7 +131,7 @@ impl Snapshot {
         };
         let after = crate::result_set::file_generation(&owner, &owner_path)?;
         crate::result_set::require_generation_unchanged(before, after, &owner_path)?;
-        let (_, latest, interrupted, acknowledged) = discover_through(&directory, through)?;
+        let (_, latest, interrupted, acknowledged, _) = discover_through(&directory, through)?;
         Ok(Some(Self {
             directory,
             identity,
@@ -159,7 +174,7 @@ impl Journal {
             .map_err(error)?
             .sync_all()
             .map_err(error)?;
-        let (next, latest, interrupted, acknowledged) = discover(&directory)?;
+        let (next, latest, interrupted, acknowledged, entries) = discover(&directory)?;
         Ok(Self {
             directory,
             identity,
@@ -168,6 +183,7 @@ impl Journal {
             latest,
             interrupted,
             acknowledged,
+            entries,
             poisoned: false,
         })
     }
@@ -222,24 +238,22 @@ impl Journal {
         if length.checked_add(96).is_none_or(|n| n > max_bytes) {
             return Err("checkpoint publication exceeds its byte admission".to_owned());
         }
+        // Discovery admits at most `directory_limit()` entries. A reservation
+        // that would make one more is refused here, before it exists, so no
+        // acknowledged checkpoint can leave the namespace unreopenable (D-1740).
+        let entries = self
+            .entries
+            .checked_add(1)
+            .filter(|entries| *entries <= directory_limit())
+            .ok_or("checkpoint namespace reached its directory admission limit")?;
         let sequence = self.next;
-        // NEVER RESERVE WHAT COLD DISCOVERY CANNOT REOPEN. `discover_through`
-        // refuses a namespace of `DIRECTORY_LIMIT` entries, the owner lock
-        // being one of them, so reservation `DIRECTORY_LIMIT` would be written
-        // and acknowledged and then every later open of the search would
-        // refuse. Refused here, before the directory exists. audit-20261003
-        // W2-cli13-5, D-1563.
-        if !usize::try_from(sequence).is_ok_and(|at| at < DIRECTORY_LIMIT) {
-            return Err(format!(
-                "checkpoint directory admission limit reached: reservation {sequence} would exceed the {DIRECTORY_LIMIT}-entry namespace cold discovery admits"
-            ));
-        }
         self.next = self
             .next
             .checked_add(1)
             .ok_or("checkpoint sequence exhausted")?;
         let directory = self.directory.join(format!("{sequence:016x}"));
         fs::create_dir(&directory).map_err(error)?;
+        self.entries = entries;
         File::open(&self.directory)
             .map_err(error)?
             .sync_all()
@@ -279,25 +293,7 @@ impl Journal {
         // A refused release leaves `latest` and `acknowledged` unadvanced and
         // poisons the writer through `publish`.
         file.release().map_err(|u| u.to_string())?;
-        // WRITTEN UNDER A SCRATCH NAME AND RENAMED (CE-3, D-1909). Created
-        // under its final name, a kill or ENOSPC between create and write left
-        // a 0-31 byte `complete` that discovery made `latest`, and every later
-        // resume refused "marker width mismatch" forever. A crash now leaves
-        // only `complete.writing`, which nothing reads: the reservation is
-        // interrupted and the next publication takes a new sequence.
-        let writing = directory.join("complete.writing");
-        let mut marker = File::create_new(&writing).map_err(error)?;
-        #[cfg(test)]
-        tests::marker_created(&self.directory);
-        marker
-            .write_all(&seal)
-            .and_then(|()| marker.sync_all())
-            .map_err(error)?;
-        fs::rename(&writing, directory.join("complete")).map_err(error)?;
-        File::open(&directory)
-            .map_err(error)?
-            .sync_all()
-            .map_err(error)?;
+        publish_marker(&directory, seal)?;
         #[cfg(test)]
         tests::marker_visible();
         verify_acknowledged(&mut raw, &path, &header, payload, seal)?;
@@ -310,6 +306,41 @@ impl Journal {
         self.acknowledged = acknowledged;
         Ok((sequence, seal))
     }
+}
+
+/// Make `complete` appear whole or not at all (D-1740). The seal is written
+/// and synced under a temporary name and only then renamed into place, then
+/// the reservation directory is synced. A kill before the rename leaves at
+/// most `complete.tmp`, which discovery never reads, so the reservation is an
+/// interrupted one and the previous checkpoint stays the resume point. A
+/// failure this process sees removes the temporary file and refuses.
+fn publish_marker(directory: &Path, seal: [u8; 32]) -> Result<(), String> {
+    let temporary = directory.join("complete.tmp");
+    let written = (|| {
+        let mut marker = File::create_new(&temporary)?;
+        #[cfg(test)]
+        tests::marker_created(directory.parent().unwrap_or(directory));
+        marker.write_all(&seal)?;
+        marker.sync_all()?;
+        #[cfg(test)]
+        tests::marker_staged(&temporary)?;
+        fs::rename(&temporary, directory.join("complete"))
+    })();
+    if let Err(why) = written {
+        return Err(match fs::remove_file(&temporary) {
+            Ok(()) => format!("checkpoint marker was not published: {why}"),
+            Err(left) if left.kind() == std::io::ErrorKind::NotFound => {
+                format!("checkpoint marker was not published: {why}")
+            }
+            Err(left) => format!(
+                "checkpoint marker was not published: {why}; its temporary file also could not be removed: {left}"
+            ),
+        });
+    }
+    File::open(directory)
+        .map_err(error)?
+        .sync_all()
+        .map_err(error)
 }
 
 fn verify_acknowledged(
@@ -446,21 +477,23 @@ fn is_os_litter(name: &str) -> bool {
     name == ".DS_Store" || name.starts_with("._")
 }
 
-fn discover(directory: &Path) -> Result<(u64, Option<u64>, u64, u64), String> {
+/// `(next, latest, interrupted, acknowledged, entries)`.
+type Discovered = (u64, Option<u64>, u64, u64, usize);
+
+fn discover(directory: &Path) -> Result<Discovered, String> {
     discover_through(directory, None)
 }
-fn discover_through(
-    directory: &Path,
-    through: Option<u64>,
-) -> Result<(u64, Option<u64>, u64, u64), String> {
+fn discover_through(directory: &Path, through: Option<u64>) -> Result<Discovered, String> {
+    let mut entries = 0_usize;
     let mut next = 1;
     let mut latest = None;
     let mut interrupted = 0_u64;
     let mut acknowledged = 0_u64;
     for (index, entry) in fs::read_dir(directory).map_err(error)?.enumerate() {
-        if index == DIRECTORY_LIMIT {
+        if index == directory_limit() {
             return Err("checkpoint directory admission limit exceeded".to_owned());
         }
+        entries = index + 1;
         let entry = entry.map_err(error)?;
         let name = entry
             .file_name()
@@ -503,10 +536,11 @@ fn discover_through(
         }
         match fs::symlink_metadata(entry.path().join("complete")) {
             // A SHORT MARKER IS A TORN CREATE, not an acknowledgment (CE-3,
-            // D-1909): a build that created it under its final name and was
-            // killed before 32 bytes landed. Counted as interrupted, so
-            // `latest` is the newest WHOLE checkpoint. A whole-width marker
-            // that disagrees with its payload is still refused by `read`.
+            // D-1909): the empty marker the pre-D-1740 protocol left when it was
+            // killed between creating `complete` and writing its seal, or any
+            // width short of 32 bytes. Counted as interrupted, so `latest` is
+            // the newest WHOLE checkpoint. A whole-width marker that disagrees
+            // with its payload is still refused by `read`.
             Ok(metadata) if metadata.file_type().is_file() && metadata.len() < 32 => {
                 interrupted = interrupted
                     .checked_add(1)
@@ -530,7 +564,7 @@ fn discover_through(
         }
     }
 
-    Ok((next, latest, interrupted, acknowledged))
+    Ok((next, latest, interrupted, acknowledged, entries))
 }
 fn read_saved(
     base: &Path,

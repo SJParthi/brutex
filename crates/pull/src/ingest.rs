@@ -1110,9 +1110,12 @@ pub fn from_window(
         rows,
     };
     let mut done = from_members(std::slice::from_ref(&member), store_root, plan);
+    // THE ONE EVENT PER GAP (OD-2, D-2371): `request_minutes` no longer logs,
+    // so this is the only line, at `Error` because the gap is a receipt
+    // failure and the removed `pull.file` duplicate carried that level.
     for why in request_minutes::audit(&member.rows, plan) {
         let _dropped_when_filtered = telemetry::emit(
-            &telemetry::Event::warn("pull.request_minutes", "request minute coverage incomplete")
+            &telemetry::Event::error("pull.request_minutes", "request minute coverage incomplete")
                 .with("instrument", telemetry::Value::Str(instrument))
                 .with("reason", telemetry::Value::Str(&why)),
         );
@@ -1281,7 +1284,17 @@ pub fn record_held(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<S
 ///
 /// # Cost
 ///
-/// Two opens and two appends per call, both O(1). Nothing scans.
+/// **Corrected by D-2372 (OD-3): this claimed two constant-cost appends and
+/// that nothing scanned — neither half held.** `keep_in_session` walks
+/// every bar and every overlay once, O(rows), before anything opens. Then two
+/// opens and two appends, and each
+/// `BarFile::append` is not O(1) in the file: it locates the batch against
+/// what is already stored by bisection, `already_stored`, at most
+/// `ceil(log2(n_valid + 1))` record reads plus O(batch) comparisons (D-1434);
+/// it re-reads and verifies the old tail block before re-sealing it (D-0910);
+/// and it re-reads every block the batch touches to seal its checksum.
+/// So one call is `O(rows + log n_valid + blocks touched)` reads and work, not
+/// constant. `docs/06-limits.md`, D-2372.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -2250,6 +2263,9 @@ fn derive_all(
     } else {
         None
     };
+    if let Some(minutes) = history.as_deref() {
+        check_day(minutes, instrument, store_root, symbol_id, &into);
+    }
     let source_bars = history.as_deref().unwrap_or(source_bars);
     for rung in derived_from(source) {
         let parts = PathParts {
@@ -2452,6 +2468,109 @@ fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
             && target.secs().is_multiple_of(source.secs())
             && target.secs() != Timeframe::DAY_1.secs()
     })
+}
+
+/// Checks Zerodha's pulled day bars for the month against the days its own
+/// minute bars fold to, and says what it found on the log. D-3001.
+///
+/// # Zerodha only, and why
+///
+/// The operator's rule of 4 Oct 2026 is a Zerodha rule: the day pass over the
+/// whole span first, then the minute pass, then everything rebuilt from the
+/// minutes. For Zerodha the two answers for one day are meant to agree, so a
+/// disagreement is news. Groww's day bar opens at the previous session's
+/// close, measured 181 points from Dhan's on one instrument on one day
+/// (D-0077), so checking it would log every day as different and drown a real
+/// gap in convention noise.
+///
+/// # Never a failure, never a write
+///
+/// The minute bars are already committed and the day bars are what the vendor
+/// served, so nothing here can make either more correct. Agreement is an
+/// `info` line, any disagreement or an unreadable day file a `warn` line, both
+/// under `pull.daycheck` on `/logs`. See [`crate::daycheck`].
+///
+/// # Cost
+///
+/// One read of the month's day file, `O(days)`, then [`crate::daycheck::compare`],
+/// `O(minutes + days)`. Once per instrument-month after its minute bars land.
+fn check_day(
+    minutes: &[Bar],
+    instrument: &str,
+    store_root: &Path,
+    symbol_id: u32,
+    into: &DeriveInto<'_>,
+) {
+    let Some(found) = day_check_of(minutes, store_root, symbol_id, into) else {
+        return;
+    };
+    let month = into.month.to_string();
+    let event = match &found {
+        Ok(report) if report.clean() => telemetry::Event::info(
+            "pull.daycheck",
+            "pulled 1day agrees with the days its 1min bars fold to",
+        ),
+        Ok(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day differs from the days its 1min bars fold to",
+        ),
+        Err(_) => telemetry::Event::warn(
+            "pull.daycheck",
+            "pulled 1day could not be checked against its 1min bars",
+        ),
+    }
+    .with("instrument", telemetry::Value::Str(instrument))
+    .with("month", telemetry::Value::Str(&month));
+    let count = |n: usize| telemetry::Value::Uint(u64::try_from(n).unwrap_or(u64::MAX));
+    let event = match &found {
+        Ok(report) => event
+            .with("agreed", count(report.agreed))
+            .with("differed", count(report.differed))
+            .with("day_absent", count(report.day_absent))
+            .with("minute_absent", count(report.minute_absent))
+            .with(
+                "why",
+                telemetry::Value::Str(report.first.as_deref().unwrap_or("")),
+            ),
+        Err(why) => event.with("why", telemetry::Value::Str(why)),
+    };
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
+/// [`check_day`]'s finding: `None` for any vendor but Zerodha, otherwise the
+/// comparison or the reason the pulled day file could not be read.
+fn day_check_of(
+    minutes: &[Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    into: &DeriveInto<'_>,
+) -> Option<Result<crate::daycheck::Report, String>> {
+    if into.vendor != Vendor::Zerodha {
+        return None;
+    }
+    let read = || -> Result<Vec<Bar>, String> {
+        let path = StorePath::new(PathParts {
+            vendor: into.vendor,
+            exchange: into.exchange.as_str(),
+            segment: into.segment.as_str(),
+            symbol: into.symbol.as_str(),
+            contract: into.contract,
+            timeframe: Timeframe::DAY_1,
+            month: into.month,
+            file: FileKind::Bars,
+        })
+        .map_err(|why| why.to_string())?;
+        let file =
+            BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+        (0..file.header().n_valid)
+            .map(|i| file.read_record(i).map_err(|why| why.to_string()))
+            .collect()
+    };
+    Some(
+        read().and_then(|days| {
+            crate::daycheck::compare(minutes, &days).map_err(|why| why.to_string())
+        }),
+    )
 }
 
 /// Folds one month of minute bars into `rung` and appends them under its own
@@ -2710,7 +2829,15 @@ fn write_and_count(
 ///
 /// # Cost
 ///
-/// One open and one append. O(1) per call.
+/// One open and one append — **not O(1) per call; corrected by D-2372 (OD-3)**.
+/// The open reads the header; the
+/// `BarFile::append` is not O(1) in the file: it locates the batch against
+/// what is already stored by bisection, `already_stored`, at most
+/// `ceil(log2(n_valid + 1))` record reads plus O(batch) comparisons (D-1434);
+/// it re-reads and verifies the old tail block before re-sealing it (D-0910);
+/// and it re-reads every block the batch touches to seal its checksum.
+/// So one call is `O(log n_valid + rows + blocks touched)`. `docs/06-limits.md`,
+/// D-2372.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -2796,8 +2923,15 @@ pub struct GreekTarget<'a> {
 ///
 /// # Cost
 ///
-/// One `fnv1a` over the symbol, one open and one append. **O(1) per call**,
-/// O(rows) in the bytes written and nothing else.
+/// One `fnv1a` over the symbol, one open and one append. **Not "O(1) per call
+/// and nothing else", which this said until D-2372 (OD-3).** The
+/// `BarFile::append` is not O(1) in the file: it locates the batch against
+/// what is already stored by bisection, `already_stored`, at most
+/// `ceil(log2(n_valid + 1))` record reads plus O(batch) comparisons (D-1434);
+/// it re-reads and verifies the old tail block before re-sealing it (D-0910);
+/// and it re-reads every block the batch touches to seal its checksum.
+/// So one call is `O(log n_valid + rows + blocks touched)`. `docs/06-limits.md`,
+/// D-2372.
 ///
 /// **UNVERIFIED as a measurement.** The bound is argued from the
 /// shape of the code and no bench in this workspace times it.
@@ -3458,9 +3592,12 @@ mod tests {
     use store::format::Bar;
     use store::header::Header;
 
+    use brutex_core::vendor::Vendor;
+    use store::path::Timeframe;
+
     use super::{
-        CensusLock, EntryKey, MAX_CENSUS_BYTES, closes_in_hand, install_locked, lock_refusal,
-        write_and_count,
+        CensusLock, DeriveInto, EntryKey, MAX_CENSUS_BYTES, check_day, closes_in_hand,
+        day_check_of, install_locked, lock_refusal, write_and_count,
     };
 
     /// **A MEMBER'S ROWS ARE LANDED BORROWED, NOT CLONED.** o1api-36, D-1203.
@@ -3484,6 +3621,43 @@ mod tests {
             "ingest::one clones a member's rows again"
         );
         assert!(body.contains(&format!("{}{}", "land_rows(&", "member.rows,")));
+    }
+
+    /// **THE THREE STORE-WRITING DOORS DO NOT CLAIM CONSTANT COST.** OD-3,
+    /// D-2372, invariant AFG-72.
+    ///
+    /// `from_rows`, `write_overlay` and `write_greeks` each called themselves
+    /// "O(1) per call" with "nothing else" or "Nothing scans", while
+    /// `BarFile::append` bisects what is stored (D-1434), verifies the old tail
+    /// block (D-0910) and re-reads each touched block to seal it, and
+    /// `from_rows` walks every row through `keep_in_session`. The needles are
+    /// assembled at run time so this test cannot match its own text.
+    /// The real cost stays UNVERIFIED as a measurement (`docs/06-limits.md`).
+    #[test]
+    fn the_store_writing_doors_state_their_real_cost() {
+        let source = include_str!("ingest.rs");
+        for false_claim in [
+            format!("{}{}", "both O(1). Nothing ", "scans."),
+            format!("{}{}", "One open and one append. ", "O(1) per call."),
+            format!("{}{}", "O(rows) in the bytes written and ", "nothing else."),
+        ] {
+            assert!(
+                !source.contains(&format!("/// {false_claim}")),
+                "a false constant-cost claim is back: {false_claim}"
+            );
+        }
+        for door in [
+            "pub fn from_rows(",
+            "fn write_overlay(",
+            "pub fn write_greeks(",
+        ] {
+            let at = source.find(door).expect("the door exists");
+            let doc = &source[..at];
+            let doc = &doc[doc.rfind("/// # Cost").expect("a cost section")..];
+            for cite in ["D-1434", "D-0910", "D-2372", "log2(n_valid + 1)"] {
+                assert!(doc.contains(cite), "{door} cost omits {cite}");
+            }
+        }
     }
 
     /// A scratch directory of this test's own, named after the line that asked
@@ -3585,6 +3759,121 @@ mod tests {
             wrote, 0,
             "a re-run wrote nothing, which is what tells it apart from a first run"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **ZERODHA'S PULLED DAY IS CHECKED AGAINST ITS OWN MINUTES, AND NO OTHER
+    /// VENDOR'S IS.** No day file is a reason, not a silence; a day file that
+    /// matches the fold agrees; a minute that moved the high is named; Dhan is
+    /// not checked at all. Each case also drives `check_day`, so every arm of
+    /// the `pull.daycheck` line runs. D-3001.
+    #[test]
+    fn zerodha_minutes_are_checked_against_the_pulled_day_and_no_other_vendor_is() {
+        let root = scratch("DayCheck");
+        let month = store::path::YearMonth::new(2026, 1).expect("a legal month");
+        let parts = |timeframe| store::path::PathParts {
+            vendor: Vendor::Zerodha,
+            exchange: "NSE",
+            segment: "INDEX",
+            symbol: "NIFTY",
+            contract: None,
+            timeframe,
+            month,
+            file: store::path::FileKind::Bars,
+        };
+        let entry = |timeframe| EntryKey {
+            contract: None,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            timeframe,
+            month,
+        };
+        let into = |vendor| DeriveInto {
+            calendar: crate::calendar::Runtime::default(),
+            cash_schedule: None,
+            contract: None,
+            vendor,
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Index,
+            symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("a symbol"),
+            month,
+        };
+        // 09:15 IST on 2026-01-02 and the two minutes after it.
+        let at = |n: i64| (20_455_i64 * 86_400 - 19_800 + 33_300 + n * 60) * 1_000_000;
+        let minute = |n: i64, open, high, low, close| Bar {
+            ts_micros: at(n),
+            open,
+            high,
+            low,
+            close,
+            volume: 10,
+            open_interest: i64::MIN,
+        };
+        let minutes = [
+            minute(0, 100, 110, 95, 105),
+            minute(1, 105, 120, 100, 115),
+            minute(2, 115, 116, 90, 98),
+        ];
+        let day = Bar {
+            ts_micros: at(0),
+            open: 100,
+            high: 120,
+            low: 90,
+            close: 98,
+            volume: 30,
+            open_interest: i64::MIN,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the id is the cross-check `open` folds; any 32 bits serve"
+        )]
+        let symbol_id = brutex_core::universe::fnv1a("NIFTY") as u32;
+        let zerodha = into(Vendor::Zerodha);
+
+        // NO PULLED DAY FILE: a reason, never a silent pass.
+        let found = day_check_of(&minutes, &root, symbol_id, &zerodha).expect("zerodha is checked");
+        assert!(found.is_err(), "{found:?}");
+        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+
+        // THE PULLED DAY MATCHES THE FOLD.
+        let _ = write_and_count(
+            &[day],
+            &root,
+            symbol_id,
+            parts(Timeframe::DAY_1),
+            entry(Timeframe::DAY_1),
+        )
+        .expect("the day bar lands");
+        let report = day_check_of(&minutes, &root, symbol_id, &zerodha)
+            .expect("zerodha is checked")
+            .expect("the day file reads");
+        assert_eq!((report.agreed, report.differed), (1, 0));
+        assert!(report.clean());
+        check_day(&minutes, "NIFTY", &root, symbol_id, &zerodha);
+
+        // A MINUTE THAT MOVED THE HIGH is named with both values.
+        let mut moved = minutes;
+        if let Some(second) = moved.get_mut(1) {
+            second.high = 125;
+        }
+        let report = day_check_of(&moved, &root, symbol_id, &zerodha)
+            .expect("zerodha is checked")
+            .expect("the day file reads");
+        assert_eq!(report.differed, 1);
+        let first = report
+            .first
+            .clone()
+            .expect("the first disagreement is named");
+        assert!(first.contains("high pulled 120 folded 125"), "{first}");
+        check_day(&moved, "NIFTY", &root, symbol_id, &zerodha);
+
+        // ANY OTHER VENDOR IS NOT CHECKED: its day bar follows its own
+        // convention (D-0077).
+        let dhan = into(Vendor::Dhan);
+        assert!(day_check_of(&moved, &root, symbol_id, &dhan).is_none());
+        check_day(&moved, "NIFTY", &root, symbol_id, &dhan);
 
         let _ = std::fs::remove_dir_all(&root);
     }

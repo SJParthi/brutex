@@ -27,8 +27,11 @@
 //! of them from its caller.  Public callers may only open, audit and page
 //! already existing bytes.
 //!
-//! Opening and generation validation scan bounded file bytes.  A page is
-//! proportional to the returned records after that scan.  Calculating one
+//! Opening, a cached audit lookup and an append's generation validation hash
+//! the complete bounded file bytes.  A page checks file generations by
+//! metadata only (length, device/inode and nanosecond modification/change
+//! times) and re-reads and re-seals only its returned records, so it is
+//! proportional to the returned records (D-1681).  Calculating one
 //! validated fixed-record offset is O(1) in record count; no whole-ledger,
 //! source measurement, allocation, hash, lock, sync or filesystem latency is
 //! described as O(1).
@@ -1249,7 +1252,11 @@ impl PreAdmissionDataLedgerV1 {
             .lock_shared()
             .map_err(|why| format!("cannot take shared pre-admission page lock: {why}"))?;
         let result = (|| {
-            self.require_unchanged()?;
+            // Metadata only: a content hash here made paging R rows
+            // O(R^2 / 256) (W2-cli13-0, D-1681). Every returned record is
+            // re-sealed and pair-checked below.
+            require_metadata_generation(self.lock_generation, &self.lock_file, &self.lock_path)?;
+            require_metadata_generation(self.data_generation, &self.data_file, &self.data_path)?;
             let count = self.completed_rows.saturating_sub(offset).min(limit);
             let capacity = usize::try_from(count)
                 .map_err(|_| "pre-admission page count does not fit usize".to_owned())?;
@@ -1257,7 +1264,7 @@ impl PreAdmissionDataLedgerV1 {
             rows.try_reserve_exact(capacity)
                 .map_err(|why| format!("cannot reserve pre-admission page: {why}"))?;
             let mut file = open_file(&self.data_path, false, false)?;
-            require_generation(self.data_generation, &file, &self.data_path)?;
+            require_metadata_generation(self.data_generation, &file, &self.data_path)?;
             for step in 0..count {
                 let sequence = offset
                     .checked_add(step)
@@ -3608,21 +3615,25 @@ fn append_synced(file: &mut File, path: &Path, raw: &[u8]) -> Result<(), PreAdmi
     crate::fixed_tail::append_block(file, path, [Ok::<_, String>(raw)], File::sync_data).map(|_| ())
 }
 
+/// Every pre-admission lock and data open: never waits on a FIFO and admits
+/// only a regular file (D-1743).
 fn open_file(path: &Path, writable: bool, create: bool) -> Result<File, PreAdmissionDataRefusal> {
-    OpenOptions::new()
-        .read(true)
-        .write(writable)
-        .create(create)
-        .truncate(false)
-        .open(path)
-        .map_err(|why| format!("cannot open {}: {why}", path.display()))
+    crate::readonly_file::regular(
+        OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .create(create)
+            .truncate(false),
+        path,
+    )
+    .map_err(|why| format!("cannot open {}: {why}", path.display()))
 }
 
 fn file_generation(file: &File, path: &Path) -> Result<FileGenerationV1, PreAdmissionDataRefusal> {
     let held_before = file
         .metadata()
         .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
-    let mut named = File::open(path).map_err(|why| {
+    let mut named = open_file(path, false, false).map_err(|why| {
         format!(
             "cannot reopen named {} for generation: {why}",
             path.display()
@@ -3686,7 +3697,15 @@ fn generation_of(metadata: &std::fs::Metadata, content_digest: [u8; 32]) -> File
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of whole-file V1 generation hashes on this thread.
+    static V1_FILE_HASHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn hash_file(file: &mut File, path: &Path) -> Result<[u8; 32], PreAdmissionDataRefusal> {
+    #[cfg(test)]
+    V1_FILE_HASHES.with(|count| count.set(count.get().saturating_add(1)));
     file.seek(SeekFrom::Start(0))
         .map_err(|why| format!("cannot seek {} for generation hash: {why}", path.display()))?;
     let mut hasher = Hasher::new();
@@ -3706,6 +3725,44 @@ fn hash_file(file: &mut File, path: &Path) -> Result<[u8; 32], PreAdmissionDataR
         );
     }
     Ok(hasher.finalize())
+}
+
+/// The metadata half of [`require_generation`]: the held and the named file
+/// must both carry the cached length, device/inode and nanosecond
+/// modification/change times. It reads no content, so it is O(1) in file
+/// bytes; a same-length rewrite that left every one of those fields equal is
+/// not detected here (D-1681). A page therefore re-seals every record it
+/// returns. Proven by
+/// `cli::pre_admission_data::pages_hash_no_file_and_reseal_only_the_records_they_return`.
+fn require_metadata_generation(
+    expected: FileGenerationV1,
+    file: &File,
+    path: &Path,
+) -> Result<(), PreAdmissionDataRefusal> {
+    let named = std::fs::metadata(path)
+        .map_err(|why| format!("cannot stat named {}: {why}", path.display()))?;
+    #[cfg(unix)]
+    let held = file
+        .metadata()
+        .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
+    #[cfg(unix)]
+    if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+        return Err(format!(
+            "held file no longer names {}; path was replaced",
+            path.display()
+        ));
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    // On Unix the held and named files are now one inode, so the named
+    // metadata is the held file's.
+    if generation_of(&named, expected.content_digest) != expected {
+        return Err(format!(
+            "{} changed after pre-admission open; cached audit refused",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn require_generation(
@@ -3841,7 +3898,7 @@ fn file_generation_v2(
     let held_before = file
         .metadata()
         .map_err(|why| format!("cannot stat held {}: {why}", path.display()))?;
-    let mut named = File::open(path).map_err(|why| {
+    let mut named = open_file(path, false, false).map_err(|why| {
         format!(
             "cannot reopen named {} for V2 generation: {why}",
             path.display()
@@ -5046,8 +5103,110 @@ mod tests {
             )?
             .contains("changed")
         );
+        // A page checks metadata only (D-1681). A write normally moves the
+        // modification and change times, and the page refuses as `changed`;
+        // a write inside one timestamp tick does not, and the page then
+        // refuses because the returned record no longer matches its seal.
+        let page_refusal = must_refuse(ledger.page(0, 1), "page also refuses stale file")?;
         assert!(
-            must_refuse(ledger.page(0, 1), "page also refuses stale file")?.contains("changed")
+            page_refusal.contains("changed") || page_refusal.contains("seal does not match"),
+            "{page_refusal}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pages_hash_no_file_and_reseal_only_the_records_they_return() -> TestResult {
+        // W2-cli13-0 / D-1681: each page used to content-hash the lock file
+        // and the data file twice, so paging R rows was O(R^2 / 256).
+        let root = test_dir()?;
+        let mut ledger = must(
+            PreAdmissionDataLedgerV1::open(root.path(), bounds(4)?),
+            "page fixture opens",
+        )?;
+        for tag in [70, 71, 72] {
+            must(
+                ledger.append_complete(&fixture(tag)?),
+                "page fixture commits",
+            )?;
+        }
+        V1_FILE_HASHES.with(|count| count.set(0));
+        for step in 0..10_u64 {
+            let page = must(ledger.page(step % 3, 2), "a page reads")?;
+            assert_eq!(page.rows().len(), if step % 3 == 2 { 1 } else { 2 });
+            assert_eq!(
+                must_some(page.rows().first(), "first paged row")?.sequence(),
+                step % 3
+            );
+        }
+        assert_eq!(
+            must(ledger.page(3, 2), "the end page is empty")?
+                .rows()
+                .len(),
+            0
+        );
+        assert_eq!(
+            V1_FILE_HASHES.with(std::cell::Cell::get),
+            0,
+            "eleven pages hash no whole file"
+        );
+        let audit = must(
+            ledger.reopen_audit(&fixture(70)?.authority_id()),
+            "a cached audit still checks content",
+        )?;
+        assert!(audit.is_some());
+        assert_eq!(
+            V1_FILE_HASHES.with(std::cell::Cell::get),
+            2,
+            "a cached audit lookup hashes the lock and data files once each"
+        );
+
+        // A same-length rewrite whose metadata the cached generation was made
+        // to match (the ABA no metadata check sees) is still refused by the
+        // page that returns the rewritten record, and only by it.
+        let data_path = root.path().join(DATA_FILE);
+        let mut external = must(open_file(&data_path, true, false), "external writer opens")?;
+        let offset = PRE_ADMISSION_HEADER_BYTES_V1 + 476;
+        let mut byte = [0_u8; 1];
+        must(
+            external
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| external.read_exact(&mut byte)),
+            "aba byte reads",
+        )?;
+        byte[0] ^= 1;
+        must(
+            external
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| external.write_all(&byte))
+                .and_then(|()| external.sync_data()),
+            "aba mutation persists",
+        )?;
+        // Pin a modification time no append can share, so the metadata
+        // refusal below does not depend on the timestamp tick.
+        must(
+            external.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+            "aba mtime moves",
+        )?;
+        drop(external);
+        assert!(
+            must_refuse(ledger.page(1, 1), "metadata moved")?.contains("changed"),
+            "a moved generation refuses every page"
+        );
+        ledger.data_generation = must(
+            file_generation(&ledger.data_file, &data_path),
+            "generation remeasures",
+        )?;
+        assert!(
+            must_refuse(ledger.page(0, 1), "the rewritten record refuses")?
+                .contains("seal does not match")
+        );
+        assert_eq!(
+            must(ledger.page(1, 2), "untouched records still page")?
+                .rows()
+                .len(),
+            2,
+            "documented limit: a page does not see a rewrite outside its range"
         );
         Ok(())
     }
@@ -5441,6 +5600,11 @@ mod tests {
                 )?
                 .contains("no longer names"),
                 "replacement of {name} did not fail closed"
+            );
+            assert!(
+                must_refuse(ledger.page(0, 1), "replacement invalidates a page")?
+                    .contains("no longer names"),
+                "a page over a replaced {name} did not fail closed"
             );
         }
         Ok(())

@@ -359,6 +359,89 @@ fn support_is_scaled_in_ppm_and_cannot_disable_extinction() {
     }
 }
 
+/// The swept-row form floors at one and saturates rather than wrapping at the
+/// top of `u64`; `min_hits_for` is the same rule over a `usize`. D-2101.
+/// D-2102: a share's dated cash closes are an identity term; an index has
+/// none, so its stored identity is exactly what it was before the term.
+#[test]
+fn the_cash_close_term_moves_a_shares_identity_and_leaves_an_index_alone() {
+    let anchored = [7_u8; 32];
+    assert_eq!(crate::bind_cash_closes(anchored, None), anchored);
+    let eligible = crate::bind_cash_closes(anchored, Some([1; 32]));
+    let ineligible = crate::bind_cash_closes(anchored, Some([2; 32]));
+    assert_ne!(eligible, anchored);
+    assert_ne!(eligible, ineligible);
+    assert_ne!(eligible, crate::bind_cash_closes([8; 32], Some([1; 32])));
+    assert_eq!(eligible, crate::bind_cash_closes(anchored, Some([1; 32])));
+}
+
+#[test]
+fn swept_support_floors_at_one_and_saturates_at_the_top() {
+    for (swept, support, expected) in [
+        (0, 999_999, 1),
+        (1_500, 200_000, 300),
+        (1_499, 200_000, 299),
+        (1_500, 999_999, 1_499),
+        (u64::MAX, 999_999, u64::MAX / 1_000_000),
+        (u64::MAX, 1, u64::MAX / 1_000_000),
+    ] {
+        assert_eq!(
+            crate::min_hits_for_swept(swept, support),
+            expected,
+            "{swept} {support}"
+        );
+    }
+    assert_eq!(
+        min_hits_for(1_500, 200_000),
+        crate::min_hits_for_swept(1_500, 200_000)
+    );
+}
+
+/// A descent over a column that swept nothing is refused by name, and any
+/// other floor is the statistical floor over the rows that can hit. D-2101.
+#[test]
+fn a_descent_over_a_column_that_swept_nothing_refuses() {
+    let rules = crate::Rules::BASELINE;
+    let refused = crate::descent_floor(&rules, 0, 600);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.starts_with("refused: ")
+                && why.contains("none of this span's 600 bar(s)")),
+        "{refused:?}"
+    );
+    for can_hit in [1, 300, 1_500] {
+        assert_eq!(
+            crate::descent_floor(&rules, can_hit, 3_000),
+            Ok(crate::statistical_floor_ppm(&rules, can_hit))
+        );
+    }
+    assert_ne!(
+        crate::statistical_floor_ppm(&rules, 300),
+        crate::statistical_floor_ppm(&rules, 600),
+        "premise: the floor moves with the row count it divides"
+    );
+}
+
+/// The descent banner names the rows it sized on as swept bars, and its
+/// round-trip estimate is the floor over those rows. D-2101.
+#[test]
+fn the_descent_banner_counts_swept_bars() {
+    let banner = crate::descent_banner(
+        "zerodha",
+        "NIFTY",
+        "5min",
+        ((2025, 5), (2025, 5)),
+        300,
+        20_000,
+        4,
+    );
+    assert!(
+        banner.contains("300 swept bars · floor 20000 ppm is about 6 round trip(s)"),
+        "{banner}"
+    );
+}
+
 #[test]
 fn missing_minute_diagnostics_do_not_invent_a_timestamp() {
     for (text, expected) in [

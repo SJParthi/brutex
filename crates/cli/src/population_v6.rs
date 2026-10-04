@@ -3232,6 +3232,11 @@ impl CommittedStoredPopulationV6 {
     /// run re-authenticates the whole retained source and projects all C rows,
     /// so the lookup does not change the call's class. W2-cli13-3. UNVERIFIED:
     /// the O(C) bound is read from the code and has not been measured.
+    ///
+    /// Every strategy is resolved and validated before any witness is minted,
+    /// and each family's OOS fold (its replay source, Θ(S + Q + D + E)) is
+    /// built once at that family's first witness and shared by the rest
+    /// (W2-cli3-3, D-1684); before D-1684 every witness rebuilt it.
     pub(crate) fn selected_stored_oos_witnesses(
         &mut self,
         request: crate::stored_post_training_oos::StoredPostTrainingOosRequestV1,
@@ -3251,6 +3256,10 @@ impl CommittedStoredPopulationV6 {
             .map_err(|why| why.to_string())?;
         let mut seen = std::collections::HashSet::new();
         seen.try_reserve(strategies.len())
+            .map_err(|why| why.to_string())?;
+        let mut planned = Vec::new();
+        planned
+            .try_reserve_exact(strategies.len())
             .map_err(|why| why.to_string())?;
         for strategy in strategies {
             if !seen.insert(*strategy) {
@@ -3295,10 +3304,30 @@ impl CommittedStoredPopulationV6 {
                 };
                 *cohort = Some(held.stored_post_training_oos_cohort(request)?);
             }
-            let witness = cohort
+            planned.push((slot, row.disposition()));
+        }
+        // One OOS fold per family, shared by every witness of that family
+        // (W2-cli3-3, D-1684): the fold depends only on cohort fields, and it
+        // used to be rebuilt for every witness.
+        let mut folds: [Option<crate::stored_post_training_oos::StoredOosFoldV1<'_>>; 2] =
+            [None, None];
+        for (slot, disposition) in planned {
+            let fold = folds
+                .get_mut(slot)
+                .ok_or("Population V6 replay family slot")?;
+            if fold.is_none() {
+                *fold = Some(
+                    cohorts
+                        .get(slot)
+                        .and_then(Option::as_ref)
+                        .ok_or("Population V6 OOS cohort disappeared")?
+                        .fold_recorded(observer)?,
+                );
+            }
+            let witness = fold
                 .as_ref()
-                .ok_or("Population V6 OOS cohort disappeared")?
-                .mint_witness_recorded(row.disposition(), observer)?;
+                .ok_or("Population V6 OOS fold disappeared")?
+                .mint_witness_recorded(disposition, observer)?;
             remaining = remaining.checked_sub(u64::try_from(witness.candidate_count()).map_err(|why| why.to_string())?)
                 .ok_or("Population V6 stored OOS aggregate candidate ceiling exceeded; no partial replay")?;
             witnesses.push(witness);

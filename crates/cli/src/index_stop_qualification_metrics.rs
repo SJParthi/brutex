@@ -1,7 +1,7 @@
 //! Exact trade/session arithmetic from native rows, without a grid capability.
 use super::{Snapshot, display};
 use crate::candidate_universe::population_base_evidence_v2::{
-    measured_ceiling_rate, measured_rate, ratio_observed, return_drawdown,
+    measured_max_rate, measured_rate, ratio_observed, return_drawdown,
 };
 use runner::admission::{
     AdmissionEvidenceValuesV1, CompletenessV1, HypothesisDecisionV1, ObservedI64V1, ObservedU64V1,
@@ -143,7 +143,7 @@ pub(in super::super) fn base<S: Snapshot>(row: &S) -> Result<AdmissionEvidenceVa
     // A rate a MAXIMUM gates rounds UP; `rate` floors, which is safe only for the
     // minimum-gated win rate and the losing rate the runner reconciles (p2idx-1,
     // D-1990).
-    let ceiling = |part, total, name| measured_ceiling_rate(part, total, name).map_err(display);
+    let ceiling = |part, total, name| measured_max_rate(part, total, name).map_err(display);
     let ratio = |part, total, name| ratio_observed(part, total, name).map_err(display);
     let measured = |n| {
         if m.trades > 0 {

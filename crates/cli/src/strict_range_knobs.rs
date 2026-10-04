@@ -55,9 +55,9 @@ fn value(name: &str, raw: &str) -> bool {
     match name {
         "BRUTEX_CEILING" => machine_count(raw, crate::ceiling_limit()).is_some(),
         "BRUTEX_SCREEN_CAP" => machine_count(raw, crate::SCREEN_CAP_CEILING).is_some(),
-        "BRUTEX_TOP" => nonnegative_floor(raw)
-            .and_then(|count| usize::try_from(count).ok())
-            .is_some_and(|count| crate::frontier::admit_top(count).is_ok()),
+        // `1..=TOP_CEILING`: the band `measure_top` prices is eight rows per
+        // printed row, so an unbounded TOP was an unbounded request (D-1727).
+        "BRUTEX_TOP" => machine_count(raw, crate::TOP_CEILING).is_some(),
         // THE SAME EIGHT WORDS EVERY OTHER READER TAKES. This accepted only `0`
         // and `1`, so `BRUTEX_VALIDATE=false` ran `cli screen` unvalidated and
         // refused `cli audit-audited-range` in the same process (CE-44, D-2651).
@@ -186,12 +186,12 @@ mod tests {
                 "4294967295".to_owned(),
                 "4294967296".to_owned(),
             ),
+            // The shared reader's ceiling is `TOP_CEILING` since D-1727; the
+            // exact limit moved from `i64::MAX` to it.
             (
                 "BRUTEX_TOP",
-                // The frontier reader bound, not i64::MAX: a TOP past it
-                // wrote rows /frontier.json refused whole. CE-19, D-1981.
-                crate::frontier::MAX_ROWS.to_string(),
-                (crate::frontier::MAX_ROWS + 1).to_string(),
+                crate::TOP_CEILING.to_string(),
+                (crate::TOP_CEILING + 1).to_string(),
             ),
             (
                 "BRUTEX_SCREEN_CAP",

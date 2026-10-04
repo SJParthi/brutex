@@ -110,9 +110,16 @@ fn no_lookahead() {
 /// or extreme.
 ///
 /// The complement of V-02: instead of truncating the future, this *corrupts* it.
-/// Every bar after the cut is replaced with a pathological one — `i64::MAX` /
-/// `i64::MIN` prices, a far-future timestamp — and the bits at and before the cut
-/// must not move.
+/// Every bar after the cut is replaced with a pathological one, cycling through
+/// four shapes — `i64::MAX` / `i64::MIN` prices with a far-future timestamp,
+/// `±i64::MAX / 4` prices on the original timestamp, `i64::MIN` everywhere with a
+/// timestamp running backwards to `i64::MIN`, and `i64::MAX` everywhere at
+/// `i64::MAX` — and the bits at and before the cut must not move. Every cut from
+/// 1 to `len − 1` is tried, so the first and last bar are both a boundary.
+///
+/// This doc promised the extremes and a far-future timestamp while the loop wrote
+/// only `±i64::MAX / 4` and never touched the timestamp (AC-whp-tb-9); the loop
+/// now does what the row says. D-1666.
 #[test]
 fn suffix_independence() {
     let bars = session(20_100, 60);
@@ -122,11 +129,40 @@ fn suffix_independence() {
         let mut mutated = bars.clone();
         for (offset, slot) in mutated.iter_mut().enumerate().skip(cut) {
             let extreme = i64::from(u32::try_from(offset % 3).unwrap_or(0));
-            slot.high = i64::MAX / 4 - extreme;
-            slot.low = -(i64::MAX / 4) + extreme;
-            slot.open = 0;
-            slot.close = extreme;
-            slot.volume = i64::MAX;
+            match offset % 4 {
+                0 => {
+                    slot.ts_micros = i64::MAX - extreme;
+                    slot.high = i64::MAX;
+                    slot.low = i64::MIN;
+                    slot.open = 0;
+                    slot.close = extreme;
+                    slot.volume = i64::MAX;
+                }
+                1 => {
+                    slot.high = i64::MAX / 4 - extreme;
+                    slot.low = -(i64::MAX / 4) + extreme;
+                    slot.open = 0;
+                    slot.close = extreme;
+                    slot.volume = i64::MAX;
+                }
+                2 => {
+                    slot.ts_micros = i64::MIN + extreme;
+                    slot.open = i64::MIN;
+                    slot.high = i64::MIN;
+                    slot.low = i64::MIN;
+                    slot.close = i64::MIN;
+                    slot.volume = i64::MIN;
+                    slot.open_interest = i64::MAX;
+                }
+                _ => {
+                    slot.ts_micros = i64::MAX;
+                    slot.open = i64::MAX;
+                    slot.high = i64::MAX;
+                    slot.low = i64::MAX;
+                    slot.close = i64::MAX;
+                    slot.volume = i64::MAX;
+                }
+            }
         }
         let got = bits_over(&mutated);
         let (a, b) = got
@@ -153,8 +189,9 @@ fn suffix_independence() {
 /// `Vwap` alone. It was V-04's only proof and never built a daily bar
 /// (P12-01); the daily timeframe is
 /// `a_daily_bar_series_sets_no_time_of_day_or_vwap_bit` below.
+/// It was named `daily_mask_clears` until D-1666.
 #[test]
-fn daily_mask_clears() {
+fn vwap_positions_stay_clear_without_volume() {
     use indicators::vwap::{Availability, Vwap};
 
     let bars = session(20_200, 120);
@@ -269,23 +306,43 @@ fn a_daily_bar_series_sets_no_time_of_day_or_vwap_bit() {
     );
 }
 
-/// **V-05.** The daily pivot ladder agrees with the design document's
-/// recurrence on five sessions. It is not a differential test of the whole
-/// evaluator on random input, which is what V-05 claimed until P12-01.
+/// **V-05.** `DailyLevels` agrees with a naive reference, on hand-picked and on
+/// seeded pseudo-random sessions.
 ///
 /// The reference is rebuilt here from the recurrence in `docs/09-design-sources.md`
 /// §1 — read off the source document, not off `daily.rs` — because a reference
 /// derived from the implementation shares the implementation's misreadings. Plain
 /// `i128`, one level at a time, no shared helpers.
+///
+/// The row this proves said "the fast evaluator agrees with a naive reference on
+/// random input", and the test held five hand-picked triples of
+/// `DailyLevels::from_previous_session` and no `Evaluator` (AC-whp-tb-9). The
+/// row now names `DailyLevels`, and 4,096 seeded triples join the five. D-1666.
 #[test]
 fn differential_vs_naive() {
-    for (h, l, c) in [
+    let mut sessions = vec![
         (2_500_000_i64, 2_400_000_i64, 2_490_000_i64),
         (2_500_000, 2_400_000, 2_410_000), // inverted CPR: bc > tc
         (2_500_000, 2_500_000, 2_500_000), // zero range
         (1, 0, 0),
         (9_000_000, 100, 4_500_000),
-    ] {
+    ];
+    // A fixed xorshift seed, so a failure names a session that reproduces. Prices
+    // up to ten billion paisa (a hundred million rupees), ordered `l <= c <= h`.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        i64::try_from(state % 10_000_000_001).expect("below i64::MAX")
+    };
+    for _ in 0..4_096 {
+        let mut three = [next(), next(), next()];
+        three.sort_unstable();
+        let [l, c, h] = three;
+        sessions.push((h, l, c));
+    }
+    for (h, l, c) in sessions {
         // The session is named in a `String` built before the call, because `expect`
         // takes a `&str` and the three prices are what identifies a failing row. A
         // `format!` on the failure path only would be a region a green run cannot
