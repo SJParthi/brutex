@@ -514,16 +514,11 @@ impl Series {
         self.last_release
     }
 
-    /// How many auctions the table holds.
+    /// How many auctions the table holds. Never zero: a table with no
+    /// auction is refused at load ([`SeriesError::Empty`]).
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn auction_count(&self) -> usize {
         self.auctions.len()
-    }
-
-    /// Always false: a table with no auction is refused at load.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.auctions.is_empty()
     }
 
     /// SHA-256 of the table's text, so a priced row can name its table.
@@ -839,7 +834,7 @@ mod tests {
             985_000
         );
         let whole = series(&table(&[("2020-01-01", "98.5000", "6.1081")]));
-        assert_eq!(whole.len(), 1);
+        assert_eq!(whole.auction_count(), 1);
         assert_eq!(decimal_e4("98"), Some(980_000));
         assert_eq!(decimal_e4("98.1234"), Some(981_234));
         assert_eq!(decimal_e4("0.0001"), Some(1));
@@ -907,8 +902,7 @@ mod tests {
     fn the_series_reports_its_extent_and_its_digest() {
         let text = three();
         let s = series(&text);
-        assert_eq!(s.len(), 3);
-        assert!(!s.is_empty());
+        assert_eq!(s.auction_count(), 3);
         assert_eq!(s.first_release(), day(2020, 1, 1));
         assert_eq!(s.last_release(), day(2020, 1, 15));
         let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
@@ -929,7 +923,7 @@ mod tests {
         std::fs::write(&good, three()).expect("written");
         let read = Series::read(&good).expect("a valid file");
         assert_eq!(read.sha256(), series(&three()).sha256());
-        assert_eq!(read.len(), 3);
+        assert_eq!(read.auction_count(), 3);
 
         assert!(matches!(
             Series::read(&scratch("absent.tsv")),
