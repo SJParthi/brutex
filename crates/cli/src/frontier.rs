@@ -2069,6 +2069,13 @@ mod tests {
         assert!(!v.priced, "trades == 0 is the only value that says so");
         assert!(!v.admitted, "and it is not admitted on a zero drawdown");
         assert!(!v.win_rate && !v.reward_to_risk && !v.return_over_drawdown);
+        // CE-42, D-2653: both unanswerable rules stay NAMED on an unpriced
+        // row, as the browser's frontier check requires of every row.
+        assert!(v.stop_unchecked, "the stop rule was not evaluated");
+        assert!(
+            v.protective_exits_unchecked,
+            "an unpriced row said its protective exits were checked"
+        );
     }
 
     /// `docs/02-store-format.md` §13 states the version, the stride and the
@@ -3346,8 +3353,14 @@ impl Row {
     pub fn verdict(&self, rules: &crate::Rules) -> Verdict {
         let d = self.derived();
         if !d.priced {
+            // BOTH UNCHECKED FLAGS, AS THEIR DOCS SAY: "Always `true`". This
+            // set only `stop_unchecked`, so an unpriced row carried
+            // `protective_exits_unchecked: false` and the browser's check of
+            // `/frontier.json` refused the WHOLE frontier for any run whose
+            // TOP exceeded what `screen_cap` priced (CE-42, D-2653).
             return Verdict {
                 stop_unchecked: true,
+                protective_exits_unchecked: true,
                 ..Verdict::default()
             };
         }

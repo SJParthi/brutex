@@ -635,7 +635,7 @@ struct WindowExtremes {
     /// Bars read so far, deque pushes and block scans alike: the cost a test
     /// holds to O(1) amortised per query (o1eng2-1, D-1572).
     /// Proved by
-    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     touched: u64,
     /// The left end the deques were last popped to. A query left of it cannot
     /// be served from them.
@@ -767,7 +767,7 @@ fn scan_extremes(bars: &[Candle], lo: usize, hi: usize, touched: &mut u64) -> Op
 /// removed, whose two `n·log₂ n` tables were 21 levels deep at 1,222,791 bars;
 /// this one is 15 levels of 19,107 pairs there, about 4.6 MB. The 4.6 MB is
 /// arithmetic, not a measurement; the O(1) query is proved by
-/// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+/// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
 struct BlockExtremes {
     /// `levels[k][b]`: the extremes of blocks `b ..= b + 2^k - 1`.
     levels: Vec<Vec<(i64, i64)>>,
@@ -804,7 +804,7 @@ impl BlockExtremes {
 
     /// The extremes of blocks `first ..= last`: two overlapping runs, O(1).
     /// Proved by
-    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     fn over(&self, first: usize, last: usize) -> Option<(i64, i64)> {
         let count = last.checked_sub(first)?.checked_add(1)?;
         let depth = count.ilog2();
@@ -4485,7 +4485,7 @@ mod window_tests {
     /// the scan, and the bars read must stay within a constant per query plus
     /// one pass over the slice. Rebuilding the deques on every backward query
     /// read ~1,000 bars per query. This test is
-    /// `runner::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
+    /// `runner::outcome::window_tests::a_backward_right_end_is_answered_in_constant_reads`.
     #[test]
     fn a_backward_right_end_is_answered_in_constant_reads() {
         let n = 20_000_usize;
@@ -4539,10 +4539,15 @@ mod window_tests {
         }
     }
 
-    /// The sparse table is gone from the live path, not merely unused: its
-    /// doubling loop was the Θ(n log n) build and its tables the n·log n memory.
+    /// No PER-BAR power-of-two table is built (D-1170): the per-bar sparse
+    /// table's two `n·log₂ n` tables are gone. The one doubling table left is
+    /// [`super::BlockExtremes`] (D-1572), over 64-bar BLOCKS, and this measures
+    /// what that costs: every level together holds fewer pairs than there are
+    /// bars, where a per-bar table would hold `n·log₂ n`.
+    /// P5-03, D-2665: this used to grep for the old spellings only, so it
+    /// passed while the row it proves said no power-of-two table existed.
     #[test]
-    fn forward_builds_no_power_of_two_table() {
+    fn forward_builds_no_per_bar_power_of_two_table() {
         let source = include_str!("outcome.rs");
         let live = source
             // Up to the first test MODULE: D-1410 put test-only items above it.
@@ -4550,11 +4555,25 @@ mod window_tests {
             .next()
             .expect("a source prefix");
         assert!(!live.contains("RangeExtremes"), "the sparse table is back");
-        assert!(
-            !live.contains("width.saturating_mul(2) <= n"),
-            "the doubling build is back"
-        );
         assert!(live.contains("WindowExtremes::new()"), "forward must slide");
+        for n in [1_usize, 63, 64, 65, 4_096, 65_536, 100_003] {
+            let bars = wobble(n);
+            let mut touched = 0_u64;
+            let blocks = super::BlockExtremes::of(&bars, &mut touched);
+            let base = blocks.levels.first().map_or(0, Vec::len);
+            assert_eq!(
+                base,
+                n.div_ceil(super::EXTREME_BLOCK),
+                "one pair per block at n={n}"
+            );
+            let pairs: usize = blocks.levels.iter().map(Vec::len).sum();
+            assert!(pairs <= n, "{pairs} pairs held for {n} bars");
+            assert_eq!(
+                touched,
+                u64::try_from(n).expect("small"),
+                "one pass at n={n}"
+            );
+        }
     }
 }
 

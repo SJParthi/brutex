@@ -699,14 +699,14 @@ mod tests {
         // `Trace` so the FLOOR is not what decides the outcome: this test is
         // about whether the event is emitted at all, and filtering is already
         // `telemetry::sink`'s to prove.
-        let Ok(sink) = telemetry::install(
+        // EXPECTED, NOT SKIPPED (P7-01, D-2667). This is the only installer in
+        // this test binary (see above), so a failure here is telemetry or the
+        // temp directory being broken, and the old early return let the one
+        // proof that this event reaches a file pass without asserting anything.
+        let sink = telemetry::install(
             &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
-        ) else {
-            // Another binary in this process installed first. Refusing to
-            // assert is right: a test that silently measures somebody else's
-            // sink is worse than one that does not run.
-            return;
-        };
+        )
+        .expect("the only sink installer in lake's lib test binary");
 
         let reader = LakePageReader::new(Bytes::new(), 0, Codec::Uncompressed);
         let refused = reader.decompress(&[1, 2, 3, 4], 5).unwrap_err();

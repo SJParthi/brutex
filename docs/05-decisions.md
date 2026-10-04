@@ -57605,3 +57605,85 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-2650 — The F&O rolling walk skips only a withdrawn cadence, and one unnamed contract no longer drops the rest of its chunk — 2026-10-04
+
+- CE-43 (high), found by the crash/edge helper's pass 5 at 1f4de71. CE-14's fix (D-1769) made `pull::rolling::expiry_of` refuse a contract whose computed expiry is a closed day. `api::server::cadence_has_contracts_on` was `expiry_of(..).is_ok()`, so that one refusal read as "this underlying has no contracts on this cadence": a NIFTY options window from 2024-08-14 asked for no weeklies at all, a window from 2023-03-29 no monthlies, and every chunk opening in a holiday week was skipped, uncounted, with `planned` shrunk to match so the walk reported complete. That is the hidden-failure fallback `CLAUDE.md` §4 bans.
+- `pull::rolling::listing_of` answers the cadence question on its own: `Listed`, `Withdrawn` (`costs::expiry`'s `WeeklyRegime::Withdrawn`), or the same named refusal `expiry_of` gives for an unserved flag, an unknown underlying or an unverified day. Both share `regime_of`, so they cannot drift on what they refuse. The walk's window and chunk filters skip only `Withdrawn`; any other refusal is asked, and `roll_one`'s preflight (now also `listing_of`) refuses it by name, counted in `failed`.
+- A row whose contract cannot be named no longer ends the whole chunk. `next_group` ends a group at the first row whose key differs OR cannot be computed, so the good rows before it are filed; `roll_one` counts the unnamed run once and resumes at the next nameable row. Before, the error propagated out of `next_group` and `break` discarded every later contract in the answer. Each row's key is computed at most three times, so the walk stays O(rows).
+- No engine answer changes: this is the F&O pull's coverage, and the contracts it now asks for are the ones a holiday week used to silently lose.
+- Proved by `pull::rolling::tests::a_closed_day_contract_is_listed_and_only_a_withdrawal_is_not`, `api::server::tests::a_holiday_week_contract_does_not_remove_its_cadence_from_the_walk` and `api::server::tests::an_unnamed_row_ends_its_group_without_discarding_the_rows_before_it` (ZX-01, ZX-02).
+
+### D-2651 — `BRUTEX_VALIDATE` has one reading in every cli path — 2026-10-04
+
+- CE-44. CE-6 (D-1769) moved `cli::validates` onto `brutex_core::knob::switch` (eight words), but `strict_range_knobs::value` still took only `0` and `1`. `BRUTEX_VALIDATE=false` therefore ran `cli screen` unvalidated and refused `cli audit-audited-range` in the same process, and a server started with `off` refused every strict browser run.
+- `value("BRUTEX_VALIDATE", ..)` is now `knob::switch(..).is_ok()`, and `request_value` no longer keeps its own word list; both take exactly the switch's words. Strict validation never parses the value itself, so the readers' meaning is unchanged: every reader goes through `knob::switch`.
+- Proved by `cli::audited_range_command::settings::tests::the_strict_validate_check_takes_the_switch_words_and_nothing_else` (ZX-03); the strict refusal tests now use a word no reader takes (`maybe`).
+
+### D-2652 — The cli log banner promises /logs only for the directory /logs reads — 2026-10-04
+
+- CE-45. `install_log` always printed that /logs merges this directory with the server's. `api::logs::cli_half` reads only `<store>/logs/cli`, so with `BRUTEX_LOG_DIR` elsewhere the banner promised events the page never showed, and the operator could not tell "none written" from "looked elsewhere".
+- `cli::log_banner` keeps the merge sentence when the directory is `<store>/logs/cli`, and otherwise says the page will NOT show these events and where it reads instead (or that no store root is set).
+- Proved by `cli::tests::the_log_banner_promises_the_logs_page_only_for_the_directory_it_reads` (ZX-04).
+
+### D-2653 — An unpriced frontier row names both unchecked rules — 2026-10-04
+
+- CE-42. `frontier::Row::verdict` returned `stop_unchecked: true` and a default (false) `protective_exits_unchecked` for an unpriced row, while the field's own doc says "Always `true`" and `web/src/lib/frontier-analytics.js` refuses any row where it is not. Every run whose TOP exceeded what `screen_cap` priced therefore had its whole frontier refused on the backtest page.
+- The unpriced arm now sets both flags. No stored byte changes: the verdict is computed on read.
+- Proved by `cli::frontier::tests::an_unpriced_row_fails_every_rule_and_is_marked_unpriced` (ZX-05).
+
+### D-2654 — Three invariant rows cite the tests that prove them now — 2026-10-04
+
+- P4-01 (medium; gate 10 red at 1f4de71) and P4-02, from the tests/docs/security helper's pass 4. RS-03 cited `a_torn_prepared_tail_blocks_every_later_commit`, renamed by D-1901 when the writer began cutting a torn detail tail; PS-02 cited `exact_trailing_prefix_retry_completes_and_foreign_retry_refuses`, split by D-1905; AFD-15 cited a `/masters` page test renamed by D-1760..1764.
+- Each row now cites the live test, and the RS-03 and PS-02 TEXT says what those tests prove: a torn prepared-detail tail is cut and the exact preparation resumes (ZL-04), and a foreign receipt-less orphan is scratch the next writer cuts (ZL-09, ZL-10). The old text still said "refuse" and "never truncated", contradicting ZL-04, ZL-09 and ZL-10.
+
+### D-2655 — A completion clock before 1970 refuses the run instead of stamping 0 — 2026-10-04
+
+- CE-50. `record_run`'s comment said a pre-1970 clock "is recorded as the negative it is rather than clamped"; the code clamped it to 0 with no word, and an overflow to `i64::MAX`. A negative stamp is not an option either, because the browser refuses a negative `finished_micros`, so one such row would blank the ledger page.
+- `cli::finished_micros_at` refuses both cases by name ("the system clock reads ... BEFORE 1970-01-01 ... was not recorded; correct the clock and rerun"). The run is not recorded; rerunning after the clock is fixed records the same identity.
+- Proved by `cli::tests::a_completion_stamp_before_the_epoch_is_refused_not_clamped` (ZX-06).
+
+### D-2656 — Every live-progress event carries the run's span and an attempt — 2026-10-04
+
+- CE-49. `note_grid_progress` sent only `feed` and `underlying`, never the span or an `attempt`, and `web/src/lib/live-progress.ts` refuses the whole fold for a live event without an exact attempt, so live progress was refused the moment pricing began, another run's progress line included. The grid-entered, grid-finished and validation-stage events took their attempt only from a browser-started run, so a terminal sweep's events carried none; the rung events already fell back to `binding_attempt`.
+- `cli::with_live_context` adds feed, underlying, the four span fields and the attempt (browser attempt, else `binding_attempt`) to all four builders, written once. `grid_progress_event` is split from its emitter so its shape is asserted with the others; it carries 10 of telemetry's 12 fields.
+- Proved by `cli::tests::every_live_boundary_carries_the_exact_question_inside_the_field_ceiling` (now including the progress line) and `cli::tests::a_live_event_without_a_browser_attempt_still_carries_one_when_a_sink_runs` (ZX-07).
+
+### D-2657 — Two invariant rows say what their proofs actually test — 2026-10-04
+
+- P5-01. RS-08 said a stale chosen-trade handle refuses a ragged tail, and cited a test by that name; the code cuts the ragged tail under the writer lock, exactly as the frontier does (D-1901, ZL-04), and the test is `cli::trades::tests::a_stale_handle_cuts_a_ragged_chosen_trade_tail_before_appending`. The row now separates the two behaviours: frontier and chosen-trade handles cut, a stale receipt handle refuses.
+- P5-02. ZR-44 cited its proof under the package name `brutex_core::knob::tests`; invariant rows name crates by directory, so the path is `core::knob::tests`.
+- No code changed; the rows now name tests that exist and the behaviour those tests assert.
+
+### D-2658 — Gates 11 and 12 green again without widening either list — 2026-10-04
+
+- Gate 11 rule 7 was red on merged staging: `api/server.rs` 5 of 4, `api/sweeprun.rs` 6 of 5, `lake/footer.rs` 1 of 0. Five range-shaped membership tests are now range patterns (`matches!(code, 500..=599)` and its siblings), the same two comparisons without the ambiguous spelling, and the `server.rs` count drops from 4 to 2. Rule 6's `sweeprun.rs 1` no longer matched and is removed. Reasons are in docs/06-limits.md under rule 7.
+- Gate 12 refused two test doc blocks that made no cost claim: "never scanned" in an `autopilot.rs` test and "a flat 0" in `boolean_admission_tests.rs`. Both are reworded; neither block is allowlisted.
+
+### D-2659 — Four api edges: the rolling pre-flight day, a bounded form check, form routes checked by route, ordered timing tests — 2026-10-04
+
+- CE-54. `roll_one`'s pre-flight asked `listing_of` at the chunk's LAST day while the walk's chunk filter asked its first, so a chunk spanning a withdrawal (BANKNIFTY weeklies, 2024-11-14) was refused whole and its earlier weeklies were lost on every rerun. `rolling_preflight` asks the first day; a withdrawal is one way, so a cadence listed then has that day's contract, and a run whose own contract cannot be named is still refused per run by `rolling_key`. ZX-08.
+- P5-05. `repeated_form_key` reserved one set entry per `&` before reading a key, so a 27 MB body of bare `&` allocated about 570 MB. `form_key_verdict` reserves `MAX_DISTINCT_FORM_KEYS` (256) once, skips empty pairs, and refuses a body naming more distinct single-valued keys than that by name. docs/06 no longer says the read bound is 8 KiB everywhere. ZX-09.
+- P5-06. The duplicate check was skipped for any body whose `Content-Type` contained `json` or that began with `{`/`[`, but form routes read their body with `param` whatever it is called, so `action=stop&action=start` sent as JSON read as `stop`. The exemption is now by route: `/backtest/run`, `/backtest/descend` and `/engine/command` decode strict JSON and refuse duplicates themselves; every other route is checked. ZX-10.
+- P5-07. `blocking_landing_work_leaves_the_runtime_answering` asserted under 300 ms after a 20 ms sleep and `a_dropped_pull_route_does_not_cancel_the_pull` raced a 200 ms sleep against a 20 ms timeout. The first is now ordered by a channel the landing waits on, the second by a gate the test opens after the drop; the remaining 10 s bound is only the signal for a real deadlock. ZX-11.
+
+### D-2665 — `forward`'s two invariant rows say what is built and what is bounded — 2026-10-04
+
+- P5-03. The `forward` row said no power-of-two table is built (D-1170), and its test passed by grepping two spellings of the old per-bar table; D-1572's `BlockExtremes` IS a doubling table, over 64-bar blocks. The row now says no PER-BAR table is built and names the block table, and `runner::outcome::window_tests::forward_builds_no_per_bar_power_of_two_table` measures it: one pair per block, every level together at most one pair per bar, one pass over the bars, at seven sizes from 1 to 100,003 bars. Four doc comments cited the test module as `runner::window_tests`; they now name `runner::outcome::window_tests`.
+- P5-04. AFF-43 said at most `3n + 130` bars per query; its test asserts `3n + 130·q` in total for `q` queries, which is also what docs/06 states. The row now says the total.
+
+### D-2666 — Regime refusals name a day that answers; the engine's cost text and k=1 reservation match the code — 2026-10-04
+
+- p6num-1. `stt_options_rate` documented entry-day regime selection that D-1535 removed; it now says the rate is the one in force on the day asked, and `trip::price` charges the tax at the sell leg's day. K-43 says either leg's day refuses, and states that the shipped tables only let the entry day land in an unverified window.
+- p6num-2. `RegimeTable::rate_on` and `refusal_windows` named the next row's start as `verified_from` whatever that row held; with two unverified rows abutting (a shape the type permits) that day refuses again. Both now name the first later VERIFIED row, the condition `dated.rs` already carries. ZX-12.
+- p7num-1. The "NOT `mut`, AND THAT IS THE PROOF" comment described a removed binding and sat above the mutable `pruned`; it is removed, and the literal `duplicates: 0` in `joined_frontier` says why it is zero.
+- p7num-2. `Ladder::walk`'s cost section still charged a per-candidate `HashSet` probe at k>=2 and `k` subset probes; it now states k=1's one insert, no dedup probe at k>=2, `k − 2` subset probes and the `Σ |B|²/2` join, as docs/06 does.
+- p7num-3. k=1 reserved its survivor vector from the caller's list length; it is now capped at `vocab::table::COUNT`, because survivors are distinct positions. ZX-13.
+
+### D-2667 — Range identity names its span; batch's identity comment, two vacuous tests and the invariant-id gates corrected — 2026-10-04
+
+- conc7-1. A span widened by a month holding nothing loads the same bars, so its digest, policy and `RunId` matched the narrower span's; the `Record` carries `from`, `to` and `months_asked` and `same_run_answer` compares them, so the second, identical computation was refused with a message saying its deterministic fields differ, and the asked span had no row. `span_policy` appends the requested `from` and `to` to the twenty policy terms for `audit-range`, `descend` and the audited range command; single-month runs keep twenty terms and their identities. Range identities recorded before this re-key, which is the honest consequence the `policy_of` contract states for an appended term. ZX-14.
+- conc7-2. `batch` said its identity equals `sweep-stored`'s for one month; it never does (anchored digest and bare `Params::of` against the execution-bound digest and `stored_month_params`). Both comments now say the two verbs key different computations and record one month as two rows. No identity changed.
+- P6-04. Gates 27 and 10b read ids with a two- or three-digit tail, so 49 ids (`S-30-session`, `RUST-UC7-a`, `AF-1203-a`, `CU-SV4-CLOSE-D0961` and others) were invisible to uniqueness. Both now read any hyphenated upper-case id (1,792 rows, header words excluded) and 10b refuses a zero match. Checked by injecting a duplicate `S-30-session` row: both gates refused it.
+- P7-01. `a_refused_page_writes_its_reason_to_the_log` returned without asserting when `telemetry::install` failed, which in its own binary only happens when telemetry or the temp directory is broken; it now expects the install, as store's sibling does.
+- P7-02. `the_surviving_set_strictly_shrinks_every_round_that_rejects` returned on an empty rejection set and asserted a per-round count that cannot fail, because a round number exists only after a non-empty round. It now requires a rejection for its fixture, each strategy at most once, and rounds in order without a gap; its doc says termination is structural.

@@ -8548,7 +8548,7 @@ where
             Err(why) => why,
         };
 
-        if why.status.is_some_and(|code| (500..=599).contains(&code)) {
+        if why.status.is_some_and(|code| matches!(code, 500..=599)) {
             server_errors = server_errors.saturating_add(1);
         }
         // THE SAME MARKER THE BARS PATH READS. Dhan spells a dead session in the
@@ -9762,7 +9762,7 @@ async fn with_retry(
                     return Err(text);
                 }
                 let invalid_auth = text.contains("Invalid_Authentication");
-                if status.is_some_and(|code| (500..=599).contains(&code)) {
+                if status.is_some_and(|code| matches!(code, 500..=599)) {
                     server_errors = server_errors.saturating_add(1);
                 }
                 match step(status, invalid_auth, named, attempt, server_errors) {
@@ -9900,7 +9900,7 @@ async fn with_retry(
 /// any other answered status, and that is the only set `with_retry` may record
 /// (D-0322, CE-30, D-1769).
 fn transport_missed_throttle(status: Option<u16>) -> bool {
-    status.is_some_and(|code| code != 429 && !(200..=299).contains(&code))
+    status.is_some_and(|code| code != 429 && !matches!(code, 200..=299))
 }
 
 #[cfg(test)]
@@ -12758,29 +12758,9 @@ async fn roll_one(
     last_settled: Day,
 ) -> Result<Rolled, String> {
     let label = format!("{word} {flag}/{code} {strike} {option_type}");
-    // THE EXPIRY THE ANSWER WILL NOT CARRY, established BEFORE the request.
-    //
-    // Asked first on purpose: if this underlying has no regime for that cadence
-    // the contract cannot be filed whatever comes back, and finding that out
-    // after the round-trip spends a request to learn something the calendar
-    // already knew.
-    // DERIVED FROM THIS CHUNK'S END, not the operator's. A rolling series is
-    // ATM-relative and its underlying contract changes every week, so resolving
-    // a 230-day ask to ONE expiry would file eight months of bars under a
-    // single contract. The chunk's own end names the contract its own bars
-    // belong to.
-    // A PRE-FLIGHT CHECK, AND ITS VALUE IS DELIBERATELY DISCARDED.
-    //
-    // Asked before the socket opens: if this underlying has no expiry regime
-    // for that cadence, not one bar can be filed whatever comes back, and
-    // learning it after the round-trip spends a request on something the
-    // calendar already knew.
-    //
-    // The ANSWER is not kept, because one expiry cannot name a rolling answer —
-    // see the split below. This asks whether the regime exists, not what it
-    // resolves to.
-    pull::rolling::expiry_of(asked.underlying.as_str(), &rolling, flag, code, window.to())
-        .map_err(|why| format!("{label}: {why}"))?;
+    // A PRE-FLIGHT CHECK on the chunk's first day, before the socket opens; see
+    // `rolling_preflight` for what it asks and why on that day.
+    rolling_preflight(asked, &rolling, flag, window, &label)?;
 
     // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S — and this sent the
     // store's.
@@ -12884,7 +12864,17 @@ async fn roll_one(
                 // The reply was decoded even when a contract cannot be named.
                 // Keep its read count and any earlier acknowledged groups.
                 note_run_failure(&mut failed, &mut why_not, why);
-                break;
+                // SKIP THE UNNAMED RUN, NOT THE REST OF THE ANSWER. A holiday
+                // week's contract is refused by name (CE-14) and counted once
+                // above; the contracts after it in the same chunk are real and
+                // were dropped by the `break` this replaced (CE-43, D-2650).
+                // Each row's key is computed a bounded number of times (at
+                // most three), so the loop stays O(rows).
+                at = at.saturating_add(1);
+                while rows.get(at).is_some_and(|row| key_at(row).is_err()) {
+                    at = at.saturating_add(1);
+                }
+                continue;
             }
         };
 
@@ -13376,8 +13366,12 @@ where
             .ok_or_else(|| format!("{label}: row vanished"))?,
     )?;
     let mut end = at.saturating_add(1);
+    // A LATER ROW THAT CANNOT BE NAMED ENDS THE GROUP; IT DOES NOT TAKE THE
+    // GROUP WITH IT. The rows before it named one contract and are filed; the
+    // unnamed row is the next call's first row, where its refusal is counted.
+    // Propagating it here discarded every good row ahead of it (CE-43, D-2650).
     while let Some(row) = rows.get(end) {
-        if key_at(row)? != key {
+        if key_at(row).ok() != Some(key) {
             break;
         }
         end = end.saturating_add(1);
@@ -14443,6 +14437,45 @@ fn cadence_has_contracts(
     cadence_has_contracts_on(asked, rolling, flag, asked.window.from())
 }
 
+/// Whether a rolling chunk can carry any contract, asked before its request.
+///
+/// Asked before the socket opens: if this underlying has no expiry regime for
+/// that cadence, not one bar can be filed whatever comes back, and learning it
+/// after the round-trip spends a request on something the calendar already
+/// knew. It asks whether the regime exists, not what it resolves to, so it asks
+/// `listing_of`, which cannot refuse a cadence for one closed-day contract the
+/// way `expiry_of` rightly refuses that contract; that refusal is counted per
+/// run inside `roll_one` (CE-43, D-2650).
+///
+/// ASKED OF THE CHUNK'S FIRST DAY, the day the walk's own chunk filter asks
+/// (`cadence_has_contracts_on(.., chunk.from())`). It was asked of the last
+/// day, so a chunk spanning a withdrawal (BANKNIFTY weeklies from 2024-11-14)
+/// was refused whole and its good weeklies before the withdrawal were lost on
+/// every rerun under the end-week reason (CE-54, D-2659). A withdrawal is one
+/// way, so a cadence listed on the first day has at least that day's contract;
+/// a run whose own contract cannot be named is refused per run by `rolling_key`.
+///
+/// # Cost
+///
+/// The bounded dated-table lookups `cadence_has_contracts_on` states, once per
+/// chunk and before any request.
+fn rolling_preflight(
+    asked: &ingest::FnoRequest,
+    rolling: &pull::vendor::RollingSpec,
+    flag: &str,
+    window: pull::session::Window,
+    label: &str,
+) -> Result<(), String> {
+    match pull::rolling::listing_of(asked.underlying.as_str(), rolling, flag, window.from()) {
+        Ok(pull::rolling::Listing::Listed) => Ok(()),
+        Ok(pull::rolling::Listing::Withdrawn) => Err(format!(
+            "{label}: this cadence was withdrawn for the underlying by the chunk's first \
+             day, so no contract existed"
+        )),
+        Err(why) => Err(format!("{label}: {why}")),
+    }
+}
+
 /// The same question asked of ONE DAY, which is the granularity the rule needs.
 ///
 /// # Why the window is not fine enough
@@ -14469,9 +14502,16 @@ fn cadence_has_contracts_on(
     flag: &str,
     on: pull::session::Day,
 ) -> bool {
-    rolling.expiry_codes.first().is_some_and(|code| {
-        pull::rolling::expiry_of(asked.underlying.as_str(), rolling, flag, code, on).is_ok()
-    })
+    // ONLY A WITHDRAWN CADENCE IS SKIPPED. This was `expiry_of(..).is_ok()`,
+    // and after CE-14 `expiry_of` also refuses one contract whose computed
+    // expiry is a closed day — so a holiday week dropped the whole cadence (at
+    // the window's first day) or the whole chunk, uncounted, with `planned`
+    // shrunk to match. Any other refusal is ASKED, so `roll_one` refuses it by
+    // name and the walk counts it (CE-43, D-2650).
+    !matches!(
+        pull::rolling::listing_of(asked.underlying.as_str(), rolling, flag, on),
+        Ok(pull::rolling::Listing::Withdrawn)
+    )
 }
 
 /// How many vendor requests this walk will make, before it makes any of them.
@@ -16336,20 +16376,61 @@ fn request_bounds_refusal(
 /// `member` is the ticked instruments of a pull; `leg` is one leg of a press.
 const MULTI_VALUED_FORM_FIELDS: [&str; 2] = ["member", "leg"];
 
-/// The first form-body key that appears twice and is not a list field, or
-/// `None`. The query rule ([`repeated_query_key`]) for the body.
-fn repeated_form_key(body: &str) -> Option<&str> {
-    let mut seen = std::collections::HashSet::with_capacity(
-        body.bytes()
-            .filter(|b| *b == b'&')
-            .count()
-            .saturating_add(1),
-    );
-    body.split('&')
+/// The most distinct single-valued keys one form body may name.
+///
+/// No form this server reads has more than a few dozen fields; every list a
+/// form carries is a [`MULTI_VALUED_FORM_FIELDS`] key and is not counted. The
+/// bound is what keeps the duplicate check's memory independent of the body:
+/// the set was reserved at one entry per `&` before a key was read, so a
+/// 27 MB body of bare `&` allocated about 570 MB (P5-05, D-2659).
+const MAX_DISTINCT_FORM_KEYS: usize = 256;
+
+/// What [`form_key_verdict`] found wrong with a form body.
+#[derive(Debug, PartialEq, Eq)]
+enum FormKeys<'a> {
+    /// This key appears twice and is not a list field.
+    Repeated(&'a str),
+    /// More than [`MAX_DISTINCT_FORM_KEYS`] distinct single-valued keys.
+    TooMany,
+}
+
+/// The first thing wrong with a form body's keys, or `None`. The query rule
+/// ([`repeated_query_key`]) for the body, with a bound on distinct keys.
+///
+/// Memory is at most [`MAX_DISTINCT_FORM_KEYS`] set entries, reserved once,
+/// whatever the body holds; empty pairs (`&&`) are skipped without a probe.
+/// Proven by `api::server::tests::a_form_body_past_the_distinct_key_bound_is_refused`.
+fn form_key_verdict(body: &str) -> Option<FormKeys<'_>> {
+    let mut seen = std::collections::HashSet::with_capacity(MAX_DISTINCT_FORM_KEYS);
+    for key in body
+        .split('&')
         .filter(|pair| !pair.is_empty())
         .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
         .filter(|key| !MULTI_VALUED_FORM_FIELDS.contains(key))
-        .find(|key| !seen.insert(*key))
+    {
+        if seen.contains(key) {
+            return Some(FormKeys::Repeated(key));
+        }
+        if seen.len() == MAX_DISTINCT_FORM_KEYS {
+            return Some(FormKeys::TooMany);
+        }
+        seen.insert(key);
+    }
+    None
+}
+
+/// Whether a route reads its body as strict JSON rather than as a form.
+///
+/// These three decode with `sweeprun::wire_body`, which refuses a duplicate
+/// key itself; every other route reads its body with [`param`], whatever the
+/// client's `Content-Type` says. The exemption was decided by that header or a
+/// leading `{`, so `action=stop&action=start` sent as JSON reached a form
+/// reader unchecked and read as `stop` (P5-06, D-2659).
+fn reads_json_body(path: &str) -> bool {
+    matches!(
+        path,
+        "/backtest/run" | "/backtest/descend" | "/engine/command"
+    )
 }
 
 /// The body bound [`one_value_per_form_field`] reads within, by route.
@@ -16384,7 +16465,9 @@ fn form_read_bound(path: &str) -> usize {
 /// one, was never read, on the very routes that spend vendor quota. The body is
 /// read here once, within [`MAX_FORM_BYTES`] (the bound `DefaultBodyLimit`
 /// already gave every handler, answered with the same `413` past it), checked,
-/// and handed on unchanged. A JSON body is not a form and is passed through.
+/// and handed on unchanged. A body on one of the three strict-JSON routes
+/// ([`reads_json_body`]) is not a form and is passed through; any other route's
+/// body is checked whatever its `Content-Type` (P5-06, D-2659).
 ///
 /// O(body) once per request, bounded by [`form_read_bound`].
 async fn one_value_per_form_field(
@@ -16414,29 +16497,31 @@ async fn one_value_per_form_field(
         )
             .into_response();
     };
-    let json = parts
-        .headers
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.to_ascii_lowercase().contains("json"))
-        || matches!(bytes.trim_ascii_start().first(), Some(b'{' | b'['));
-    if !json
+    if !reads_json_body(parts.uri.path())
         && let Ok(text) = std::str::from_utf8(&bytes)
-        && let Some(key) = repeated_form_key(text)
+        && let Some(wrong) = form_key_verdict(text)
     {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            format!(
+        let why = match wrong {
+            FormKeys::Repeated(key) => format!(
                 "REFUSED — the form names {:?} more than once. Every field this \
                  server reads from a form is read once, so a second value would \
                  be silently ignored; send each field once. Nothing was read or \
                  run.\n",
                 note_alphabet(key)
             ),
+            FormKeys::TooMany => format!(
+                "REFUSED — the form names more than {MAX_DISTINCT_FORM_KEYS} \
+                 distinct fields, and no form this server reads has that many. \
+                 Nothing was read or run.\n"
+            ),
+        };
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            why,
         )
             .into_response();
     }
@@ -19538,6 +19623,103 @@ mod tests {
             "weeklies existed before 2024-11-13, so this is a dated table and \
              not a constant that always refuses WEEK"
         );
+    }
+
+    /// CE-43, D-2650: A HOLIDAY-WEEK CONTRACT DOES NOT REMOVE ITS CADENCE.
+    ///
+    /// NIFTY's weekly computed from 2024-08-14 lands on 2024-08-15, a closed
+    /// day, so `expiry_of` refuses that ONE contract (CE-14). The cadence
+    /// filter read that refusal as "no weekly contracts" and dropped WEEK for
+    /// the whole window, and every chunk opening in a holiday week, uncounted.
+    /// Both the window-level and the per-chunk question must now say "asked".
+    #[test]
+    fn a_holiday_week_contract_does_not_remove_its_cadence_from_the_walk() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        let asked = ingest::parse_fno(
+            "underlying=NIFTY&series=opt&vendor=dhan&from=2024-08-14&to=2024-09-13",
+            today,
+        )
+        .expect("a NIFTY expired-option window is readable");
+        let on = asked.window.from();
+        assert!(
+            pull::rolling::expiry_of("NIFTY", &dhan_rolling(), "WEEK", "1", on).is_err(),
+            "the premise: the near weekly computed from 2024-08-14 is refused"
+        );
+        assert!(
+            cadence_has_contracts(&asked, &dhan_rolling(), "WEEK"),
+            "a refused contract is not a withdrawn cadence: WEEK must be asked"
+        );
+        assert!(cadence_has_contracts_on(
+            &asked,
+            &dhan_rolling(),
+            "WEEK",
+            on
+        ));
+        let ram_navami_month = pull::session::Day::new(2023, 3, 29).expect("a real date");
+        assert!(
+            cadence_has_contracts_on(&asked, &dhan_rolling(), "MONTH", ram_navami_month),
+            "the monthly computed from 2023-03-29 is a closed day; MONTH is still asked"
+        );
+    }
+
+    /// CE-54, D-2659: a chunk that spans a cadence's withdrawal is asked, because
+    /// its first day still has contracts; a chunk wholly after it is refused.
+    #[test]
+    fn a_chunk_spanning_a_withdrawal_is_asked_for_the_weeks_before_it() {
+        let today = pull::session::Day::new(2026, 8, 20).expect("a real date");
+        let asked = ingest::parse_fno(
+            "underlying=BANKNIFTY&series=opt&vendor=dhan&from=2024-11-01&to=2024-11-30",
+            today,
+        )
+        .expect("a BANKNIFTY expired-option window is readable");
+        let day = |d: u8| pull::session::Day::new(2024, 11, d).expect("a real date");
+        assert_eq!(
+            pull::rolling::listing_of("BANKNIFTY", &dhan_rolling(), "WEEK", day(30)),
+            Ok(pull::rolling::Listing::Withdrawn),
+            "the premise: BANKNIFTY weeklies are withdrawn by the chunk's last day"
+        );
+        let spanning = pull::session::Window::new(day(1), day(30)).expect("a window");
+        assert_eq!(
+            rolling_preflight(&asked, &dhan_rolling(), "WEEK", spanning, "w"),
+            Ok(())
+        );
+        let after = pull::session::Window::new(day(20), day(30)).expect("a window");
+        let why = rolling_preflight(&asked, &dhan_rolling(), "WEEK", after, "w")
+            .expect_err("a chunk wholly after the withdrawal has no contract");
+        assert!(why.contains("withdrawn"), "{why}");
+        let monthly = rolling_preflight(&asked, &dhan_rolling(), "MONTH", after, "m");
+        assert_eq!(monthly, Ok(()), "the monthly is never withdrawn");
+    }
+
+    /// CE-43, D-2650: one row that cannot be named ends its group; it does not
+    /// discard the good rows before it, and the rows after it start a new group.
+    #[test]
+    fn an_unnamed_row_ends_its_group_without_discarding_the_rows_before_it() {
+        let row = |ts_micros: i64| pull::rolling::Row {
+            bar: store::format::Bar {
+                ts_micros,
+                ..store::format::Bar::default()
+            },
+            overlay: store::format::Overlay {
+                ts_micros,
+                spot: store::format::OI_NULL,
+                iv_micros: store::format::OI_NULL,
+            },
+            strike: Some(100),
+        };
+        let rows = [row(1), row(2), row(3), row(4)];
+        let day = Day::new(2024, 8, 22).expect("a real date");
+        // Row 3 is the holiday-week bar: its contract cannot be named.
+        let key_at = |r: &pull::rolling::Row| {
+            if r.bar.ts_micros == 3 {
+                Err("closed-day expiry".to_owned())
+            } else {
+                Ok((day, 100))
+            }
+        };
+        assert_eq!(next_group(&rows, 0, "t", key_at), Ok((2, (day, 100))));
+        assert!(next_group(&rows, 2, "t", key_at).is_err());
+        assert_eq!(next_group(&rows, 3, "t", key_at), Ok((4, (day, 100))));
     }
 
     /// AN UNREADABLE CENSUS REFUSES RATHER THAN GUESSING EITHER WAY.
@@ -23991,14 +24173,84 @@ mod tests {
         })
         .await;
         assert_eq!(
-            repeated_form_key("a=1&b=2&member=x&member=y&leg=1&leg=2"),
+            form_key_verdict("a=1&b=2&member=x&member=y&leg=1&leg=2"),
             None
         );
-        assert_eq!(repeated_form_key("a=1&&b=2&a"), Some("a"));
         assert_eq!(
-            repeated_form_key("action=stop&action=start"),
-            Some("action")
+            form_key_verdict("a=1&&b=2&a"),
+            Some(FormKeys::Repeated("a"))
         );
+        assert_eq!(
+            form_key_verdict("action=stop&action=start"),
+            Some(FormKeys::Repeated("action"))
+        );
+    }
+
+    /// P5-05, D-2659: the duplicate check's set is bounded by a constant, not by
+    /// the body. A body of bare separators names no key and is passed; a body
+    /// naming one more distinct key than the bound is refused by name.
+    #[test]
+    fn a_form_body_past_the_distinct_key_bound_is_refused() {
+        assert_eq!(form_key_verdict(&"&".repeat(1 << 20)), None);
+        let keys = |n: usize| {
+            (0..n)
+                .map(|i| format!("k{i}=1"))
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        assert_eq!(form_key_verdict(&keys(MAX_DISTINCT_FORM_KEYS)), None);
+        assert_eq!(
+            form_key_verdict(&keys(MAX_DISTINCT_FORM_KEYS + 1)),
+            Some(FormKeys::TooMany)
+        );
+        let lists = format!("{}&a=1", "member=x&leg=1&".repeat(4096));
+        assert_eq!(
+            form_key_verdict(&lists),
+            None,
+            "list fields are not counted"
+        );
+    }
+
+    /// P5-06, D-2659: a form route checks its body whatever the client calls
+    /// it. The exemption followed `Content-Type` and a leading `{`, so a form
+    /// sent as JSON reached [`param`] unchecked; only the three strict-JSON
+    /// routes are exempt now, and each refuses a duplicate key itself.
+    #[tokio::test]
+    async fn a_form_sent_as_json_to_a_form_route_is_still_checked() {
+        assert!(reads_json_body("/engine/command"));
+        assert!(reads_json_body("/backtest/run"));
+        assert!(reads_json_body("/backtest/descend"));
+        assert!(!reads_json_body("/pull/spot"));
+        with_server("jsonform", |addr| async move {
+            for form in [
+                "target=swept&vendor=dhan&vendor=groww&from=2024-01-01&to=2024-01-31",
+                "{&target=swept&vendor=dhan&vendor=groww&from=2024-01-01&to=2024-01-31",
+            ] {
+                let host = format!("localhost:{}", addr.port());
+                let request = format!(
+                    "POST /pull/spot HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\n\
+                     Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
+                    form.len()
+                );
+                let said = tokio::task::spawn_blocking(move || {
+                    use std::io::Read as _;
+                    let mut s = std::net::TcpStream::connect(addr).expect("connect");
+                    s.write_all(request.as_bytes()).expect("write");
+                    let mut buf = String::new();
+                    s.read_to_string(&mut buf).expect("read");
+                    buf
+                })
+                .await
+                .expect("the client thread must not panic");
+                assert!(said.starts_with("HTTP/1.1 400"), "{form}: {said}");
+                assert!(
+                    said.contains("the form names \"vendor\" more than once"),
+                    "{form}: {said}"
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -28193,9 +28445,15 @@ mod tests {
     /// `autopilot`'s tests, which drive `take_seat` and `take_every_seat`
     /// against each other directly.
     /// audit-20261003 o1surface2-3, D-1589: A LANDING DOES NOT HOLD THE ONLY
-    /// WORKER. On a one-worker multi-thread runtime, a task doing 400 ms of
-    /// blocking store work through `off_the_workers` leaves another task free
-    /// to run; inline, that task would wait the full 400 ms.
+    /// WORKER. On a one-worker multi-thread runtime, a task blocked inside
+    /// `off_the_workers` leaves another task free to run; inline, that task
+    /// would wait for the landing.
+    ///
+    /// Ordered by a channel, not timed (P5-07, D-2659): the landing blocks
+    /// until the other task has run, so the test passes only if that task ran
+    /// while the landing held its thread. A wall-clock bound of 300 ms after a
+    /// 20 ms sleep failed on a loaded host with nothing wrong; the 10 s here is
+    /// only the failure signal for a real deadlock.
     #[test]
     fn blocking_landing_work_leaves_the_runtime_answering() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -28204,20 +28462,20 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let began = std::time::Instant::now();
-            let landing = tokio::spawn(async {
-                off_the_workers(|| std::thread::sleep(std::time::Duration::from_millis(400)));
+            let (ran, wait) = std::sync::mpsc::channel::<()>();
+            let landing = tokio::spawn(async move {
+                off_the_workers(move || wait.recv_timeout(std::time::Duration::from_secs(30)))
             });
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let answered = tokio::spawn(async { std::time::Instant::now() })
-                .await
-                .unwrap();
+            let answered = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::spawn(async move { ran.send(()) }),
+            )
+            .await;
             assert!(
-                answered.duration_since(began) < std::time::Duration::from_millis(300),
-                "another task waited {:?} behind a landing",
-                answered.duration_since(began)
+                matches!(answered, Ok(Ok(Ok(())))),
+                "another task could not run while a landing held its thread: {answered:?}"
             );
-            landing.await.unwrap();
+            assert_eq!(landing.await.unwrap(), Ok(()));
         });
         // And both landing calls in `land_spot` go through it.
         let source = include_str!("server.rs");
@@ -28236,18 +28494,23 @@ mod tests {
     async fn a_dropped_pull_route_does_not_cancel_the_pull() {
         let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&finished);
+        // GATED, NOT TIMED (P5-07, D-2659). The pull cannot finish until the
+        // route has been dropped, so the drop always lands mid-pull; a 200 ms
+        // sleep raced a 20 ms timeout and a loaded host could lose that race.
+        let (release, gate) = tokio::sync::oneshot::channel::<()>();
         let route = detached_pull("Spot pull", async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            gate.await.expect("the test releases the pull");
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
             (axum::http::StatusCode::OK, String::from("done"))
         });
-        // The client goes away 20 ms in: the route's future is dropped.
+        // The client goes away mid-pull: the route's future is dropped.
         let cut = tokio::time::timeout(std::time::Duration::from_millis(20), route).await;
         assert!(
             cut.is_err(),
             "the route had not finished when it was dropped"
         );
         assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+        release.send(()).expect("the pull still holds its gate");
         let until = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while !finished.load(std::sync::atomic::Ordering::SeqCst) {
             assert!(

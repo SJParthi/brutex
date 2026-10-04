@@ -212,8 +212,10 @@ fn run(
         direction: Direction::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&crate::policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&crate::span_policy(
+            crate::policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            request.from,
+            request.to,
         )),
         data_digest: digest,
         commit,

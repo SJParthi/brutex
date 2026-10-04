@@ -178,9 +178,15 @@ impl RegimeTable {
                 selected = row;
                 // A later row has displaced the one whose successor this was.
                 verified_from = None;
-            } else if verified_from.is_none() {
-                // Rows ascend, so the first row that has not started yet is
-                // the successor of whichever row is in force.
+            } else if verified_from.is_none() && matches!(row.rate, Rate::Verified(_)) {
+                // Rows ascend, so this is the first row that has not started
+                // yet AND carries a rate: the day a refusal names must be a
+                // day that answers. Naming the next row whatever it held sent
+                // a caller to a day that refuses again once two unverified rows
+                // abut, the shape `is_shipping_shape` permits. The same
+                // condition `dated::DatedTable::value_on` carries (p6num-2,
+                // D-2666), proved by
+                // `costs::regime::tests::the_day_a_regime_refusal_names_is_a_day_that_answers`.
                 verified_from = Some(row.start);
             }
         }
@@ -210,13 +216,16 @@ impl RegimeTable {
     /// from the table it claims to describe.
     fn refusal_windows(&self) -> [Option<RefusalWindow>; MAX_REGIME_ROWS] {
         let mut windows = [None; MAX_REGIME_ROWS];
-        let successors = self
-            .rows()
-            .skip(1)
-            .map(|row| Some(row.start))
-            .chain(std::iter::once(None));
-        for (slot, (row, verified_from)) in windows.iter_mut().zip(self.rows().zip(successors)) {
+        for (at, (slot, row)) in windows.iter_mut().zip(self.rows()).enumerate() {
             if row.rate == Rate::Unverified {
+                // The first LATER row that carries a rate closes the window,
+                // not merely the next row (p6num-2, D-2666). At most
+                // `MAX_REGIME_ROWS` rows, a compile-time bound.
+                let verified_from = self
+                    .rows()
+                    .skip(at.saturating_add(1))
+                    .find(|later| matches!(later.rate, Rate::Verified(_)))
+                    .map(|later| later.start);
                 *slot = Some(RefusalWindow {
                     start: row.start,
                     verified_from,
@@ -472,9 +481,11 @@ const _: () = assert!(BSE_EXCHANGE_CHARGE.get() == 3_250);
 
 /// The STT rate on options sell-side premium in force on `day`.
 ///
-/// The regime is selected by the trade's **entry** date, per the source's
-/// `DEC-COST-002`. A boundary date is inclusive: 2024-10-01 is the first day
-/// of the 0.10% regime, not the last day of the 0.0625% one.
+/// The rate in force on `day`, whichever day the caller asks about:
+/// `trip::price` passes each leg its own day and charges this tax at the SELL
+/// leg's day (D-1535); keying it to the entry day is the under-charge D-1535
+/// removed (p6num-1, D-2666). A boundary date is inclusive: 2024-10-01 is the
+/// first day of the 0.10% regime, not the last day of the 0.0625% one.
 ///
 /// # Errors
 ///
@@ -591,6 +602,55 @@ mod tests {
         assert_eq!(APR_2026, day(2026, 4, 1));
         assert_ne!(OCT_2024, TradeDay::MIN);
         assert_ne!(APR_2026, TradeDay::MIN);
+    }
+
+    /// p6num-2, D-2666: with two unverified rows abutting, a refusal and its
+    /// window name the first day that ANSWERS, not the next row's start.
+    #[test]
+    fn the_day_a_regime_refusal_names_is_a_day_that_answers() {
+        let subject = RegimeTable {
+            charge: "a test charge",
+            exchange: None,
+            anchor: RegimeRow::unverified(TradeDay::MIN, "the first gap"),
+            later: [
+                Some(RegimeRow::unverified(day(2010, 1, 1), "a later gap")),
+                Some(RegimeRow::verified(
+                    day(2015, 1, 1),
+                    9,
+                    "the closing citation",
+                )),
+            ],
+        };
+        for asked in [
+            TradeDay::MIN,
+            day(2009, 12, 31),
+            day(2010, 1, 1),
+            day(2014, 12, 31),
+        ] {
+            let refusal = subject.rate_on(asked).expect_err("both rows refuse");
+            // Naming the next row's start would answer 2010-01-01 for the
+            // first two days here, and 2010-01-01 refuses.
+            assert_eq!(
+                refusal.verified_from(),
+                Some(day(2015, 1, 1)),
+                "asked {asked}"
+            );
+            let retry = refusal.verified_from().expect("a closed window");
+            assert_eq!(rate_of(subject.rate_on(retry)), 9, "asked {asked}");
+        }
+        let closes: Vec<_> = subject
+            .refusal_windows()
+            .iter()
+            .flatten()
+            .map(|window| (window.start(), window.verified_from()))
+            .collect();
+        assert_eq!(
+            closes,
+            vec![
+                (TradeDay::MIN, Some(day(2015, 1, 1))),
+                (day(2010, 1, 1), Some(day(2015, 1, 1))),
+            ]
+        );
     }
 
     #[test]

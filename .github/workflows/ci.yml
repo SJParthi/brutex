@@ -2020,8 +2020,15 @@ jobs:
           # Gate 10 could not see it: it walks rows -> tests and never asks
           # whether a row is uniquely named. See D-0329.
           f=docs/04-invariants.md
-          dups=$(grep -oE '^\| [A-Z]+-[0-9]+[a-z]? ' "$f" \
-                 | tr -d '| ' | sort | uniq -d || true)
+          # The same id shape gate 27 reads (D-2667, P6-04), and a zero-match
+          # guard: a pattern that stopped matching would pass every duplicate.
+          all=$(grep -oE '^\| *`?[A-Z][A-Z0-9]*(-[A-Za-z0-9]+)+`? *\|' "$f" \
+                | sed -E 's/^\| *`?//; s/`? *\|$//' || true)
+          if [ -z "$all" ]; then
+            echo "GATE 10B FOUND NO INVARIANT IDS in $f. A silent zero is not a pass."
+            exit 1
+          fi
+          dups=$(printf '%s\n' "$all" | sort | uniq -d || true)
           if [ -n "$dups" ]; then
             printf 'INVARIANT IDENTIFIER DEFINED MORE THAN ONCE:\n%s\n' "$dups"
             echo
@@ -4518,7 +4525,13 @@ jobs:
           # D-1608: a digit may follow the first letter (`FV4-01`); 179 rows
           # were invisible to uniqueness until it could.
           f=docs/04-invariants.md
-          ids=$(grep -oE '^\| *`?[A-Z][A-Z0-9-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
+          # WIDENED BY D-2667 (P6-04). The old pattern required a two- or
+          # three-digit tail, so 49 ids with a letter suffix after a hyphen or
+          # a longer tail (`S-30-session`, `RUST-UC7-a`, `AF-1203-a`,
+          # `CU-SV4-CLOSE-D0961`) were invisible to uniqueness, the blind spot
+          # D-1608 closed once for 179 others. Any hyphenated upper-case id now
+          # counts; header words (`ID`, `Invariant`, `Point`) have no hyphen.
+          ids=$(grep -oE '^\| *`?[A-Z][A-Z0-9]*(-[A-Za-z0-9]+)+`? *\|' "$f" \
                 | sed -E 's/^\| *`?//; s/`? *\|$//')
           n=$( { printf '%s\n' "$ids" | grep -c . || true; } )
           # A pattern that stops matching is the failure mode gate 8 shipped
@@ -5552,7 +5565,6 @@ jobs:
           crates/api/src/pullrun.rs 1
           crates/api/src/server.rs 9
           crates/api/src/store_wire.rs 1
-          crates/api/src/sweeprun.rs 1
           crates/cli/src/boolean_campaign_codec.rs 2
           crates/cli/src/boolean_qualification_reader.rs 1
           crates/cli/src/boolean_rung_scope.rs 1
@@ -5599,7 +5611,7 @@ jobs:
           crates/api/src/coverage.rs 1
           crates/api/src/credential_law.rs 1
           crates/api/src/merge.rs 2
-          crates/api/src/server.rs 4
+          crates/api/src/server.rs 2
           crates/api/src/sweeprun.rs 5
           crates/cli/src/batch.rs 1
           crates/cli/src/candidate_universe.rs 1

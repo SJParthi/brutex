@@ -3089,19 +3089,44 @@ pub fn install_log() -> String {
                 BRUTEX_STORE or HOME so the log can sit beside the store."
             .to_owned();
     };
-    let shown = dir.display().to_string();
+    let shown = log_banner(&dir, store_root().ok().as_deref());
     match telemetry::install(&telemetry::Config::new(dir)) {
         Err(why) => format!("events are NOT being recorded: {why}"),
         // THE DIRECTORY, NOT A TICK. "recorded successfully" would leave the
         // operator exactly where the measurement above found them: told it
         // worked, and unable to find the file.
-        Ok(_installed) => format!(
+        Ok(_installed) => shown,
+    }
+}
+
+/// The line `install_log` prints once the sink is installed at `dir`.
+///
+/// The /logs page reads the cli half at `<store>/logs/cli` and nowhere else
+/// (`api::logs::cli_half`). So the promise that these events appear there is
+/// made only when `dir` IS that directory; a `BRUTEX_LOG_DIR` elsewhere is told
+/// plainly that /logs will not show them, rather than promised a merge that
+/// never happens (CE-45, D-2652).
+fn log_banner(dir: &std::path::Path, store: Option<&std::path::Path>) -> String {
+    let shown = dir.display();
+    let page_reads = store.map(|s| s.join("logs").join("cli"));
+    if page_reads.as_deref() == Some(dir) {
+        return format!(
             "events -> {shown}\n  \
              The /logs page walks BOTH halves -- the server's directory and \
              this `cli/` beside it -- and merges them newest-first on the \
              clock, so these events appear there. D-0301."
-        ),
+        );
     }
+    let reads = page_reads.map_or_else(
+        || "no store root is set, so it has no cli half to read".to_owned(),
+        |p| format!("it reads the cli half only at {}", p.display()),
+    );
+    format!(
+        "events -> {shown}\n  \
+         The /logs page will NOT show these events: {reads}, and \
+         BRUTEX_LOG_DIR put them elsewhere. Read the file directly, or unset \
+         BRUTEX_LOG_DIR. D-2652."
+    )
 }
 
 /// One structural event about a run. **Never called per bar or per candidate.**
@@ -3195,6 +3220,41 @@ pub fn deliver(
         }
     );
     earned
+}
+
+/// The run context every live-progress event carries: feed, underlying, the
+/// asked span and an attempt token.
+///
+/// `web/src/lib/live-progress.ts` refuses the whole fold for any live event
+/// without an exact `attempt` field, and for a claimed one whose span differs
+/// from the active run's. The grid and validation events each wrote this block
+/// by hand: the progress line dropped the span and the attempt, and the other
+/// three took the attempt only from a browser-started run, so a terminal sweep's
+/// events carried none. The rung events already fell back to
+/// [`binding_attempt`]; this is that rule, written once (CE-49, D-2656).
+fn with_live_context<'a>(event: &mut telemetry::Event<'a>, recording: Option<Recording<'a>>) {
+    live_context_over(event, recording, binding_attempt());
+}
+
+/// [`with_live_context`] with the fallback attempt passed in, so the rule is
+/// provable without installing a process-wide sink.
+fn live_context_over<'a>(
+    event: &mut telemetry::Event<'a>,
+    recording: Option<Recording<'a>>,
+    fallback: Option<u64>,
+) {
+    if let Some(held) = recording {
+        *event = event
+            .with("feed", held.feed)
+            .with("underlying", held.underlying)
+            .with("from_year", u64::from(held.from.0))
+            .with("from_month", u64::from(held.from.1))
+            .with("to_year", u64::from(held.to.0))
+            .with("to_month", u64::from(held.to.1));
+    }
+    if let Some(attempt) = recording.and_then(|held| held.attempt).or(fallback) {
+        *event = event.with("attempt", attempt);
+    }
 }
 
 /// Emits one structural event under an exact browser-attempt key when one was
@@ -7137,8 +7197,10 @@ fn audit_range_kernel_cached(
         // Same `policy_of` and the same argument order as
         // `screen_range_inner`'s call, so the two paths key identically and a
         // knob added to one cannot be missed by the other.
-        params: Params::of(ladder).with_policy(&policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&span_policy(
+            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            from,
+            to,
         )),
         // ONE DATA TERM, BOTH SERIES THAT DECIDE THE ANSWER. On a coarse rung
         // `execution` names the separately loaded one-minute path used for every
@@ -10591,6 +10653,29 @@ fn validates(raw: Option<&str>) -> Option<bool> {
 /// separating them.
 const UNVALIDATED: &str = "!! NOT VALIDATED -- walk-forward, PBO and the bootstrap did NOT run.\n\
    These are CANDIDATES, not findings. Unset BRUTEX_VALIDATE to price them in full.";
+
+/// A range run's policy with the REQUESTED span appended.
+///
+/// `load_span` tolerates months that hold nothing, so widening a span by an
+/// empty month leaves the bars, the digest and [`policy_of`] unchanged, and the
+/// `RunId` with them. The `Record` carries `from`, `to` and `months_asked` and
+/// `same_run_answer` compares them, so the second, byte-identical computation
+/// found its identity taken by a different span and was refused as "its
+/// deterministic fields differ" -- and the asked span then had no row for
+/// `latest_for` to find (conc7-1, D-2667). The span is what the record is keyed
+/// by, so it is folded into the identity, after the twenty policy terms; a
+/// single-month run keeps the twenty and its identity is unchanged.
+fn span_policy(policy: [u64; 20], from: (u16, u8), to: (u16, u8)) -> [u64; 22] {
+    let month = |(year, month): (u16, u8)| u64::from(year) * 100 + u64::from(month);
+    let mut out = [0_u64; 22];
+    for (slot, term) in out
+        .iter_mut()
+        .zip(policy.into_iter().chain([month(from), month(to)]))
+    {
+        *slot = term;
+    }
+    out
+}
 
 /// Everything outside the `Ladder` that changes what this run records.
 ///
@@ -16395,8 +16480,10 @@ fn screen_range_kernel_cached(
         direction: RunDirection::Undirected,
         instrument: &span.key,
         timeframe: span.timeframe,
-        params: Params::of(ladder).with_policy(&policy_of(
-            &span.bars, rules, lens, validate, horizon, rungs,
+        params: Params::of(ladder).with_policy(&span_policy(
+            policy_of(&span.bars, rules, lens, validate, horizon, rungs),
+            from,
+            to,
         )),
         data_digest: stored_executed_digest(&span.bars, exact_minute, daily, execution_slice)?,
         commit,
@@ -17836,13 +17923,9 @@ fn record_run(
         |slot: Option<usize>| -> i16 { slot.and_then(|v| i16::try_from(v).ok()).unwrap_or(-1) };
     let record = results::Record {
         identity: id.bytes(),
-        // The wall clock, taken once, after the work. `SystemTime` can precede
-        // the epoch on a machine whose clock is set wrongly, and that is
-        // recorded as the negative it is rather than clamped: a row stamped
-        // before 1970 is a clock problem an operator should see.
-        finished_micros: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX)),
+        // The wall clock, taken once, after the work. See [`finished_micros_at`]:
+        // a clock before 1970 is REFUSED by name, never clamped to 0 (CE-50).
+        finished_micros: finished_micros_at(std::time::SystemTime::now())?,
         feed: results::field(into.feed),
         underlying: results::field(into.underlying),
         timeframe: results::field(into.timeframe),
@@ -17902,6 +17985,36 @@ fn record_run(
         ),
     };
     Ok((report, committed))
+}
+
+/// A ledger row's completion stamp, in microseconds since the epoch.
+///
+/// The comment this replaced said a clock before 1970 "is recorded as the
+/// negative it is rather than clamped", while the code clamped it to `0` with
+/// no word, and an overflow to `i64::MAX`. A negative stamp is not an option
+/// either: the browser refuses a negative `finished_micros`, so one such row
+/// would blank the ledger page. So the run is refused before it reaches the
+/// ledger, naming the clock as the cause — the operator fixes the clock and
+/// reruns, and the rerun is the same identity (CE-50, D-2655).
+///
+/// # Errors
+///
+/// A clock before the epoch, or one past what `i64` microseconds can hold.
+fn finished_micros_at(now: std::time::SystemTime) -> Result<i64, String> {
+    let since = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|before| {
+            format!(
+                "the system clock reads {:?} BEFORE 1970-01-01, so this run has no honest \
+             completion time and was not recorded; correct the clock and rerun",
+                before.duration()
+            )
+        })?;
+    i64::try_from(since.as_micros()).map_err(|_| {
+        "the system clock reads a time past what the ledger's microsecond stamp can \
+         hold, so this run was not recorded; correct the clock and rerun"
+            .to_owned()
+    })
 }
 
 /// The sentence [`record_run`] opens with when the row did not reach the ledger.
@@ -18753,18 +18866,7 @@ fn grid_entered_event(
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
         .with("cap", u64::try_from(cap).unwrap_or(u64::MAX))
         .with("validate", u64::from(validate));
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying)
-            .with("from_year", u64::from(held.from.0))
-            .with("from_month", u64::from(held.from.1))
-            .with("to_year", u64::from(held.to.0))
-            .with("to_month", u64::from(held.to.1));
-        if let Some(attempt) = held.attempt {
-            event = event.with("attempt", attempt);
-        }
-    }
+    with_live_context(&mut event, recording);
     event
 }
 
@@ -18870,17 +18972,30 @@ impl<'a> GridProgress<'a> {
 /// minutes, not one record — and that measurement says why this exists, not
 /// what it costs.
 fn note_grid_progress(recording: Option<Recording<'_>>, priced: usize, candidates: usize) {
+    note_attempt(
+        recording.and_then(|held| held.attempt),
+        &grid_progress_event(recording, priced, candidates),
+    );
+}
+
+/// The event [`note_grid_progress`] emits, split out so its shape is asserted
+/// beside every other live boundary's.
+fn grid_progress_event(
+    recording: Option<Recording<'_>>,
+    priced: usize,
+    candidates: usize,
+) -> telemetry::Event<'_> {
     let rung = recording.map_or("", |held| held.timeframe);
     let mut event = telemetry::Event::info("cli.audit", "exit grid progress")
         .with("rung", rung)
         .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX));
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying);
-    }
-    note_attempt(recording.and_then(|held| held.attempt), &event);
+    // THE SAME CONTEXT EVERY OTHER LIVE EVENT CARRIES. This sent only feed
+    // and underlying, never the span or an attempt, so `live-progress.ts`
+    // refused the WHOLE fold the moment pricing began, another run's
+    // progress line included (CE-49, D-2656).
+    with_live_context(&mut event, recording);
+    event
 }
 
 /// The other half of the bracket, and the count the live view cannot carry.
@@ -18903,18 +19018,7 @@ fn grid_finished_event(
         .with("priced", u64::try_from(priced).unwrap_or(u64::MAX))
         .with("candidates", u64::try_from(candidates).unwrap_or(u64::MAX))
         .with("grid_trades", u64::try_from(trades).unwrap_or(u64::MAX));
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying)
-            .with("from_year", u64::from(held.from.0))
-            .with("from_month", u64::from(held.from.1))
-            .with("to_year", u64::from(held.to.0))
-            .with("to_month", u64::from(held.to.1));
-        if let Some(attempt) = held.attempt {
-            event = event.with("attempt", attempt);
-        }
-    }
+    with_live_context(&mut event, recording);
     event
 }
 
@@ -18985,18 +19089,7 @@ fn validation_stage_event<'a>(
     let mut event = telemetry::Event::info("cli.audit", msg)
         .with("stage", stage)
         .with("rung", rung);
-    if let Some(held) = recording {
-        event = event
-            .with("feed", held.feed)
-            .with("underlying", held.underlying)
-            .with("from_year", u64::from(held.from.0))
-            .with("from_month", u64::from(held.from.1))
-            .with("to_year", u64::from(held.to.0))
-            .with("to_month", u64::from(held.to.1));
-        if let Some(attempt) = held.attempt {
-            event = event.with("attempt", attempt);
-        }
-    }
+    with_live_context(&mut event, recording);
     event
 }
 
@@ -21055,6 +21148,9 @@ mod tests {
             rung_finished_event(rung, true, ""),
             validation_stage_event(Some(recording), "bootstrap", true),
             validation_stage_event(Some(recording), "bootstrap", false),
+            // CE-49, D-2656: the progress line between them was missing here,
+            // and it carried neither the span nor an attempt.
+            crate::grid_progress_event(Some(recording), 5, 25),
         ];
 
         for event in &events {
@@ -21092,8 +21188,55 @@ mod tests {
                 .iter()
                 .map(|event| event.fields().len())
                 .collect::<Vec<_>>(),
-            vec![12, 12, 11, 12, 9, 9]
+            vec![12, 12, 11, 12, 9, 9, 10]
         );
+    }
+
+    /// CE-49, D-2656: a terminal sweep's grid and validation events carry the
+    /// sink's own run as their attempt, as the rung events always did, so the
+    /// live fold never meets a live event with no attempt field.
+    #[test]
+    fn a_live_event_without_a_browser_attempt_still_carries_one_when_a_sink_runs() {
+        let recording = Recording {
+            root: std::path::Path::new("."),
+            feed: "zerodha",
+            underlying: "NIFTY",
+            timeframe: "15min",
+            from: (2024, 1),
+            to: (2024, 12),
+            attempt: None,
+            months_asked: 12,
+            months_found: 12,
+        };
+        let bare = |message| telemetry::Event::info("cli.audit", message);
+        for message in ["exit grid progress", "validation stage entered"] {
+            let mut with_sink = bare(message);
+            crate::live_context_over(&mut with_sink, Some(recording), Some(77));
+            assert!(
+                with_sink
+                    .fields()
+                    .contains(&("attempt", telemetry::Value::Uint(77))),
+                "{message}: a terminal run's event must carry the sink's run"
+            );
+            let browser = Recording {
+                attempt: Some(41),
+                ..recording
+            };
+            let mut chosen = bare(message);
+            crate::live_context_over(&mut chosen, Some(browser), Some(77));
+            assert!(
+                chosen
+                    .fields()
+                    .contains(&("attempt", telemetry::Value::Uint(41))),
+                "{message}: a browser attempt wins over the fallback"
+            );
+            assert!(
+                !chosen
+                    .fields()
+                    .contains(&("attempt", telemetry::Value::Uint(77))),
+                "{message}: exactly one attempt"
+            );
+        }
     }
 
     /// The fold line carries what the operator could not read for 5h33m:
@@ -22429,6 +22572,49 @@ mod tests {
             log_dir_from(Some(OsString::from("/var/log/brutex")), None),
             Ok(Some(PathBuf::from("/var/log/brutex"))),
         );
+    }
+
+    /// CE-45, D-2652: the banner promises /logs only for the directory /logs
+    /// reads. A `BRUTEX_LOG_DIR` elsewhere, or no store root at all, is told
+    /// the page will not show its events.
+    #[test]
+    fn the_log_banner_promises_the_logs_page_only_for_the_directory_it_reads() {
+        let store = std::path::PathBuf::from("/srv/store");
+        let read = super::log_banner(&store.join("logs").join("cli"), Some(&store));
+        assert!(read.contains("so these events appear there"), "{read}");
+        assert!(!read.contains("will NOT show"), "{read}");
+
+        let elsewhere = super::log_banner(std::path::Path::new("/tmp/x"), Some(&store));
+        assert!(
+            elsewhere.contains("will NOT show these events"),
+            "{elsewhere}"
+        );
+        assert!(elsewhere.contains("/srv/store/logs/cli"), "{elsewhere}");
+        assert!(!elsewhere.contains("appear there"), "{elsewhere}");
+
+        let no_store = super::log_banner(std::path::Path::new("/tmp/x"), None);
+        assert!(no_store.contains("no store root is set"), "{no_store}");
+    }
+
+    /// CE-50, D-2655: a clock before 1970 refuses the run by name; it is never
+    /// clamped to a plausible 0, and a real time is the exact microsecond count.
+    #[test]
+    fn a_completion_stamp_before_the_epoch_is_refused_not_clamped() {
+        let epoch = std::time::UNIX_EPOCH;
+        let before = epoch - std::time::Duration::from_secs(5);
+        let why = super::finished_micros_at(before).expect_err("before 1970");
+        assert!(why.contains("BEFORE 1970-01-01"), "{why}");
+        assert!(why.contains("not recorded"), "{why}");
+        assert_eq!(super::finished_micros_at(epoch), Ok(0));
+        let later = epoch + std::time::Duration::from_micros(1_759_561_200_123_456);
+        assert_eq!(super::finished_micros_at(later), Ok(1_759_561_200_123_456));
+    }
+
+    #[test]
+    fn the_log_banner_never_promises_without_a_store() {
+        let no_store = super::log_banner(std::path::Path::new("/tmp/x"), None);
+        assert!(no_store.contains("no store root is set"), "{no_store}");
+        assert!(!no_store.contains("appear there"), "{no_store}");
     }
 
     /// P3-02-03..05, D-1769: the help text names the optional TIMEFRAMES

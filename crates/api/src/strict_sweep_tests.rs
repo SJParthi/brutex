@@ -475,6 +475,8 @@ fn strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_sta
     for (name, value) in [
         ("horizon_bars", "4294967296"),
         ("top", "9223372036854775808"),
+        // CE-19, D-1981: one past the rows `/frontier.json` serves for a run.
+        ("top", "4097"),
         ("screen_cap", "10000001"),
         ("grid_rungs", "1"),
         ("grid_rungs", "18446744073709551615"),
@@ -495,7 +497,8 @@ fn strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_sta
     }
     for (name, value) in [
         ("horizon_bars", "4294967295"),
-        ("top", "9223372036854775807"),
+        // The frontier reader bound itself is the largest admitted TOP.
+        ("top", "4096"),
         ("screen_cap", "10000000"),
     ] {
         let body = format!("{},\"{name}\":\"{value}\"}}", BODY.trim_end_matches('}'));

@@ -264,7 +264,7 @@ fn value(cur: &mut Cursor<'_>, ty: u8, in_field: bool) -> Result<Option<Frame>, 
 }
 
 fn element(kind: u8) -> Result<u8, LakeError> {
-    if (BOOL_TRUE..=UUID).contains(&kind) {
+    if matches!(kind, BOOL_TRUE..=UUID) {
         Ok(kind)
     } else {
         Err(refuse(&format!(
