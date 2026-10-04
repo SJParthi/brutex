@@ -438,30 +438,31 @@ impl Series {
             return Err(SeriesError::Empty);
         };
         let (first_release, last_release) = (head.released, tail.released);
-        let first = first_release.ordinal() + 1;
-        let end = last_release.ordinal() + MAX_AGE_DAYS;
+        // Each auction owns the days after its release up to and including
+        // the next release's day (a release is not known on its own day), or
+        // up to MAX_AGE_DAYS after it for the last one. Within that run a day
+        // is fresh while it is at most MAX_AGE_DAYS after the release, and a
+        // zero slot otherwise. Two bounded ranges, no search: the table is
+        // contiguous from the day after the first release.
         let mut by_day = Vec::new();
-        let mut current = 0_usize;
-        for ordinal in first..=end {
-            while auctions
-                .get(current + 1)
-                .is_some_and(|(next, _)| next.released.ordinal() < ordinal)
-            {
-                current += 1;
-            }
-            let fresh = auctions
-                .get(current)
-                .is_some_and(|(a, _)| ordinal - a.released.ordinal() <= MAX_AGE_DAYS);
-            // `current + 1` fits: there is at most one release per day of a
+        for (index, (auction, _)) in auctions.iter().enumerate() {
+            let released = auction.released.ordinal();
+            let owns_until = auctions
+                .get(index + 1)
+                .map_or(released + MAX_AGE_DAYS, |(next, _)| next.released.ordinal());
+            // `index + 1` fits: there is at most one release per day of a
             // window of about 40,560 days.
-            by_day.push(if fresh {
-                u32::try_from(current + 1).unwrap_or(u32::MAX)
-            } else {
-                0
-            });
+            let slot = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            for day in released + 1..=owns_until {
+                by_day.push(if day - released <= MAX_AGE_DAYS {
+                    slot
+                } else {
+                    0
+                });
+            }
         }
         Ok(Self {
-            first,
+            first: first_release.ordinal() + 1,
             by_day,
             auctions,
             first_release,
@@ -512,6 +513,14 @@ impl Series {
     #[must_use]
     pub const fn last_release(&self) -> TradeDay {
         self.last_release
+    }
+
+    /// How many days the dense table covers: from the day after the first
+    /// release to [`MAX_AGE_DAYS`] after the last. Every day outside it is
+    /// refused without a read.
+    #[must_use]
+    pub fn days(&self) -> usize {
+        self.by_day.len()
     }
 
     /// How many auctions the table holds. Never zero: a table with no
@@ -652,6 +661,8 @@ mod tests {
             ("2020-01-01", "98.5000", "6.1081"),
             ("2020-01-20", "98.4000", "6.5219"),
         ]));
+        // 2020-01-02 ..= 2020-02-03, the gap's zero slots included.
+        assert_eq!(gap.days(), 33);
         assert_eq!(
             gap.on(day(2020, 1, 15)).expect("age 14").auction.released,
             day(2020, 1, 1)
@@ -903,6 +914,9 @@ mod tests {
         let text = three();
         let s = series(&text);
         assert_eq!(s.auction_count(), 3);
+        // 2020-01-02 ..= 2020-01-29: the day after the first release to
+        // fourteen days after the last.
+        assert_eq!(s.days(), 28);
         assert_eq!(s.first_release(), day(2020, 1, 1));
         assert_eq!(s.last_release(), day(2020, 1, 15));
         let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
