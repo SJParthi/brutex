@@ -1276,3 +1276,115 @@ fn the_session_edges_keep_0915_00_and_1529_59_and_count_what_is_outside() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_fold_refusal_other_than_volume_is_named_in_the_folds_words() {
+    let why = crate::fold::FoldError::OutOfOrder {
+        at: 1,
+        previous: 2,
+        found: 1,
+    };
+    assert!(
+        matches!(fold_refusal(why, d1()), ImportRefusal::Fold { why } if why.contains("OutOfOrder"))
+    );
+}
+
+#[test]
+fn an_incomplete_day_is_closed_in_the_journal_and_retried() {
+    let root = scratch("import-incomplete");
+    world(&root, &[d1()]);
+    let store = root.join("S");
+    put(
+        &store,
+        "imports/gdfl.journal",
+        b"begin indices 2024-04-01 *\nincomplete indices 2024-04-01 * files=1\n",
+    );
+    let got = import(&root, Src::Store, ImportKind::Indices, d1(), d1(), &store);
+    assert!(
+        got.resumed.is_empty(),
+        "an incomplete day is closed, not crashed"
+    );
+    assert_eq!(got.days_imported, 1, "and imported again");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_quantity_past_i64_in_a_real_file_refuses_that_file_by_name() {
+    let root = scratch("import-huge");
+    let folder = crate::gdfl_cm::day_folder_name(CmKind::Stocks, d1());
+    let huge = csv(&[row(
+        "SBIN.NSE",
+        d1(),
+        NINE_FIFTEEN,
+        "1.00",
+        9_223_372_036_854_775_808,
+        0,
+    )]);
+    let entries = vec![
+        (
+            format!("{folder}/RELIANCE.NSE.csv"),
+            stock_file("RELIANCE.NSE", d1()),
+        ),
+        (format!("{folder}/SBIN.NSE.csv"), huge),
+        // Two names for one ticker: refused once, the twin skipped.
+        (
+            format!("{folder}/SBIN.NSE.CSV"),
+            stock_file("SBIN.NSE", d1()),
+        ),
+    ];
+    put(
+        &root,
+        "ts/cm/STOCKS/2024/APR_2024/GFDLCM_STOCK_TICK_01042024.bts",
+        &bts(&as_refs(&entries)),
+    );
+    let got = import(
+        &root,
+        Src::Store,
+        ImportKind::Stocks,
+        d1(),
+        d1(),
+        &root.join("S"),
+    );
+    assert_eq!(got.files, 1, "{:?}", got.failures);
+    assert_eq!(got.files_refused, 1, "{:?}", got.failures);
+    // Options: a trading day the source does not hold.
+    let none = import(
+        &root,
+        Src::Store,
+        ImportKind::Options,
+        d1(),
+        d1(),
+        &root.join("T"),
+    );
+    assert_eq!(none.days_missing, vec![d1()]);
+    // The huge quantity, through the options reader into the converter.
+    let ofolder = crate::gdfl_nfo::day_folder_name(d1());
+    let t = "NIFTY04APR2422000CE";
+    let entries = vec![(
+        format!("{ofolder}\\Options\\{t}.NFO.csv"),
+        csv(&[row(
+            &format!("{t}.NFO"),
+            d1(),
+            NINE_FIFTEEN,
+            "5",
+            9_223_372_036_854_775_808,
+            1,
+        )]),
+    )];
+    put(
+        &root,
+        "ts/options/2024/APR_2024/GFDLNFO_TICK_01042024.bts",
+        &bts(&as_refs(&entries)),
+    );
+    let big = import(
+        &root,
+        Src::Store,
+        ImportKind::Options,
+        d1(),
+        d1(),
+        &root.join("U"),
+    );
+    assert_eq!((big.files, big.files_refused), (1, 1), "{:?}", big.failures);
+    assert!(big.failures[0].why.contains("does not fit an i64"));
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -385,14 +385,14 @@ fn monthly_expiry(year: u16, month: u8) -> Option<Day> {
     let end = Day::new(year, month, 1).ok()?.end_of_month();
     // Back from the month's end to its last Thursday: day 0 was a Thursday.
     let mut day = end.days_from_epoch() - end.days_from_epoch() % 7;
-    for _ in 0..31 {
+    // Ends: every walk back reaches an open day or the calendar's first day.
+    loop {
         match crate::calendar::sourced_kind_of(i64::from(day)) {
             crate::calendar::DayKind::Open(_) => return Day::from_days(day).ok(),
             crate::calendar::DayKind::Unmeasured => return None,
             _ => day -= 1,
         }
     }
-    None
 }
 
 /// One reading of a ticker before its underlying is checked.
@@ -799,15 +799,6 @@ impl NfoZips {
 pub struct ZipFileLocator<B = std::fs::File> {
     file: Arc<B>,
     at: ZipLocator,
-}
-
-impl<B> Clone for ZipFileLocator<B> {
-    fn clone(&self) -> Self {
-        Self {
-            file: Arc::clone(&self.file),
-            at: self.at,
-        }
-    }
 }
 
 impl NfoSource for NfoZips {

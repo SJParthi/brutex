@@ -335,16 +335,22 @@ pub fn convert(kind: ImportKind, day: Day, ticks: &[Tick]) -> Result<Converted, 
             open_interest: tick.oi.unwrap_or(OI_NULL),
         });
     }
-    let refused = |why: crate::fold::FoldError| match why {
+    let seconds = fold(&rows, Bucket::SECOND).map_err(|why| fold_refusal(why, day))?;
+    Ok(Converted { seconds, placement })
+}
+
+/// What a fold refusal is to the import: a volume sum past `i64::MAX` names
+/// its second; any other (none reachable once rows are placed in order with
+/// non-negative quantities) is named in the fold's own words.
+fn fold_refusal(why: crate::fold::FoldError, day: Day) -> ImportRefusal {
+    match why {
         crate::fold::FoldError::VolumeOverflow { bucket, .. } => ImportRefusal::VolumeOverflow {
             sod: second_of(bucket, day),
         },
         other => ImportRefusal::Fold {
             why: format!("{other:?}"),
         },
-    };
-    let seconds = fold(&rows, Bucket::SECOND).map_err(refused)?;
-    Ok(Converted { seconds, placement })
+    }
 }
 
 /// The second of `day` a bucket starting at `ts_micros` names.
@@ -522,9 +528,8 @@ impl Journal {
         let refused = |why: std::io::Error| ImportRefusal::Journal {
             why: format!("{}: {why}", self.path.display()),
         };
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(refused)?;
-        }
+        // The journal always sits in `imports/` under the store root.
+        std::fs::create_dir_all(self.path.with_file_name("")).map_err(refused)?;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -538,16 +543,9 @@ impl Journal {
 
 /// Every day of `from..=to`.
 fn days(from: Day, to: Day) -> Vec<Day> {
-    let mut out = Vec::new();
-    let mut day = from;
-    while day.days_from_epoch() <= to.days_from_epoch() {
-        out.push(day);
-        match day.succ() {
-            Ok(next) => day = next,
-            Err(_) => break,
-        }
-    }
-    out
+    (from.days_from_epoch()..=to.days_from_epoch())
+        .filter_map(|n| Day::from_days(n).ok())
+        .collect()
 }
 
 /// Emits one event, discarding whether the sink kept it (a filtered level is
@@ -902,8 +900,10 @@ fn cm_day<S: CmSource>(
             read.skipped += 1;
             continue;
         }
-        match read_listed(source, &listing, &key) {
-            Ok(Some(day_file)) => sink(TickFile {
+        // A key resolved from this listing always has its file here, so a
+        // `None` is refused by name rather than counted as skipped.
+        match read_listed(source, &listing, &key).and_then(|f| f.ok_or(CmRefusal::NotSwept)) {
+            Ok(day_file) => sink(TickFile {
                 symbol,
                 contract: None,
                 name: day_file.name,
@@ -919,7 +919,6 @@ fn cm_day<S: CmSource>(
                     })
                     .collect(),
             }),
-            Ok(None) => read.skipped += 1,
             Err(why) => read.refused.push(Failure {
                 instrument: file.name().to_owned(),
                 why: why.to_string(),
