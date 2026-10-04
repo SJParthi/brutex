@@ -142,3 +142,12 @@ Total new across rounds 1-13: 203. Round 13 = 3 medium, 8 low. Newly fixed: CE-1
 | Search | 17 | search counting and sizing | p17num-1 med (raising read ceiling restarts alpha budget, ran) | numeric-pass17.md |
 | Limits/plan | 17 | docs/06 + docs/07 vs code | P17-01 med (Ingest page reads renamed failure key; always 0, grep-confirmed), P17-02..21 low | tests-docs-security-pass17.md |
 Total new across rounds 1-14: 229. Round 14 = 2 medium, 24 low.
+
+## Round 15 (same head 1f4de71) — done 2026-10-04 ~18:35 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Lints | 20 | all 333 production lint exceptions | CE-95..98 low | crash-edge-pass20.md |
+| Web races | 18 | overlapping requests in web pages | conc18-1 med (/ingest double Pull; Stop lost, ran), conc18-2 med (ingest error states never rendered), conc18-3..5 low | conc-pass18.md |
+| Leakage | 18 | in-sample vs out-of-sample | p18num-1 low (latent purge width h vs h+1, ran) | numeric-pass18.md |
+| Decisions | 18 | superseded decisions cited as current | P18-01..05 low | tests-docs-security-pass18.md |
+Total new across rounds 1-15: 244. Round 15 = 2 medium, 13 low.
