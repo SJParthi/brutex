@@ -2279,40 +2279,12 @@ jobs:
           crates/cli/build_provenance.rs 1
           crates/cli/commit_stamp.rs 1'
 
-          work=$(mktemp -d)
-          bad=0
-
           # `path:line:text` records compared against a `path count` allowlist.
           # Identical in shape to gates 11 and 12 on purpose: one mechanism to
           # learn, and adding a line anywhere is a visible diff.
-          verdict() {
-            layer="$1"; hits="$2"; allow="$3"
-            for f in $( { printf '%s\n' "$hits" | grep . | cut -d: -f1 | sort -u; } || true ); do
-              c=$( { printf '%s\n' "$hits" | grep -c "^${f}:" || true; } | tr -d ' ')
-              a=$( { printf '%s\n' "$allow" | awk -v F="$f" '$1==F{print $2; exit}'; } || true)
-              [ -n "$a" ] || a=0
-              if [ "$c" -gt "$a" ]; then
-                printf '  REFUSED  %s — %s occurrence(s), %s allowed\n' "$f" "$c" "$a"
-                { printf '%s\n' "$hits" | grep "^${f}:" | sed 's/^/             /' | head -8; } || true
-                bad=1
-              else
-                printf '  allowed  %s — %s of %s\n' "$f" "$c" "$a"
-              fi
-            done
-            # An entry naming a file that is gone makes this gate read stronger
-            # than it is, so it is a FAILURE. An entry whose file no longer
-            # matches is only loose, and says so.
-            for p in $( { printf '%s\n' "$allow" | awk 'NF{print $1}'; } || true ); do
-              if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-                printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
-                bad=1
-              elif ! grep -q "^${p}:" <<< "$hits"; then
-                printf '  ::warning title=Gate 13 allowlist is loose::'
-                printf '%s no longer matches layer %s — drop the entry\n' "$p" "$layer"
-              fi
-            done
-            :
-          }
+          # An entry naming a file that is gone makes this gate read stronger
+          # than it is, so it is a FAILURE. An entry whose file no longer
+          # matches is only loose, and says so.
 
           # ---- layer 1: no manifest DECLARES one. ---------------------------
           # EVERY tracked Cargo.toml, the root one included. Checking only
@@ -2325,23 +2297,9 @@ jobs:
           # is not itself a violation. The cost is that a `#` inside a string
           # truncates its line; no manifest here has one, and a truncated line
           # can only cause a MISS inside a comment, never a false refusal.
-          decl="$work/decl"; : > "$decl"
           # And the same manifests PARSED, one declaration per line (D-1108). A
           # manifest the scanner cannot read is a refusal: an unparsed manifest
           # is one whose dependencies nobody has vouched for.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          parsed="$work/parsed"; : > "$parsed"
-          nt=0
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            case "${f##*/}" in Cargo.toml) ;; *) continue ;; esac
-            nt=$((nt + 1))
-            awk -v F="$f" '{ l = $0; sub(/#.*$/, "", l); print F":"NR":"l }' "$f" >> "$decl"
-            if ! "$scan" deps "$f" >> "$parsed"; then
-              printf '  REFUSED  %s could not be read as TOML\n' "$f"
-              bad=1
-            fi
-          done < <(git ls-files '*Cargo.toml')
 
           # ---- layer 2: nothing in the LOCK either. -------------------------
           # A transitive pull is the same violation one level down and much
@@ -2351,79 +2309,26 @@ jobs:
           # not matched and do not need to be: every name in one of those
           # arrays has its own [[package]] stanza in the same file, by the
           # format's own definition.
-          lockc="$work/lock"; : > "$lockc"
-          nl=0
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            nl=$((nl + 1))
-            awk -v F="$f" '{ print F":"NR":"$0 }' "$f" >> "$lockc"
-          done < <(git ls-files '*Cargo.lock')
 
-          nb=$( { printf '%s\n' $banned | grep -c . || true; } | tr -d ' ')
-          echo "walked ${nt} tracked Cargo.toml and ${nl} tracked Cargo.lock"
-          echo "  $(awk 'END{print NR}' "$decl") manifest line(s) after comment stripping"
-          echo "  $(awk 'END{print NR}' "$lockc") lock line(s)"
-          echo "  ${nb} banned crate name(s), each matched with its -* and _* family"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
-          if [ "$nt" -eq 0 ]; then
-            echo "GATE 13 WALKED NO MANIFEST. A repository with no Cargo.toml is"
-            echo "not a Rust workspace; a silent zero is not a pass."
-            exit 1
-          fi
-          if [ "$nl" -eq 0 ]; then
-            echo "GATE 13 WALKED NO LOCK FILE. Cargo.lock is the ONLY place a"
-            echo "transitive binding is visible, and gate 4 builds --locked."
-            echo "An untracked lock disarms the layer that matters most."
-            exit 1
-          fi
 
-          dh=''; lh=''
-          for n in $banned; do
-            fam="(${n}|${n}[-_][A-Za-z0-9_-]+)"
-            # A dependency key: `n = ...`, `n.workspace = ...`, or the inline
-            # form `dependencies = { n = ... }`. Preceded by any non-name
-            # character, which the corpus prefix's own `:` also satisfies.
-            d1="[^A-Za-z0-9_-]${fam}(\.[A-Za-z_-]+)?[[:space:]]*="
-            # A dependency TABLE header: [dependencies.n], [dev-dependencies.n],
-            # [build-dependencies.n], [workspace.dependencies.n], and the
-            # [target.'cfg(...)'.dependencies.n] shape.
-            d2="\[[^]]*dependencies[^]]*\.${fam}\]"
-            # A RENAMED dependency: `alias = { package = "n", ... }`. Without
-            # this, one word defeats the whole gate.
-            d3="package[[:space:]]*=[[:space:]]*\"${fam}\""
-            h=$( { grep -E "${d1}|${d2}|${d3}" "$decl" || true; } )
-            [ -z "$h" ] || dh="${dh}${h}
-          "
-            # THE SAME QUESTION, ASKED OF THE PARSED MANIFEST (D-1108). The
-            # three patterns above read lines, and four valid spellings walked
-            # past them: `"n" = ..`, `n . version = ..`, `package = 'n'` and
-            # `[dependencies."n"]`. `source_scan deps` lists every declaration
-            # as `FILE:LINE:kind:name:package`, so a family match on the NAME or
-            # the PACKAGE field is the declaration, however it was spelt. The
-            # line patterns stay: they are not weaker, and two readings that
-            # must both be fooled are stronger than one.
-            h=$( { grep -E "(:${fam}:[^:]+|:${fam})$" "$parsed" || true; } )
-            [ -z "$h" ] || dh="${dh}${h}
-          "
-            h=$( { grep -E ":name[[:space:]]*=[[:space:]]*\"${fam}\"" "$lockc" || true; } )
-            [ -z "$h" ] || lh="${lh}${h}
-          "
-          done
-
-          echo
-          echo "layer 1: a manifest declares a binding or an embedded runtime"
-          if [ -z "$( { printf '%s\n' "$dh" | grep . || true; } )" ]; then
-            echo "  none"
-          fi
-          verdict 1 "$dh" "$allow_decl"
-
-          echo
-          echo "layer 2: the lock resolves one, directly or transitively"
-          if [ -z "$( { printf '%s\n' "$lh" | grep . || true; } )" ]; then
-            echo "  none"
-          fi
-          verdict 2 "$lh" "$allow_lock"
+          # A dependency key: `n = ...`, `n.workspace = ...`, or the inline
+          # form `dependencies = { n = ... }`. Preceded by any non-name
+          # character, which the corpus prefix's own `:` also satisfies.
+          # A dependency TABLE header: [dependencies.n], [dev-dependencies.n],
+          # [build-dependencies.n], [workspace.dependencies.n], and the
+          # [target.'cfg(...)'.dependencies.n] shape.
+          # A RENAMED dependency: `alias = { package = "n", ... }`. Without
+          # this, one word defeats the whole gate.
+          # THE SAME QUESTION, ASKED OF THE PARSED MANIFEST (D-1108). The
+          # three patterns above read lines, and four valid spellings walked
+          # past them: `"n" = ..`, `n . version = ..`, `package = 'n'` and
+          # `[dependencies."n"]`. `source_scan deps` lists every declaration
+          # as `FILE:LINE:kind:name:package`, so a family match on the NAME or
+          # the PACKAGE field is the declaration, however it was spelt. The
+          # line patterns stay: they are not weaker, and two readings that
+          # must both be fooled are stronger than one.
 
           # ---- layer 3: no build script EXISTS. -----------------------------
           # Gate 2 asks the narrower question — does a build script shell out —
@@ -2441,10 +2346,10 @@ jobs:
           # rather than in a review comment so the difference is visible. The
           # allowlist below is the escape, and taking it should come with a
           # decisions entry.
-          bh=$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 ":1:a build script exists" }'; } || true )
 
-          # AND A BUILD SCRIPT IS NOT ONE FILE. `$NF == "build.rs"` reports the
-          # ROOT of the script and nothing the root declares.
+          # AND A BUILD SCRIPT IS NOT ONE FILE. A match on the last path
+          # segment (the shell's `$NF == "build.rs"`) reports the ROOT of the
+          # script and nothing the root declares.
           # `crates/cli/build.rs` says `mod build_provenance;` and
           # `mod commit_stamp;` on two consecutive lines; both files sit beside
           # it and both are compiled into the script cargo runs, and neither has
@@ -2462,94 +2367,30 @@ jobs:
           # this replaced read only `mod NAME;` and `pub mod NAME;`, so a
           # `#[path]`, `pub(crate) mod` or `include!` file joined the script
           # with this layer still printing "1 of 1 allowed".
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          git ls-files -z > "$work/tracked"
-          roots="$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 }'; } || true )"
-          bs=""
-          if [ -n "$roots" ]; then
-            # shellcheck disable=SC2086
-            if ! "$scan" closure "$work/tracked" $roots > "$work/bclosure"; then
-              echo "  REFUSED  a build script pulls in code layer 3 cannot resolve:"
-              grep '^UNRESOLVED ' "$work/bclosure" | sed 's/^/             /'
-              bad=1
-            fi
-            bs=$(grep -v '^UNRESOLVED ' "$work/bclosure" || true)
-          fi
-          rootset=" $( printf '%s ' $roots ) "
-          for f in $bs; do
-            case "$rootset" in
-              *" $f "*) ;;
-              *) bh=$( { printf '%s\n%s\n' "$bh" "$f:1:a module compiled into a build script" | grep . || true; } ) ;;
-            esac
-          done
 
-          # AND THE SCRIPT NEED NOT BE CALLED `build.rs`. `$NF == "build.rs"`
+          # AND THE SCRIPT NEED NOT BE CALLED `build.rs`. That segment match
           # reads the DEFAULT filename; a manifest that says `build = "gen.rs"`
           # renames the script straight out of this layer, and the file it names
           # is a `.rs` that gate 1's extension allowlist welcomes. Gate 2's
           # `*build.rs` glob had the identical hole and is closed in the same
           # commit -- one `build =` line used to defeat both checks at once.
           #
-          # `$decl` is already the comment-stripped corpus of every tracked
-          # manifest that layer 1 walks, so the key costs one grep and arrives in
-          # the `path:line:text` shape `verdict` reads. `links =` rides along
+          # The comment-stripped corpus of every tracked manifest that layer 1
+          # walks is already in hand, so the key costs one more pattern and
+          # arrives in the `path:line:text` shape the verdict reads. `links =` rides along
           # because a package that declares one is a package cargo REQUIRES a
           # build script for -- it is this layer's subject announced in a
           # different word.
-          bk=$( { grep -E ':[[:space:]]*(build|links)[[:space:]]*=' "$decl" || true; } )
-          if [ -n "$bk" ]; then
-            bh=$( { printf '%s\n%s\n' "$bh" "$bk" | grep . || true; } )
-          fi
-          echo
-          echo "layer 3: a build script exists anywhere in the tree, by file or by manifest key"
-          if [ -z "$( { printf '%s\n' "$bh" | grep . || true; } )" ]; then
-            echo "  none"
-          fi
-          verdict 3 "$bh" "$allow_build"
 
           # ---- layer 4: the second line of defence is still armed. ----------
-          echo
-          echo "layer 4: deny.toml and the step that runs it"
-          d=deny.toml
-          if ! git ls-files --error-unmatch "$d" >/dev/null 2>&1; then
-            echo "  REFUSED  deny.toml is not tracked — gate 3 has no policy to read"
-            bad=1
-          else
-            if grep -qE '^[[:space:]]*wildcards[[:space:]]*=[[:space:]]*"deny"' "$d"; then
-              echo '  present  deny.toml sets wildcards = "deny"'
-            else
-              echo '  REFUSED  deny.toml no longer sets wildcards = "deny"'
-              echo '           Every path dependency in this workspace carries a'
-              echo '           version BECAUSE of that line — crates/api and'
-              echo '           crates/pull both say so in their manifests. Removing'
-              echo '           it turns those comments into false claims.'
-              bad=1
-            fi
-            # PINNED AT WHAT deny.toml CARRIES TODAY. A name on this line that
-            # disappears from deny.toml is a red build: that is the guard-the-
-            # guard half, and it is the same argument gate 11 rule 5b makes
-            # about the clippy lint table. Names on THIS gate's list that
-            # deny.toml has never carried are a WARNING and not a failure — the
-            # scan above is the primary control for them, cargo-deny is the
-            # second, and making this step red for a file it does not own would
-            # teach a reader to ignore it.
-            must='pyo3 mlua rlua deno_core v8 rusty_v8 quickjs-rs boa_engine node-bindgen neon jni'
-            for n in $must; do
-              if grep -qE "name[[:space:]]*=[[:space:]]*\"${n}\"" "$d"; then
-                printf '  present  deny.toml bans %s\n' "$n"
-              else
-                printf '  REFUSED  deny.toml no longer bans %s\n' "$n"
-                bad=1
-              fi
-            done
-            for n in $banned; do
-              case " $must " in *" $n "*) continue ;; esac
-              if ! grep -qE "name[[:space:]]*=[[:space:]]*\"${n}\"" "$d"; then
-                printf '  ::warning title=Gate 13 is ahead of deny.toml::'
-                printf 'this gate refuses %s and deny.toml does not list it\n' "$n"
-              fi
-            done
-          fi
+          # PINNED AT WHAT deny.toml CARRIES TODAY. A name on this line that
+          # disappears from deny.toml is a red build: that is the guard-the-
+          # guard half, and it is the same argument gate 11 rule 5b makes
+          # about the clippy lint table. Names on THIS gate's list that
+          # deny.toml has never carried are a WARNING and not a failure — the
+          # scan above is the primary control for them, cargo-deny is the
+          # second, and making this step red for a file it does not own would
+          # teach a reader to ignore it.
           # Is cargo-deny actually RUN, and at a pinned version? Gate 3's own
           # comment argues both, and a comment cannot enforce itself.
           #
@@ -2571,41 +2412,22 @@ jobs:
           # crate); and the job is in ci-ok's `needs`. An allowlist of safe
           # conditions rather than a denylist of unsafe ones, because the
           # denylist is what the audit walked past.
-          wf=.github/workflows/ci.yml
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          if "$scan" step-runs "$wf" 'cargo deny check' | sed 's/^/  /'; then
-            echo "  present  gate 3 invokes cargo deny check, unconditionally"
-          else
-            echo "  REFUSED  nothing in this workflow RUNS cargo deny check so that"
-            echo "           its failure fails the run. Reasons above."
-            bad=1
-          fi
-          if "$scan" step-runs "$wf" 'cargo install cargo-deny --version ' | sed 's/^/  /' \
-             && grep -qE '^[[:space:]]+cargo install cargo-deny --version [0-9]' "$wf"; then
-            echo "  present  cargo-deny is installed at a pinned version, unconditionally"
-          else
-            echo "  REFUSED  cargo-deny is installed unpinned — a security verdict"
-            echo "           that can change with no commit is a verdict nobody"
-            echo "           can read. See D-0034."
-            bad=1
-          fi
 
-          echo
-          if [ "$bad" -ne 0 ]; then
-            echo "GATE 13 FAILED."
-            echo
-            echo "CLAUDE.md section 2 has no exception for this. A binding does"
-            echo "not become acceptable by being transitive, by being a"
-            echo "dev-dependency, or by being convenient. Remove it, or write"
-            echo "the allowlist line above WITH the reason and a"
-            echo "docs/05-decisions.md entry beside it."
-            exit 1
-          fi
           # The line said "declared, resolved, or built for", and an audit built
           # `ring`'s C under it (rustonly-6): this step reads manifests and the
           # lock and cannot see what a feature switches on. Gates 13b and 13c
           # in the build job are what read the build (D-1111).
-          echo "OK — no foreign runtime is declared or resolved by name (gates 13b and 13c read what is built)."
+
+          # D-2312: every rule above is `.github/gates_runtime.rs`, built here
+          # once for gates 13 to 24 and tested before it is trusted. The
+          # scanner it reads tokens with is gate 0's, bound at compile time.
+          export CARGO_BIN_EXE_source_scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          gr="${RUNNER_TEMP:-/tmp}/gates-runtime"
+          rustc --edition=2024 --test -D warnings .github/gates_runtime.rs -o "${gr}-tests"
+          "${gr}-tests"
+          rustc --edition=2024 -D warnings .github/gates_runtime.rs -o "$gr"
+          "$gr" gate13 --banned "$banned" --allow-decl "$allow_decl" \
+            --allow-lock "$allow_lock" --allow-build "$allow_build"
 
       - name: Gate 15 — the forbidden word appears in no tracked file
         run: |
@@ -2619,7 +2441,10 @@ jobs:
           # dot. Gate 13 sees only manifests and the lock. This step walks
           # every tracked byte.
           #
-          # THE TOKEN IS ASSEMBLED AT RUN TIME AND IT MUST STAY ASSEMBLED.
+          # THE TOKEN IS ASSEMBLED AND IT MUST STAY ASSEMBLED. It is `WORD` in
+          # .github/gates_runtime.rs (D-2312), `concat!` of two halves at
+          # compile time, with `WORD_LEN` as the length self-check; it was
+          # assembled by this step's shell before, by the same argument.
           # This workflow is itself a tracked file — gate 1 walks `git
           # ls-files` and `.github/workflows/ci.yml` is in that list — so a
           # gate that spelled the banned word out would refuse ITSELF on its
@@ -2631,7 +2456,7 @@ jobs:
           #
           # IF YOU ARE HERE TO "TIDY" THIS INTO A LITERAL, STOP. That single
           # edit breaks the gate against itself and there is no clean repair.
-          # The length self-check below is the tripwire for the other half of
+          # The length self-check is the tripwire for the other half of
           # the same accident: blanking a fragment would leave a token that
           # matches every line, or an empty one that matches nothing.
           #
@@ -2641,7 +2466,7 @@ jobs:
           # refuses all three for free, without this file naming any of them.
           #
           # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files` and the two
-          # static fragments below. Gate 1c's discipline. Nothing from the
+          # static fragments of `WORD`. Gate 1c's discipline. Nothing from the
           # event payload is expanded.
           #
           # WHAT IT CANNOT SEE, said plainly:
@@ -2664,17 +2489,6 @@ jobs:
           # A CI LOG IS NOT A TRACKED FILE, but the log below still MASKS the
           # token wherever it echoes an offending line. Printing it verbatim
           # would make this gate's own output the leak it exists to prevent.
-
-          # ---- the assembly. Neither half is the word; the pair is. ---------
-          frag_a=$(printf 'py')
-          frag_b=$(printf 'thon')
-          tok="${frag_a}${frag_b}"
-          if [ "${#tok}" -ne 6 ]; then
-            echo "GATE 15 CANNOT ASSEMBLE ITS OWN TOKEN — got ${#tok} characters."
-            echo "Somebody edited one of the two fragments above. Read the"
-            echo "paragraph beginning IF YOU ARE HERE TO TIDY THIS."
-            exit 1
-          fi
 
           # THE ESCAPE HATCH IS HERE, NEVER IN THE CODE. `path max_count`,
           # gate 1d's and gate 11's mechanism. IT SHIPS EMPTY, on the same
@@ -2723,94 +2537,34 @@ jobs:
           docs/05-decisions.md 1
           '
 
-          work=$(mktemp -d)
-          refused="$work/refused"; : > "$refused"
-          walked=0; skipped=0
-
           # The listing is written to a file first, so a git that FAILS fails
           # this step under `set -e`; read from a process substitution, its
           # failure was swallowed and the loop read nothing (AC-gates-law-10).
           # NUL-separated, so a name git would quote is read as itself.
-          git ls-files -z > "$work/tracked"
-          while IFS= read -r -d '' f; do
-            [ -n "$f" ] || continue
-            walked=$((walked + 1))
-            # A FILE GREP READS AS BINARY IS STILL READ (D-1104). This used to
-            # be `grep -I`, which SKIPS a file holding one NUL byte -- and an
-            # audit put the banned word in a `.md` beside one NUL and watched
-            # this gate print OK. `-a` reads every byte as text. The binary
-            # count stays, as a count, so it is visible; gate 1 refuses a NUL
-            # byte in any tracked file outside web/ outright.
-            if ! grep -Iq . -- "$f" 2>/dev/null; then
-              skipped=$((skipped + 1))
-            fi
-            n=$( { grep -aoiF -e "$tok" -- "$f" || true; } | wc -l | tr -d ' ')
-            [ "$n" -gt 0 ] || continue
-            # COUNT FIRST, TAB-SEPARATED, PATH LAST. Written `path count` and
-            # read back on spaces, a tracked file whose name contains a space
-            # splits into the wrong fields, the count comparison becomes a
-            # string comparison that errors, and the file is reported ALLOWED.
-            # A silent miss is the one failure mode these gates exist to
-            # prevent, so the separator is a tab and the unbounded field is
-            # last.
-            printf '%s\t%s\n' "$n" "$f" >> "$refused"
-          done < "$work/tracked"
+          # A FILE GREP READS AS BINARY IS STILL READ (D-1104). This used to
+          # be `grep -I`, which SKIPS a file holding one NUL byte -- and an
+          # audit put the banned word in a `.md` beside one NUL and watched
+          # this gate print OK. `-a` reads every byte as text. The binary
+          # count stays, as a count, so it is visible; gate 1 refuses a NUL
+          # byte in any tracked file outside web/ outright.
+          # COUNT FIRST, TAB-SEPARATED, PATH LAST. Written `path count` and
+          # read back on spaces, a tracked file whose name contains a space
+          # splits into the wrong fields, the count comparison becomes a
+          # string comparison that errors, and the file is reported ALLOWED.
+          # A silent miss is the one failure mode these gates exist to
+          # prevent, so the separator is a tab and the unbounded field is
+          # last.
 
-          echo "walked ${walked} tracked file(s)"
-          echo "  ${skipped} binary or empty, each read byte for byte all the same"
-          echo "  $(awk 'END{print NR}' "$refused") file(s) contain the banned token"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
-          if [ "$walked" -eq 0 ]; then
-            echo "GATE 15 WALKED NOTHING. A gate that reads no file is not a gate."
-            exit 1
-          fi
-
-          bad=0
-          echo
-          tab=$(printf '\t')
-          while IFS="$tab" read -r c f; do
-            [ -n "${f:-}" ] || continue
-            a=$( { printf '%s\n' "$allow_word" | awk -v F="$f" '$1==F{print $2; exit}'; } || true)
-            [ -n "$a" ] || a=0
-            if [ "$c" -gt "$a" ]; then
-              printf '  REFUSED  %s — %s occurrence(s), %s allowed\n' "$f" "$c" "$a"
-              { grep -ainF -e "$tok" -- "$f" \
-                  | sed -E "s/${tok}/[BANNED WORD]/Ig" \
-                  | sed 's/^/             /' | head -8; } || true
-              bad=1
-            else
-              printf '  allowed  %s — %s of %s\n' "$f" "$c" "$a"
-            fi
-          done < "$refused"
 
           # The same two self-audits gates 11 and 12 carry. An entry naming a
           # file that is gone makes this gate read stronger than it is, so it
           # is a failure; an entry whose file is now clean is only loose, and
           # says so.
-          for p in $( { printf '%s\n' "$allow_word" | awk 'NF{print $1}'; } ); do
-            if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-              printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
-              bad=1
-            elif ! awk -F'\t' -v F="$p" '$2==F{found=1} END{exit !found}' "$refused"; then
-              printf '  ::warning title=Gate 15 allowlist is loose::'
-              printf '%s no longer contains the token — drop the entry\n' "$p"
-            fi
-          done
 
-          echo
-          if [ "$bad" -ne 0 ]; then
-            echo "GATE 15 FAILED."
-            echo
-            echo "The word is banned outright, including in prose about a"
-            echo "predecessor repository. Reword it — 'the predecessor', 'the"
-            echo "prior implementation' — or, if the occurrence genuinely has"
-            echo "to stay, add its file to the allowlist above with the reason"
-            echo "beside it. Do not spell the word into this workflow to make"
-            echo "the match narrower: this file is scanned too."
-            exit 1
-          fi
-          echo "OK — the banned token appears in no tracked file."
+          # D-2312: the walk, the count and the mask are `gates_runtime gate15`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate15 --allow "$allow_word"
 
       - name: Gate 16 — every crate root forbids unsafe outright
         run: |
@@ -2876,46 +2630,8 @@ jobs:
           allow_root='
           '
 
-          root=Cargo.toml
-          bad=0
-          nm=0; nr=0
-
-          echo "layer 1: every crate root carries #![forbid(unsafe_code)]"
-          while IFS= read -r m; do
-            [ -n "$m" ] || continue
-            nm=$((nm + 1))
-            c=$(printf '%s\n' "$m" | cut -d/ -f2)
-            found=0
-            for base in lib main; do
-              f="crates/${c}/src/${base}.rs"
-              git ls-files --error-unmatch "$f" >/dev/null 2>&1 || continue
-              found=$((found + 1)); nr=$((nr + 1))
-              if grep -qE '^#!\[forbid\([^]]*\bunsafe_code\b' "$f"; then
-                printf '  ok       %s\n' "$f"
-              elif { printf '%s\n' "$allow_root" | awk 'NF{print $1}' \
-                     > /tmp/gate-unsafe-allow.txt; } \
-                   && grep -qxF -- "$f" /tmp/gate-unsafe-allow.txt; then
-                printf '  allowed  %s — no forbid, listed above\n' "$f"
-              else
-                printf '  REFUSED  %s carries no #![forbid(unsafe_code)]\n' "$f"
-                bad=1
-              fi
-            done
-            if [ "$found" -eq 0 ]; then
-              printf '  REFUSED  %s — neither src/lib.rs nor src/main.rs is tracked.\n' "$m"
-              printf '           This gate will not guess where the crate root is.\n'
-              bad=1
-            fi
-          done < <(git ls-files 'crates/*/Cargo.toml')
-
-          echo "  ${nm} crate manifest(s), ${nr} crate root(s) examined"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
-          if [ "$nm" -eq 0 ] || [ "$nr" -eq 0 ]; then
-            echo "GATE 16 EXAMINED NO CRATE ROOT. A gate that reads no lib.rs and"
-            echo "no main.rs is not a gate."
-            exit 1
-          fi
 
           # LAYER 1b — THE OTHER CRATE ROOTS (D-1103). Every `tests/*.rs`,
           # `benches/*.rs`, `examples/*.rs`, `src/bin/*.rs` and `build.rs` is a
@@ -2928,126 +2644,30 @@ jobs:
           # to see. So every file those roots compile -- their scanner closure
           # -- may not carry `unsafe`, a foreign `extern` interface or `asm!`, all
           # read from tokens, never from comments or strings. The tree uses none.
-          echo
-          echo "layer 1b: no other crate root, nor any file it compiles, uses unsafe"
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          u16=$(mktemp -d)
-          git ls-files -z > "$u16/tracked"
-          other=$(git ls-files 'crates/*/build.rs' 'crates/*/tests/*.rs' 'crates/*/benches/*.rs' \
-                                'crates/*/examples/*.rs' 'crates/*/src/bin/*.rs' \
-                  | awk -F/ 'NF == 3 || (NF == 4 && $3 != "src") || (NF == 5 && $4 == "bin") || (NF == 5 && $5 == "main.rs")')
-          if [ -z "$other" ]; then
-            echo "  REFUSED  no test, bench or build root found — a gate that reads"
-            echo "           none is not a gate"
-            bad=1
-          else
-            # shellcheck disable=SC2086
-            if ! "$scan" closure "$u16/tracked" $other > "$u16/closure"; then
-              echo "  REFUSED  a root pulls in code this layer cannot resolve:"
-              grep '^UNRESOLVED ' "$u16/closure" | sed 's/^/             /'
-              bad=1
-            fi
-            files=$(grep -v '^UNRESOLVED ' "$u16/closure" || true)
-            printf '  %s root(s), %s file(s) in their closure\n' \
-              "$(printf '%s\n' "$other" | grep -c .)" "$(printf '%s\n' "$files" | grep -c .)"
-            # ONE FILE IS EXCEPTED, BY NAME, AND ONLY FOR WHAT IT DECLARES
-            # (D-1450). `crates/pull/tests/allocation.rs` implements
-            # `GlobalAlloc` to COUNT heap allocations, the one way to prove
-            # `pull::csv`'s "no allocation per row" against an allocation
-            # rather than against a spelling (D-0721, D-0724). It is a test
-            # crate root, never linked into a shipped binary, it carries the
-            # `#![allow(unsafe_code)]` gate 5 counts as one of its three, and
-            # every method forwards unchanged to `System`. D-1103 wrote this
-            # layer while that file lived on another branch ("the tree uses
-            # none"); the two met in the combined fold. The exception is a
-            # file, not a pattern: any other root with `unsafe`, and any
-            # `extern` or `asm!` even in this file, is still refused.
-            allow_unsafe_test_root='crates/pull/tests/allocation.rs'
-            # shellcheck disable=SC2086
-            "$scan" unsafe $files > "$u16/found" || true
-            grep -vF "${allow_unsafe_test_root}:" "$u16/found" > "$u16/refused" || true
-            excepted=$(grep -F "${allow_unsafe_test_root}:" "$u16/found" || true)
-            beyond=$(grep -v ': `unsafe`$' <<< "$excepted" || true)
-            if [ -n "$beyond" ]; then
-              echo "  REFUSED  the excepted allocator file holds more than unsafe:"
-              sed 's/^/             /' <<< "$beyond"
-              bad=1
-            fi
-            if [ -s "$u16/refused" ]; then
-              echo "  REFUSED  unsafe outside a forbidding crate root:"
-              sed 's/^/             /' "$u16/refused"
-              bad=1
-            else
-              printf '  ok       none outside %s (%s site(s) there, D-1450)\n' \
-                "$allow_unsafe_test_root" "$(grep -cF "${allow_unsafe_test_root}:" "$u16/found" || true)"
-            fi
-          fi
+          # ONE FILE IS EXCEPTED, BY NAME, AND ONLY FOR WHAT IT DECLARES
+          # (D-1450). `crates/pull/tests/allocation.rs` implements
+          # `GlobalAlloc` to COUNT heap allocations, the one way to prove
+          # `pull::csv`'s "no allocation per row" against an allocation
+          # rather than against a spelling (D-0721, D-0724). It is a test
+          # crate root, never linked into a shipped binary, it carries the
+          # `#![allow(unsafe_code)]` gate 5 counts as one of its three, and
+          # every method forwards unchanged to `System`. D-1103 wrote this
+          # layer while that file lived on another branch ("the tree uses
+          # none"); the two met in the combined fold. The exception is a
+          # file, not a pattern: any other root with `unsafe`, and any
+          # `extern` or `asm!` even in this file, is still refused.
+          allow_unsafe_test_root='crates/pull/tests/allocation.rs'
 
           # The same two self-audits gates 11 through 15 carry. An entry naming
           # a file that is gone makes this gate read stronger than it is, so it
           # is a failure; an entry whose file now carries the attribute anyway
           # is only loose, and says so.
-          while IFS= read -r p; do
-            [ -n "$p" ] || continue
-            if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-              printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
-              bad=1
-            elif grep -qE '^#!\[forbid\([^]]*\bunsafe_code\b' "$p"; then
-              printf '  ::warning title=Gate 16 allowlist is loose::'
-              printf '%s forbids unsafe after all — drop the entry\n' "$p"
-            fi
-          done < <(printf '%s\n' "$allow_root" | awk 'NF{print $1}')
 
           # ---- layer 2: the workspace deny, and who has opted in to it. -----
-          echo
-          echo "layer 1c: every .github/*.rs gate tool forbids unsafe and holds none (D-2349)"
-          tools=$(git ls-files '.github/*.rs')
-          [ -n "$tools" ] || { echo "  REFUSED  no .github/*.rs tool read"; bad=1; }
-          for f in $tools; do
-            if grep -qE '^#!\[forbid\([^]]*\bunsafe_code\b' "$f" && "$scan" unsafe "$f" > /dev/null; then
-              printf '  ok       %s\n' "$f"
-            else
-              printf '  REFUSED  %s lacks #![forbid(unsafe_code)] or uses unsafe\n' "$f"; bad=1
-            fi
-          done
 
-          echo
-          echo "layer 2: the workspace lint table, and every member inheriting it"
-          if grep -qE '^[[:space:]]*unsafe_code[[:space:]]*=[[:space:]]*"deny"' "$root"; then
-            echo '  present  root Cargo.toml sets unsafe_code = "deny"'
-          else
-            echo '  REFUSED  root Cargo.toml no longer denies unsafe_code. Gate 5'
-            echo '           states that line already fails the build, and gate 5'
-            echo '           cannot check its own premise.'
-            bad=1
-          fi
-          while IFS= read -r m; do
-            [ -n "$m" ] || continue
-            if awk '
-              /^\[lints\]/ { inl = 1; next }
-              /^\[/        { inl = 0 }
-              inl && /^[[:space:]]*workspace[[:space:]]*=[[:space:]]*true/ { ok = 1 }
-              END { exit !ok }
-            ' "$m"; then
-              printf '  present  %s inherits [lints] workspace = true\n' "$m"
-            else
-              printf '  REFUSED  %s does not write [lints] workspace = true, so the\n' "$m"
-              printf '           workspace lint table applies to none of it\n'
-              bad=1
-            fi
-          done < <(git ls-files 'crates/*/Cargo.toml')
-
-          echo
-          if [ "$bad" -ne 0 ]; then
-            echo "GATE 16 FAILED."
-            echo
-            echo "Add #![forbid(unsafe_code)] to the crate root — every crate"
-            echo "root, a binary being its own — and keep [lints] workspace ="
-            echo "true in the manifest. A deny that one attribute switches off"
-            echo "is not the guarantee CLAUDE.md section 9 is read as making."
-            exit 1
-          fi
-          echo "OK — every crate root forbids unsafe and inherits the lint table."
+          # D-2312: every layer above is `gates_runtime gate16`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate16 --allow-root "$allow_root" \
+            --allow-unsafe-test-root "$allow_unsafe_test_root"
 
       - name: Gate 17 — nothing logs from inside the sweep
         run: |
@@ -3129,56 +2749,12 @@ jobs:
           # NUL-separated file, so no path is word-split.
           #
           # MEASURED BEFORE THE SWITCH: zero hits over the four crates.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
           swept='vocab engine indicators runner'
-          bad=0
-          scanned=0
-          g17=$(mktemp -d)
-          git ls-files -z > "$g17/tracked.z"
-          [ -s "$g17/tracked.z" ] || { echo "GATE 17 READ NO TRACKED FILE."; exit 1; }
           # A macro invocation is printed with a trailing `!`, so a local named
           # `print` or a variable named `stderr` is not a hit.
-          rule='^.+:[0-9]+:((telemetry|log|tracing)(::.+|!)|((std|core|alloc)::)?(e?print(ln)?|dbg)!|((std|core|alloc)::)?io::(stdout|stderr))$'
-          for c in $swept; do
-            if [ -z "$(git ls-files -- "crates/$c/src/lib.rs")" ]; then
-              printf '  REFUSED  crates/%s/src/lib.rs is not tracked. A swept crate\n' "$c"
-              printf '           cannot be covered by its absence.\n'
-              bad=1
-              continue
-            fi
-            git ls-files -z -- "crates/$c/src/*.rs" > "$g17/$c.z"
-            if ! "$scan" closure "$g17/tracked.z" "crates/$c/src/lib.rs" > "$g17/$c.closure"; then
-              printf '  REFUSED  crates/%s: the module closure did not resolve:\n' "$c"
-              grep '^UNRESOLVED' "$g17/$c.closure" | sed 's/^/           /'
-              bad=1
-            fi
-            grep -v '^UNRESOLVED' "$g17/$c.closure" | tr '\n' '\0' >> "$g17/$c.z"
-            tr '\0' '\n' < "$g17/$c.z" | sort -u | grep . | tr '\n' '\0' > "$g17/$c.files.z"
-            n=$(tr -cd '\0' < "$g17/$c.files.z" | wc -c | tr -d ' ')
-            scanned=$((scanned + n))
-            if ! xargs -0 -r "$scan" paths < "$g17/$c.files.z" > "$g17/$c.paths"; then
-              printf '  REFUSED  crates/%s: a source file could not be lexed\n' "$c"
-              bad=1
-            fi
-            hits=$( { grep -E "$rule" "$g17/$c.paths" || true; } )
-            if [ -n "$hits" ]; then
-              printf 'LOGGING INSIDE THE SWEEP: crates/%s\n%s\n' "$c" "$hits"
-              bad=1
-            fi
-          done
-          if [ "$bad" -ne 0 ]; then
-            echo
-            echo "GATE 17 FAILED."
-            echo
-            echo "The sweep evaluates a mask per (bar, combination). A call that"
-            echo "is O(1) is still a call, and there are billions of them."
-            echo "Count in a plain integer and emit ONE aggregate at the k-level"
-            echo "boundary — the shape pull::session::DropCensus already uses."
-            exit 1
-          fi
-          echo "OK — ${scanned} swept source file(s) scanned, none logs per combination."
-          echo "     (vocab, engine, indicators AND runner — the per-bar and"
-          echo "      per-trial loops are in the last of those.)"
+
+          # D-2312: the closure, the paths and the rule are `gates_runtime gate17`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate17 --swept "$swept"
 
       - name: Gate 23 — stderr is not a log, and a new crate is covered the day it appears
         run: |
@@ -3194,7 +2770,6 @@ jobs:
           #
           # This walks `crates/*/src` BY GLOB. There is no crate list to fall out
           # of date.
-          fail=0
 
           # WHOLE FILES, TEST CODE INCLUDED, AND DELIBERATELY SO.
           #
@@ -3237,27 +2812,6 @@ jobs:
           # calls. A handle obtained through a trait object or `libc::write` is
           # still not seen; gate 22 clause B refuses `libc::` in the swept
           # crates. MEASURED: zero handles across the workspace today.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          g23=$(mktemp -d)
-          git ls-files -z -- 'crates/*/src/*.rs' > "$g23/files.z"
-          [ -s "$g23/files.z" ] || { echo "GATE 23 READ NO FILE under crates/*/src."; exit 1; }
-          if ! xargs -0 -r "$scan" paths < "$g23/files.z" > "$g23/paths"; then
-            echo "  REFUSED  a source file under crates/*/src could not be lexed"
-            fail=1
-          fi
-          : > /tmp/prints.txt
-          : > /tmp/handles.txt
-          awk '
-            { p = $0; sub(/^[^:]*:[0-9]+:/, "", p); f = $0; sub(/:[0-9]+:.*$/, "", f); sub(/^crates\//, "", f) }
-            p ~ /^((std|core|alloc)::)?(println|eprintln|print|eprint|dbg)!$/ {
-              m = p; sub(/^.*::/, "", m); n[f ":" m]++ }
-            p ~ /^((std|core|alloc)::)?io::(stdout|stderr)$/ { h[f ":handle"]++ }
-            END {
-              for (k in n) print k ":" n[k] > "/tmp/prints.txt"
-              for (k in h) print k ":" h[k] > "/tmp/handles.txt"
-            }
-          ' "$g23/paths"
-
 
           # CLAUSE A — the print surface is exactly this, and every line says
           # which kind it is.
@@ -3480,25 +3034,6 @@ jobs:
           pull/src/cash_auction.rs:eprintln!:3
           pull/src/cash_session_cache.rs:eprintln!:2"
 
-          want=$(printf '%s\n' $declared | sort)
-          got=$(sort /tmp/prints.txt)
-          echo "  declared:"; printf '%s\n' "$want" | sed 's/^/    /'
-          echo "  measured:"; printf '%s\n' "$got"  | sed 's/^/    /'
-          if [ "$want" != "$got" ]; then
-            echo
-            echo "  REFUSED  the print surface is not the declared one."
-            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
-            echo
-            echo "           A NEW print: if it is a DIAGNOSTIC on a production"
-            echo "           path, emit an event too — stderr is seen by whoever"
-            echo "           is watching, the FILE is what gets handed to a"
-            echo "           diagnosis afterwards. Then declare it above saying"
-            echo "           which kind it is. A print that is GONE: delete its"
-            echo "           line, because a declaration nobody can trace to code"
-            echo "           is the stale lie gate 1d refuses."
-            fail=1
-          fi
-
           # CLAUSE A2 — the same question, asked of the handle spellings.
           #
           # Its declared list was EMPTY until D-1202: nothing in this workspace
@@ -3515,25 +3050,9 @@ jobs:
           # says a failed stdout on stderr and emits `cli.output`.
           declared_handles='api/src/server.rs:handle:3
           cli/src/main.rs:handle:2'
-          # Both sides normalised the same way, because an empty `printf` emits a
-          # blank line and an empty file emits nothing, and comparing those two
-          # would fail on the healthy case forever.
-          want_h=$( { printf '%s\n' $declared_handles | grep . || true; } | sort)
-          got_h=$( { grep . /tmp/handles.txt || true; } | sort)
-          echo "  declared stream handles: ${want_h:-<none>}"
-          echo "  measured stream handles: ${got_h:-<none>}"
-          if [ "$want_h" != "$got_h" ]; then
-            echo
-            echo "  REFUSED  the set of writes to a process stream is not the"
-            echo "           declared one."
-            diff <(printf '%s\n' "$want_h") <(printf '%s\n' "$got_h") || true
-            echo
-            echo '           writeln!(io::stderr(), ...) is a diagnostic wearing'
-            echo "           a different macro. If it is on a production path,"
-            echo "           emit the event beside it and declare it above; if it"
-            echo "           is gone, delete its line."
-            fail=1
-          fi
+          # Both sides are compared as sorted lists of non-empty words, so an
+          # empty declaration and an empty measurement are equal on the healthy
+          # case (the shell had to normalise a blank `printf` line by hand).
 
           # CLAUSE B — a crate that writes to stderr must be ABLE to log.
           #
@@ -3572,7 +3091,7 @@ jobs:
           # declare telemetry in the flat table and still answer yes; `core` and
           # `costs` answer no, as they should.
           #
-          # NOW READ AS TOML (D-1107). The two greps above read one header
+          # NOW READ AS TOML (D-1107). The two greps it replaced read one header
           # spelling and one key spelling, so `[ dependencies . telemetry ]`
           # and a root-level `dependencies.telemetry = ..` answered no (a loud
           # false refusal), and `telemetry = { package = "store", .. }` answered
@@ -3581,33 +3100,9 @@ jobs:
           # exactly when a plain `dependencies` declaration links the PACKAGE
           # `telemetry`. A target-only dependency still answers no, the safe
           # direction recorded above. An unreadable manifest answers no.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          has_telemetry() {
-            local m="crates/$1/Cargo.toml" listed
-            [ -n "$(git ls-files -- "$m")" ] || return 1
-            listed=$("$scan" deps "$m") || return 1
-            grep -qE '^[^:]*:[0-9]+:dependencies:[^:]*:telemetry$' <<< "$listed"
-          }
           # Both files, because clause A2's handles are the same hazard as an
           # `eprintln!` and were not reaching this loop at all.
           # Read line by line, so a path holding a space is one path (D-1109).
-          { cat /tmp/prints.txt /tmp/handles.txt \
-              | grep -E ':(eprint!|eprintln!|handle):[0-9]+$' || true; } \
-            | cut -d/ -f1 | sort -u > /tmp/stderr-crates.txt
-          while IFS= read -r crate; do
-            [ "$crate" = "telemetry" ] && continue   # it IS the logger
-            if has_telemetry "$crate"; then
-              echo "  ok       $crate writes to stderr and can also emit"
-            else
-              echo "  REFUSED  crate '$crate' writes to stderr but declares no"
-              echo "           telemetry dependency in its [dependencies] table,"
-              echo "           so stderr is the ONLY channel it has in a shipping"
-              echo "           build. Add the dependency and emit the event."
-              echo "           A dev-dependency does not answer this: it links"
-              echo "           into tests and into no release build."
-              fail=1
-            fi
-          done < /tmp/stderr-crates.txt
 
           # CLAUSE C — a temporary path names the process that made it.
           #
@@ -3733,74 +3228,25 @@ jobs:
           telemetry/src/lib.rs 1
           '
           #
-          # AND YES, THE SCRATCH FILE BELOW IS ITSELF A FIXED /tmp NAME. It is
-          # the convention clauses A and B already use -- `/tmp/prints.txt`,
-          # `/tmp/code.txt` -- and on a runner this step is the only process
-          # that exists, so the collision this clause polices cannot happen to
-          # it there. Run two copies of this gate on one developer machine and
-          # they WILL fight over it. Said out loud rather than left for somebody
-          # to find, because a gate that exempts itself from its own rule
-          # without saying so is the shape gate 12 exists to refuse.
+          # THE SCRATCH FILES ARE GONE. This step used to keep its working
+          # lists in fixed /tmp names -- `/tmp/prints.txt`,
+          # `/tmp/fixed-temp.txt` -- and said so here: on a runner this step is
+          # the only process, but two copies on one machine WILL fight over
+          # them. They did, while D-2312 was being measured: one copy's clause C
+          # read another's file and counted paths in files it never opened.
+          # `gates_runtime gate23` keeps every list in memory, so the gate no
+          # longer exempts itself from its own rule.
           tmp_window=3
-          : > /tmp/fixed-temp.txt
           # READ THROUGH THE LEXER, FROM A NUL-SEPARATED LISTING (D-1110). The
-          # awk below skipped a line whose first non-blank character was `//`
+          # awk it replaced skipped a line whose first non-blank character was `//`
           # or `*`, which also skipped a `*`-led statement; it now reads
           # `source_scan code`, in which comments are already blank and every
           # other line is itself, so no line is skipped. The listing was read
           # through process substitution, so a failing git meant a pass.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          git ls-files -z -- 'crates/**/*.rs' > /tmp/fixed-temp-files.z
-          [ -s /tmp/fixed-temp-files.z ] || { echo "GATE 23 CLAUSE C READ NO FILE."; exit 1; }
-          nfixed=0
-          while IFS= read -r -d '' f; do
-            nfixed=$((nfixed + 1))
-            if ! "$scan" code "$f" > /tmp/fixed-temp-code.rs; then
-              printf '  REFUSED  %s could not be lexed\n' "$f"
-              fail=1
-              continue
-            fi
-            awk -v W="$tmp_window" -v name="${f#crates/}" '
-              { line[NR] = $0 }
-              END {
-                for (i = 1; i <= NR; i++) {
-                  if (line[i] !~ /env::temp_dir\(\)/) continue
-                  ok = 0
-                  for (j = i; j <= NR && j <= i + W; j++) {
-                    if (line[j] ~ /process::id\(\)/) { ok = 1; break }
-                  }
-                  if (!ok) print name ":" i
-                }
-              }' /tmp/fixed-temp-code.rs >> /tmp/fixed-temp.txt
-          done < /tmp/fixed-temp-files.z
 
-          echo "  clause C: $(wc -l < /tmp/fixed-temp.txt | tr -d ' ') temporary path(s)"
-          echo "            that do not name their process, over"
-          echo "            ${nfixed} tracked source file(s)"
-          for p in $( { cut -d: -f1 /tmp/fixed-temp.txt | sort -u; } || true ); do
-            c=$( { grep -c "^${p}:" /tmp/fixed-temp.txt || true; } | tr -d ' ')
-            a=$( { printf '%s\n' "$allow_fixed" | awk -v F="$p" '$1==F{print $2; exit}'; } || true)
-            [ -n "$a" ] || a=0
-            if [ "$c" -gt "$a" ]; then
-              printf '  REFUSED  %s — %s fixed temporary path(s), %s allowed\n' "$p" "$c" "$a"
-              { grep "^${p}:" /tmp/fixed-temp.txt | sed 's/^/             crates\//' | head -6; } || true
-              fail=1
-            else
-              printf '  allowed  %s — %s of %s\n' "$p" "$c" "$a"
-            fi
-          done
           # An entry naming a file that is gone makes this clause read stronger
           # than it is, so it is a failure. An entry whose file no longer matches
           # is only loose, and says so — somebody fixed a fixture.
-          for p in $( { printf '%s\n' "$allow_fixed" | awk 'NF{print $1}'; } || true ); do
-            if ! git ls-files --error-unmatch "crates/$p" >/dev/null 2>&1; then
-              printf '  STALE ENTRY — crates/%s is not a tracked file\n' "$p"
-              fail=1
-            elif ! grep -q "^${p}:" /tmp/fixed-temp.txt; then
-              printf '::warning title=Gate 23 clause C is loose::'
-              printf 'crates/%s no longer names a fixed temporary path — drop the entry\n' "$p"
-            fi
-          done
 
           # WHAT THIS DOES NOT PROVE, said plainly so nobody reads more into a
           # green gate than it earned: it fixes the SET of prints and forces a
@@ -3809,14 +3255,11 @@ jobs:
           # does not verify that a particular diagnostic has a matching event.
           # The declaration above carries that, and a reviewer keeps it honest —
           # the same division of labour gate 1d uses for path-shaped literals.
-          if [ "$fail" -ne 0 ]; then
-            echo
-            echo "GATE 23 FAILED."
-            echo "A diagnostic that exists only on a terminal nobody kept is a"
-            echo "fact this repository did not record. CLAUDE.md section 4."
-            exit 1
-          fi
-          echo "OK - every print is declared, and stderr is never a crate's only channel."
+
+          # D-2312: clauses A to C are `gates_runtime gate23`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate23 --declared "$declared" \
+            --declared-handles "$declared_handles" --allow-fixed "$allow_fixed" \
+            --window "$tmp_window"
 
       - name: Gate 21 — the logger opens nothing but its own files
         run: |
@@ -3828,7 +3271,6 @@ jobs:
           # sitting on the disk, the logger must be INCAPABLE of reading it.
           #
           # Two clauses, because either alone is weak.
-          fail=0
 
           # CLAUSE A — crates/telemetry declares NO dependencies.
           #
@@ -3846,20 +3288,6 @@ jobs:
           # manifest printed nothing too, which read as "std only".
           # `source_scan deps` parses the manifest and prints one line per
           # declaration of any kind; an absent or unreadable manifest refuses.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          if [ -z "$(git ls-files -- crates/telemetry/Cargo.toml)" ] \
-             || ! deps=$("$scan" deps crates/telemetry/Cargo.toml); then
-            echo "  REFUSED  crates/telemetry/Cargo.toml is absent or could not be read as TOML"
-            deps='(unreadable)'
-          fi
-          if [ -n "$deps" ]; then
-            echo "  REFUSED  crates/telemetry declares dependencies:"
-            printf '%s\n' "$deps" | sed 's/^/             /'
-            echo "           A logger that can reach the store can read a bar."
-            fail=1
-          else
-            echo "  ok       crates/telemetry declares no dependencies - std only"
-          fi
 
           # CLAUSE B — the production file-opening sites are exactly these.
           #
@@ -3944,51 +3372,9 @@ jobs:
           sink.rs:std::fs::remove_file:1
           sink.rs:std::fs::rename:1
           tail.rs:std::fs::File::open:2'
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          git ls-files -z -- 'crates/telemetry/src/*.rs' > /tmp/telemetry-src.z
-          [ -s /tmp/telemetry-src.z ] || { echo "  REFUSED  crates/telemetry/src holds no tracked file"; exit 1; }
-          if ! xargs -0 -r "$scan" paths-prod < /tmp/telemetry-src.z > /tmp/telemetry-paths.txt; then
-            echo "  REFUSED  a crates/telemetry source file could not be lexed"
-            fail=1
-          fi
-          globs=$(grep -E ':std::(fs|process|net|os)(::[A-Za-z0-9_]+)*::\*$' /tmp/telemetry-paths.txt || true)
-          if [ -n "$globs" ]; then
-            printf '  REFUSED  a glob import hides which capability is used:\n%s\n' "$globs"
-            fail=1
-          fi
-          awk '
-            { f = $0; sub(/:[0-9]+:.*$/, "", f); sub(/^crates\/telemetry\/src\//, "", f)
-              p = $0; sub(/^[^:]*:[0-9]+:/, "", p) }
-            p ~ /^std::(fs|process|net|os)::/ && p ~ /::[a-z_][a-z0-9_]*!?$/ { n[f ":" p]++ }
-            END { for (k in n) print k ":" n[k] }
-          ' /tmp/telemetry-paths.txt > /tmp/io-sites.txt
 
-          want=$(printf '%s\n' $declared | sort)
-          got=$(sort /tmp/io-sites.txt)
-
-          echo "  declared:"; printf '%s\n' "$want" | sed 's/^/    /'
-          echo "  measured:"; printf '%s\n' "$got"  | sed 's/^/    /'
-
-          if [ "$want" != "$got" ]; then
-            echo
-            echo "  REFUSED  the logger's file-opening surface is not the declared one."
-            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
-            echo
-            echo "           A NEW site: say which path it opens and why, and add"
-            echo "           it above in the same commit. A site that is GONE:"
-            echo "           delete its line, because a declaration nobody can"
-            echo "           trace to code is the stale lie gate 1d refuses."
-            fail=1
-          fi
-
-          if [ "$fail" -ne 0 ]; then
-            echo
-            echo "GATE 21 FAILED."
-            echo "CLAUDE.md section 4: no fallback that hides a failure. A logger"
-            echo "that can reach real bars can be silently wrong about them."
-            exit 1
-          fi
-          echo "OK - the logger depends on nothing and opens only its own files."
+          # D-2312: clauses A and B are `gates_runtime gate21`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate21 --declared "$declared"
 
       - name: Gate 22 — the sweep crates cannot read a bar
         run: |
@@ -4015,7 +3401,6 @@ jobs:
           #
           # and gate 22 printed OK. Everything below is the repair, and each
           # clause names the bypass it now refuses.
-          fail=0
           # TWO LISTS, BECAUSE THIS GATE ASKS TWO DIFFERENT QUESTIONS.
           #
           # It shipped with ONE list doing both jobs, and that is why
@@ -4080,31 +3465,6 @@ jobs:
           # dev-, build- or target-dependency is a different kind and is
           # therefore refused. A manifest that is absent or unreadable is a
           # refusal, never a pass.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          for c in $PINNED; do
-            m="crates/$c/Cargo.toml"
-            if [ -z "$(git ls-files -- "$m")" ]; then
-              echo "REFUSED  $m is not a tracked file. A pinned crate cannot be pinned by its absence."
-              fail=1
-              continue
-            fi
-            if ! raw=$("$scan" deps "$m"); then
-              echo "REFUSED  $m could not be read as TOML, so its dependency set is unknown."
-              fail=1
-              continue
-            fi
-            deps=$(awk -F: 'NF { print $3 ":" $NF }' <<< "$raw" | sort -u | tr '\n' ' ')
-            case "$c" in
-              vocab)             want='' ;;
-              indicators|engine) want='dependencies:vocab ' ;;
-            esac
-            if [ "$deps" != "$want" ]; then
-              echo "REFUSED  crates/$c declares [$deps] and must declare [$want]"
-              printf '%s\n' "$raw" | sed 's/^/           /'
-              echo "         A new dependency here is how a bar reaches the sweep."
-              fail=1
-            fi
-          done
 
           # ── CLAUSE B — no filesystem call site in src/ or benches/ ─────────────
           #
@@ -4120,17 +3480,6 @@ jobs:
           # all three do. `exit` cannot read anything. Spawning a process can, which
           # is what `Command` names.
           BANNED='File::open|File::create|OpenOptions|fs::read|fs::write|fs::copy|fs::rename|fs::remove|fs::File|fs::metadata|fs::canonicalize|read_dir|std::fs|MmapOptions|Mmap::|memmap|include_bytes!|process::Command|Command::new|std::os::|libc::'
-          for c in $SWEEP; do
-            for dir in src benches; do
-              [ -d "crates/$c/$dir" ] || continue
-              hits=$(grep -rnE "$BANNED" "crates/$c/$dir" 2>/dev/null || true)
-              if [ -n "$hits" ]; then
-                echo "REFUSED  crates/$c/$dir reaches the filesystem:"
-                printf '%s\n' "$hits" | sed 's/^/           /'
-                fail=1
-              fi
-            done
-          done
 
           # ── CLAUSE C — no import of a crate that reads the store, any spelling ─
           #
@@ -4139,15 +3488,6 @@ jobs:
           # keeping. So the pattern is anchored to an import -- but the first
           # version anchored it to a BARE `use`, and the audit walked past with
           # `pub use store::…` and with `use store as st;`.
-          for c in $SWEEP; do
-            hits=$(grep -rnE '^[[:space:]]*(pub[[:space:]]+)?use[[:space:]]+(brutex_)?(store|pull|lake|api|telemetry)([^A-Za-z0-9_]|$)' \
-                   "crates/$c/src" "crates/$c/benches" 2>/dev/null || true)
-            if [ -n "$hits" ]; then
-              echo "REFUSED  crates/$c imports a crate that reads the store:"
-              printf '%s\n' "$hits" | sed 's/^/           /'
-              fail=1
-            fi
-          done
 
           # ── CLAUSES B2 AND C2 — the same two questions, asked of PATHS ─────────
           #
@@ -4174,45 +3514,6 @@ jobs:
           # as s;`, whose alias the scanner does not record. Clause A pins the
           # dependency sets of three of the four crates, which is what makes the
           # second unreachable there.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          g22=$(mktemp -d)
-          git ls-files -z > "$g22/tracked.z"
-          [ -s "$g22/tracked.z" ] || { echo "GATE 22 READ NO TRACKED FILE."; exit 1; }
-          fs_rule='^.+:[0-9]+:((std|core|alloc)::(fs|os|net)(::.*)?|(std|core|alloc)::process(::.*)?|libc(::.*)?|memmap[0-9]*(::.*)?|include_bytes!)$'
-          ok_rule=':(std|core|alloc)::process(::(exit|abort|id|ExitCode|ExitStatus|Termination))?$'
-          store_rule='^.+:[0-9]+:(brutex_)?(store|pull|lake|api|telemetry)::.+$'
-          for c in $SWEEP; do
-            if [ -z "$(git ls-files -- "crates/$c/src/lib.rs")" ]; then
-              echo "REFUSED  crates/$c/src/lib.rs is not tracked. A swept crate cannot"
-              echo "         be held to these clauses by its absence."
-              fail=1
-              continue
-            fi
-            git ls-files -z -- "crates/$c/src/*.rs" "crates/$c/benches/*.rs" > "$g22/$c.z"
-            if ! "$scan" closure "$g22/tracked.z" "crates/$c/src/lib.rs" > "$g22/$c.closure"; then
-              echo "REFUSED  crates/$c: the module closure did not resolve:"
-              grep '^UNRESOLVED' "$g22/$c.closure" | sed 's/^/           /'
-              fail=1
-            fi
-            grep -v '^UNRESOLVED' "$g22/$c.closure" | tr '\n' '\0' >> "$g22/$c.z"
-            tr '\0' '\n' < "$g22/$c.z" | grep . | sort -u | tr '\n' '\0' > "$g22/$c.files.z"
-            if ! xargs -0 -r "$scan" paths < "$g22/$c.files.z" > "$g22/$c.paths"; then
-              echo "REFUSED  crates/$c: a source file could not be lexed"
-              fail=1
-            fi
-            hits=$( { grep -E "$fs_rule" "$g22/$c.paths" | grep -vE "$ok_rule"; } || true)
-            if [ -n "$hits" ]; then
-              echo "REFUSED  crates/$c reaches the filesystem or a process, read as a path:"
-              printf '%s\n' "$hits" | sed 's/^/           /'
-              fail=1
-            fi
-            hits=$(grep -E "$store_rule" "$g22/$c.paths" || true)
-            if [ -n "$hits" ]; then
-              echo "REFUSED  crates/$c names a crate that reads the store, read as a path:"
-              printf '%s\n' "$hits" | sed 's/^/           /'
-              fail=1
-            fi
-          done
 
           # ── CLAUSE D — every compile-time include is a document, by a literal ──
           #
@@ -4223,34 +3524,9 @@ jobs:
           # the audit walked past it with
           # `include_str!(concat!(env!("HOME"), "/.brutex/store/bars/…/2020-01.bin"))`,
           # which is not a literal at all and matched nothing.
-          for c in $SWEEP; do
-            for dir in src benches tests; do
-              [ -d "crates/$c/$dir" ] || continue
-              # A computed include path is refused outright. There is no legitimate
-              # one here, and a gate that cannot evaluate the expression must not
-              # guess at what it evaluates to.
-              computed=$(grep -rnE 'include_str!\([^")]' "crates/$c/$dir" 2>/dev/null || true)
-              if [ -n "$computed" ]; then
-                echo "REFUSED  crates/$c/$dir computes an include path instead of writing one:"
-                printf '%s\n' "$computed" | sed 's/^/           /'
-                fail=1
-              fi
-              for p in $(grep -rhoE 'include_str!\("[^"]+"\)' "crates/$c/$dir" 2>/dev/null \
-                         | sed 's/include_str!("//; s/")//' || true); do
-                case "$p" in
-                  *.md|*.rs|*.toml|*.lock) : ;;
-                  *) echo "REFUSED  crates/$c/$dir includes '$p', not a document or a source file"
-                     fail=1 ;;
-                esac
-                case "$p" in
-                  *bars*|*.bin|*.parquet|*.csv)
-                     echo "REFUSED  crates/$c/$dir includes '$p', which is bar-shaped"
-                     fail=1 ;;
-                  *) : ;;
-                esac
-              done
-            done
-          done
+          # A computed include path is refused outright. There is no legitimate
+          # one here, and a gate that cannot evaluate the expression must not
+          # guess at what it evaluates to.
 
           # ── CLAUSE E — tests/ may read the disk, bounded ───────────────────────
           #
@@ -4261,16 +3537,6 @@ jobs:
           # clause green. So the exemption is bounded the same way clause D bounds
           # its own: a path may be built from `CARGO_MANIFEST_DIR`, and may never
           # be bar-shaped or reach into a home directory.
-          for c in $SWEEP; do
-            [ -d "crates/$c/tests" ] || continue
-            hits=$(grep -rnE 'env!\("HOME"\)|var\("HOME"\)|\.brutex|store/bars|\.bin"|\.parquet"' \
-                   "crates/$c/tests" 2>/dev/null || true)
-            if [ -n "$hits" ]; then
-              echo "REFUSED  crates/$c/tests names a path outside the repository:"
-              printf '%s\n' "$hits" | sed 's/^/           /'
-              fail=1
-            fi
-          done
 
           # WHAT THIS GATE CANNOT SEE, said rather than implied. A caller can still
           # read bars itself and hand them to `Evaluator::step` -- that is the API
@@ -4278,17 +3544,10 @@ jobs:
           # question: these three crates cannot go and find data on their own.
           # `crates/api` and `crates/pull` may touch the store, deliberately, and
           # gates 9 and 13 govern them.
-          if [ "$fail" -ne 0 ]; then
-            echo
-            echo "GATE 22 FAILED."
-            echo
-            echo "A sweep crate that can reach the filesystem can be handed real"
-            echo "bars by accident, and the owner's constraint is that even bars"
-            echo "pulled by mistake are never used. Keep the capability absent."
-            exit 1
-          fi
-          echo "OK — vocab, indicators, engine and runner cannot reach a bar,"
-          echo "     and the first three declare exactly the dependencies pinned above."
+
+          # D-2312: clauses A to E are `gates_runtime gate22`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate22 --pinned "$PINNED" --sweep "$SWEEP" \
+            --banned "$BANNED"
 
       - name: Gate 24 — no writable memory mapping
         run: |
@@ -4318,7 +3577,7 @@ jobs:
           # raise the signal this rule is about at all -- a truncated file can,
           # which is a different hazard with a different answer -- so
           # `Mmap::map` and `MmapOptions` are deliberately absent from the
-          # pattern below.
+          # pattern (`maps_writably` in .github/gates_runtime.rs, D-2312).
           #
           # THE SPELLINGS, and why each one:
           #   MmapMut          the type. Naming it is enough; you cannot use one
@@ -4353,11 +3612,7 @@ jobs:
           # allowlist -- section 4 says "without exception", and a gate for an
           # unconditional rule must not ship the mechanism for excusing it.
           #
-          # NO UNTRUSTED INPUT: `git ls-files` and the pattern below.
-          BANNED_MAP='MmapMut|MmapRaw|(^|[^A-Za-z0-9_])map_mut\(|(^|[^A-Za-z0-9_])map_anon(_mut)?\(|(^|[^A-Za-z0-9_])map_copy\('
-          scanned=0
-          work=$(mktemp -d)
-          : > "$work/hits"
+          # NO UNTRUSTED INPUT: `git ls-files` and that pattern.
           # COMMENTS ARE BLANKED BY THE LEXER, NOT BY A LINE FILTER (D-1109).
           # This used to drop every line whose first non-blank character was
           # `//` or `*`, and `*slot = Some(MmapOptions::new().len(4096)
@@ -4368,37 +3623,9 @@ jobs:
           # line, so a `*`-led statement is read like any other and the line
           # number shown is the line in the file. The listing is a NUL-separated
           # file, so a git that fails fails the step and no path is split.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          git ls-files -z -- 'crates/**/*.rs' > "$work/files.z"
-          while IFS= read -r -d '' f; do
-            scanned=$((scanned + 1))
-            if ! "$scan" code "$f" > "$work/code"; then
-              echo "  REFUSED  $f could not be lexed"
-              echo "$f: (unlexable)" >> "$work/hits"
-              continue
-            fi
-            { grep -nE "$BANNED_MAP" "$work/code" || true; } \
-              | sed "s|^|${f}:|" >> "$work/hits"
-          done < "$work/files.z"
 
-          echo "scanned ${scanned} tracked source file(s) under crates/"
-          if [ "$scanned" -eq 0 ]; then
-            echo "GATE 24 SCANNED NOTHING. A gate that reads no file is not a gate."
-            exit 1
-          fi
-          if [ -s "$work/hits" ]; then
-            echo 'WRITABLE MEMORY MAPPING:'
-            sed 's/^/  /' "$work/hits"
-            echo
-            echo "GATE 24 FAILED."
-            echo
-            echo "CLAUDE.md section 4 bans a writable memory mapping without"
-            echo "exception: it raises SIGBUS on a full disk and a signal cannot"
-            echo "be caught, least of all under panic = abort. Write through the"
-            echo "file API, check the error, and refuse loudly."
-            exit 1
-          fi
-          echo "OK — no crate maps a file or an anonymous region writably."
+          # D-2312: the walk and the spellings are `gates_runtime gate24`.
+          "${RUNNER_TEMP:-/tmp}/gates-runtime" gate24
 
       - name: Gate 25 — the release profile still refuses silent wrapping
         run: |
