@@ -3104,58 +3104,15 @@ impl CensusLock {
             //   breaks the file inside it.
             //
             // Both are the §4 fallback that hides a failure, and both went live
-            // the day feeds began running concurrently. Enumerated by kind
-            // rather than inverted into "refuse unless the path is at fault"
-            // because a name past the host's limit is `InvalidFilename`, is the
-            // path's fault, and must keep deferring —
-            // `a_census_that_cannot_be_measured_stops_the_run` builds exactly
-            // that and expects the install's wording.
-            Err(why)
-                if matches!(
-                    why.kind(),
-                    ErrorKind::PermissionDenied | ErrorKind::IsADirectory
-                ) =>
-            {
-                return Err(format!(
-                    "the census lock at {} exists but cannot be opened: {why}. \
-                     Refused rather than run without it -- the census beside it \
-                     is still writable, so this run would have interleaved a \
-                     read-modify-write with any other and silently discarded \
-                     one of them, while the loser's receipt still read 'every \
-                     row accounted for' because its own books balanced. Fix the \
-                     ownership, the permissions or the type of that path and \
-                     try again.",
-                    lock_path.display()
-                ));
-            }
-            // Every other cause is the path's, and the install reports it --
-            // UNLESS SOMETHING THAT IS NOT A FILE OCCUPIES THE NAME (v3b-1,
-            // D-1480). A UNIX socket at this name fails the open with ENXIO,
-            // which is neither kind above, so it deferred here and the run went
-            // unserialised with nothing said: the install never touches this
-            // path. The kind cannot tell a socket from a path failure, but the
-            // name can: `symlink_metadata` that SUCCEEDS on a non-regular entry
-            // means the directory is sound and this one name is misfiled -- a
-            // socket, a device that would not open, a symlink that leads
-            // nowhere or loops. Refused, naming the type. A genuine path
-            // failure (no directory, a file where the directory belongs, a name
-            // past the host's limit) fails `symlink_metadata` too, so it still
-            // defers to the install's wording. A REGULAR file that would not
-            // open for another reason also still defers: its directory is the
-            // install's directory, and the install fails on the same host.
-            Err(why) => match fs::symlink_metadata(&lock_path) {
-                Ok(found) if !found.is_file() => {
-                    return Err(format!(
-                        "the census lock at {} is not a regular file ({}) and \
-                         cannot be opened: {why}. Refused rather than run \
-                         without it: the census beside it is still writable. \
-                         Remove what occupies that name and try again.",
-                        lock_path.display(),
-                        entry_kind(found.file_type())
-                    ));
-                }
-                _ => return Ok(Self { _held: None }),
-            },
+            // the day feeds began running concurrently. A name past the host's
+            // limit is `InvalidFilename`, is the path's fault, and must keep
+            // deferring — `a_census_that_cannot_be_measured_stops_the_run`
+            // builds exactly that and expects the install's wording.
+            //
+            // Every OTHER kind now refuses too while the census directory
+            // stands (pull2-1, D-2765): an EMFILE or an ENOSPC on the lock is
+            // not a failure the install repeats. See [`CensusLock::unopened`].
+            Err(why) => return Self::unopened(&lock_path, &why),
         };
         // A LOCK THAT OPENED BUT IS NOT A REGULAR FILE IS REFUSED BY NAME. A
         // FIFO or a device that opens at this name is a misfiled path, the same
@@ -3184,6 +3141,85 @@ impl CensusLock {
         Flock::try_lock(lock, lock_path.clone())
             .map(|held| Self { _held: Some(held) })
             .map_err(|refusal| lock_refusal(&lock_path, refusal))
+    }
+
+    /// Why the lock file would not open, and whether that may defer.
+    ///
+    /// Split out of [`CensusLock::take`] so its arms can be driven with host
+    /// error kinds a test cannot provoke on demand (EMFILE, ENOSPC). D-2765.
+    fn unopened(lock_path: &Path, why: &std::io::Error) -> Result<Self, String> {
+        if matches!(
+            why.kind(),
+            ErrorKind::PermissionDenied | ErrorKind::IsADirectory
+        ) {
+            return Err(format!(
+                "the census lock at {} exists but cannot be opened: {why}. \
+                 Refused rather than run without it -- the census beside it \
+                 is still writable, so this run would have interleaved a \
+                 read-modify-write with any other and silently discarded \
+                 one of them, while the loser's receipt still read 'every \
+                 row accounted for' because its own books balanced. Fix the \
+                 ownership, the permissions or the type of that path and \
+                 try again.",
+                lock_path.display()
+            ));
+        }
+        // SOMETHING THAT IS NOT A FILE OCCUPIES THE NAME (v3b-1, D-1480). A
+        // UNIX socket at this name fails the open with ENXIO, which is neither
+        // kind above. The kind cannot tell a socket from a path failure, but
+        // the name can: `symlink_metadata` that SUCCEEDS on a non-regular entry
+        // means the directory is sound and this one name is misfiled -- a
+        // socket, a device that would not open, a symlink that leads nowhere or
+        // loops. Refused, naming the type.
+        if let Ok(found) = fs::symlink_metadata(lock_path)
+            && !found.is_file()
+        {
+            return Err(format!(
+                "the census lock at {} is not a regular file ({}) and \
+                 cannot be opened: {why}. Refused rather than run \
+                 without it: the census beside it is still writable. \
+                 Remove what occupies that name and try again.",
+                lock_path.display(),
+                entry_kind(found.file_type())
+            ));
+        }
+        // A REGULAR FILE THAT WOULD NOT OPEN, OR NO FILE AT ALL, IS NOT THE
+        // PATH'S FAULT WHILE ITS DIRECTORY STANDS (pull2-1, D-2765). Both used
+        // to defer to the install on the claim that it "fails on the same
+        // host". It does not: EMFILE, ENFILE and ENOMEM pass by the time the
+        // install runs, and a missing lock that cannot be created on an
+        // inode-exhausted disk leaves an existing census appendable in place.
+        // Each ran the census read-modify-write unserialised. Only a directory
+        // that is not there to hold the census defers now -- absent, a file in
+        // its place, or a name past the host's limit -- because the install
+        // then fails on that same cause, as
+        // `a_broken_directory_defers_because_the_install_fails_on_the_same_cause`
+        // and `a_census_that_cannot_be_measured_stops_the_run` assert.
+        match lock_path.parent().map(fs::metadata) {
+            Some(Ok(dir)) if dir.is_dir() => Err(format!(
+                "the census lock at {} could not be opened: {why}. Refused \
+                 rather than run without it: the directory that holds the \
+                 census stands, so the census may still be writable, and \
+                 running unlocked would interleave this run's \
+                 read-modify-write with any other and silently discard one \
+                 of them. Try again once the host can open that file.",
+                lock_path.display()
+            )),
+            Some(Err(stat))
+                if !matches!(
+                    stat.kind(),
+                    ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::InvalidFilename
+                ) =>
+            {
+                Err(format!(
+                    "the census lock at {} could not be opened: {why}, and \
+                     the directory that holds it could not be measured: \
+                     {stat}. Refused rather than run without the lock.",
+                    lock_path.display()
+                ))
+            }
+            _ => Ok(Self { _held: None }),
+        }
     }
 }
 
@@ -3339,6 +3375,30 @@ fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<
 /// made to lie. [`Commit::durable_through`] names the offset, so a writer
 /// cannot claim it did not know which one to flush.
 fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
+    write_appends_observed(path, appends, |_| {})
+}
+
+/// [`write_appends`], with a look at the file after its last slot is durable
+/// and before its modification time is moved past it: the instant a lock-free
+/// reader could stamp the census while the slot was still being copied.
+///
+/// # Why the time is moved at the end (census-1, D-2766)
+///
+/// An in-place `write` updates the inode's times BEFORE it copies the bytes,
+/// and a buffered reader takes no lock to copy a page. A reader that stamped
+/// the manifest inside that window and read it before the copy cached the
+/// older census, or a torn and "degraded" one, under the FINAL stamp, because
+/// nothing moved the times again; the api served it until the next manifest
+/// write, possibly the next day. Setting the modification time once more,
+/// after every byte is durable, to a value strictly past the one the writes
+/// left, guarantees that any stamp taken during them differs from the final
+/// one, so the next request reads again. The whole-image install needs none
+/// of this: its rename publishes an inode whose bytes were complete first.
+fn write_appends_observed(
+    path: &Path,
+    appends: &[Append],
+    mut landed: impl FnMut(&fs::File),
+) -> std::io::Result<()> {
     use std::io::{Seek, SeekFrom};
 
     let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
@@ -3355,7 +3415,15 @@ fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
         file.write_all(&append.commit.bytes)?;
         file.sync_all()?;
     }
-    Ok(())
+    if appends.is_empty() {
+        return Ok(());
+    }
+    landed(&file);
+    let written = file.metadata()?.modified()?;
+    let past = written
+        .checked_add(std::time::Duration::from_nanos(1))
+        .ok_or_else(|| std::io::Error::other("the census's modification time cannot advance"))?;
+    file.set_modified(std::time::SystemTime::now().max(past))
 }
 
 /// The install itself, once the census lock is held.
@@ -3670,6 +3738,105 @@ mod tests {
             "nothing was published at the live path either"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A LOCK THAT WILL NOT OPEN FOR A TRANSIENT OR SPACE REASON REFUSES.**
+    /// pull2-1, D-2765.
+    ///
+    /// EMFILE, ENFILE and ENOMEM on a regular lock file, and ENOSPC creating a
+    /// missing one, used to hand back a guard holding nothing, and the run did
+    /// its census read-modify-write unserialised: the install does not fail on
+    /// those causes, so concurrent installs lost rows silently. The host's
+    /// kinds are driven directly because no test can make the host return them
+    /// on demand; `OutOfMemory` and `StorageFull` are the kinds std gives
+    /// ENOMEM and ENOSPC.
+    #[test]
+    fn a_transient_or_space_failure_on_the_lock_refuses_while_the_directory_stands() {
+        let root = scratch("lock-transient");
+        let census = root.join("manifest").join("dhan.man");
+        let lock_path = census.with_extension("man.lock");
+        std::fs::write(&census, b"a census that stays writable").expect("a census");
+
+        // NO LOCK FILE YET, and creating it hit a full disk.
+        let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
+        let Err(why) = CensusLock::unopened(&lock_path, &full) else {
+            panic!("a lock that could not be created must refuse, never run unlocked")
+        };
+        assert!(why.contains("man.lock") && why.contains("Refused"), "{why}");
+
+        // A REGULAR LOCK FILE that would not open for want of memory.
+        std::fs::write(&lock_path, b"").expect("a regular lock file");
+        let starved = std::io::Error::from(std::io::ErrorKind::OutOfMemory);
+        let Err(why) = CensusLock::unopened(&lock_path, &starved) else {
+            panic!("a regular lock that would not open must refuse, never run unlocked")
+        };
+        assert!(
+            why.contains("directory that holds the census stands"),
+            "{why}"
+        );
+
+        // THE BOUNDARY: with no directory to hold the census, the same kind
+        // still defers to the install, which fails on that cause.
+        std::fs::remove_dir_all(root.join("manifest")).expect("make room for the file");
+        std::fs::write(root.join("manifest"), b"NOT A DIRECTORY").expect("a file in the way");
+        assert!(
+            CensusLock::unopened(&lock_path, &full).is_ok(),
+            "a broken directory is the install's to report"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **AN IN-PLACE APPEND ENDS UNDER A STAMP NO READER COULD HAVE TAKEN
+    /// WHILE IT WROTE.** census-1, D-2766.
+    ///
+    /// The hook stamps the census after its last slot is durable, which is the
+    /// latest instant a reader inside the write could have stamped it: the
+    /// kernel moved the times before copying the bytes, and nothing after the
+    /// slot moved them again. Before D-2766 the final stamp WAS that stamp, so
+    /// the api's cache kept whatever that reader saw under it indefinitely.
+    #[test]
+    fn an_in_place_append_moves_the_census_stamp_past_its_own_writes() {
+        let root = scratch("census-stamp");
+        let census = root.join("manifest").join("dhan.man");
+        std::fs::write(&census, vec![0_u8; 4096]).expect("a census file");
+        let append = super::Append {
+            ordinal: 0,
+            offset: 1024,
+            bytes: [7; crate::manifest::ENTRY_LEN],
+            commit: crate::manifest::Commit {
+                slot: 0,
+                offset: 64,
+                bytes: [9; crate::manifest::IMAGE_LEN],
+                durable_through: 1024 + 128,
+                header: crate::manifest::ManifestHeader::genesis(brutex_core::vendor::Vendor::Dhan),
+            },
+        };
+        let mut seen = None;
+        super::write_appends_observed(&census, std::slice::from_ref(&append), |file| {
+            seen = Some(
+                file.metadata()
+                    .and_then(|meta| meta.modified())
+                    .expect("a stamp inside the write"),
+            );
+        })
+        .expect("the append lands");
+        let inside = seen.expect("the hook saw the landed slot");
+        let after = std::fs::metadata(&census)
+            .and_then(|meta| meta.modified())
+            .expect("the final stamp");
+        assert!(
+            after > inside,
+            "the final stamp must differ from any stamp taken during the write: \
+             {inside:?} then {after:?}"
+        );
+        let bytes = std::fs::read(&census).expect("the census");
+        assert_eq!(
+            bytes.get(1024..1152),
+            Some(&[7_u8; 128][..]),
+            "the entry landed"
+        );
+        assert_eq!(bytes.get(64..128), Some(&[9_u8; 64][..]), "the slot landed");
         std::fs::remove_dir_all(&root).ok();
     }
 

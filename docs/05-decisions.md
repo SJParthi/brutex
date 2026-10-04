@@ -60283,3 +60283,156 @@ lines and the new subcommand take effect together once main carries both.
 `.github/gh_json.rs`; `every_widened_inline_program_form_is_refused` in
 `.github/source_scan.rs` now lists `--jq .sha`, `--jq '.behind_by'`, `-q
 .state` and `jq .sha f` as refusals. AFG-20.
+
+### D-2760 — A pull run's edits are addressed to its own claim of the run slot — 2026-10-04
+
+**Finding (conc:runs-1).** `pullrun::conduct_with` publishes its summary,
+which frees `site.run`, and only then drops its `Finisher` and its ticker
+handle. `Finisher::drop` checked only `finished.is_none()`, so a press (or a
+recovery) admitted in that gap had its fresh claim stamped "ended abnormally",
+which freed the slot for a third run over the same store. `ticker.abort()`
+does not stop a poll already inside `rows_now`, so that poll could also write
+after the summary, into the next run.
+
+**Decision.** `pullrun::Progress` carries a `generation`, taken from one
+process-wide counter by `Progress::claimed()` (0 is the never-claimed
+`Default`). `pull_run` passes the generation it installed to `conduct`, and
+every edit a run makes (`with_progress`, `halted_feeds`, `stopping`, the
+`Finisher`, the ticker, `note_dead_chain`, `note_leg_failure`) lands only on
+the document with that generation. A run whose slot holds another claim, or
+none, reads itself as stopped. The conductor awaits the aborted ticker before
+the final write. Operator routes (`/pull/run/stop`) and the recovery driver
+still edit whatever the slot holds.
+
+**Proof.** `a_finisher_dropped_after_the_next_claim_leaves_that_run_running`
+and `edits_from_an_ended_run_never_land_on_the_next_claim` in
+`crates/api/src/pullrun.rs`. FB-61.
+
+### D-2761 — A recovery retry takes its feed seat before it reserves an attempt — 2026-10-04
+
+**Finding (conc:recovery-1, widened by recauto-1).** `recovery::retry_day`
+made an `InFlight` attempt durable in the shared `attempts.bin` and only then
+called `server::recovery_spot`, whose first line took the feed seat. A seat
+held by an autopilot tick, a hand `/pull/spot` or an F&O walk refused with no
+request sent, and the attempt stayed charged; three such refusals exhausted
+the day for good, since shared budgets are never refunded.
+
+**Decision.** `retry_day` checks the unit's body and takes the feed seat
+before `reserve`/`append_attempt`, and hands the held seat to
+`recovery_spot`, which no longer takes its own. A busy seat refuses with
+"no attempt was reserved and this day's retry budget is unchanged". Waiting
+for the seat (recauto-1's bounded retry) is not added here: the run still ends
+BLOCKED, but it no longer costs budget.
+
+**Proof.** `a_held_feed_seat_refuses_retry_day_without_charging_its_budget`
+in `crates/api/src/recovery.rs`. FB-62.
+
+### D-2762 — The first recovery activation stages its pointer before `active.bin` exists — 2026-10-04
+
+**Finding (conc:recovery-2).** `recovery::seeded` opened `active.bin` with
+`Journal::open` (create) before appending the activation pointer. A crash, or
+a failed append or sync, between the two left a 0-byte `active.bin`, which
+`active_history` refuses, so every later start, successor preparation and boot
+resume refused until someone deleted the file by hand.
+
+**Decision.** On the first activation (no `active.bin`) the pointer journal is
+created as `active.bin.first`, the pointer is appended and synced, and the file
+is hard-linked to `active.bin` (which refuses rather than replaces a name that
+appeared meanwhile), the staging name removed and the directory synced.
+`active.bin` therefore either does not exist or holds a pointer. A staging file
+left by a crash was never linked, never stood for an activation, and is
+removed by the next first activation. Later activations open the existing
+`active.bin` without creating it. An empty `active.bin` already on disk from
+an older build is still refused, as before.
+
+**Proof.** `a_first_activation_that_fails_before_its_pointer_leaves_no_empty_pointer_file`
+in `crates/api/src/recovery.rs`, using a test-only failure point placed after
+the pointer journal opens and before the append. FB-63.
+
+### D-2763 — A refused candidate trade page evicts its cached reader — 2026-10-04
+
+**Finding (conc:apicache-1).** `/candidate-trades.json` caches one
+`TradeReader`, keyed by content only (model, root, identity, attempt, catalog
+digest, candidate key). The reader also pins its trade file's filesystem
+generation, so a byte-identical file relinked, restored or `chmod`ed made every
+`page` refuse, and the slot was never evicted: that candidate refused until a
+restart, while the refusal said to reopen.
+
+**Decision.** `trade_page` keeps its slot and delegates to `page_through`,
+which empties the slot when `page` fails. The failing request is still
+refused; the next one cold-opens and re-verifies every row and the seal, as
+every sibling cache already does.
+
+**Proof.** `a_trade_reader_whose_file_generation_moved_is_evicted_by_its_refusal`
+in `crates/api/src/candidatejson.rs`. FB-64.
+
+### D-2764 — A lease holder admits past a CLI sweep that died without its terminal marker — 2026-10-04
+
+**Finding (conc:sweep-1).** A CLI sweep stopped by Ctrl-C, a kill, an OOM or
+a panic leaves `command started` as the newest `cli.lifecycle` marker. That
+reads as `running` and then `unknown`, never `launch_clear`, so every browser
+launch was refused and the status poll said admission unavailable, even though
+the store's execution lease the refusal protects was free.
+
+**Decision.** `cli::run_durable` takes the store's execution lease before it
+begins its durable invocation and releases it only after that invocation's
+terminal is written; the kernel releases the flock when its holder dies. So a
+caller that HOLDS the lease (`claim_execution`, or the status poll's `probe`)
+admits when the newest marker is a named sweep's `command started` whose run
+id is in the durable namespace (above `operation_audit::ID_BASE`) and
+`operation_audit::read` of this store finds that id as a CLI invocation of the
+same command. Everything else still refuses: legacy run ids, an id this store
+does not hold, a different origin or command, an audit read that fails, and
+damaged telemetry. Nothing is rewritten: the status document still reports
+what the log shows, no terminal is written into the dead invocation, and the
+poll's `admission.why` names the invocation it found ended. No telemetry site
+was added.
+
+**Proof.** `a_cli_sweep_that_died_without_its_terminal_does_not_block_a_lease_holder`
+in `crates/api/src/sweeprun_admission_tests.rs`; the legacy-id case stays
+covered by `active_and_stale_unfinished_external_sweeps_block_even_when_the_lease_is_free`.
+FB-65.
+
+### D-2765 — The census lock refuses every open failure while its directory stands — 2026-10-04
+
+**Finding (conc:pull2-1).** `CensusLock::take` refused only `PermissionDenied`,
+`IsADirectory` and a non-regular entry at the lock's name. Any other open
+failure on a regular lock file (EMFILE, ENFILE, ENOMEM), or a failure to create
+a missing one (ENOSPC on exhausted inodes), returned a guard holding nothing,
+and the run did its census read-modify-write unserialised. The install does
+not fail on those causes, so concurrent installs could lose census rows.
+
+**Decision.** The open-failure arms move to `CensusLock::unopened`. After the
+existing refusals, a failure defers to the install only when the directory
+that holds the census is not there to hold it (absent, a file in its place, or
+a name past the host's limit: `NotFound`, `NotADirectory`, `InvalidFilename`),
+because the install then fails on that same cause. When the directory stands,
+or cannot be measured for another reason, the run refuses, naming the lock
+path and the host's error.
+
+**Proof.** `a_transient_or_space_failure_on_the_lock_refuses_while_the_directory_stands`
+in `crates/pull/src/ingest.rs`, which drives `unopened` with
+`ErrorKind::StorageFull` and `ErrorKind::OutOfMemory` (a test cannot make the
+host return them on demand); the deferral boundary stays covered by
+`a_broken_directory_defers_because_the_install_fails_on_the_same_cause` and
+`a_census_that_cannot_be_measured_stops_the_run`. FB-66.
+
+### D-2766 — An in-place census append moves the manifest's mtime after its bytes land — 2026-10-04
+
+**Finding (conc:census-1).** `write_appends` rewrites a header slot in place.
+An in-place buffered write updates the inode's times before it copies the
+bytes, and the api's census reader takes no lock, so a stamp taken during the
+copy could key the pre-append (or a torn, "degraded") census under the final
+stamp. Nothing moved the times again, so `census_now` served it until the next
+manifest write.
+
+**Decision.** After the last slot is durable, `write_appends` sets the
+manifest's modification time once more, to the later of now and one
+nanosecond past the time the writes left. Any stamp taken during the writes
+then differs from the final one, and the next request reads again. A failure
+to set it is returned like any other append failure. The whole-image install
+is unchanged: its rename publishes an inode whose bytes were complete first.
+
+**Proof.** `an_in_place_append_moves_the_census_stamp_past_its_own_writes` in
+`crates/pull/src/ingest.rs`, whose hook stamps the file after the last slot is
+durable and before the time is moved. FB-67.
