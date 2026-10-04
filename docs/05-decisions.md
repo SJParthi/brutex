@@ -57620,3 +57620,10 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 - `parse_cadence` has always accepted a `/w` suffix (`3/w` is three a week, pinned by an existing test), and nothing documented it. It is kept, not dropped, so no command an operator has typed changes meaning, and it is now named in the refusal sentence and in `USAGE`.
 - Exit codes are unchanged: these are malformed arguments and exit `MISUSED` (2) with the usage.
 - Proved by `cli::tests::a_refused_cadence_or_ceiling_names_the_grammar_its_parser_accepts` (FB-22).
+
+### D-2723 — Every reader of a policy knob accepts the same values — 2026-10-04
+
+- P8-04 (tests-docs-security pass 8), the CE-6 / CE-44 "one rule, two readers" class on knobs those findings did not cover. `Rules::stated` (behind screen, range-all, range-rung, pool, elite, the ledgers and the browser sweep) and `strict_range_knobs` admitted any `i64 >= 0` for the policy floors, while `expression_pricing::validate_overrides` refused `BRUTEX_MIN_WIN_RATE_BP` above 10,000 and any `BRUTEX_PROTECTED_EXITS` other than `0` or `1`. So a 200% win-rate floor ran screen silently (no row clears it, and the cascade then relaxed to its tiers) while `expression-backtest-stored` refused it, and `BRUTEX_PROTECTED_EXITS=2` or `01` read as "on" on one path and was refused on the other.
+- `knobs::policy_floor(name, raw)` is the one rule: a non-negative whole number, a win rate at most 10,000 bp (a fraction of trades cannot exceed one), and the protective-exit switch exactly `0` or `1`. `Rules::stated`, `validate_overrides` and the strict-range admission all call it.
+- What each reader does with an unusable value is unchanged and stays its own documented choice: `Rules::stated` names the value under `KNOB REFUSED` and takes the knob's documented fallback; the expression and strict-range paths refuse before computation. No new default is introduced. Leading and trailing whitespace is trimmed on every path, as `nonnegative_floor` already did for two of the three.
+- Proved by `cli::tests::every_reader_of_a_policy_knob_accepts_the_same_values`, which drives all three readers over the same values (FB-23).

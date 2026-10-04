@@ -82,7 +82,7 @@ fn value(name: &str, raw: &str) -> bool {
         | "BRUTEX_MAX_STOP_POINTS"
         | "BRUTEX_PROTECTED_EXITS"
         | "BRUTEX_MIN_FILL_HEADROOM_BP"
-        | "BRUTEX_MIN_AVG_RR_BP" => nonnegative_floor(raw).is_some(),
+        | "BRUTEX_MIN_AVG_RR_BP" => crate::knobs::policy_floor(name, raw).is_some(),
         // `BRUTEX_SCREEN_BUDGET_MS` IS IN `NAMES` AND REACHES THIS ARM ON
         // PURPOSE: it is never usable, whatever it says. The strict range audit
         // records, and a budget derives the priced cap from a wall-clock

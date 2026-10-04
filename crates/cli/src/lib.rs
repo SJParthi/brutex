@@ -9661,7 +9661,9 @@ impl Rules {
     /// the presence test cannot drift apart again.
     fn stated(name: &str) -> Option<i64> {
         let raw = crate::knobs::var(name)?;
-        if let Some(v) = crate::knobs::nonnegative_floor(&raw) {
+        // `policy_floor`, not `nonnegative_floor`: the same rule the expression
+        // and strict-range readers apply to the same knob (P8-04, D-2723).
+        if let Some(v) = crate::knobs::policy_floor(name, &raw) {
             Some(v)
         } else {
             // NAMED, NOT SWALLOWED. The table in this function's own doc lists
@@ -21310,6 +21312,62 @@ mod tests {
         let mut out = String::new();
         assert_eq!(run(&argv(&["auto", "6"]), &mut out), OK, "{out}");
         assert!(!out.is_empty(), "auto rendered something");
+    }
+
+    /// EVERY READER OF A POLICY KNOB ACCEPTS THE SAME VALUES. P8-04, D-2723.
+    ///
+    /// `Rules::stated` admitted any `i64 >= 0`, so `BRUTEX_MIN_WIN_RATE_BP=20000`
+    /// ran screen/elite/ledger silently and `BRUTEX_PROTECTED_EXITS=2` read as
+    /// "on", while `expression-backtest-stored` refused both. For each value,
+    /// the three readers -- `Rules::stated`, `validate_overrides` and the
+    /// strict-range admission -- now agree on whether it is usable.
+    #[test]
+    fn every_reader_of_a_policy_knob_accepts_the_same_values() {
+        let _knobs = crate::knobs::serially();
+        let cases: &[(&str, &str, bool)] = &[
+            ("BRUTEX_MIN_WIN_RATE_BP", "20000", false),
+            ("BRUTEX_MIN_WIN_RATE_BP", "10001", false),
+            ("BRUTEX_MIN_WIN_RATE_BP", "10000", true),
+            ("BRUTEX_MIN_WIN_RATE_BP", "7000", true),
+            ("BRUTEX_MIN_WIN_RATE_BP", "-1", false),
+            ("BRUTEX_PROTECTED_EXITS", "2", false),
+            ("BRUTEX_PROTECTED_EXITS", "01", false),
+            ("BRUTEX_PROTECTED_EXITS", "0", true),
+            ("BRUTEX_PROTECTED_EXITS", "1", true),
+            ("BRUTEX_MIN_TRADES", "40", true),
+            ("BRUTEX_MIN_TRADES", "x", false),
+        ];
+        for &(name, raw, usable) in cases {
+            crate::knobs::clear_all();
+            crate::knobs::set(name, raw);
+            assert_eq!(
+                super::Rules::stated(name).is_some(),
+                usable,
+                "Rules::stated {name}={raw}"
+            );
+            assert_eq!(
+                crate::expression_pricing::validate_overrides().is_ok(),
+                usable,
+                "validate_overrides {name}={raw}"
+            );
+            assert_eq!(
+                crate::audited_range_command::request_value(name, raw),
+                usable,
+                "strict range {name}={raw}"
+            );
+        }
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_MIN_WIN_RATE_BP", "20000");
+        assert_eq!(super::Rules::operator().min_win_rate_bp, 5_000);
+        assert!(
+            crate::knobs::refused().is_some_and(|text| text.contains("BRUTEX_MIN_WIN_RATE_BP")),
+            "the fallback is named, not silent"
+        );
+        crate::knobs::clear_all();
+        crate::knobs::set("BRUTEX_PROTECTED_EXITS", "2");
+        assert!(super::Rules::protective_exits_required());
+        assert!(crate::knobs::refused().is_some());
+        crate::knobs::clear_all();
     }
 
     /// A REFUSED ARGUMENT IS REFUSED IN THE GRAMMAR ITS PARSER ACCEPTS. P8-02, D-2721.

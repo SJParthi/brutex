@@ -84,7 +84,7 @@ impl Plan {
     }
 }
 
-fn validate_overrides() -> Result<(), String> {
+pub(crate) fn validate_overrides() -> Result<(), String> {
     for name in [
         "BRUTEX_MAX_MAE_PPM",
         "BRUTEX_MIN_RR_BP",
@@ -97,18 +97,16 @@ fn validate_overrides() -> Result<(), String> {
         "BRUTEX_TOP",
     ] {
         if let Some(value) = crate::knobs::var(name) {
-            let valid = value
-                .parse::<i64>()
-                .ok()
-                .is_some_and(|n| n >= 0 && (name != "BRUTEX_MIN_WIN_RATE_BP" || n <= 10_000));
-            if !valid {
+            // The one rule `Rules::stated` also applies (P8-04, D-2723).
+            if crate::knobs::policy_floor(name, &value).is_none() {
                 return Err(format!(
                     "{name} is malformed or outside its nonnegative policy range; no default was substituted"
                 ));
             }
         }
     }
-    if crate::knobs::var("BRUTEX_PROTECTED_EXITS").is_some_and(|s| !matches!(s.as_str(), "0" | "1"))
+    if crate::knobs::var("BRUTEX_PROTECTED_EXITS")
+        .is_some_and(|s| crate::knobs::policy_floor("BRUTEX_PROTECTED_EXITS", &s).is_none())
     {
         return Err("BRUTEX_PROTECTED_EXITS must be exactly 0 or 1".to_owned());
     }
