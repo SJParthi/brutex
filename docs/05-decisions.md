@@ -57671,3 +57671,11 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 
 - P5-03. The `forward` row said no power-of-two table is built (D-1170), and its test passed by grepping two spellings of the old per-bar table; D-1572's `BlockExtremes` IS a doubling table, over 64-bar blocks. The row now says no PER-BAR table is built and names the block table, and `runner::outcome::window_tests::forward_builds_no_per_bar_power_of_two_table` measures it: one pair per block, every level together at most one pair per bar, one pass over the bars, at seven sizes from 1 to 100,003 bars. Four doc comments cited the test module as `runner::window_tests`; they now name `runner::outcome::window_tests`.
 - P5-04. AFF-43 said at most `3n + 130` bars per query; its test asserts `3n + 130·q` in total for `q` queries, which is also what docs/06 states. The row now says the total.
+
+### D-2666 — Regime refusals name a day that answers; the engine's cost text and k=1 reservation match the code — 2026-10-04
+
+- p6num-1. `stt_options_rate` documented entry-day regime selection that D-1535 removed; it now says the rate is the one in force on the day asked, and `trip::price` charges the tax at the sell leg's day. K-43 says either leg's day refuses, and states that the shipped tables only let the entry day land in an unverified window.
+- p6num-2. `RegimeTable::rate_on` and `refusal_windows` named the next row's start as `verified_from` whatever that row held; with two unverified rows abutting (a shape the type permits) that day refuses again. Both now name the first later VERIFIED row, the condition `dated.rs` already carries. ZX-12.
+- p7num-1. The "NOT `mut`, AND THAT IS THE PROOF" comment described a removed binding and sat above the mutable `pruned`; it is removed, and the literal `duplicates: 0` in `joined_frontier` says why it is zero.
+- p7num-2. `Ladder::walk`'s cost section still charged a per-candidate `HashSet` probe at k>=2 and `k` subset probes; it now states k=1's one insert, no dedup probe at k>=2, `k − 2` subset probes and the `Σ |B|²/2` join, as docs/06 does.
+- p7num-3. k=1 reserved its survivor vector from the caller's list length; it is now capped at `vocab::table::COUNT`, because survivors are distinct positions. ZX-13.
