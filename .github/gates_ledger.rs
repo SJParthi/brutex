@@ -2827,12 +2827,17 @@ mod tests {
         );
         assert!(!ok, "{}", out.text);
         assert!(
-            out.text
-                .contains("INVARIANT NAMES A MODULE ITS TEST IS NOT IN: store::wrong::reads (S-02)"),
+            out.text.contains(
+                "INVARIANT NAMES A MODULE ITS TEST IS NOT IN: store::wrong::reads (S-02)"
+            ),
             "{}",
             out.text
         );
-        assert!(!out.text.contains("store::unit::reads (S-01)"), "{}", out.text);
+        assert!(
+            !out.text.contains("store::unit::reads (S-01)"),
+            "{}",
+            out.text
+        );
         assert!(out.text.contains("  1 missing"), "{}", out.text);
     }
 

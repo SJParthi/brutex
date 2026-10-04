@@ -1312,7 +1312,10 @@ fn run_gate(args: &[String], out: &mut Vec<String>) -> Result<bool, String> {
             ];
             gate14(&Git, cover, &lexed, [&runs[0], &runs[1]], out)
         }
-        _ => Err("usage: gates_bounds gate12-tokens | gate12 ALLOW RESOLVED | gate14 COVER WORKDIR".into()),
+        _ => Err(
+            "usage: gates_bounds gate12-tokens | gate12 ALLOW RESOLVED | gate14 COVER WORKDIR"
+                .into(),
+        ),
     }
 }
 
@@ -1516,7 +1519,10 @@ mod tests {
             vec!["core::a::b_1", "a::b", "x::y", "a::b::c::d"]
         );
         // Every segment at any length, digits included (D-2100).
-        assert_eq!(qualified("ab9::x::y and v2_tests::z"), vec!["ab9::x::y", "v2_tests::z"]);
+        assert_eq!(
+            qualified("ab9::x::y and v2_tests::z"),
+            vec!["ab9::x::y", "v2_tests::z"]
+        );
         assert_eq!(qualified("a:: b and ::c and a::B"), Vec::<&str>::new());
     }
 
@@ -1637,7 +1643,10 @@ mod tests {
             resolved_table("a::b\tx y\na::b\tx z\nno tab\nc::d\tnospace\n"),
             Resolved::from([(
                 "a::b".to_owned(),
-                vec![("x".to_owned(), "y".to_owned()), ("x".to_owned(), "z".to_owned())]
+                vec![
+                    ("x".to_owned(), "y".to_owned()),
+                    ("x".to_owned(), "z".to_owned())
+                ]
             )])
         );
     }
