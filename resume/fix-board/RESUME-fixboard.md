@@ -3,7 +3,7 @@
 Saved ahead of a 5-hour usage pause. GitHub state wins over this file.
 
 ## The board
-- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 14 at 18:2x UTC).
+- Artifact (republish to this same URL every refresh): https://claude.ai/artifact/5Jr1kKxEUEmzZF9f19YfTi (version 15 at 19:2x UTC).
 - Hourly routine trig_01BEoTSneJLtU8Rb1PLXNhWe fires at :19.
 - Builder: `resume/fix-board/builder` (Rust, standalone). Steps and the refresh command: `resume/fix-board/README.md`.
 - Last refresh 18:2x UTC: 1,183 rows (495 pushed, 285 branch, 132 fixing, 5 partial, 17 doc, 249 found). PR #74 head fc6dbb9d, run 37223441970. Since then head is 1f588aae (web batch 1 merged).
