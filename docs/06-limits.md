@@ -14431,6 +14431,11 @@ witness as well; §169 states it.
   derives per cell through `derive_strategy_digest_from_validated_v1` after
   one validation, so the O(1)-per-cell statement above holds for that path
   only.
+  **Fixed by D-1834.** The O(G) entry is deleted; the only entry is
+  `derive_strategy_digest_from_validated_v1`, now `pub`, which takes the
+  grid's one validation and is O(1) per cell
+  (`no_strategy_digest_entry_validates_the_whole_grid_per_cell`). The
+  O(1)-per-cell statement now holds for every caller.
 - **Max-gated rates are floored (GAP15-17).** Not a cost: an exact rate just
   above a `max_*_rate_ppm` ceiling floors onto it and is admitted. D-1640
   records why it is not changed here.

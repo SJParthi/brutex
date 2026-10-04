@@ -336,57 +336,28 @@ pub fn derive_population_id_v1(
 ///
 /// # Cost
 ///
-/// **O(G) per call, for G cells in the evaluated grid**, because it validates
-/// the whole evaluation (`validate_evaluation`) before deriving one cell's
-/// digest. Deriving every cell of a grid through this entry is O(G²). The
-/// production per-cell path validates once and calls
-/// `derive_strategy_digest_from_validated_v1`, which is O(1) per cell; this
-/// entry has no production caller (W2-cli10-2, D-1639).
+/// O(1) per cell: `validated` is the grid's one
+/// `ResolvedExitGridV1::validate_evaluation`, taken once by the caller and
+/// checked here to belong to `resolved` and `evaluated`. Until D-1834 a second
+/// public entry, `derive_strategy_digest_v1`, validated the whole grid on every
+/// call, so a grid derived through it cost O(G²) (W2-cli10-2); it had no
+/// production caller and is gone. Pinned by
+/// `cli::population_admission_writer::tests::no_strategy_digest_entry_validates_the_whole_grid_per_cell`.
 ///
 /// **UNVERIFIED as a measured bound.** No bench in this workspace
 /// times this, so the shape above is read from the source rather
-/// than measured; `docs/06-limits.md` records it. `CLAUDE.md` §3 rule 6.
+/// than measured. `CLAUDE.md` §3 rule 6.
 ///
 /// # Errors
 ///
-/// Refuses an absent identity, a torn/foreign evaluation, a side mismatch, an
-/// empty or non-live mask, or an exit index that cannot be represented by the
-/// append-only Population V1 coordinate.
+/// Refuses an absent identity, a validation of another resolution or
+/// evaluation, a side mismatch, an empty or non-live mask, or an exit index
+/// that cannot be represented by the append-only Population V1 coordinate.
 #[expect(
     clippy::too_many_arguments,
     reason = "each argument is an independently validated strategy-identity term and no term may be defaulted"
 )]
-pub fn derive_strategy_digest_v1(
-    population_id: [u8; 32],
-    instrument_family: InstrumentFamilyV1,
-    rung_seconds: u32,
-    evaluation_policy_digest: [u8; 32],
-    direction: TradeDirectionV1,
-    resolved: &ResolvedExitGridV1,
-    evaluated: &EvaluatedExitGridV1,
-    cell_ordinal: usize,
-) -> Result<[u8; 32], PopulationAdmissionWriterRefusal> {
-    let validated = resolved.validate_evaluation(evaluated).map_err(|why| {
-        format!("strategy identity received a torn exit-grid evaluation: {why:?}")
-    })?;
-    derive_strategy_digest_from_validated_v1(
-        population_id,
-        instrument_family,
-        rung_seconds,
-        evaluation_policy_digest,
-        direction,
-        resolved,
-        evaluated,
-        &validated,
-        cell_ordinal,
-    )
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the validated fast path preserves every independently sourced strategy-identity term"
-)]
-pub(crate) fn derive_strategy_digest_from_validated_v1(
+pub fn derive_strategy_digest_from_validated_v1(
     population_id: [u8; 32],
     instrument_family: InstrumentFamilyV1,
     rung_seconds: u32,
@@ -1694,6 +1665,27 @@ fn require_consistent_i64(
 )]
 mod tests {
 
+    /// W2-cli10-2, D-1834: no strategy-digest entry validates the whole grid
+    /// per cell. The public `derive_strategy_digest_v1` ran
+    /// `validate_evaluation` (O(G)) for every cell it was asked about, so a
+    /// caller deriving a grid through it paid O(G²); the only entry now takes
+    /// the grid's one validation and is O(1) per cell.
+    #[test]
+    fn no_strategy_digest_entry_validates_the_whole_grid_per_cell() {
+        let source = include_str!("population_admission_writer.rs");
+        let production = source
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("production source");
+        assert!(!production.contains("fn derive_strategy_digest_v1("));
+        let derive = production
+            .split_once("pub fn derive_strategy_digest_from_validated_v1(")
+            .map(|(_, rest)| rest.split_once("\n}\n").map_or(rest, |(body, _)| body))
+            .unwrap_or_default();
+        assert!(derive.contains("validated: &ValidatedExitGridV1<'_>,"));
+        assert!(!derive.contains("validate_evaluation("));
+    }
+
     /// W2-cli10-1, D-1639: the evaluated-side append keeps `Vec`'s geometric
     /// growth: no exact one-slot reservation anywhere in production source.
     #[test]
@@ -2411,6 +2403,30 @@ mod tests {
         assert!(long_first.grid().cells.get(1).is_some());
         let population_id = [0xB1; 32];
         let evaluation_policy = [0xB2; 32];
+        // One validation per grid, then O(1) per cell (D-1834).
+        let derive_strategy_digest_v1 = |population_id,
+                                         family,
+                                         rung,
+                                         policy,
+                                         direction,
+                                         resolved: &ResolvedExitGridV1,
+                                         evaluated: &EvaluatedExitGridV1,
+                                         ordinal| {
+            let validated = resolved
+                .validate_evaluation(evaluated)
+                .expect("complete fixture grid validates");
+            derive_strategy_digest_from_validated_v1(
+                population_id,
+                family,
+                rung,
+                policy,
+                direction,
+                resolved,
+                evaluated,
+                &validated,
+                ordinal,
+            )
+        };
         let base = derive_strategy_digest_v1(
             population_id,
             InstrumentFamilyV1::Nifty,
