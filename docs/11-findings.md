@@ -835,6 +835,14 @@ Narrative only. No row is added to the table above.
   D-2302.
 - **OS-5** (`/selection-v6.json` read every block and refused past 64): fixed by
   paging. D-2303, AFG-03.
+- **OE-5** (sweep depth counted every level): fixed, O(1). D-2304, AFG-04.
+- **OE-2** (a fresh index vector per bootstrap draw): fixed, one buffer per
+  test. D-2305, AFG-05.
+- **OS-8** (recovery cloned a scope's windows per pending item): fixed.
+  D-2306.
+- **OE-3** (a day-window evaluation walked every signal row and period):
+  fixed by bisection, digest pinned to the old walk. D-2307, AFG-06.
+- **OE-4** (median heaps grew by doubling in the bar loop): fixed. D-2308.
 
 ### Rust and O(1) sweep, data side — dispositions — 2026-10-04
 

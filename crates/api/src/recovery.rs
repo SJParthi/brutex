@@ -1091,7 +1091,6 @@ async fn reconcile_pending(
         let Some(windows) = scopes.get(&stored_scope_key(&item.body)?) else {
             continue;
         };
-        let windows = windows.clone();
         let asked = checked(&item.body, today)?;
         if item.key != key(&item.body)
             || asked.window.days() != 1

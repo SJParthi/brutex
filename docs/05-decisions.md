@@ -57173,3 +57173,77 @@ four lists, which `the_three_banned_lists_agree` holds together. crates.io
 answered 200 for each on 2026-10-04 except `extendr` and `perl-sys` (404),
 kept for their families; `libperl-sys` is the published binding. None is in
 `Cargo.lock`. AFG-46.
+
+### D-2304 — Sweep depth is answered in O(1) — 2026-10-04
+
+**Finding (Rust and O(1) sweep, OE-5).** `engine::Sweep::depth` and
+`engine::keep::Streamed::depth` counted the non-empty levels with a filter over
+every recorded level: O(levels) for a question the ladder's shape already
+answers.
+
+**Decision.** The level-wise walk records a level and stops when its frequent
+frontier is empty, so only the last recorded level can be empty. Depth is the
+level count, less one when the last level is empty: one `last()` and one
+subtraction. `Streamed` mirrors `Sweep` level for level, so the same form holds
+over its survivor counts.
+
+**Proof.** `engine::tests::depth_is_the_level_count_less_the_empty_last_level`
+(AFG-04) checks a ladder that ends empty and one that does not; the existing
+`engine::keep::tests::the_result_types_answer_depth_completion_and_the_derives`
+and the retained-versus-streamed depth equality keep `Streamed` bound to it.
+
+### D-2305 — One bootstrap index buffer per test, not one per draw — 2026-10-04
+
+**Finding (OE-2).** `runner::bootstrap::stationary_indices` returned a fresh
+`Vec<usize>` of `periods` entries for every bootstrap draw, so White's RC,
+Hansen's SPA and both receipt paths allocated once per draw inside the draw
+loop.
+
+**Decision.** `stationary_indices_into` fills a caller-owned buffer (cleared,
+then reserved once); each of the four draw loops holds one buffer sized to
+`periods` before the loop. `stationary_indices` stays as the wrapper the other
+callers use. The draws themselves, the random stream and every receipt are
+unchanged, so no receipt domain is versioned.
+
+**Proof.** `runner::bootstrap::tests::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does`
+(AFG-05) draws through one reused buffer and through fresh vectors from the
+same seed and requires equal indices draw by draw; the runner's pinned
+bootstrap receipts stay green.
+
+### D-2306 — Recovery reconciliation borrows the stored windows — 2026-10-04
+
+**Finding (OS-8).** `api::recovery::reconcile_pending` cloned a scope's whole
+window set for every pending item, O(windows) per item, and only ever read it.
+
+**Decision.** The loop borrows the set from the scope map. No behaviour change;
+the existing recovery tests are the proof that nothing read the clone mutably.
+
+### D-2307 — A signal-candle-stop evaluation bisects its day window — 2026-10-04
+
+**Finding (OE-3).** `runner::signal_candle_stop::Prepared::evaluate_days`
+walked every signal row (deriving each row's IST day only to `continue` past
+it) and walked the periods twice (`position`, then `filter`), so a one-day
+evaluation cost as much as the full span, once per program and side.
+
+**Decision.** Preparation records each column row's IST day once
+(`position_days`). `validate_source` already refuses sources and signal stamps
+that are not strictly increasing, so those days are non-decreasing, and
+`period_geometry` opens periods in strictly increasing day order. An evaluation
+now takes its periods and its rows with two bisections each and walks only the
+rows inside its days. A signal stamp whose IST day overflows is now refused with
+the same `Error::Arithmetic` at preparation instead of at the first evaluation.
+
+**Proof.** `runner::signal_candle_stop::tests::a_bisected_day_window_seals_exactly_what_the_full_row_walk_did`
+(AFG-06) folds the sealed digest of 240 window evaluations (every start day,
+three end days, both sides) and equals the fold measured on the build before
+this change.
+
+### D-2308 — The prefix cadence heaps are sized once — 2026-10-04
+
+**Finding (OE-4).** `runner::outcome::prefix_median_steps_over` built both
+running-median heaps with `BinaryHeap::new()` and grew them by doubling inside
+the bar loop.
+
+**Decision.** At most `n - 1` gaps exist and each heap holds at most half of
+them plus one transient push, so both are created with capacity `ceil(n / 2)`.
+Output is unchanged; every prefix-cadence test is the proof that it is.

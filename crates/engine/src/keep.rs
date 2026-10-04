@@ -167,9 +167,13 @@ impl Streamed {
     ///
     /// Zero when no single condition met `min_hits`. The same question
     /// [`crate::Sweep::depth`] answers, over counts rather than vectors.
+    ///
+    /// O(1) for the reason [`crate::Sweep::depth`] gives: only the last level
+    /// recorded can be empty (D-2304).
     #[must_use]
     pub fn depth(&self) -> usize {
-        self.levels.iter().filter(|l| l.survivors > 0).count()
+        let ended_empty = self.levels.last().is_some_and(|l| l.survivors == 0);
+        self.levels.len().saturating_sub(usize::from(ended_empty))
     }
 
     /// Did the ladder go extinct, which is the answer `CLAUDE.md` §6 asks for?

@@ -781,3 +781,41 @@ fn codecs_and_checked_aggregate_overflow_cannot_change_trade_readings_or_clocks(
         assert!(Policy::decode(&bytes).is_err());
     }
 }
+
+#[test]
+fn a_bisected_day_window_seals_exactly_what_the_full_row_walk_did() {
+    // D-2307: the window is found by bisecting `position_days` and `periods`
+    // rather than by walking every row and period. The pinned fold below was
+    // measured on the build before that change, over every start day and three
+    // end days per start, both sides, so any drift in which rows or periods a
+    // window takes changes it.
+    let mut fixture = Fixture::new(1, 30);
+    fixture.signals = fixture.bars.clone();
+    fixture.column = column(&fixture.signals);
+    let prepared = fixture.prepared();
+    let mut fold = Hasher::new();
+    let mut windows = 0_u32;
+    for first in 0..=LAST_DAY {
+        for last in [first, (first + 1).min(LAST_DAY), LAST_DAY] {
+            for side in [Direction::Long, Direction::Short] {
+                let result = prepared
+                    .evaluate_days(&always(), side, 100_000, first, last)
+                    .unwrap();
+                assert!(
+                    result
+                        .periods()
+                        .iter()
+                        .all(|period| period.day >= first && period.day <= last)
+                );
+                fold.update(&result.digest());
+                windows += 1;
+            }
+        }
+    }
+    assert_eq!(windows, 240);
+    let pin: [u8; 32] = [
+        115, 168, 60, 123, 173, 208, 37, 133, 254, 72, 232, 166, 232, 107, 241, 176, 137, 227, 42,
+        200, 185, 248, 182, 169, 204, 8, 90, 7, 172, 20, 223, 148,
+    ];
+    assert_eq!(fold.finalize(), pin);
+}

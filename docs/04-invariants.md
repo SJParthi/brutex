@@ -6409,6 +6409,9 @@ old line regex the same input and watched it pass.
 | AFG-01 | `pool-oos` holds no span beyond its lane and no training series: a training walk keeps no booking, every later trade is booked once, each pooled row sums to its tally, the streamed judge equals the judge over prepared spans, and a family too large to hold is refused by name (D-2300) | `cli::pool_oos::tests::the_streamed_judge_books_every_trade_and_keeps_no_training_series` | ✓ |
 | AFG-02 | `pool::union_of` opens the results ledger once per union, not once per instrument, and keeps every committed run's rows in screen order (D-2301) | `cli::tests::the_pool_union_opens_the_parent_ledger_once_for_every_instrument` | ✓ |
 | AFG-03 | `/selection-v6.json` reads one page of at most 8 blocks per rung from a seek, names each file's block count, pages past the end empty, and refuses a malformed or out-of-range page selector (D-2303) | `api::selectionv6json::tests::the_page_selectors_are_bounded_and_strict` | ✓ |
+| AFG-04 | `Sweep::depth` and `Streamed::depth` are the level count less one when the last level is empty, O(1), and equal the count of non-empty levels (D-2304) | `engine::tests::depth_is_the_level_count_less_the_empty_last_level` | ✓ |
+| AFG-05 | A bootstrap index buffer reused across draws yields exactly the indices fresh vectors do from the same seed (D-2305) | `runner::bootstrap::tests::a_reused_index_buffer_draws_exactly_what_a_fresh_one_does` | ✓ |
+| AFG-06 | A signal-candle-stop evaluation over any day window seals the same digest as the full row walk did, and keeps only periods inside the window (D-2307) | `runner::signal_candle_stop::tests::a_bisected_day_window_seals_exactly_what_the_full_row_walk_did` | ✓ |
 
 ### Rust and O(1) sweep, data side (D-2370 onward)
 

@@ -441,8 +441,9 @@ pub fn reality_check(
 
     let mut rng = Rng::new(seed);
     let mut beaten = 0_usize;
+    let mut index = Vec::with_capacity(periods);
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
         // RECENTRED, and this is the whole test. Each resampled mean has its
         // OWN observed mean subtracted, so the bootstrap distribution is what a
         // set of strategies with NO edge would produce while keeping this set's
@@ -608,8 +609,9 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 
     let mut rng = Rng::new(seed);
     let mut beaten = 0_usize;
+    let mut index = Vec::with_capacity(periods);
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
         let mut best = f64::NEG_INFINITY;
         for (s, series) in returns.iter().enumerate() {
             let Some(own) = stats.get(s) else { continue };
@@ -713,8 +715,9 @@ pub fn white_reality_check_receipt_v1(
 
     let mut rng = Rng::new(seed);
     let mut matched_or_exceeded = 0_usize;
+    let mut index = Vec::with_capacity(periods);
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
         let mut best = f64::NEG_INFINITY;
         for (strategy, series) in returns.iter().enumerate() {
             let resampled = mean_at(series, &index);
@@ -782,8 +785,9 @@ pub fn spa_receipt_v1(
     };
     let mut rng = Rng::new(seed);
     let mut matched_or_exceeded = 0_usize;
+    let mut index = Vec::with_capacity(periods);
     for _ in 0..draws {
-        let index = stationary_indices(periods, block, &mut rng);
+        stationary_indices_into(&mut index, periods, block, &mut rng);
         let mut best = f64::NEG_INFINITY;
         for (strategy, series) in returns.iter().enumerate() {
             let own = stats.get(strategy)?;
@@ -1674,8 +1678,21 @@ pub(crate) fn studentized(statistic: f64, standard_error: f64) -> f64 {
 /// resample keeps serial dependence that a single-period resample destroys.
 fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize> {
     let mut out = Vec::with_capacity(periods);
+    stationary_indices_into(&mut out, periods, block, rng);
+    out
+}
+
+/// [`stationary_indices`] into a caller's buffer, which is cleared first.
+///
+/// The draw loops of [`reality_check`], [`spa`] and both receipts hold one
+/// buffer for every draw, so B draws allocate once rather than B times (Rust
+/// and O(1) sweep OE-2, D-2305). The indices are the same: one `rng` stream,
+/// consumed in the same order.
+fn stationary_indices_into(out: &mut Vec<usize>, periods: usize, block: usize, rng: &mut Rng) {
+    out.clear();
+    out.reserve(periods);
     if periods == 0 {
-        return out;
+        return;
     }
     // Continue-probability as parts per million, so the draw stays integer.
     let carry_on = if block <= 1 {
@@ -1695,7 +1712,6 @@ fn stationary_indices(periods: usize, block: usize, rng: &mut Rng) -> Vec<usize>
             rng.below(periods)
         };
     }
-    out
 }
 
 /// Mean of `series` taken at `index`.
@@ -2160,6 +2176,29 @@ mod tests {
         // the same seed gives the same answer, a different seed may not.
         let again = romano_wolf(&set, 300, 11, DEFAULT_BLOCK, 50_000);
         assert_eq!(rejected, again, "the same seed gave two different answers");
+    }
+
+    /// **One buffer reused across draws yields the draws a fresh vector
+    /// does.** Rust and O(1) sweep OE-2, D-2305.
+    ///
+    /// Two generators from one seed: one fills a single buffer for every draw,
+    /// the other allocates per draw. Every draw's indices are equal, at block
+    /// lengths 1, 3 and 50 and at 1 and 97 periods, and the buffer is cleared,
+    /// not appended to.
+    #[test]
+    fn a_reused_index_buffer_draws_exactly_what_a_fresh_one_does() {
+        for (periods, block) in [(1_usize, 1_usize), (97, 1), (97, 3), (97, 50)] {
+            let (mut reused, mut fresh) = (super::Rng::new(41), super::Rng::new(41));
+            let mut buffer = Vec::new();
+            for _ in 0..200 {
+                super::stationary_indices_into(&mut buffer, periods, block, &mut reused);
+                assert_eq!(
+                    buffer,
+                    super::stationary_indices(periods, block, &mut fresh)
+                );
+                assert_eq!(buffer.len(), periods);
+            }
+        }
     }
 
     #[test]

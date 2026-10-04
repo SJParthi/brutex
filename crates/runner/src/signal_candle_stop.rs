@@ -99,6 +99,10 @@ pub struct Prepared<'a> {
     duplicates: Vec<bool>,
     periods: Vec<Period>,
     period_of: Vec<usize>,
+    /// The IST day of each signal-column row, in column order. Non-decreasing,
+    /// because `validate_source` refuses rows whose sources or signal stamps
+    /// are not strictly increasing, so a day window is two bisections (D-2307).
+    position_days: Vec<i64>,
     data_digest: [u8; 32],
     source_id: [u8; 32],
     signal_length: i64,
@@ -926,6 +930,7 @@ impl<'a> Prepared<'a> {
         identity.update(&crate::identity::identity(&run).bytes());
         let duplicates = duplicates(source.series.bars())?;
         let (periods, period_of) = period_geometry(source.series.bars(), &facts, &duplicates)?;
+        let position_days = position_days(&source)?;
         Ok(Self {
             policy,
             source,
@@ -935,6 +940,7 @@ impl<'a> Prepared<'a> {
             duplicates,
             periods,
             period_of,
+            position_days,
             data_digest,
             source_id: identity.finalize(),
             signal_length,
@@ -1051,41 +1057,39 @@ impl<'a> Prepared<'a> {
             periods: Vec::new(),
             digest: [0; 32],
         };
-        out.periods
-            .try_reserve_exact(self.periods.len())
-            .map_err(|_| Error::Allocation)?;
-        let period_start = self
+        // Periods are strictly increasing by day (`period_geometry` opens one per
+        // new day over time-ordered bars) and the column's rows are
+        // non-decreasing by day, so the window is four bisections rather than a
+        // walk of every period and every row (D-2307).
+        let period_start = self.periods.partition_point(|row| row.day < first_day);
+        let period_end = self.periods.partition_point(|row| row.day <= last_day);
+        let window_periods = self
             .periods
-            .iter()
-            .position(|row| row.day >= first_day)
-            .unwrap_or(self.periods.len());
-        out.periods.extend(
-            self.periods
-                .iter()
-                .filter(|row| row.day >= first_day && row.day <= last_day)
-                .copied(),
-        );
+            .get(period_start..period_end)
+            .ok_or(Error::Source)?;
+        out.periods
+            .try_reserve_exact(window_periods.len())
+            .map_err(|_| Error::Allocation)?;
+        out.periods.extend_from_slice(window_periods);
+        let row_start = self.position_days.partition_point(|&day| day < first_day);
+        let row_end = self.position_days.partition_point(|&day| day <= last_day);
+        let column = self.source.signal_column;
+        let rows = column
+            .bits()
+            .get(row_start..row_end)
+            .zip(column.known().get(row_start..row_end))
+            .zip(column.sources().get(row_start..row_end))
+            .ok_or(Error::Source)?;
         let mut occupied = None;
         let mut peak_equity = 0_i64;
-        for (position, ((&bits, &known), &signal)) in self
-            .source
-            .signal_column
-            .bits()
+        let ((bits_rows, known_rows), source_rows) = rows;
+        for (offset, ((&bits, &known), &signal)) in bits_rows
             .iter()
-            .zip(self.source.signal_column.known())
-            .zip(self.source.signal_column.sources())
+            .zip(known_rows)
+            .zip(source_rows)
             .enumerate()
         {
-            let signal_day = ist_day(
-                self.source
-                    .signal_bars
-                    .get(signal)
-                    .ok_or(Error::Source)?
-                    .ts_micros,
-            )?;
-            if signal_day < first_day || signal_day > last_day {
-                continue;
-            }
+            let position = row_start.checked_add(offset).ok_or(Error::Arithmetic)?;
             let truth = program.evaluate(bits, known);
             out.truth.evaluated = add(out.truth.evaluated, 1)?;
             match truth {
@@ -1401,6 +1405,23 @@ fn duplicates(bars: &[Candle]) -> Result<Vec<bool>, Error> {
         );
     }
     Ok(rows)
+}
+/// The IST day of every signal-column row, in column order (D-2307).
+///
+/// Computed once at preparation so an evaluation bisects its day window instead
+/// of re-deriving every row's day. A signal stamp whose IST day overflows is
+/// refused here with the `Error::Arithmetic` an evaluation used to return for it,
+/// now at preparation rather than at the first evaluation.
+fn position_days(source: &Source<'_>) -> Result<Vec<i64>, Error> {
+    let sources = source.signal_column.sources();
+    let mut days = Vec::new();
+    days.try_reserve_exact(sources.len())
+        .map_err(|_| Error::Allocation)?;
+    for &signal in sources {
+        let bar = source.signal_bars.get(signal).ok_or(Error::Source)?;
+        days.push(ist_day(bar.ts_micros)?);
+    }
+    Ok(days)
 }
 fn period_geometry(
     bars: &[Candle],

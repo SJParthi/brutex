@@ -11217,7 +11217,9 @@ prefix-count vectors. The cost is paid once per `SliceFacts::of`,
 `SessionBounds::of` or `trade::forced_exits` call, so once per slice, never
 per candidate. Every lookup afterwards (`SliceFacts::step_at`) is one
 bounds-checked read. A constant-per-bar running median would need a bounded
-alphabet of step values, and the slice does not guarantee one. **UNVERIFIED as
+alphabet of step values, and the slice does not guarantee one. Both heaps are
+sized once to `ceil(n / 2)` before the bar loop (D-2308), so no push inside it
+reallocates. **UNVERIFIED as
 a measured bound**: no bench row times it (`CLAUDE.md` §3 rule 6).
 ## A following append verifies the old tail block before re-sealing it — D-0910, 2 October 2026
 
@@ -11421,8 +11423,9 @@ and `final_selection`, whose chains sat inside older `allow_scan` counts):
   complete minute context: O(M), once per attestation, beside an O(M) pass
   over the same slice (sections 134 and 142).
 - `runner::signal_candle_stop` finds an evaluation's first daily period:
-  O(days) per evaluation, beside an O(days) filter over the same periods and
-  the evaluation's walk of every signal bar.
+  O(log days) per evaluation by bisection since D-2307, which also bisects the
+  signal rows to the window, so an evaluation walks only the rows and periods
+  inside its days (it walked every period twice and every signal row before).
 - `runner::validate` re-checks an argmax four times: O(retained placements)
   once per fold, beside a `.max()` over the same slice.
 - `cli::final_selection` finds the best traded row: O(priced rows) once per
