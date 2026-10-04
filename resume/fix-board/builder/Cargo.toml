@@ -1,0 +1,12 @@
+[package]
+name = "fixboard"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Rebuilds the Brutex Fix Board ledger (one row per finding) from the audit sources, the per-thread status files and git evidence."
+
+# Standalone: this crate lives on the fix-queue notes branch and is not a member of the brutex workspace.
+[workspace]
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
