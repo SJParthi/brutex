@@ -17978,13 +17978,15 @@ fn record_run(
 ///
 /// A clock before the epoch, or one past what `i64` microseconds can hold.
 fn finished_micros_at(now: std::time::SystemTime) -> Result<i64, String> {
-    let since = now.duration_since(std::time::UNIX_EPOCH).map_err(|before| {
-        format!(
-            "the system clock reads {:?} BEFORE 1970-01-01, so this run has no honest \
+    let since = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|before| {
+            format!(
+                "the system clock reads {:?} BEFORE 1970-01-01, so this run has no honest \
              completion time and was not recorded; correct the clock and rerun",
-            before.duration()
-        )
-    })?;
+                before.duration()
+            )
+        })?;
     i64::try_from(since.as_micros()).map_err(|_| {
         "the system clock reads a time past what the ledger's microsecond stamp can \
          hold, so this run was not recorded; correct the clock and rerun"
@@ -22554,7 +22556,10 @@ mod tests {
         assert!(!read.contains("will NOT show"), "{read}");
 
         let elsewhere = super::log_banner(std::path::Path::new("/tmp/x"), Some(&store));
-        assert!(elsewhere.contains("will NOT show these events"), "{elsewhere}");
+        assert!(
+            elsewhere.contains("will NOT show these events"),
+            "{elsewhere}"
+        );
         assert!(elsewhere.contains("/srv/store/logs/cli"), "{elsewhere}");
         assert!(!elsewhere.contains("appear there"), "{elsewhere}");
 

@@ -19595,7 +19595,12 @@ mod tests {
             cadence_has_contracts(&asked, &dhan_rolling(), "WEEK"),
             "a refused contract is not a withdrawn cadence: WEEK must be asked"
         );
-        assert!(cadence_has_contracts_on(&asked, &dhan_rolling(), "WEEK", on));
+        assert!(cadence_has_contracts_on(
+            &asked,
+            &dhan_rolling(),
+            "WEEK",
+            on
+        ));
         let ram_navami_month = pull::session::Day::new(2023, 3, 29).expect("a real date");
         assert!(
             cadence_has_contracts_on(&asked, &dhan_rolling(), "MONTH", ram_navami_month),

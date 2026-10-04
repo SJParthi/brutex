@@ -215,14 +215,15 @@ pub fn listing_of(
 ) -> Result<Listing, RollingError> {
     let (cadence, slot, day) = regime_of(underlying, spec, flag, on)?;
     match cadence {
-        crate::vendor::ExpiryCadence::Weekly => match costs::expiry::next_weekly_expiry(slot, day)
-        {
-            Ok(Some(_)) => Ok(Listing::Listed),
-            Ok(None) => Ok(Listing::Withdrawn),
-            Err(_) => Err(RollingError::NoExpiry {
-                why: "the day is before this weekly regime was verified from",
-            }),
-        },
+        crate::vendor::ExpiryCadence::Weekly => {
+            match costs::expiry::next_weekly_expiry(slot, day) {
+                Ok(Some(_)) => Ok(Listing::Listed),
+                Ok(None) => Ok(Listing::Withdrawn),
+                Err(_) => Err(RollingError::NoExpiry {
+                    why: "the day is before this weekly regime was verified from",
+                }),
+            }
+        }
         crate::vendor::ExpiryCadence::Monthly => costs::expiry::next_monthly_expiry(slot, day)
             .map(|_| Listing::Listed)
             .map_err(|_| RollingError::NoExpiry {
