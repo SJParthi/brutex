@@ -316,6 +316,53 @@ pub const MAX_MASTER_BYTES: u64 = 256 * 1024 * 1024;
 /// unreadable row — never dropped, never truncated and read anyway.
 pub const MAX_ROW_BYTES: usize = 4096;
 
+/// The master's text, read through one handle and capped (CE-65, D-2684).
+///
+/// `metadata(path).len()` is 0 for a FIFO or a device, so the size check
+/// passed and `read_to_string` by path then blocked on a FIFO or read
+/// `/dev/zero` without end. One open that does not wait on a FIFO, one `fstat`
+/// of that handle, a refusal by name for anything that is not a regular file,
+/// and a read that stops one byte past [`MAX_MASTER_BYTES`]: the shape
+/// `census::sized` has (P-19).
+fn read_capped(path: &std::path::Path) -> Result<String, String> {
+    let unreadable = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = crate::census::open_without_waiting(path).map_err(unreadable)?;
+    let meta = file.metadata().map_err(unreadable)?;
+    if !meta.is_file() {
+        return Err(format!(
+            "{}: not a regular file (a {}); a master is one, and this reader \
+             neither waits on a FIFO nor reads a device",
+            path.display(),
+            if meta.is_dir() {
+                "directory"
+            } else {
+                crate::census::kind_of(meta.file_type())
+            }
+        ));
+    }
+    let size = meta.len();
+    if size > MAX_MASTER_BYTES {
+        return Err(format!(
+            "{}: {size} bytes; this reader holds at most {MAX_MASTER_BYTES}",
+            path.display()
+        ));
+    }
+    let mut text = String::new();
+    let _ = std::io::Read::read_to_string(
+        &mut std::io::Read::take(file, MAX_MASTER_BYTES.saturating_add(1)),
+        &mut text,
+    )
+    .map_err(unreadable)?;
+    if text.len() as u64 > MAX_MASTER_BYTES {
+        return Err(format!(
+            "{}: grew past {MAX_MASTER_BYTES} bytes while it was read; this \
+             reader holds at most {MAX_MASTER_BYTES}",
+            path.display()
+        ));
+    }
+    Ok(text)
+}
+
 /// Reads a vendor master and decodes every row.
 ///
 /// # Errors
@@ -329,16 +376,9 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
     // can report -- it is an allocator failure or an OOM kill, and neither
     // reaches the operator as "the master is too big". One `metadata` call is
     // the difference between a named refusal and a dead process.
-    let size = std::fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .len();
-    if size > MAX_MASTER_BYTES {
-        return Err(format!(
-            "{}: {size} bytes; this reader holds at most {MAX_MASTER_BYTES}",
-            path.display()
-        ));
-    }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    //
+    // AND THE SIZE IS THE HANDLE'S, AND THE READ IS CAPPED: `read_capped`.
+    let text = read_capped(path)?;
     let mut lines = text.lines();
     let header = lines.next().ok_or_else(|| "file is empty".to_owned())?;
     // THE HEADER IS A ROW, AND IT WAS THE ONE ROW WITH NO BOUND.
@@ -1009,6 +1049,39 @@ mod tests {
             .write_all(&[0xFF, 0xFE, 0x00, 0x41])
             .expect("write");
         assert!(load(&raw, Vendor::Groww).is_err());
+    }
+
+    /// **CE-65. A MASTER PATH THAT IS NOT A REGULAR FILE IS REFUSED UNREAD,
+    /// AND A FIFO THERE NEVER HOLDS THE LOAD.** `metadata().len()` is 0 for a
+    /// FIFO or a device, so the size bound passed and `read_to_string` by path
+    /// then blocked on a FIFO or read `/dev/zero` without end.
+    #[test]
+    fn a_master_path_that_is_not_a_regular_file_is_refused_unread_and_never_waits() {
+        let fifo = crate::scratch::path("master-fifo.csv");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo runs")
+                .success()
+        );
+        let (sent, answer) = std::sync::mpsc::channel();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sent.send(load(&fifo, Vendor::Groww).map(|_| ()));
+            })
+        };
+        let read = answer.recv_timeout(std::time::Duration::from_secs(2));
+        if read.is_err() {
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        let _ = reader.join();
+        let why = read
+            .expect("a FIFO at the master path must not hold the load")
+            .expect_err("refused");
+        assert!(why.contains("not a regular file"), "{why}");
+        let _ = std::fs::remove_file(&fifo);
     }
 
     #[test]

@@ -959,12 +959,16 @@ fn seek_page(
 /// Every record of a window's files, change-folded IN TIME ORDER, for the
 /// reading path. `files` are newest first when `newest_first`. Faults are
 /// returned, and reported once for the request (Z1-slice11-F3).
+///
+/// # Errors
+///
+/// [`reserved_window`]'s refusal, when `total` rows cannot be held.
 fn read_in_time(
     files: &[BarFile],
     newest_first: bool,
     total: u64,
-) -> (Vec<WindowBar>, Vec<String>) {
-    let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+) -> Result<(Vec<WindowBar>, Vec<String>), String> {
+    let mut all: Vec<WindowBar> = reserved_window(total)?;
     let mut record_faults = Vec::new();
     let mut first_faulted = None;
     /* IN TIME ORDER, so each file's first row is measured against the last
@@ -995,7 +999,33 @@ fn read_in_time(
     if let Some(file) = first_faulted {
         note_unreadable_records(file, &record_faults, all.len(), 0);
     }
-    (all, record_faults)
+    Ok((all, record_faults))
+}
+
+/// Room for a whole window's `total` rows, or a refusal naming the number.
+///
+/// `Vec::with_capacity` aborts the process on a size no allocation can hold
+/// (`handle_alloc_error`; the release profile also aborts on panic), and a
+/// window sums `n_valid` over up to [`MAX_WINDOW_MONTHS`] months. The store
+/// bounds each month's counter by its grid (D-2685), and that still leaves a
+/// sum the machine may not have. `try_reserve_exact` turns it into an answer
+/// (CE-61, D-2685).
+///
+/// # Errors
+///
+/// A sentence naming `total`, when it does not fit `usize` or the reservation
+/// fails.
+fn reserved_window(total: u64) -> Result<Vec<WindowBar>, String> {
+    let refused = || {
+        format!(
+            "the window holds {total} stored records, more than this process \
+             can reserve at once; ask for fewer months"
+        )
+    };
+    let rows = usize::try_from(total).map_err(|_| refused())?;
+    let mut all = Vec::new();
+    all.try_reserve_exact(rows).map_err(|_| refused())?;
+    Ok(all)
 }
 
 /// One page of bars across a range of months, in one request.
@@ -1121,7 +1151,7 @@ pub fn window(
     against the previous bar in TIME and a sorted page has no time
     neighbours. Folding after the sort would compute each row against
     whichever row happened to land above it. */
-    let (all, mut record_faults) = read_in_time(&files, desc && !sort.scans(), total);
+    let (all, mut record_faults) = read_in_time(&files, desc && !sort.scans(), total)?;
     faults.append(&mut record_faults);
 
     let extremes = want_extremes.then(|| extremes_of(&all));
@@ -1553,7 +1583,7 @@ mod tests {
                 .0,
         );
         for quoted in [
-            "let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));",
+            "let mut all: Vec<WindowBar> = reserved_window(total)?;",
             "let (rows, mut bad) = slots(file, 0, held);",
             "match file.read_record(index)",
             "let extremes = want_extremes.then(|| extremes_of(&all));",
@@ -1716,6 +1746,24 @@ mod window_tests {
     use store::path::PathParts;
 
     const SYMBOL: &str = "WINDOWTEST";
+
+    /// **CE-61. A WINDOW TOTAL NO ALLOCATION CAN HOLD IS REFUSED BY NAME.**
+    ///
+    /// The reading path reserved `total` rows with `Vec::with_capacity`, so a
+    /// counter no machine can hold aborted the server (`panic = "abort"`,
+    /// and an allocation failure aborts in any profile). The store now refuses
+    /// a counter past the month at open (D-2685); this is the second wall, for
+    /// a sum over many months that is legal per month and still too large.
+    #[test]
+    fn a_window_total_no_allocation_can_hold_is_refused_by_name() {
+        let why = read_in_time(&[], false, u64::MAX)
+            .map(|(all, _)| all.len())
+            .expect_err("refused, not aborted");
+        assert!(why.contains(&u64::MAX.to_string()), "{why}");
+        // A total that fits is reserved, and nothing is read for it.
+        let (all, faults) = read_in_time(&[], false, 3).expect("three rows fit");
+        assert!(all.is_empty() && all.capacity() >= 3 && faults.is_empty());
+    }
 
     /// A scratch store nobody else in this process shares, emptied first.
     fn scratch(tag: &str) -> std::path::PathBuf {

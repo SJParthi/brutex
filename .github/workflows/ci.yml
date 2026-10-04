@@ -1717,6 +1717,17 @@ jobs:
           somewhere src strategy-indices support tests thematic-indices tmp
           uploads usr wp-content y zero'
 
+          # ---- D-2680..D-2689 (CE-56..CE-65, p10num-1/2): telemetry field
+          # keys this repository chose (`category`, `categories`, `elements`
+          # on the index-skip line; `negative_oi`, `quote_rows` on the CSV
+          # line), scratch-directory tags and a four-byte fixture body in
+          # tests, `mkfifo` (the coreutils command the FIFO tests run, as the
+          # api's census test already does), and `folds` from an expect()
+          # message. None names an account, an environment or a vendor field.
+          data_edges='category categories elements negative_oi quote_rows
+          census-ceiling census-not-regular masters-not-regular 1234 mkfifo
+          folds'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1729,7 +1740,7 @@ jobs:
           ${vendor_error} ${event_field} ${pull_scratch} ${bare_number}
           ${capture_field} ${pull_scratch_2} ${pull_assert} ${pull_asserted_number}
           ${ssm_region_fixture} ${inner_literal} ${signed_number} ${fold_literal} ${audit_literal}
-          ${late_fixture} ${joined_piece}"
+          ${late_fixture} ${joined_piece} ${data_edges}"
           # MATERIALISED ONCE, AND NOT PIPED. `printf '%s\n' $allowed |
           # grep -qxF` was the shape here, and under `set -euo pipefail` it is
           # unsound in the direction that fails a green build: `grep -q` exits

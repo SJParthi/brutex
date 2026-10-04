@@ -378,6 +378,35 @@ fn persist(root: &Path, bounds: SelectionV6Bounds, expected: &Block) -> Result<b
 /// rewritten. An existing quarantine at the same offset must hold exactly the
 /// same bytes, otherwise this refuses and changes nothing. The move is named
 /// in the log, so the repair is never silent.
+/// The bytes an existing quarantine holds, or `None` when its length already
+/// differs from `tail_len` (then it holds different bytes, read or not).
+///
+/// Opened once through [`crate::readonly_file::open`]: no final symlink is
+/// followed, a FIFO does not hold the open, and anything that is not a regular
+/// file is refused by name. It used to be `fs::read` by path, so a FIFO here
+/// blocked the ledger's repair under its exclusive lock and a device was read
+/// without a bound. The read stops one byte past the tail. CE-65, D-2684.
+fn quarantined(aside: &Path, tail_len: usize) -> Result<Option<Vec<u8>>, String> {
+    use std::io::Read as _;
+    let refused = |why: std::io::Error| {
+        format!(
+            "Selection V6 abandoned tail quarantine {}: {why}; nothing repaired",
+            aside.display()
+        )
+    };
+    let file = crate::readonly_file::open(aside).map_err(refused)?;
+    let len = file.metadata().map_err(refused)?.len();
+    if usize::try_from(len).ok() != Some(tail_len) {
+        return Ok(None);
+    }
+    let mut held = Vec::new();
+    let _ = file
+        .take(len.saturating_add(1))
+        .read_to_end(&mut held)
+        .map_err(refused)?;
+    Ok(Some(held))
+}
+
 fn set_aside_abandoned_tail(
     file: &mut File,
     root: &Path,
@@ -397,9 +426,8 @@ fn set_aside_abandoned_tail(
                 .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
         }
         Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => {
-            let held = std::fs::read(&aside)
-                .map_err(|why| format!("Selection V6 abandoned tail quarantine: {why}"))?;
-            if held != tail {
+            let held = quarantined(&aside, tail.len())?;
+            if held.as_deref() != Some(tail.as_slice()) {
                 return Err(format!(
                     "Selection V6 abandoned tail quarantine {} already holds different bytes; nothing repaired",
                     aside.display()

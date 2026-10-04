@@ -51,12 +51,14 @@
 //!
 //! [`StorePath::to_path_buf`] guarantees a **lexical** property. No component
 //! is `..`, none is absolute, so the rendered path cannot climb out of
-//! `root/bars/<vendor>/` *as text*. A symlink at any component defeats that,
-//! and nothing in this crate resolves or refuses one — a `bars/groww` symlink
-//! pointing at `bars/dhan` sends every groww write into dhan's files while
-//! satisfying every assertion the isolation test makes. Closing it needs
-//! `openat` with `O_NOFOLLOW` per component in a writer that does not exist
-//! yet. Stated here rather than implied away.
+//! `root/bars/<vendor>/` *as text*. A symlink at any component defeats that —
+//! a `bars/groww` symlink pointing at `bars/dhan` sends every groww write into
+//! dhan's files while satisfying every assertion the isolation test makes.
+//! This type resolves nothing; the bar writer refuses the links it finds
+//! (`crate::file::BarFile::open_or_create`, CE-62, D-2686), and a directory
+//! link swapped in between its walk and its open is the window it leaves,
+//! because per-component `openat` needs `unsafe`. Stated here rather than
+//! implied away.
 //!
 //! `store::unit::vendor_prefix_isolated` is the test X-12 names.
 //!
@@ -966,9 +968,9 @@ impl<'a> StorePath<'a> {
     /// redirects the whole subtree: with `root/bars/groww` linked to
     /// `root/bars/dhan`, a write through a groww path lands in dhan's file
     /// while still satisfying `starts_with(root/bars/groww)` and holding no
-    /// `Component::ParentDir`. This crate does not resolve or refuse links —
-    /// that needs `openat` with `O_NOFOLLOW` per component, in a writer that
-    /// does not exist yet, halting loudly and naming the linked component. The
+    /// `Component::ParentDir`. This function does not resolve or refuse
+    /// links; the bar writer refuses the ones it finds and names the linked
+    /// component (CE-62, D-2686), with the window module docs state. The
     /// earlier wording here claimed the filesystem property outright, which
     /// was a failure hidden behind a claim.
     #[must_use]

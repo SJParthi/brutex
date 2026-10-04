@@ -10163,7 +10163,8 @@ released while counting; both count the same snapshot. Not timed.
 ordered by anything but `ts`, or with `extremes=1`, takes the reading path in
 `bars::window`. Quoted from that function:
 
-* `let mut all: Vec<WindowBar> = Vec::with_capacity(usize::try_from(total).unwrap_or(0));`
+* `let mut all: Vec<WindowBar> = reserved_window(total)?;` (a `try_reserve_exact`
+  that refuses by name rather than aborting, D-2685)
   and, per opened month, `let (rows, mut bad) = slots(file, 0, held);`: one
   `read_record` per stored record in the range (`match file.read_record(index)`
   in `slots`), and one resident `WindowBar` per readable record, for the whole
@@ -14571,3 +14572,19 @@ inner route admits, percent-encoded twice more. That is the worst case, held in
 memory once per request; a real press is a few kilobytes per leg. One leg past
 the bound is refused by name (`Refusal::TooManyLegs`) rather than read further.
 The figure is arithmetic from the constants, not a measurement.
+
+## Bars already stored before D-2688 and D-2689 stay as written — 4 October 2026
+
+**GDFL quote rows.** Until D-2688 a GDFL futures, options or equity file
+folded every row, quote updates included, so a stored minute's open, high or
+low can be a trade from an earlier minute, and a minute that traded nothing can
+exist with volume 0. The decoder now skips those rows; minutes already on disk
+are not rewritten (`CLAUDE.md` §3 rule 8). Correcting them needs a versioned
+repair through `store::repair`, which has not been run. Which stored months are
+affected is UNMEASURED.
+
+**Index open interest.** Until D-2689 an index row from a TrueData or GDFL
+archive stored open interest 0 rather than the `i64::MIN` null. New landings
+store the null; bars already written keep their zero, so one index minute can
+still read 0 from one feed and `i64::MIN` from another. No sweep reads index
+open interest.
