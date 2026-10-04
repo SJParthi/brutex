@@ -6207,11 +6207,16 @@ mod tests {
     #[test]
     fn a_command_needing_a_rung_is_refused_without_one() {
         for word in ["audit-range", "auto-stored", "sweep-stored", "sweep-all"] {
-            let why = command_from(&command_body(&format!(
-                r#""command":"{word}","min_hits":500"#
-            )))
-            .expect_err("{word} needs a rung");
-            assert!(why.why().contains("rung"), "{}", why.why());
+            // `auto-stored` reads no `min_hits`, and naming it is refused
+            // (D-1972), so its body omits the field.
+            let hits = if word == "auto-stored" {
+                ""
+            } else {
+                r#","min_hits":500"#
+            };
+            let why = command_from(&command_body(&format!(r#""command":"{word}"{hits}"#)))
+                .expect_err("{word} needs a rung");
+            assert!(why.why().contains("`rung`"), "{}", why.why());
         }
     }
 
