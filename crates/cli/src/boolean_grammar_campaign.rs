@@ -30,9 +30,14 @@ struct Request<'a> {
 }
 
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    match parse(args).and_then(|request| execute(&request, out)) {
+    // Arguments, then work, each with its own code (P8-03, D-2722).
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(&request, out) {
         Ok(()) => crate::OK,
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 
@@ -54,6 +59,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
     else {
         return Err("boolean-grammar-campaign-stored requires its 12 explicit arguments".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let month = |year: &str, month: &str| -> Result<(u16, u8), String> {
         let year = year.parse::<u16>().map_err(display)?;
         let month = month.parse::<u8>().map_err(display)?;

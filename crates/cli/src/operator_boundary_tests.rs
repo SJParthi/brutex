@@ -426,7 +426,7 @@ fn command_reports_preserve_the_failure_and_the_requested_result() {
     );
     assert_eq!(out, "prior\nmeasured\n");
     assert_eq!(
-        command_report(&mut out, Err("missing receipt".to_owned()), "AUDIT"),
+        command_report(&mut out, Err("missing receipt".to_owned().into()), "AUDIT"),
         FAILED
     );
     assert_eq!(out, "prior\nmeasured\nAUDIT REFUSED: missing receipt\n");

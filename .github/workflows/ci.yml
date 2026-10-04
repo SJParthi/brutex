@@ -5329,7 +5329,7 @@ jobs:
           crates/pull/src/pricing.rs 22
           crates/pull/src/tenor.rs 5
           crates/runner/src/grid.rs 4
-          crates/runner/src/significance.rs 21
+          crates/runner/src/significance.rs 41
           crates/runner/src/admission.rs 4
           crates/runner/src/bootstrap.rs 51
           crates/runner/src/bootstrap_family_pass.rs 17

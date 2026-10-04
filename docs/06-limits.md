@@ -9564,13 +9564,15 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   reaches it only through `pool_arm`, which hands `pool::pool` a rung only
   after finding it among `EVERY_RUNG`'s entries, and `swept_rung` accepts
   every one of those, so the verb never reaches that refusal. The other ten
-  are `sweep_audited_stored`, `sweep_stored_inner`, `auto_stored_inner`,
+  are `stored_words`, `sweep_stored_inner`, `auto_stored_inner`,
   `audit_stored_inner`, `audit_range_inner` and `screen_range_inner` in
   `lib.rs`, and one each in `audited_stored.rs`, `audited_range.rs`,
   `expression.rs` and `expression_search.rs`. Each of those takes the rung it
-  checks as a parameter or a field of one, except `sweep_audited_stored`,
-  which takes it from the `sweep-audited-stored` command's own argument
-  list; the chains above them were not all followed to their end. `batch.rs`
+  checks as a parameter or a field of one; `stored_words` takes it as an
+  optional parameter, and `sweep_audited_stored`, which called `swept_rung`
+  on the `sweep-audited-stored` command's own rung word until D-2722, now
+  hands that word to `stored_words` instead. The chains above them were not
+  all followed to their end. `batch.rs`
   has a `swept_rung` of its own that quotes raw too, but only a word
   `stored::rung` has already accepted as a stored rung reaches that quote.
 
@@ -12747,8 +12749,13 @@ row at all accumulated.
   store/format.rs 14 -- the greeks record. Volatility, delta, gamma,
     theta, vega, rho are statistical values, and the file's own doc
     says so before declaring them.
-  runner/significance.rs 18 -> 21 -- three more in the same
-    multiple-comparison arithmetic the eighteen already cover.
+  runner/significance.rs 18 -> 21 -> 41 -- three more in the same
+    multiple-comparison arithmetic the eighteen already cover, then
+    twenty for the Student-t tail a row's t is judged on (D-2725):
+    the regularized incomplete beta, its continued fraction, ln Gamma,
+    and the Bonferroni bar found by bisection on that tail. Every
+    input is a COUNT (observations, trials) or a t-statistic; no price
+    reaches any of them.
   runner/outcome.rs 5 -> 8 -> 15 -- the three Newey-West
     accumulators added with the overlap correction, then the payoff
     terms. `cross_a`, `cross_b` and `cross_c` are weighted

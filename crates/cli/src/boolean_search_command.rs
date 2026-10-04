@@ -24,9 +24,14 @@ struct Request<'a> {
     batches: u64,
 }
 pub(crate) fn command(args: &[&str], out: &mut String) -> u8 {
-    match parse(args).and_then(|request| execute(&request, out)) {
+    // Arguments, then work, each with its own code (P8-03, D-2722).
+    let request = match parse(args) {
+        Ok(request) => request,
+        Err(why) => return crate::refuse(out, &why),
+    };
+    match execute(&request, out) {
         Ok(()) => crate::OK,
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
@@ -64,6 +69,7 @@ fn parse<'a>(args: &[&'a str]) -> Result<Request<'a>, String> {
     else {
         return Err("boolean-qualified-search-stored requires 17 explicit arguments: VENDOR SYMBOLS FY FM TY TM BITS HORIZON MAX_POINTS BATCH_PROGRAMS NODE_ALLOWANCE BATCH_ALLOWANCE OUTPUT LATER_FY LATER_FM LATER_TY LATER_TM [TIMEFRAMES comma-separated; omitted means all eight]".into());
     };
+    crate::boolean_catalog_command::words(vendor, symbols)?;
     let from = month(fy, fm)?;
     let to = month(ty, tm)?;
     let later_from = month(lfy, lfm)?;

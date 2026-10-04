@@ -178,7 +178,11 @@ fn swept_rung_calls() -> Vec<Call> {
         };
         for (at, _) in text.match_indices(needle) {
             let before = text.get(..at).expect("a prefix");
-            if before.ends_with("fn ") {
+            // The definition is not a call, and neither is a unit test's
+            // `super::swept_rung(..)` assertion on it (D-2724's test asserts
+            // which rungs it accepts): the bullet counts production callers
+            // that hand it a rung to refuse (D-2722).
+            if before.ends_with("fn ") || before.ends_with("super::") {
                 continue;
             }
             let argument = text
@@ -615,7 +619,7 @@ fn the_raw_quote_limit_counts_and_names_every_call_of_swept_rung() {
             "rung" if call.function == "sweep_audited_stored" => {
                 call.lead.contains("        rung,\n") && call.lead.contains("] = arguments\n")
             }
-            "rung" => signature.contains("rung: &"),
+            "rung" => signature.contains("rung: &") || signature.contains("rung: Option<&"),
             "request.rung" => signature.contains("(request: "),
             "args.rung" => signature.contains("(args: &"),
             _ => false,

@@ -99,7 +99,8 @@ pub(crate) fn api_for_test(
     )
 }
 
-pub(crate) fn command(arguments: &[&str]) -> Result<String, String> {
+pub(crate) fn command(arguments: &[&str]) -> Result<String, crate::Refused> {
+    use crate::misused;
     let [
         vendor,
         underlying,
@@ -114,17 +115,19 @@ pub(crate) fn command(arguments: &[&str]) -> Result<String, String> {
         records,
     ] = arguments
     else {
-        return Err("strict range audit requires eleven arguments".to_owned());
+        return Err(misused("strict range audit requires eleven arguments"));
     };
-    let from = month(fy, fm)?;
-    let to = month(ty, tm)?;
-    let min_hits = crate::parse_min_hits(hits).map_err(str::to_owned)?;
-    let max_bytes = bound(bytes, "MAX_BYTES")?;
-    let max_records = bound(records, "MAX_RECORDS")?;
+    // EVERY ARGUMENT BEFORE THE BUILD OR THE STORE (P8-03, D-2722).
+    let from = month(fy, fm).map_err(misused)?;
+    let to = month(ty, tm).map_err(misused)?;
+    let min_hits = crate::parse_min_hits(hits).map_err(misused)?;
+    let max_bytes = bound(bytes, "MAX_BYTES").map_err(misused)?;
+    let max_records = bound(records, "MAX_RECORDS").map_err(misused)?;
+    crate::stored_words(vendor, Some(underlying), Some(rung), Some((from, to))).map_err(misused)?;
     let commit = crate::commit_stamp()
         .ok_or("strict range audit requires a verified clean build identity")?;
     let root = crate::store_root()?;
-    audit_identified(
+    Ok(audit_identified(
         Request {
             store_root: &root,
             vendor,
@@ -137,7 +140,7 @@ pub(crate) fn command(arguments: &[&str]) -> Result<String, String> {
         },
         &StrictConfig::explicit(Path::new(receipts), max_bytes, max_records),
         commit,
-    )
+    )?)
 }
 
 fn month(year: &str, month: &str) -> Result<(u16, u8), String> {

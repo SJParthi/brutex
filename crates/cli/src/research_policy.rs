@@ -199,16 +199,24 @@ fn resolve_value(field: AdmissionFieldV1, raw: &str, risk: u64) -> Result<String
 }
 
 pub(crate) fn command(path: &str, points: &str, out: &mut String) -> u8 {
+    // MAX_POINTS is the argument this build parses; the FILE is read by the
+    // work, so a file that cannot be read or admitted exits `FAILED` without
+    // the usage, and a malformed MAX_POINTS exits `MISUSED` with it (P8-03,
+    // D-2722).
+    if let Err(why) = risk_of(points) {
+        return crate::refuse(out, &why);
+    }
     match explain(Path::new(path), points) {
         Ok(report) => {
             out.push_str(&report);
             crate::OK
         }
-        Err(why) => crate::refuse(out, &why),
+        Err(why) => crate::fail(out, &why),
     }
 }
 
-pub(crate) fn explain(path: &Path, points: &str) -> Result<String, String> {
+/// `MAX_POINTS`, and the paisa risk it states.
+fn risk_of(points: &str) -> Result<(u64, u64), String> {
     let max_points = points
         .parse::<u64>()
         .ok()
@@ -217,6 +225,11 @@ pub(crate) fn explain(path: &Path, points: &str) -> Result<String, String> {
     let risk = max_points
         .checked_mul(100)
         .ok_or_else(|| "MAX_POINTS overflows paisa".to_owned())?;
+    Ok((max_points, risk))
+}
+
+pub(crate) fn explain(path: &Path, points: &str) -> Result<String, String> {
+    let (max_points, risk) = risk_of(points)?;
     let profile = ResearchPolicy::read(path, risk)?;
     let provenance = profile.provenance().to_owned();
     let request = crate::ledger_all::LedgerAllRequest {

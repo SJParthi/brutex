@@ -9,20 +9,17 @@
 //! and deliberately so: two binaries that end differently are two things an
 //! operator has to learn.
 //!
-//! # The four commands
+//! # The commands
 //!
-//! ```text
-//! cli sweep        SESSIONS MIN_HITS                          generated bars
-//! cli audit        SESSIONS MIN_HITS                          generated bars
-//! cli auto         SESSIONS                                   generated bars
-//! cli sweep-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS  REAL bars
-//! ```
-//!
-//! This list read `sweep | auto` and omitted half the surface, including the
-//! only command that touches real market data. `sweep-stored` also needs the
-//! binary stamped from a clean HEAD. The build proves HEAD, index, and working
-//! source agree; an explicit `BRUTEX_COMMIT` can only assert that same HEAD and
-//! cannot bypass a dirty tree. CLAUDE.md section 3 rule 3 forbids a computation
+//! [`cli::USAGE`] is the one list of commands, and `cli::COMMANDS` is the one
+//! list the dispatcher is checked against. This header listed four commands
+//! under a heading that claimed them all, while the binary served thirty-five
+//! (P8-05, D-2724); before that it read `sweep | auto` and omitted the only
+//! command that touched real market data. A copy here drifts, so it names
+//! none. Every stored command needs the binary stamped from a clean HEAD. The
+//! build proves HEAD, index, and working source agree; an explicit
+//! `BRUTEX_COMMIT` can only assert that same HEAD and cannot bypass a dirty
+//! tree. CLAUDE.md section 3 rule 3 forbids a computation
 //! whose run identity cannot be recorded, so an unproved build refuses before it
 //! reads a bar. [`cli::USAGE`] is what an operator actually sees; a doc comment
 //! here reaches nobody at a terminal, which is why it had drifted unnoticed.
