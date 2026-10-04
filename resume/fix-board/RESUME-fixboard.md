@@ -29,7 +29,7 @@ All on branches from final/all-fixes-zero 1f4de71a; hashes sent to zero-findings
 - fixboard/zero-num56 93283ef6: p5num-1/3/4 (D-2712..2714) are being merged by zero-findings. 0ec5fbe6 (p6num) is NOT taken, because it duplicates D-2666. p5num-2 needs a format version (operator); p5num-5 not started.
 - fixboard/zero-web12 dca033e1: CE-70..73 (D-2730..2733). Base 1f4de71a already fails Gate W1 (web/build stale); dca033e1 rebuilds it.
 - fixboard/zero-p10 7b2ffdd9: P10-01/02/03/05/06/07a killed; P10-04 was already killed (false finding); P10-07b restructured (D-2740).
-- fixboard/zero-p8 ab860bc5 (paused, D-2720..2729, FB-21..29). DONE with tests revert-checked: P8-01 6667f094 (D-2720), P8-02 d8937689+71361651 (D-2721), P8-04 e79b2ffb (D-2723; fixture fix in ab860bc5), P8-05 00f247fc (D-2724), p8num-1 b398ab2a (D-2725, Gate 11 float allowance for significance.rs 21 to 41). P8-03 is WIP (d18c2e1d, ab860bc5: stored_words, Refused::{Arguments, Work}, misused exits 2). LEFT: write D-2722 and FB-27; rerun cli tests/pool_and_escape_docs.rs; revert-check a_malformed_argument_exits_misused_and_a_refused_job_exits_failed; cargo fmt --check; clippy for cli/runner/api; the whole cli suite once; cargo test -p api and -p core; then send the hashes to zero-findings. The runner end_to_end the_whole_pipeline... failure also fails on 1f4de71a.
+- fixboard/zero-p8 c26d8db5: P8-01..05 and p8num-1 all done (D-2720..2725, FB-21..27), handed to zero-findings 17:3x UTC. Base failure found: api sweeprun::strict_tests::strict_out_of_domain_request_settings_refuse_before_configuration_slot_or_start (reported to zero-findings).
 
 ## Next
 1. Hourly refresh as above.
