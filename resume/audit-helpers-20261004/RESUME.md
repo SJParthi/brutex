@@ -36,3 +36,12 @@ All sent to the zero-findings thread. Round 1 + 2 total: 34 new findings. Next: 
 | Tests/docs | 6 | Rust-only, gate replay, graph, vocab | P6-01..03 med (gates 1d, 11, 12 red at 1f4de71; green at #74 73441e5), P6-04 low | tests-docs-security-pass6.md |
 Rust-only: clean across 982 files. Owner question left open by D-1602: CI shell/awk vs CLAUDE.md §2 "no interpreted runtime as a tool".
 Total new across rounds 1-3: 49.
+
+## Round 4 (same head 1f4de71) — done 2026-10-04 ~09:30 UTC
+| Angle | Pass | Area | New | Report |
+|---|---|---|---|---|
+| Crash/edge | 9 | store/lake on-disk bytes | CE-61 med (forged header count aborts api server, ran), CE-62, CE-63 low | crash-edge-pass9.md |
+| Determinism | 7 | run identity, idempotence | conc7-1, conc7-2 low (identity hash itself sound) | conc-pass7.md |
+| Engine | 7 | Apriori + O(1) ops | p7num-1..3 low (join proven complete and injective) | numeric-pass7.md |
+| House rules | 7 | empty tests, fallbacks, float money | P7-01, P7-02 low | tests-docs-security-pass7.md |
+Total new across rounds 1-4: 59. Severity trend: round 4 = 1 medium, 9 low.
