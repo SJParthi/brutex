@@ -3,8 +3,10 @@
 //! no vendor row is quoted (`gdfl_cm::tests::fixtures_are_built_not_pasted`).
 
 #![allow(
-    clippy::unwrap_used,
     clippy::expect_used,
+    clippy::panic,
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::too_many_lines,
     reason = "a test that cannot panic cannot fail"

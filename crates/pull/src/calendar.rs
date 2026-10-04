@@ -506,9 +506,9 @@ pub fn kind_of(epoch_day: i64) -> DayKind {
     }
     // OUTSIDE THE MEASURED BITSET, INSIDE THE CALENDAR: the circular-sourced
     // spans of D-2805.
-    if epoch_day < MEASURED_FIRST_DAY || epoch_day > MEASURED_LAST_DAY {
+    let (MEASURED_FIRST_DAY..=MEASURED_LAST_DAY) = epoch_day else {
         return sourced_kind(epoch_day);
-    }
+    };
     // `try_from` RATHER THAN `as`, and the failure arm is honest rather than a
     // panic. The range check above already makes the difference 0..=2468, so
     // this cannot fail; if a future edit breaks that, saying "I have not
@@ -745,12 +745,15 @@ mod tests {
         // Every listed holiday is a weekday inside a sourced span, and closed.
         for day in SOURCED_HOLIDAYS {
             assert!((day + 3).rem_euclid(7) < 5, "{day} is a weekday");
-            assert!(day < MEASURED_FIRST_DAY || day > MEASURED_LAST_DAY, "{day}");
+            assert!(
+                !(MEASURED_FIRST_DAY..=MEASURED_LAST_DAY).contains(&day),
+                "{day}"
+            );
             if !SOURCED_SPECIAL.contains(&day) {
                 assert_eq!(kind_of(day), DayKind::Closed, "{day}");
             }
         }
-        assert!(SOURCED_HOLIDAYS.windows(2).all(|w| w[0] < w[1]));
+        assert!(SOURCED_HOLIDAYS.windows(2).all(|w| w.first() < w.last()));
         assert_eq!(
             kind_of(at(2019, 4, 29)),
             DayKind::Closed,

@@ -20,7 +20,7 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-fn env_of(pairs: &[(&str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> {
+fn env_of(pairs: &[(&str, PathBuf)]) -> impl Fn(&str) -> Option<OsString> + use<> {
     let pairs: Vec<(String, OsString)> = pairs
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone().into_os_string()))

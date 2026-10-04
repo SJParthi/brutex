@@ -2,8 +2,10 @@
 //! Tests of the GDFL options reader. Every value is invented at run time.
 
 #![allow(
-    clippy::unwrap_used,
     clippy::expect_used,
+    clippy::panic,
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::unwrap_used,
     clippy::indexing_slicing,
     reason = "a test that cannot panic cannot fail"
 )]
@@ -272,6 +274,10 @@ impl Rng {
 }
 
 #[test]
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the six parts of a ticker, named by their letters"
+)]
 fn a_million_strings_decode_with_an_exact_round_trip_or_a_named_refusal() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let unders = [
@@ -307,7 +313,7 @@ fn a_million_strings_decode_with_an_exact_round_trip_or_a_named_refusal() {
     let (mut decoded, mut refused) = (0_u32, 0_u32);
     for i in 0..1_000_000_u32 {
         let t = if i % 2 == 0 {
-            let monthly = rng.next() % 3 == 0;
+            let monthly = rng.next().is_multiple_of(3);
             let (u, d, m, y, s, side) = (
                 rng.pick(&unders),
                 rng.pick(&days),
@@ -605,7 +611,7 @@ fn every_row_fault_is_refused_by_name_at_its_line() {
         good.replacen(",10,", ",92233720368547758.08,", 1),
         NfoRefusal::PriceRefused { line: 3 },
     );
-    let mut bad = csv(&[good.clone()]);
+    let mut bad = csv(std::slice::from_ref(&good));
     bad.insert(bad.len() - 3, 0xFF);
     assert_eq!(
         decode(&bad, STEM, trade()),
@@ -843,7 +849,7 @@ fn every_fault_of_the_yearly_zip_is_refused_by_name() {
     let day_zip = zip(&[(&e1, &one, Method::Deflated)]);
     let open = |year: Vec<u8>| {
         let len = u64::try_from(year.len()).unwrap();
-        listing_in(Arc::new(year), len, d)
+        listing_in(&Arc::new(year), len, d)
     };
     // Two day zips for one day.
     assert_eq!(

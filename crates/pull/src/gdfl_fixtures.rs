@@ -1,4 +1,8 @@
 #![cfg(test)]
+#![allow(
+    clippy::expect_used,
+    reason = "a test builder that cannot panic cannot fail"
+)]
 //! Test-only builders for invented GDFL shapes: zip and tick-store
 //! containers, and files whose every value is made up at run time. No vendor
 //! row is quoted anywhere (the licence is UNVERIFIED; D-2800), and

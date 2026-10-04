@@ -445,7 +445,7 @@ fn readings_at(
     // every one of the 1,218,362 tickers: this is the tick store's reading
     // for all 2,240 pre-switch index weeklies, each last traded on or before
     // that day; an index MONTHLY has no day reading and stays monthly.
-    if !modern && !(index_weekly && had_day) {
+    if !(modern || (index_weekly && had_day)) {
         let monthly = (|| {
             let yy = rest.get(0..2).and_then(two_digits)?;
             let mon = rest.get(2..5).and_then(month_of)?;
@@ -822,7 +822,7 @@ impl NfoSource for NfoZips {
             Err(why) => return Err(unavailable(why)),
         };
         let len = file.metadata().map_err(unavailable)?.len();
-        listing_in(Arc::new(file), len, day)
+        listing_in(&Arc::new(file), len, day)
     }
 
     fn fetch(&self, file: &ListedFile<ZipFileLocator>) -> Result<Vec<u8>, CmRefusal> {
@@ -839,13 +839,13 @@ impl NfoSource for NfoZips {
 /// The zip refusals of [`zip_entries`] and [`stored_span`], and
 /// [`CmRefusal::ArchiveDuplicateDay`] for two day zips of one day.
 pub fn listing_in<B: ReadAt>(
-    file: Arc<B>,
+    file: &Arc<B>,
     len: u64,
     day: Day,
 ) -> Result<Option<NfoDay<ZipFileLocator<B>>>, CmRefusal> {
     let want = format!("{}/{}.zip", month_folder(day), day_folder_name(day));
     let mut inner: Option<ZipEntry> = None;
-    for entry in zip_entries(&*file, 0, len)? {
+    for entry in zip_entries(&**file, 0, len)? {
         if entry.name == want {
             if inner.is_some() {
                 return Err(CmRefusal::ArchiveDuplicateDay { day });
@@ -856,8 +856,8 @@ pub fn listing_in<B: ReadAt>(
     let Some(inner) = inner else {
         return Ok(None);
     };
-    let (base, span) = stored_span(&*file, &inner)?;
-    let members = zip_entries(&*file, base, span)?;
+    let (base, span) = stored_span(&**file, &inner)?;
+    let members = zip_entries(&**file, base, span)?;
     let mut listing = NfoDay::new(day, members.len());
     for entry in members {
         listing.push(
@@ -865,7 +865,7 @@ pub fn listing_in<B: ReadAt>(
             entry.len,
             entry.crc32,
             ZipFileLocator {
-                file: Arc::clone(&file),
+                file: Arc::clone(file),
                 at: entry.locator,
             },
         );

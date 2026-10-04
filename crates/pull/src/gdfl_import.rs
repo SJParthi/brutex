@@ -573,7 +573,7 @@ fn note_failure(kind: ImportKind, day: Day, about: &str, why: &str) -> Failure {
 }
 
 /// The plan one rung of one file is filed under.
-fn plan<'a>(kind: ImportKind, request: &'a BarRequest, contract: Option<Contract>) -> Plan<'a> {
+fn plan(kind: ImportKind, request: &BarRequest, contract: Option<Contract>) -> Plan<'_> {
     Plan {
         calendar: crate::calendar::Runtime::default(),
         cash_schedule: None,
@@ -605,7 +605,7 @@ struct DayWork<'a> {
 
 impl DayWork<'_> {
     /// Converts and files one instrument file.
-    fn file(&mut self, file: TickFile) {
+    fn file(&mut self, file: &TickFile) {
         self.report.files += 1;
         let converted = match convert(self.run.kind, self.day, &file.ticks) {
             Ok(converted) => converted,
@@ -658,6 +658,71 @@ impl DayWork<'_> {
     }
 }
 
+/// Writes the day's `done` (clean) or `incomplete` journal line, when the
+/// day began a write or is clean, naming a journal that will not take it.
+fn close_day(
+    journal: &Journal,
+    key: &str,
+    begun: bool,
+    (before, report): (&Report, &Report),
+    failures: &mut Vec<Failure>,
+    (kind, day): (ImportKind, Day),
+) {
+    let clean = failures.is_empty();
+    if !(begun || clean) {
+        return;
+    }
+    let stats = format!(
+        "files={} seconds={} failures={}",
+        report.files - before.files,
+        report.seconds - before.seconds,
+        failures.len()
+    );
+    let verdict = if clean { "done" } else { "incomplete" };
+    if let Err(why) = journal.append(&format!("{verdict} {key} {stats}")) {
+        let failure = note_failure(kind, day, "journal", &why.to_string());
+        failures.push(failure);
+    }
+}
+
+/// Whether `day` is imported this run: not already done, a regular
+/// session (a closed day is counted, any other calendar answer is a named
+/// failure), and named as resumed when an earlier run began it.
+fn admit(run: &Run<'_>, journal: &Journal, key: &str, day: Day, report: &mut Report) -> bool {
+    if journal.done.contains(key) {
+        report.days_skipped += 1;
+        return false;
+    }
+    match session_gate(day) {
+        Ok(()) => {}
+        Err(CmRefusal::CalendarNotRegular {
+            kind: crate::calendar::DayKind::Closed,
+        }) => {
+            report.days_closed += 1;
+            return false;
+        }
+        Err(why) => {
+            report.days_refused += 1;
+            let failure = note_failure(run.kind, day, "calendar", &why.to_string());
+            report.failures.push(failure);
+            return false;
+        }
+    }
+    if journal.open.contains(key) {
+        report.resumed.push(day);
+        let day_text = day.to_string();
+        note(
+            &telemetry::Event::warn(
+                TARGET,
+                "resuming a day an earlier run began and did not finish",
+            )
+            .with("kind", run.kind.as_str())
+            .with("day", day_text.as_str()),
+        );
+    }
+    true
+}
+
 /// The one runtime: every day of the run through the calendar, the venue,
 /// the journal, the source's `read_day` and the common filing path.
 ///
@@ -698,36 +763,8 @@ where
     let mut report = Report::default();
     for day in days(run.from, run.to) {
         let key = format!("{} {day} {filter}", run.kind.as_str());
-        if journal.done.contains(key.as_str()) {
-            report.days_skipped += 1;
+        if !admit(run, &journal, &key, day, &mut report) {
             continue;
-        }
-        match session_gate(day) {
-            Ok(()) => {}
-            Err(CmRefusal::CalendarNotRegular {
-                kind: crate::calendar::DayKind::Closed,
-            }) => {
-                report.days_closed += 1;
-                continue;
-            }
-            Err(why) => {
-                report.days_refused += 1;
-                let failure = note_failure(run.kind, day, "calendar", &why.to_string());
-                report.failures.push(failure);
-                continue;
-            }
-        }
-        if journal.open.contains(key.as_str()) {
-            report.resumed.push(day);
-            let day_text = day.to_string();
-            note(
-                &telemetry::Event::warn(
-                    TARGET,
-                    "resuming a day an earlier run began and did not finish",
-                )
-                .with("kind", run.kind.as_str())
-                .with("day", day_text.as_str()),
-            );
         }
         let before = report.clone();
         let mut work = DayWork {
@@ -741,7 +778,7 @@ where
             report: &mut report,
             failures: Vec::new(),
         };
-        let read = read_day(day, &mut |file| work.file(file));
+        let read = read_day(day, &mut |file| work.file(&file));
         let (begun, held, mut failures) = (work.begun, work.held, work.failures);
         report.files_skipped += read.skipped;
         report.files_refused += read.refused.len();
@@ -765,20 +802,14 @@ where
             let failure = note_failure(run.kind, day, "census", &why);
             failures.push(failure);
         }
-        let clean = failures.is_empty();
-        if begun || clean {
-            let stats = format!(
-                "files={} seconds={} failures={}",
-                report.files - before.files,
-                report.seconds - before.seconds,
-                failures.len()
-            );
-            let word = if clean { "done" } else { "incomplete" };
-            if let Err(why) = journal.append(&format!("{word} {key} {stats}")) {
-                let failure = note_failure(run.kind, day, "journal", &why.to_string());
-                failures.push(failure);
-            }
-        }
+        close_day(
+            &journal,
+            &key,
+            begun,
+            (&before, &report),
+            &mut failures,
+            (run.kind, day),
+        );
         let day_text = day.to_string();
         note(
             &telemetry::Event::info(TARGET, "day imported")
