@@ -10372,18 +10372,21 @@ that file by `c4_cli_02_limits::each_quoted_line_is_in_the_source_it_names`.
   and verifies every completed batch
   (`for batch in 0..reader.completed_batches() {`,
   `reader.verify_batch(batch as u64)?;`) before any completed work is skipped.
-  Then, before each completion is published, the command opens the whole
-  history
-  (`let prior = Reader::open(request.input.output, identity, observe, records)?;`)
-  and verifies every completed batch (`prior.verify_batch(batch as u64)?;`),
-  and after publishing it does both again (`saved.verify_batch(batch as u64)?;`).
+  After each completion is published it verifies that new batch only
+  (`saved.verify_batch(newest as u64)?;`), and before the invocation reports
+  its outcome it verifies every completed batch once more
+  (`saved.verify_batch(batch as u64)?;`). Until D-2668 (CE-66) it verified
+  every completed batch both before and after EACH completion, so an
+  invocation's work grew with the square of its batch count.
   In `crates/cli/src/boolean_search_reader.rs`, `verify_batch` of a nonempty
   batch opens its campaign (`QualifiedCampaign::open(`) and each selected rung
   (`drop(open_rung(&self.root, &record, rung, allowance)?);`), and every `verify_batch`
   ends by rereading every retained record (`for old in &self.history {`). So
-  a resume pays one pass over every completed batch and a completion pays
-  two, and each pass costs work that grows with the completed batches times
-  the retained history, as well as each batch's campaign and rung ancestry.
+  a resume pays one pass over every completed batch, a completion pays one
+  batch, and the closing pass pays one more pass; each full pass costs work
+  that grows with the completed batches times the retained history, as well
+  as each batch's campaign and rung ancestry. NOT constant: it is one pass at
+  each end of an invocation, no longer one per completion.
   D-0549's section above says a cold reader "charges every declared replay
   allowance"; it did not say the command repeats that for every completed
   batch at every completion.

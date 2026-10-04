@@ -57669,7 +57669,7 @@ line changes, and the lock's refusal stays exactly as strict. Proven locally:
 
 ### D-2665 — `forward`'s two invariant rows say what is built and what is bounded — 2026-10-04
 
-- P5-03. The `forward` row said no power-of-two table is built (D-1170), and its test passed by grepping two spellings of the old per-bar table; D-1572's `BlockExtremes` IS a doubling table, over 64-bar blocks. The row now says no PER-BAR table is built and names the block table, and `runner::outcome::window_tests::forward_builds_no_per_bar_power_of_two_table` measures it: one pair per block, every level together at most one pair per bar, one pass over the bars, at seven sizes from 1 to 100,003 bars. Four doc comments cited the test module as `runner::window_tests`; they now name `runner::outcome::window_tests`.
+- P5-03. The `forward` row said no power-of-two table is built (D-1170), and its test passed by grepping two spellings of the old per-bar table; D-1572's `BlockExtremes` IS a doubling table, over 64-bar blocks. The row now says no PER-BAR table is built and names the block table, and `runner::outcome::window_tests::forward_builds_no_per_bar_power_of_two_table` measures it: one pair per block, every level together at most one pair per bar, one pass over the bars, at seven sizes from 1 to 100,003 bars. Four doc comments cite the test as `runner::window_tests::…`, which omits the `outcome` file module; they keep that three-segment form because gate 12 resolves a proof as exactly `crate::module::name` against the (crate, test fn) pair, and a four-segment path names nothing to it.
 - P5-04. AFF-43 said at most `3n + 130` bars per query; its test asserts `3n + 130·q` in total for `q` queries, which is also what docs/06 states. The row now says the total.
 
 ### D-2666 — Regime refusals name a day that answers; the engine's cost text and k=1 reservation match the code — 2026-10-04
@@ -57831,3 +57831,14 @@ that fails the full check is kept when it is unsealed and still carries a
 canonical identity, a safe index and its two state booleans; it is never
 computed (`compareRuns` requires the seal, and `best` requires `sealed`). A
 sealed row that fails still refuses the envelope. ZB-10.
+
+### D-2668 — The qualified search verifies each completion once and every batch once at each end — 2026-10-04
+
+- CE-66. `boolean-search-stored` re-verified every completed batch before AND after each new completion, so an invocation of `b` batches over `B` completed ones did about `2·b·B` full batch verifications, each rereading the retained history. The cost was declared in docs/06 (D-1400 section), so this is the O(1) rule's "make it constant where possible", not an undeclared cost.
+- Now: a resume verifies every completed batch once (unchanged); each completion verifies only the batch it just published; and before the outcome is reported, a closing pass verifies every completed batch once, so a child changed while the invocation ran is still refused before any outcome is shown. Per invocation that is two full passes instead of `2·b`.
+- Still not constant: each full pass grows with the completed batches times the retained history, as docs/06 now states. `c4_cli_02_limits` pins the new loops and lines.
+
+### D-2669 — `BlockExtremes` builds every level, so a long backward query is answered — 2026-10-04
+
+- FB-01, found by the Fix Board thread (its branch `fixboard/zero-p5`, b83845d1). `BlockExtremes::of` stopped doubling when the next span exceeded the length of the level below, which is shorter than the block count by `2^(k-1) - 1`, so it built one level too few on many slice lengths. A backward query whose middle run needed the missing level got `None` from `over`, and `forward` recorded no excursion where a scan has one: a silent loss on the D-1572 path.
+- The loop now compares the next span with the block count. `runner::outcome::window_tests::a_backward_query_spanning_most_of_the_slice_is_answered` checks every slice from 3 to 40 blocks against a full scan, and `forward_builds_no_per_bar_power_of_two_table` now also asserts one level per power of two up to the block count. ZX-15.
