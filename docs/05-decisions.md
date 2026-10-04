@@ -56677,3 +56677,34 @@ a sink and reopens one on the same directory holds it for reading: 14 in
 `sink.rs` and one in `tail.rs`. Readers do not wait on each other. No production
 line changes, and the lock's refusal stays exactly as strict. Proven locally:
 4 of 60 runs failed before the change and 0 of 60 after.
+
+### D-1463 — The staging observer's strict JSON reader decodes `arbitrary_precision` numbers instead of treating them as objects — 2026-10-04
+
+**What was observed.** PR #74 run 1265 on c97ff00: Gate 6d (D-1607) failed two
+native tests in `web/sweep-readiness/deployment-preflight-tests.rs`.
+D-1570 turned on serde_json's `arbitrary_precision` for the whole workspace, and
+Gate 6d links the web/ native tests against the same `serde_json` rlib. With
+that feature, `deserialize_any` hands every number that is not an exact i64/u64
+to the visitor as a one-entry map under serde_json's private number token, so
+`files::json`'s `UniqueVisitor` decoded `0.125` as an object
+(`raw_report_json_preserves_exact_numbers_and_rejects_recursive_duplicate_keys`)
+and accepted `1e999`, because `visit_f64`'s finite check was never reached
+(`strict_report_json_keeps_byte_recursion_and_complete_input_bounds`).
+`cargo test --workspace` cannot see this: no crate owns web/*.rs.
+
+**The decision.** `visit_map` reads the first key; when it is the number token,
+the value's digits become a `serde_json::Number` (kept digit for digit, as
+D-1570 wants for prices), a second key is refused, and digits that are not a
+JSON number or that no finite f64 holds are refused with the same
+"nonfinite JSON number" `visit_f64` uses. Any other first key is an ordinary
+object and keeps the duplicate-key refusal. The token is private to serde_json;
+the round-trip test is what binds it, because a renamed token decodes `0.125`
+as an object again and fails. A literal object whose only key is the token
+decodes as that number, which is exactly what `serde_json::Value` itself does
+under the feature. The reader stays O(input bytes) with the same recursion
+limit; one extra key read per object.
+
+**Proof.** The two failing tests pass again, and
+`report_json_decimals_keep_their_digits_and_refuse_nonfinite_or_forged_numbers`
+pins the digits of `100.12499999999999999`, refuses `-1e999` and `1E+309`, and
+refuses a token map with extra fields or non-number digits.

@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 
 /// Parse bounded report JSON without accepting last-key-wins ambiguity.
 /// Serde's default finite recursion limit remains enabled. Integer visitors keep
-/// exact i64/u64 values; decimal metadata uses serde_json's existing float form.
+/// exact i64/u64 values. The workspace builds serde_json with
+/// `arbitrary_precision` (D-1570), which hands every other number to the visitor
+/// as a one-entry map under serde_json's number token; that map is decoded back
+/// into the number its own digits name, and a value no finite f64 can hold is
+/// refused exactly as `visit_f64` refuses one (D-1463).
 pub(super) fn json(raw: &[u8], ceiling: u64) -> Result<serde_json::Value, String> {
     use serde::Deserialize;
     if raw.len() as u64 > ceiling {
@@ -22,6 +26,21 @@ pub(super) fn json(raw: &[u8], ceiling: u64) -> Result<serde_json::Value, String
 }
 
 struct UniqueJson(serde_json::Value);
+
+/// The map key serde_json's `arbitrary_precision` build uses to carry a number's
+/// digits through `deserialize_any`. Private to serde_json, so the round trip in
+/// `raw_report_json_preserves_exact_numbers_and_rejects_recursive_duplicate_keys`
+/// is what binds it: a renamed token decodes `0.125` as an object and fails there.
+const NUMBER_TOKEN: &str = "$serde_json::private::Number";
+
+/// The number `digits` spell, kept digit for digit, or `None` when they are not
+/// a JSON number or no finite f64 can hold them (`1e999`).
+fn number_from_digits(digits: &str) -> Option<serde_json::Number> {
+    let finite = digits.parse::<f64>().is_ok_and(f64::is_finite);
+    finite
+        .then(|| digits.parse::<serde_json::Number>().ok())
+        .flatten()
+}
 impl<'de> serde::Deserialize<'de> for UniqueJson {
     fn deserialize<D: serde::Deserializer<'de>>(parser: D) -> Result<Self, D::Error> {
         parser.deserialize_any(UniqueVisitor)
@@ -72,6 +91,20 @@ impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
         mut items: A,
     ) -> Result<Self::Value, A::Error> {
         let mut values = serde_json::Map::new();
+        let Some(first) = items.next_key::<String>()? else {
+            return Ok(UniqueJson(serde_json::Value::Object(values)));
+        };
+        if first == NUMBER_TOKEN {
+            let digits = items.next_value::<String>()?;
+            if items.next_key::<String>()?.is_some() {
+                return Err(serde::de::Error::custom("JSON number carries extra fields"));
+            }
+            return number_from_digits(&digits)
+                .map(|value| UniqueJson(serde_json::Value::Number(value)))
+                .ok_or_else(|| serde::de::Error::custom("nonfinite JSON number"));
+        }
+        let UniqueJson(value) = items.next_value()?;
+        values.insert(first, value);
         while let Some(key) = items.next_key::<String>()? {
             if values.contains_key(&key) {
                 return Err(serde::de::Error::custom("duplicate JSON object key"));
