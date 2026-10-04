@@ -85,3 +85,139 @@ export function withheldDays(runs, isoOfEpochDay) {
   }
   return { days, months };
 }
+
+/**
+ * An epoch day as `YYYY-MM-DD`. UTC midnight, like every other date on /ingest.
+ *
+ * @param {number} day
+ * @returns {string}
+ */
+export function isoOfEpochDay(day) {
+  return new Date(day * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * @typedef {{
+ *   first: string, last: string,
+ *   owed: Map<string, number|null>,
+ *   indexOwed: Map<string, number|null>,
+ *   withheld: Set<string>, withheldMonths: Set<string>,
+ *   from: string[], clashes: number, why: string
+ * }} Calendar
+ */
+
+/**
+ * The calendar that measures nothing. `why` is the reason; `''` reads as "it
+ * has not loaded yet" on the page.
+ *
+ * @param {string} why
+ * @returns {Calendar}
+ */
+export function emptyCalendar(why) {
+  return {
+    first: '',
+    last: '',
+    owed: new Map(),
+    indexOwed: new Map(),
+    withheld: new Set(),
+    withheldMonths: new Set(),
+    from: [],
+    clashes: 0,
+    why
+  };
+}
+
+/**
+ * Read one feed's `/calendar.json` into the page's calendar. Never throws: a
+ * refusal or a failure is an empty calendar that names its reason.
+ *
+ * @param {string} feed
+ * @param {(url: string, init: RequestInit) => Promise<Response>} request
+ * @param {AbortSignal} signal
+ * @returns {Promise<Calendar>}
+ */
+export async function readCalendar(feed, request, signal) {
+  try {
+    const response = await request(`/calendar.json?feed=${encodeURIComponent(feed)}`, {
+      cache: 'no-store',
+      signal
+    });
+    if (!response.ok) return emptyCalendar(`/calendar.json answered ${response.status}`);
+    const body = await response.json();
+    /** @type {Map<string, number|null>} */
+    const owed = new Map();
+    /** @type {Map<string, number|null>} */
+    const indexOwed = new Map();
+    for (const entry of body?.days ?? []) {
+      const day = isoOfEpochDay(entry.day);
+      owed.set(day, entry.owed ?? null);
+      // MISSING IS UNKNOWN, NEVER "SAME AS EXCHANGE". An older API does not
+      // carry the index-specific field and therefore cannot prove a common
+      // index denominator on the systems-outage day. Falling back to `owed`
+      // would silently restore the false 166-hole claim D-0420 refuses.
+      indexOwed.set(day, entry.indexOwed ?? null);
+    }
+    // A DAY ABSENT FROM `days` IS A HOLIDAY ONLY IF IT IS NOT WITHHELD. The
+    // server names, in `withheld`, every stretch whose daily rung it did not
+    // read or could not trust (R9-api-law-0, D-1443); a malformed list throws
+    // into the catch below and the whole calendar degrades loudly, rather than
+    // its days becoming holidays. D-1507.
+    const withheld = withheldDays(body?.withheld, isoOfEpochDay);
+    return {
+      first: owed.size ? isoOfEpochDay(body.firstDay) : '',
+      last: owed.size ? isoOfEpochDay(body.lastDay) : '',
+      owed,
+      indexOwed,
+      withheld: withheld.days,
+      withheldMonths: withheld.months,
+      from: body?.derivedFrom ?? [],
+      clashes: (body?.disagreements ?? []).length,
+      why: owed.size ? '' : 'the store holds no bars for this feed'
+    };
+  } catch (error) {
+    return emptyCalendar(
+      error instanceof Error
+        ? `the calendar request failed (${error.message})`
+        : 'the calendar request failed'
+    );
+  }
+}
+
+/**
+ * ONE CALENDAR READ AT A TIME, AND ONLY THE CURRENT FEED'S MAY LAND (CE-71,
+ * D-2732).
+ *
+ * `/ingest` read `/calendar.json` with no ticket: switching feed A to B while
+ * A's read was in flight let A's slower answer replace B's calendar, and A's
+ * calendar stood under B (and under "no feed") until anything answered. That
+ * calendar is the denominator for the "NSE holiday" marks, the month span and
+ * every owed-minute count in the coverage meter.
+ *
+ * `load(feed)` now clears the calendar to "not loaded" at once, revokes the
+ * read in flight, and applies an answer only while its ticket is current —
+ * `createPageRequests`' generation, which revokes a late reply even when the
+ * transport ignores the abort.
+ *
+ * @param {{
+ *   request: (url: string, init: RequestInit) => Promise<Response>,
+ *   apply: (calendar: Calendar) => void,
+ *   requests: { run: (work: (ticket: { signal: AbortSignal, current: () => boolean }) => Promise<void>) => Promise<void>, cancel: () => void }
+ * }} options
+ */
+export function createCalendarLoader({ request, apply, requests }) {
+  return {
+    /** @param {string | null | undefined} feed */
+    load(feed) {
+      requests.cancel();
+      if (!feed) {
+        apply(emptyCalendar('no feed is selected'));
+        return Promise.resolve();
+      }
+      apply(emptyCalendar(''));
+      return requests.run(async (ticket) => {
+        const calendar = await readCalendar(feed, request, ticket.signal);
+        if (ticket.current()) apply(calendar);
+      });
+    }
+  };
+}
