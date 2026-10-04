@@ -57565,3 +57565,64 @@ The refusal messages match line for line, apart from the omitted hunk headers.
 Two trees separate old from new, and they are the holes described above: 13
 `spacepath` and 22 `binary-file` pass the old step and are refused by the new
 tool.
+
+### D-2313 — Gates 25, 27, 27b, 26, 19, 10 and 11 are read by one Rust tool — 2026-10-04
+
+**Finding.** The seven `language-purity` steps from gate 25 to gate 11 held
+their logic as inline text programs in `.github/workflows/ci.yml`: 20 inline
+awk programs (gate 0's count falls from 71 to 51), sed substitutions,
+grep/cut/sort/uniq/tr/xargs pipelines and shell loops. That is a second
+language in a tracked file outside `web/` (CLAUDE.md section 2), and the
+standing default is that the rule covers CI.
+
+**Decision.** One std-only tool, `.github/gates_ledger.rs`
+(`#![forbid(unsafe_code)]`), built and tested with
+`rustc --edition=2024 [--test] -D warnings` in gate 25's step and reused from
+`RUNNER_TEMP` by the other six. One subcommand per gate: `release-profile`
+(25), `invariant-ids` (27), `decision-numbers` (27b), `tls-provider` (26),
+`failure-events` (19), `invariant-tests` (10) and `banned-constructs` (11).
+The tool starts no program but `git`, because gate 0's `spawns` rule (D-2344)
+refuses a `.github` tool that does; so gates 25 and 10 keep the scanner and
+`.github/invariant_paths.rs` as plain commands in their steps, piped through
+the two filters `path-declarations` and `module-table`, with no conditional
+or text program around them. A manifest or source the scanner cannot read
+now fails the step with the scanner's own message naming the file, where the
+old step printed a generic line. Each step keeps its name, conditions, env and the
+comments that justify it; comments that described shell mechanics moved beside
+the Rust. Gate 11's ten allowlists, gate 10's `ALLOW_PENDING` (with its
+reasons) and gate 27b's five pins moved into the tool as constants, entry for
+entry; the reasons for gate 11's entries stay in `docs/06-limits.md` (D-1451).
+The test-module stripper, formerly copied character for character into gates
+11 and 19, is one function. `ci.yml` falls from 472,900 to 424,584 bytes.
+`AWK_IN_CI` in `.github/source_scan.rs` must go from 71 to 51; that edit is
+left to the integration of the parallel CI ports.
+
+Where the old step let more through, the tool keeps the stricter reading and
+never the looser: paths are read NUL-separated rather than as git's quoted
+form; gate 10 reads a last row with no newline after it and never matches an
+empty row id against a blank allowlist line (the old step passed both, measured);
+a test-module file stem that is not an identifier exempts nothing.
+
+**Proof.** On this tree every old step body and its subcommand printed the
+same lines with the same exit status: 25, 27, 27b, 26, 19 and 10 pass; 11
+fails in both on the same two refusals that predate this change (rule 1,
+`crates/runner/src/signal_candle_stop.rs` 4 of 0; rule 6,
+`crates/telemetry/src/sink.rs` 1 of 0). The only output differences are the
+tool's own test log in gate 25's step, gate 10's `invariant_paths` verdict
+now printing before its row summary as it always ran first, and gate 11's
+closing line naming the tool. Mutated scratch trees refused by
+both, with the same lines: gate 25 by a quoted `"overflow-checks" = false`,
+a `[profile.release.package.engine]` override, a RUSTFLAGS codegen flag, a
+CRLF environment override and `panic = "unwind"`; gate 27 by a duplicate
+id, a backticked CRLF duplicate of `FV4-01` and a document with no rows;
+gate 27b by a reused number, a removed pinned `D-0076`, a five-digit
+`D-00011` and no headings; gate 26 by a removed guard, a second builder
+mention and no sites; gate 19 by a deleted emit, a failure after a test
+module, an undelimited module, a one-line `#[cfg(test)] mod`, two failures
+sharing one emit, a CRLF test module and an emit only in a comment; gate 10
+by a missing test, a test in the wrong crate and a renamed allowlisted row;
+gate 11 by an `unwrap`, a formatter-broken `.iter().position(` chain, a
+multi-line local allow, a disarmed `indexing_slicing`, an undelimited module,
+a one-line file with no newline and a runtime `assert!` beside a const one.
+The tool's own `#[test]`s cover each refusal branch and these shapes, and run
+in CI before any gate trusts it.

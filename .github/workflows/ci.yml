@@ -2321,7 +2321,7 @@ jobs:
           # The lint floor denies `clippy::cast_possible_truncation`,
           # `cast_sign_loss` and `cast_possible_wrap`, and the workspace answers
           # with `checked_`/`saturating_` at every site that can exceed a bound
-          # -- the census below counts them live. Every one of those was chosen
+          # -- the census counts them live. Every one of those was chosen
           # by an author who believed the unchecked spelling would PANIC. Turn
           # this key off and that belief is false everywhere at once.
           #
@@ -2337,10 +2337,11 @@ jobs:
           # choice. It reads two keys and refuses their absence. That is a small
           # claim, and it is the one that was missing.
           #
-          # NO UNTRUSTED INPUT: the tracked root manifest and the patterns below.
-          [ -f Cargo.toml ] || { echo "GATE 25: no root Cargo.toml"; exit 1; }
+          # NO UNTRUSTED INPUT: the tracked manifests and workflows, and the
+          # patterns in .github/gates_ledger.rs.
+          #
           # THE MANIFESTS ARE PARSED, NOT GREPPED (D-1113). The "other
-          # direction" check below matched the key set false only at column zero
+          # direction" check matched the key set false only at column zero
           # of the root manifest, so an indented key, a quoted key
           # (`"overflow-checks"` set false), a dotted key
           # (`profile.release.overflow-checks` set false before any header) and a
@@ -2359,80 +2360,28 @@ jobs:
           # a profile from, is refused outright by gate 1g (D-1105), and so is
           # `cargo --config`. What remains is the environment: a
           # `CARGO_PROFILE_<NAME>_OVERFLOW_CHECKS` variable or an
-          # `overflow-checks` codegen flag in RUSTFLAGS, refused below in every
-          # tracked workflow. The patterns are assembled from pieces so that
-          # this paragraph is not itself a hit.
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          g25=$(mktemp -d)
-          git ls-files -z -- '*Cargo.toml' > "$g25/manifests.z"
-          [ -s "$g25/manifests.z" ] || { echo "GATE 25 READ NO MANIFEST."; exit 1; }
-          bad=0
-          : > "$g25/leaves"
-          while IFS= read -r -d '' m; do
-            case "${m##*/}" in Cargo.toml) ;; *) continue ;; esac
-            if ! "$scan" toml "$m" >> "$g25/leaves"; then
-              echo "  REFUSED  $m could not be read as TOML"
-              bad=1
-            fi
-          done < "$g25/manifests.z"
-          if ! grep -q '^Cargo\.toml:[0-9]*:profile\.release = {table}$' "$g25/leaves"; then
-            echo "  REFUSED  Cargo.toml has no [profile.release] table at all"
-            bad=1
-          fi
-          if grep -q '^Cargo\.toml:[0-9]*:profile\.release\.overflow-checks = true$' "$g25/leaves"; then
-            echo "  present  [profile.release] overflow-checks = true"
-          else
-            echo "  REFUSED  [profile.release] no longer sets overflow-checks = true."
-            echo "           release would WRAP where dev panics, and every"
-            echo "           checked_/saturating_ site in the workspace was"
-            echo "           written believing the opposite."
-            bad=1
-          fi
-          if grep -q '^Cargo\.toml:[0-9]*:profile\.release\.panic = "abort"$' "$g25/leaves"; then
-            echo '  present  [profile.release] panic = "abort"'
-          else
-            echo '  REFUSED  [profile.release] no longer sets panic = "abort".'
-            echo "           That is a decision, and docs/05-decisions.md is"
-            echo "           where a decision goes."
-            bad=1
-          fi
+          # `overflow-checks` codegen flag in RUSTFLAGS, refused in every
+          # tracked workflow.
+          #
           # And the other direction: a profile, or a package override inside
           # one, that turns the check back OFF. `[profile.bench]` inherits
           # release, so gate 8 measures the shipped arithmetic -- unless
           # something re-enables wrapping under it.
-          off=$(grep -E '^[^:]+:[0-9]+:profile\.(.*\.)?overflow-checks = ' "$g25/leaves" \
-                | grep -vE ' = true$' || true)
-          if [ -n "$off" ]; then
-            printf '  REFUSED  a profile switches overflow checking back off:\n%s\n' "$off"
-            bad=1
-          else
-            echo "  present  no profile in any tracked manifest sets overflow-checks off"
-          fi
-          env_key="CARGO_PRO""FILE_[A-Z0-9_]*_OVER""FLOW_CHECKS"
-          flag_key="over""flow-checks[[:space:]]*=[[:space:]]*(off|no|n|false|0)"
-          git ls-files -z -- '.github/workflows/*' > "$g25/workflows.z"
-          envs=$( { xargs -0 -r grep -nE "${env_key}|${flag_key}" < "$g25/workflows.z" || true; } )
-          if [ -n "$envs" ]; then
-            printf '  REFUSED  a workflow overrides overflow checking from the environment:\n%s\n' "$envs"
-            bad=1
-          else
-            echo "  present  no workflow overrides overflow checking from the environment"
-          fi
-          # The census is REPORTING, not a rule. It is here so the log carries
-          # the size of what these two keys are protecting, and so a reader can
-          # see the number move.
-          sat=$( { git ls-files 'crates/**/*.rs' | xargs grep -ohE '(saturating|checked|wrapping)_[a-z_]+' \
-                   || true; } | wc -l | tr -d ' ')
-          echo "  context  ${sat} explicit saturating_/checked_/wrapping_ site(s) in tracked sources"
-          if [ "$bad" -ne 0 ]; then
-            echo
-            echo "GATE 25 FAILED."
-            echo
-            echo "Silent wrapping is not an acceptable answer to an arithmetic"
-            echo "mistake in a backtesting engine. CLAUDE.md section 4."
-            exit 1
-          fi
-          echo "OK — the release profile still panics on overflow and aborts on panic."
+          #
+          # D-2313: the reading is `.github/gates_ledger.rs release-profile`.
+          # This step builds that tool and runs its tests once for the job;
+          # gates 27, 27b, 26, 19, 10 and 11 below reuse the same binary from
+          # RUNNER_TEMP. The step, not the tool, runs the scanner: a `.github`
+          # tool starts no program but git (gate 0, D-2344). A manifest the
+          # scanner cannot read fails the step here, with the scanner's own
+          # message naming the file.
+          ledger="${RUNNER_TEMP:-/tmp}/gates-ledger"
+          rustc --edition=2024 --test -D warnings .github/gates_ledger.rs -o "${ledger}-tests"
+          "${ledger}-tests"
+          rustc --edition=2024 -D warnings .github/gates_ledger.rs -o "$ledger"
+          leaves="$(mktemp -d)/leaves"
+          git ls-files -z -- '*Cargo.toml' | xargs -0 -r "${SOURCE_SCAN:?gate 0 builds the source scanner first}" toml > "$leaves"
+          "$ledger" release-profile "$leaves"
 
       - name: Gate 27 — every invariant row id names exactly one invariant
         run: |
@@ -2453,83 +2402,28 @@ jobs:
           # WHAT IT CANNOT SEE: whether two ids that are DIFFERENT describe the
           # same invariant. That is a judgement, not a string comparison.
           #
-          # NO UNTRUSTED INPUT: one tracked document and the pattern below.
-          # D-1608: a digit may follow the first letter (`FV4-01`); 179 rows
-          # were invisible to uniqueness until it could.
-          f=docs/04-invariants.md
-          ids=$(grep -oE '^\| *`?[A-Z][A-Z0-9-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
-                | sed -E 's/^\| *`?//; s/`? *\|$//')
-          n=$( { printf '%s\n' "$ids" | grep -c . || true; } )
+          # NO UNTRUSTED INPUT: one tracked document and the pattern in
+          # .github/gates_ledger.rs. D-1608: a digit may follow the first letter
+          # (`FV4-01`); 179 rows were invisible to uniqueness until it could.
           # A pattern that stops matching is the failure mode gate 8 shipped
-          # with: it reported success while measuring nothing.
-          if [ "$n" -eq 0 ]; then
-            echo "GATE 27 FOUND NO ROWS. Either the document moved or the pattern"
-            echo "stopped matching. A silent zero is not a pass."
-            exit 1
-          fi
-          dupes=$( { printf '%s\n' "$ids" | sort | uniq -d || true; } )
-          echo "read ${n} invariant row id(s) in ${f}"
-          if [ -n "$dupes" ]; then
-            echo
-            echo "AN ID NAMES MORE THAN ONE INVARIANT:"
-            for d in $dupes; do
-              printf '  %s\n' "$d"
-              grep -nE "^\| *\`?${d}\`? *\|" "$f" | cut -c1-110 | sed 's/^/      /'
-            done
-            echo
-            echo "A citation to a duplicated id resolves to whichever row comes"
-            echo "first, which is a coincidence and not a citation. Renumber the"
-            echo "NEWER family onto free ids by the evidence rule D-0045 set and"
-            echo "D-0215 reapplied: whichever side is cited from OUTSIDE this"
-            echo "document keeps the letter. C-18..C-25 stay retired."
-            exit 1
-          fi
-          echo "OK — ${n} rows, all ids unique."
+          # with -- it reported success while measuring nothing -- so zero rows
+          # is a refusal. D-2313: the tool gate 25 built.
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" invariant-ids
       - name: Gate 27b — every decision number heads exactly one entry
         run: |
-          # pipefail: an awk that fails must fail the step, not empty `bad`.
           set -euo pipefail
           # Gate 27's rule, applied to docs/05-decisions.md. Five numbers were
           # issued twice and a merge moved main's D-0035..D-0037 to
           # D-0329..D-0331, because nothing read the ledger back (D-0104,
           # D-0684). Entries are never edited, so the five stay, pinned at
           # their EXACT counts: a third copy fails, and so does a removed one.
-          # Every other number must head exactly one entry.
-          # WHAT IT CANNOT SEE: a heading outside the pattern below, which
+          # Every other number must head exactly one entry. The pins are
+          # `DECISION_PINS` in .github/gates_ledger.rs (D-2313).
+          # WHAT IT CANNOT SEE: a heading outside the pattern, which
           # entry a citation means, or two unmerged branches that pick one
           # number -- that fails only in a tree holding both. docs/06-limits.md.
-          # NO UNTRUSTED INPUT: one tracked document and the list below.
-          f=docs/05-decisions.md
-          allow='D-0076:2 D-0077:2 D-0078:2 D-0370:2 D-0372:2'
-          nums=$( { grep -E '^#{2,4} +D-[0-9]{4}' "$f" || true; } \
-                  | sed -E 's/^#+ +(D-[0-9]{4}).*/\1/')
-          n=$( { printf '%s\n' "$nums" | grep -c . || true; } )
-          if [ "$n" -eq 0 ]; then
-            echo "GATE 27B FOUND NO DECISION HEADINGS. Either the document moved"
-            echo "or the pattern stopped matching. A silent zero is not a pass."
-            exit 1
-          fi
-          bad=$(printf '%s\n' "$nums" | sort | uniq -c | awk -v allow="$allow" '
-            BEGIN { k = split(allow, a, " ")
-                    for (i = 1; i <= k; i++) { split(a[i], p, ":"); want[p[1]] = p[2] + 0 } }
-            { seen[$2] = 1; w = ($2 in want) ? want[$2] : 1
-              if ($1 + 0 != w) printf "%s %d %d\n", $2, $1, w }
-            END { for (d in want) if (!(d in seen)) printf "%s 0 %d\n", d, want[d] }' | sort)
-          echo "read ${n} decision heading(s) in ${f}"
-          if [ -n "$bad" ]; then
-            echo
-            echo "A DECISION NUMBER HEADS THE WRONG NUMBER OF ENTRIES:"
-            printf '%s\n' "$bad" | while read -r d c w; do
-              printf '  %s: %s heading(s), allowed %s\n' "$d" "$c" "$w"
-              { grep -nE "^#{2,4} +${d}([^0-9]|\$)" "$f" || true; } \
-                | cut -c1-110 | sed 's/^/      /'
-            done
-            echo
-            echo "Never renumber or delete an entry. Give the NEWER one the next"
-            echo "free number, max(existing) + 1 read from the merged tree. D-0684."
-            exit 1
-          fi
-          echo "OK — ${n} headings; every number heads one entry, the five pinned by D-0684 aside."
+          # NO UNTRUSTED INPUT: one tracked document and the pinned list.
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" decision-numbers
       - name: Gate 26 — every HTTPS client installs the TLS provider
         run: |
           set -eu
@@ -2555,37 +2449,13 @@ jobs:
           # Both are the conservative direction: it can miss, it cannot
           # falsely accuse.
           #
-          # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files` and the
-          # patterns below. Gate 1c's discipline.
-          bad=0; sites=0; files=0
-          for f in $(git ls-files 'crates/*.rs'); do
-            n=$( { grep -c 'Client::builder()' "$f" || true; } | tr -d ' ')
-            [ "$n" -eq 0 ] && continue
-            files=$((files + 1)); sites=$((sites + n))
-            g=$( { grep -c 'ensure_tls_provider()' "$f" || true; } | tr -d ' ')
-            if [ "$g" -lt "$n" ]; then
-              printf 'UNGUARDED CLIENT  %s — %s Client::builder() call(s), %s ensure_tls_provider()\n' \
-                "$f" "$n" "$g"
-              bad=1
-            else
-              printf '  ok  %s — %s site(s), %s guard(s)\n' "$f" "$n" "$g"
-            fi
-          done
-          echo "checked ${sites} client construction site(s) in ${files} file(s)"
           # A pattern that stops matching is the failure mode gate 8 shipped
-          # with: it reported success while measuring nothing.
-          if [ "$sites" -eq 0 ]; then
-            echo "GATE 26 FOUND NO CLIENT SITES. Either reqwest left the workspace"
-            echo "or the pattern stopped matching. A silent zero is not a pass."
-            exit 1
-          fi
-          if [ "$bad" -ne 0 ]; then
-            echo
-            echo "Call pull::ensure_tls_provider() before building the client."
-            echo "See docs/05-decisions.md D-0211."
-            exit 1
-          fi
-          echo "OK — every client construction is guarded."
+          # with: it reported success while measuring nothing. Zero client
+          # sites is a refusal.
+          #
+          # NO UNTRUSTED INPUT REACHES THIS STEP: the tracked list and the
+          # patterns in .github/gates_ledger.rs. Gate 1c's discipline. D-2313.
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" tls-provider
 
       - name: Gate 19 — a failure an operator can see is a failure the log records
         run: |
@@ -2605,10 +2475,11 @@ jobs:
           #
           # THE RULE. Every `failures.push(` and `failures: vec![` in production
           # code under crates/{pull,api}/src must have a `telemetry::emit(` or a
-          # `note_*(` helper call within the WINDOW lines above it. Both forms
-          # count because this workspace extracts emits into `note_*` helpers as
-          # soon as a function reaches clippy's line limit — refusing the helper
-          # form would push authors to inline the emit and fail the OTHER gate.
+          # `note_*(` helper call within the WINDOW (12) lines above it. Both
+          # forms count because this workspace extracts emits into `note_*`
+          # helpers as soon as a function reaches clippy's line limit — refusing
+          # the helper form would push authors to inline the emit and fail the
+          # OTHER gate.
           #
           # WHAT IT DELIBERATELY DOES NOT DO. It does not check that the event
           # is at a useful level, or carries the right fields, or is reachable
@@ -2629,11 +2500,11 @@ jobs:
           # it sits on const fns and on statements inside shipping bodies. One
           # attribute shrinks the scan exactly as silently as two.
           #
-          # So the boundary is a SUBTRACTION now, not a cut. The stripper below
-          # is gate 11's, character for character, and it is duplicated rather
-          # than shared because a `run:` step cannot import from another step and
-          # the alternative -- a tracked shell script -- is a file extension
-          # gate 1 refuses. From a `#[cfg(test)]`, skip blank lines, `//`
+          # So the boundary is a SUBTRACTION now, not a cut, and the stripper is
+          # gate 11's. It was once duplicated into this step character for
+          # character, because one `run:` step cannot import from another; since
+          # D-2313 it is one Rust function, `strip` in .github/gates_ledger.rs,
+          # that both gates call. From a `#[cfg(test)]`, skip blank lines, `//`
           # comments and attributes to find the item it covers; if that item is
           # an inline `mod NAME {`, drop through to the matching `}` at the same
           # indent; otherwise keep the attribute and the item and carry on. A
@@ -2670,7 +2541,7 @@ jobs:
           #
           # THE WINDOW IS COUNTED IN ORIGINAL SOURCE LINES, not in corpus lines.
           # The stripper stamps every kept line with the line number it had in
-          # the file, and the arithmetic below reads that stamp -- so a comment
+          # the file, and the window arithmetic reads that stamp -- so a comment
           # block or a test module between an emit and a failure still costs its
           # full height, exactly as it did before. Twelve means twelve lines of
           # file, which is the only reading a person checking the diff can make.
@@ -2685,153 +2556,12 @@ jobs:
           # which is the false-NEGATIVE direction and is the one this gate has
           # always had. And `#[cfg(test)] mod tests {` written on ONE line is not
           # recognised as a module, so its body is scanned -- loud, never silent.
-          window=12
-          work="$(mktemp -d)"
-          found="$work/missing"; : > "$found"
-          counted="$work/counted"; : > "$counted"
-
-          strip='
-            function emit(line, no,   t) {
-              print F ":" no ":" line > SCOPE
-              t = line; sub(/^[ \t]+/, "", t)
-              if (t !~ /^\/\//) print F ":" no ":" line
-            }
-            function flush(  i) { for (i = 1; i <= nb; i++) emit(bl[i], bn[i]); nb = 0 }
-            function hold(line, no) { nb++; bl[nb] = line; bn[nb] = no }
-            BEGIN { st = 0; depth = 0; nb = 0; drop = 0 }
-            {
-              if (st == 2) {
-                drop++
-                if ($0 ~ CLOSE) { st = 0; next }
-                # INSIDE THE MODULE, EVERY LINE IS DEEPER THAN THE `mod`
-                # KEYWORD OR IT IS BLANK. A line at the module indent or
-                # shallower that is NOT the closing brace means the brace this
-                # scanner is waiting for is not the one that closes the module,
-                # and matching a later brace at the same indent would swallow
-                # whatever lies between them -- silently, which is the whole
-                # defect this boundary replaced. Refuse instead.
-                #
-                # Blank lines and whole-line comments are exempt, and that
-                # costs nothing: neither can hide a construct, and the first
-                # line of actual code past the module still trips the check.
-                lead = $0; sub(/[^ \t].*$/, "", lead)
-                t = $0; sub(/^[ \t]+/, "", t)
-                if (t != "" && t !~ /^\/\// && length(lead) <= length(IND)) exit 3
-                next
-              }
-              t = $0; sub(/^[ \t]+/, "", t)
-              if (st == 0) {
-                if (t ~ /^#\[cfg\(test\)\][ \t]*$/) { st = 1; depth = 0; nb = 0; hold($0, NR); next }
-                emit($0, NR); next
-              }
-              if (depth > 0) { depth += gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
-              if (t == "" || t ~ /^\/\//) { hold($0, NR); next }
-              if (t ~ /^#\[/) { depth = gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
-              if ($0 ~ /^[ \t]*(pub([ \t]*\([^)]*\))?[ \t]+)?mod[ \t]+[A-Za-z0-9_]+[ \t]*\{[ \t]*$/) {
-                IND = $0; sub(/[^ \t].*$/, "", IND)
-                CLOSE = "^" IND "\\}[ \t]*$"
-                drop += nb + 1; nb = 0; st = 2; next
-              }
-              flush(); emit($0, NR); st = 0
-            }
-            # A module still open at EOF, or an attribute with no item under
-            # it, is the same refusal for the same reason: this scanner will
-            # not guess where test code ends.
-            END { print drop > SUM; if (st != 0) exit 3 }
-          '
-
-          # A FUNCTION, and not an inline filter, because bash's process
-          # substitution parser fails on `#` comments inside `<( ... )`.
-          # `grep -A 1` means the attribute has to sit immediately above the
-          # declaration to count.
-          whole_file_test_module() {
-            # The compiler excludes this entire file in every non-test build.
-            if [ "$(head -1 "$1")" = '#![cfg(test)]' ]; then return 0; fi
-            stem="${1##*/}"; stem="${stem%.rs}"
-            root="${1%/src/*}/src/lib.rs"
-            [ -f "$root" ] \
-              && grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$" \
-                   <<< "$(grep -A 1 '^#\[cfg(test)\]$' "$root" || true)"
-          }
-
-          walked=0; kept=0; dropped=0; undelimited=0
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            walked=$((walked + 1))
-            # `wc -l` counts newlines, not lines. `awk END{print NR}` is the
-            # count that survives a file whose last line is unterminated -- the
-            # same correction gate 11 carries.
-            tot=$(awk 'END{print NR}' "$f")
-            : > "$work/one.scope"; : > "$work/one.sum"
-            # NOTHING IS SCANNED UNTIL THE FILE PARSES. The corpus is the
-            # comment-stripped half; `one.scope` is written by the stripper and
-            # is deliberately not read here, because this gate matches code and
-            # a `//` line cannot hold a call.
-            if awk -v F="$f" -v SCOPE="$work/one.scope" -v SUM="$work/one.sum" \
-                   "$strip" "$f" > "$work/one.corpus"; then
-              d=$(cat "$work/one.sum")
-              dropped=$((dropped + d)); kept=$((kept + tot - d))
-            else
-              printf 'UNDELIMITED TEST MODULE  %s\n' "$f"
-              undelimited=$((undelimited + 1))
-              continue
-            fi
-            awk -F: -v window="$window" -v name="$f" '
-              { n = $2 + 0; t = $0; sub(/^[^:]*:[0-9]+:/, "", t) }
-              t ~ /^[[:space:]]*fn[[:space:]]+note_[a-z_]+\(/ { next }
-              t ~ /telemetry::emit\(|note_[a-z_]+\(/ { e[++ne] = n; next }
-              t ~ /failures\.push\(|failures: vec!\[/ { p[++np] = n }
-              END {
-                for (i = 1; i <= np; i++) {
-                  print "counted" > "/dev/stderr"
-                  ok = 0
-                  for (j = ne; j >= 1; j--) {
-                    if (claimed[j]) continue
-                    if (e[j] >= p[i]) continue
-                    if (p[i] - e[j] > window) break
-                    claimed[j] = 1; ok = 1; break
-                  }
-                  if (!ok) print name ":" p[i]
-                }
-              }' "$work/one.corpus" >> "$found" 2>>"$counted"
-          done < <(git ls-files 'crates/pull/src/*.rs' 'crates/api/src/*.rs' \
-                   | while IFS= read -r cand; do
-                       whole_file_test_module "$cand" || printf %s\\n "$cand"
-                     done || true)
-
-          # A gate must say what it walked. A glob that matches nothing is the
+          #
+          # A gate must say what it walked: a glob that matches nothing is the
           # failure mode gate 8 shipped with for the whole life of the
-          # repository, and it reported success the entire time.
-          echo "walked ${walked} production source file(s) under crates/{pull,api}/src/"
-          echo "  ${kept} line(s) in scope, ${dropped} inside a #[cfg(test)] module"
-          if [ "$walked" -eq 0 ]; then
-            echo "GATE 19 WALKED NOTHING. A gate that scans no file is not a gate."
-            exit 1
-          fi
-          if [ "$undelimited" -ne 0 ]; then
-            echo
-            echo 'A #[cfg(test)] module above has no closing brace at the same'
-            echo 'indent as its own `mod` keyword, so this scanner cannot tell'
-            echo 'where it ends and will not guess. `cargo fmt` does not emit'
-            echo 'that shape; if it is deliberate, the boundary is what has to'
-            echo 'change, not this message.'
-            exit 1
-          fi
-
-          echo "checked $(wc -l < "$counted" | tr -d ' ') production failure-recording site(s)"
-          if [ -s "$found" ]; then
-            echo
-            echo "A FAILURE IS RECORDED HERE AND NOTHING IS LOGGED:"
-            sed 's/^/  /' "$found"
-            echo
-            echo "The receipt will show it and the log will not, so an operator"
-            echo "reading /logs after a failed run sees a quiet file. Emit an"
-            echo "event beside it — Error or Warn, so it clears the default"
-            echo "floor — or extract a note_* helper as pull::ingest does."
-            echo "CLAUDE.md section 4: degrade loudly and name the reason."
-            exit 1
-          fi
-          echo "OK — every recorded failure has its own event beside it."
+          # repository, and it reported success the entire time. Walking no
+          # file is a refusal. D-2313: the tool gate 25 built.
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" failure-events
 
 
       - name: Gate 10 — every invariant names a test that exists
@@ -2888,43 +2618,40 @@ jobs:
           #     bare names (3+ underscores) in a status row's proof cell, but a
           #     module-first `a::b` only to "declared somewhere".
           #
-          # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files`, the document,
-          # and the static patterns below. Gate 1c's discipline.
-          f=docs/04-invariants.md
-          work=$(mktemp -d)
-
-          # ROWS ARE EXEMPTED ONLY HERE, never by a glyph in the document --
-          # that is the whole repair. One row id per line, with the reason
-          # beside it, gate 1d's mechanism: adding a line is a visible diff and
-          # the moment to ask whether the test should just be written.
+          # NO UNTRUSTED INPUT REACHES THIS STEP: the tracked list, the
+          # document, and the static patterns in .github/gates_ledger.rs. Gate
+          # 1c's discipline.
+          #
+          # ROWS ARE EXEMPTED ONLY IN `ALLOW_PENDING` in .github/gates_ledger.rs,
+          # never by a glyph in the document -- that is the whole repair. One
+          # row id per entry, with the reason beside it, gate 1d's mechanism:
+          # adding one is a visible diff and the moment to ask whether the test
+          # should just be written. (It lived in this step until D-2313.)
           #
           # IT WAS DELIBERATELY EMPTY while ten rows were being worked through,
           # so that all ten stayed named in this step's log rather than becoming
           # one line nobody reads. Five survived that pass. Two of the five were
           # WRITABLE and have been written -- A-20 and X-02, D-0060 and D-0061.
-          # The three below are not writable, and they are not writable for the
-          # same reason each time: THE SUBJECT DOES NOT EXIST. There is no code
-          # for a test to drive, so a test here would assert the absence and
+          # The ones that remain are not writable, and they are not writable for
+          # the same reason each time: THE SUBJECT DOES NOT EXIST. There is no
+          # code for a test to drive, so a test here would assert the absence and
           # then have to be deleted the day the thing arrives.
           #
-          # A line is honest ONLY while that stays true. Each says what is
+          # An entry is honest ONLY while that stays true. Each says what is
           # missing and what would close it; when the closing condition is met,
-          # the line goes and the test is written in the same change.
+          # the entry goes and the test is written in the same change.
           #
-          # WHAT A LINE COSTS, because it is not free. The allowlist keys on the
-          # ROW, not on the token, so a row naming two tests has both silenced.
-          # P-03 names a second test that EXISTS and passes --
+          # WHAT AN ENTRY COSTS, because it is not free. The allowlist keys on
+          # the ROW, not on the token, so a row naming two tests has both
+          # silenced. P-03 names a second test that EXISTS and passes --
           # pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule,
           # which pins the absence of a weekend rule as the current behaviour --
-          # and this step stops confirming its name for as long as the P-03 line
-          # is here. It is still run by cargo test; what is lost is this gate's
-          # check that the ROW still points at it. Both silenced tokens are
-          # printed by name above, so the cost is in the log rather than hidden.
-          allow_pending='
-          P-03  no trading calendar and no holiday list exist. crates/pull/src/session.rs computes no day of the week and docs/00-charter.md section 3 records special-session shapes and NO holiday list, so a weekend rule would be wrong -- it records 2025-02-01, a Saturday, as a full 375-bar session. CLOSED BY: a sourced holiday list recorded in the charter FIRST (golden rule 1 forbids inventing one), then a filter in session.rs, then pull::unit::calendar_filter driving it.
-          X-13  no cross-vendor bar comparison exists. The reader is there -- BarFile::read_record, walked at every index by S-02, and X-12 already files each vendor under its own path prefix -- but nothing opens two vendors months and matches them bar for bar, so there is no code for a test to drive. This is NOT ruled out by docs/07-plan.md R-6: that forbids SHOWING two feeds side by side and is enforced by a picker and a column, while api::merge already refuses a universe on a cross-vendor ISIN conflict. CLOSED BY: a two-BarFile comparison in crates/store that refuses and names the first divergent timestamp, then store::unit::vendor_disagreement_refuses.
-          '
-
+          # and this step stops confirming its name for as long as the P-03
+          # entry is there. It is still run by cargo test; what is lost is this
+          # gate's check that the ROW still points at it. Both silenced tokens
+          # are printed by name in the log, so the cost is in the log rather
+          # than hidden.
+          #
           # (crate, fn) for every tracked crate, built once.
           #
           # COMMENT LINES ARE DROPPED BEFORE THE `fn` IS READ, and until they were
@@ -2940,422 +2667,92 @@ jobs:
           # proof table can be extended by writing a comment is a gate a comment
           # can satisfy.
           #
-          # The filter is the one gates 17, 22 and 23 already use: drop lines
-          # whose first non-blank token is `//` or `*`. It is conservative in the
-          # safe direction -- a `fn` declaration cannot sit on a line beginning
-          # `//` -- and it does NOT strip a trailing comment on a code line, nor
-          # the opening line of a `/* */` block. Both remain, and both are
-          # documented the same way in gate 17.
-          #
-          # One file at a time rather than `xargs`, because the filter is
-          # per-file. That is slower and it is 189 files.
-          #
-          # AND NOW THE TABLE IS BUILT FROM TOKENS (D-1114). The line filter
-          # above also dropped a `*`-led line, and it kept a `fn name` written
-          # inside a string literal or a `/* */` block. `source_scan fns` prints
-          # each `fn` KEYWORD TOKEN and the identifier after it, so prose and
+          # AND NOW THE TABLE IS BUILT FROM TOKENS (D-1114). A line filter also
+          # dropped a `*`-led line, and it kept a `fn name` written inside a
+          # string literal or a `/* */` block. `source_scan fns` prints each
+          # `fn` KEYWORD TOKEN and the identifier after it, so prose and
           # literals add nothing and every line of code is read. The tracked
           # `.rs` tools under `.github/` are indexed too, by path only, so a row
           # proven by `name` in `.github/source_scan.rs` is checked rather than
           # skipped (they belong to no crate, so they never satisfy a
           # crate-qualified token).
-          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
-          fns="$work/fns"; : > "$fns"
-          path_fns="$work/path-fns"; : > "$path_fns"
-          git ls-files -z -- 'crates/*.rs' '.github/*.rs' > "$work/sources.z"
-          [ -s "$work/sources.z" ] || { echo "GATE 10 READ NO SOURCE FILE."; exit 1; }
-          if ! xargs -0 -r "$scan" fns < "$work/sources.z" > "$work/fn-lines"; then
-            echo "GATE 10 COULD NOT LEX A SOURCE FILE."
-            exit 1
-          fi
-          # `FILE:LINE:name` -> `FILE<TAB>name`, and `crate name` for crates/.
-          sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' "$work/fn-lines" > "$path_fns"
-          awk -F'\t' '$1 ~ /^crates\/[^\/]+\// { split($1, p, "/"); print p[2] " " $2 }' "$path_fns" > "$fns"
-          sort -u -o "$fns" "$fns"
-
+          #
           # D-0662: bare test names followed by a source path are also proof
-          # references. The old qualified-token expression ignored them all.
-          rustc --edition=2024 --test -D warnings .github/invariant_paths.rs -o "$work/invariant-path-tests"
-          "$work/invariant-path-tests"
-          # The module each compiled file is mounted as, following `#[path]`
+          # references. The old qualified-token expression ignored them all;
+          # `invariant_paths.rs` reads them, after `source_scan modules` gives
+          # the module each compiled file is mounted as, following `#[path]`
           # (D-1114). A file mounted as `server::store_wire` has no `server`
-          # in its path, so without this table a module-first token naming it
+          # in its path, so without that table a module-first token naming it
           # could be neither proven nor refused. An UNRESOLVED mounting is a
           # refusal, not a smaller table.
-          git ls-files -z > "$work/tracked.z"
-          if ! "$scan" modules "$work/tracked.z" > "$work/modules"; then
-            echo "GATE 10 COULD NOT RESOLVE THE MODULE TREE."
-            exit 1
-          fi
-          [ -s "$work/modules" ] || { echo "GATE 10 READ NO MODULE MOUNTING."; exit 1; }
-          if grep -q 'UNRESOLVED' "$work/modules"; then
-            grep 'UNRESOLVED' "$work/modules"
-            echo "GATE 10: a module mounting could not be resolved."
-            exit 1
-          fi
-          rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
-          "$work/invariant-paths" "$f" "$path_fns" "$work/modules"
-
-          rows=0; checked=0; missing=0; pending=0; exempt=0
-          while IFS= read -r line; do
-            case "$line" in \|*) ;; *) continue ;; esac
-            rows=$((rows + 1))
-            id=$(printf '%s\n' "$line" | awk -F'|' '{print $2}' | tr -d ' ')
-            for t in $( { printf '%s\n' "$line" \
-                          | grep -oE '`[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*){2,}`' | tr -d '`' || true; } ); do
-              c="${t%%::*}"; fn="${t##*::}"
-              # A token whose first segment is NOT a tracked crate is a MODULE
-              # path -- `server::tests::x` -- and is no longer skipped (D-1114).
-              # This branch used to count it "pending" on the claim that the
-              # crate was not a member yet; with all thirteen crates members,
-              # every one of the 52 such tokens was a module path that nothing
-              # checked. `invariant_paths.rs`, run above, now resolves each one
-              # against the files whose path names that module and fails the
-              # step on any it cannot find.
-              if ! git ls-files --error-unmatch "crates/${c}/Cargo.toml" >/dev/null 2>&1; then
-                pending=$((pending + 1))
-                continue
-              fi
-              if [ -n "$( { printf '%s\n' "$allow_pending" \
-                            | awk -v I="$id" '$1==I{print "y"; exit}'; } )" ]; then
-                exempt=$((exempt + 1))
-                printf 'EXEMPT (allowlisted) %s — %s\n' "$id" "$t"
-                continue
-              fi
-              checked=$((checked + 1))
-              if ! grep -qxF "${c} ${fn}" "$fns"; then
-                printf 'INVARIANT POINTS AT A TEST THAT DOES NOT EXIST: %s (%s)\n' "$t" "$id"
-                missing=$((missing + 1))
-              fi
-            done
-          done < "$f"
-
-          echo "read ${rows} table row(s) in ${f}"
-          echo "  ${checked} named test(s) checked against a tracked crate"
-          echo "  ${pending} module-first, resolved by invariant_paths.rs above"
-          echo "  ${exempt} exempted by the allowlist in this file"
-          echo "  ${missing} missing"
+          #
+          # A token whose first segment is NOT a tracked crate is a MODULE
+          # path -- `server::tests::x` -- and is no longer skipped (D-1114).
+          # It used to be counted "pending" on the claim that the crate was not
+          # a member yet; with all thirteen crates members, every one of the 52
+          # such tokens was a module path that nothing checked.
+          # `invariant_paths.rs` now resolves each one against the files whose
+          # path names that module and fails the step on any it cannot find.
+          #
           # A pattern that stops matching is the failure mode gate 8 shipped
-          # with: it reported success while measuring nothing.
-          if [ "$checked" -eq 0 ]; then
-            echo "GATE 10 CHECKED NOTHING. Either every crate vanished or the row"
-            echo "pattern stopped matching. A silent zero is not a pass."
-            exit 1
-          fi
-
-          bad=0
-          [ "$missing" -eq 0 ] || bad=1
-          for i in $( { printf '%s\n' "$allow_pending" | awk 'NF{print $1}'; } ); do
-            if ! grep -qE "^\| *${i} *\|" "$f"; then
-              printf 'STALE ALLOWLIST ENTRY — %s is not a row in %s\n' "$i" "$f"
-              bad=1
-            fi
-          done
-
-          if [ "$bad" -ne 0 ]; then
-            echo
-            echo "Either write the test, or record abandoning the invariant in"
-            echo "docs/05-decisions.md. Rows are never deleted to go green, and"
-            echo "a status glyph no longer silences one."
-            exit 1
-          fi
-          echo "OK — checked named invariant references resolve to tracked declarations."
+          # with: checking nothing is a refusal. A stale allowlist entry, one
+          # naming no row, is a refusal too. Rows are never deleted to go green.
+          # D-2313: the reading is `.github/gates_ledger.rs`, the tool gate 25
+          # built. The step runs the scanner and invariant_paths.rs, because a
+          # `.github` tool starts no program but git (gate 0, D-2344): a source
+          # the scanner cannot lex fails the step with the scanner's message
+          # naming the file, `module-table` names every UNRESOLVED mounting,
+          # `path-declarations` turns `FILE:LINE:name` into `FILE<TAB>name`, and
+          # `invariant-tests` walks the rows against that table.
+          work=$(mktemp -d)
+          ledger="${RUNNER_TEMP:-/tmp}/gates-ledger"
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          rustc --edition=2024 --test -D warnings .github/invariant_paths.rs -o "$work/invariant-path-tests"
+          "$work/invariant-path-tests"
+          rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
+          git ls-files -z -- 'crates/*.rs' '.github/*.rs' | xargs -0 -r "$scan" fns | "$ledger" path-declarations > "$work/path-fns"
+          git ls-files -z > "$work/tracked.z"
+          "$scan" modules "$work/tracked.z" | "$ledger" module-table > "$work/modules"
+          "$work/invariant-paths" docs/04-invariants.md "$work/path-fns" "$work/modules"
+          "$ledger" invariant-tests "$work/path-fns"
 
       - name: Gate 11 — banned constructs on the O(1) paths
         run: |
           set -euo pipefail
-
-          allow_search='
-          crates/store/src/file.rs 1
-          '
-
-          # ---- rule 2. CLAUDE.md section 7, BOTH HALVES OF IT. --------------
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rule 2,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_float='
-          crates/api/src/ingest.rs 1
-          crates/api/src/server.rs 4
-          crates/core/src/price.rs 4
-          crates/greeks/src/bsm.rs 36
-          crates/greeks/src/normal.rs 21
-          crates/greeks/src/error.rs 17
-          crates/greeks/src/solver.rs 14
-          crates/greeks/src/moneyness.rs 6
-          crates/pull/src/pricing.rs 22
-          crates/pull/src/tenor.rs 5
-          crates/runner/src/grid.rs 4
-          crates/runner/src/significance.rs 21
-          crates/runner/src/admission.rs 4
-          crates/runner/src/bootstrap.rs 52
-          crates/runner/src/bootstrap_family_pass.rs 17
-          crates/runner/src/outcome.rs 26
-          crates/runner/src/report.rs 3
-          crates/runner/src/validate.rs 1
-          crates/store/src/format.rs 14
-          crates/lake/src/bar.rs 9
-          crates/lake/src/reader.rs 3
-          crates/telemetry/src/value.rs 5
-          crates/telemetry/src/encode.rs 1
-          crates/telemetry/src/record.rs 1
-          crates/cli/src/live.rs 1
-          crates/cli/src/institutional_evidence.rs 8
-          crates/cli/src/institutional_statistics.rs 19
-          crates/cli/src/population_statistics_v2.rs 18
-          crates/cli/src/population_statistics_v3.rs 11
-          crates/cli/src/boolean_statistics_reader.rs 3
-          crates/cli/src/boolean_qualification_wire.rs 5
-          crates/cli/src/boolean_qualification_reader.rs 1
-          crates/api/src/booleanevidencejson.rs 1
-          '
-
-          # ---- rule 3. docs/07 law 2: pre-size every map. -------------------
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rule 3,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_unsized='
-          crates/api/src/catalog.rs 1
-          crates/pull/src/manifest.rs 1
-          crates/api/src/autopilot.rs 1
-          crates/api/src/ladder.rs 1
-          crates/api/src/server.rs 4
-          crates/cli/src/admission_store.rs 5
-          crates/cli/src/all_rung_selection_v5.rs 6
-          crates/cli/src/anchored_search_lineage_v2.rs 1
-          crates/cli/src/anchored_search_lineage_v3.rs 1
-          crates/cli/src/anchored_search_lineage_v4.rs 1
-          crates/cli/src/candidate_universe.rs 2
-          crates/cli/src/execution_capability.rs 2
-          crates/cli/src/execution_disposition_v2.rs 4
-          crates/cli/src/execution_v3.rs 8
-          crates/cli/src/execution_v4.rs 9
-          crates/cli/src/frontier.rs 1
-          crates/cli/src/global_replay.rs 9
-          crates/cli/src/global_replay_v2.rs 10
-          crates/cli/src/global_replay_v3.rs 10
-          crates/cli/src/institutional_statistics.rs 2
-          crates/cli/src/knobs.rs 1
-          crates/cli/src/population.rs 13
-          crates/cli/src/population_admission_v2.rs 6
-          crates/cli/src/population_admission_v3.rs 2
-          crates/cli/src/population_admission_v4.rs 1
-          crates/cli/src/population_base_evidence_ledger_v2.rs 1
-          crates/cli/src/population_base_evidence_v2.rs 1
-          crates/cli/src/population_finalization_v2.rs 4
-          crates/cli/src/population_finalization_v3.rs 2
-          crates/cli/src/population_finalization_v4.rs 2
-          crates/cli/src/population_observations_v1.rs 6
-          crates/cli/src/population_statistics_v2.rs 3
-          crates/cli/src/population_statistics_v3.rs 1
-          crates/cli/src/population_v5.rs 2
-          crates/cli/src/population_v6.rs 4
-          crates/cli/src/pre_admission_data.rs 4
-          crates/cli/src/selection.rs 4
-          crates/cli/src/selection_v3.rs 2
-          crates/cli/src/selection_v4.rs 2
-          crates/cli/src/selection_v5.rs 14
-          crates/cli/src/stored_data_completeness.rs 1
-          crates/cli/src/trades.rs 1
-          crates/pull/src/nse.rs 1
-          crates/runner/src/lib.rs 1
-          crates/runner/src/rank.rs 1
-          crates/cli/src/pool.rs 1
-          crates/pull/src/cash_auction.rs 3
-          crates/engine/src/lib.rs 1
-          crates/cli/src/all_rung_selection_v6.rs 1
-          crates/cli/src/global_replay_v4.rs 1
-          crates/cli/src/boolean_candidate_v1.rs 1
-          crates/cli/src/index_stop.rs 1
-          crates/api/src/recovery.rs 1
-          crates/cli/src/boolean_catalog_command.rs 1
-          crates/engine/src/resume.rs 2
-          crates/cli/src/selection_v6_source.rs 2
-          crates/cli/src/boolean_candidate_reader.rs 1
-          crates/pull/src/cash_session_cache.rs 2
-          crates/cli/src/selection_v6.rs 1
-          crates/cli/src/index_stop_store.rs 1
-          crates/api/src/recovery_journal.rs 1
-          crates/pull/src/http.rs 1
-          '
-
-          # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rule 4,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_sort='
-          crates/runner/src/audit.rs 2
-          crates/runner/src/bootstrap.rs 4
-          crates/runner/src/bootstrap_family_pass.rs 1
-          crates/runner/src/outcome.rs 4
-          crates/runner/src/pbo.rs 2
-          crates/runner/src/excursion.rs 1
-          crates/pull/src/folder.rs 1
-          crates/api/src/bars.rs 3
-          crates/api/src/calendar_of.rs 3
-          crates/api/src/constituents.rs 3
-          crates/api/src/logs.rs 1
-          crates/cli/src/frontier.rs 1
-          crates/cli/src/global_replay_v3.rs 1
-          crates/cli/src/knobs.rs 1
-          crates/cli/src/population_statistics_v3.rs 1
-          crates/cli/src/trades.rs 1
-          crates/cli/src/live.rs 2
-          crates/api/src/coverage.rs 1
-          crates/api/src/indexmap.rs 1
-          crates/api/src/pullrun.rs 1
-          crates/api/src/server.rs 12
-          crates/cli/src/lib.rs 7
-          crates/engine/src/lib.rs 2
-          crates/pull/src/nseindex.rs 1
-          crates/runner/src/grid.rs 3
-          crates/runner/src/exit_grid_policy.rs 3
-          crates/runner/src/rank.rs 3
-          crates/runner/src/significance.rs 1
-          crates/indicators/src/evaluator.rs 1
-          crates/api/src/autopilot.rs 1
-          crates/api/src/catalog.rs 2
-          crates/api/src/census.rs 2
-          crates/api/src/master.rs 1
-          crates/api/src/merge.rs 4
-          crates/api/src/render.rs 1
-          crates/pull/src/archive.rs 1
-          crates/pull/src/manifest.rs 1
-          crates/store/src/catalog.rs 1
-          crates/cli/src/boolean_statistics_v1.rs 1
-          crates/pull/src/ingest.rs 1
-          crates/api/src/recovery.rs 2
-          crates/api/src/indexstopqualificationjson.rs 1
-          crates/runner/src/research_family.rs 1
-          crates/api/src/indexstoprankingjson.rs 1
-          crates/cli/src/index_stop_vix.rs 1
-          crates/cli/src/boolean_observation_file.rs 1
-          crates/cli/src/global_replay_v4.rs 1
-          crates/pull/src/cash_session_cache.rs 1
-          crates/cli/src/boolean_qualified_observer.rs 1
-          crates/cli/src/index_stop_vix_codec.rs 1
-          crates/cli/src/boolean_qualified_journal.rs 1
-          crates/cli/src/pool.rs 2
-          crates/cli/src/admission_store.rs 1
-          crates/cli/src/population.rs 1
-          '
-
-          # ---- rule 5. CLAUDE.md section 4: refuse, never die. --------------
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rule 5,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_panic='
-          crates/api/src/server.rs 2
-          crates/pull/src/ssm.rs 1
-          crates/runner/src/rank.rs 1
-          crates/telemetry/src/json.rs 5
-          crates/telemetry/src/record.rs 4
-          '
-
-          # ---- rule 5c. Nothing disarms those lints outside a test module. --
-          # Two entries, each the same line rule 5 allows above. ssm.rs carries
-          # `#[allow(clippy::expect_used, reason = ...)]` on `hmac`, and
-          # api/src/server.rs carries one on `note_header` for the `.expect`
-          # described there. Rule 5c's awk walk counts only a real attribute at
-          # bracket depth 0, so unlike rule 5 this count of 1 is exact and holds
-          # no prose. Both would read better as `#[expect]`, which reports an
-          # exemption nobody needs any more; that is their owners' call.
-          # Kept as its own list rather than folded into `allow_panic` because
-          # the two ask different questions — "this construct appears" and
-          # "the lint that would have caught it is switched off here" — and a
-          # file could earn one without the other.
-          allow_disarm='
-          crates/api/src/server.rs 1
-          crates/pull/src/ssm.rs 1
-          '
-
-          # ---- rule 5d. `assert!` is a panic that clippy does not lint. -----
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rule 5d,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_assert='
-          crates/core/src/universe.rs 2
-          crates/pull/src/manifest.rs 1
-          crates/store/src/layout.rs 1
-          crates/store/src/file.rs 1
-          crates/cli/src/candidate_universe.rs 1
-          crates/cli/src/population_admission_v3.rs 1
-          '
-
-          work=$(mktemp -d)
-          corpus="$work/corpus"
-          scope="$work/scope"
-          : > "$corpus"; : > "$scope"
-
+          # THE ALLOWLISTS, one per rule, are in .github/gates_ledger.rs since
+          # D-2313: `ALLOW_SEARCH` (rule 1), `ALLOW_FLOAT` (rule 2, CLAUDE.md
+          # section 7, both halves of it), `ALLOW_UNSIZED` (rule 3, docs/07 law
+          # 2: pre-size every map), `ALLOW_SORT` (rule 4, docs/07 layer 12:
+          # bounded page, never O(universe)), `ALLOW_PANIC` (rule 5, CLAUDE.md
+          # section 4: refuse, never die), `ALLOW_DISARM` (rule 5c),
+          # `ALLOW_ASSERT` (rule 5d, `assert!` is a panic that clippy does not
+          # lint), `ALLOW_SCAN` and `ALLOW_SCAN_UNREAD` (rules 6 and 7, the
+          # linear membership scan) and `ALLOW_MEMBER` (rule 7, the ambiguous
+          # membership test). The reasons for every entry, and its history, are
+          # in docs/06-limits.md under "Gate 11 allowlist reasons", moved there
+          # verbatim because GitHub will not start a workflow file this large
+          # (D-1451). A new or changed entry still gets its reason THERE, in the
+          # same change, and a count without one is the drift D-1451 forbids.
+          #
           # THE SUBTRACTION, one file at a time. `scope` keeps every line that
           # is not inside a `#[cfg(test)] mod NAME { ... }` block, comments and
           # all; `corpus` is `scope` with whole-line `//` dropped. Rules 1..5
           # read `corpus`; rule 5c reads `scope`, because an attribute list can
           # carry a `//` comment inside it and a bracket-counting walk over the
           # stripped text would then lose count.
-          strip='
-            function emit(line, no,   t) {
-              print F ":" no ":" line > SCOPE
-              t = line; sub(/^[ \t]+/, "", t)
-              if (t !~ /^\/\//) print F ":" no ":" line
-            }
-            function flush(  i) { for (i = 1; i <= nb; i++) emit(bl[i], bn[i]); nb = 0 }
-            function hold(line, no) { nb++; bl[nb] = line; bn[nb] = no }
-            BEGIN { st = 0; depth = 0; nb = 0; drop = 0 }
-            {
-              if (st == 2) {
-                drop++
-                if ($0 ~ CLOSE) { st = 0; next }
-                # INSIDE THE MODULE, EVERY LINE IS DEEPER THAN THE `mod`
-                # KEYWORD OR IT IS BLANK. A line at the module indent or
-                # shallower that is NOT the closing brace means the brace this
-                # scanner is waiting for is not the one that closes the module,
-                # and matching a later brace at the same indent would swallow
-                # whatever lies between them -- silently, which is the whole
-                # defect this boundary replaced. Refuse instead.
-                #
-                # Blank lines and whole-line comments are exempt, and that
-                # costs nothing: neither can hide a construct, and the first
-                # line of actual code past the module still trips the check.
-                lead = $0; sub(/[^ \t].*$/, "", lead)
-                t = $0; sub(/^[ \t]+/, "", t)
-                if (t != "" && t !~ /^\/\// && length(lead) <= length(IND)) exit 3
-                next
-              }
-              t = $0; sub(/^[ \t]+/, "", t)
-              if (st == 0) {
-                if (t ~ /^#\[cfg\(test\)\][ \t]*$/) { st = 1; depth = 0; nb = 0; hold($0, NR); next }
-                emit($0, NR); next
-              }
-              if (depth > 0) { depth += gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
-              if (t == "" || t ~ /^\/\//) { hold($0, NR); next }
-              if (t ~ /^#\[/) { depth = gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
-              if ($0 ~ /^[ \t]*(pub([ \t]*\([^)]*\))?[ \t]+)?mod[ \t]+[A-Za-z0-9_]+[ \t]*\{[ \t]*$/) {
-                IND = $0; sub(/[^ \t].*$/, "", IND)
-                CLOSE = "^" IND "\\}[ \t]*$"
-                drop += nb + 1; nb = 0; st = 2; next
-              }
-              flush(); emit($0, NR); st = 0
-            }
-            # A module still open at EOF, or an attribute with no item under
-            # it, is the same refusal for the same reason: this scanner will
-            # not guess where test code ends.
-            END { print drop > SUM; if (st != 0) exit 3 }
-          '
-
-          walked=0; kept=0; dropped=0; undelimited=0
+          #
+          # INSIDE A MODULE, EVERY LINE IS DEEPER THAN THE `mod` KEYWORD OR IT
+          # IS BLANK. A line at the module indent or shallower that is NOT the
+          # closing brace means the brace the stripper is waiting for is not the
+          # one that closes the module, and matching a later brace at the same
+          # indent would swallow whatever lies between them -- silently, which
+          # is the whole defect this boundary replaced. It refuses instead, and
+          # so does a module still open at end of file or an attribute with no
+          # item under it: the stripper will not guess where test code ends.
+          #
           # A WHOLE-FILE TEST MODULE IS NOT ON ANY PATH.
           #
-          # The stripper below removes `#[cfg(test)] mod NAME { .. }` blocks
+          # The stripper removes `#[cfg(test)] mod NAME { .. }` blocks
           # written INSIDE a file. It cannot see the other shape: a module whose
           # entire file is test code, gated by `#[cfg(test)]` on its `mod` line
           # in the crate root. store/src/emits.rs, pull/src/emit_sites.rs and
@@ -3367,355 +2764,63 @@ jobs:
           #
           # A crate-root test attribute or a file-wide #![cfg(test)] must
           # exclude the file from production. Names and comments cannot do so.
-          # `grep -A 1` means the attribute has to sit immediately above the
-          # declaration to count.
+          # The attribute has to sit immediately above the declaration to count.
           #
-          # A FUNCTION, and not an inline filter, because bash's process
-          # substitution parser fails on `#` comments inside `<( ... )` --
-          # "bad substitution: no closing `)'". The reasoning has to live
-          # somewhere it can be read, so it lives here.
-          whole_file_test_module() {
-            # The compiler excludes this entire file in every non-test build.
-            if [ "$(head -1 "$1")" = '#![cfg(test)]' ]; then return 0; fi
-            stem="${1##*/}"; stem="${stem%.rs}"
-            root="${1%/src/*}/src/lib.rs"
-            [ -f "$root" ] \
-              && grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$" \
-                   <<< "$(grep -A 1 '^#\[cfg(test)\]$' "$root" || true)"
-          }
-
-
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            walked=$((walked + 1))
-            # `wc -l` COUNTS NEWLINES, NOT LINES, so a file whose last line is
-            # unterminated is reported one short — and a one-line file reports
-            # ZERO, which set `end=0` and skipped the file entirely. Caught by
-            # feeding this gate a one-line violation with no trailing newline:
-            # it exited 0. `cargo fmt` would reject such a file, but gate 6a
-            # lives in a later job that this one gates, so relying on it would
-            # make gate 11 blind exactly while it runs first.
-            tot=$(awk 'END{print NR}' "$f")
-            # Pre-created, because a file that is nothing but a test module
-            # produces neither, and `set -e` would kill the gate on the `cat`.
-            : > "$work/one.scope"; : > "$work/one.sum"
-            # NOTHING IS APPENDED UNTIL THE FILE PARSES. A partial corpus from
-            # a file the scanner could not delimit would be a scan that quietly
-            # covered less than it reported — the exact defect this boundary
-            # replaced.
-            if awk -v F="$f" -v SCOPE="$work/one.scope" -v SUM="$work/one.sum" \
-                   "$strip" "$f" > "$work/one.corpus"; then
-              cat "$work/one.corpus" >> "$corpus"
-              cat "$work/one.scope" >> "$scope"
-              d=$(cat "$work/one.sum")
-              dropped=$((dropped + d)); kept=$((kept + tot - d))
-            else
-              printf 'UNDELIMITED TEST MODULE  %s\n' "$f"
-              undelimited=$((undelimited + 1))
-            fi
-          done < <(git ls-files 'crates/*.rs' \
-                   | grep '/src/' | grep -vE '/(tests|benches)/' \
-                   | while IFS= read -r cand; do
-                       whole_file_test_module "$cand" || printf %s\\n "$cand"
-                     done || true)
-
+          # NOTHING IS KEPT UNTIL A FILE PARSES. A partial corpus from a file
+          # the scanner could not delimit would be a scan that quietly covered
+          # less than it reported — the exact defect this boundary replaced.
+          #
+          # `wc -l` COUNTS NEWLINES, NOT LINES, so a file whose last line is
+          # unterminated was reported one short — and a one-line file reported
+          # ZERO, which skipped the file entirely. Caught by feeding this gate a
+          # one-line violation with no trailing newline: it exited 0. `cargo
+          # fmt` would reject such a file, but gate 6a lives in a later job that
+          # this one gates, so relying on it would make gate 11 blind exactly
+          # while it runs first. The Rust reader counts that last line.
+          #
           # A gate must say what it walked. A glob that matches nothing is the
           # failure mode gate 8 shipped with for the whole life of the
           # repository, and it reported success the entire time.
-          echo "walked ${walked} non-test source file(s) under crates/*/src/"
-          echo "  ${kept} line(s) in scope, ${dropped} inside a #[cfg(test)] module"
-          echo "  $(awk 'END{print NR}' "$corpus") line(s) after comment stripping"
-          if [ "$walked" -eq 0 ]; then
-            echo "GATE 11 WALKED NOTHING. A gate that scans no file is not a gate."
-            exit 1
-          fi
-          if [ "$undelimited" -ne 0 ]; then
-            echo
-            echo 'A #[cfg(test)] module above has no closing brace at the same'
-            echo 'indent as its own `mod` keyword, so this scanner cannot tell'
-            echo 'where it ends and will not guess. `cargo fmt` does not emit'
-            echo 'that shape; if it is deliberate, the boundary above is what'
-            echo 'has to change, not this message.'
-            exit 1
-          fi
-
-          bad=0
-
-          check() {
-            rule="$1"; pattern="$2"; allow="$3"; law="$4"; src="${5:-$corpus}"
-            hits=$( { grep -E "$pattern" "$src" || true; } )
-            n=$( { printf '%s' "$hits" | grep -c . || true; } | tr -d ' ')
-            echo
-            echo "rule ${rule}: ${n} occurrence(s) — ${law}"
-            for f in $( { printf '%s\n' "$hits" | grep . | cut -d: -f1 | sort -u; } || true ); do
-              c=$( { printf '%s\n' "$hits" | grep -c "^${f}:" || true; } | tr -d ' ')
-              a=$( { printf '%s\n' "$allow" | awk -v F="$f" '$1==F{print $2; exit}'; } || true)
-              [ -n "$a" ] || a=0
-              if [ "$c" -gt "$a" ]; then
-                printf '  REFUSED  %s — %s occurrence(s), %s allowed\n' "$f" "$c" "$a"
-                { printf '%s\n' "$hits" | grep "^${f}:" \
-                    | awk -F: '{printf "           %s:%s\n", $1, $2}' | head -8; } || true
-                bad=1
-              else
-                printf '  allowed  %s — %s of %s\n' "$f" "$c" "$a"
-              fi
-            done
-            # An entry naming a file that no longer exists makes this gate read
-            # stronger than it is, so it is a failure and not a note. An entry
-            # whose file no longer matches is only loose, and says so.
-            for p in $( { printf '%s\n' "$allow" | awk 'NF{print $1}'; } || true ); do
-              if ! git ls-files --error-unmatch "$p" >/dev/null 2>&1; then
-                printf '  STALE ALLOWLIST ENTRY — %s is not a tracked file\n' "$p"
-                bad=1
-              elif ! grep -q "^${p}:" <<< "$hits"; then
-                printf '  ::warning title=Gate 11 allowlist is loose::'
-                printf '%s no longer matches rule %s — tighten it\n' "$p" "$rule"
-              fi
-            done
-            :
-          }
-
-          # ---- rules 6 and 7. THE LINEAR MEMBERSHIP SCAN. ------------------
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rules 6 and 7,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_scan='
-          crates/api/src/audit_json.rs 1
-          crates/api/src/autopilot.rs 2
-          crates/api/src/backtest.rs 1
-          crates/api/src/booleanjson.rs 2
-          crates/api/src/expressionsearchjson.rs 1
-          crates/api/src/indexstoprankingjson.rs 1
-          crates/api/src/pullrun.rs 1
-          crates/api/src/server.rs 9
-          crates/api/src/store_wire.rs 1
-          crates/api/src/sweeprun.rs 1
-          crates/cli/src/boolean_campaign_codec.rs 2
-          crates/cli/src/boolean_qualification_reader.rs 1
-          crates/cli/src/boolean_rung_scope.rs 1
-          crates/cli/src/candidate_universe.rs 1
-          crates/cli/src/global_replay_v4.rs 1
-          crates/cli/src/index_stop_qualification_numeric.rs 1
-          crates/cli/src/index_stop_search.rs 1
-          crates/cli/src/index_stop_store.rs 1
-          crates/cli/src/index_stop_vix_codec.rs 1
-          crates/cli/src/lib.rs 7
-          crates/cli/src/population_admission_v2.rs 1
-          crates/cli/src/population_finalization_v2.rs 1
-          crates/cli/src/population_v6.rs 1
-          crates/cli/src/pre_admission_data.rs 1
-          crates/cli/src/results.rs 1
-          crates/cli/src/stored.rs 1
-          crates/cli/src/strict_range_knobs.rs 1
-          crates/pull/src/cash_auction.rs 2
-          crates/pull/src/config.rs 3
-          crates/pull/src/fno.rs 1
-          crates/pull/src/manifest.rs 1
-          crates/pull/src/resolve.rs 1
-          crates/pull/src/rolling.rs 3
-          crates/pull/src/ssm.rs 1
-          crates/pull/src/vendor.rs 8
-          crates/runner/src/exit_grid_policy.rs 1
-          crates/runner/src/grid.rs 2
-          crates/runner/src/research_family.rs 1
-          crates/runner/src/signal_candle_stop.rs 2
-          crates/runner/src/validate.rs 5
-          crates/telemetry/src/record.rs 1
-          '
-
-          # ---- rule 7: the ambiguous membership test -----------------------
-          # The reasons for every entry in the list below, and its history, are in
-          # docs/06-limits.md under "Gate 11 allowlist reasons", rule 7: the ambiguous membership test,
-          # moved there verbatim because GitHub will not start a workflow file this
-          # large (D-1451). A new or changed entry still gets its reason THERE, in the
-          # same change, and a count here without one is the drift D-1451 forbids.
-          allow_member='
-          crates/api/src/assets.rs 1
-          crates/api/src/calendar_of.rs 2
-          crates/api/src/constituents.rs 2
-          crates/api/src/coverage.rs 1
-          crates/api/src/credential_law.rs 1
-          crates/api/src/merge.rs 2
-          crates/api/src/server.rs 4
-          crates/api/src/sweeprun.rs 5
-          crates/cli/src/batch.rs 1
-          crates/cli/src/candidate_universe.rs 1
-          crates/cli/src/execution_capability.rs 1
-          crates/cli/src/global_replay_v2.rs 1
-          crates/cli/src/global_replay_v3.rs 1
-          crates/cli/src/institutional_evidence.rs 2
-          crates/cli/src/institutional_statistics.rs 1
-          crates/cli/src/lib.rs 5
-          crates/cli/src/population.rs 3
-          crates/cli/src/population_admission_v2.rs 2
-          crates/cli/src/population_admission_v3.rs 2
-          crates/cli/src/population_finalization_v2.rs 2
-          crates/cli/src/population_observations_v1.rs 1
-          crates/cli/src/population_statistics_v2.rs 7
-          crates/cli/src/population_statistics_v3.rs 3
-          crates/cli/src/pre_admission_data.rs 2
-          crates/cli/src/selection.rs 2
-          crates/cli/src/selection_v3.rs 1
-          crates/cli/src/selection_v4.rs 2
-          crates/cli/src/selection_v5.rs 3
-          crates/cli/src/stored.rs 5
-          crates/cli/src/stored_data_completeness.rs 1
-          crates/core/src/vendor.rs 2
-          crates/costs/src/day.rs 2
-          crates/engine/src/lib.rs 1
-          crates/greeks/src/solver.rs 1
-          crates/pull/src/calendar.rs 1
-          crates/pull/src/fnowork.rs 1
-          crates/pull/src/pricing.rs 2
-          crates/runner/src/closed.rs 1
-          crates/runner/src/lib.rs 1
-          crates/runner/src/outcome.rs 1
-          crates/runner/src/rank.rs 1
-          crates/runner/src/split.rs 1
-          crates/telemetry/src/json.rs 3
-          crates/telemetry/src/tail.rs 1
-          crates/cli/src/expression_search_reader.rs 2
-          crates/cli/src/boolean_qualified_observer.rs 1
-          crates/cli/src/index_stop_qualification.rs 1
-          crates/cli/src/boolean_qualification_plan.rs 2
-          crates/cli/src/index_stop_source_context.rs 1
-          crates/cli/src/boolean_qualified_journal.rs 1
-          crates/runner/src/expression_validation.rs 1
-          crates/cli/src/boolean_statistics_v1.rs 2
-          crates/cli/src/boolean_statistics_reader.rs 1
-          crates/api/src/indexstopvixjson.rs 1
-          crates/cli/src/boolean_qualification_wire.rs 1
-          crates/cli/src/boolean_catalog_prepared.rs 1
-          crates/cli/src/index_stop_qualification_codec.rs 2
-          crates/api/src/booleansearchjson.rs 1
-          crates/cli/src/boolean_candidate_v1.rs 1
-          crates/api/src/indexstopjson.rs 1
-          crates/cli/src/operation_audit.rs 2
-          crates/api/src/indexstoplaunch.rs 1
-          crates/cli/src/minute_gaps.rs 1
-          crates/api/src/indexstopqualificationjson.rs 1
-          crates/api/src/index_consistency_projection.rs 1
-          crates/cli/src/index_stop_search_reader.rs 1
-          crates/api/src/pullrun.rs 3
-          crates/cli/src/selection_v6_source.rs 1
-          crates/api/src/booleanjson.rs 1
-          crates/cli/src/audited_range.rs 1
-          crates/cli/src/index_consistency.rs 2
-          crates/cli/src/boolean_search_record.rs 1
-          crates/cli/src/boolean_campaign.rs 2
-          crates/api/src/recovery.rs 8
-          crates/api/src/booleanevidencejson.rs 1
-          crates/cli/src/index_stop.rs 2
-          crates/api/src/booleanoosjson.rs 1
-          crates/cli/src/index_stop_qualification_numeric.rs 1
-          crates/api/src/booleanlaunch.rs 1
-          crates/cli/src/index_stop_source_context_codec.rs 3
-          crates/api/src/expressionsearchjson.rs 1
-          crates/engine/src/resume.rs 1
-          crates/cli/src/index_stop_store.rs 1
-          '
-
-          check 1 '\.(binary_search|partition_point)' \
-                "$allow_search" \
-                'docs/07 layer 4 — never binary_search'
-
-          check 2 '\b(f32|f64)\b' \
-                "$allow_float" \
-                'CLAUDE.md section 7 — prices are paisa i64 and never a float; statistics keep full precision'
-
-          check 3 '\b(HashMap|HashSet)::(new\(\)|default\(\)|with_capacity\(0\))' \
-                "$allow_unsized" \
-                'docs/07 law 2 — pre-size every map'
-
-          check 4 '\.sort(_[a-z_]+)?\(|select_nth_unstable|BinaryHeap|collect::<BTree(Set|Map)' \
-                "$allow_sort" \
-                'docs/07 layer 12 — bounded page, never O(universe)'
-
-          check 5 '(^|[^A-Za-z0-9_])(panic!|todo!|unimplemented!|unreachable!)|\.unwrap\(\)|\.expect\(' \
-                "$allow_panic" \
-                'CLAUDE.md section 4 — degrade loudly or refuse, never die'
-
-          # EMPTY SINCE D-1121. D-1115 pinned the 41 chained searches rule 6
-          # first saw here, unread; each was opened and moved into `allow_scan`
-          # with its bound (see the block above it). The list stays, empty, so
-          # a future change to rule 6 that surfaces sites it cannot classify at
-          # once has a place that says so rather than a silent raise of
-          # `allow_scan`. It may only shrink, and it is at zero.
-          allow_scan_unread='
-          '
-          # One entry per file for `check`, which reads the first match only.
-          allow_scan_all=$(printf '%s\n%s\n' "$allow_scan" "$allow_scan_unread" \
-                           | awk 'NF { s[$1] += $2 } END { for (f in s) print f, s[f] }' | sort)
+          #
+          # An allowlist entry naming a file that no longer exists makes this
+          # gate read stronger than it is, so it is a failure and not a note. An
+          # entry whose file no longer matches is only loose, and says so.
+          #
           # RULE 6 READS METHOD CHAINS, NOT LINES (D-1115, AC-gates-law-3). Past
           # 100 columns `cargo fmt` breaks a chain before every `.`, so
           # `xs\n    .iter()\n    .find(` -- the formatter's default, not an
           # evasion -- never matched a one-line pattern, and any long expression
-          # could add a data-bounded search with the allowance unraised.
-          # `chained` folds each corpus record whose code starts with `.`
+          # could add a data-bounded search with the allowance unraised. The
+          # chain fold folds each corpus record whose code starts with `.`
           # (leading blanks dropped) onto the record above it in the same file,
           # keeping that record's `FILE:LINE`, so a chain is one record and is
-          # counted once. Its self-test runs first: a broken fold is a refusal,
-          # not a smaller count.
-          chain='
-            function out() { if (have) print buf; have = 0 }
-            {
-              p = index($0, ":"); f = substr($0, 1, p - 1); r = substr($0, p + 1)
-              q = index(r, ":"); code = substr(r, q + 1)
-              t = code; sub(/^[ \t]+/, "", t)
-              if (have && f == lastf && substr(t, 1, 1) == ".") { buf = buf t; next }
-              out(); buf = $0; lastf = f; have = 1
-            }
-            END { out() }
-          '
-          printf '%s\n' \
-            'a.rs:1:    let x = xs' 'a.rs:2:        .iter()' 'a.rs:3:        .position(is_one);' \
-            'a.rs:4:    let y = ys.iter().find(ok);' \
-            'b.rs:1:        .iter()' 'b.rs:2:    .find(ok)' > "$work/chain-fixture"
-          awk "$chain" "$work/chain-fixture" > "$work/chain-out"
-          got=$( { grep -cE '\.iter\(\)\.(find|position|rposition)\(' "$work/chain-out" || true; } )
-          joined=0
-          grep -qx 'a.rs:1:    let x = xs.iter().position(is_one);' "$work/chain-out" && joined=1
-          if [ "$got" != "3" ] || [ "$joined" != 1 ]; then
-            echo "GATE 11 RULE 6's CHAIN FOLD FAILED ITS SELF-TEST (expected 3 hits, one per chain and none across files, got ${got}):"
-            cat "$work/chain-out"
-            exit 1
-          fi
-          chained="$work/chained"
-          awk "$chain" "$corpus" > "$chained"
-
-          check 6 '\.iter\(\)\.(find|position|rposition)\(' \
-                "$allow_scan_all" \
-                'CLAUDE.md section 3 rule 4 — a search must be bounded by a compile-time table, never by the data' \
-                "$chained"
-
-          check 7 '\.contains\(&' \
-                "$allow_member" \
-                'CLAUDE.md section 3 rule 4 — a membership test is a Range, a hash probe, or a declared bound'
-
+          # counted once. Its self-test runs first, on the fixture of three
+          # chains with one across a file boundary: a broken fold is a
+          # refusal, not a smaller count. `ALLOW_SCAN_UNREAD` has been EMPTY
+          # SINCE D-1121; it may only shrink, and it is at zero.
+          #
           # Rule 5's construct is ALREADY denied by clippy at the workspace
-          # root, and gate 6b runs clippy with -D warnings — so the grep above
-          # is expected to find nothing, and finding nothing is not evidence
+          # root, and gate 6b runs clippy with -D warnings — so its count is
+          # expected to find nothing, and finding nothing is not evidence
           # this gate works. What clippy cannot defend is clippy: the lint
           # table is an ordinary tracked file, and deleting one line from it
           # silently disarms the deny across the whole workspace with every
-          # other gate still green. These two steps guard the guard.
-          echo
-          # `indexing_slicing` IS IN THIS LIST AND WAS IN NO GATE AT ALL. It is
-          # denied at the workspace root beside the other five and it is
+          # other gate still green. Rules 5b and 5c guard the guard.
+          #
+          # `indexing_slicing` IS IN RULE 5b's LIST AND WAS IN NO GATE AT ALL.
+          # It is denied at the workspace root beside the other five and it is
           # panic-capable in exactly the same way -- `xs[i]` on a short slice is
           # an index-out-of-bounds panic, which is the §4 breach "degrade loudly
           # or refuse, never die" names. An audit found the string
           # `indexing_slicing` appeared NOWHERE in this file, so deleting its one
           # line from Cargo.toml disarmed it across twelve crates with every gate
-          # here still green. Rule 5's grep cannot cover it -- `[i]` is not a
+          # here still green. Rule 5's count cannot cover it -- `[i]` is not a
           # spelling a text scan can separate from an array literal or an
           # attribute -- so the lint table is the only place it can be held, and
-          # this is that place.
+          # rule 5b is that place.
           #
-          # IT IS DELIBERATELY *NOT* IN RULE 5c BELOW, and the number is the
-          # reason rather than the taste. Rule 5c refuses a LOCAL `#[allow]` that
+          # IT IS DELIBERATELY *NOT* IN RULE 5c, and the number is the reason
+          # rather than the taste. Rule 5c refuses a LOCAL `#[allow]` that
           # switches a lint off in shipping code; adding `indexing_slicing` to
           # its pattern was measured over this workspace's own production scope
           # and produces 16 hits across 10 files -- `core/src/universe.rs` 4,
@@ -3726,16 +2831,7 @@ jobs:
           # TABLE is guarded and the local allows are NOT, and it is written here
           # rather than discovered later. Raising it to rule 5c is a separate
           # change that should read those sixteen sites one at a time.
-          echo "rule 5b: the lint table that denies rule 5 workspace-wide"
-          for lint in unwrap_used expect_used panic todo unimplemented indexing_slicing; do
-            if ! grep -qE "^${lint}[[:space:]]*=[[:space:]]*\"deny\"" Cargo.toml; then
-              printf '  REFUSED  Cargo.toml no longer denies clippy::%s\n' "$lint"
-              bad=1
-            else
-              printf '  present  clippy::%s = deny\n' "$lint"
-            fi
-          done
-
+          #
           # And the second way to disarm it: a local allow. In a test module
           # that is legitimate and this gate never looks there; in shipping
           # code it is a panic nobody can see from the lint table.
@@ -3749,92 +2845,20 @@ jobs:
           # walk over `scope` now: from a line beginning `#[allow(` or
           # `#[expect(`, count `[` against `]` until the attribute closes, and
           # test the whole joined attribute for the five lint names. `#[expect]`
-          # is included because it disarms exactly as `#[allow]` does.
+          # is included because it disarms exactly as `#[allow]` does. The walk
+          # used to build a new pattern on every line, which went quadratic in
+          # the corpus and ran for over half an hour (D-1115).
           #
-          # Read over `scope` and not `corpus`, because an attribute list may
-          # carry a `//` comment inside it — crates/costs/src/trip.rs does —
-          # and a bracket count over comment-stripped text loses its place.
-          awk -F: '
-            {
-              p = $1; n = $2; t = $0
-              # A constant pattern, not `"^" p ":" n ":"`: that built a new
-              # regex on every line, and mawk keeps each one it compiles, so
-              # the step went quadratic in the corpus and ran for over half an
-              # hour where it now takes seconds (D-1115). Same match: no path
-              # holds a colon and the line number is digits.
-              sub(/^[^:]*:[0-9]*:/, "", t); sub(/^[ \t]+/, "", t)
-              if (d <= 0) {
-                if (t !~ /^#\[(allow|expect)\(/) next
-                acc = t; sp = p; sn = n; d = gsub(/\[/, "[", t) - gsub(/\]/, "]", t)
-              } else {
-                acc = acc " " t; d += gsub(/\[/, "[", t) - gsub(/\]/, "]", t)
-              }
-              if (d <= 0 && acc ~ /clippy::(unwrap_used|expect_used|panic|todo|unimplemented)/) {
-                print sp ":" sn ":" acc
-              }
-            }
-          ' "$scope" > "$work/disarm"
-          check 5c 'clippy::' \
-                "$allow_disarm" \
-                'CLAUDE.md section 4 — a local allow is a panic the lint table cannot show' \
-                "$work/disarm"
-
-          # The old inline form printed "none" and nothing else. Kept, because
-          # a rule whose healthy state prints one word is a rule a reader can
-          # confirm at a glance.
-          if [ ! -s "$work/disarm" ]; then
-            echo "  none"
-          fi
-
-          # Rule 5d's corpus: the lines whose nearest enclosing item is an `fn`.
-          # The whole argument is written above `allow_assert`; these are the five
-          # lines it describes. Read over `$corpus` and not `$scope`, so that a
-          # const assertion QUOTED IN A COMMENT -- and this file's crates quote
-          # them often -- cannot enter either side of the count.
-          awk '
-            {
-              p = $0; sub(/:[0-9]+:.*$/, "", p)
-              if (p != cur) { cur = p; kind = "fn" }
-              t = $0; sub(/^[^:]*:[0-9]+:/, "", t)
-              s = t; sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
-              if (s ~ /^(pub([ \t]*\([^)]*\))?[ \t]+)?const[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*:/) {
-                if (s !~ /;$/) kind = "const"
-                next
-              }
-              if (s ~ /(^|[^A-Za-z0-9_])fn[ \t]+[a-z_]/) kind = "fn"
-              if (kind == "fn") print
-            }
-          ' "$corpus" > "$work/fnscope"
-          fn_lines=$(awk 'END{print NR}' "$work/fnscope")
-          all_lines=$(awk 'END{print NR}' "$corpus")
-          echo
-          echo "rule 5d scope: ${fn_lines} line(s) inside an fn, $((all_lines - fn_lines))"
-          echo "               inside a const item and therefore compile-time"
-          # A classifier that stops matching would silently drop every line out of
-          # scope and this rule would print a clean zero over nothing at all --
-          # the failure mode gate 8 shipped with. A workspace with a function in
-          # it cannot have an empty fn scope.
-          if [ "$fn_lines" -eq 0 ]; then
-            echo "  REFUSED  rule 5d classified NO line as fn scope. The classifier"
-            echo "           above stopped matching; a silent zero is not a pass."
-            bad=1
-          fi
-          check 5d '(^|[^A-Za-z0-9_])assert(_eq|_ne)?!' \
-                "$allow_assert" \
-                'CLAUDE.md section 4 — a runtime assert is a panic clippy::panic does not lint' \
-                "$work/fnscope"
-
-          echo
-          if [ "$bad" -ne 0 ]; then
-            echo "GATE 11 FAILED."
-            echo
-            echo "Either the construct goes, or its file earns a line in the"
-            echo "allowlist above WITH the reason it is bounded. A count is"
-            echo "raised only by someone who can say why. See CLAUDE.md"
-            echo "section 3 rule 4 and docs/07-o1-architecture.md."
-            exit 1
-          fi
-          echo "OK — no banned construct outside the allowlist."
+          # Rule 5d's corpus is the lines whose nearest enclosing item is an
+          # `fn`, read over `corpus` and not `scope`, so that a const assertion
+          # QUOTED IN A COMMENT -- and this file's crates quote them often --
+          # cannot enter either side of the count. A classifier that stops
+          # matching would silently drop every line out of scope and the rule
+          # would print a clean zero over nothing at all -- the failure mode
+          # gate 8 shipped with -- so an empty fn scope is a refusal.
+          #
+          # D-2313: the tool gate 25 built.
+          "${RUNNER_TEMP:-/tmp}/gates-ledger" banned-constructs
 
       - name: Gate 12 — every O(1) claim names the test that proves it
         run: |
