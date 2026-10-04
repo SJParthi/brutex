@@ -4095,8 +4095,13 @@ mod tests {
         assert!(workflow_findings(".github/workflows/ci.yml", &pinned).is_empty());
         let more = format!("{pinned}{one}");
         assert!(!workflow_findings(".github/workflows/ci.yml", &more).is_empty());
-        let fewer: String = std::iter::repeat_n(one, AWK_IN_CI - 1).collect();
-        assert!(!workflow_findings(".github/workflows/ci.yml", &fewer).is_empty());
+        // At a pin of zero there is no "fewer"; a nonzero pin still refuses one.
+        if let Some(below) = AWK_IN_CI.checked_sub(1) {
+            let fewer: String = std::iter::repeat_n(one, below).collect();
+            assert!(!workflow_findings(".github/workflows/ci.yml", &fewer).is_empty());
+        }
+        let any = format!("x\n{one}");
+        assert!(!workflow_findings(".github/workflows/ci.yml", &any).is_empty() || AWK_IN_CI == 1);
     }
 
     #[test]
