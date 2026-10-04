@@ -139,8 +139,9 @@ fn bar(index: i64) -> Bar {
 /// that point says `true`. The revision is then read back whole, and a retry
 /// of the same request is `Reused`, which is what "may be visible" promised.
 ///
-/// One unlock is let through first: the revision writer's month lock, which
-/// its guard's `Drop` releases as `write_revision` returns, before the source
+/// Two unlocks are let through first: the revision writer's month lock, which
+/// `write_revision` drops once the receipt is synced, and the reservation's
+/// own exclusive lock it then releases (D-2551), both before the source
 /// release. If that order changes, the refusal lands elsewhere, and this test
 /// fails on the error it compares rather than passing by accident.
 #[test]
@@ -150,7 +151,7 @@ fn a_refused_source_release_after_the_write_says_the_publication_may_be_visible(
     let expected = fixture.source(&[bar(1), bar(3)]);
     let merged = [bar(0), bar(1), bar(2), bar(3)];
 
-    refuse_unlock(1, io::ErrorKind::PermissionDenied);
+    refuse_unlock(2, io::ErrorKind::PermissionDenied);
     let refused = fixture
         .publish(expected, &merged)
         .expect_err("the source lock's release was refused and publish must say so");
@@ -268,6 +269,10 @@ fn repair_refusals_name_the_reason_path_and_publication_visibility() {
             RepairError::InvalidReceipt(at.clone()),
             "invalid repair receipt at revision/2024-06.bin",
         ),
+        (
+            RepairError::Busy(at.clone()),
+            "repair revision revision/2024-06.bin is being published by another caller; retry the same ordinal",
+        ),
     ];
     for (error, expected) in cases {
         assert_eq!(error.to_string(), expected);
@@ -381,6 +386,38 @@ fn a_checksum_valid_source_with_nonincreasing_timestamps_is_not_repaired() {
             "refuse before reservation"
         );
     }
+}
+
+/// store2-1, D-2551: while another caller holds an ordinal's reservation,
+/// the same request is `Busy` (retry the same ordinal), never an I/O failure
+/// that says nothing was published and never `Incomplete`; once that holder
+/// is gone, a reservation without a receipt is `Incomplete` as before.
+#[test]
+fn a_live_publisher_of_the_same_ordinal_is_busy_not_abandoned() {
+    let _sink_is_mine = crate::emits::hold_the_sink();
+    let fixture = Fixture::new("busy");
+    let expected = fixture.source(&[bar(1)]);
+    let physical = path().to_path_buf(&revision().root(&fixture.root));
+    let reservation = physical.with_extension("reserved-v1");
+    fs::create_dir_all(reservation.parent().expect("month directory")).expect("revision directory");
+    let held = super::reserve(&reservation).expect("a live publisher's reservation");
+    assert_eq!(
+        super::reserve(&reservation).err(),
+        Some(RepairError::Busy(reservation.clone())),
+        "a lost reservation race"
+    );
+    assert_eq!(
+        fixture.publish(expected, &[bar(1)]),
+        Err(RepairError::Busy(reservation.clone())),
+        "a retry during a live publication"
+    );
+    held.release().expect("the publisher stops");
+    assert_eq!(
+        fixture.publish(expected, &[bar(1)]),
+        Err(RepairError::Incomplete(
+            physical.with_extension("repair-v1")
+        ))
+    );
 }
 
 #[test]

@@ -264,7 +264,9 @@ fn regular_files_and_symlinks_to_them_still_open() {
     assert_eq!(file.read_record(4).expect("last"), bar(4));
 }
 
-/// An absent lock is still `None`, and an absent bar file still `Missing`.
+/// An absent lock is created and held shared, so a writer that arrives while
+/// the reader is live is refused (store1-1, D-2551); an absent bar file is
+/// still `Missing`.
 #[test]
 fn absent_siblings_keep_their_answers() {
     let scratch = Scratch::new("absent");
@@ -273,7 +275,19 @@ fn absent_siblings_keep_their_answers() {
     fs::remove_file(&lock).expect("remove lock");
     let file = BarFile::open_existing(&scratch.root, month(), 7).expect("no lock is fine");
     assert_eq!(file.records(), 1);
+    assert!(lock.is_file(), "the reader created the absent lock");
+    assert_eq!(
+        BarFile::open_or_create(&scratch.root, month(), 7).err(),
+        Some(StoreError::Locked { path: lock.clone() }),
+        "a later writer is excluded while the lockless reader is live"
+    );
     drop(file);
+    assert_eq!(
+        BarFile::open_or_create(&scratch.root, month(), 7)
+            .expect("the month is free again")
+            .records(),
+        1
+    );
     let bars = month().to_path_buf(&scratch.root);
     fs::remove_file(&bars).expect("remove bars");
     assert_eq!(

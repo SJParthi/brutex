@@ -57705,3 +57705,63 @@ barrier failed in this process.
 
 **Evidence.** ZK-04. The two former tests that asserted the refusal now assert
 the commit; each failed on the previous code by construction.
+
+### D-2557 — Candidate Universe, Base Evidence V2 and Pre-Admission discard a foreign receipt-less orphan — 2026-10-04
+
+**The findings.** ledgerall-1 and cand-1: the Candidate Universe page ledger,
+Base Evidence Ledger V2 and Pre-Admission Data V1 and V2 refused every later
+append because of a receipt-less trailing record of another identity ("not
+exact retry; no fallback may hide it"). That identity carries the commit and
+the data digest, so a rebuild or new data made the refusal permanent, and every
+Step-3 run on the store was wedged by one interrupted earlier run.
+
+**The decision.** The D-1905 rule, applied to these four writers: under the
+append lock, a receipt-less trailing record that is not this exact retry is
+scratch. No Completion acknowledged it, so no reader ever saw it. It is cut back
+to where it began with `fixed_tail::discard_orphan`, which emits a `cli.ledger`
+warn event naming it, and the writer then appends its own record. An exact
+retry still resumes as before. A torn, ragged, corrupt or out-of-order tail, a
+foreign Completion and a stale path still refuse.
+
+**Evidence.** ZK-05. The tests that asserted the refusal now assert the commit,
+so they failed on the previous code by construction.
+
+### D-2551 — A store reader holds a lock a later writer must respect, and a live repair publisher is Busy, not abandoned — 2026-10-04
+
+**The findings.** store1-1: `BarFile::open_existing` on a month with no
+`.lock` read without any lock. A writer arriving later created the lock, took
+it exclusively against nobody, and appended under the reader's live handle.
+store2-1: a repair reservation was a bare `create_new` file. A second caller
+of the same ordinal found it and reported `Incomplete` (abandoned) for a
+publication still in progress, or an I/O failure that said nothing was
+published.
+
+**The decision.**
+- A reader that finds the lock absent creates it, empty and with
+  `create_new`, and holds it shared like any other. A lost creation race goes
+  back to the ordinary read-only open. Only a read-only filesystem, where no
+  writer can append either, reads without a lock.
+- A repair reservation is created and exclusively locked under a per-process
+  scratch name, and only then hard-linked to `.reserved-v1`. Its publisher
+  holds the lock until the completion is synced. A caller that finds it still
+  locked gets the new `RepairError::Busy` and retries the SAME ordinal. A
+  reservation nobody holds and no completion is `Incomplete` as before.
+
+**Evidence.** ZK-07. `absent_siblings_keep_their_answers` was seen failing
+with the reader fix disabled. The Busy test cannot compile against the
+previous code, because `RepairError::Busy` is new.
+
+### D-2559 — A store header slot whose barrier failed is written back — 2026-10-04
+
+**The finding.** store1-2 (the part D-1907 left): a failed barrier on the
+header slot was remembered, so later appends refused, but the slot itself
+stayed in the page cache. Every reader in this boot took it as the newest
+commit and named records the device may not hold.
+
+**The decision.** Before writing the slot, the append reads its previous 64
+bytes. If the barrier fails, it writes them back and syncs, so the previous
+commit is the newest one again. If the restore itself fails, that failure is
+returned. The month stays barred for appends in this process (D-1907).
+
+**Evidence.** ZK-08. The extended test was seen failing with the restore
+disabled.
