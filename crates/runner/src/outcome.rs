@@ -4533,7 +4533,7 @@ mod window_tests {
     #[test]
     fn a_left_end_behind_the_popped_one_reads_the_block_table_and_an_equal_one_does_not() {
         let mut bars = wobble(200);
-        bars[2].high = i64::MAX / 2;
+        bars.get_mut(2).expect("wobble(200) has a third bar").high = i64::MAX / 2;
         let mut back = WindowExtremes::new();
         assert_eq!(back.over(&bars, 5, 10), scan(&bars, 5, 10));
         assert_eq!(back.over(&bars, 0, 12), scan(&bars, 0, 12));
