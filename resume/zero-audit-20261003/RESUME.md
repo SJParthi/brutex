@@ -1,5 +1,61 @@
 # Zero-findings audit loop — resume state
 
+## FINAL SAVE 2026-10-04 ~06:15 UTC — read this first (supersedes everything below)
+User said "final save" (switching accounts). All agents stopped; no timers.
+
+### Exact heads (all pushed to origin)
+- Staging `final/all-fixes-zero` = **6104a4b4**. Contains D-1769, test-teeth,
+  ledger-tails, #74 head b23976fc (merged, D-1770), merge fallout fixes.
+- `zero/api-routes` = **2f7f8efa** (base bde50c0c). FIXED, NOT MERGED:
+  P3-01-02, P3-02-06 (D-1972), P3-01-03 (D-1973), P3-01-04 (D-1974),
+  P3-02-01 (D-1971: Rust no-script page moved /audit -> /audit/page),
+  P3-02-07 (D-1970, .claude/launch.json). ZW-01..06. api lib 1427 pass; its one
+  failure (/pull/run 413) is fixed on staging by D-1770's form_read_bound.
+- `zero/numeric` = **fd45f9d2** (base bde50c0c). PARTIAL, NOT MERGED. D-1990,
+  D-1991, ZN-01..05. Fixed + tested: run3-1, p2bool-1, p2inst-1, p2idx-1.
+  Fixed in code, tests NOT run: D-0743 PBO ceiling, D-0742 block refusal,
+  xcut-1 (n>=30 + mispaired row refusal; api never compiled on that branch).
+  run1-3 already fixed by CE-7. Not started: pst-1, grk-1, run2-1, run2-2,
+  pst-2, pst-4, grk-2. No clippy, no fmt-then-test on final tree.
+- `zero/cli-edges-2` = **ed5f3b38** (base ad1bead4). NOT MERGED. CE-12, CE-13
+  FIXED (D-1980, ZE-01, new lake::footer pre-parse walk; lake tests + clippy
+  clean, break-tested). CE-19 PARTIAL (frontier MAX_ROWS 4096 + admit_top;
+  missing D-1981 entry, ZE-02 row, clippy cli/api, full cli tests). CE-9,
+  CE-18, CE-20 not started.
+
+### Verification state of staging 6104a4b4
+- clippy --workspace --all-targets -D warnings: clean on bde50c0c; later
+  commits small (form_read_bound, a test, docs) — re-run clippy.
+- Full `cargo test --workspace --no-fail-fast` on bde50c0c: only 2 failures,
+  both fixed after (api /pull/run 413 -> form_read_bound; cli
+  an_unexpected_validate_value test updated to knob::switch). Both re-run
+  green alone. A full re-run on 6104a4b4 was NOT completed.
+- Not run: cargo-mutants, non-root tests, web tests (no node_modules here).
+
+### Next steps, in order
+1. Full clippy + `cargo test --workspace --locked --no-fail-fast` on 6104a4b4.
+2. Merge zero/api-routes, then zero/cli-edges-2 (finish CE-19 ledger rows,
+   clippy), then zero/numeric (run its unrun tests, clippy). Keep both sides
+   of docs/04 + docs/05 conflicts. Re-test.
+3. Message PR 74 CI thread (cse_01TPJRnnkg5yuNeRBHDyzaaP), then merge staging
+   into final/all-fixes (#74). Tell the 4 helper sessions the new head.
+4. Continue the 165 `found` rows in zero-findings.tsv.md.
+
+### Operator questions (do not guess)
+- pst-3: CSCV median tie overfit as `>=` or `>`?
+- clib-1: support floor round once (ceiling trades->hits)? changes run identity.
+- clib-2: Cadence::trades_over divide once at end (43 vs 40 trades)?
+- gaps-7: date the F&O universe by membership history (survivorship)? source?
+- run1-1/run1-2: add a real-loser count to Cell (store-format bump)?
+- CE-19: /trades beyond 4096 rows: page it, or refuse to record such runs?
+
+### Gotchas learned this session
+- Never `pkill -f`/`pgrep -f` a pattern contained in your own command line.
+- Delete finished agents' `.claude/worktrees/*/target` (disk filled at 98%).
+- Next free main numbers: D-1771..1799, ZR-57; agent ranges D-1975..1979,
+  D-1982..1989, D-1992..1999 remain.
+
+
 ## UPDATE 2026-10-04 05:35 UTC — read this first (supersedes the 20:20 UTC block below)
 - Resumed 03:40 UTC on the user's "Go". Staging `final/all-fixes-zero` is now
   **ad1bead4** (pushed). It contains:

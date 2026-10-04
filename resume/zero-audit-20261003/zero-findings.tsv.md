@@ -99,7 +99,7 @@ pop2-7	found	-
 sel-1	branch	ledger-tails (merged bde50c0c)
 search-1	branch	3f22aed8
 search-2	branch	ledger-tails (merged bde50c0c)
-xcut-1	found	-
+xcut-1	branch	zero/numeric fd45f9d2 (not merged; tests partly unrun)
 xcut-2	found	-
 xcut-3	found	-
 barflow-1	found	-
@@ -235,14 +235,14 @@ P1-19-03	found	-
 P1-20-01	found	-
 pst-1	found	-
 grk-1	found	-
-run1-1	found	-
-run1-2	found	-
-run1-3	found	-
+run1-1	found	needs Cell loser count + store-format bump (operator scope decision)
+run1-2	found	needs Cell loser count + store-format bump (operator scope decision)
+run1-3	branch	already fixed by CE-7 (9c6284c2)
 run2-1	found	-
 run2-2	found	-
-run3-1	found	-
+run3-1	branch	zero/numeric fd45f9d2 (not merged)
 pst-2	found	-
-pst-3	found	-
+pst-3	found	operator decision needed (see RESUME)
 grk-2	found	-
 STO-1	found	-
 STO-2	found	-
@@ -254,8 +254,8 @@ rep-1	found	-
 pst-4	found	-
 apir-3	found	-
 apis-2	found	-
-clib-1	found	-
-clib-2	found	-
+clib-1	found	operator decision needed (see RESUME)
+clib-2	found	operator decision needed (see RESUME)
 ind1-1	found	-
 ind1-2	found	-
 CE-1	branch	3f22aed8
@@ -272,8 +272,8 @@ CE-8	branch	9c6284c2
 CE-9	found	-
 CE-10	branch	9c6284c2
 CE-11	branch	ledger-tails (merged bde50c0c)
-CE-12	found	-
-CE-13	found	-
+CE-12	branch	zero/cli-edges-2 ed5f3b38 (not merged)
+CE-13	branch	zero/cli-edges-2 ed5f3b38 (not merged)
 CE-14	branch	9c6284c2
 CE-15	branch	9c6284c2
 CE-16	branch	9c6284c2
@@ -306,18 +306,18 @@ locks-1	branch	9c6284c2
 locks-2	branch	9c6284c2
 locks-3	branch	9c6284c2
 P3-01-01	branch	9c6284c2
-P3-01-02	found	-
-P3-01-03	found	-
-P3-01-04	found	-
+P3-01-02	branch	zero/api-routes 2f7f8efa (not merged yet)
+P3-01-03	branch	zero/api-routes 2f7f8efa (not merged yet)
+P3-01-04	branch	zero/api-routes 2f7f8efa (not merged yet)
 P3-01-05	branch	9c6284c2
-P3-02-01	found	-
+P3-02-01	branch	zero/api-routes 2f7f8efa (not merged yet)
 P3-02-02	branch	9c6284c2
 P3-02-03	branch	9c6284c2
 P3-02-04	branch	9c6284c2
 P3-02-05	branch	9c6284c2
-P3-02-06	found	-
-P3-02-07	found	-
-CE-19	found	-
+P3-02-06	branch	zero/api-routes 2f7f8efa (not merged yet)
+P3-02-07	branch	zero/api-routes 2f7f8efa (not merged yet)
+CE-19	fixing	partial zero/cli-edges-2 ed5f3b38: ledger rows, clippy, operator question on /trades >4096 open
 CE-21	branch	9c6284c2
 CE-20	found	-
 CE-22	branch	3f22aed8
@@ -329,3 +329,8 @@ CE-40	branch	9c6284c2
 CE-41	branch	9c6284c2
 p3floor-1	branch	9c6284c2
 p3floor-2	branch	9c6284c2
+p2bool-1	branch	zero/numeric fd45f9d2 (not merged; tests partly unrun)
+p2inst-1	branch	zero/numeric fd45f9d2 (not merged; tests partly unrun)
+p2idx-1	branch	zero/numeric fd45f9d2 (not merged; tests partly unrun)
+D-0743-pbo	branch	zero/numeric fd45f9d2 (not merged; tests partly unrun)
+D-0742-block	branch	zero/numeric fd45f9d2 (not merged; tests partly unrun)
