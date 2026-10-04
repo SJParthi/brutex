@@ -60840,3 +60840,153 @@ is unchanged: its rename publishes an inode whose bytes were complete first.
 **Proof.** `an_in_place_append_moves_the_census_stamp_past_its_own_writes` in
 `crates/pull/src/ingest.rs`, whose hook stamps the file after the last slot is
 durable and before the time is moved. FB-67.
+
+### D-2770 — In-process journal writers queue; only another process is refused — 2026-10-04
+
+**Finding (conc:server1-1).** `Journal::appended` took the audit journal's
+`flock` with `try_lock`. The legs of one Pull press run in parallel and every
+leg appends its run record (and one record per failed member) to the same
+`audit/pull.journal`; `flock` conflicts between two open file descriptions of
+one process, so a leg whose append met another leg's `write_all` + `sync_all`
+window was refused ("this run is NOT in the journal") and its landed bars had
+no `/audit` row.
+
+**Decision.** A process-wide `APPENDING` mutex is held across the whole append,
+taken before the file lock. Writers in this process wait for each other (one
+fsync per queued writer); `Flock::try_lock` is then met only by another
+process, which is still refused by name, as before.
+
+**Proof.** `a_second_writer_in_this_process_waits_for_the_first_instead_of_being_refused`
+in `crates/api/src/audit.rs`; the cross-process refusal stays covered by
+`a_held_journal_lock_refuses_a_second_writer_without_appending`. FB-71.
+
+### D-2771 — Shutdown stops pull walks and bounds the drain — 2026-10-04
+
+**Finding (conc:server1-2).** After Ctrl-C, axum's graceful shutdown waited
+for every in-flight request, and a hand `/pull/spot` or `/pull/fno` answers
+only when its whole walk ends (up to half an hour). Nothing on the shutdown
+path moved the stop epoch `broker_run` checks before each instrument, and
+`ctrl_c` keeps SIGINT, so a second Ctrl-C did nothing and SIGKILL mid-walk
+was the only way out.
+
+**Decision.** The serve arm wraps the signal in `stopping_walks`, which pauses
+the autopilot when the signal fires: the epoch moves, and every spot walk
+(hand, press or autopilot) breaks at its next instrument and journals its
+partial run. `serve_limited` bounds the drain after the signal by
+`ConnectionLimits::drain_timeout` (`SHUTDOWN_GRACE`, 10 s, when served); a
+request still running then is not waited for, and a Warn event plus a stderr
+line say so. The F&O walk has no per-instrument stop check, so it is cut at
+the end of the bounded drain and runtime grace rather than journalling a
+partial run; that remains an honest limit. A second Ctrl-C is still not
+handled; the exit is now bounded without it.
+
+**Proof.** `the_shutdown_signal_stops_a_walk_that_captured_the_epoch_before_it`
+and `a_request_still_running_after_the_signal_does_not_hold_the_server_open`
+in `crates/api/src/server.rs` (`shutdown_tests`). FB-72.
+
+### D-2772 — A front end built after startup is served without a restart — 2026-10-04
+
+**Finding (conc:server2-1).** `Assets::new` resolved `web/build` once. When it
+was absent at startup, every page answered the 503 that names the build
+command, and kept answering it after that command succeeded, until a restart
+the page never mentioned.
+
+**Decision.** `Assets::respond` re-resolves the build directory on the
+not-built branch only (one `canonicalize` per request while nothing is
+built); the branch that found a build at startup costs nothing extra. The
+startup banner and `Build` stay the startup observation they are documented
+as. A build directory that is a symlink retargeted after startup is still
+resolved through the startup root; not changed here.
+
+**Proof.** `a_build_made_after_startup_is_served_without_a_restart` in
+`crates/api/src/assets.rs`. FB-73.
+
+### D-2773 — The in-process serve lock is counted; the last holder releases it — 2026-10-04
+
+**Finding (conc:server2-2).** The in-process set of served roots had no
+count. A second `take_serve_lock` of a root in one process got a
+pass-through whose drop removed the key the first still owned, and the
+first's drop unlocked `serve.lock` while the pass-through still served the
+store, so another process could serve it too.
+
+**Decision.** The set becomes a map from canonical root to a holder count and
+the one file lock. A take of a held root increments the count; a fresh take
+opens, locks and stamps the file while holding the map's lock and inserts the
+entry only on success. `ServeLock`'s drop decrements, and the last holder
+removes the entry and unlocks the file under the map's lock, so no take can
+see the key gone while the file is still locked. `release_root` is removed.
+
+**Proof.** `the_serve_lock_is_released_by_the_last_holder_in_this_process_only`
+in `crates/api/src/server.rs`. FB-74.
+
+### D-2774 — A status probe's look at the execution lease does not refuse a claimant — 2026-10-04
+
+**Finding (conc:runs-2).** `execution_lease::probe`, called by every
+`/backtest/run.json` poll, takes the lease file's exclusive lock for an
+instant. A `Lease::acquire` (CLI sweep or browser launch) that met that
+instant was refused `Busy`, "another sweep owns this store's execution
+lease", with no sweep running.
+
+**Decision.** A second empty file, `.sweep-execution-v1.probe-gate`, beside
+the lease. `acquire` creates it before the lease, tries the lease once, and on
+`Busy` takes the gate (blocking) and tries again; a probe holds the gate
+(blocking) around its look at the lease. Under the gate a refusal can only be
+an owner's (or a non-participating older binary's). Nobody holds the gate
+across a run, so the wait is one probe's open, lock, two stats and unlock.
+A lease file left by a binary that predates the gate is probed without it
+until a current claimant has created the gate. The gate is never removed;
+`verify` applies to it as to the lease.
+
+**Proof.** `a_claim_that_meets_a_probe_mid_look_owns_the_slot_once_the_probe_ends`
+in `crates/cli/src/execution_lease.rs`. FB-75.
+
+### D-2775 — A Stop press persists its STOP with the pull slot free — 2026-10-04
+
+**Finding (conc:runs-3).** `pull_run_stop` held `site.run` (a std mutex, on an
+async worker) through `recovery_control::stop`: directory creation, a journal
+append and three fsyncs. Every chain's progress write and every
+`/pull/run.json` poll blocked its own worker until the disk answered.
+
+**Decision.** The handler sets `stopping` and takes the active-ID lock while
+holding `site.run` (lock order `run` then `recovery_active`, unchanged), then
+drops `site.run` and persists through `recovery_control::stop_active` under
+the active-ID lock alone, which is what already serialises a STOP with a
+clear or an activation. Answers and refusals are unchanged.
+
+**Proof.** `the_stop_is_persisted_with_the_pull_slot_free` in
+`crates/api/src/recovery_control.rs`. FB-76.
+
+### D-2776 — A second browser sweep admission is refused, not queued — 2026-10-04
+
+**Finding (conc:runs-4).** Every sweep POST holds one of the four shared
+`detail::run` permits, then waited on the process-wide `ADMISSION` mutex
+while another admission did unbounded I/O. Three queued presses exhausted the
+pool, and every `detail::run` route (the run's own status poll included)
+answered `Saturated` until the first admission ended.
+
+**Decision.** The admission lock moves onto `Site` (`sweep_admission`) and is
+taken with `try_lock`: a press that meets another admission is refused
+`Busy` (409) at once, which is what the run being admitted would answer it,
+and holds its permit only for that refusal. Per `Site`, so two test sites
+never refuse each other. `docs/06-limits.md` is corrected to say so.
+
+**Proof.** `admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`
+in `crates/api/src/sweeprun.rs`, now asserting the immediate refusal. FB-77.
+
+### D-2777 — An unchanged first page reuses the held search session — 2026-10-04
+
+**Finding (conc:apicache-2).** An unpinned `/expression-search.json` request
+dropped every held session of the same search and checkpoint and held a fresh
+reader that knew only the head, so one viewer's first-page load broke another
+viewer's deep pagination ("search cursor is not linked to this admitted
+snapshot") on any paused, stopped or exhausted search.
+
+**Decision.** `first_page` keeps a held session that observed exactly what
+the fresh reader observes (same root, identity, checkpoint, writer
+observation and interrupted count), moves it to the back of the LRU and
+serves from it; the fresh reader is dropped. Otherwise the old behaviour
+stands: same-checkpoint sessions are dropped, the fresh one held, at most
+eight.
+
+**Proof.** `an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors`
+in `crates/api/src/expressionsearchjson.rs`. FB-78.

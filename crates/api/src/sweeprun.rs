@@ -1730,7 +1730,18 @@ type JsonHeaders = [(axum::http::HeaderName, &'static str); 1];
 /// One route answer, as [`refused`] and the handlers build it.
 type Answer = (axum::http::StatusCode, JsonHeaders, String);
 
-/// Serialises browser ADMISSIONS, so the slot's own mutex never has to.
+/// Admits one run: refuses while one is in flight, prepares it with the slot
+/// UNLOCKED, and installs it.
+///
+/// `prepare` does every fallible, I/O-bound admission step and returns the
+/// accepted [`Progress`] with whatever the caller keeps. Under the site's
+/// admission lock nothing else installs into the slot between the busy check and the install,
+/// and a [`TaskFinisher`] only writes a slot whose run is in flight, which the
+/// busy check has just ruled out. A refusal from `prepare` leaves the slot as
+/// it was. The slot's own lock is taken twice, each time for O(1) work:
+/// `api::sweeprun::admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`.
+///
+/// # The admission lock serialises browser ADMISSIONS, so the slot's own mutex never has to
 ///
 /// Admission does file-system work no constant bounds: two canonicalizations,
 /// the execution lease, an external-log walk of up to 8 MiB, a launch
@@ -1742,29 +1753,25 @@ type Answer = (axum::http::StatusCode, JsonHeaders, String);
 /// slot lock was doing there; the slot itself is now held only for one read
 /// and one write.
 ///
-/// Process-wide rather than per-`Site`: a process serves one `Site`, and two
-/// test sites admitting at once only wait for each other, never deadlock,
-/// because nothing takes this lock while holding the slot.
-static ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Admits one run: refuses while one is in flight, prepares it with the slot
-/// UNLOCKED, and installs it.
-///
-/// `prepare` does every fallible, I/O-bound admission step and returns the
-/// accepted [`Progress`] with whatever the caller keeps. Under [`ADMISSION`]
-/// nothing else installs into the slot between the busy check and the install,
-/// and a [`TaskFinisher`] only writes a slot whose run is in flight, which the
-/// busy check has just ruled out. A refusal from `prepare` leaves the slot as
-/// it was. The slot's own lock is taken twice, each time for O(1) work:
-/// `api::sweeprun::admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other`.
+/// `try_lock`, NOT `lock`: refused rather than queued. Each POST holds one of
+/// the four shared `detail::run` permits before it gets here, so a press that
+/// WAITED for another admission parked a permit for that admission's whole
+/// I/O, and three such presses answered `Saturated` on every unrelated
+/// `detail::run` route, the run's own status poll included. A press that
+/// meets another admission is refused as `Busy` at once, as it would be by the
+/// run that admission is about to install. The lock is per `Site`
+/// ([`crate::server::Site::sweep_admission`]), so two test sites admitting at
+/// once never refuse each other. conc:runs-4, D-2776.
 fn admit<T>(
     site: &crate::server::Loaded,
     busy: impl FnOnce() -> Answer,
     prepare: impl FnOnce() -> Result<(Progress, T), Answer>,
 ) -> Result<T, Answer> {
-    let _admitting = ADMISSION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _admitting = match site.sweep_admission.try_lock() {
+        Ok(admitting) => admitting,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(busy()),
+    };
     let in_flight = site
         .sweep
         .lock()
@@ -3702,9 +3709,10 @@ mod tests {
     /// log walk, the audit `begin` and the marker run. While it is parked: a
     /// poll takes the slot at once (it used to wait out the whole admission on
     /// an async worker); a second admission does not reach its own `prepare`
-    /// and has not answered 50 ms later, because admissions are still one at a
-    /// time. Released, the first installs its in-flight run and the second
-    /// then answers `Busy` without ever preparing. A refusing `prepare` leaves
+    /// and is refused `Busy` at once rather than queued behind the first,
+    /// because admissions are still one at a time and a queued one parked a
+    /// shared `detail::run` permit (conc:runs-4, D-2776). Released, the first
+    /// installs its in-flight run. A refusing `prepare` leaves
     /// a finished slot exactly as it was, and a busy slot never runs `prepare`.
     #[test]
     fn admission_io_runs_with_the_slot_unlocked_and_admissions_still_exclude_each_other() {
@@ -3741,24 +3749,33 @@ mod tests {
                 polled.is_ok_and(|slot| slot.is_none()),
                 "a poll during admission I/O must take the slot at once and see no run yet"
             );
-            let second = scope.spawn(|| {
-                super::admit(&site, busy, || {
+            // REFUSED, NOT QUEUED (conc:runs-4, D-2776). A second admission
+            // that waited parked a shared `detail::run` permit for the
+            // first's whole I/O. The bound only turns a regression (a wait)
+            // into a failure rather than a hang; the fixed path never meets it.
+            let (answered, answer) = std::sync::mpsc::channel();
+            let second_prepared = &second_prepared;
+            let second = scope.spawn(move || {
+                let refused = super::admit(site_ref, busy, || {
                     second_prepared.store(true, Ordering::SeqCst);
                     Ok((running(2), "second"))
-                })
+                });
+                answered.send(()).expect("the test is listening");
+                refused
             });
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            assert!(
-                !second.is_finished(),
-                "a second admission waits for the first"
-            );
-            assert!(!second_prepared.load(Ordering::SeqCst));
+            let refused_at_once = answer
+                .recv_timeout(std::time::Duration::from_secs(60))
+                .is_ok();
             release.send(()).expect("the first admission is waiting");
             assert_eq!(first.join().expect("first").ok(), Some("first"));
             let (status, _, body) = second
                 .join()
                 .expect("second")
-                .expect_err("the first run is in flight");
+                .expect_err("another admission is in progress");
+            assert!(
+                refused_at_once,
+                "a second admission is refused while the first is admitting, not queued"
+            );
             assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
         });
         assert!(!first_busy.load(Ordering::SeqCst));

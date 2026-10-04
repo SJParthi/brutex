@@ -5302,6 +5302,11 @@ pub struct Site {
     /// writes them, and refusing one because the other is running would be a
     /// constraint neither of them has.
     pub sweep: std::sync::Mutex<Option<crate::sweeprun::Progress>>,
+    /// The one browser sweep ADMISSION in progress over this site, taken with
+    /// `try_lock` so a second press is refused at once rather than parking a
+    /// shared `detail::run` permit behind the first's I/O. Per `Site` so two
+    /// test sites never refuse each other. See `sweeprun::admit` (D-2776).
+    pub(crate) sweep_admission: std::sync::Mutex<()>,
     /// Everything the instrument masters produce, behind one lock so a refresh
     /// can replace it without a restart.
     ///
@@ -5555,6 +5560,7 @@ impl Site {
             recovery_active: std::sync::Mutex::new(None),
             // NO SWEEP UNTIL SOMEBODY PRESSES RUN, for the reason above it.
             sweep: std::sync::Mutex::new(None),
+            sweep_admission: std::sync::Mutex::new(()),
             reload_lock: std::sync::Mutex::new(()),
             parsed: std::sync::RwLock::new(Parsed {
                 read,
@@ -11166,18 +11172,36 @@ pub(crate) async fn pull_run_json(
 pub(crate) async fn pull_run_stop(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
-    let mut held = site
-        .run
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let stopping = match held.as_mut() {
-        Some(progress) if progress.running() => {
-            progress.stopping = true;
-            true
-        }
-        _ => false,
+    // THE SLOT IS HELD FOR THE FLAG, NOT FOR THE FSYNCS. Lock order stays
+    // `run` then `recovery_active`: the active-ID lock is taken while the slot
+    // is held, then the slot is dropped and the STOP is persisted under the
+    // active-ID lock alone, which is what serialises it with a clear or an
+    // activation. Held across the syncs, the slot stalled every chain's
+    // progress write and every `/pull/run.json` poll on its own worker.
+    // conc:runs-3, D-2775.
+    let (stopping, active) = {
+        let mut held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stopping = match held.as_mut() {
+            Some(progress) if progress.running() => {
+                progress.stopping = true;
+                true
+            }
+            _ => false,
+        };
+        let active = stopping.then(|| {
+            site.recovery_active
+                .lock()
+                .map_err(|_| "recovery active-plan lock is poisoned".to_owned())
+        });
+        (stopping, active)
     };
-    if stopping && let Err(why) = crate::recovery_control::stop(&site) {
+    let persisted = active.map(|active| {
+        active.and_then(|active| crate::recovery_control::stop_active(&site, *active))
+    });
+    if let Some(Err(why)) = persisted {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             json_headers(),
@@ -17179,6 +17203,10 @@ pub struct ConnectionLimits {
     /// See [`MAX_CONNECTIONS`]. Zero is read as one: a server that can never
     /// accept is a hang, not a limit.
     pub max_connections: usize,
+    /// How long, after the shutdown signal, in-flight requests may still run
+    /// before [`serve_limited`] returns without them. See [`SHUTDOWN_GRACE`]
+    /// and D-2771.
+    pub drain_timeout: std::time::Duration,
 }
 
 impl ConnectionLimits {
@@ -17187,6 +17215,7 @@ impl ConnectionLimits {
         head_read_timeout: HEAD_READ_TIMEOUT,
         body_read_timeout: BODY_READ_TIMEOUT,
         max_connections: MAX_CONNECTIONS,
+        drain_timeout: SHUTDOWN_GRACE,
     };
 }
 
@@ -17609,6 +17638,111 @@ impl tokio::io::AsyncWrite for HeadDeadline {
     }
 }
 
+/// `shutdown`, which on resolving first asks every pull walk to stop.
+///
+/// A hand `/pull/spot` walk answers only when it ends, and the graceful drain
+/// waited for it. Pausing the autopilot bumps the stop epoch that
+/// `broker_run` checks before every instrument, hand pulls included, so the
+/// walk breaks at its next instrument and journals the partial run inside the
+/// bounded drain rather than being dropped mid-walk. The process is ending,
+/// so the pause is never resumed. conc:server1-2, D-2771.
+fn stopping_walks(site: Loaded, shutdown: Shutdown) -> Shutdown {
+    Box::pin(async move {
+        let signalled = shutdown.await;
+        site.autopilot.pause();
+        signalled
+    })
+}
+
+/// conc:server1-2, D-2771: the shutdown signal stops pull walks, and the
+/// drain after it is bounded.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod shutdown_tests {
+    use super::{ConnectionLimits, Loaded, Site, serve_limited, stopping_walks};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt as _;
+
+    /// **The shutdown signal asks every pull walk to stop at its next
+    /// instrument.** A hand walk compares the epoch it captured at its start;
+    /// before the fix nothing on the shutdown path moved it.
+    #[tokio::test]
+    async fn the_shutdown_signal_stops_a_walk_that_captured_the_epoch_before_it() {
+        let root = crate::scratch::path("shutdown-stops-walks");
+        let site = Loaded::new(Site::load(&root.join("missing-masters"), &root));
+        let captured = site.autopilot.epoch();
+        let (fire, fired) = tokio::sync::oneshot::channel::<()>();
+        let wrapped = stopping_walks(
+            Loaded::clone(&site),
+            Box::pin(async move {
+                let _ = fired.await;
+                Ok(())
+            }),
+        );
+        assert!(
+            !site.autopilot.stopped(captured),
+            "wrapping the signal stops nothing"
+        );
+        fire.send(()).unwrap();
+        wrapped
+            .await
+            .expect("the signal's own outcome is passed through");
+        assert!(
+            site.autopilot.stopped(captured),
+            "a walk that started before the signal breaks at its next instrument"
+        );
+    }
+
+    /// **A request still running after the signal does not hold the server
+    /// open.** The handler never answers, as a half-hour walk does not within
+    /// any drain; `serve_limited` must still return once `drain_timeout`
+    /// passes. The outer bound only turns a regression into a failure rather
+    /// than a hang.
+    #[tokio::test]
+    async fn a_request_still_running_after_the_signal_does_not_hold_the_server_open() {
+        let (entered, mut inside) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let app = axum::Router::new().route(
+            "/forever",
+            axum::routing::get(move || {
+                let entered = entered.clone();
+                async move {
+                    let _ = entered.send(());
+                    std::future::pending::<()>().await;
+                    "never"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(serve_limited(
+            listener,
+            app,
+            Box::pin(async move {
+                let _ = stopped.await;
+                Ok(())
+            }),
+            ConnectionLimits {
+                drain_timeout: Duration::from_millis(50),
+                ..ConnectionLimits::SERVED
+            },
+        ));
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /forever HTTP/1.1\r\nHost: brutex\r\n\r\n")
+            .await
+            .unwrap();
+        inside.recv().await.expect("the request is in flight");
+        stop.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(60), served)
+            .await
+            .expect("serve returned after the bounded drain, not after the request")
+            .expect("the serve task joins");
+        assert!(outcome.is_ok(), "{outcome:?}");
+        drop(client);
+    }
+}
+
 /// Serves on an already-bound listener until `shutdown` resolves.
 ///
 /// The shutdown signal is a parameter rather than a `ctrl_c()` buried inside,
@@ -17657,14 +17791,49 @@ pub async fn serve_limited(
         limits.body_read_timeout,
         body_deadline,
     ));
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
+    // THE DRAIN IS BOUNDED. A graceful stop waits for every in-flight
+    // request, and a hand `/pull/spot` or `/pull/fno` answers only when its
+    // whole walk ends -- up to half an hour -- while `ctrl_c` keeps SIGINT, so
+    // a second Ctrl-C did nothing and SIGKILL mid-walk was the only way out.
+    // After the signal the requests get `drain_timeout`; then this returns
+    // without them, says so, and the caller's bounded runtime end follows.
+    // conc:server1-2, D-2771.
+    let (fired, heard) = tokio::sync::oneshot::channel::<()>();
+    let mut served = Box::pin(std::future::IntoFuture::into_future(
+        axum::serve(listener, app).with_graceful_shutdown(async move {
             // The signal's own error is not actionable: a failed ctrl-c
             // registration still means stop, and there is nothing else to do
             // about it here.
             let _ = shutdown.await;
-        })
-        .await
+            let _ = fired.send(());
+        }),
+    ));
+    let grace = limits.drain_timeout;
+    tokio::select! {
+        outcome = &mut served => outcome,
+        () = async move {
+            // A dropped sender means `serve` itself ended, and the arm above
+            // has the answer; this arm then never resolves.
+            if heard.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(grace).await;
+        } => {
+            let millis = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+            let _noted = telemetry::emit(
+                &telemetry::Event::warn(
+                    "api.serve",
+                    "shutdown drain ended with requests still in flight",
+                )
+                .with("grace_ms", telemetry::Value::Uint(millis)),
+            );
+            warn_line!(
+                "stopping: requests still in flight {millis} ms after the signal were not \
+                 waited for; a hand spot pull stops at its next instrument"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// probeapi-1, D-1200: slow, partial, silent, oversized and crowding clients
@@ -17739,6 +17908,7 @@ mod head_deadline_tests {
             head_read_timeout: T,
             body_read_timeout: T,
             max_connections: cap,
+            drain_timeout: Duration::from_secs(30),
         }
     }
 
@@ -18485,7 +18655,8 @@ fn announce_universe(read: &Read) -> bool {
 /// kernel releases it when the last descriptor referring to that description
 /// closes, which includes a process that was killed — so an abandoned lock
 /// file never wedges the next start, the way a PID file written by hand does.
-/// The handle is kept alive for the whole session by this value.
+/// The handle is kept alive in [`serving_roots`] for as long as any
+/// `ServeLock` over that store lives in this process (D-2773).
 ///
 /// A live process releases it by an explicit unlock, never by closing its
 /// handle: a descriptor duplicated into a child another thread spawned would
@@ -18494,27 +18665,44 @@ fn announce_universe(read: &Read) -> bool {
 /// (D-0693).
 #[derive(Debug)]
 struct ServeLock {
-    /// The locked handle. `None` when this process already holds the lock — see
-    /// [`take_serve_lock`].
-    held: Option<store::flock::Flock<std::fs::File>>,
     /// The store this lock is over, canonical, so [`Drop`] releases the same
     /// key that was taken.
     root: PathBuf,
 }
 
+/// One store root served by this process: how many [`ServeLock`]s name it,
+/// and the one file lock they share.
+#[derive(Debug)]
+struct Serving {
+    holders: usize,
+    file: store::flock::Flock<std::fs::File>,
+}
+
 impl Drop for ServeLock {
-    /// Unlocks the file BEFORE freeing the in-process key. The other order
-    /// leaves a window in which a second serve in this process takes the key,
-    /// finds the file still locked, and refuses itself.
+    /// The LAST holder of a root unlocks its file and frees its key, both
+    /// under the set's lock, so no other take can see the key gone while the
+    /// file is still locked. An earlier holder only counts itself out.
+    ///
+    /// The set had no count: a pass-through's drop removed the key a live
+    /// holder owned, and the first holder's drop unlocked the file while a
+    /// pass-through still served the root. conc:server2-2, D-2773.
     fn drop(&mut self) {
-        drop(self.held.take());
-        if let Ok(mut held) = serving_roots().lock() {
-            held.remove(&self.root);
+        let mut held = serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(serving) = held.get_mut(&self.root) {
+            serving.holders = serving.holders.saturating_sub(1);
+            if serving.holders == 0
+                && let Some(Serving { file, .. }) = held.remove(&self.root)
+            {
+                drop(file);
+            }
         }
     }
 }
 
-/// The store roots this process is already serving.
+/// The store roots this process is already serving, each with its holder
+/// count and its file lock.
 ///
 /// # Why a second serve inside ONE process is allowed
 ///
@@ -18524,10 +18712,11 @@ impl Drop for ServeLock {
 /// open file description, so a second handle in the same process would refuse
 /// itself. That would turn a suite into a race and would not detect one extra
 /// instance of the thing this guards against.
-fn serving_roots() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
-    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
-        std::sync::OnceLock::new();
-    ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+fn serving_roots() -> &'static std::sync::Mutex<std::collections::BTreeMap<PathBuf, Serving>> {
+    static ROOTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, Serving>>,
+    > = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
 /// The name of the lock file inside the store root.
@@ -18576,27 +18765,17 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // canonicalization; reopening through that spelling would put the lock on
     // a different filesystem while `root` still names the first one.
     let path = key.join(SERVE_LOCK);
-    match serving_roots().lock() {
-        // A POISONED MUTEX IS NOT A LICENCE TO SKIP THE CHECK. It means another
-        // thread panicked holding it; the set is still readable and the lock
-        // below is still the real guard, so this continues rather than refusing
-        // a server for a fault in a test harness.
-        Err(poisoned) => {
-            if !poisoned.into_inner().insert(key.clone()) {
-                return Ok(ServeLock {
-                    held: None,
-                    root: key,
-                });
-            }
-        }
-        Ok(mut held) => {
-            if !held.insert(key.clone()) {
-                return Ok(ServeLock {
-                    held: None,
-                    root: key,
-                });
-            }
-        }
+    // ONE TAKE AT A TIME, AND THE KEY APPEARS ONLY WITH ITS FILE LOCK. The
+    // set is held across the open, the lock and the stamp, which run once per
+    // serve, so a concurrent take in this process either finds the root with
+    // its lock already held and joins it, or waits. A poisoned set is still
+    // readable and the file lock is still the real guard (as before).
+    let mut roots = serving_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(serving) = roots.get_mut(&key) {
+        serving.holders = serving.holders.saturating_add(1);
+        return Ok(ServeLock { root: key });
     }
     let file = match std::fs::OpenOptions::new()
         .read(true)
@@ -18607,7 +18786,6 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     {
         Ok(file) => file,
         Err(why) => {
-            release_root(&key);
             return Err(format!(
                 "REFUSED: the one-server lock {} could not be opened — {why}",
                 path.display()
@@ -18628,7 +18806,6 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
             // store. R9-api-cx-2, D-1446.
             let held_by = std::fs::read_to_string(&path).unwrap_or_default();
             let held_by = held_by.lines().next().unwrap_or_default().trim();
-            release_root(&key);
             return Err(format!(
                 "REFUSED: another brutex api is already serving this store.\n  \
                  store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
@@ -18661,15 +18838,9 @@ fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<Serv
     // was taken left the PREVIOUS holder's line in the file, and a refused
     // second instance quoted that dead pid as the one holding the store -- the
     // misattribution R9-api-cx-2 fixed, back through the error path.
-    if let Err(refusal) = stamp_serve_lock(&file, addr, &path) {
-        drop(file);
-        release_root(&key);
-        return Err(refusal);
-    }
-    Ok(ServeLock {
-        held: Some(file),
-        root: key,
-    })
+    stamp_serve_lock(&file, addr, &path)?;
+    roots.insert(key.clone(), Serving { holders: 1, file });
+    Ok(ServeLock { root: key })
 }
 
 /// Writes this instance's `addr=… pid=…` line into the held serve lock, cut to
@@ -18740,13 +18911,6 @@ fn stamp_outcome(
              wrong process as the one serving this store.",
             path.display()
         )),
-    }
-}
-
-/// Drops a root out of the in-process set after a failed take.
-fn release_root(key: &Path) {
-    if let Ok(mut held) = serving_roots().lock() {
-        held.remove(key);
     }
 }
 
@@ -19549,6 +19713,7 @@ async fn run_in_over(
                     note_recovery_not_resumed(&why);
                     warn_line!("Recovery NOT resumed: {why}");
                 }
+                let shutdown = stopping_walks(Loaded::clone(&site), shutdown);
                 let code = stopped_over(
                     serve(
                         listener,
@@ -22008,6 +22173,78 @@ mod tests {
         drop(taken);
     }
 
+    /// How many `ServeLock`s in this process name `root`; zero when none.
+    fn serve_lock_holders(root: &Path) -> usize {
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(root)
+            .map_or(0, |serving| serving.holders)
+    }
+
+    /// A duplicate of the handle that holds `root`'s file lock, when one does.
+    fn serve_lock_file(root: &Path) -> Option<std::fs::File> {
+        serving_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(root)
+            .and_then(|serving| serving.file.try_clone().ok())
+    }
+
+    /// Whether another open file description could lock `root`'s serve lock
+    /// now, which is what a second process would find. Released at once.
+    fn another_process_could_serve(root: &Path) -> bool {
+        let path = root.join(SERVE_LOCK);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("the lock file");
+        store::flock::Flock::try_lock(file, path).is_ok()
+    }
+
+    /// **The serve lock is held while ANY serve in this process holds the
+    /// store, and freed only by the last.** conc:server2-2, D-2773.
+    ///
+    /// The in-process set had no count. A second serve got a pass-through
+    /// whose drop removed the key the first still owned, and the first's drop
+    /// unlocked the file while the pass-through still served the store, so a
+    /// second PROCESS could take it.
+    #[test]
+    fn the_serve_lock_is_released_by_the_last_holder_in_this_process_only() {
+        let root = crate::scratch::path("serve-lock-refcount");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
+        let first = take_serve_lock(&root, addr).expect("a free store");
+        let key = first.root.clone();
+        let joined = take_serve_lock(&root, addr).expect("the same process joins");
+        assert_eq!(serve_lock_holders(&key), 2);
+
+        drop(first);
+        assert_eq!(serve_lock_holders(&key), 1, "the joined serve still holds");
+        assert!(
+            !another_process_could_serve(&key),
+            "the store stays locked while a serve in this process still serves it"
+        );
+        let third = take_serve_lock(&root, addr).expect("joins the live holder, not refused");
+        drop(joined);
+        assert!(
+            !another_process_could_serve(&key),
+            "an earlier holder's drop does not free a key a later one still owns"
+        );
+        drop(third);
+        assert_eq!(serve_lock_holders(&key), 0);
+        assert!(
+            another_process_could_serve(&key),
+            "the last holder frees the store"
+        );
+        let again = take_serve_lock(&root, addr).expect("and the store can be served again");
+        assert_eq!(serve_lock_holders(&key), 1);
+        drop(again);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// **A dropped serve lock is released while a duplicate of its descriptor
     /// is still open.** D-0693.
     ///
@@ -22024,9 +22261,7 @@ mod tests {
         let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().expect("an address");
 
         let first = take_serve_lock(&root, addr).expect("a free store");
-        let child = first
-            .held
-            .as_deref()
+        let child = serve_lock_file(&first.root)
             .expect("the first serve in this process holds the file lock")
             .try_clone()
             .expect("the duplicate a spawned child would hold");
@@ -22034,8 +22269,9 @@ mod tests {
 
         let second = take_serve_lock(&root, addr)
             .expect("the dropped serve lock was released despite the duplicate");
-        assert!(
-            second.held.is_some(),
+        assert_eq!(
+            serve_lock_holders(&second.root),
+            1,
             "and this serve holds the file lock itself, not an in-process pass"
         );
         drop(second);
@@ -22159,8 +22395,9 @@ mod tests {
         // a regular lock file at the name, the same store is taken at once.
         std::fs::remove_file(&lock_path).expect("unlink");
         let taken = take_serve_lock(&root, addr).expect("the store is free again");
-        assert!(
-            taken.held.is_some(),
+        assert_eq!(
+            serve_lock_holders(&taken.root),
+            1,
             "a real file lock, not the in-process pass"
         );
         drop(taken);

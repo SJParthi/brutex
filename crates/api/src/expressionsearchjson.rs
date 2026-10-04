@@ -130,20 +130,26 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         else {
             return Ok(json!({"schema_version":1,"status":"missing","identity":crate::server::hex32(asked.identity),"why":"No recorded expression-search checkpoint namespace exists for this exact search ID.","rows":[],"refusal":null}).to_string());
         };
-        sessions.retain(|held| {
-            held.root != root
-                || held.identity != asked.identity
-                || held.reader.progress().checkpoint != reader.progress().checkpoint
-        });
-        if sessions.len() == 8 {
-            sessions.pop_front();
-        }
-        sessions.push_back(Session {
-            root: root.to_path_buf(),
-            identity: asked.identity,
-            reader,
-        });
-        sessions.len() - 1
+        let fresh = reader.progress();
+        let same_search = |held: &Session| held.root == root && held.identity == asked.identity;
+        let (checkpoint, writer, interrupted) =
+            (fresh.checkpoint, fresh.writer_observed, fresh.interrupted);
+        first_page(
+            &mut sessions,
+            Session {
+                root: root.to_path_buf(),
+                identity: asked.identity,
+                reader,
+            },
+            |held| {
+                let observed = held.reader.progress();
+                same_search(held)
+                    && observed.checkpoint == checkpoint
+                    && observed.writer_observed == writer
+                    && observed.interrupted == interrupted
+            },
+            |held| same_search(held) && held.reader.progress().checkpoint == checkpoint,
+        )
     };
     let held = sessions
         .get_mut(index)
@@ -152,6 +158,37 @@ fn render(root: &Path, asked: &Asked) -> Result<String, String> {
         .reader
         .page(asked.cursor, asked.limit, crate::detail::MAX_SCAN_BYTES)?;
     Ok(body(held.reader.progress(), &page, asked.limit))
+}
+/// Where an unpinned first page is served from, as an index into `sessions`.
+///
+/// A held session that observed exactly what `fresh` observes (`unchanged`) is
+/// kept and moved to the back: its reader has learned every cursor another
+/// viewer paged to, and the fresh reader knows only the head. Replacing it
+/// broke that viewer's next page with "search cursor is not linked to this
+/// admitted snapshot" whenever anyone loaded the first page of a paused,
+/// stopped or exhausted search. Otherwise held sessions of the same snapshot
+/// (`superseded`) are dropped and `fresh` is held, the oldest evicted past
+/// eight. conc:apicache-2, D-2777.
+fn first_page<S>(
+    sessions: &mut VecDeque<S>,
+    fresh: S,
+    unchanged: impl Fn(&S) -> bool,
+    superseded: impl Fn(&S) -> bool,
+) -> usize {
+    if let Some(kept) = sessions
+        .iter()
+        .position(&unchanged)
+        .and_then(|at| sessions.remove(at))
+    {
+        sessions.push_back(kept);
+        return sessions.len() - 1;
+    }
+    sessions.retain(|held| !superseded(held));
+    if sessions.len() == 8 {
+        sessions.pop_front();
+    }
+    sessions.push_back(fresh);
+    sessions.len() - 1
 }
 fn anchor_json(anchor: Option<Anchor>) -> Value {
     anchor.map_or(Value::Null,|anchor|json!({"sequence":anchor.sequence.to_string(),"seal":crate::server::hex32(anchor.seal)}))
@@ -173,6 +210,44 @@ fn body(progress: &Progress, page: &Page, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **One viewer's first page does not discard another viewer's cursors.**
+    /// conc:apicache-2, D-2777.
+    ///
+    /// A session is modelled as (snapshot, cursors learned). Viewer A has
+    /// paged to two cursors on snapshot 7; viewer B's unpinned load of the
+    /// same, unchanged snapshot must be served from A's session, which keeps
+    /// what A learned. A snapshot that moved on still replaces the old one.
+    #[test]
+    fn an_unchanged_first_page_keeps_the_held_session_and_its_learned_cursors() {
+        let mut sessions: VecDeque<(u32, Vec<u32>)> =
+            VecDeque::from([(7, vec![7, 70, 700]), (8, vec![8])]);
+        let at = first_page(
+            &mut sessions,
+            (7, vec![7]),
+            |held| held.0 == 7,
+            |held| held.0 == 7,
+        );
+        assert_eq!(sessions.len(), 2, "no second session for one snapshot");
+        assert_eq!(
+            sessions.get(at),
+            Some(&(7, vec![7, 70, 700])),
+            "viewer A's learned cursors survive viewer B's first page"
+        );
+        assert_eq!(at, 1, "and the kept session is the most recently used");
+
+        let at = first_page(&mut sessions, (9, vec![9]), |_| false, |held| held.0 == 7);
+        assert_eq!(sessions.get(at), Some(&(9, vec![9])));
+        assert_eq!(
+            sessions,
+            VecDeque::from([(8, vec![8]), (9, vec![9])]),
+            "a superseded snapshot is dropped"
+        );
+        for snapshot in 10..20 {
+            first_page(&mut sessions, (snapshot, vec![]), |_| false, |_| false);
+        }
+        assert_eq!(sessions.len(), 8, "still at most eight held");
+    }
     #[test]
     fn exact_snapshot_and_cursor_pairs_refuse_splicing_or_unbounded_queries() -> Result<(), String>
     {

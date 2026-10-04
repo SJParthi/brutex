@@ -11610,9 +11610,10 @@ would close this.
   still does file-system work with no constant bound (canonicalization, the
   lease, a log walk of up to 8 MiB, launch preparation, an audit `begin` with
   its syncs, a telemetry marker), on the blocking pool. A poll now holds the
-  slot for one clone and never waits on that work. A second admission still
-  waits for the first, behind the process-wide `ADMISSION` mutex, on a
-  blocking thread. Not timed.
+  slot for one clone and never waits on that work. A second admission no
+  longer waits for the first: it meets the site's admission lock with
+  `try_lock` and is refused `Busy` at once, so it never parks a shared
+  `detail::run` permit behind the first's I/O (D-2776). Not timed.
 - **The journal makes at most one directory per append.** `create_dir` of
   `audit/` replaces `create_dir_all`; a missing store root refuses the append
   instead of being recreated, so a pull into a root that does not exist loses
