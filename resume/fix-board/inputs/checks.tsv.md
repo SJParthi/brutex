@@ -1,8 +1,8 @@
 name	result	started	finished	url
-Gate W — the browser tree	pass	09:10	09:12	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111403805784
-Gate 1+2 — one language (all static gates)	pass	09:10	09:45	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111403805910
-Gates 3-6 — fmt, clippy, deny, every workspace test and Gate 6d	pass	09:46	10:35	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111409540229
-Gate 8 — O(1) ratio	pass	10:35	10:48	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111417417443
-Coverage — measured, then Gate 20 failed: telemetry sink.rs has 31 uncovered lines, 20 declared	fail	10:35	11:34	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111417417475
-Gate 18 — mutation planner passed; shards skipped because coverage failed	skipped	10:35	11:34	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111417417464
-ci-ok (the check merging waits on)	fail	11:34	11:34	https://github.com/SJParthi/brutex/actions/runs/37191256038/job/111427142457
+Gate W — the browser tree	pass	14:15	14:18	https://github.com/SJParthi/brutex/actions/runs/37208561651/job/111454899976
+Gate 1+2 — one language (all static gates)	pass	14:15	14:51	https://github.com/SJParthi/brutex/actions/runs/37208561651/job/111454900203
+Gates 3-6 — fmt, clippy, deny, every workspace test and Gate 6d	pass	14:51	15:31	https://github.com/SJParthi/brutex/actions/runs/37208561651/job/111461406562
+Gate 8 — O(1) ratio	pass	15:31	15:44	https://github.com/SJParthi/brutex/actions/runs/37208561651/job/111468674791
+Coverage and Gate 20 (logger lines declared)	pass	15:31	16:39	https://github.com/SJParthi/brutex/actions/runs/37208561651/job/111468674765
+Gate 18 — mutation planner passed; 127 mutation shards running	running	16:39	-	https://github.com/SJParthi/brutex/actions/runs/37208561651
+ci-ok (the check merging waits on)	waiting	-	-	https://github.com/SJParthi/brutex/actions/runs/37208561651
