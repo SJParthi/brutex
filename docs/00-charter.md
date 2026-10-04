@@ -211,6 +211,12 @@ It is therefore absent rather than guessed.
 
 Evidence lane is recorded per row and is never promoted while copying.
 
+**Corporate-action adjustment is UNVERIFIED for every feed.** Each feed's table
+below carries its own row; TrueData, which has a descriptor in `pull::vendor`
+and no section here, is UNVERIFIED on the same question. The store keeps the
+vendor's prices as served (`docs/02-store-format.md` §3) and records no
+adjustment basis. numeric-pass16 p16num-2, D-1969.
+
 ### Groww — primary
 
 | Fact | Value | Lane |
@@ -222,13 +228,14 @@ Evidence lane is recorded per row and is never promoted while copying.
 | History depth, 1-minute | **2020-01-01 — the same day as the daily rung, and this row was REVERSED on 12 Aug 2026.** It read "a rolling 3 months — NOT 2020", binding the vendor's published `1 min` row **"Last 3 months"** (`Groww Docs / 08-historical-data.md`) on the rule that the stricter claim wins. The operator restated the floor on **12 Aug 2026**, having watched this build refuse January 2020 through May 2026 on his own account: *"GROWW — data is available from JANUARY 2020. A fixed floor, not a rolling one."* That is a report of what his entitlement answers, not a competing reading of what Groww published, so it outranks rather than merely out-stricts — see `pull::vendor::ClaimStanding`. The vendor's quarter is carried beside it as the contested claim. **UNVERIFIED:** he stated the figure against the vendor, not against a rung, so it is applied to both rungs unchanged; whether this rung truly reaches 2020 is unmeasured, and no request was made to find out. D-0113, D-0131. | operator-stated 12 Aug 2026, contested by vendor docs; the per-rung split UNVERIFIED |
 | Window cap, 1-minute | 30 days per request at 1-minute granularity | documented |
 | Window cap, 1-minute — the vendor's own table says 7 | **UNRESOLVED, and both figures are written down.** The 30 above is what this repository has carried and is what `pull::vendor::HttpSpec::window_caps` encodes. `Groww Docs / 08-historical-data.md`'s interval table gives the `1 min` row a **"Max Duration per Request" of 7 days**, and its `1 day` row 1,080. Nothing was changed on the strength of this reading: the 30 is operator-facing history and a narrower cap only costs requests, while a wrong one loses bars. Named here so it is not discovered a third time. | conflicting sources |
-| Window cap, daily | **UNVERIFIED.** No day-level figure is published in any source this repository has read; the 30 above carries its own "at 1-minute granularity" qualifier and is not promoted. Encoded as **absent** in `pull::vendor::HttpSpec::window_caps`, which means "the vendor bounds nothing here" — the store's one-month-per-file boundary still splits every request. | unverified |
+| Window cap, daily | **180 days per request, read from the vendor's own backtesting limits table, and a second vendor table disagrees.** `Groww Docs / 11-backtesting.md`, "Backtesting Data Limits", gives `1 hour, 4 hours, 1 day, 1 week, ...` **180 days**; `pull::vendor::HttpSpec::window_caps` encodes `(Day1, 180)` and cites that table. `Groww Docs / 08-historical-data.md`'s interval table gives its `1 day` row 1,080 (row above). The narrower 180 is the one encoded: a narrower cap only costs requests, a wider wrong one loses bars. This row read "UNVERIFIED ... no day-level figure is published in any source this repository has read ... encoded as absent" while the descriptor already carried 180 (W1-pull4-2 left it for a charter edit); corrected by tests-docs-security-pass17 P17-05, D-1963. The vendor page was not re-read in that change; the citation is the descriptor's. | documented, two vendor tables disagreeing |
 | Daily interval word | **`1day`.** The vendor's own annexure, *Candle Interval*, gives `GrowwAPI.CANDLE_INTERVAL_DAY` the value **`1day`** — the same table that gives `CANDLE_INTERVAL_MIN_1` the value `1minute` this repository already used. The full table also carries `2minute`…`4hour`, `1week` and `1month`; none is recorded here, because `store::path::Timeframe` has a directory for two rungs and a token for a rung the store cannot file is a request whose answer has nowhere to go. Was UNVERIFIED until the docs were read; D-0076. | verified from vendor annexure |
 | Index segment word | **`CASH`** — the same word an equity takes. The vendor's live-data page states it: *"Use the segment value FNO for derivatives and CASH for stocks and index."* Before this was read, `Listing::Index` was absent from the descriptor and a live index pull refused by name with `FetchError::ListingNotSpellable`. D-0076. | verified from vendor docs |
 | Instrument-type word | **Not applicable to this request.** The annexure carries an instrument-type alphabet (`EQ`, `IDX`, `FUT`, `CE`, `PE`), but the historical-candles request schema is `exchange`, `segment`, `trading_symbol`, `start_time`, `end_time`, `interval_in_minutes` and nothing else — there is no field for a kind, so no word is written into one. Contrast Dhan, whose request carries `instrument`. | verified from vendor docs |
 | Response shape | row arrays: `[ts, o, h, l, c, v, oi]`, `oi` null off-derivatives | verified |
 | Timestamp | native IST string, or epoch seconds defensively | verified |
 | Price unit | rupees as float on the wire; converted to paisa at the boundary | verified |
+| Cash-equity candles adjusted for splits, bonuses or other corporate actions | **UNVERIFIED** for 1min and 1day alike. No page read states whether historical candles are back-adjusted after an action, and none was measured. If they are, months pulled before and after an action sit in the store on different bases, and nothing records the pull date's basis. numeric-pass16 p16num-2, D-1969. | unverified |
 | Rate limit | 500 requests per minute. **No daily quota.** | operator-confirmed, not published |
 | Per-second cap | **UNVERIFIED.** The published 10/s applies to a different endpoint group. Production ceiling is 8/s, chosen not measured. | unverified |
 | Auth | TOTP-derived daily token, reset 06:00 IST | verified |
@@ -252,6 +259,7 @@ Evidence lane is recorded per row and is never promoted while copying.
 | Credentials | `/<org>/<env>/<vendor>/<field>` — read-only. Fields: `client-id`, `access-token`. Real segments resolved at runtime; see D-0013. | verified |
 | Security ids | NIFTY = 13 (verified from the SDK's own example). BANKNIFTY 25, SENSEX 51, INDIA VIX 21 — **community sources only, unverified.** | mixed |
 | India VIX candle availability | **UNVERIFIED.** No documentation states it. Treat as a hard gate before relying on it. | unverified |
+| Cash-equity candles adjusted for corporate actions | **Not applicable to this build's use, and UNVERIFIED as a vendor fact.** This feed is used for spot indices only, so no cash equity is pulled from it; whether its equity candles are split- or bonus-adjusted is not stated in anything read. numeric-pass16 p16num-2, D-1969. | unverified |
 
 ### 4z. Zerodha — recorded, and carried nowhere
 
@@ -301,6 +309,7 @@ lane above applies only to the history depth, which that page still does not sta
 | Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
 | Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
 | Prices | decimal rupees (`1704.5`) | documented |
+| Cash-equity candles adjusted for splits, bonuses or other corporate actions | **UNVERIFIED** for `minute` and `day` alike. The historical page read for this table does not say whether candles are back-adjusted after an action, and none was measured. numeric-pass16 p16num-2, D-1969. | unverified |
 | Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
 | Window cap | **NOW STATED, AND NOT BY THE PAGE.** The historical page still states no span limit at any interval — that half of the old row was and remains true. The figures come from Zerodha's own Kite Connect developer forum, thread `kite.trade/forum/discussion/7756`, posted by staff member `rakeshr` in May 2020, which other forum threads and Zerodha staff cite as the canonical reference. Max days per single request: `minute` **60** · `3minute` **100** · `5minute` **100** · `10minute` **100** · `15minute` **200** · `30minute` **200** · `60minute` **400** · `day` **2000**. A request spanning more than the permitted days for its interval FAILS, so a backfill must chunk to them. Captured 19 Aug 2026. | forum-sourced, authoritative-but-unversioned |
 | Rate limit | **3 requests/second** on the historical candle endpoint | documented |
@@ -648,6 +657,7 @@ statement and does not say what any other day holds.
 | Alignment of GDFL seconds with Zerodha minutes and folded rungs | UNVERIFIED — no day has been read from both |
 | GDFL's naming for every F&O underlying's cash series, and its mapping to `InstrumentKey` | UNVERIFIED — three tickers seen on one day: `NIFTY 50.NSE_IDX`, `NIFTY BANK.NSE_IDX`, `RELIANCE.NSE` |
 | Whether GDFL's and Zerodha's price series agree in level, including corporate-action adjustment for the cash equities | UNVERIFIED |
+| Whether GDFL's own cash-equity series is adjusted for splits, bonuses or other corporate actions | UNVERIFIED — nothing read states it (numeric-pass16 p16num-2, D-1969) |
 | The price of the data | not recorded; the operator states it is in hand |
 | Licence terms for this use | UNVERIFIED |
 

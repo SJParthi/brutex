@@ -4741,10 +4741,10 @@ const GROWW: Descriptor = Descriptor {
         // and was carried in prose here; it is now in the KEY, which is the
         // only place it binds.
         //
-        // The day row is absent for the same reason as the vendor above: the
-        // charter records no day-level cap for this feed either. UNVERIFIED,
-        // and absent rather than guessed.
-        // BOTH ROWS THE VENDOR PUBLISHES, and the daily one was missing.
+        // BOTH ROWS THE VENDOR PUBLISHES, and the daily one was missing. (Three
+        // lines above this said the day row was "absent rather than guessed";
+        // they contradicted the row below and were deleted by
+        // tests-docs-security-pass17 P17-05, D-1963.)
         //
         // `Groww Docs/11-backtesting.md`, "Backtesting Data Limits":
         //
@@ -4759,10 +4759,15 @@ const GROWW: Descriptor = Descriptor {
         // files two rungs, and a cap for a rung nothing can request is a fact
         // with nowhere to apply.
         //
-        // It changes no request today — `split_window` binds the MONTH at every
-        // rung and a month is never 180 days — but a declared cap that is
-        // absent reads as "this vendor published none", which is a different
-        // claim about the vendor and the wrong one.
+        // It changes requests: `split_window` ends a capped chunk at the cap,
+        // not at the month end (D-0320, D-1370), so Groww's daily pass over
+        // the 80 months from 2020-01 to 2026-08 is 14 requests, not 80
+        // (`api::server::tests::each_rung_is_split_by_the_cap_its_own_vendor_published`).
+        // This said "It changes no request today — `split_window` binds the
+        // MONTH at every rung", D-0055's rule; tests-docs-security-pass18
+        // P18-03, D-1962. And a declared cap that is absent reads as "this
+        // vendor published none", which is a different claim about the vendor
+        // and the wrong one.
         window_caps: &[(Granularity::Minute1, 30), (Granularity::Day1, 180)],
         // The one rung this feed's wire word is recorded for. Read first-hand
         // from groww.in/trade-api/docs/curl/historical-data, which is where

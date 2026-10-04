@@ -34,6 +34,14 @@ committed work, not issued requests).
 
 ## 3. The browser needs a generated loader
 
+**Superseded (2026-10-04, tests-docs-security-pass17 P17-09, D-1967).** This
+section describes the era before D-0052 and D-0053. Since then the front end
+under `web/` is unrestricted (`CLAUDE.md` §2): its source there is hand-written
+and is not Rust, and `web/build` is committed output (D-0068). "Zero
+hand-written non-Rust source" and "the generated loader ... is not committed"
+are therefore false of this repository; what still holds is that `crates/**` is
+Rust and builds with `web/` absent (gate 1e). Kept below as it was written.
+
 A browser runs one of two things: script, or WebAssembly. Shipping
 WebAssembly produces a small generated loader alongside it.
 
@@ -53,11 +61,21 @@ The per-operation costs below were measured on the reference machine (14-core
 M4 Pro, 48 GB). Anything expressed in billions of trials is those numbers
 multiplied out.
 
+**The three timings in this table are not measurements of this engine and
+cannot be reproduced here** (tests-docs-security-pass17 P17-10, D-1967). No
+bench, test, `docs/04-invariants.md` row or decision in this repository
+produced them, and no harness of "94,000 bars × 10,000 masks" exists in it.
+Where they came from is not recorded; the predecessor repository is the likely
+source and that attribution is UNVERIFIED. They carry no date and no recorded
+run. `CLAUDE.md` §3 rule 6 forbids presenting them as current. The measured
+per-operation figures for this engine are the C-V, C-E and C-I bench rows in
+`docs/04-invariants.md`. The record width is this format's and is exact.
+
 | Operation | Measured | Source |
 |---|---|---|
-| Superset test | 0.192 ns per bar·mask | 94,000 bars × 10,000 masks |
-| Trade walk | 1.28 ns per bar·mask | same harness |
-| Frequent-count pass | 0.257 ns per bar·mask | same harness |
+| Superset test | 0.192 ns per bar·mask (origin unrecorded, unreproducible here) | 94,000 bars × 10,000 masks |
+| Trade walk | 1.28 ns per bar·mask (origin unrecorded, unreproducible here) | same harness |
+| Frequent-count pass | 0.257 ns per bar·mask (origin unrecorded, unreproducible here) | same harness |
 | Record width | 56 bytes | this format |
 
 **A full production sweep has never completed.** A full-range attempt did run:
@@ -653,8 +671,11 @@ is the one enforced, by C-07. Per *byte* it is linear and stays linear.
 
 **The whole lake, once, is an EXTRAPOLATION.** 1,706,290 bars ÷ 73 records per
 block × 1,485.0 ns = 0.035 s, against 0.357 s before. That is arithmetic on a
-per-block measurement, not an end-to-end run; no such run has been made, because
-no bar reader exists. Labelled as required by §3 rule 6.
+per-block measurement, not an end-to-end run; no such run has been made.
+Labelled as required by §3 rule 6. (This said no run was made "because no bar
+reader exists"; `store::file::BarFile` reads bars and `cli sweep-stored` uses
+it, so the reader exists and the whole-lake run is simply not taken.
+tests-docs-security-pass17 P17-11, D-1967.)
 
 **A hardware kernel would be faster and is not used.** An earlier probe measured
 the ARMv8 CRC32C instruction at 381.9 ns for the same block — roughly 3.9× this
@@ -664,10 +685,15 @@ crate carries `#![forbid(unsafe_code)]`, and a `#[cfg(target_arch)]`-gated body
 would be invisible to a CI that runs only `x86_64` while the coverage gate
 still reported 100%.
 
-**`x86_64` timings are UNMEASURED.** Every number above is aarch64. The kernel
-is one body on both targets so the *values* are identical by construction and
-checked by S-12 on whichever host runs; the *speeds* on the machine CI actually
-uses have never been taken here.
+**`x86_64` has one figure, and the table above is still aarch64.** Every number
+in the table is aarch64. The kernel is one body on both targets so the *values*
+are identical by construction and checked by S-12 on whichever host runs. One
+`x86_64` speed has been taken since: C-07, one block's seal, at about 2.45 µs on
+a shared `x86_64` host (4 cores, 8 concurrent builds), recorded in the D-0914
+section below ("The cold bar lookup is measured"). That is one figure on a
+loaded host, not a table, and the rows above have no `x86_64` counterpart. (This
+paragraph said `x86_64` timings were UNMEASURED and had "never been taken here";
+P17-11, D-1967.)
 
 ---
 
@@ -1964,7 +1990,10 @@ Recorded so no reader mistakes an unexamined claim for an examined one.
   `crates/api` have **never** been mutation-tested at all, and `crates/store`'s
   five hand-planted mutants are five points of a space the tool enumerates in
   full (§22). **CI has no `cargo-mutants` step**, so `CLAUDE.md` §9's
-  "no surviving mutant" bullet is enforced by nobody.
+  "no surviving mutant" bullet is enforced by nobody. *(Dated 2026-08-07.
+  Since D-0078 gate 18 installs and runs `cargo-mutants` 26.2.0 over the
+  diff, so touched code is checked; the workspace-wide gap remains as §43
+  states it. tests-docs-security-pass17 P17-12, D-1967.)*
 - **Branch coverage is not measured and cannot be**, on the pinned toolchain —
   `llvm-cov` reports `-` in the branch column for all 47 files including TOTAL.
   Every 100% figure anywhere in these documents is **line and region only**.
@@ -2010,6 +2039,11 @@ D-0045 owns `docs/**` only. Both of these are in `crates/**`:
   *"`docs/04-invariants.md` C-11"*. C-11 is a `crates/pull` manifest invariant
   (`pull::bench::census_beats_the_scan_it_replaces`). The correct id is **C-14**,
   which is what `crates/api/benches/ratio.rs` itself prints.
+
+**Both fixed on 2026-10-04** (tests-docs-security-pass17 P17-13, D-1967):
+`format.rs` now says "walks all 56 (field, byte) positions — seven fields of
+eight bytes each", and `catalog.rs`'s `page()` cites C-14. The two were still in
+the tree, at later line numbers, when that pass read them.
 ## 29. `crates/greeks` — what is bounded, what is measured, and what is neither
 
 Added by D-0046. **Renumbered from §18 to §29 on merge**: `feat/greeks` numbered it when this file ended at §17, and `feat/pull` had meanwhile appended §18 through §28. Same collision as the D-0037 one, one document over — and the same cause: a number chosen on an unmerged branch is provisional until it merges.
@@ -2582,6 +2616,11 @@ now written as a question about the **sign**, which has no boundary at all.
 
 ## 30. There is no incremental type-ahead on the symbol fields, and there cannot be one
 
+**Superseded (2026-10-04, P17-09, D-1967).** The "cannot" rested on the
+no-script rule, which D-0052 and D-0053 replaced. `/typeahead.js` is routed by
+`api::server`, `api::render` injects it into every page the Rust server renders,
+and §82 below describes it. Kept below as it was written.
+
 Referenced by `crates/api/src/render.rs` since the `<datalist>` was removed and
 **not written until now** — a pointer to a section that did not exist is exactly
 the kind of quiet gap this file is for.
@@ -2625,6 +2664,12 @@ clicks and is always available.** Asserted by
 This is a limit of the no-script constraint, not an oversight, and the cost is
 one extra click on 2 of the 12 months.
 
+**The limit still holds and the reason no longer does** (2026-10-04, P17-09,
+D-1967). The arrows still do not cross a year, and the test above still says
+so. But a script is no longer forbidden on these pages (D-0052, D-0053; §30's
+note), so this is now a choice to keep the markup-only control, not something
+`CLAUDE.md` §2 forces.
+
 ## 32. `census::held_series` is O(keys log keys), and it is the only thing on `/store` that is not O(1)
 
 `crates/api/src/census.rs`, and `pull::manifest::Manifest::held_keys` beneath it.
@@ -2634,7 +2679,12 @@ out of the instrument master (D-0048), which means enumerating every key each
 manifest holds and sorting them. That is **O(keys) to collect and O(keys log keys)
 to sort**, and no arrangement of a hash index makes it less.
 
-**It is not on a request path.** `api::server::Site::new` computes it once at
+**It is on one request path now** (UC-20, D-1446): `/store?show=gaps` calls it
+over that request's fresh censuses, so a gaps request pays O(keys log keys) for
+the axis; the default held-only view does not. The rest of this paragraph
+describes the startup call, which remains. (This said "It is not on a request
+path" until tests-docs-security-pass17 P17-16, D-1967.)
+`api::server::Site::new` computes it once at
 startup, beside the `Manifest::open` that is already O(entries) and the master
 read that measured 150 ms per request when it was wrongly per-request (D-0039).
 Every `/store` request is then ordinal arithmetic into that vector plus one hash
@@ -3219,7 +3269,7 @@ checkable.
 
 ---
 
-## 43. The mutation gate scopes to the diff, and 15 mutants already survive
+## 43. The mutation gate scopes to the diff, and at most 2 known lake mutants survive (15 when written)
 
 **CI gate 18 exists as of D-0078 and it does NOT prove this workspace is free of
 surviving mutants.** It proves a *change* did not add one.
@@ -3252,12 +3302,22 @@ Thirteen in one function is not thirteen problems: `from_cash_columns` validates
 a parquet schema with a chain nothing exercises at the boundary. One test that
 drives each column mismatch separately would kill most of them.
 
+**That test now exists, so the count is at most 2.**
+`lake::batch::tests::one_short_column_is_enough_to_refuse_and_every_column_is_checked`
+drives each column mismatch alone, and its doc comment names the thirteen
+`from_cash_columns` mutants it is written to kill. What is left of the table is
+`page.rs`'s two. "At most", because no gate-18 run over `crates/lake` has been
+taken since the test landed: the 13 are killed by construction of the test, not
+by a recorded mutation run. (This section said "the number is 15" until
+tests-docs-security-pass17 P17-14, D-1967.)
+
 `crates/lake` also measures **83.50% lines / 83.74% regions** against §9's 100%,
 `error.rs` at 24%. The two facts are the same fact.
 
 ### What is NOT claimed
 
-* That the workspace is mutant-free. It is not, and the number is 15.
+* That the workspace is mutant-free. It is not. The lake number was 15 when
+  written and is at most 2 since the test above (unremeasured).
 * That `--in-diff` catches a mutant in code the change did not touch. It cannot.
 * That a caught mutant means the test is good. It means the test *noticed*.
 
@@ -3518,7 +3578,15 @@ takes on the operator's own store and network, so the staleness has no figure
 here, only a shape. Stating one from a test fixture would be the invention
 `CLAUDE.md` §3 rule 1 forbids.
 
-## 49. A halted feed cannot be revived without restarting the server, and no route can change that
+## 49. A credential- or configuration-halted feed cannot be revived without restarting the server, and no route can change that
+
+**Scoped on 2026-10-04 (tests-docs-security-pass17 P17-18, D-1967).** Two of
+the four halt kinds revive themselves without a restart and without a route:
+`FeedState::revive` is called when a census-halted feed's manifest loads again
+(`Halt::Census`) and when a store-halted feed's write probe succeeds
+(`Halt::Store`), both inside the autopilot's own tick. What follows still holds
+for `Halt::Credential` and `Halt::Configuration`, which arm no probe; the title
+said "a halted feed" without that scope.
 
 `api::autopilot::FeedState::halted` is set at three sites and the
 `Vec<FeedState>` holding it is a local of `autopilot::fly`. No HTTP handler
@@ -3673,7 +3741,7 @@ session. A per-bar cost quoted from quiet data understates an active day by up t
 
 ---
 
-## 53. Peak memory is unmeasured; corrected collection benches require a rerun
+## 53. Peak memory is unmeasured; the corrected collection benches have been rerun
 
 `docs/04-invariants.md` keeps the rows rather than deleting them to go green.
 Their limits are different and must not be collapsed into one check mark.
@@ -3694,6 +3762,15 @@ k=1 `HashSet<u32>::insert` path. C-E-11 formerly grew an unreserved
 the offered width and later levels to a capped previous-frontier heuristic. The
 benchmark sources now match those paths, so the former ratios are historical
 and cannot be relabelled as measurements of the corrected rows.
+
+**Rerun since, so the C-03/C-04 half of this section is closed.** The corrected
+rows were measured through the production primitives: C-E-10
+`primitives::offer` at 1.011× / 0.993× and C-E-11 `primitives::append` at
+1.015× / 1.204× (1,000 → 10,000 / 100,000, D-0924, shared container), and again
+on a replica on 2026-10-02 at 1.000× / 1.028× and 1.011× / 1.560× (D-1448).
+`docs/04-invariants.md` carries both rows. The heading said the benches
+"require a rerun" until tests-docs-security-pass17 P17-08 (D-1967). E-08 is
+unchanged: still unmeasured.
 
 A push that fits existing capacity has no growth allocation. A later level can
 outgrow its heuristic, and that individual push can move every held item; only
@@ -4361,6 +4438,14 @@ archive — the operator's folders are not on this machine. The bound above is
 structural, not measured, and is labelled as such under `CLAUDE.md` §3 rule 6.
 
 ## 66. `run_local` decodes every archive feed with GDFL's ten columns, and fixing it is a store-path decision
+
+**The columns half is closed; the segment half stands** (2026-10-04,
+tests-docs-security-pass17 P17-17, D-1967). `run_local` now reads the layout:
+`archive.layout(Segment::Fno)` refuses a feed that declares no FNO layout, and
+the plan takes `columns: layout.shape` (D-0344), so no archive feed is decoded
+at GDFL's width by default. The segment is still the literal
+`Segment::Fno`, which is the store-path decision the rest of this section
+describes. Kept below as it was written.
 
 `api::server::run_local` builds its `pull::ingest::Plan` with
 `columns: pull::csv::Columns::Gdfl` and `segment: Segment::Fno` — both literals,
@@ -5423,7 +5508,18 @@ already covers. The run that would say is the one that did not finish.
 <!-- Arrived on `main` as §16 and renumbered here: this file already had a
      §16 ("The pasted-secret check is a backstop") and runs to §42, so the two
      collided on a number rather than on content. Nothing in it changed. -->
-## 85. The mutation floor is five, not zero
+## 85. The mutation floor is five, not zero (as measured then; unmeasured since)
+
+**Stale as a floor, 2026-10-04 (tests-docs-security-pass17 P17-15, D-1967).**
+Four of the five mutation sites in the table below no longer exist in
+`crates/core`: `isin.rs` now reads `if i % 2 == 0`, `Vendor::bit` returns `1`
+for Groww rather than `1 << 0`, no `1 << 0` remains anywhere in `crates/core`,
+and `Symbol::is_empty` is `const fn … { false }`, which leaves no expression to
+mutate to `false`. So a future run must NOT read "five" as the expected
+survivor count: the equivalent-mutant floor for `crates/core` is **unmeasured**
+since those rewrites, and a survivor is a real survivor until a fresh
+`cargo mutants -p core` run says otherwise. The section is kept as it was
+measured.
 
 X-07 asks that no mutant survive on a touched module. Measured over
 `crates/core` with `cargo-mutants 26.2.0`, 252 mutants, 15 survived. Ten were
@@ -9381,6 +9477,25 @@ by `File::unlock`. What that does not cover, stated rather than implied away:
   (§41.3). A month holding an unadjusted split still ranks, and its fake
   overnight crash still fires every bar-shape and gap condition. The sentence
   tells the reader that. It does not protect them.
+- **Dividends, rights issues and face-value changes are unhandled too, and
+  the sentence names them now.** The constant named only "split, bonus or
+  demerger" until numeric-pass16 p16num-3 (D-1969). Three facts, each read from
+  the source and none measured:
+  - *A dividend never enters P&L.* Every trade is flat by 15:10 IST on its own
+    session (`runner::outcome::FORCED_EXIT_MINUTE`), so no position is ever held
+    through an ex-date and no dividend entitlement is missed or owed. That is
+    why ignoring dividends is correct for the money, and it was not written
+    down anywhere before.
+  - *The ex-date gap still reaches the conditions.* An ex-dividend or ex-rights
+    open is an overnight drop with no market cause, smaller than a split's but
+    the same shape: it fires the gap conditions (bits 48/49) and moves the
+    previous-day levels, `DailyLevels`, `prev_day_bits` and the Prev5 ladder,
+    exactly as a split does. A face-value split is a split.
+  - *No detector exists for any of them.* Nothing detects, refuses or adjusts
+    a split, bonus, rights issue, face-value change, demerger or dividend;
+    D-1540's largest-overnight-move line names one date to check by hand and
+    decides nothing. Whether a vendor's candles arrive already adjusted is
+    UNVERIFIED for every feed (`docs/00-charter.md` §4, D-1969).
 - **Where the sentence is not.** No JSON projection carries it, as none
   carries D-0681's gross label: `/frontier.json`, `/trades.json` and
   `/backtest.json` serve a recorded stock run's figures with neither, and the
@@ -12275,7 +12390,11 @@ quiet-machine measurement.
   repository's choices for a loopback-only listener, not vendor facts.
 - **`param` scans the query once per field, bounded rather than parsed once.**
   A route reading `k` fields does `k` scans of a query of at most 8,192 bytes
-  (a form body: at most `MAX_FORM_BYTES`, 8,192). That is constant per
+  (a form body: at most `MAX_FORM_BYTES`, 8,192, on every route except four:
+  `/ingest/queue` and `/pull/spot` admit `ingest::MAX_MEMBER_FORM_BYTES`,
+  168,192, and `/pull/run` and `/pull/recovery` admit
+  `pullrun::MAX_RUN_FORM_BYTES`, 27,347,836, so a `param` scan on those reads up
+  to 27 MB — P17-19, D-1967). That is constant per
   request because both lengths are capped, not because the reader is O(1) in
   the query length. Parsing once into slices was rejected for this change:
   `param` has over 130 call sites in 20 files, several of them on branches still
@@ -12746,10 +12865,14 @@ this gate sits behind gate 1e in the same job, so a failing
 `cargo build` skipped it -- for long enough that five files with no
 row at all accumulated.
 
-  pull/pricing.rs 22, pull/tenor.rs 5 -- an interest RATE and a
+  pull/pricing.rs 22 -> 23, pull/tenor.rs 5 -- an interest RATE and a
     years-to-expiry, both dimensionless ratios feeding Black-Scholes.
     `Rate::annual` and `Tenor::years` are what `greeks` takes; a
-    paisa `i64` cannot express 0.0675.
+    paisa `i64` cannot express 0.0675. The 23rd is
+    `MIN_PLAUSIBLE_RATE: f64 = -1.0`, the lower edge of the rate band
+    written as a literal so the band needs no float negation and the
+    crate's `float_arithmetic` exception at that site could go
+    (crash-edge-pass20 CE-97, D-1958). A rate, not a price.
   api/ingest.rs 1 -- `text.parse::<f64>()` on the `rate` PARAMETER,
     the operator-supplied annual rate, refused by name through
     `Refusal::UnreadableRate` when it will not parse or leaves
@@ -13123,13 +13246,18 @@ a mute button.
                 substring search, which layer 12 names as "the
                 named exception and stays O(universe)" and
                 docs/06-limits.md §24 measures at 6.53 ms.
-    census.rs   held_series ONLY, and the word ONLY is a correction --
-                see the paragraph below this list. It runs in
-                `Site::new` beside the manifest load, sorts the
+    census.rs   held_series -- NOT startup only any more; see the
+                paragraph below this list. It runs in `Site::new`
+                beside the manifest load AND once per
+                `/store?show=gaps` request (UC-20, D-1446), sorts the
                 store's own held keys, and is sorted for
                 REPRODUCIBILITY rather than for display: the pager
                 addresses a row by ordinal, and HashMap order is
                 not stable between processes. docs/06-limits.md §32.
+                (This line said "held_series ONLY" under the
+                startup heading until tests-docs-security-pass17
+                P17-16, D-1967; the heading's own rule says such an
+                entry is wrong, and the reason below is the bound.)
     master.rs   skipped_by_reason — sorts DECLINE REASONS, bounded
                 by the Skip vocabulary. Reached from `universe()`.
     merge.rs    single_vendor_members — O(universe log universe),
@@ -13336,9 +13464,11 @@ and must be deleted rather than re-pinned." One of them had already
 moved, and nothing here noticed.
 
 WHAT IS ACTUALLY TRUE, traced rather than assumed:
-  held_series   startup only. Its one production call site is
-                `Site::new` (server.rs), and every other reference is
-                in that file's or census.rs's own tests.
+  held_series   startup AND `/store?show=gaps`. `Site::new` calls it,
+                and so does `store_html` on the gaps view, over that
+                request's fresh censuses (UC-20, D-1446). This said
+                "startup only. Its one production call site is
+                `Site::new`" until P17-16, D-1967.
   held_entries  startup AND per request. `Site::new` calls it, and so
                 does `server::census_now`, which is reached from THREE
                 route handlers: `instruments_json` (`/instruments.json`),
@@ -14605,14 +14735,19 @@ one: `every_live_rate_span_floors_at_one_permit_per_second` pins every shipped
 descriptor. A feed added with one inherits this limit until a bound on the wait
 itself exists.
 
-## `/pull/run` and `/pull/recovery` read up to about 26.5 MB of form — D-1769, 3 October 2026
+## `/pull/run` and `/pull/recovery` read up to 27,347,836 bytes of form — D-1769, 3 October 2026
 
 `MAX_RUN_FORM_BYTES` is sized so every run `pullrun::legs_from` accepts is read:
 `MAX_RUN_LEGS` (feeds × 3 rungs × 2 routes = 30) legs, each a member form the
 inner route admits, percent-encoded twice more. That is the worst case, held in
 memory once per request; a real press is a few kilobytes per leg. One leg past
 the bound is refused by name (`Refusal::TooManyLegs`) rather than read further.
-The figure is arithmetic from the constants, not a measurement.
+The figure is arithmetic from the constants, not a measurement: 8,192 +
+31 × 881,924 = **27,347,836 bytes, about 27.3 MB or 26.1 MiB**, where 881,924 =
+4 + 5 × (168,192 + 8,192) is one leg field and 168,192 is
+`ingest::MAX_MEMBER_FORM_BYTES`. This heading and `pullrun.rs` said "about
+26.5 MB", which is neither unit (tests-docs-security-pass17 P17-19, D-1967;
+`api::pullrun::tests::the_run_form_bound_is_the_figure_the_limits_document_states`).
 
 ## Bars already stored before D-2688 and D-2689 stay as written — 4 October 2026
 

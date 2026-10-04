@@ -802,10 +802,13 @@ pub fn grid_rows(series: usize) -> usize {
 ///
 /// # Cost
 ///
-/// **O(keys log keys)** — one pass to collect and one sort. Not O(1), and it is
-/// not on a request path: `api::server::Site` computes it once at startup beside
-/// the manifest load that is already O(entries), and every `/store` request is
-/// arithmetic and hash probes off the result. `docs/06-limits.md` §32.
+/// **O(keys log keys)** — one pass to collect and one sort. Not O(1).
+/// `api::server::Site` computes it once at startup beside the manifest load
+/// that is already O(entries), and `/store?show=gaps` computes it again per
+/// request over that request's fresh censuses (UC-20, D-1446); the default
+/// `/store` view is arithmetic and hash probes off the startup result.
+/// `docs/06-limits.md` §32. (This said "not on a request path" until
+/// tests-docs-security-pass17 P17-16, D-1967.)
 ///
 /// Sorted, because the pager addresses a row by **ordinal** — `HashMap`
 /// iteration order is not stable between runs, so an unsorted axis would put a

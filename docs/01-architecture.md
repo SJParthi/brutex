@@ -55,6 +55,17 @@ claimed dependency set. It checks all thirteen members, every normal/dev/build
 dependency spelling, both directions of table/manifest equality, and the
 acyclic property. The ASCII diagram is deliberately not the parser's authority.
 
+**What the gate compares is every dependency table, not `--edges normal`.** It
+counts a member named under `[dependencies]`, `[dev-dependencies]`,
+`[build-dependencies]` or any `[target.*]` form of them. The two agree today
+only because no member names another member outside `[dependencies]` (the one
+`[dev-dependencies]` table, `cli`'s, names two external crates); a member added
+as a dev-dependency alone would be an arrow here that `cargo tree --edges
+normal` does not print. **What the gate does not read:** the ASCII diagram, the
+"Owns" column, the "zero external packages" claim below (the parser keeps only
+workspace members), `CLAUDE.md` §5's block, and §2 to §6 of this document.
+(tests-docs-security-pass14 graph note, D-1959.)
+
 That gate found the direct `cli -> pull` edge omitted here while the manifest
 and `cargo tree -p cli --edges normal --depth 1` both named it. The edge is
 production: stored-run calendar attestation calls `pull::calendar::kind_of`,
@@ -263,23 +274,36 @@ attested long/short dynamic grids + naturally-extinct Candidate Universe V1
 Pre-Admission Data V1
                   │  Data sync, Completion last, fresh reopen, exact ID join
                   ▼
-        [implemented, focused-green D-0475 boundary]
                   │
-                  ├ - - > aligned trade-period observation authority  (open)
-                  ├ - - > Statistics V2 + finalization/admission       (open)
-                  ├ - - > Execution V2 + Selection V4 reconstruction  (open)
-                  └ - - > eight lists / 200-witness Global Replay V2   (open)
+                  ▼
+Population Observations V1 -> Statistics V2/V3 -> Admission V4
+                  -> Finalization V4 -> Population V6
+                  │
+                  ▼
+Execution V4 -> Selection V6 (per rung, then all-rung)
+                  │
+                  ▼
+Global Replay V4
 ```
 
-The solid boundary is callable from non-test Rust and accepts no raw bars,
-digest, calendar receipt, commit string, pre-resolved grid or depth. Its daily
-and minute typed loaders reuse the existing canonical converters after the
-month headers enforce explicit cumulative record ceilings. The dashed arrows
-are deliberately not called implemented by the green Candidate/Pre-Admission
-tests: Candidate now derives an in-memory aligned trade/session observation
-capability, but its bounded fixed-stride receipt-last authority and fresh-reopen
-refusal suite are still being implemented, so it cannot yet construct
-production Statistics V2. The first adversarial warm-up findings are closed:
+**The whole chain is written from an operator command.** `cli ledger-v6`
+dispatches `ledger_v6::ledger_v6`, which drives `step3_orchestrator`: Candidate
+Universe V1 is produced by `candidate_universe::produce_candidate_universe_v1`
+and committed receipt-last by `append_and_reopen` inside
+`commit_candidate_family_guarded_v6`, and `ledger_v6` then commits the Population
+V6 route, Execution V4, Selection V6 and Global Replay V4. The arrows above name
+the modules that route reaches; they are not a claim about every intermediate
+call. This diagram ended at Pre-Admission with four dashed successors marked
+"(open)" and said the path "cannot yet construct production Statistics V2"
+until tests-docs-security-pass14 P14-06 (D-1959). Global Replay V3 and the V5
+population/selection modules are not on this route; `global_replay_v3` has no
+production caller at all (CE-95, D-1956).
+
+The boundary into this path is callable from non-test Rust and accepts no raw
+bars, digest, calendar receipt, commit string, pre-resolved grid or depth. Its
+daily and minute typed loaders reuse the existing canonical converters after
+the month headers enforce explicit cumulative record ceilings. The first
+adversarial warm-up findings are closed:
 canonical NSE session identity classifies every daily/signal day, exact
 terminal-minute geometry binds the prior accepted session, and transformed
 allocations are fallible. D-0475 and `docs/06-limits.md` §156 record the exact

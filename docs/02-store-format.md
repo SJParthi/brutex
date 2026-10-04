@@ -78,6 +78,10 @@ differently on each (§3 rule 5).
 | 56 | 4 | `slot_crc` | CRC-32C over bytes 0..56 **and** 60..64 |
 | 60 | 4 | reserved | zero; a non-zero value is refused (D-1353) |
 
+**Every integer in the slot is little-endian**, whatever the host: the
+encoder writes each field with `to_le_bytes` and the decoder reads it with
+`from_le_bytes` (tests-docs-security-pass14 P14-03, D-1959).
+
 The checksum covers every byte of the slot except the four it occupies, so a
 flipped bit anywhere in the 64 is detected — there is no window a corruption
 can land in and be called clean.
@@ -138,9 +142,23 @@ const _: () = assert!(size_of::<Bar>() == 56);
 const _: () = assert!(align_of::<Bar>() == 8);
 ```
 
+**On disk the seven fields are little-endian `i64`s at offsets 0, 8, 16, 24,
+32, 40 and 48**, written by `Bar::image` with `to_le_bytes`. The `#[repr(C)]`
+above fixes the field *order*, not the byte order: the record is not a
+native-endian memory image, and a reader on a big-endian host still decodes it
+little-endian (P14-03, D-1959).
+
 **Prices are paisa integers.** Never a float, at any layer, for any reason.
 A float price is how a rounding difference becomes a divergent result set six
 months later.
+
+**The prices are the vendor's, as served.** The store snaps each price to the
+paisa grid at the write boundary and changes nothing else: it applies no split,
+bonus, dividend or other corporate-action adjustment, and it records no
+adjustment basis. Whether a vendor's cash-equity candles arrive already
+adjusted is UNVERIFIED for every feed (`docs/00-charter.md` §4), so a month
+pulled before an action and one pulled after it may sit here on different
+bases with nothing to tell them apart. numeric-pass16 p16num-2, D-1969.
 
 **`i64::MIN` is the open-interest null sentinel.** Zero means zero. Spot
 indices carry no open interest and store the sentinel; conflating that with a
@@ -352,6 +370,26 @@ bars/groww/NSE/INDEX/NIFTY/1min/2024-03.crc
 
 The sidecar is indexed by `i / 73`, not by `(32768 + i*56) / 4096`.
 
+**The sidecar's bytes.** `.crc`, `.ovl.crc` and `.grk.crc` share one layout,
+each at its own family's records per block (73 bars, 170 overlay rows, 51 Greek
+rows):
+
+| Property | Value |
+|---|---|
+| Header, magic, version | none. The file is entries only. |
+| Entry for block *b* | 4 bytes at byte offset `4·b` |
+| Entry encoding | `u32`, little-endian |
+| Entry value | CRC-32C of the block's **covered** bytes: from the block start (`32768 + b · block_len`) for the committed records only, so a partial tail block covers `(n_valid mod records_per_block) · stride` bytes (§6 above) |
+| CRC-32C parameters | Castagnoli polynomial, reflected form `0x82F63B78`; register initialised to `0xFFFFFFFF` and the result inverted (`xorout 0xFFFFFFFF`); check value `0xE3069283` for `b"123456789"` (`store::crc::CHECK_VALUE`) |
+| Blocks a reader consults | `0 .. blocks_for(n_valid)`, the blocks the header's commit counter reaches. Bytes past the last of them are not read. |
+
+The writer seals each block an append reached with one 4-byte positional write
+at `4·b` (`store::file`, "FOUR BYTES AT `block * 4`"); the reader verifies one
+block with one 4-byte positional read at the same offset. Until
+tests-docs-security-pass14 P14-02 (D-1959) these facts were stated only in
+Rust comments, and this document named the checksum and nothing about where an
+entry is or how it is encoded.
+
 **Why this is not optional.** A flipped bit in a raw `i64` price produces a
 different price — a *plausible* one. There is no structure to violate, no
 parse to fail. Without a checksum the corruption is silent and permanent, and
@@ -426,6 +464,47 @@ bars/<vendor>/NSE/FNO/<underlying>/<contract>/1min/2024-03.grk
 This keeps the base stride constant forever. A base file written in year one
 is readable in year ten by arithmetic that has not changed.
 
+`.ovl` and `.grk` are the bar file's header region and slot (§2) with their own
+magic, version and stride: the same 32,768-byte header region, the same
+64-byte slot, the same commit counter, and blocks of whole records anchored at
+byte 32,768. Their block checksums are optional as at bar version 2 (`flags`
+bit 0), and when present live in `.ovl.crc` / `.grk.crc` (§6's sidecar layout).
+Neither is in `store::layout::Layout::KNOWN`, the bar versions a `.bin` resolves
+against. Every integer and float is little-endian. Until P14-03 (D-1959) this
+section gave only each record's width and version.
+
+### 8.1 `.ovl` — overlay record, 24 bytes
+
+Magic `BRUTEXB9`, version `9`, stride `24`, **170** records per block
+(`24 × 170 = 4,080`). Written by `store::format::Overlay::image`.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `ts_micros` | `i64`, the open of the bar it overlays; joined to the bar by value, not by position |
+| 8 | 8 | `spot` | `i64` paisa, or `i64::MIN` when the vendor stated none |
+| 16 | 8 | `iv_micros` | `i64` millionths of implied volatility (`125000` is 0.125), or `i64::MIN` when absent |
+
+### 8.2 `.grk` — computed Greeks record, 80 bytes
+
+Magic `BRUTEXB8`, version `8`, stride `80`, **51** records per block
+(`80 × 51 = 4,080`). Written by `store::format::Greek::image`.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `ts_micros` | `i64`, the open of the bar it prices |
+| 8 | 8 | `spot` | `i64` paisa, the underlying level used |
+| 16 | 8 | `volatility` | `f64` decimal (`0.1425`, not `14.25`) |
+| 24 | 8 | `delta` | `f64`, scale-free |
+| 32 | 8 | `gamma` | `f64`, **per paisa** |
+| 40 | 8 | `vega` | `f64`, per `1.00` of volatility, **per paisa** |
+| 48 | 8 | `theta` | `f64`, per year, **per paisa** |
+| 56 | 8 | `rho` | `f64`, per `1.00` of rate, **per paisa** |
+| 64 | 8 | `rate` | `f64`, the continuously-compounded rate priced under |
+| 72 | 8 | `provenance` | `i64`, packed: bits `0..8` volatility source (`0` solved, `1` vendor); bits `8..16` rate source (`0` charter, `1` operator, `2` solved); bit `16` below the validated band; bits `32..64` signed `i32` moneyness steps (sign-extend when reading) |
+
+The `f64` fields keep full precision (`CLAUDE.md` §7: a greek is a statistic,
+not a price); the two `i64` fields that are prices are paisa.
+
 Each record family owns its checksum file (D-0667). Sharing `.crc` between
 different strides overwrote the source bars' integrity evidence when an overlay
 or Greek file committed. The month-wide `.lock` remains shared, so writers stay
@@ -448,7 +527,7 @@ ext4 and one file on APFS.
 | Hazard | Position |
 |---|---|
 | Page fault on a network mount that has gone away | Uninterruptible. Keep the store on local disk. This is an operational rule, not an architectural fix. |
-| Two writers on one file | Not supported. One writer per file, enforced by an advisory lock on the `.lock` sibling, and the lock is a leaf — never held while acquiring another. Nothing in `crates/store` can check it. |
+| Two writers on one file | Not supported. One writer per file, enforced by `store::flock`: the writer takes an exclusive `try_lock` (`flock(2)`) on the `.lock` sibling at open and refuses when another holder has it (§5). The lock is a leaf — never held while acquiring another. What it does not cover: it is **advisory**, so a process that writes the month without taking it is not stopped; and it is not relied on across hosts on a network filesystem, where `flock` semantics are the filesystem's and not this crate's. (This row said "Nothing in `crates/store` can check it", which §5 and `BarFile`'s open contradicted; tests-docs-security-pass14 P14-04, D-1959.) |
 | A failure coarser than 16384 bytes | Takes both header slots. No arrangement inside one file survives a dead device. |
 | A symlink at a path component | Defeats vendor-prefix isolation, which is a **lexical** property of `StorePath`, not a filesystem one. The writer asks every existing component below the store root with `symlink_metadata` before it creates anything, opens the month file, its `.lock` and its `.crc` with `O_NOFOLLOW`, and halts with `StoreError::Symlinked` naming the linked component (CE-62, D-2686). The remaining window: a directory link swapped in between that walk and the open is followed, because per-component `openat` is not available in `std` without `unsafe`. The store root itself may be a link; it is the operator's to place. |
 | A wrong value that is well-formed | Out of scope here. Range validation happens at the ingest boundary, before a byte is written. |
@@ -524,13 +603,22 @@ a constant on the read path. 32768 divides by both strides, so an entry is
 | 0 | 8 | `magic` | `b"BRUTEXM1"` at version 1, `b"BRUTEXM2"` at versions 2 and 3 — the magic names the GEOMETRY, not the version |
 | 8 | 2 | `format_version` | `1`, `2` or `3`. **Selects the geometry and the meaning of reserved bytes.** |
 | 10 | 2 | `entry_stride` | `64` at version 1, `128` at versions 2 and 3. Read it; never assume it, and check it against what the version declares. |
+| 12 | 4 | reserved | written zero |
 | 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
 | 24 | 8 | `n_valid` | the commit counter: entries readable |
 | 32 | 8 | `n_keys` | distinct `(instrument, timeframe, month)` keys among them |
 | 40 | 8 | `total_rows` | bars held across every distinct key |
-| 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name |
-| 54 | 6 | reserved | zero |
+| 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name. All eight bytes are the vendor's: `truedata` fills them and `zerodha` uses seven |
+| 56 | 4 | reserved | written zero |
 | 60 | 4 | `crc` | CRC-32C over bytes `0..60`, one contiguous run |
+
+All integers are little-endian. **The two reserved runs are written zero and
+are not checked individually**: the decoder reads neither `12..16` nor
+`56..60`, so a non-zero byte there is caught only by the slot's `crc`, which
+covers both. (The bar slot refuses a non-zero reserved field by name, D-1353;
+this one does not.) This table put a reserved row at `54..60` over the last two
+bytes of `vendor` and gave no row for `12..16` until tests-docs-security-pass14
+P14-01 (D-1959).
 
 The slot layout is **identical across all three versions**: only the magic, the
 version and the stride differ, which is why one decoder reads them all and
@@ -1350,13 +1438,18 @@ D-0461, IS-01 and limits §146 define that boundary.
 
 Candidate Universe V1 is the first durable object in the selection-independent
 Step-3 successor path. Its codec encodes closed-mask/grid-cell source terms and
-raw direct-cell fields; production derivation of those terms is not yet proved.
-It contains no assurance, admission verdict, ranking score, selected rank or
-final Population identity. The current public surface is deliberately
-**audit only**: it can reopen, validate and page already existing V1 bytes, but
-there is no public production constructor or writer. Until the typed
-closed-frontier/full-grid producer exists, this format cannot authorize a live
-run merely because controlled fixture bytes pass its codec.
+raw direct-cell fields. It contains no assurance, admission verdict, ranking
+score, selected rank or final Population identity.
+
+**It has a production writer.** `cli::candidate_universe::produce_candidate_universe_v1`
+derives the rows from a naturally-extinct sweep, and
+`append_and_reopen` → `append_produced_candidate_universe_v1` commits them
+receipt-last and reopens them. Both are `pub(crate)` and are reached from
+`step3_orchestrator::commit_candidate_family_guarded_v6`, which the operator
+command `cli ledger-v6` (`ledger_v6::ledger_v6`) drives. This section called the
+format "audit only" with "no public production constructor or writer" until
+tests-docs-security-pass14 P14-06 (D-1959); "public" was true and the
+conclusion was not.
 
 The three paths are:
 
@@ -2045,7 +2138,17 @@ candle (time, open, high, low, close, volume, open interest).
 | 992 | 32 | seal |
 
 India VIX is stamped after admission and never changes selection, execution,
-money or replay identity (`CLAUDE.md` §1).
+P&L or the replay identity (`CLAUDE.md` §1). It is hashed into each money id
+(`money_id` hashes the entry and exit stamps after the trade row), and so into
+the ordered money digest, the publication identity and the completion identity:
+a VIX backfill or correction changes those four and no other (numeric-pass19
+p19num-1, D-1957). This said VIX "never changes ... money ... identity", which
+contradicted the code and the V1 statement in §18.
+
+No production command writes Global Replay V3. Nothing outside
+`cli::global_replay_v3` names the module; the Step-3 orchestrator writes Global
+Replay V4 instead (`ledger_v6`). This section describes the format the V3 code
+and its tests define (crash-edge-pass20 CE-95, D-1956).
 `cli::global_replay_v3::tests::the_store_format_doc_states_the_global_replay_v3_this_build_writes`
 binds this section to the constants.
 
@@ -2144,7 +2247,9 @@ signature or an independently embedded trade date. No candle format changes.
 ## Explicit bar repair V1 (not transparently promoted)
 
 `crates/store/REPAIR.md` specifies the additive revision protocol and exact
-144-byte completion receipt. Original V2 bar geometry is unchanged. Revisions
+144-byte completion receipt. The bar geometry (versions 2 and 3 share it) is
+unchanged; a revision file is born at `Layout::CURRENT`, version 3 since D-1571,
+whatever its source's version (P14-05, D-1959). Revisions
 live below `bar-revisions-v1/<ordinal>/` with their own bar/CRC/lock pair,
 create-once `.reserved-v1` marker, and completion-last `.repair-v1` receipt.
 Ordinary readers and census paths still select the original data. Missing or
@@ -2540,6 +2645,16 @@ body is additive; no original candidate, source or qualification stride changes.
 | Setting, 80 bytes each | Original run32, original source32, first trade offset8, trade count8. Extents are contiguous in the original setting order, including zero-trade settings. |
 | Month, 72 bytes plus reason | Year8, month8, validated-snapshot flag8, original row count8, snapshot digest32, reason byte length8, then bounded UTF-8 diagnostic bytes. A validated month has no reason; an unavailable month has no row count or snapshot digest. |
 | Trade annotation, 240 bytes each | Original local ordinal8, run32, original native trade digest32, entry/exit-bar/exit-from/exit-until timestamps32, month index8, then two 64-byte stamps. Each stamp is state8 and seven i64 candle fields56. Absent and unavailable states require zero payload padding. |
+
+**Units of the stamped candle.** The seven `i64` candle fields are the stored
+`NSE-INDIAVIX` bar: time in microseconds, then open, high, low and close in
+**hundredths of an India VIX index point** (the price write path's ×100
+scale; VIX is a volatility index in points, not a price in rupees), then volume
+and open interest (`i64::MIN` when absent). `/index-stop-vix.json` serves the
+four price-path fields as `open_paisa` .. `close_paisa`; those names are the
+shared path's and are frozen, and the response's `policy` text states the unit
+(`api::indexstopvixjson::CANDLE_UNIT`). A `close_paisa` of `1345` is VIX 13.45,
+not ₹13.45. numeric-pass19 p19num-2, D-1968.
 
 The body order is header, settings, months and their reasons, then annotations.
 `brutex-index-stop-vix-reference-lookup-v1\0` binds catalog identity and pin.

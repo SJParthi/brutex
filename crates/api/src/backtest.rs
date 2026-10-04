@@ -525,9 +525,13 @@ impl Run {
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
-        reason = "every index is a constant offset into a fixed-size array \
-                  whose length is const-asserted against the field sum by \
-                  FIELD_SUM, so no offset here can be out of bounds"
+        reason = "every `take` width is a literal and `raw` is a fixed-size \
+                  array. FIELD_SUM restates those widths BY HAND and is \
+                  const-asserted equal to PAYLOAD_BYTES, but nothing ties this \
+                  `take` sequence to FIELD_SUM at compile time: the bound is \
+                  held by every_field_lands_where_the_writer_put_it and \
+                  a_record_survives_a_round_trip_through_its_own_index, which \
+                  decode a whole record and would panic on an overrun"
     )]
     fn from_bytes(index: u64, raw: &[u8; STRIDE_BYTES], sealed: bool) -> Self {
         let mut at = 0_usize;

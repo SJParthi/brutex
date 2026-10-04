@@ -474,7 +474,7 @@ impl Catalog {
     ///
     /// One slice index and at most [`PAGE_ROWS`] row copies, whatever the size
     /// of the universe. Nothing here is proportional to the instrument set —
-    /// that is `docs/04-invariants.md` C-11 and `crates/api/benches/ratio.rs`
+    /// that is `docs/04-invariants.md` C-14 and `crates/api/benches/ratio.rs`
     /// asserts it.
     #[must_use]
     pub fn page(&self, sel: Selection, page: usize) -> Page {

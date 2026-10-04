@@ -167,9 +167,18 @@ pub const CASH_EQUITY_GROSS: &str = "  CASH EQUITY. EVERY TOTAL BELOW IS GROSS O
 /// and to say so on every such report rather than refuse them. This is the
 /// sentence that says so. An index never splits, so no index report carries
 /// it.
-pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus or\n  \
-     demerger detection has run over these bars, so an overnight jump in\n  \
-     them can be a corporate action rather than a market move. D-0018\n  \
+///
+/// It names every action kind that moves a stock's open with no market cause:
+/// split, bonus, rights issue, face-value change, demerger and dividend. It
+/// named only "split, bonus or demerger" until numeric-pass16 p16num-3
+/// (D-1969); an ex-dividend or ex-rights open is the same fake gap, smaller.
+/// A dividend never enters P&L, because every trade has exited by its own
+/// session's close and so never holds through an ex-date (`docs/06-limits.md`,
+/// the D-0694 section, says so); the ex-date gap still reaches the conditions.
+pub const CORPORATE_ACTIONS_UNCHECKED: &str = "  CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694). No split, bonus,\n  \
+     rights issue, face-value change, demerger or dividend detection has\n  \
+     run over these bars. An overnight jump in them\n  \
+     can be a corporate action rather than a market move. D-0018\n  \
      requires such a window to be refused with its date named; no\n  \
      threshold for that detector is sourced, so none was applied.";
 
@@ -2378,7 +2387,8 @@ mod tests {
     /// A CASH-EQUITY AUDIT SAYS CORPORATE ACTIONS ARE UNCHECKED, BESIDE ITS
     /// CHARGE STATEMENT, AND AN INDEX AUDIT NEVER DOES. D-0694.
     ///
-    /// No split, bonus or demerger detector exists (D-0018 names no threshold
+    /// No split, bonus, rights, face-value, demerger or dividend detector
+    /// exists (D-0018 names no threshold
     /// and the charter names no source), so an overnight jump in a stock's
     /// bars can be a corporate action. The operator chose to keep ranking
     /// stocks and to say so; an index never splits and says nothing.
@@ -2398,7 +2408,7 @@ mod tests {
             );
             for fact in [
                 "CORPORATE ACTIONS ARE UNCHECKED (D-0018, D-0694)",
-                "No split, bonus or\n  demerger detection has run",
+                "No split, bonus,\n  rights issue, face-value change, demerger or dividend detection has",
                 "can be a corporate action rather than a market move",
                 "no\n  threshold for that detector is sourced",
             ] {

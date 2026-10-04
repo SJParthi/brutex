@@ -449,7 +449,11 @@ impl Cell {
     // SCOPED TO THIS FUNCTION, and deliberately not to the module.
     //
     // `significance`, `bootstrap` and `outcome` each take this exception at
-    // module level, and they can: none of them ever sees a price. `grid` does --
+    // module level. `outcome` is not price-free: it reads candles, and its
+    // `Edge` carries paisa SUMS as `f64` (D-1173), so its module-wide allow
+    // is a standing exception over money rather than evidence that none is
+    // there (this said "none of them ever sees a price"; CE-96, D-1958).
+    // `grid` --
     // it carries paisa in `gross_win`, `gross_loss` and every P&L field on this
     // same struct -- so a module-level allow here would switch off the lint that
     // keeps §7's integer rule enforceable for the rest of the file.

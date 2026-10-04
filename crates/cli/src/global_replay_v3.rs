@@ -39,7 +39,7 @@
 
 #![expect(
     dead_code,
-    reason = "Global Replay V3 remains crate-private until the Step-3 orchestrator moves the all-rung Selection V5 and exact OOS replay capabilities into this terminal join"
+    reason = "Global Replay V3 has NO production caller: nothing outside this file names the module, and the Step-3 orchestrator writes Global Replay V4 instead. It is kept, with its tests, as the append-only definition of a format docs/02 describes. Module-wide on purpose, because the whole module is unreached (CE-95 checked it, D-1956)"
 )]
 
 use std::collections::{HashMap, HashSet};
@@ -3404,6 +3404,50 @@ mod tests {
             "| 116 | {} | eight selection IDs",
             RUNG_COUNT * 32
         )));
+        // `money_id` hashes both VIX stamps, so the section must say VIX
+        // reaches the money identity and must not claim it never does.
+        // numeric-pass19 p19num-1, D-1957.
+        assert!(section.contains("It is hashed into each money id"));
+        assert!(!section.contains("never changes selection, execution, money"));
+    }
+
+    /// The doc's claim above, held by the code: one VIX stamp changed and
+    /// nothing else changes the money id. numeric-pass19 p19num-1, D-1957.
+    #[test]
+    fn a_vix_stamp_is_part_of_the_money_identity() -> Result<(), String> {
+        let row = priceable(1, 2, 3);
+        let candle = Candle {
+            ts_micros: 1_700_000_000_000_000,
+            open: 1_500,
+            high: 1_510,
+            low: 1_490,
+            close: 1_505,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+        let absent = VixPairV3 {
+            entry: VixStamp::Absent,
+            exit: VixStamp::Absent,
+        };
+        let entry_exact = VixPairV3 {
+            entry: VixStamp::Exact(candle),
+            exit: VixStamp::Absent,
+        };
+        let exit_exact = VixPairV3 {
+            entry: VixStamp::Absent,
+            exit: VixStamp::Exact(candle),
+        };
+        let decision = [7_u8; 32];
+        let base = money_id(decision, row, absent)?;
+        assert_ne!(base, money_id(decision, row, entry_exact)?);
+        assert_ne!(base, money_id(decision, row, exit_exact)?);
+        assert_ne!(
+            money_id(decision, row, entry_exact)?,
+            money_id(decision, row, exit_exact)?,
+            "the entry and exit stamps occupy distinct positions"
+        );
+        assert_eq!(base, money_id(decision, row, absent)?);
+        Ok(())
     }
 
     struct AbsentVix {
