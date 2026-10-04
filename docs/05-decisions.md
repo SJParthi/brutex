@@ -56912,3 +56912,34 @@ at another address.
 `cli::execution_disposition_v2::v2_tests::both_global_replays_price_their_streams_through_one_attestation_cache`
 requires both replays to hold one cache across their stream loop and neither
 to call the per-call door.
+
+### D-1839 — A span read for one number seeds the work it hands off — 2026-10-04
+
+**What was found (o1cli-5; left stated in `docs/06-limits.md`, "Four commands
+load a span for one number, then load it again").** `elite_descend_in_points_inner`,
+`reference_of_span` (the `screen` arm), `screen_range_in_points` and
+`descent_bar_count` each read a whole stored span for a reference price,
+measured rules or a bar count, dropped it, and the work they handed off read the
+same months again: one extra O(span bars) read per command, two for the points
+descent.
+
+**The change.** `ScreenCache` gains a `seed` slot holding a signal span already
+read for one `ScreenKey`. Every entry reads through one function,
+`read_signal_span`, and hands the span on in a seeded cache:
+`elite_descend_seeded` and `screen_range_seeded` take that cache;
+`descent_bar_count` reads through the descent's cache (`signal_span`), so the
+first step takes the span the count read; `load_screen_inputs` uses a seed in
+place of its own read. The kernel takes a seed only when its key equals the
+question's; any other seed is left in place and the span is read. The bars, the
+order of refusals and every page are unchanged, and only one copy of a span is
+held, since the first step moves the seed into its inputs. Reading header
+counts instead was rejected for the reason the limit already gave.
+
+**What it proves.**
+`cli::audited_stored_tests::a_span_read_for_one_number_seeds_the_screen_that_follows`
+counts one read for a descent's bar count and first step (two before), requires
+the page to equal an unseeded screen's, and shows a foreign seed is neither
+screened nor consumed.
+`the_span_loaded_for_one_number_seeds_the_work_it_hands_off`
+(`crates/cli/tests/limits_o1cli_5.rs`) holds the four entries and the kernel to
+that shape.

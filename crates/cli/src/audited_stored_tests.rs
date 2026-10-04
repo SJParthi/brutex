@@ -2373,6 +2373,114 @@ fn a_descent_loads_its_stored_inputs_once() {
     crate::knobs::clear_all();
 }
 
+/// **A span read for one number is the span the screen reads.** o1cli-5,
+/// D-1839.
+///
+/// `screen`, `screen_range_in_points`, the points descent and every descent's
+/// bar count read the signal span for a reference price, measured rules or a
+/// bar count, dropped it, and the screen kernel read the same months again.
+/// Counted before the fix: a descent's bar count and its first step read the
+/// 5min span twice. Now the count reads it once into the cache, the step reads
+/// nothing, and the page equals an unseeded screen's. A seed for another
+/// question is never screened: the kernel reads its own span and leaves the
+/// seed untouched.
+#[test]
+fn a_span_read_for_one_number_seeds_the_screen_that_follows() {
+    let _knobs = crate::knobs::serially();
+    crate::knobs::clear_all();
+    let fresh = Fixture::warmed();
+    let seeded = Fixture::warmed();
+    let other = Fixture::warmed();
+    let reads = || crate::SIGNAL_SPAN_READS.with(std::cell::Cell::get);
+    let request = |fixture: &Fixture| crate::StoredScreenRequest {
+        root: fixture.root.clone(),
+        vendor: Vendor::Zerodha,
+        underlying: fixture.symbol,
+        rung: "5min",
+        span: ((2025, 5), (2025, 5)),
+        support_ppm: 1_000_000,
+        policy: crate::Policy {
+            rules: crate::Rules::BASELINE,
+            lens: runner::rank::Lens::Detectability,
+            validate: false,
+        },
+        attempt: Some(13),
+        commit: "generated-stored-screen-fixture",
+    };
+    let key = |fixture: &Fixture, rung: &str| {
+        crate::screen_key(
+            &fixture.root,
+            Vendor::Zerodha,
+            fixture.symbol,
+            rung,
+            ((2025, 5), (2025, 5)),
+        )
+    };
+
+    let before = reads();
+    let expected =
+        crate::screen_range_kernel_cached(request(&fresh), &mut crate::ScreenCache::default())
+            .expect("unseeded screen");
+    assert_eq!(reads() - before, 1, "an unseeded screen reads its span");
+
+    let before = reads();
+    let mut cache = crate::ScreenCache::default();
+    let (bars, _) = crate::descent_bar_count_at(key(&seeded, "5min"), (0, 1), &mut cache)
+        .expect("the bar count reads the span");
+    assert!(bars > 0);
+    let (again, _) = crate::descent_bar_count_at(key(&seeded, "5min"), (0, 1), &mut cache)
+        .expect("a held span is counted again");
+    assert_eq!(again, bars);
+    let page =
+        crate::screen_range_kernel_cached(request(&seeded), &mut cache).expect("seeded screen");
+    assert_eq!(
+        reads() - before,
+        1,
+        "the count and the step share one read (two before D-1839)"
+    );
+    assert!(
+        cache.seed.is_none(),
+        "the step took the seed into its inputs"
+    );
+    assert!(page.contains("RESULT RECORDED"), "{page}");
+    assert_eq!(
+        page.replace(
+            &seeded.root.display().to_string(),
+            &fresh.root.display().to_string()
+        ),
+        expected
+    );
+
+    let before = reads();
+    let span = crate::read_signal_span(
+        &other.root,
+        Vendor::Zerodha,
+        other.symbol,
+        "1min",
+        ((2025, 5), (2025, 5)),
+    )
+    .expect("a 1min span");
+    let mut foreign = crate::ScreenCache::seeded(key(&other, "1min"), span);
+    let page = crate::screen_range_kernel_cached(request(&other), &mut foreign)
+        .expect("a 5min screen beside a 1min seed");
+    assert_eq!(reads() - before, 2, "the 5min screen read its own span");
+    assert!(
+        foreign
+            .seed
+            .as_ref()
+            .is_some_and(|(held, _)| *held == key(&other, "1min")),
+        "a seed for another question is left untouched"
+    );
+    assert_eq!(
+        page.replace(
+            &other.root.display().to_string(),
+            &fresh.root.display().to_string()
+        ),
+        expected
+    );
+    crate::knobs::clear_all();
+}
+
 /// A RELIANCE (or index) May whose every price halves from 2025-05-09 on:
 /// an unadjusted 1:2 split, written at all three rungs `warmed_for` writes.
 fn split_on_the_ninth(symbol: &'static str) -> Fixture {
