@@ -197,17 +197,36 @@ pub const SOURCED_HOLIDAYS: [i64; 34] = [
 /// regular day: 2018-11-07 (a Wednesday holiday) and 2019-10-27 (a Sunday).
 pub const SOURCED_SPECIAL: [i64; 2] = [17_842, 18_196];
 
+/// Whether `day` is one of a compile-time table's entries: a walk bounded by
+/// the table's own constant length, never by the data (the shape `kind_of`
+/// already uses for its two tables).
+fn listed(table: &[i64], day: i64) -> bool {
+    let mut at = 0_usize;
+    while at < table.len() {
+        match table.get(at) {
+            Some(&held) if held == day => return true,
+            _ => at += 1,
+        }
+    }
+    false
+}
+
 /// A day of the sourced spans: a Muhurat is open with no length, a weekend
 /// or a listed holiday is closed, every other weekday is a regular session.
 /// Two bounded walks over compile-time tables (2 and 34 entries) and one
-/// remainder: O(1), no allocation.
+/// remainder, no allocation.
+///
+/// **UNVERIFIED as a measurement.** The bound is argued from the
+/// shape of the code and no bench in this workspace times it.
+/// `CLAUDE.md` §3 rule 6: a structural argument is not a
+/// measurement, however sound it is.
 fn sourced_kind(epoch_day: i64) -> DayKind {
-    if SOURCED_SPECIAL.contains(&epoch_day) {
+    if listed(&SOURCED_SPECIAL, epoch_day) {
         return DayKind::OpenLengthUnmeasured;
     }
     // 1970-01-01, day 0, was a Thursday: Monday..Friday are 0..=4 here.
     let weekday = (epoch_day + 3).rem_euclid(7) < 5;
-    if weekday && !SOURCED_HOLIDAYS.contains(&epoch_day) {
+    if weekday && !listed(&SOURCED_HOLIDAYS, epoch_day) {
         DayKind::Open(Session::full())
     } else {
         DayKind::Closed
@@ -487,7 +506,7 @@ pub fn kind_of(epoch_day: i64) -> DayKind {
     }
     // OUTSIDE THE MEASURED BITSET, INSIDE THE CALENDAR: the circular-sourced
     // spans of D-2805.
-    if !(MEASURED_FIRST_DAY..=MEASURED_LAST_DAY).contains(&epoch_day) {
+    if epoch_day < MEASURED_FIRST_DAY || epoch_day > MEASURED_LAST_DAY {
         return sourced_kind(epoch_day);
     }
     // `try_from` RATHER THAN `as`, and the failure arm is honest rather than a

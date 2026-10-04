@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests of the GDFL options reader. Every value is invented at run time.
 
 #![allow(
@@ -276,6 +277,9 @@ fn weekday_and_month_helpers_hold_their_edges() {
     assert!(!is_weekday(day(2024, 4, 7)));
     assert!(is_weekday(day(2024, 4, 8)));
     assert!(is_weekday(day(2024, 4, 5)));
+    for (at, name) in MONTHS.iter().enumerate() {
+        assert_eq!(month_of(name.as_bytes()), Some(u8::try_from(at + 1).unwrap()), "{name}");
+    }
     assert_eq!(month_of(b"JAN"), Some(1));
     assert_eq!(month_of(b"DEC"), Some(12));
     assert_eq!(month_of(b"Jan"), None);
@@ -450,7 +454,7 @@ fn only_option_files_of_the_day_folder_are_filed_by_ticker() {
     ] {
         assert_eq!(entry_ticker(&folder, &other), None, "{other}");
     }
-    let mut listing: NfoDay<u8> = NfoDay::new(d);
+    let mut listing: NfoDay<u8> = NfoDay::new(d, 2);
     listing.push(&entry(d, "A01APR241CE"), 3, 4, 0);
     listing.push(&format!("{folder}\\Futures\\X.NFO.csv"), 3, 4, 1);
     assert_eq!(listing.day(), d);
@@ -464,7 +468,7 @@ fn only_option_files_of_the_day_folder_are_filed_by_ticker() {
 #[test]
 fn a_ticker_listed_twice_is_refused_by_name() {
     let d = trade();
-    let mut listing: NfoDay<u8> = NfoDay::new(d);
+    let mut listing: NfoDay<u8> = NfoDay::new(d, 2);
     listing.push(&entry(d, "A01APR241CE"), 3, 4, 0);
     listing.push(&format!("{}\\Options\\A01APR241CE.NFO.CSV", day_folder_name(d)), 3, 4, 1);
     assert_eq!(
@@ -564,7 +568,7 @@ fn every_fault_of_a_source_is_refused_by_name() {
         Err(CmRefusal::ArchiveUnavailable { .. })
     ));
     // A file that is not an option file of the day, read anyway.
-    let mut listing: NfoDay<crate::gdfl_nfo::StoreLocator> = NfoDay::new(d);
+    let mut listing: NfoDay<crate::gdfl_nfo::StoreLocator> = NfoDay::new(d, 2);
     let fine = NfoTickStore::new(&root.join("a")).day(d).unwrap().unwrap();
     let mut odd = fine.entries()[0].clone();
     odd.entry = "elsewhere.csv".into();

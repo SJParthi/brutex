@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests of the GDFL import runtime. Every value is invented at run time;
 //! no vendor row is quoted (`gdfl_cm::tests::fixtures_are_built_not_pasted`).
 

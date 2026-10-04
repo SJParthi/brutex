@@ -317,10 +317,21 @@ const fn is_weekday(day: Day) -> bool {
 
 /// The month number a three-letter upper-case month name states.
 fn month_of(name: &[u8]) -> Option<u8> {
-    MONTHS
-        .iter()
-        .position(|m| m.as_bytes() == name)
-        .and_then(|at| u8::try_from(at + 1).ok())
+    match name {
+        b"JAN" => Some(1),
+        b"FEB" => Some(2),
+        b"MAR" => Some(3),
+        b"APR" => Some(4),
+        b"MAY" => Some(5),
+        b"JUN" => Some(6),
+        b"JUL" => Some(7),
+        b"AUG" => Some(8),
+        b"SEP" => Some(9),
+        b"OCT" => Some(10),
+        b"NOV" => Some(11),
+        b"DEC" => Some(12),
+        _ => None,
+    }
 }
 
 /// Two ASCII digits as a number.
@@ -342,7 +353,7 @@ fn strike_paisa(text: &[u8]) -> Option<i64> {
         && whole.bytes().all(|b| b.is_ascii_digit())
         && (whole == "0" || !whole.starts_with('0'));
     let frac_ok = frac.is_none_or(|f| {
-        (1..=2).contains(&f.len()) && f.bytes().all(|b| b.is_ascii_digit()) && !f.ends_with('0')
+        matches!(f.len(), 1 | 2) && f.bytes().all(|b| b.is_ascii_digit()) && !f.ends_with('0')
     });
     if !(whole_ok && frac_ok) {
         return None;
@@ -570,14 +581,14 @@ pub struct NfoDay<L> {
 }
 
 impl<L> NfoDay<L> {
-    /// An empty listing of `day`.
+    /// An empty listing of `day`, sized for the `entries` its source states.
     #[must_use]
-    pub fn new(day: Day) -> Self {
+    pub fn new(day: Day, entries: usize) -> Self {
         Self {
             day,
             folder: day_folder_name(day),
-            entries: Vec::new(),
-            by_ticker: HashMap::new(),
+            entries: Vec::with_capacity(entries),
+            by_ticker: HashMap::with_capacity(entries),
             duplicates: Vec::new(),
             skipped: 0,
         }
@@ -715,7 +726,7 @@ impl NfoSource for NfoTickStore {
         let len = file.metadata().map_err(unavailable)?.len();
         let entries = read_index(&file, len)?;
         let file = Arc::new(file);
-        let mut listing = NfoDay::new(day);
+        let mut listing = NfoDay::new(day, entries.len());
         for entry in entries {
             let (name, size, crc) = (entry.name.clone(), entry.size, entry.crc);
             listing.push(
@@ -820,8 +831,9 @@ pub fn listing_in<B: ReadAt>(
         return Ok(None);
     };
     let (base, span) = stored_span(&*file, &inner)?;
-    let mut listing = NfoDay::new(day);
-    for entry in zip_entries(&*file, base, span)? {
+    let members = zip_entries(&*file, base, span)?;
+    let mut listing = NfoDay::new(day, members.len());
+    for entry in members {
         listing.push(
             &entry.name,
             entry.len,

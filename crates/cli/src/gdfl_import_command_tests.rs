@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests of `cli gdfl-import`. No vendor byte: the sources here are empty or
 //! refused, and the import's own behaviour is tested in `pull::gdfl_import`.
 
