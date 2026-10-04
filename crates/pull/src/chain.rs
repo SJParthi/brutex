@@ -288,6 +288,15 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         .by_name()
         .map_or("contracts", |d| d.contracts_field);
 
+    // THE EXCHANGE THIS WALK ASKED ON, read from the request's own fixed
+    // `exchange` parameter rather than restated here, so the comparison below
+    // is against what was actually sent. D-3115.
+    let asked_exchange = asked_exchange(&spec);
+    // ONE FILING PER DECODED CONTRACT across the whole walk, keyed on what
+    // `read_contract` decoded rather than on the vendor's spelling. D-3116.
+    let mut filed: std::collections::HashMap<(String, brutex_core::instrument::Contract), String> =
+        std::collections::HashMap::new();
+
     let url = fno::expiries_url(&spec, ask).map_err(ChainError::Lookup)?;
     let body = from.get(&url).await.map_err(|why| ChainError::Transport {
         url: url.clone(),
@@ -351,6 +360,24 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
             if !seen_names.insert(name.clone()) {
                 continue;
             }
+            // THE EXCHANGE TOKEN AGAINST THE ASK. `read_contract` binds it to
+            // `_`, so a `BSE-` name, or one with an empty exchange, answering
+            // an NSE ask was filed as NSE. Equality, not a normalisation, for
+            // the reason the underlying comparison below gives. D-3115.
+            if let Some((exchange, _)) = name.split_once('-')
+                && asked_exchange != Some(exchange)
+            {
+                chain.unreadable.push(format!(
+                    "{name}: this contract names exchange {exchange:?} and the \
+                     walk asked on {}. Refused rather than filed under the \
+                     exchange that was asked for.",
+                    asked_exchange.map_or_else(
+                        || "no stated exchange, so no name can be checked".to_owned(),
+                        |e| format!("{e:?}")
+                    )
+                ));
+                continue;
+            }
             match fno::read_contract(&name, keyed_expiry) {
                 // THE ANSWER IS CHECKED AGAINST THE ASK, AND IT WAS NOT.
                 //
@@ -383,13 +410,47 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
                         found.underlying, ask.underlying
                     ));
                 }
-                Some(found) => chain.contracts.push(found),
+                // A SECOND SPELLING OF A CONTRACT ALREADY FILED. The month word
+                // reads case-blind and `77.5`/`77.50` read to one paisa, so two
+                // names can decode to one contract; filing both would fetch and
+                // store its bars twice. The first is kept and the later one is
+                // refused naming the first, never merged silently. D-3116.
+                Some(found) => match filed.entry((found.underlying.clone(), found.contract)) {
+                    std::collections::hash_map::Entry::Occupied(first) => {
+                        chain.unreadable.push(format!(
+                            "{name}: decodes to the same contract as {}, which \
+                                 was already filed. Two spellings of one contract \
+                                 are not two contracts; this one was refused \
+                                 rather than filed twice.",
+                            first.get()
+                        ));
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(name);
+                        chain.contracts.push(found);
+                    }
+                },
                 // REPORTED, NEVER SKIPPED. See the module header.
                 None => chain.unreadable.push(name),
             }
         }
     }
     Ok(chain)
+}
+
+/// The value of the request's fixed `exchange` parameter, or `None` when the
+/// descriptor states none — in which case every name is refused, because there
+/// is nothing to check its exchange against. D-3115.
+fn asked_exchange(spec: &HttpSpec) -> Option<&'static str> {
+    let discovery = spec.fno.by_name()?;
+    for param in discovery.contracts_params {
+        if param.name == "exchange"
+            && let crate::vendor::ParamValue::Fixed(value) = param.value
+        {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// `2024-01-25` into an expiry.
@@ -853,6 +914,7 @@ mod tests {
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::panic,
+    clippy::indexing_slicing,
     reason = "a test that cannot panic cannot fail"
 )]
 mod attack_pricing {
@@ -890,5 +952,121 @@ mod attack_pricing {
         assert_eq!((leap.year(), leap.month(), leap.day()), (2024, 2, 29));
         let edge = iso_expiry("2100-12-31").expect("the last representable day");
         assert_eq!((edge.year(), edge.month(), edge.day()), (2100, 12, 31));
+    }
+
+    struct Canned(std::cell::RefCell<Vec<String>>);
+
+    impl super::Discovery for Canned {
+        async fn get(&self, _url: &str) -> Result<String, super::Refusal> {
+            let mut left = self.0.borrow_mut();
+            if left.is_empty() {
+                return Err(super::Refusal::transport("no answer left".to_owned()));
+            }
+            Ok(left.remove(0))
+        }
+    }
+
+    fn walk(expiry: &str, names: &[&str]) -> super::Chain {
+        let contracts = names
+            .iter()
+            .map(|n| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let canned = Canned(std::cell::RefCell::new(vec![
+            format!(r#"{{"expiries":["{expiry}"]}}"#),
+            format!(r#"{{"contracts":[{contracts}]}}"#),
+        ]));
+        let ask = crate::fno::Ask {
+            underlying: "NIFTY".to_owned(),
+            year: 2024,
+            month: 1,
+            expiry: String::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        runtime
+            .block_on(super::month(crate::vendor::Feed::Groww, &ask, &canned))
+            .expect("the walk completes")
+    }
+
+    /// **THE EXCHANGE TOKEN IS CHECKED AGAINST THE ASK.** `read_contract`
+    /// binds it to `_`, and on the unmodified code `month` compared only the
+    /// underlying, so a `BSE-` name or one with no exchange at all, answering
+    /// an NSE ask, was filed as NSE NIFTY. D-3115.
+    #[test]
+    fn dpp_a_name_on_another_exchange_is_refused_by_name() {
+        let chain = walk(
+            "2024-01-25",
+            &[
+                "BSE-NIFTY-25Jan24-21000-CE",
+                "-NIFTY-25Jan24-21000-PE",
+                "nse-NIFTY-25Jan24-21100-CE",
+                "NSE-NIFTY-25Jan24-21000-CE",
+            ],
+        );
+        assert_eq!(chain.contracts.len(), 1, "{chain:#?}");
+        assert_eq!(
+            chain.contracts[0].vendor_symbol,
+            "NSE-NIFTY-25Jan24-21000-CE"
+        );
+        assert_eq!(chain.unreadable.len(), 3, "{chain:#?}");
+        for (said, name) in chain.unreadable.iter().zip([
+            "BSE-NIFTY-25Jan24-21000-CE",
+            "-NIFTY-25Jan24-21000-PE",
+            "nse-NIFTY-25Jan24-21100-CE",
+        ]) {
+            assert!(said.starts_with(name), "{said}");
+            assert!(said.contains("exchange"), "{said}");
+        }
+        assert!(!chain.whole());
+    }
+
+    /// **ONE CONTRACT, ONE FILING, WHATEVER IT IS CALLED.** The month word is
+    /// read case-blind and a strike's trailing zero reads to the same paisa,
+    /// so on the unmodified code `04JAN24`/`04Jan24` and `77.5`/`77.50` were
+    /// two names for one contract and both were filed. The first is kept and
+    /// every later spelling is refused, naming the one it collided with.
+    /// D-3116.
+    #[test]
+    fn dpp_two_spellings_of_one_contract_are_filed_once_and_the_second_is_named() {
+        let chain = walk(
+            "2024-01-04",
+            &[
+                "NSE-NIFTY-04JAN24-21000-CE",
+                "NSE-NIFTY-04Jan24-21000-CE",
+                "NSE-NIFTY-04Jan24-21077.5-PE",
+                "NSE-NIFTY-04Jan24-21077.50-PE",
+                "NSE-NIFTY-04Jan24-FUT",
+                "NSE-NIFTY-Jan24-FUT",
+                "NSE-NIFTY-04Jan24-21000-CE",
+                "NSE-NIFTY-04JAN24-21000-CE",
+            ],
+        );
+        let filed: Vec<&str> = chain
+            .contracts
+            .iter()
+            .map(|f| f.vendor_symbol.as_str())
+            .collect();
+        assert_eq!(
+            filed,
+            [
+                "NSE-NIFTY-04JAN24-21000-CE",
+                "NSE-NIFTY-04Jan24-21077.5-PE",
+                "NSE-NIFTY-04Jan24-FUT",
+            ],
+            "{chain:#?}"
+        );
+        // Three collisions named; the exact repeat of the FIRST name is one
+        // name said twice and is not a second spelling.
+        assert_eq!(chain.unreadable.len(), 3, "{chain:#?}");
+        assert!(chain.unreadable[0].starts_with("NSE-NIFTY-04Jan24-21000-CE"));
+        assert!(chain.unreadable[0].contains("NSE-NIFTY-04JAN24-21000-CE"));
+        assert!(chain.unreadable[1].contains("NSE-NIFTY-04Jan24-21077.5-PE"));
+        assert!(chain.unreadable[2].contains("NSE-NIFTY-04Jan24-FUT"));
+        for said in &chain.unreadable {
+            assert!(said.contains("same contract"), "{said}");
+        }
+        assert!(!chain.whole());
     }
 }

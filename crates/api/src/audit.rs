@@ -1694,6 +1694,7 @@ mod tests {
             rows_folded: 291_527,
             counted: 194,
             census: census(0, 170, 0, 0),
+            decoder_skips: pull::fetch::DecodeSkips::default(),
             failures: Vec::new(),
         }
     }

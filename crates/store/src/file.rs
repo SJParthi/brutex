@@ -2108,6 +2108,62 @@ impl BarFile {
         self.verify_block_of(sidecar, self.layout.block_of(last), at, image, &mut cache)
     }
 
+    /// Refuses when the header's `last_ts_micros` is not the stamp of the last
+    /// record it counts. D-3140.
+    ///
+    /// # Why the writer asks before every append
+    ///
+    /// Every decision `append` makes about where a batch belongs — follows,
+    /// already present, resumes a held tail, conflicts — partitions on
+    /// `last_ts_micros`, a header field, and `Header::validate` checks only
+    /// that the advertised range does not run backwards. A slot whose checksum
+    /// is good and whose range is wrong (a damaged writer, a hand-edited
+    /// header) therefore admitted a bar stamped BEHIND records the month
+    /// holds, and committed it: measured, a month of minutes 0..=9 whose slot
+    /// said its last stamp was minute 0 accepted minute 6 at index 10. The
+    /// file was then out of order for good, and the bisection every lookup
+    /// rests on answered a neighbour. `attack_store::a_header_whose_last_stamp
+    /// _disagrees_with_its_last_record_cannot_steer_an_append`.
+    ///
+    /// # Why the read is NOT the verified one
+    ///
+    /// The bytes read here are never served and never sealed: they can only
+    /// REFUSE. Reading them through the block verify would make a rotted FULL
+    /// tail block refuse every following append, which D-0910 deliberately does
+    /// not do — that block is not re-sealed, so the damage stays where a reader
+    /// finds it (`only_a_partially_covered_old_tail_block_is_verified_before_a
+    /// _following_append`). A record whose stamp is the header's agrees with it
+    /// whatever else rotted in it; one whose stamp is not is refused by name.
+    ///
+    /// # Cost
+    ///
+    /// One positional read of one record, of record `n_valid - 1`, into a stack
+    /// buffer. Constant per append, never a walk. A month with no record has no
+    /// last stamp to disagree with.
+    fn last_stamp_is_the_headers<R: Row>(&self) -> Result<(), StoreError> {
+        let Some(last) = self.header.n_valid.checked_sub(1) else {
+            return Ok(());
+        };
+        let at = refused(self.layout.offset_of(last), &self.bars_path)?;
+        let mut image = [0u8; MAX_ROW_LEN];
+        let image = image.get_mut(..R::LEN).ok_or(StoreError::NotCommitted {
+            index: last,
+            n_valid: self.header.n_valid,
+        })?;
+        read_fully(&self.bars, &self.bars_path, at, image)?;
+        let record = refused(R::read_from(image), &self.bars_path)?.stamp();
+        if record == self.header.last_ts_micros {
+            return Ok(());
+        }
+        Err(StoreError::Format {
+            path: self.bars_path.clone(),
+            source: FormatError::LastStampDisagrees {
+                header: self.header.last_ts_micros,
+                record,
+            },
+        })
+    }
+
     /// The committed header, as the file's own bytes describe it.
     #[must_use]
     pub const fn header(&self) -> Header {
@@ -2201,7 +2257,9 @@ impl BarFile {
     /// committed range with different bars, a stamp the month never held, or a
     /// gap over a held one (D-1525). [`StoreError::Format`] carrying
     /// [`FormatError::CounterOverflow`] and
-    /// [`FormatError::GenerationExhausted`] at the counters' ends. Anything
+    /// [`FormatError::GenerationExhausted`] at the counters' ends, and
+    /// [`FormatError::LastStampDisagrees`] when the committed header's last
+    /// stamp is not the stamp of the last record it counts (D-3140). Anything
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
     /// [`StoreError::Denied`], [`StoreError::Io`].
     pub fn append<R: Row>(&mut self, batch: &[R]) -> Result<Appended, StoreError> {
@@ -2313,6 +2371,11 @@ impl BarFile {
                 }));
             }
         };
+        // THE HEADER SAID THE BATCH FOLLOWS; THE LAST RECORD MUST AGREE. Only
+        // this branch writes on the strength of `last_ts_micros` alone — the
+        // overlap branches above compare against the records themselves.
+        // D-3140.
+        self.last_stamp_is_the_headers::<R>()?;
         let commit = refused(next.commit(), &self.bars_path)?;
         let first_index = self.header.n_valid;
         let at = refused(self.layout.offset_of(first_index), &self.bars_path)?;

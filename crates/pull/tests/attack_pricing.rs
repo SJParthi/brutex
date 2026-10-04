@@ -582,7 +582,9 @@ fn dpp_side_flip_mirrors_moneyness() {
             atm_call().ts_micros,
             2_500_000,
             strike,
-            30_000,
+            // Above intrinsic on BOTH sides: one premium serves the call and
+            // the put, and D-3114 refuses a premium under either floor.
+            (2_500_000 - strike).abs() + 30_000,
             OptionSide::Call,
         );
         let p = Quote {
@@ -711,26 +713,78 @@ fn dpp_price_all_counts_balance_and_rerun_identically() {
     }
 }
 
-/// **Divergence, recorded.** With a vendor volatility a premium under
-/// intrinsic is priced; without one the same quote is refused. Pinned so a
-/// change to either half is a decision, not drift.
+/// **ONE FACT, ONE ANSWER.** A premium at or below the discounted intrinsic
+/// value is refused by the vendor path with the solved path's own arm and
+/// numbers. On the unmodified code the vendor path priced it (D-3114).
 #[test]
-fn dpp_vendor_path_does_not_read_the_premium() {
+fn dpp_vendor_path_refuses_a_premium_below_intrinsic_like_the_solver() {
     let q = Quote {
         spot: 2_600_000,
         strike: 2_500_000,
         premium: 1,
         ..atm_call()
     };
+    let solved = solve_iv(q, rate(), YearBasis::Calendar365).unwrap_err();
+    let vendor = price(q, Some(0.15), rate(), YearBasis::Calendar365).unwrap_err();
     assert!(matches!(
-        solve_iv(q, rate(), YearBasis::Calendar365),
-        Err(PricingError::Model(GreeksError::PriceBelowIntrinsic { .. }))
+        solved,
+        PricingError::Model(GreeksError::PriceBelowIntrinsic { .. })
     ));
-    let row = price(q, Some(0.15), rate(), YearBasis::Calendar365).expect("vendor path");
-    assert_eq!(row.premium, 1);
+    assert_eq!(vendor, solved, "two answers for one premium");
+    assert_eq!(
+        price(q, None, rate(), YearBasis::Calendar365).unwrap_err(),
+        solved
+    );
+}
+
+/// The same by property: 50,000 seeded quotes across both sides, ITM and OTM
+/// rungs and premiums from 1 paisa upward. Whenever the solver refuses as
+/// below intrinsic, the vendor path refuses identically; whenever the vendor
+/// path refuses as below intrinsic, the solver does too.
+#[test]
+fn dpp_vendor_and_solved_paths_agree_on_the_intrinsic_floor() {
+    let mut mix = Mix(0x5EED_0006);
+    let base = atm_call();
+    let mut refused = 0_u32;
+    for _ in 0..50_000 {
+        let strike = 2_500_000 + 5_000 * (mix.below(41) as i64 - 20);
+        let spot = 2_400_000 + mix.below(200_000) as i64;
+        let side = if mix.next().is_multiple_of(2) {
+            OptionSide::Call
+        } else {
+            OptionSide::Put
+        };
+        let intrinsic = match side {
+            OptionSide::Call => (spot - strike).max(0),
+            OptionSide::Put => (strike - spot).max(0),
+        };
+        let premium = 1 + (intrinsic + mix.below(4_000) as i64 - 2_000).max(0);
+        let q = Quote {
+            spot,
+            strike,
+            premium,
+            side,
+            ..base
+        };
+        let s = solve_iv(q, rate(), YearBasis::Calendar365);
+        let v = price(q, Some(0.15), rate(), YearBasis::Calendar365);
+        let s_below = matches!(
+            s,
+            Err(PricingError::Model(GreeksError::PriceBelowIntrinsic { .. }))
+        );
+        let v_below = matches!(
+            v,
+            Err(PricingError::Model(GreeksError::PriceBelowIntrinsic { .. }))
+        );
+        assert_eq!(s_below, v_below, "{q:?}: solved {s:?} vendor {v:?}");
+        if s_below {
+            refused += 1;
+            assert_eq!(s.unwrap_err(), v.unwrap_err());
+        }
+    }
     assert!(
-        row.greeks.price > 99_000.0,
-        "the model price ignores the premium"
+        refused > 1_000,
+        "the sweep reached the floor {refused} times"
     );
 }
 

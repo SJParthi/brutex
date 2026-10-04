@@ -608,6 +608,28 @@ const fn kind_of(side: OptionSide) -> OptionKind {
     }
 }
 
+/// The low no-arbitrage bound `greeks` refuses a solve against, with carry 0:
+/// `max(S − K·e^(−rT), 0)` for a call and `max(K·e^(−rT) − S, 0)` for a put.
+///
+/// The SAME expression `greeks::bsm::Checked::no_arbitrage_bounds` evaluates
+/// (`forward = spot · e^0 = spot`, `discounted_strike = strike · exp(−r·T)`),
+/// so the vendor path and the solved path refuse at the same bits. That method
+/// is crate-private to `greeks`; making it public is the cleaner home and is
+/// proposed in D-3114 rather than done from here. O(1), no allocation.
+#[expect(
+    clippy::float_arithmetic,
+    reason = "a no-arbitrage bound on a model price, not a stored price: §7 \
+              keeps prices as paisa integers and this compares one against \
+              the bound the model itself uses"
+)]
+fn discounted_intrinsic(contract: &Contract, kind: OptionKind) -> f64 {
+    let discounted_strike = contract.strike * (-contract.rate * contract.years_to_expiry).exp();
+    match kind {
+        OptionKind::Call => (contract.spot - discounted_strike).max(0.0),
+        OptionKind::Put => (discounted_strike - contract.spot).max(0.0),
+    }
+}
+
 /// The model contract for one quote, or the reason there is none.
 fn contract_of(quote: Quote, rate: Rate, basis: YearBasis) -> Result<Contract, PricingError> {
     if rate.basis() != basis {
@@ -842,6 +864,25 @@ pub fn price(
     };
 
     let greeks = contract.greeks(volatility, kind)?;
+    // ONE FACT, ONE ANSWER. The solved path refuses a premium at or below the
+    // discounted intrinsic value; until D-3114 the vendor path priced the same
+    // premium, because it never read it. Refused here with the solver's own
+    // arm and numbers, after `greeks` has validated every input, so the bound
+    // below is computed from checked, finite values.
+    if matches!(vol_from, VolSource::Vendor(_)) {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "see contract_of — paisa is exact in f64 at this magnitude"
+        )]
+        let premium = quote.premium as f64;
+        let intrinsic = discounted_intrinsic(&contract, kind);
+        if premium <= intrinsic {
+            return Err(PricingError::Model(GreeksError::PriceBelowIntrinsic {
+                price: premium,
+                intrinsic,
+            }));
+        }
+    }
 
     #[expect(
         clippy::cast_precision_loss,

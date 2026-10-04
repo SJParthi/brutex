@@ -324,7 +324,10 @@ fn drive_duplicate_candles(scratch: &Scratch) {
     let first = *rows.first().expect("a full session");
     rows.insert(1, first);
     let done = crate::ingest::from_window(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -340,7 +343,10 @@ fn drive_duplicate_candles(scratch: &Scratch) {
 fn drive_request_minutes(scratch: &Scratch) {
     let request = request_over(Window::new(window().from(), window().from()).expect("one day"));
     let done = crate::ingest::from_window(
-        &RawWindow { rows: Vec::new() },
+        &RawWindow {
+            rows: Vec::new(),
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -377,7 +383,10 @@ fn drive_bad_candles(scratch: &Scratch, conflict: bool) {
         rows.push(RawRow { volume: 2, ..row });
     }
     let done = crate::ingest::from_window(
-        &RawWindow { rows },
+        &RawWindow {
+            rows,
+            skipped: crate::fetch::DecodeSkips::default(),
+        },
         INSTRUMENT,
         "emit-sites",
         &scratch.store(),
@@ -1276,6 +1285,7 @@ fn drive_folder_refused(scratch: &Scratch) {
 fn drive_land(_scratch: &Scratch) {
     let request = request_over(window());
     let raw = RawWindow {
+        skipped: crate::fetch::DecodeSkips::default(),
         rows: vec![RawRow {
             timestamp: 0,
             open: 1,

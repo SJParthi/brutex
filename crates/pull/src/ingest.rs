@@ -257,6 +257,14 @@ pub struct Ingested {
     pub counted: usize,
     /// Every row that did not become a bar, by reason.
     pub census: DropCensus,
+    /// Candles the vendor SENT that the decoder declined, by reason (D-3122).
+    ///
+    /// They are in [`Self::rows_read`] — the vendor's count, not the decoder's
+    /// — and [`Self::balances`] accounts for them here. Before this, a skipped
+    /// candle was in neither, so a day window of three candles with one
+    /// impossible bar read `rows_read 2, bars_stored 2` and balanced. See
+    /// [`crate::fetch::DecodeSkips`].
+    pub decoder_skips: crate::fetch::DecodeSkips,
     /// Members that failed, named. The run continued past each.
     pub failures: Vec<Failure>,
 }
@@ -283,19 +291,25 @@ impl Ingested {
         self.rows_folded += other.rows_folded;
         self.counted += other.counted;
         self.census.absorb(other.census);
+        self.decoder_skips.absorb(other.decoder_skips);
         self.failures.extend(other.failures);
     }
 
     /// Whether every row is accounted for: stored, folded into a bar that was
-    /// already open, dropped, or in a member that failed.
+    /// already open, dropped, skipped by the decoder under a named reason, or
+    /// in a member that failed.
     ///
-    /// A row that vanished without landing in one of those four is
+    /// A row that vanished without landing in one of those five is
     /// indistinguishable from a row the vendor never sent, which is the
     /// failure this whole pipeline is shaped to prevent.
     #[must_use]
     pub fn balances(&self) -> bool {
         self.failures.is_empty()
-            && self.rows_read == self.bars_stored + self.rows_folded + self.census.total() as usize
+            && self.rows_read
+                == self.bars_stored
+                    + self.rows_folded
+                    + self.census.total() as usize
+                    + self.decoder_skips.total()
     }
 }
 
@@ -1066,7 +1080,8 @@ pub fn from_window(
             );
             return Ingested {
                 members: 1,
-                rows_read: raw.rows.len(),
+                rows_read: raw.rows.len() + raw.skipped.total(),
+                decoder_skips: raw.skipped,
                 failures: vec![Failure {
                     instrument: instrument.to_owned(),
                     why: format!(
@@ -1088,7 +1103,8 @@ pub fn from_window(
                 );
                 return Ingested {
                     members: 1,
-                    rows_read: raw.rows.len(),
+                    rows_read: raw.rows.len() + raw.skipped.total(),
+                    decoder_skips: raw.skipped,
                     failures: vec![Failure {
                         instrument: instrument.to_owned(),
                         why: format!(
@@ -1125,6 +1141,11 @@ pub fn from_window(
         });
     }
     done.rows_read += duplicates;
+    // THE CANDLES THE DECODER DECLINED ARE THE VENDOR'S ROWS TOO (D-3122).
+    // Read, and accounted for by reason, so `balances` cannot say every
+    // offered candle is on the receipt while one of them is nowhere.
+    done.rows_read += raw.skipped.total();
+    done.decoder_skips.absorb(raw.skipped);
     done.rows_folded += duplicates;
     if duplicates > 0 {
         let _dropped_when_filtered = telemetry::emit(
@@ -1316,7 +1337,18 @@ pub fn from_rows(
     };
     // THE WINDOW AND THE SESSION, WHICH THIS PATH NEVER APPLIED AT ALL.
     // See [`keep_in_session`] for what that cost.
-    let (bars, overlays, census) = keep_in_session(bars, overlays, &plan);
+    let (bars, overlays, census) = match keep_in_session(bars, overlays, &plan) {
+        Ok(kept) => kept,
+        Err(why) => {
+            note_not_filed(instrument, "timestamp", &why);
+            done.failures.push(Failure {
+                instrument: instrument.to_owned(),
+                why,
+            });
+            name_the_origin(&mut done, origin);
+            return done;
+        }
+    };
     done.census = census;
     let (bars, overlays) = (bars.as_slice(), overlays.as_slice());
     if bars.is_empty() {
@@ -1436,6 +1468,14 @@ pub fn from_rows(
     done
 }
 
+/// What [`keep_in_session`] hands back: the bars and overlays it kept, and the
+/// census of what it declined.
+type Kept = (
+    Vec<store::format::Bar>,
+    Vec<store::format::Overlay>,
+    DropCensus,
+);
+
 /// Drops the bars this engine declines, and counts why.
 ///
 /// The same question `fetch::land` asks of a raw vendor row, asked of a bar
@@ -1480,11 +1520,7 @@ fn keep_in_session(
     bars: &[store::format::Bar],
     overlays: &[store::format::Overlay],
     plan: &Plan<'_>,
-) -> (
-    Vec<store::format::Bar>,
-    Vec<store::format::Overlay>,
-    DropCensus,
-) {
+) -> Result<Kept, String> {
     let mut census = DropCensus::default();
     let cadence = plan.request.granularity.cadence();
     let venue = plan.request.listing.venue();
@@ -1495,16 +1531,28 @@ fn keep_in_session(
     };
 
     let mut kept = Vec::with_capacity(bars.len());
-    for bar in bars {
-        // A TIMESTAMP THE CALENDAR CANNOT READ IS A DROP, NOT A HALT. `land`
-        // refuses one because it is decoding the vendor and a stamp it cannot
-        // read means the DECODER is wrong. Here the bar is already built, so
-        // the same value is a bar this engine declines — counted, never stored,
-        // and never silently kept.
+    for (at, bar) in bars.iter().enumerate() {
+        // A TIMESTAMP THE CALENDAR CANNOT READ IS REFUSED, NOT DROPPED — and
+        // it was dropped under a reason that was false (D-3121). This counted
+        // it as `BeforeWindow`, so a bar stamped `i64::MAX`, or one on a day
+        // whose venue hours are UNVERIFIED, reached the receipt as "before the
+        // requested window": a named reason, and the wrong one, which is worse
+        // than none because the operator goes to look at the chunking. There
+        // is no `DropReason` for "this instant cannot be placed", because it
+        // is not a decline — it is the decoder or the vendor being wrong, the
+        // case `fetch::land` refuses as `TimestampRefused`. Same rule here,
+        // same whole-batch refusal, with the stamp and the calendar's words.
         match verdict(bar.ts_micros) {
             Ok(None) => kept.push(*bar),
             Ok(Some(reason)) => census.count(reason),
-            Err(_) => census.count(crate::session::DropReason::BeforeWindow),
+            Err(why) => {
+                return Err(format!(
+                    "decoded bar {at} is stamped {} epoch microseconds, which \
+                     this build's calendar cannot place ({why}); the batch is \
+                     refused rather than counted under a drop reason it is not",
+                    bar.ts_micros
+                ));
+            }
         }
     }
     let overlays = overlays
@@ -1512,7 +1560,7 @@ fn keep_in_session(
         .filter(|o| matches!(verdict(o.ts_micros), Ok(None)))
         .copied()
         .collect();
-    (kept, overlays, census)
+    Ok((kept, overlays, census))
 }
 
 /// Puts the endpoint that produced these rows onto every refusal they caused.
@@ -1708,6 +1756,16 @@ fn nothing_landed(census: DropCensus, folded: usize, outside_session: u32) -> La
     }
 }
 
+/// One month of a member that the store refused, named by instrument and month.
+/// The other months of the batch are written and counted on their own
+/// (D-3120).
+fn month_refused(member: &Member, ym: store::path::YearMonth, why: &str) -> Failure {
+    Failure {
+        instrument: member.instrument.clone(),
+        why: format!("{} {ym}: {why}", member.instrument),
+    }
+}
+
 fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, String> {
     let Plan {
         request,
@@ -1782,6 +1840,9 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let mut entries = Vec::new();
     let mut committed = 0usize;
     let mut months_written = 0usize;
+    // Bars OFFERED to a month file that accepted them; a refused month's bars
+    // are not stored and must not be reported as stored.
+    let mut stored = 0usize;
     let mut failures = Vec::new();
     for (ym, slice) in &by_month {
         let parts = PathParts {
@@ -1794,7 +1855,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             month: *ym,
             file: FileKind::Bars,
         };
-        let (pulled, wrote) = write_and_count(
+        let written = write_and_count(
             slice,
             store_root,
             symbol_id,
@@ -1807,10 +1868,22 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
                 timeframe,
                 month: *ym,
             },
-        )
-        .map_err(|why| format!("{}: {why}", member.instrument))?;
+        );
+        // A MONTH THE STORE REFUSES DOES NOT UNCOUNT THE MONTHS ALREADY
+        // WRITTEN (D-3120). This was `?`: the refusal of month k returned
+        // through it and dropped `entries`, so months 1..k-1 — appended,
+        // fsynced and derived — reached the disk with no census row. That is
+        // the outcome this module's header calls worse than refusing outright.
+        // The refused month is named in `failures`; every other month is
+        // written and counted on its own, because each is its own file.
+        let Ok((pulled, wrote)) =
+            written.map_err(|why| failures.push(month_refused(member, *ym, &why)))
+        else {
+            continue;
+        };
         entries.push(pulled);
         months_written = months_written.saturating_add(1);
+        stored = stored.saturating_add(slice.len());
         // SUMMED ACROSS MONTHS, because it is a COUNT of bars written and not
         // a flag. `Ingested::bars_stored` reads it, and a batch of eighty
         // months reporting one month's figure would under-report the run by
@@ -1864,7 +1937,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         derived_count_in(plan.contract, timeframe).saturating_mul(months_written);
     Ok(Landed {
         failures,
-        bars: landed.bars.len(),
+        bars: stored,
         // WRITTEN, AS DISTINCT FROM OFFERED. See `Ingested::bars_stored`.
         committed,
         folded,

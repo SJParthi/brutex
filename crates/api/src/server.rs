@@ -20505,7 +20505,17 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                super::observed_cash_days(&[(window, RawWindow { rows })], encoding).unwrap(),
+                super::observed_cash_days(
+                    &[(
+                        window,
+                        RawWindow {
+                            rows,
+                            skipped: pull::fetch::DecodeSkips::default()
+                        }
+                    )],
+                    encoding
+                )
+                .unwrap(),
                 vec![first, last]
             );
         }
@@ -20514,6 +20524,7 @@ mod tests {
                 &[(
                     window,
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(i64::MIN)]
                     }
                 )],
@@ -20526,6 +20537,7 @@ mod tests {
                 &[(
                     window,
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(i64::MAX)]
                     }
                 )],
@@ -20539,6 +20551,7 @@ mod tests {
                 .is_empty()
         );
         let outside_hours = RawWindow {
+            skipped: pull::fetch::DecodeSkips::default(),
             rows: vec![row(utc(day(2026, 8, 23)) - 60)],
         };
         assert!(
@@ -20592,12 +20605,14 @@ mod tests {
                 (
                     Window::new(before, before).unwrap(),
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(before)],
                     },
                 ),
                 (
                     Window::new(after, after).unwrap(),
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(after)],
                     },
                 ),
@@ -20665,6 +20680,7 @@ mod tests {
                 bodies: vec![(
                     window,
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: vec![row(midnight)],
                     },
                 )],
@@ -20677,6 +20693,7 @@ mod tests {
             landed.bodies = vec![(
                 window,
                 RawWindow {
+                    skipped: pull::fetch::DecodeSkips::default(),
                     rows: (0..375)
                         .map(|minute| row(midnight + (555 + minute) * 60))
                         .collect(),
@@ -20759,6 +20776,7 @@ mod tests {
             bodies: vec![(
                 window,
                 RawWindow {
+                    skipped: pull::fetch::DecodeSkips::default(),
                     rows: vec![RawRow {
                         timestamp: midnight,
                         open: 100,
@@ -20847,6 +20865,7 @@ mod tests {
             bodies: vec![(
                 first,
                 RawWindow {
+                    skipped: pull::fetch::DecodeSkips::default(),
                     rows: vec![row(midnight(days[0]))],
                 },
             )],
@@ -20862,6 +20881,7 @@ mod tests {
                 (
                     Window::new(date, date).unwrap(),
                     RawWindow {
+                        skipped: pull::fetch::DecodeSkips::default(),
                         rows: (0..375)
                             .map(|minute| row(midnight(date) + (555 + minute) * 60))
                             .collect(),
@@ -20870,7 +20890,10 @@ mod tests {
             })
             .chain(std::iter::once((
                 Window::new(day(2026, 9, 5), day(2026, 9, 5)).unwrap(),
-                RawWindow { rows: Vec::new() },
+                RawWindow {
+                    rows: Vec::new(),
+                    skipped: pull::fetch::DecodeSkips::default(),
+                },
             )))
             .collect();
         let key = brutex_core::instrument::InstrumentKey::index(
@@ -20958,7 +20981,13 @@ mod tests {
             store_vendor: Vendor::Zerodha,
             window,
             granularity: Granularity::Minute1,
-            bodies: vec![(window, RawWindow { rows })],
+            bodies: vec![(
+                window,
+                RawWindow {
+                    rows,
+                    skipped: pull::fetch::DecodeSkips::default(),
+                },
+            )],
         };
         // Seed each actual date independently: missing intervening source days
         // are not needed as fixture evidence and must not be synthesized.
@@ -20977,7 +21006,13 @@ mod tests {
                         == date
                 })
                 .collect();
-            let bodies = [(span, RawWindow { rows })];
+            let bodies = [(
+                span,
+                RawWindow {
+                    rows,
+                    skipped: pull::fetch::DecodeSkips::default(),
+                },
+            )];
             let schedule = super::prepare_cash_schedule(&landed, &bodies, &key, &site, &mut dated)
                 .await
                 .unwrap();
