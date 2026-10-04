@@ -3213,7 +3213,25 @@ jobs:
           rustc --edition=2024 --test -D warnings .github/gates_bounds.rs -o "${tool}-tests"
           "${tool}-tests"
           rustc --edition=2024 -D warnings .github/gates_bounds.rs -o "$tool"
-          "$tool" gate12 "$allow_claim"
+          # EVERY `::` TOKEN IS READ WHOLE, AT ANY LENGTH (D-2100, carried onto
+          # the tool by D-2105). `gate12-tokens` lists every token the gate can
+          # look up; `invariant_paths.rs --resolve` maps each to the `crate fn`
+          # pairs it names against the scanner's declaration, module-mounting
+          # and inline-module tables, and `gate12` asks whether any is a test.
+          work=$(mktemp -d)
+          scan="${SOURCE_SCAN:?gate 0 builds the source scanner first}"
+          rustc --edition=2024 -D warnings .github/invariant_paths.rs -o "$work/invariant-paths"
+          git ls-files -z -- 'crates/*.rs' > "$work/sources.z"
+          xargs -0 -r "$scan" fns < "$work/sources.z" \
+            | sed -E 's/^(.*):[0-9]+:([A-Za-z_][A-Za-z0-9_]*)$/\1\t\2/' > "$work/path-fns"
+          git ls-files -z > "$work/tracked.z"
+          "$scan" modules "$work/tracked.z" > "$work/modules"
+          xargs -0 -r "$scan" inline-mods < "$work/sources.z" > "$work/inline"
+          "$tool" gate12-tokens \
+            | "$work/invariant-paths" --resolve "$work/path-fns" "$work/modules" "$work/inline" \
+            > "$work/resolved"
+          echo "  $(awk 'END{print NR}' "$work/resolved") (token, crate fn) resolution(s)"
+          "$tool" gate12 "$allow_claim" "$work/resolved"
 
       - name: Gate 14 — every crate that claims a bound re-measures it
         run: |

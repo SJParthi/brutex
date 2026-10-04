@@ -60150,3 +60150,55 @@ fold knows which rows it swept.
   ranking, and the lens was never reached. The helper lifts the cap to
   1,048,576 for its own run; the cap is a test budget, and the default ceiling
   is 2^26.
+
+### D-2105 — Merging bb6b3b4 keeps the base's code where both sides fixed one defect, and carries D-2100 onto the Rust gate tools — 2026-10-04
+
+**Finding.** `final/all-fixes` bb6b3b4 met lane 1-b in three places that both
+sides had fixed, and in one place where it undid lane 1's change.
+
+- **Pool union.** Lane 1's D-1703 (W2-cli9-0) and the base's D-2301 (sweep
+  audit OS-4) both admit the parent ledger once per union rather than once per
+  instrument.
+- **Results listing.** Lane 1's D-1729 (`listing_window`, W2-cli8-5) and the
+  base's D-2310 (`ListingFold`, the open's one pass) both bound what
+  `cli results` retains.
+- **Ledger open counter.** Lane 1's `OPENS_ON_THIS_THREAD` and the base's
+  test-only `OPENS` count the same `open_with` seam.
+- **Pool preparation.** The base lifted pass 2's preparation into
+  `prepare_span` for `pool-oos` (D-1576), from the pre-lane-1 body: no dated
+  closes, no withholding build, no execution projection. Lane 1 had made
+  `price_all` price the projected execution series (W2-cli9-4, D-1702).
+- **Gates 10 and 12.** The sweep's 8c16ba3 moved both gates' logic out of
+  `ci.yml` into `.github/gates_ledger.rs` and `.github/gates_bounds.rs`, from
+  the pre-D-2100 shell. Gate 10 again read no middle segment, and gate 12 again
+  matched exactly three segments and looked up first and last.
+
+**Decision.**
+
+- The base's code stands for the union, the listing and the counter. Lane 1's
+  copies are removed: `listing_window`, `ListingWindow`, the test-only
+  `best_complete_newest_first` reference test and `OPENS_ON_THIS_THREAD`. Lane
+  1's union tests stay, read the base's `OPENS`, and expect the base's
+  "parent ledger not opened" text. SCB-10 now cites the base's
+  `the_one_pass_listing_matches_the_removed_newest_first_walk`.
+- `prepare_span` carries lane 1's whole sequence: dated cash closes, the
+  minute-hole census, the withholding build, the horizon, floors measured on the
+  execution series, and the projection. `PreparedSpan` returns the projected
+  bars and column and gains `rules`. `price_all` prices that span, so
+  `pool-oos` now walks the series its trades fill on, not the signal bars.
+  `the_pool_prepares_projects_and_prices_in_order_inside_price_all` checks the
+  order within each function's own body.
+- D-2100 is carried onto the tools. Gate 10's step lists inline modules, runs
+  `invariant_paths.rs --middles`, and passes that table to
+  `gates_ledger invariant-tests`, which refuses a checked token listed there
+  (CIG-27). Gate 12's tool reads tokens whole at any length, prints them with
+  `gate12-tokens`, and proves a claim only through the table
+  `invariant_paths.rs --resolve` builds from them (CIG-28). Neither tool starts
+  a program; the step runs the scanner and the resolver (D-2344). Locally gate
+  10 checked 2,457 tokens with none missing, and gate 12 found 2 unproven
+  claims, both on its allowlist.
+
+**Rejected.** Keeping both counters, or both listing folds. Two
+implementations of one fact drift. Reverting `prepare_span` to `price_all`'s
+body. That would leave `pool-oos` on the unprojected column and lose D-1576's
+shared sequence.

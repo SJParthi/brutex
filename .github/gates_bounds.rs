@@ -473,46 +473,57 @@ fn fn_tables(
     }
 }
 
-/// `\b[a-z_]+::[a-z_]+::[a-z_0-9]+\b`.
+/// The end of every `::`-joined segment from `i`, longest last: a segment is
+/// `[a-z_][a-z_0-9]*`, and the first end listed already has one `::` in it.
+///
+/// EVERY SEGMENT, AT ANY LENGTH (D-2100, carried onto this tool by D-2105).
+/// The readers matched exactly `a::b::c`: a two-segment proof was never seen,
+/// a four-segment one was cut to its first three segments and looked up as the
+/// wrong function, and a digit in a module segment (`v2_tests`) split it.
+fn segment_ends(b: &[u8], i: usize) -> Vec<usize> {
+    let seg = |c: u8| lower_(c) || c.is_ascii_digit();
+    let mut ends = Vec::new();
+    if !b.get(i).is_some_and(|&c| lower_(c)) {
+        return ends;
+    }
+    let mut e = run(b, i, seg);
+    while has_at(b, e, b"::") && b.get(e + 2).is_some_and(|&c| lower_(c)) {
+        e = run(b, e + 2, seg);
+        ends.push(e);
+    }
+    ends
+}
+
+/// `\b[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*)+\b`, backtracking as the regex
+/// does: the longest run of segments whose end is a word boundary.
 fn qualified(text: &str) -> Vec<&str> {
     let b = text.as_bytes();
     find_all(b, |b, i| {
-        if !lower_(b[i]) || !bound_before(b, i) {
+        if !bound_before(b, i) {
             return None;
         }
-        let a = run(b, i, lower_);
-        if !has_at(b, a, b"::") || !b.get(a + 2).is_some_and(|&c| lower_(c)) {
-            return None;
-        }
-        let m = run(b, a + 2, lower_);
-        if !has_at(b, m, b"::") {
-            return None;
-        }
-        let e = run(b, m + 2, |c| lower_(c) || c.is_ascii_digit());
-        (e > m + 2 && bound_after(b, e)).then_some(e)
+        segment_ends(b, i)
+            .into_iter()
+            .rev()
+            .find(|&e| bound_after(b, e))
     })
     .into_iter()
     .map(|(s, e)| &text[s..e])
     .collect()
 }
 
-/// `` `[a-z_]+::[a-z_]+::[a-z_0-9]+` ``, backticks removed.
+/// `` `[a-z_][a-z_0-9]*(::[a-z_][a-z_0-9]*)+` ``, backticks removed.
 fn ticked(text: &str) -> Vec<&str> {
     let b = text.as_bytes();
     find_all(b, |b, i| {
         if b[i] != b'`' {
             return None;
         }
-        let a = run(b, i + 1, lower_);
-        if a == i + 1 || !has_at(b, a, b"::") {
-            return None;
-        }
-        let m = run(b, a + 2, lower_);
-        if m == a + 2 || !has_at(b, m, b"::") {
-            return None;
-        }
-        let e = run(b, m + 2, |c| lower_(c) || c.is_ascii_digit());
-        (e > m + 2 && b.get(e) == Some(&b'`')).then_some(e + 1)
+        segment_ends(b, i + 1)
+            .into_iter()
+            .rev()
+            .find(|&e| b.get(e) == Some(&b'`'))
+            .map(|e| e + 1)
     })
     .into_iter()
     .map(|(s, e)| &text[s + 1..e - 1])
@@ -594,10 +605,54 @@ enum Proof {
     Row,
 }
 
-fn first_and_last(token: &str) -> (String, String) {
-    let first = token.split("::").next().unwrap_or("");
-    let last = token.rsplit("::").next().unwrap_or("");
-    (first.to_owned(), last.to_owned())
+/// `invariant_paths.rs --resolve`'s table, `token<TAB>crate fn` per line: the
+/// `(crate, fn)` pairs each token names once every one of its segments is read
+/// against the scanner's module tables. A crate-first token names its crate
+/// and a file answering to every middle segment; a module-first one a file
+/// answering to every segment but the last. A token the table does not list
+/// names nothing.
+type Resolved = BTreeMap<String, Vec<(String, String)>>;
+
+fn resolved_table(text: &str) -> Resolved {
+    let mut table = Resolved::new();
+    for line in lines(text) {
+        let Some((token, named)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some((krate, name)) = named.split_once(' ') else {
+            continue;
+        };
+        table
+            .entry(token.to_owned())
+            .or_default()
+            .push((krate.to_owned(), name.to_owned()));
+    }
+    table
+}
+
+/// Does any `(crate, fn)` the token resolves to prove — a test or a bench?
+fn proven(token: &str, resolved: &Resolved, proving: &BTreeSet<(String, String)>) -> bool {
+    resolved
+        .get(token)
+        .is_some_and(|named| named.iter().any(|pair| proving.contains(pair)))
+}
+
+/// Every token gate 12 can look up, sorted and once each: the `::` tokens of
+/// every doc block under `crates/` and the ticked ones of every invariant row.
+/// The step resolves this list and hands the table back to [`gate12`].
+fn gate12_tokens(repo: &dyn Repo) -> Result<Vec<String>, String> {
+    let mut tokens = BTreeSet::new();
+    for f in repo.ls("crates/*.rs")? {
+        for block in claim_blocks(&f, &repo.read(&f)?) {
+            tokens.extend(qualified(&block.text).into_iter().map(str::to_owned));
+        }
+    }
+    for row in lines(&repo.read(INVARIANTS)?) {
+        if row.starts_with('|') {
+            tokens.extend(ticked(row).into_iter().map(str::to_owned));
+        }
+    }
+    Ok(tokens.into_iter().collect())
 }
 
 /// The kind of proof a block names, tried in rule order, or none.
@@ -605,11 +660,12 @@ fn prove(
     repo: &dyn Repo,
     text: &str,
     proving: &BTreeSet<(String, String)>,
+    resolved: &Resolved,
     inv: &str,
 ) -> Result<Option<Proof>, String> {
     if qualified(text)
         .into_iter()
-        .any(|t| proving.contains(&first_and_last(t)))
+        .any(|t| proven(t, resolved, proving))
     {
         return Ok(Some(Proof::Test));
     }
@@ -622,7 +678,7 @@ fn prove(
         if let Some(row) = invariant_row(inv, r)
             && ticked(row)
                 .into_iter()
-                .any(|t| proving.contains(&first_and_last(t)))
+                .any(|t| proven(t, resolved, proving))
         {
             return Ok(Some(Proof::Row));
         }
@@ -637,8 +693,14 @@ fn fields(l: &str) -> Vec<&str> {
         .collect()
 }
 
-fn gate12(repo: &dyn Repo, allow: &str, out: &mut Vec<String>) -> Result<bool, String> {
+fn gate12(
+    repo: &dyn Repo,
+    allow: &str,
+    resolved: &str,
+    out: &mut Vec<String>,
+) -> Result<bool, String> {
     let inv = repo.read(INVARIANTS)?;
+    let resolved = resolved_table(resolved);
     let mut fns = BTreeSet::new();
     let mut proving = BTreeSet::new();
     for manifest in repo.ls("crates/*/Cargo.toml")? {
@@ -684,7 +746,7 @@ fn gate12(repo: &dyn Repo, allow: &str, out: &mut Vec<String>) -> Result<bool, S
             by_unverified += 1;
             continue;
         }
-        match prove(repo, &b.text, &proving, &inv)? {
+        match prove(repo, &b.text, &proving, &resolved, &inv)? {
             Some(Proof::Test) => by_test += 1,
             Some(Proof::Path) => by_path += 1,
             Some(Proof::Row) => by_row += 1,
@@ -1219,7 +1281,18 @@ fn read_work(dir: &str, name: &str) -> Result<String, String> {
 
 fn run_gate(args: &[String], out: &mut Vec<String>) -> Result<bool, String> {
     match args {
-        [cmd, allow] if cmd == "gate12" => gate12(&Git, allow, out),
+        [cmd, allow, resolved] if cmd == "gate12" => {
+            let table = std::fs::read(resolved).map_err(|e| format!("{resolved}: {e}"))?;
+            if table.is_empty() {
+                out.push("GATE 12 RESOLVED NO PROOF TOKEN.".into());
+                return Ok(false);
+            }
+            gate12(&Git, allow, &String::from_utf8_lossy(&table), out)
+        }
+        [cmd] if cmd == "gate12-tokens" => {
+            out.extend(gate12_tokens(&Git)?);
+            Ok(true)
+        }
         [cmd, cover, work] if cmd == "gate14" => {
             let listing: Vec<String> = std::fs::read(format!("{work}/benches"))
                 .map_err(|e| format!("{work}/benches: {e}"))?
@@ -1239,7 +1312,7 @@ fn run_gate(args: &[String], out: &mut Vec<String>) -> Result<bool, String> {
             ];
             gate14(&Git, cover, &lexed, [&runs[0], &runs[1]], out)
         }
-        _ => Err("usage: gates_bounds gate12 ALLOW | gate14 COVER WORKDIR".into()),
+        _ => Err("usage: gates_bounds gate12-tokens | gate12 ALLOW RESOLVED | gate14 COVER WORKDIR".into()),
     }
 }
 
@@ -1439,9 +1512,12 @@ mod tests {
     fn qualified_tokens_need_word_boundaries() {
         assert_eq!(
             qualified("see core::a::b_1, Xcore::a::b and x::y::zA and a::b::c::d"),
-            vec!["core::a::b_1", "a::b::c"]
+            // `Xcore` is no token, but the regex then restarts at `a::b`.
+            vec!["core::a::b_1", "a::b", "x::y", "a::b::c::d"]
         );
-        assert_eq!(qualified("ab9::x::y"), Vec::<&str>::new());
+        // Every segment at any length, digits included (D-2100).
+        assert_eq!(qualified("ab9::x::y and v2_tests::z"), vec!["ab9::x::y", "v2_tests::z"]);
+        assert_eq!(qualified("a:: b and ::c and a::B"), Vec::<&str>::new());
     }
 
     #[test]
@@ -1466,6 +1542,10 @@ mod tests {
         assert_eq!(
             ticked("| x | `a::b::c`, `d::e::f``g::h::i` `j::K::l` `x `m::n::o`"),
             vec!["a::b::c", "d::e::f", "g::h::i", "m::n::o"]
+        );
+        assert_eq!(
+            ticked("`a::b` `c::d::e::f` `v2_tests::g` `h::i::J`"),
+            vec!["a::b", "c::d::e::f", "v2_tests::g"]
         );
     }
 
@@ -1518,10 +1598,57 @@ mod tests {
         ),
     ];
 
+    /// The fixture's resolution, as `invariant_paths.rs --resolve` gives it
+    /// for these trees: every token names its first segment's crate and its
+    /// last segment's function.
+    fn crate_first(tree: &Fake) -> String {
+        gate12_tokens(tree)
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let first = t.split("::").next().unwrap_or("");
+                let last = t.rsplit("::").next().unwrap_or("");
+                format!("{t}\t{first} {last}\n")
+            })
+            .collect()
+    }
+
     fn g12(tree: &Fake, allow: &str) -> (bool, String) {
         let mut out = Vec::new();
-        let ok = gate12(tree, allow, &mut out).unwrap();
+        let ok = gate12(tree, allow, &crate_first(tree), &mut out).unwrap();
         (ok, out.join("\n"))
+    }
+
+    #[test]
+    fn gate12_proves_only_through_the_resolved_table() {
+        let tree = with(G12, &[]);
+        let mut out = Vec::new();
+        // Nothing resolved: the qualified proof and the row proofs name
+        // nothing; only the tracked bench path is left.
+        assert!(!gate12(&tree, "", "", &mut out).unwrap());
+        let log = out.join("\n");
+        assert!(log.contains("    0 name a test that exists"), "{log}");
+        // A token resolved to a non-test proves nothing either.
+        let mut out = Vec::new();
+        let table = "api::tests::fast\tapi hot\n";
+        assert!(!gate12(&tree, "", table, &mut out).unwrap());
+        assert!(out.join("\n").contains("    0 name a test that exists"));
+        assert_eq!(
+            resolved_table("a::b\tx y\na::b\tx z\nno tab\nc::d\tnospace\n"),
+            Resolved::from([(
+                "a::b".to_owned(),
+                vec![("x".to_owned(), "y".to_owned()), ("x".to_owned(), "z".to_owned())]
+            )])
+        );
+    }
+
+    #[test]
+    fn gate12_tokens_list_block_and_row_tokens_once() {
+        let tree = with(G12, &[]);
+        assert_eq!(
+            gate12_tokens(&tree).unwrap(),
+            vec!["api::lib::hot", "api::t::proof", "api::tests::fast"]
+        );
     }
 
     #[test]
@@ -1718,7 +1845,7 @@ mod tests {
         );
         let mut out = Vec::new();
         assert!(
-            gate12(&fake(&[]), "", &mut out).is_err(),
+            gate12(&fake(&[]), "", "", &mut out).is_err(),
             "no invariants file is an error"
         );
     }
