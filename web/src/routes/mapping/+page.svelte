@@ -60,6 +60,11 @@
   import { feeds } from '$lib/feeds.svelte.js';
   import { ask } from '$lib/ask.js';
   import { createPageRequests } from '$lib/page-requests.js';
+  // THE LOCALE AND THE ZONE ARE NAMED, NEVER INHERITED (CE-72, D-2733): a bare
+  // `toLocaleString()` printed a master file's time in the host's zone with no
+  // label and its byte count in the host's digit grouping.
+  import { group } from '$lib/money.js';
+  import { stampLabel } from '$lib/dates.js';
   import * as prefix from '$lib/prefix.js';
 
   /* ====================================================================
@@ -611,9 +616,9 @@
             <div class="mstate">
               {#if file.present}
                 <span class="ok">on disk</span>
-                <span class="dim">{file.bytes.toLocaleString()} bytes</span>
+                <span class="dim">{group(file.bytes)} bytes</span>
                 {#if file.modified_unix_millis}
-                  <span class="dim">{new Date(file.modified_unix_millis).toLocaleString()}</span>
+                  <span class="dim">{stampLabel(file.modified_unix_millis)} IST</span>
                 {/if}
               {:else}
                 <span class="no">absent</span>
@@ -624,7 +629,7 @@
                 <span class="dim">asking…</span>
               {:else if done?.written}
                 <span class="ok">{done.changed ? 'updated' : 'unchanged'}</span>
-                <span class="dim">{done.bytes.toLocaleString()} bytes</span>
+                <span class="dim">{group(done.bytes)} bytes</span>
               {:else if done?.skipped}
                 <span class="skip">skipped</span><span class="dim">{done.refusal}</span>
               {:else if done}

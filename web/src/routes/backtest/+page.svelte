@@ -7104,12 +7104,12 @@
             {#each live.rungs as r (r.key)}
               <tr>
                 <td><b>{r.rung}</b>{#if r.validating} <span class="dim">validation</span>{/if}</td>
-                <td class="num">{r.bars ? r.bars.toLocaleString() : '—'}</td>
-                <td class="num">{r.minHits ? r.minHits.toLocaleString() : '—'}</td>
+                <td class="num">{r.bars ? group(r.bars) : '—'}</td>
+                <td class="num">{r.minHits ? group(r.minHits) : '—'}</td>
                 <td class="num">
                   {r.bars && r.minHits ? `${((r.minHits / r.bars) * 100).toFixed(2)}%` : '—'}
                 </td>
-                <td class="num">{r.candidates ? r.candidates.toLocaleString() : '—'}</td>
+                <td class="num">{r.candidates ? group(r.candidates) : '—'}</td>
                 <td>
                   <!--
                     FIVE STATES, NOT TWO. This read `recorded / refused /
@@ -7122,7 +7122,7 @@
                   {#if r.done && r.recorded}<span class="ok">recorded</span>
                   {:else if r.done}<span class="warnish">refused — {r.why || 'no reason given'}</span>
                   {:else if r.phase === 'priced'}<span class="dim"
-                      >priced {r.priced.toLocaleString()} — validating…</span
+                      >priced {group(r.priced)} — validating…</span
                     >
                   {:else if r.phase === 'pricing'}<span class="dim">pricing the exit grid…</span>
                   {:else}<span class="dim">sweeping…</span>{/if}
